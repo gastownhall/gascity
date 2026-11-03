@@ -263,8 +263,10 @@ type infraPrepared struct {
 }
 
 // infraPayloadDifference compares the payloads on one bead's within-infra edges
-// in both directions, as infraEdgePayloadDifference does, from payloads both
-// stores reported in a batch.
+// in both directions, from what each store reported (absent: carries
+// nothing). It walks the union of the two edge sets, so a payload on an edge
+// only the binding holds is a difference too; a copy that invented a payload
+// is as much a changed graph as one that dropped it.
 func infraPayloadDifference(id string, wantDeps, gotDeps []beads.Dep, infraIDs map[string]bool, want, got map[beads.DepPair]string) string {
 	pairs := make(map[string]bool, len(wantDeps)+len(gotDeps))
 	for _, d := range wantDeps {

@@ -971,7 +971,6 @@ cmd/gc/idle_nudge.go	poolContinuationBackstop.reserve	raw-param	1
 cmd/gc/idle_nudge.go	writeContinuationClaimMarker	raw-param	1
 cmd/gc/idle_nudge.go	writeIdleClaimMarker	raw-param	1
 cmd/gc/infra_class_clear.go	infraRestoreKeptEdge	cap-assert	1
-cmd/gc/infra_class_migrate.go	importInfraSnapshot	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraCopyDepEdge	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraDestinationEdgePayloadRefusal	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraReadEdgePayload	cap-assert	1

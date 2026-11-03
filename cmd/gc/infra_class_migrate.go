@@ -1392,7 +1392,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := infraEngineCrashPoint("prepare"); err != nil {
 		return fail(err)
 	}
-	imported, err := importInfraSnapshot(writer, source, plan, prepared, infraEngineClockFor(cityPath))
+	imported, err := importInfraSnapshot(writer, plan, prepared, infraEngineClockFor(cityPath))
 	if err != nil {
 		return paused(err)
 	}
@@ -2373,7 +2373,7 @@ func infraDestinationPreflightRefusal(target infraBindingTarget) error {
 // payload the source holds for it. Cross-boundary edges into work stay metadata
 // linkage, resolved by the owning-store read on each side — re-adding them here
 // would need a work-store row the destination does not own.
-func importInfraSnapshot(destination beads.Store, source beads.Store, plan infraCopyPlan, prepared infraPrepared, clock infraEngineClock) (int, error) {
+func importInfraSnapshot(destination beads.Store, plan infraCopyPlan, prepared infraPrepared, clock infraEngineClock) (int, error) {
 	var create []beads.Bead
 	for _, b := range plan.rows {
 		if !prepared.kept[b.ID] {
@@ -2387,30 +2387,12 @@ func importInfraSnapshot(destination beads.Store, source beads.Store, plan infra
 		}
 		edges = append(edges, e)
 	}
-	// A destination without the batch capabilities, or a wrapper whose store
-	// has none: one create and one edge at a time, each payload read from the
-	// source as it is written.
-	perRow := func() (int, error) {
-		one, ok := destination.(beads.ForeignIDCreator)
-		if !ok {
-			return 0, fmt.Errorf("binding store cannot preserve bead ids: %T does not implement ForeignIDCreator", destination)
-		}
-		for _, b := range create {
-			if _, err := one.CreateWithForeignID(b); err != nil {
-				return 0, fmt.Errorf("importing bead %s: %w", b.ID, err)
-			}
-		}
-		for _, e := range edges {
-			if err := infraCopyDepEdge(destination, source, e.IssueID, e.DependsOnID, e.Type); err != nil {
-				return len(create), fmt.Errorf("importing dep %s -> %s: %w", e.IssueID, e.DependsOnID, err)
-			}
-		}
-		return len(create), nil
-	}
+	// The binding is a SQLite store, which writes in batches; any other
+	// destination is refused rather than copied into by an untested path.
 	creator, batchRows := beads.As[beads.ForeignIDBatchCreator](destination)
 	writer, batchEdges := beads.As[beads.DepBatchWriter](destination)
 	if !batchRows || !batchEdges {
-		return perRow()
+		return 0, fmt.Errorf("binding store %T cannot create rows and edges in batches", destination)
 	}
 	err := runInfraBatches(clock, "copying rows", len(create), infraCopyRowBatch, func(start, end int) error {
 		if err := creator.CreateWithForeignIDBatch(create[start:end]); err != nil {
@@ -2418,9 +2400,6 @@ func importInfraSnapshot(destination beads.Store, source beads.Store, plan infra
 		}
 		return nil
 	})
-	if errors.Is(err, beads.ErrBatchCopyUnsupported) {
-		return perRow()
-	}
 	if err != nil {
 		return 0, err
 	}
@@ -2430,14 +2409,6 @@ func importInfraSnapshot(destination beads.Store, source beads.Store, plan infra
 		}
 		return nil
 	})
-	if errors.Is(err, beads.ErrBatchCopyUnsupported) {
-		for _, e := range edges {
-			if err := infraCopyDepEdge(destination, source, e.IssueID, e.DependsOnID, e.Type); err != nil {
-				return len(create), fmt.Errorf("importing dep %s -> %s: %w", e.IssueID, e.DependsOnID, err)
-			}
-		}
-		return len(create), nil
-	}
 	if err != nil {
 		return len(create), err
 	}
@@ -2569,20 +2540,10 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		}
 	}
 	// And their payloads, both directions. A payload-blind source declares
-	// none; a binding that cannot be asked is read edge by edge, which
-	// refuses it there.
+	// none; a binding that cannot be asked is refused.
 	dstReader, dstAsks := beads.As[beads.DepMetadataReader](destination)
 	if !dstAsks {
-		for _, id := range proven {
-			diff, err := infraEdgePayloadDifference(id, wantDeps[id], gotDeps[id], infraIDs, source, destination)
-			if err != nil {
-				return nil, err
-			}
-			if diff != "" {
-				return nil, errors.New(diff)
-			}
-		}
-		return proven, nil
+		return nil, fmt.Errorf("binding store %T cannot report the payloads on its dependency edges: %w", destination, beads.ErrDepMetadataUnsupported)
 	}
 	internal := func(d beads.Dep) bool { return infraIDs[d.DependsOnID] }
 	want := map[beads.DepPair]string{}
@@ -2605,55 +2566,6 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		}
 	}
 	return proven, nil
-}
-
-// infraEdgePayloadDifference compares the payloads on one bead's within-infra
-// edges in BOTH directions, or "" when every edge carries on the destination
-// exactly what it carries on the source.
-//
-// It is separate from infraDepDifference because the payload is not a field of
-// beads.Dep — it is a sidecar the source keeps in its dependencies.metadata
-// column and the destination keeps in kv, reachable only by asking the store
-// about a specific pair. No reflection over the Dep struct can see it, which is
-// why the edge field-sync guard cannot cover it and why this exists instead.
-//
-// Both directions, for the reason the structural comparison gives: a copy that
-// invented a payload is as much a changed graph as one that dropped it, and a
-// forward-only check would let the destination carry a gate the source never
-// had. The union of the two edge sets is walked rather than the source's alone,
-// so an edge present only on the destination is compared too — its source-side
-// payload reads as absent, and a destination payload on it is a difference.
-//
-// Absent and present-but-empty stay distinguishable, which is the rule the
-// binding's own adoption witness states. infraReadEdgePayload normalizes each
-// engine's rendering of "no payload" to absent before comparing, so the two
-// sides are comparable without either being flattened into the other.
-func infraEdgePayloadDifference(id string, wantDeps, gotDeps []beads.Dep, infraIDs map[string]bool, source, destination beads.Store) (string, error) {
-	pairs := make(map[string]bool, len(wantDeps)+len(gotDeps))
-	for _, d := range wantDeps {
-		if infraIDs[d.DependsOnID] {
-			pairs[d.DependsOnID] = true
-		}
-	}
-	for _, d := range gotDeps {
-		pairs[d.DependsOnID] = true
-	}
-	for _, dependsOn := range sortedMapKeys(pairs) {
-		want, err := infraReadEdgePayload(source, id, dependsOn)
-		if err != nil {
-			return "", fmt.Errorf("re-reading the work store's payload on dep %s -> %s: %w", id, dependsOn, err)
-		}
-		got, err := infraReadEdgePayload(destination, id, dependsOn)
-		if err != nil {
-			return "", fmt.Errorf("reading the binding's payload on dep %s -> %s: %w", id, dependsOn, err)
-		}
-		if want == got {
-			continue
-		}
-		return fmt.Sprintf("dep %s -> %s carries %s in the binding, want %s",
-			id, dependsOn, infraFormatEdgePayload(got), infraFormatEdgePayload(want)), nil
-	}
-	return "", nil
 }
 
 // infraFormatEdgePayload renders an edge payload for a difference message,
@@ -2792,7 +2704,7 @@ func infraCopyClassDifference(want, got beads.Bead) string {
 // production by every formula step with a waits_for gate. It is not a field of
 // beads.Dep — it is a sidecar reached by asking a store about one pair — so no
 // comparison over this struct can see it, and the field-sync guard over
-// beads.Dep cannot cover it either. infraEdgePayloadDifference witnesses it,
+// beads.Dep cannot cover it either. infraPayloadDifference witnesses it,
 // both directions, on the same edges this function compares structurally.
 //
 // Splitting them is deliberate: this one is a pure function of two edge slices
