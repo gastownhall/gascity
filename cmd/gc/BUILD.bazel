@@ -1468,6 +1468,7 @@ go_test(
         "dead_assignee_repair_test.go",
         "demand_cross_store_gate_test.go",
         "demand_divergence_test.go",
+        "demand_pool_bound_claim_window_test.go",
         "demand_pool_scale_check_leg_test.go",
         "demand_serve_agreement_test.go",
         "demand_serve_cross_store_test.go",

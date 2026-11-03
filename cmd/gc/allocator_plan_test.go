@@ -1637,3 +1637,119 @@ func TestAllocator_UnusableWorktreeEvidenceNamesItsWorkItem(t *testing.T) {
 		}
 	})
 }
+
+// TestAllocator_NameOnlyRequestWithRefusedEvidenceStartsUnnamed pins v2's
+// twin of legacy's name-only fallback (nameOnlyFallback): a warm custom
+// pool's seat whose name the pass refuses still plans, unnamed, with the
+// refusal traced as a named request's is. A row the merge names no seat for
+// (unusable evidence) is traced naming its work item, so the planner's
+// worktree alert still fires for it.
+//
+// Kills: a refused name refusing its seat (the pool a seat short of its
+// count); the fallback planning the named request anyway; a merge refusal
+// left untraced (no alert).
+func TestAllocator_NameOnlyRequestWithRefusedEvidenceStartsUnnamed(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	nameOnly := func(t *testing.T, edit func(*scaleCheckDemand)) *allocFixture {
+		f := newAllocFixture(t, cfg).demand("worker", "w-1")
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}}
+		f.in.Demand.Collected.NameOnlyTemplates = map[string]bool{"worker": true}
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		edit(&d)
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		return f
+	}
+	refusals := func(d allocDecision) []allocTraceRecord {
+		var out []allocTraceRecord
+		for _, r := range d.Trace {
+			if r.Reason == "ineligible:"+gateWorktreeRefused {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	withSpec := func(storeRef string) func(*scaleCheckDemand) {
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: storeRef, Path: "/wt/w-1"}
+		return func(d *scaleCheckDemand) { d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec} }
+	}
+
+	t.Run("usable evidence (control)", func(t *testing.T) {
+		d := nameOnly(t, withSpec("city")).decide()
+		if got := planWork(d); !slices.Equal(got, []string{"w-1"}) || len(refusals(d)) != 0 {
+			t.Fatalf("planned work %q, refusals %+v; want the seat named for w-1", got, refusals(d))
+		}
+	})
+	t.Run("evidence naming another store", func(t *testing.T) {
+		d := nameOnly(t, withSpec("rig:alpha")).decide()
+		got := refusals(d)
+		if !slices.Equal(planWork(d), []string{""}) || len(got) != 1 || got[0].WorkBeadID != "w-1" || !strings.Contains(got[0].Detail, `store "rig:alpha" does not match request store "city"`) {
+			t.Fatalf("planned work %q, refusals %+v; want one unnamed seat and w-1 refused for its store", planWork(d), got)
+		}
+	})
+	t.Run("live verification backoff", func(t *testing.T) {
+		f := nameOnly(t, withSpec("city"))
+		f.in.Backoff = workRefusal(*f.in.Demand.Collected.DefaultDemand["worker"].WorktreeSpecs["w-1"])
+		d := f.decide()
+		got := refusals(d)
+		if !slices.Equal(planWork(d), []string{""}) || len(got) != 1 || got[0].WorkBeadID != "" {
+			t.Fatalf("planned work %q, refusals %+v; want one unnamed seat and one refusal naming no work item", planWork(d), got)
+		}
+	})
+	t.Run("unusable evidence the merge names no seat for", func(t *testing.T) {
+		const missing = `work bead w-1 has gc.work_dir="/wt/w-1" but is missing gc.worktree_root`
+		d := nameOnly(t, func(d *scaleCheckDemand) { d.WorktreeErrors = map[string]string{"w-1": missing} }).decide()
+		got := refusals(d)
+		if !slices.Equal(planWork(d), []string{""}) || len(got) != 1 || got[0].WorkBeadID != "w-1" || !strings.Contains(got[0].Detail, "missing gc.worktree_root") {
+			t.Fatalf("planned work %q, refusals %+v; want one unnamed seat and w-1 refused with its missing key", planWork(d), got)
+		}
+	})
+}
+
+// TestAllocator_RefusedNameMovesAReusedStartCandidateToThePoolDir pins v2's
+// twin of legacy's move for a refused name
+// (TestLegacyRefusedNameMovesASeatThatIsNotAliveToThePoolDir): a start
+// candidate the unnamed request reuses is bound to the pool's own directory,
+// not left in the one its last binding recorded (here a worktree), where its
+// start would launch it. A start candidate that records no directory gets
+// none, as a fresh unnamed seat records none.
+//
+// Kills: the unnamed binding clearing only the trigger, so the start launches
+// the seat in its previous work's worktree.
+func TestAllocator_RefusedNameMovesAReusedStartCandidateToThePoolDir(t *testing.T) {
+	agent := allocPoolAgent("worker", 3)
+	agent.WorkDir = "/pool"
+	cfg := &config.City{Agents: []config.Agent{agent}}
+	binding := func(t *testing.T, meta ...string) *bindingTarget {
+		t.Helper()
+		row := poolRow("gc-1", "worker", 1, "active", append([]string{beadmeta.TriggerBeadIDMetadataKey, "w-old"}, meta...)...)
+		f := newAllocFixture(t, cfg).sessions(row).demand("worker", "w-1")
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}}
+		f.in.Demand.Collected.NameOnlyTemplates = map[string]bool{"worker": true}
+		d := f.in.Demand.Collected.DefaultDemand["worker"]
+		spec := worktree.Spec{BeadID: "w-1", StoreRef: "rig:alpha", Path: "/wt/w-1"}
+		d.WorktreeSpecs = map[string]*worktree.Spec{"w-1": &spec}
+		f.in.Demand.Collected.DefaultDemand["worker"] = d
+		dec := f.decide()
+		e := entryOf(t, dec, "gc-1")
+		if len(dec.Plans) != 0 || !e.InDesired || e.Binding == nil || e.Binding.WorkBeadID != "" {
+			t.Fatalf("plans %v, gc-1 indesired=%v binding %+v; want gc-1 reused, bound unnamed", planWork(dec), e.InDesired, e.Binding)
+		}
+		return e.Binding
+	}
+
+	t.Run("records a worktree", func(t *testing.T) {
+		b := binding(t, beadmeta.WorkDirMetadataKey, "/wt/old", beadmeta.LegacyWorkDirMetadataKey, "/wt/old")
+		want := session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: "", beadmeta.WorkDirMetadataKey: "/pool", beadmeta.LegacyWorkDirMetadataKey: "/pool"}
+		if !maps.Equal(b.Patch, want) {
+			t.Fatalf("binding patch %v, want %v: the trigger cleared and the seat moved to the pool's own directory", b.Patch, want)
+		}
+	})
+	t.Run("records no directory", func(t *testing.T) {
+		b := binding(t)
+		if want := (session.MetadataPatch{beadmeta.TriggerBeadIDMetadataKey: ""}); !maps.Equal(b.Patch, want) {
+			t.Fatalf("binding patch %v, want %v: only the trigger cleared", b.Patch, want)
+		}
+	})
+}
