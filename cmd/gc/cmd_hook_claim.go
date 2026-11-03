@@ -258,8 +258,25 @@ type hookClaimOps struct {
 	DrainPending hookDrainPendingFunc
 	// InputDone reports whether the workflow a candidate belongs to has an
 	// input convoy whose tracked work is already terminal (closed/tombstone),
-	// returning the workflow root id so SkipDoneWorkflow can retire it.
+	// returning the workflow root id so SkipDoneWorkflow can retire it. It is
+	// the done-only form of InputVerdict: set without InputVerdict, it answers
+	// the done-check and leaves no input unjudged, so the purge probe never
+	// runs.
 	InputDone hookInputDoneFunc
+	// InputVerdict judges the input of the workflow a candidate belongs to:
+	// done, not done, or unjudged — an input convoy whose membership read
+	// came back empty or with only unresolved placeholders, the shape a purge
+	// leaves and the only one InputPurged is asked about.
+	InputVerdict hookInputVerdictFunc
+	// InputPurged proves an unjudged input purged, returning the evidence ids
+	// it found absent; any error means the purge is not proved and the
+	// candidate is served as usual. Nil — the default — probes nothing; only
+	// hookCity.claimOps installs it, over the invocation's city frame.
+	InputPurged hookInputPurgedFunc
+	// RetirePurgedWorkflow closes a workflow root and its open steps as
+	// gc.outcome=fail, gc.failure_class=hard, gc.failure_reason=input_purged
+	// after InputPurged proved its input gone.
+	RetirePurgedWorkflow hookSkipDoneWorkflowFunc
 	// SkipDoneWorkflow closes a workflow root and its open steps with
 	// gc.outcome=skipped after InputDone reported the input terminal.
 	SkipDoneWorkflow hookSkipDoneWorkflowFunc
@@ -405,6 +422,8 @@ type (
 	hookDrainAckFunc              func(io.Writer) error
 	hookDrainPendingFunc          func(sessionID string) (bool, error)
 	hookInputDoneFunc             func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
+	hookInputVerdictFunc          func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error)
+	hookInputPurgedFunc           func(verdict workflowInputVerdict) ([]string, error)
 	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
@@ -671,11 +690,17 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.DrainPending == nil {
 		ops.DrainPending = hookSessionDrainPending
 	}
-	if ops.InputDone == nil {
-		ops.InputDone = hookInputDoneWithBdStore
+	if ops.InputVerdict == nil && ops.InputDone != nil {
+		ops.InputVerdict = inputVerdictFromDone(ops.InputDone)
+	}
+	if ops.InputVerdict == nil {
+		ops.InputVerdict = hookInputVerdictWithBdStore
 	}
 	if ops.SkipDoneWorkflow == nil {
 		ops.SkipDoneWorkflow = hookSkipDoneWorkflowWithBdStore
+	}
+	if ops.RetirePurgedWorkflow == nil {
+		ops.RetirePurgedWorkflow = hookRetirePurgedWorkflowWithBdStore
 	}
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
@@ -2257,7 +2282,10 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 // untouched, #2293) has a path to end it, so the claim path is where the
 // done-check belongs.
 func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) []beads.Bead {
-	if ops.InputDone == nil || ops.SkipDoneWorkflow == nil {
+	if ops.InputVerdict == nil && ops.InputDone != nil {
+		ops.InputVerdict = inputVerdictFromDone(ops.InputDone)
+	}
+	if ops.InputVerdict == nil || ops.SkipDoneWorkflow == nil {
 		return candidates
 	}
 	kept := candidates[:0:0]
@@ -2279,18 +2307,23 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 
 // hookSkipIfInputDone reports whether candidate belongs to a workflow whose
 // input convoy work is already terminal and, if so, retires that workflow
-// (root + open steps closed with gc.outcome=skipped). Lookup and close
+// (root + open steps closed with gc.outcome=skipped). An input left unjudged
+// goes to the purge probe (hookRetireIfInputPurged). Lookup and close
 // failures are logged and treated as not-done so a store hiccup can never
 // suppress real work.
 func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	rootID, done, err := ops.InputDone(ctx, dir, opts.Env, candidate, opts.IdentityCandidates)
+	verdict, err := ops.InputVerdict(ctx, dir, opts.Env, candidate, opts.IdentityCandidates)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: checking input convoy for %s: %v\n", candidate.ID, err) //nolint:errcheck
 		return false
 	}
-	if !done {
+	rootID := verdict.RootID
+	if !verdict.Done {
+		if verdict.Unjudged {
+			return hookRetireIfInputPurged(candidate, verdict, opts, ops, dir, stderr)
+		}
 		return false
 	}
 	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID); err != nil {
@@ -2309,7 +2342,39 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 // identityCandidates, blocks. A root with no input convoy, or a convoy with
 // no resolvable members, is never "done".
 func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
+	verdict, err := workflowInputDoneAcross(store, store, candidate, identityCandidates)
+	return verdict.RootID, verdict.Done, err
+}
+
+// workflowInputVerdict is the done-check's judgement of one workflow's input.
+//
+// Unjudged is the shape the done-check cannot rule on: the root names an input
+// convoy, and its membership read found no convoy, returned no members, or
+// only unresolved placeholders (convoy.IsUnresolvedTrackedItem). A purged convoy or a purged
+// tracked bead leaves exactly that shape, and so does a read that did not span
+// the member's store, so it is never "done" — it is the only input the purge
+// probe is asked to prove gone.
+type workflowInputVerdict struct {
+	// RootID is the workflow root the candidate resolved to, "" when the
+	// candidate is not part of a workflow.
+	RootID string
+	// ConvoyID is the root's input convoy, "" when it names none.
+	ConvoyID string
+	// Done reports every tracked member terminal or handed off.
+	Done bool
+	// Unjudged reports membership empty or made only of placeholders.
+	Unjudged bool
+	// Unresolved lists the placeholder member ids of an unjudged input.
+	Unresolved []string
+}
+
+// inputVerdictFromDone adapts a done-only InputDone seam to InputVerdict: its
+// verdicts are never unjudged.
+func inputVerdictFromDone(done hookInputDoneFunc) hookInputVerdictFunc {
+	return func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
+		rootID, isDone, err := done(ctx, dir, env, candidate, identityCandidates)
+		return workflowInputVerdict{RootID: rootID, Done: isDone}, err
+	}
 }
 
 // workflowRootIDForInputCheck is the workflow root workflowInputDone resolves
@@ -2332,29 +2397,39 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // convoy and its members from work. On a single-store city both are the same
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
-func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
 	root := candidate
 	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {
-			return "", false, nil
+			return workflowInputVerdict{}, nil
 		}
 		var err error
 		root, err = graph.Get(rootID)
 		if err != nil {
-			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
+			return workflowInputVerdict{}, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
 	}
-	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
-	if convoyID == "" {
-		return root.ID, false, nil
+	verdict := workflowInputVerdict{RootID: root.ID, ConvoyID: strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])}
+	if verdict.ConvoyID == "" {
+		return verdict, nil
 	}
-	members, err := convoy.Members(work, convoyID, true)
+	members, err := convoy.Members(work, verdict.ConvoyID, true)
+	if errors.Is(err, beads.ErrNotFound) {
+		verdict.Unjudged = true
+		return verdict, nil
+	}
 	if err != nil {
-		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
+		return verdict, fmt.Errorf("listing input convoy %s members: %w", verdict.ConvoyID, err)
 	}
-	if len(members) == 0 {
-		return root.ID, false, nil
+	for _, m := range members {
+		if convoy.IsUnresolvedTrackedItem(m) {
+			verdict.Unresolved = append(verdict.Unresolved, m.ID)
+		}
+	}
+	if len(verdict.Unresolved) == len(members) {
+		verdict.Unjudged = true
+		return verdict, nil
 	}
 	var workflowSeats []string
 	for _, m := range members {
@@ -2368,16 +2443,17 @@ func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, iden
 			if workflowSeats == nil {
 				workflowSeats, err = workflowStepAssignees(graph, root.ID)
 				if err != nil {
-					return root.ID, false, err
+					return verdict, err
 				}
 			}
 			if !hookClaimHasIdentity(m.Assignee, workflowSeats) {
 				continue
 			}
 		}
-		return root.ID, false, nil
+		return verdict, nil
 	}
-	return root.ID, true, nil
+	verdict.Done = true
+	return verdict, nil
 }
 
 // workflowStepAssignees lists every seat recorded on any step (open or closed)
@@ -2412,6 +2488,25 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
 // with gc.outcome=skipped so pool demand and continuation claims drop.
 func skipDoneWorkflow(store beads.Store, rootID string) error {
+	return closeWorkflowOpenMembers(store, rootID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              hookSkipDoneWorkflowCloseReason,
+	})
+}
+
+// workflowCloseStore is the slice of a store that closing a workflow's open
+// members needs.
+type workflowCloseStore interface {
+	List(query beads.ListQuery) ([]beads.Bead, error)
+	CloseAll(ids []string, metadata map[string]string) (int, error)
+}
+
+// closeWorkflowOpenMembers closes rootID and every non-terminal step under it
+// (by gc.root_bead_id, both tiers) with one CloseAll stamping disposition.
+// Terminal steps are left out, so they keep the disposition they closed with,
+// and the root goes last: a CloseAll that stops part-way leaves the root open
+// for the next claim to retire the rest.
+func closeWorkflowOpenMembers(store workflowCloseStore, rootID string, disposition map[string]string) error {
 	steps, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
@@ -2429,17 +2524,15 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 		ids = append(ids, step.ID)
 	}
 	ids = append(ids, rootID)
-	_, err = store.CloseAll(ids, map[string]string{
-		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-		"close_reason":              hookSkipDoneWorkflowCloseReason,
-	})
+	_, err = store.CloseAll(ids, disposition)
 	return err
 }
 
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
-func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDone(hookClaimBdStoreContext(ctx, dir, env, ""), candidate, identityCandidates)
+func hookInputVerdictWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
 }
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {

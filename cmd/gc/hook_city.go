@@ -37,6 +37,11 @@ type hookCity struct {
 
 	mu    sync.Mutex
 	front *session.Store
+
+	// inputPurgeFrame is the city frame the claim-time purge probe judges
+	// over, opened on the first unjudged input and kept, error and all, for
+	// the rest of the invocation (openInputPurgeFrame).
+	inputPurgeFrame func() (workflowInputPurgeFrame, error)
 }
 
 // hookCityStoreOpener opens the city store behind a hook invocation's session
@@ -46,7 +51,9 @@ var hookCityStoreOpener = openCityStoreAtWithConfig
 // newHookCity is the city a `gc hook` invocation resolved at path and loaded
 // as cfg.
 func newHookCity(path string, cfg *config.City) *hookCity {
-	return &hookCity{path: path, cfg: cfg}
+	h := &hookCity{path: path, cfg: cfg}
+	h.inputPurgeFrame = sync.OnceValues(h.openInputPurgeFrame)
+	return h
 }
 
 // sessionFront returns the invocation's session front door, opening the city
@@ -76,10 +83,18 @@ func (h *hookCity) recorder() events.Recorder {
 // session work-dir lookup, the current-claim stamp and its clear, and the
 // work_started write, removal and read) answer through the invocation's one
 // session front door, whose claim store refs are read off its loaded config, and whose events and continuation
-// nudge reach the invocation's city without resolving it again. Every other
+// nudge reach the invocation's city without resolving it again. It installs
+// the purge probe (InputPurged) over the invocation's city frame. Every other
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.InputPurged = func(verdict workflowInputVerdict) ([]string, error) {
+		frame, err := h.inputPurgeFrame()
+		if err != nil {
+			return nil, err
+		}
+		return proveWorkflowInputPurged(frame, verdict)
+	}
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}

@@ -90,6 +90,11 @@ const (
 	FailureClassHard      = "hard"
 )
 
+// FailureReasonInputPurged is the FailureReasonMetadataKey ("gc.failure_reason")
+// value stamped on a graph.v2 workflow retired because its input convoy, or the
+// work that convoy tracked, was proved purged from every store of the city.
+const FailureReasonInputPurged = "input_purged"
+
 // FormulaContractGraphV2 is the value of FormulaContractMetadataKey
 // ("gc.formula_contract") marking a workflow compiled under the graph.v2
 // contract — the single most-branched-on metadata value in the engine.
