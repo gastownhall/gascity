@@ -13,18 +13,26 @@ package main
 //   - bd's indefinite deferral (status=deferred with no defer_until, or one
 //     already past that bd's sweep has not lifted). Gas City reads it as
 //     IndefinitelyDeferred, which no class binding can record.
+//   - any other status bd parks a bead with: blocked (the sanctioned "I cannot
+//     proceed" mark), pinned, hooked, or a custom status. A bd-backed read folds
+//     each to "open" and keeps the raw status beside it (Bead.SourceStatus);
+//     Gas City's demand reads and gc hook honor the raw status, so the bead is
+//     parked in the work store, while the binding stores the folded "open".
 //
 // Either way the bead an operator or agent parked arrives open and ready in the
-// binding, and is dispatched. The rehearsals found both on every unsplit city.
+// binding, and is dispatched. The rehearsals found the first two on every
+// unsplit city.
 //
 // A `blocks` edge onto unfinished work crosses as a cross-store gate in the
 // binding (internal/dispatch cross_store_gate.go), exactly as the rig importer
 // and the drain carry the same hold: the bead waits on the gate through an
 // ordinary same-store edge every readiness reader honors, and the controller's
 // gate lane releases the gate once the work bead closes. The holds a gate
-// cannot encode — another blocking type, or an undated deferral — are refused
-// by id, before anything is written, with what to do about each, and preflight
-// names the same refusal so the operator fixes it before taking the window.
+// cannot encode — another blocking type, an undated deferral, or a parking
+// status — are refused by id, before anything is written, with what to do about
+// each, and preflight names the same refusal so the operator fixes it before
+// taking the window. A deferral with a future defer_until crosses as that date,
+// which the binding honors.
 
 import (
 	"errors"
@@ -78,8 +86,8 @@ func planInfraCopyHolds(source, work beads.Store, rows []beads.Bead, now time.Ti
 		if b.Status == "closed" {
 			continue
 		}
-		if b.IndefinitelyDeferred && (b.DeferUntil == nil || !b.DeferUntil.After(now)) {
-			uncarried = append(uncarried, fmt.Sprintf("%s is deferred in the work store with no future defer_until, which the binding cannot hold: give it a dated deferral (bd defer %s --until <date>), which the copy carries, or undefer it (bd undefer %s)", b.ID, b.ID, b.ID))
+		if why := infraParkedStatusRefusal(b, now); why != "" {
+			uncarried = append(uncarried, why)
 		}
 		deps, err := source.DepList(b.ID, "down")
 		if err != nil {
@@ -111,6 +119,26 @@ func planInfraCopyHolds(source, work beads.Store, rows []beads.Bead, now time.Ti
 		return nil, &infraUncarriedHolds{Holds: uncarried}
 	}
 	return gates, nil
+}
+
+// infraParkedStatusRefusal names the hold bd's raw status puts on b when the
+// binding cannot carry it, or returns "". The binding stores Gas City's three
+// statuses only, so a bead bd parks by status reaches it as the "open" a
+// bd-backed read folds the status to, and is ready there. A deferral is carried
+// only as a future defer_until; deferred is read from either signal a store
+// reports it by (IndefinitelyDeferred, or the raw status alone).
+func infraParkedStatusRefusal(b beads.Bead, now time.Time) string {
+	if b.IndefinitelyDeferred || b.SourceStatus == "deferred" {
+		if b.DeferUntil != nil && b.DeferUntil.After(now) {
+			return ""
+		}
+		return fmt.Sprintf("%s is deferred in the work store with no future defer_until, which the binding cannot hold: give it a dated deferral (bd defer %s --until <date>), which the copy carries, or undefer it (bd undefer %s)", b.ID, b.ID, b.ID)
+	}
+	switch b.SourceStatus {
+	case "", "open", "in_progress", "closed":
+		return ""
+	}
+	return fmt.Sprintf("%s has bd status %q in the work store, which parks it there and which the binding cannot hold (it stores open, in_progress and closed), so it would arrive ready: keep it parked with a dated deferral (bd defer %s --until <date>), which the copy carries, release it (bd update %s --status open), or close it", b.ID, b.SourceStatus, b.ID, b.ID)
 }
 
 // mintInfraCopyGates creates each planned gate in the binding, stamped as this
