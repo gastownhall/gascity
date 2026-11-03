@@ -431,6 +431,53 @@ func TestCompactScriptLiveGateQuarantinesEveryGCRewriteEntryPath(t *testing.T) {
 	}
 }
 
+// TestCompactScriptLiveGateSkipsProbeWhenNothingRewritten asserts dry runs
+// and passes that skip before rewrite preparation mutate nothing and run no
+// probe: their outcome is unchanged by the gate.
+func TestCompactScriptLiveGateSkipsProbeWhenNothingRewritten(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		args []string
+		env  []string
+	}{
+		{
+			name: "flatten dry run", mode: "success", args: []string{"--dry-run"},
+			env: []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"},
+		},
+		{name: "gc-only dry run", mode: "success", args: []string{"--gc-only", "--dry-run"}},
+		{
+			name: "bare-gc dry run", mode: "success", args: []string{"--dry-run"},
+			env: []string{"GC_DOLT_COMPACT_BARE_GC=1"},
+		},
+		{
+			name: "below threshold", mode: "below_threshold",
+			env: []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.runWithArgs(t, tt.mode, tt.args, tt.env...)
+			if err != nil {
+				t.Fatalf("skip path must keep its success outcome:\n%s", out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))") {
+				t.Fatalf("a pass that rewrites nothing must not probe liveness:\n%s", logData)
+			}
+			for _, markerDir := range []string{"compact-quarantine", "compact-pending-gc", "compact-pending-push"} {
+				if _, statErr := os.Stat(filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", markerDir, "beads")); !os.IsNotExist(statErr) {
+					t.Fatalf("skip path must not write a %s marker (stat err=%v):\n%s", markerDir, statErr, out)
+				}
+			}
+		})
+	}
+}
+
 // installDoltShim wraps the fixture's fake dolt with a shell shim so a test
 // can mutate the data dir after a chosen rewrite command succeeds while the
 // server keeps answering SQL.
