@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -1164,6 +1165,46 @@ func TestUnreadableEnvironUserManagerScopeUnderIncarnationBound(t *testing.T) {
 	got, err := scanWithRootSince(root, "ga-target", boot.Add(10*time.Second))
 	if err != nil || len(got) != 0 {
 		t.Fatalf("scanWithRootSince = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+	}
+}
+
+// TestUnreadableEnvironUserManagerMixedScan (ga-zpcphq): beside an exempt
+// manager helper, an unreadable process outside the manager's scope is still
+// the scan's entry error and a readable root is still found. A readable
+// credential agent carrying a session id is a root like any other: its name
+// proves nothing about it.
+func TestUnreadableEnvironUserManagerMixedScan(t *testing.T) {
+	requireUnprivileged(t)
+	root := t.TempDir()
+	writeFakeBootTime(t, root, time.Unix(1_700_000_000, 0))
+	euid := strconv.Itoa(os.Geteuid())
+	buildUnreadableProc(t, root, 2642, "(sd-pam)", 100, unifiedCgroupFile(ownUserManagerScope()))
+	buildUnreadableProc(t, root, 3700, "codex", 100,
+		unifiedCgroupFile("/user.slice/user-"+euid+".slice/session-3.scope/tmux-spawn-a1b2.scope"))
+	buildFakeProcUnder(t, root, 500, 1, "agent", map[string]string{"GC_SESSION_ID": "gc-root"})
+	buildFakeProcUnder(t, root, 600, 1, "ssh-agent", map[string]string{"GC_SESSION_ID": "gc-agent"})
+	writeFakeProcessCgroup(t, filepath.Join(root, "600"), ownUserManagerScope())
+
+	pidsOf := func(got []runtime.LiveRuntime) []int {
+		pids := []int{}
+		for _, live := range got {
+			pids = append(pids, live.PID)
+		}
+		return pids
+	}
+	scoped, err := scanWithRoot(root, "gc-root")
+	if pids := pidsOf(scoped); !slices.Equal(pids, []int{500}) {
+		t.Fatalf("scanWithRoot roots = %v, want the readable root 500", pids)
+	}
+	if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{3700}) || HasWholeScanFailure(err) {
+		t.Fatalf("scanWithRoot error %v names pids %v, want only the unproven 3700", err, pids)
+	}
+	orphans, err := scanOrphanCandidatesWithRoot(root, 0)
+	if pids := pidsOf(orphans); !slices.Equal(pids, []int{500, 600}) {
+		t.Fatalf("scanOrphanCandidatesWithRoot roots = %v, want the readable roots 500 and 600", pids)
+	}
+	if pids := entryErrorPIDs(err); !slices.Equal(pids, []int{3700}) || HasWholeScanFailure(err) {
+		t.Fatalf("scanOrphanCandidatesWithRoot error %v names pids %v, want only the unproven 3700", err, pids)
 	}
 }
 
