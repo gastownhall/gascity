@@ -37,9 +37,19 @@ import (
 //     LEG E reachable-red: drop protectedWakeWorkIDs(preWakeCandidates) from
 //     the call site (pass nil) and W2 is reopened — this test MUST fail.
 //
+//   - W3 (non-vacuity control, ga-8uf72n): assigned to a session that has no
+//     bead anywhere — a true orphan. The sweep now runs as an in-tick DELTA over
+//     the assignees whose session just went away (the rest is the off-tick
+//     backstop's), so W1 and W2 only reach the release loop if their assignees
+//     are queued. The test queues them, and asserts W3 IS released: without
+//     that, "W1 and W2 were retained" would be satisfied by a call site that no
+//     longer sweeps at all.
+//
 // Coverage denominator, stated per the receipt rule: this control covers the
 // beadReconcileTick call site (city_runtime.go). The one-shot path's separate
-// call site in cmd_start.go is NOT covered by this test.
+// call site in cmd_start.go and the v2 reconciler's orphanRelease are NOT
+// covered by this test. The off-tick backstop's own deference to the published
+// protected set is covered by orphan_release_lane_test.go.
 func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork(t *testing.T) {
 	workStore := beads.NewMemStore()
 	sessionStore := beads.NewMemStore() // relocated [beads.classes.sessions] binding
@@ -87,6 +97,20 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 		t.Fatalf("w2 in_progress: %v", err)
 	}
 
+	// W3: a true orphan. Its assignee has no session bead anywhere, and nothing
+	// wake-protects it.
+	w3, err := workStore.Create(beads.Bead{
+		Title:    "w3 routed work whose assignee has no session",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create w3: %v", err)
+	}
+	if err := workStore.Update(w3.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("w3 in_progress: %v", err)
+	}
+
 	// Snapshot: one open worker session whose own identities match neither
 	// assignee — it exists to make W2 wake-reachable through the template key,
 	// exactly the "wake arm is about to serve this" half of the treadmill.
@@ -127,10 +151,15 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 
 	result := DesiredStateResult{
 		State:                 map[string]TemplateParams{},
-		AssignedWorkBeads:     []beads.Bead{callsiteControlGet(t, workStore, w1.ID), callsiteControlGet(t, workStore, w2.ID)},
-		AssignedWorkStores:    []beads.Store{workStore, workStore},
-		AssignedWorkStoreRefs: []string{"", ""},
+		AssignedWorkBeads:     []beads.Bead{callsiteControlGet(t, workStore, w1.ID), callsiteControlGet(t, workStore, w2.ID), callsiteControlGet(t, workStore, w3.ID)},
+		AssignedWorkStores:    []beads.Store{workStore, workStore, workStore},
+		AssignedWorkStoreRefs: []string{"", "", ""},
 	}
+
+	// The delta trigger: these assignees' sessions just went away. Queuing all
+	// three puts every bead in front of the release loop, so W1's and W2's
+	// retention is the cures' doing and W3's release is the sweep's.
+	cr.orphanReleaseLaneOf().queueAssignees("worker-w1-live", "worker", "worker-dead")
 
 	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, newSessionBeadSnapshot([]beads.Bead{snapshotSession}), nil, false)
 
@@ -145,6 +174,13 @@ func TestBeadReconcileTick_OrphanReleaseCallSite_RetainsLiveAndWakeProtectedWork
 			t.Errorf("%s was released at the production call site: assignee=%q status=%q, want assignee=%q status=%q — lost cure: %s",
 				tc.id, got.Assignee, got.Status, tc.assignee, inProgress, tc.cure)
 		}
+	}
+
+	// Control: the same call released the true orphan, so the retentions above
+	// were decisions rather than a sweep that never ran.
+	if got := callsiteControlGet(t, workStore, w3.ID); got.Assignee != "" || got.Status != "open" {
+		t.Errorf("%s (true orphan) not released at the production call site: assignee=%q status=%q, want an open, unassigned bead — the call site no longer sweeps, so the W1/W2 assertions are vacuous",
+			w3.ID, got.Assignee, got.Status)
 	}
 }
 
