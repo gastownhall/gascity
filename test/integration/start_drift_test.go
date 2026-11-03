@@ -1287,7 +1287,8 @@ WantedBy=default.target
 	if err := os.MkdirAll(guardDir, 0o755); err != nil {
 		t.Fatalf("creating isolated HOME systemd dir: %v", err)
 	}
-	for _, path := range []string{filepath.Join(dir, unitName), filepath.Join(guardDir, unitName)} {
+	// Mirror first: the runtime-dir copy is the one the manager loads, and the caller registers its cleanup only after this helper returns.
+	for _, path := range []string{filepath.Join(guardDir, unitName), filepath.Join(dir, unitName)} {
 		if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 			t.Fatalf("writing systemd unit: %v", err)
 		}
