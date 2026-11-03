@@ -97,7 +97,14 @@ var (
 	migrationWindowStartProvider = ensureBeadsProvider
 	migrationWindowStopProvider  = shutdownBeadsProvider
 	migrationWindowSessions      = managedDoltSessionLister
+	migrationWindowStartScope    = startProviderOwnedScope
 )
+
+// startProviderOwnedScope starts one provider-owned scope, as the provider's
+// start op starts the city's.
+func startProviderOwnedScope(cityPath, scopeRoot string) error {
+	return runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, scopeRoot, "start")
+}
 
 // migrationSourceWindow is one open maintenance window.
 type migrationSourceWindow struct {
@@ -136,7 +143,13 @@ type migrationWindowRecord struct {
 // down, forces the payload-reading lanes, and, on a gc-managed Dolt it
 // started, refuses a foreign session. The caller closes the window before it
 // releases the lock.
-func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) (*migrationSourceWindow, error) {
+//
+// rigRoots are the rig scopes the verb reads. ensureBeadsProvider starts the
+// city's scope alone, and the stop retires every provider-owned scope, so a
+// window that starts the provider also starts each of those rigs bd owns a
+// proxied scope for: what the run reads, it starts, and what it starts, it
+// stops.
+func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPrefix string, stderr io.Writer, rigRoots ...string) (*migrationSourceWindow, error) {
 	if lock == nil {
 		return nil, errors.New("the maintenance window needs the city's controller lock held")
 	}
@@ -170,6 +183,16 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 		if err := migrationWindowStartProvider(cityPath); err != nil {
 			stopErr := w.stopProvider()
 			return nil, errors.Join(fmt.Errorf("starting the bead-store provider for the maintenance window: %w", err), stopErr)
+		}
+		for _, root := range rigRoots {
+			owned, err := scopeProviderOwned(cityPath, root)
+			if err == nil && owned {
+				err = migrationWindowStartScope(cityPath, root)
+			}
+			if err != nil {
+				stopErr := w.stopProvider()
+				return nil, errors.Join(fmt.Errorf("starting the proxied scope %s for the maintenance window: %w", root, err), stopErr)
+			}
 		}
 		fmt.Fprintf(stderr, "%s: started the bead-store provider for this run; it is stopped again when the run ends\n", logPrefix) //nolint:errcheck // best-effort stderr
 	}

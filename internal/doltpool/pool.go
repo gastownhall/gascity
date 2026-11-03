@@ -123,7 +123,8 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 // explicit fresh-dial path for a caller that must not share a pooled session:
 // cmd/gc's storage maintenance window lists a server's sessions and counts
 // every session but its own, so its own must not sit in a pool other reads
-// leave idle connections in.
+// leave idle connections in. One-shot use only, never per operation: a fresh
+// dial per call is the churn the registry exists to prevent.
 func OpenPrivate(host, port, user, password, database string) (*sql.DB, error) {
 	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
 	if err != nil {

@@ -1530,8 +1530,13 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 	}
 	// The maintenance window (storage_maintenance.go), once every check that
 	// reads no store has passed, and before anything opens one: the city's
-	// provider serves its rigs' stores too.
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	// provider serves its rigs' stores too, and the rigs bd owns a proxied
+	// scope for are started with it.
+	rigRoots := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		rigRoots = append(rigRoots, resolveStoreScopeRoot(request.CityPath, rig.Path))
+	}
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, rigRoots...)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1

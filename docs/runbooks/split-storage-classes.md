@@ -203,8 +203,9 @@ What the command does, in order:
      pollers), recording that it did in `.gc/storage-window.json` first, and
      stops it again before the lock is released. A provider that was already
      up is left as it was, except a bd-owned proxy: bd restarts it on any
-     read, so the window always starts the city's proxied scope and stops
-     every provider-owned scope at the end, as `gc stop` does. A provider a
+     read, so the window always starts the city's proxied scope (and, for
+     `--from-rigs`, the proxied scope of each rig it reads) and stops every
+     provider-owned scope at the end, as `gc stop` does. A provider a
      killed run started is stopped by the next run, whoever has started it
      since: the city is stopped and locked.
    - Inside the window the migration's own opens of the work store take the
@@ -338,9 +339,14 @@ migration copies a generic exec store's edges carrying no payload, as its
 protocol declares, but the rig import does not take that declaration yet. The
 import runs in the same maintenance window as the city migration (Step 4), so
 a managed rig is read natively. A proxied-server rig is read on the
-proxied-native lane, which the window forces on, but the window starts only
-the city's own proxied scope: a rig whose bd proxy is down refuses with the
-lane's `proxy_gone` verdict. Bring that rig's proxy up (any `bd` read in the
+proxied-native lane, which the window forces on. When the window starts the
+city's provider it also starts the proxied scope of every rig the import
+reads, and a rig scope that will not start refuses the run; at the end it
+stops every provider-owned scope, as `gc stop` does. A rig whose proxy is
+down anyway (the window found the provider up and started nothing) is read
+through the bd CLI instead, silently: a rig with no edge on the rows the
+import moves imports as before, and one with such an edge is refused by the
+payload-read refusal above. Bring that rig's proxy up (any `bd` read in the
 rig does) and run the import again. While an
 import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
 every gc command refuse; re-run the import to finish it. If a rig store is

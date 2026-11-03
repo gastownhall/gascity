@@ -36,6 +36,8 @@ type migrationWindowProvider struct {
 	unlistable bool
 	listErr    error
 	lists      int
+	// scopeStarts are the rig scopes the window started.
+	scopeStarts []string
 }
 
 func stubMigrationWindowProvider(t *testing.T, p *migrationWindowProvider) {
@@ -50,10 +52,14 @@ func stubMigrationWindowProvider(t *testing.T, p *migrationWindowProvider) {
 // whether the provider is down is the real probe's answer.
 func stubMigrationWindowStartStop(t *testing.T, p *migrationWindowProvider) {
 	t.Helper()
-	prevStart, prevStop, prevSessions, prevSettle := migrationWindowStartProvider, migrationWindowStopProvider, migrationWindowSessions, migrationWindowSessionSettle
+	prevStart, prevStop, prevSessions, prevSettle, prevScope := migrationWindowStartProvider, migrationWindowStopProvider, migrationWindowSessions, migrationWindowSessionSettle, migrationWindowStartScope
 	t.Cleanup(func() {
-		migrationWindowStartProvider, migrationWindowStopProvider, migrationWindowSessions, migrationWindowSessionSettle = prevStart, prevStop, prevSessions, prevSettle
+		migrationWindowStartProvider, migrationWindowStopProvider, migrationWindowSessions, migrationWindowSessionSettle, migrationWindowStartScope = prevStart, prevStop, prevSessions, prevSettle, prevScope
 	})
+	migrationWindowStartScope = func(_, scopeRoot string) error {
+		p.scopeStarts = append(p.scopeStarts, scopeRoot)
+		return nil
+	}
 	migrationWindowSessionSettle = 0
 	migrationWindowStartProvider = func(cityPath string) error {
 		p.starts++
@@ -840,6 +846,83 @@ func TestStorageVerbsTouchNoProviderBeforeTheirChecksPass(t *testing.T) {
 			})
 		}
 	}
+
+	// The checks particular to a verb: a shared work store with no
+	// attestation (it would take the co-tenants' locks), and for a rig
+	// import an unconverged city and an unknown rig name.
+	for _, tc := range []struct {
+		name string
+		want string
+		run  func(t *testing.T) (int, string)
+	}{
+		{name: "migrate/shared store unattested", want: "--force=shared-store:" + sharedToken, run: func(t *testing.T) (int, string) {
+			request, _ := exclusionCity(t)
+			request.FleetStopped = true
+			sharedStoreCities(t, request)
+			return migrateFor(t, request)
+		}},
+		{name: "recover-stranded/shared store unattested", want: "--force=shared-store:" + sharedToken, run: func(t *testing.T) (int, string) {
+			request, _ := exclusionCity(t)
+			if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &bytes.Buffer{}); report.Outcome != infraMigrationConverged {
+				t.Fatalf("cutover = %v", report.Outcome)
+			}
+			sharedStoreCities(t, request)
+			var stdout, stderr bytes.Buffer
+			code := doStorageRecoverStranded(context.Background(), request, strandedRecoveryOptions{}, &stdout, &stderr)
+			return code, stderr.String()
+		}},
+		{name: "from-rigs/unconverged city", want: "has not converged", run: func(t *testing.T) (int, string) {
+			request, _ := exclusionCity(t)
+			request.Cfg.Rigs = []config.Rig{{Name: "packs", Prefix: "gp", Path: t.TempDir()}}
+			var stdout, stderr bytes.Buffer
+			code := doStorageMigrateFromRigs(context.Background(), request, nil, &stdout, &stderr)
+			return code, stdout.String() + stderr.String()
+		}},
+		{name: "from-rigs/unknown rig", want: "nope", run: func(t *testing.T) (int, string) {
+			f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+			code, stdout, stderr := f.importRigs("nope")
+			return code, stdout + stderr
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &migrationWindowProvider{down: true}
+			stubMigrationWindowProvider(t, provider)
+			code, said := tc.run(t)
+			if code == 0 || !strings.Contains(said, tc.want) {
+				t.Fatalf("exit %d, output %q; want a refusal naming %q", code, said, tc.want)
+			}
+			if provider.starts != 0 || provider.stops != 0 {
+				t.Fatalf("starts = %d, stops = %d on a refused run; want the provider untouched", provider.starts, provider.stops)
+			}
+		})
+	}
+}
+
+// TestStorageMigrateFromRigsStartsTheProxiedRigsItReads: the window starts
+// the city's scope through ensureBeadsProvider and stops every provider-owned
+// scope, so it also starts each rig scope bd owns that the import reads, and
+// only those, and only when it started the provider.
+func TestStorageMigrateFromRigsStartsTheProxiedRigsItReads(t *testing.T) {
+	for _, down := range []bool{true, false} {
+		f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"}, config.Rig{Name: "plain", Prefix: "pl"})
+		writeScopeBeadsMetadata(t, f.rigPaths["packs"], `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"gp"}`)
+		provider := &migrationWindowProvider{down: down}
+		stubMigrationWindowProvider(t, provider)
+		if code, stdout, stderr := f.importRigs(); code != 0 {
+			t.Fatalf("down=%v: import = %d: %s %s", down, code, stdout, stderr)
+		}
+		want := []string{}
+		if down {
+			want = []string{normalizePathForCompare(f.rigPaths["packs"])}
+		}
+		got := make([]string, 0, len(provider.scopeStarts))
+		for _, root := range provider.scopeStarts {
+			got = append(got, normalizePathForCompare(root))
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("down=%v: the window started rig scopes %v, want %v", down, got, want)
+		}
+	}
 }
 
 // TestMigrationWindowRefusalStopsOnlyWhatThisRunStarted: a refused session
@@ -891,4 +974,23 @@ func TestMigrationWindowRefusalStopsOnlyWhatThisRunStarted(t *testing.T) {
 			t.Fatalf("the note does not name the provider and who started it: %s", said)
 		}
 	})
+}
+
+// TestMigrationWindowFailedRigScopeStartStopsWhatItStarted: a proxied rig
+// scope that will not start refuses the window, and the provider it started
+// is stopped.
+func TestMigrationWindowFailedRigScopeStartStopsWhatItStarted(t *testing.T) {
+	cityPath, lock := windowCity(t)
+	rig := t.TempDir()
+	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"gp"}`)
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	migrationWindowStartScope = func(string, string) error { return errors.New("proxy would not start") }
+	_, err := openMigrationSource(lock, cityPath, &config.City{}, "gc storage migrate --from-rigs", &bytes.Buffer{}, rig)
+	if err == nil || !strings.Contains(err.Error(), "proxy would not start") {
+		t.Fatalf("openMigrationSource = %v, want the rig scope's start failure", err)
+	}
+	if provider.stops != 1 || activeMigrationWindow(cityPath) != nil {
+		t.Fatalf("stops = %d, active = %v: the refused window left what it started running", provider.stops, activeMigrationWindow(cityPath) != nil)
+	}
 }
