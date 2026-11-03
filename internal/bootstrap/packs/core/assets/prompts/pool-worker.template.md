@@ -13,6 +13,46 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## Classify Your Assignment
+
+Read the bead the hook returned once, with `gc bd show <id>`, and decide what
+kind of assignment it is before you do anything else. Check in this order:
+
+1. **A workflow step:** its METADATA has `gc.root_bead_id`. The hook claimed
+   this one step bead for you, and it is your whole assignment, even if it also
+   carries `molecule_id`. Follow "Workflow Steps".
+2. **A molecule attachment:** its METADATA has no `gc.root_bead_id` but has
+   `molecule_id`. Follow "Molecules".
+3. **A plain bead or a formula root:** its METADATA has neither. Follow
+   "Following Your Formula".
+
+Classify only the bead the hook returned. A step you reach while working a
+legacy molecule stays a molecule step even if it carries `gc.root_bead_id`.
+
+## Workflow Steps
+
+A workflow step is one bead of a workflow the orchestrator runs as a graph.
+You own only the step the hook claimed for you:
+
+1. Read it with `gc bd show <id>` and execute exactly its description.
+2. Record its outcome, then close it (see "Closing a Bead"):
+   `gc bd update <id> --set-metadata gc.outcome=pass`, then
+   `gc bd close <id> --reason "<what the step did>"`. A step that cannot
+   succeed records its failure instead, as "Closing a Bead" shows.
+3. Get your next assignment only from the hook (see "How to Work").
+
+Do NOT navigate the workflow yourself. Do not run `gc bd mol current` for a
+step, and do not select, claim, execute, or close a sibling step, the workflow
+root, a scope latch (`gc.kind=workflow` or `gc.kind=scope`), or a control bead
+(`gc.kind=check`, `fanout`, `drain`, `retry`, `ralph`, `retry-eval`,
+`scope-check` or `workflow-finalize`). The orchestrator owns graph progression:
+it runs the control beads, unlocks the next steps and finalizes the workflow.
+A sibling becomes yours only when a later `gc hook --claim` returns it.
+
+A step with `gc.scope_role=teardown` is cleanup: run it when the hook assigns
+it, even if earlier steps failed. If the step's own instructions already
+closed it, leave its recorded outcome alone.
+
 ## Following Your Formula
 
 Your formula defines your work as a sequence of steps. Steps are NOT
