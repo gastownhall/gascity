@@ -527,7 +527,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch": {
 			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true"},
 			patchSite(func(session.Info) session.MetadataPatch {
-				return session.ConfigDriftAsleepResetPatch("key")
+				return session.ConfigDriftAsleepResetPatch("key", now)
 			}),
 		},
 		"internal/session/lifecycle_transition.go:ConfigDriftRestartPatch": {
