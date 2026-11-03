@@ -487,6 +487,34 @@ available when `metadata.free_text` is `"true"`.
 }
 ```
 
+When the same pending question also advertises `metadata.multi_select: "true"`,
+use `answers` instead of `text` on this existing endpoint:
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "answer",
+  "answers": ["Otter", "Fox"]
+}
+```
+
+`answers` supplies the entire desired selection, replacing any previously
+checked choices. It must contain one to 32 unique, nonempty, exact authored
+labels from `options`. Empty selections, unknown labels, the provider's Other
+or free-text row, and mixed `answers` plus `text` are unsupported. The initial
+implementation supports native Claude multiple-selection dialogs; live-provider
+multiple-selection qualification is pending. Native Codex questions currently
+use the single-choice/text contract above. Trust the pending metadata for that
+specific question, rather than assuming a provider or `kind: "question"` is
+answerable.
+
+Keep the exact request ID, answer array **including its order**, and
+`Idempotency-Key` when retrying. The recorded payload binds all three; changing
+array order under the same key conflicts even if it describes the same set. A
+retry of a recorded terminal response returns its historical outcome without
+answering a later question. A new response still requires the current request
+ID; replay support does not authorize an answer to a stale occurrence.
+
 Use one `Idempotency-Key` for that answer and retain it when retrying. A missing
 or stale question ID returns 409 `invalid_interaction` without answering the
 current question. Questions can be withdrawn by their provider, so refresh

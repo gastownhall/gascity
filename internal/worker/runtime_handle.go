@@ -570,7 +570,20 @@ func (h *RuntimeHandle) Respond(ctx context.Context, req InteractionResponse) er
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
+		Answers:   append(req.Answers[:0:0], req.Answers...),
 		Metadata:  cloneStringMap(req.Metadata),
+	}
+	if err := sessionpkg.ValidateInteractionResponse(response); err != nil {
+		return err
+	}
+	if response.Answers != nil {
+		pending, err := ip.Pending(h.sessionName)
+		if err != nil {
+			return runtimeInteractionError(err)
+		}
+		if err := sessionpkg.ValidateInteractionResponseForPending(response, pending); err != nil {
+			return err
+		}
 	}
 	if !req.Fence.IsZero() {
 		if err := req.Fence.Validate(); err != nil {

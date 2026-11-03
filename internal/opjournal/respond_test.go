@@ -71,6 +71,39 @@ func TestRespondPayloadRefusesWhatIsNotAnAnswer(t *testing.T) {
 	}
 }
 
+func TestRespondPayloadTypedAnswersKeepOldBytesAndBindSelectionOrder(t *testing.T) {
+	legacy, err := EncodeRespondPayload(RespondPayload{Action: "answer", Text: "Owl"})
+	if err != nil || legacy != `{"action":"answer","text":"Owl"}` {
+		t.Fatalf("old answer encoding changed: %q,%v", legacy, err)
+	}
+	first, err := EncodeRespondPayload(RespondPayload{Action: "answer", Answers: []string{"Owl", "Otter"}})
+	if err != nil || first != `{"action":"answer","answers":["Owl","Otter"]}` {
+		t.Fatalf("typed answer encoding=%q,%v", first, err)
+	}
+	second, err := EncodeRespondPayload(RespondPayload{Action: "answer", Answers: []string{"Otter", "Owl"}})
+	if err != nil || first == second {
+		t.Fatalf("changed frozen selection order did not change request payload: %q,%q,%v", first, second, err)
+	}
+	decoded, err := DecodeRespondPayload(first)
+	if err != nil || strings.Join(decoded.Answers, "|") != "Owl|Otter" || decoded.Text != "" {
+		t.Fatalf("typed selections lost: %+v,%v", decoded, err)
+	}
+}
+
+func TestRespondPayloadTypedAnswersRefuseMalformedDurableRows(t *testing.T) {
+	for _, payload := range []RespondPayload{
+		{Action: "approve", Answers: []string{"Owl"}},
+		{Action: "answer", Text: "Otter", Answers: []string{"Owl"}},
+		{Action: "answer", Answers: []string{"Owl", "Owl"}},
+		{Action: "answer", Answers: []string{""}},
+		{Action: "answer", Answers: []string{"Owl\n"}},
+	} {
+		if _, err := EncodeRespondPayload(payload); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("invalid typed row %+v accepted: %v", payload, err)
+		}
+	}
+}
+
 func TestInteractionOccurrenceNamesOneRaising(t *testing.T) {
 	occ, err := InteractionOccurrence("tmux-abc#def", 3)
 	if err != nil || occ != "tmux-abc#def#3" {

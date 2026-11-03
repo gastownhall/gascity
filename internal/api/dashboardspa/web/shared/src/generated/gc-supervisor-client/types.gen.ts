@@ -4385,6 +4385,10 @@ export type SessionRespondInputBody = {
      */
     action: string;
     /**
+     * Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused.
+     */
+    answers?: Array<string> | null;
+    /**
      * Optional response metadata.
      */
     metadata?: {

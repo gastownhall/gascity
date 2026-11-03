@@ -130,3 +130,57 @@ func TestQuestionAnswerRequiresExplicitRequest(t *testing.T) {
 		t.Fatalf("unbound answer reached runtime %d times", n)
 	}
 }
+
+func TestTypedQuestionAnswersValidateShapeBeforeRuntime(t *testing.T) {
+	for _, response := range []runtime.InteractionResponse{
+		{RequestID: "q", Action: "approve", Answers: []string{"Otter"}},
+		{RequestID: "q", Action: "answer", Text: "Owl", Answers: []string{"Otter"}},
+		{RequestID: "q", Action: "answer", Answers: []string{"Otter", "Otter"}},
+		{RequestID: "q", Action: "answer", Answers: []string{""}},
+		{RequestID: "q", Action: "answer", Answers: []string{"Owl\n"}},
+	} {
+		if err := ValidateInteractionResponse(response); !errors.Is(err, ErrInteractionMismatch) {
+			t.Errorf("malformed typed answer %+v = %v, want interaction mismatch", response, err)
+		}
+	}
+}
+
+func TestTypedQuestionAnswersRequireCurrentAuthoredLabels(t *testing.T) {
+	for name, tc := range map[string]struct {
+		options  []string
+		multiple bool
+		answers  []string
+	}{
+		"unknown":                {[]string{"Otter", "Owl"}, true, []string{"Fox"}},
+		"ambiguous native label": {[]string{"Otter", "Otter"}, true, []string{"Otter"}},
+		"single select":          {[]string{"Otter", "Owl"}, false, []string{"Owl"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr, sp, info := startedQuestionSession(t)
+			metadata := map[string]string{"multi_select": "false"}
+			if tc.multiple {
+				metadata["multi_select"] = "true"
+			}
+			sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "q", Kind: "question", Options: tc.options, Metadata: metadata})
+			err := mgr.Respond(info.ID, runtime.InteractionResponse{RequestID: "q", Action: "answer", Answers: tc.answers})
+			if !errors.Is(err, ErrInteractionMismatch) {
+				t.Fatalf("unknown/unavailable selection reached runtime: %v", err)
+			}
+			if calls := sp.CountCalls("Respond", info.SessionName); calls != 0 {
+				t.Fatalf("Respond calls=%d, want zero", calls)
+			}
+		})
+	}
+}
+
+func TestTypedQuestionAnswersReachRuntimeAsAuthoredValues(t *testing.T) {
+	mgr, sp, info := startedQuestionSession(t)
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "q", Kind: "question", Options: []string{"Otter", "Owl"}, Metadata: map[string]string{"multi_select": "true"}})
+	if err := mgr.Respond(info.ID, runtime.InteractionResponse{RequestID: "q", Action: "answer", Answers: []string{"Owl", "Otter"}}); err != nil {
+		t.Fatal(err)
+	}
+	responses := sp.Responses[info.SessionName]
+	if len(responses) != 1 || strings.Join(responses[0].Answers, "|") != "Owl|Otter" {
+		t.Fatalf("typed selections lost or encoded in text: %+v", responses)
+	}
+}

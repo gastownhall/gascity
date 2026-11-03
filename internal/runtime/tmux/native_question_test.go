@@ -800,3 +800,366 @@ func TestNativeClaudeFormReviewSubmitStaysUnderIncarnationFence(t *testing.T) {
 		t.Fatalf("review submit escaped incarnation guard: error=%v bare=%q events=%q", err, bare, events)
 	}
 }
+
+// Unchecked rows and Submit match the retained native Claude2.1.308 capture.
+// The checked glyph also occurs in the maintained2.1.314 native fixture.
+const nativeClaudeMultiplePane = `←  ☐ Animals  ✔ Submit  →
+Which qualification animals?
+❯ 1. [ ] Otter
+         Choose otter
+  2. [ ] Owl
+         Choose owl
+  3. [ ] Fox
+         Choose fox
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel
+`
+
+type nativeMultipleExecutor struct {
+	paneExecutor
+	focus       int
+	checked     map[int]bool
+	stage       int
+	keys        []string
+	literal     []string
+	labels      []string
+	afterToggle func()
+}
+
+func (e *nativeMultipleExecutor) render() string {
+	if e.stage == 2 {
+		return "● Multiple answers received.\n❯ "
+	}
+	if e.stage == 1 {
+		var selected []string
+		for i, label := range e.labels {
+			if e.checked[i+1] {
+				selected = append(selected, label)
+			}
+		}
+		return "←  ☒ Animals  ✔ Submit  →\nReview your answers\n ● Which qualification animals?\n   → " + strings.Join(selected, ", ") + "\nReady to submit your answers?\n❯ 1. Submit answers\n  2. Cancel\n"
+	}
+	pane := nativeClaudeMultiplePane
+	for _, checked := range e.checked {
+		if checked {
+			pane = strings.Replace(pane, "☐ Animals", "☒ Animals", 1)
+			break
+		}
+	}
+	for i, label := range e.labels {
+		number := i + 1
+		before := fmt.Sprintf("%d. [ ] %s", number, []string{"Otter", "Owl", "Fox"}[i])
+		mark := "[ ]"
+		if e.checked[number] {
+			mark = "[✔]"
+		}
+		pane = strings.ReplaceAll(pane, before, fmt.Sprintf("%d. %s %s", number, mark, label))
+	}
+	rows := strings.Split(pane, "\n")
+	for i, line := range rows {
+		if match := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
+			mark := "  "
+			if match[2] == fmt.Sprint(e.focus) {
+				mark = "❯ "
+			}
+			rows[i] = mark + match[2] + ". " + match[3]
+		}
+		if strings.TrimSpace(line) == "Submit" && e.focus == 0 {
+			rows[i] = "❯    Submit"
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (e *nativeMultipleExecutor) execute(args []string) (string, error) {
+	if slices.Contains(args, "send-keys") && !slices.Contains(args, "-X") {
+		key := args[len(args)-1]
+		if slices.Contains(args, "-l") {
+			e.literal = append(e.literal, key)
+		} else {
+			e.keys = append(e.keys, key)
+			if key == "Down" || key == "Up" {
+				numbers := []int{1, 2, 3, 4, 0, 5}
+				index := slices.Index(numbers, e.focus)
+				if key == "Down" {
+					index++
+				} else {
+					index--
+				}
+				if index >= 0 && index < len(numbers) {
+					e.focus = numbers[index]
+				}
+			}
+			if key == "Enter" {
+				switch {
+				case e.stage == 1:
+					e.stage = 2
+				case e.focus == 0:
+					e.stage = 1
+				case e.focus >= 1 && e.focus <= 3:
+					e.checked[e.focus] = !e.checked[e.focus]
+					if e.afterToggle != nil {
+						e.afterToggle()
+					}
+				}
+			}
+		}
+	}
+	e.pane = e.render()
+	return e.paneExecutor.execute(args)
+}
+
+func (e *nativeMultipleExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func nativeMultipleTmux(t *testing.T) (*Tmux, *nativeMultipleExecutor, *claudeQuestionProjection) {
+	t.Helper()
+	ex := &nativeMultipleExecutor{paneExecutor: paneExecutor{inMode: "0"}, focus: 1, checked: map[int]bool{}, labels: []string{"Otter", "Owl", "Fox"}}
+	ex.pane = ex.render()
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	var projection claudeQuestionProjection
+	if err := json.Unmarshal([]byte(`{"version":1,"session_id":"native-multi-session","prompt_id":"native-multi-prompt","tool_use_id":"toolu_native_multi","questions":[{"header":"Animals","question":"Which qualification animals?","multiSelect":true,"options":[{"label":"Otter"},{"label":"Owl"},{"label":"Fox"}]}]}`), &projection); err != nil {
+		t.Fatal(err)
+	}
+	tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-multi-session","promptId":"native-multi-prompt","message":{"content":"ask multiple"}}` + "\n", nil
+	}
+	tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return []claudeQuestionProjection{projection}, nil }
+	return tm, ex, &projection
+}
+
+func TestNativeClaudeTypedMultipleChoicesExposeAuthoredSchemaWithoutInput(t *testing.T) {
+	tm, ex, _ := nativeMultipleTmux(t)
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || !slices.Equal(pending.Options, []string{"Otter", "Owl", "Fox"}) || pending.Metadata["multi_select"] != "true" || pending.Metadata["answer_action"] != "answer" || pending.Metadata["free_text"] != "false" {
+		t.Fatalf("multiple-choice native schema=%+v,%v", pending, err)
+	}
+	requireNoKeys(t, ex.calls, false)
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("question nudge guard=%v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+// Submit is unnumbered but appears before Chat about this in the captured
+// provider pane. Navigation must preserve that row order, including when the
+// cursor is already on Submit; no answer is authorized by this observation.
+func TestNativeClaudeTypedMultipleChoicesKeepSubmitInVisibleOrder(t *testing.T) {
+	tm, ex, _ := nativeMultipleTmux(t)
+	for _, focus := range []int{1, 0} {
+		ex.focus = focus
+		ex.pane = ex.render()
+		dialog, err := tm.dialogInPane("q")
+		if err != nil || dialog.question == nil {
+			t.Fatalf("dialog=%+v,%v", dialog, err)
+		}
+		q := dialog.question
+		if !slices.Equal(q.Numbers, []int{1, 2, 3, 4, 0, 5}) ||
+			!slices.Equal(q.Choices, []string{"Otter", "Owl", "Fox", "Type something.", "Submit", "Chat about this"}) {
+			t.Fatalf("focus=%d reordered visible rows: numbers=%v choices=%q", focus, q.Numbers, q.Choices)
+		}
+		if q.FocusedNumber != focus || focus == 0 && q.Focused != "Submit" {
+			t.Fatalf("focus=%d parsed focus=%d,%q", focus, q.FocusedNumber, q.Focused)
+		}
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeTypedMultipleChoicesSelectOnlyExactAuthoredSet(t *testing.T) {
+	tm, ex, _ := nativeMultipleTmux(t)
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Answers: []string{"Fox", "Otter"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !ex.checked[1] || ex.checked[2] || !ex.checked[3] || ex.stage != 2 || len(ex.literal) != 0 {
+		t.Fatalf("typed selection lost/encoded: checked=%v stage=%d literal=%q", ex.checked, ex.stage, ex.literal)
+	}
+	if !slices.Equal(ex.keys, []string{"Enter", "Down", "Down", "Enter", "Down", "Down", "Enter", "Enter"}) {
+		t.Fatalf("unexpected navigation/toggle/submit: %q", ex.keys)
+	}
+}
+
+func TestNativeClaudeTypedMultipleChoicesRejectMalformedBeforeKeys(t *testing.T) {
+	for name, response := range map[string]runtime.InteractionResponse{
+		"unknown":       {Action: "answer", Answers: []string{"Badger"}},
+		"duplicate":     {Action: "answer", Answers: []string{"Otter", "Otter"}},
+		"mixed text":    {Action: "answer", Text: "Otter", Answers: []string{"Fox"}},
+		"empty":         {Action: "answer", Answers: []string{}},
+		"free text":     {Action: "answer", Text: "Other animal"},
+		"approval verb": {Action: "approve", Answers: []string{"Otter"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm, ex, _ := nativeMultipleTmux(t)
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil {
+				t.Fatalf("Pending=%+v,%v", pending, err)
+			}
+			response.RequestID = pending.RequestID
+			if err := tm.Respond("q", response); err == nil {
+				t.Fatal("malformed selection accepted")
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeClaudeTypedMultipleChoicesSchemaChangeRefusesStaleAnswer(t *testing.T) {
+	tm, ex, projection := nativeMultipleTmux(t)
+	first, err := tm.Pending("q")
+	if err != nil || first == nil {
+		t.Fatalf("Pending=%+v,%v", first, err)
+	}
+	projection.Questions[0].Options[2].Label = "Badger"
+	ex.labels[2] = "Badger"
+	ex.pane = ex.render()
+	second, err := tm.Pending("q")
+	if err != nil || second == nil || first.RequestID == second.RequestID {
+		t.Fatalf("changed authored schema reused answer identity: first=%+v next=%+v,%v", first, second, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "answer", Answers: []string{"Otter"}}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("stale native schema=%v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeTypedMultipleChoicesStopAfterSchemaChangesDuringToggle(t *testing.T) {
+	tm, ex, projection := nativeMultipleTmux(t)
+	ex.afterToggle = func() { projection.Questions[0].Options[2].Label = "Badger"; ex.labels[2] = "Badger" }
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Answers: []string{"Otter", "Fox"}}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("schema changed during response=%v", err)
+	}
+	if !slices.Equal(ex.keys, []string{"Enter"}) {
+		t.Fatalf("continued after schema changed: %q", ex.keys)
+	}
+}
+
+func TestNativeClaudeTypedMultipleChoiceKeysKeepIncarnationFence(t *testing.T) {
+	_, state, projection := nativeMultipleTmux(t)
+	m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+	m.screen = func(*fenceModel) string { return state.render() }
+	m.onEvent = func(_ *fenceModel, event string) {
+		if key, ok := strings.CutPrefix(event, "key:"); ok {
+			_, _ = state.execute([]string{"send-keys", key})
+		}
+	}
+	m.beforeGuard = func(m *fenceModel, n int) {
+		if n == 2 {
+			m.dead = true
+		}
+	}
+	provider := fenceModelProvider(m)
+	provider.tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-multi-session","promptId":"native-multi-prompt","message":{"content":"ask multiple"}}` + "\n", nil
+	}
+	provider.tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return []claudeQuestionProjection{*projection}, nil }
+	pending, err := provider.Pending(fenceModelSession)
+	if err != nil || pending == nil {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	err = provider.RespondFenced(context.Background(), fenceModelSession, testFence, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Answers: []string{"Otter", "Fox"}})
+	var miss *runtime.FenceMismatchError
+	bare, events, _ := m.snapshot()
+	if !errors.As(err, &miss) || len(bare) != 0 || !slices.Equal(events, []string{"key:Enter"}) {
+		t.Fatalf("typed selection escaped its incarnation: err=%v bare=%q events=%q", err, bare, events)
+	}
+}
+
+// A desired selection set must converge from a partially completed earlier
+// attempt. Blindly replaying toggles would clear Otter and leave Owl selected.
+func TestNativeClaudeTypedMultipleChoicesReplacePreselectedSet(t *testing.T) {
+	tm, ex, _ := nativeMultipleTmux(t)
+	ex.checked[1], ex.checked[2] = true, true
+	ex.pane = ex.render()
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Answers: []string{"Fox", "Otter"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !ex.checked[1] || ex.checked[2] || !ex.checked[3] || ex.stage != 2 || len(ex.literal) != 0 {
+		t.Fatalf("preselected set did not converge: checked=%v stage=%d literal=%q", ex.checked, ex.stage, ex.literal)
+	}
+	if !slices.Equal(ex.keys, []string{"Down", "Enter", "Down", "Enter", "Down", "Down", "Enter", "Enter"}) {
+		t.Fatalf("re-toggled retained choice or missed prior selection: %q", ex.keys)
+	}
+}
+
+// If all desired boxes already match, a new explicit response submits them
+// without toggling any authored choice. This is not an operation-journal replay.
+func TestNativeClaudeTypedMultipleChoicesKeepAlreadySelectedSet(t *testing.T) {
+	tm, ex, _ := nativeMultipleTmux(t)
+	ex.checked[1], ex.checked[3] = true, true
+	ex.pane = ex.render()
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Answers: []string{"Otter", "Fox"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !ex.checked[1] || ex.checked[2] || !ex.checked[3] || ex.stage != 2 || len(ex.literal) != 0 {
+		t.Fatalf("matching set was changed: checked=%v stage=%d literal=%q", ex.checked, ex.stage, ex.literal)
+	}
+	if !slices.Equal(ex.keys, []string{"Down", "Down", "Down", "Down", "Enter", "Enter"}) {
+		t.Fatalf("matching boxes were toggled again: %q", ex.keys)
+	}
+}
+
+// A runtime-only caller is still an input boundary. Typed question answers
+// must never be silently ignored while an approval owns the same pane.
+func TestNativeTypedAnswersCannotGrantOrDenyApproval(t *testing.T) {
+	for name, response := range map[string]runtime.InteractionResponse{
+		"grant":          {Action: "approve", Answers: []string{"Otter"}},
+		"deny":           {Action: "deny", Answers: []string{"Otter"}},
+		"mixed text":     {Action: "approve", Text: "other input", Answers: []string{"Otter"}},
+		"explicit empty": {Action: "approve", Answers: []string{}},
+		"answer verb":    {Action: "answer", Answers: []string{"Otter"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ex := &fakeExecutor{agentPane: true, out: "assistant ready", outs: []string{approvalPromptPane(), "0", ""}}
+			tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+			err := tm.Respond("q", response)
+			if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+				t.Fatalf("typed answers reached an approval: %v", err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeTypedAnswersCannotBecomeNoPendingApprovalNoop(t *testing.T) {
+	ex := &fakeExecutor{agentPane: true, out: "assistant ready"}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	err := tm.Respond("q", runtime.InteractionResponse{Action: "approve", Answers: []string{"Otter"}})
+	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+		t.Fatalf("typed answers without a question became a successful approval/noop: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeApprovalWithoutTypedAnswersKeepsExistingActions(t *testing.T) {
+	for action, key := range map[string]string{"approve": "1", "deny": "3"} {
+		t.Run(action, func(t *testing.T) {
+			ex := &fakeExecutor{agentPane: true, out: "assistant ready", outs: []string{approvalPromptPane(), "0", ""}}
+			tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+			if err := tm.Respond("q", runtime.InteractionResponse{Action: action}); err != nil {
+				t.Fatal(err)
+			}
+			if keys := sentKeys(ex.calls); !slices.Equal(keys, []string{key}) {
+				t.Fatalf("ordinary approval changed: sent %q, want %q", keys, key)
+			}
+		})
+	}
+}

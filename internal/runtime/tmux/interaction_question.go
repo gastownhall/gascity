@@ -111,17 +111,19 @@ type parsedQuestion struct {
 	// Choices are the numbered options' labels in pane order.
 	Choices []string
 	// Focused is the label of the highlighted option.
-	Focused       string
-	Numbers       []int
-	Provider      string
-	NativeID      string
-	BindingError  string
-	FreeNumber    int
-	ChatNumber    int
-	Draft         string
-	FocusedNumber int
-	Collapsed     bool
-	ClaudeForm    *claudeQuestionForm
+	Focused        string
+	Numbers        []int
+	Provider       string
+	NativeID       string
+	BindingError   string
+	FreeNumber     int
+	ChatNumber     int
+	Draft          string
+	FocusedNumber  int
+	Collapsed      bool
+	MultiSelect    bool
+	CheckedChoices map[int]bool
+	ClaudeForm     *claudeQuestionForm
 }
 
 // parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
@@ -468,7 +470,7 @@ func (q *parsedQuestion) requestID() string {
 // answerChoices excludes the provider's editor and chat controls from the
 // model-authored answers shown to a client.
 func (q *parsedQuestion) isChoice(index int) bool {
-	return q.Numbers[index] != q.textOption() && q.Numbers[index] != q.ChatNumber
+	return q.Numbers[index] > 0 && q.Numbers[index] != q.textOption() && q.Numbers[index] != q.ChatNumber
 }
 
 func (q *parsedQuestion) answerChoices() []string {
@@ -507,6 +509,9 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 	}
 	if q.NativeID == "" {
 		return fmt.Errorf("%w: native question identity is unavailable; answer in the terminal", runtime.ErrInteractionActionUnavailable)
+	}
+	if q.MultiSelect || response.Answers != nil {
+		return t.respondClaudeMultipleChoices(ctx, target, q, response)
 	}
 	if strings.TrimSpace(response.Text) == "" || len(response.Text) > 16384 || strings.ContainsFunc(response.Text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) {
 		return fmt.Errorf("%w: answer must be nonempty text of at most 16384 bytes without control characters", runtime.ErrInteractionResponseInvalid)
@@ -587,7 +592,7 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 			return fmt.Errorf("verifying question answer: %w", err)
 		}
 		if next.question != nil && q.ClaudeForm != nil && isClaudeQuestionFormReview(next.question) {
-			return t.submitClaudeQuestionFormReview(ctx, target, q, response.Text, next.question)
+			return t.submitClaudeQuestionFormReview(ctx, target, q, response.Text, nil, next.question)
 		}
 		if next.question == nil || next.question.requestID() != q.requestID() {
 			return nil

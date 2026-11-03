@@ -883,7 +883,7 @@ func (t *Tmux) cancelClaudeDialog(ctx context.Context, name string) (handled boo
 
 // questionMetadata is the metadata a pending question carries.
 func questionMetadata(q *parsedQuestion) map[string]string {
-	metadata := map[string]string{"source": "tmux", "header": q.Header, "free_text": strconv.FormatBool(q.textOption() > 0 && q.NativeID != "")}
+	metadata := map[string]string{"source": "tmux", "header": q.Header, "free_text": strconv.FormatBool(q.textOption() > 0 && q.NativeID != "" && !q.MultiSelect)}
 	if q.NativeID != "" {
 		metadata["answer_action"] = "answer"
 	} else {
@@ -891,6 +891,9 @@ func questionMetadata(q *parsedQuestion) map[string]string {
 		if q.BindingError != "" {
 			metadata["answer_unavailable"] += ": " + q.BindingError
 		}
+	}
+	if q.MultiSelect {
+		metadata["multi_select"] = "true"
 	}
 	if q.Focused != "" {
 		metadata["focused"] = q.Focused
@@ -1032,6 +1035,9 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	}
 	if dialog.question != nil {
 		return t.respondQuestion(ctx, target, dialog.question, response)
+	}
+	if response.Answers != nil {
+		return fmt.Errorf("%w: typed answers require a native multiple-selection question", runtime.ErrInteractionResponseInvalid)
 	}
 	current := dialog.approval
 	if current == nil {

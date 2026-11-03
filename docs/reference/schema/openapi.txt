@@ -10088,6 +10088,18 @@
             "minLength": 1,
             "type": "string"
           },
+          "answers": {
+            "description": "Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "metadata": {
             "additionalProperties": {
               "type": "string"

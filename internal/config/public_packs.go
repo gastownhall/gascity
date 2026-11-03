@@ -18,7 +18,7 @@ const (
 	// PublicGascityPackVersion pins fresh init output to the registry
 	// release content commit from gastownhall/gascity-packs main
 	// (RFC8191 candidate branch; qualify this exact content before release).
-	PublicGascityPackVersion = "sha:02039579a40ae20aea47060d96027fc924333ef5"
+	PublicGascityPackVersion = "sha:aa5dcf701a70ca5db19228811e9ee822d852006c"
 
 	// PublicGascityRolesPackSource is the concrete durable source for the
 	// gascity role-agents subpack (gc-roles): the providerless, rig-scoped
@@ -134,4 +134,5 @@ var SupersededPublicGascityPackVersions = []string{
 	"sha:4c479c7dfb5b0b38e227953ab9ab75905d6f5b66",
 	"sha:78764b7ae1cb98960d4a4cfcb75468d06f86d7ed",
 	"sha:dd2cff200f18a64e8a010fe1d5b975b1f0493e14",
+	"sha:02039579a40ae20aea47060d96027fc924333ef5",
 }

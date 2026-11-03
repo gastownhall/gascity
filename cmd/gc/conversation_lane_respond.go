@@ -75,6 +75,7 @@ func (e *conversationLaneExec) respondLocked(ctx context.Context, h worker.Handl
 		RequestID: c.RequestID,
 		Action:    c.Response.Action,
 		Text:      c.Response.Text,
+		Answers:   append(c.Response.Answers[:0:0], c.Response.Answers...),
 		Metadata:  maps.Clone(c.Response.Metadata),
 		Fence:     fence,
 	})

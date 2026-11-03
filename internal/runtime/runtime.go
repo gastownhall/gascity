@@ -655,10 +655,12 @@ type InteractionResponse struct {
 	// a caller answering one raising sets it (the conversation lane always
 	// does: request ids may repeat, and an answer must not reach a prompt it
 	// was not meant for). Empty answers whatever is pending.
-	RequestID string            `json:"request_id,omitempty"`
-	Action    string            `json:"action"`
-	Text      string            `json:"text,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action"`
+	Text      string `json:"text,omitempty"`
+	// Answers carries exact authored labels for a multiple-selection question.
+	Answers  []string          `json:"answers,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // InteractionProvider is an optional extension for providers that can

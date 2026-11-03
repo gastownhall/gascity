@@ -878,13 +878,14 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 type respondOpPayload struct {
 	Action   string            `json:"action"`
 	Text     string            `json:"text"`
+	Answers  []string          `json:"answers,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // encodeRespondOpPayload is resp as a legacy /respond op's payload
 // (respondOpPayload).
 func encodeRespondOpPayload(resp runtime.InteractionResponse) (string, error) {
-	raw, err := json.Marshal(respondOpPayload{Action: resp.Action, Text: resp.Text, Metadata: resp.Metadata})
+	raw, err := json.Marshal(respondOpPayload{Action: resp.Action, Text: resp.Text, Answers: resp.Answers, Metadata: resp.Metadata})
 	if err != nil {
 		return "", apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
 	}
@@ -982,6 +983,20 @@ func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req s
 		(resp.RequestID == "" || resp.RequestID == prior.Interaction) {
 		req.scope = prior
 		return req, nil
+	}
+	if resp.Answers != nil {
+		pending, supported, err := mgr.Pending(req.conv)
+		switch {
+		case err != nil:
+			return req, humaSessionManagerError(err)
+		case !supported:
+			return req, humaSessionManagerError(session.ErrInteractionUnsupported)
+		case pending == nil:
+			return req, humaSessionManagerError(session.ErrNoPendingInteraction)
+		}
+		if err := session.ValidateInteractionResponseForPending(resp, pending); err != nil {
+			return req, humaSessionManagerError(err)
+		}
 	}
 	scope.Interaction = resp.RequestID
 	if scope.Interaction == "" {

@@ -6039,6 +6039,9 @@ type SessionRespondInputBody struct {
 	// Action Response action (e.g. allow, deny).
 	Action string `json:"action"`
 
+	// Answers Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused.
+	Answers *[]string `json:"answers,omitempty"`
+
 	// Metadata Optional response metadata.
 	Metadata *map[string]string `json:"metadata,omitempty"`
 

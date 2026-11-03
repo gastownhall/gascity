@@ -608,10 +608,12 @@ type PendingInteraction struct {
 
 // InteractionResponse resolves a pending interaction.
 type InteractionResponse struct {
-	RequestID string            `json:"request_id,omitempty"`
-	Action    string            `json:"action"`
-	Text      string            `json:"text,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action"`
+	Text      string `json:"text,omitempty"`
+	// Answers carries exact authored labels for a multiple-selection question.
+	Answers  []string          `json:"answers,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 	// Fence, when set, confines the answer to the incarnation it names
 	// (see runtime.InputFence): a runtime that cannot fence answers to the
 	// session (runtime.ResponseFencingFor reports none) refuses with

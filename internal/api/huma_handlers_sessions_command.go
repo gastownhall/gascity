@@ -1308,6 +1308,7 @@ func (s *Server) humaHandleSessionRespond(ctx context.Context, input *SessionRes
 				RequestID: input.Body.RequestID,
 				Action:    input.Body.Action,
 				Text:      input.Body.Text,
+				Answers:   append(input.Body.Answers[:0:0], input.Body.Answers...),
 				Metadata:  input.Body.Metadata,
 			})
 		}, syncAnswer.final)

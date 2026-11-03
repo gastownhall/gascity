@@ -2406,6 +2406,7 @@ export const zSessionResetStalledPayload = z.object({
 
 export const zSessionRespondInputBody = z.object({
     action: z.string().min(1),
+    answers: z.array(z.string()).min(1).max(32).nullish(),
     metadata: z.record(z.string(), z.string()).optional(),
     request_id: z.string().optional(),
     text: z.string().optional()

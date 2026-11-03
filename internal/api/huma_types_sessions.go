@@ -245,6 +245,7 @@ type SessionRespondInput struct {
 		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID (optional)."`
 		Action    string            `json:"action" minLength:"1" doc:"Response action (e.g. allow, deny)."`
 		Text      string            `json:"text,omitempty" doc:"Optional response text."`
+		Answers   []string          `json:"answers,omitempty" minItems:"1" maxItems:"32" doc:"Exact authored choice labels for a multiple-selection native question. Mutually exclusive with text; empty, duplicate, unknown and mixed free-text selections are refused."`
 		Metadata  map[string]string `json:"metadata,omitempty" doc:"Optional response metadata."`
 	}
 }

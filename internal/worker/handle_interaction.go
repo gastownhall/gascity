@@ -58,6 +58,7 @@ func (h *SessionHandle) Respond(ctx context.Context, req InteractionResponse) er
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
+		Answers:   append(req.Answers[:0:0], req.Answers...),
 		Metadata:  cloneStringMap(req.Metadata),
 	}
 	if !req.Fence.IsZero() {

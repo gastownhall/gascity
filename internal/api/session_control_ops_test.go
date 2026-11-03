@@ -30,6 +30,60 @@ import (
 // The O0 shadow ops on the synchronous session commands (DES-O0API §7,
 // §15 OJ-4).
 
+func TestSessionTypedAnswersRefuseUnknownBeforeOpAdmission(t *testing.T) {
+	for _, mode := range []string{"off", "auto", "require"} {
+		t.Run(mode, func(t *testing.T) {
+			e := newControlOpsEnv(t, mode, "off")
+			info := e.session(t, "Typed answers")
+			e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "q", Kind: "question", Options: []string{"Otter", "Owl"}, Metadata: map[string]string{"multi_select": "true"}})
+			rec := e.post(t, "/session/"+info.ID+"/respond", "unknown-choice", `{"request_id":"q","action":"answer","answers":["Fox"]}`)
+			wantStatus(t, "unknown authored label", rec, http.StatusConflict)
+			if rows := e.opRows(t); len(rows) != 0 {
+				t.Fatalf("unknown label admitted %d ops", len(rows))
+			}
+			if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 0 {
+				t.Fatalf("unknown label reached runtime %d times", n)
+			}
+			mgr := e.server(t).sessionManager(e.store)
+			if _, err := laneRespondPending(mgr, info.ID, runtime.InteractionResponse{RequestID: "q", Action: "answer", Answers: []string{"Fox"}}); !errors.Is(err, session.ErrInteractionMismatch) {
+				t.Fatalf("lane front door accepted unknown authored label: %v", err)
+			}
+		})
+	}
+}
+
+func TestSessionTypedAnswersReplayFrozenArrayAfterRestart(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "off")
+	info := e.session(t, "Frozen typed answers")
+	e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "q", Kind: "question", Options: []string{"Otter", "Owl"}, Metadata: map[string]string{"multi_select": "true"}})
+	body := `{"request_id":"q","action":"answer","answers":["Owl","Otter"]}`
+	first := e.post(t, "/session/"+info.ID+"/respond", "frozen-choices", body)
+	wantStatus(t, "first typed answer", first, http.StatusAccepted)
+	answer := decodeCommandAnswer(t, first)
+	if answer.Op == nil {
+		t.Fatal("typed answer was not durably recorded")
+	}
+	stored, err := e.opStore(t).Get(answer.Op.ID)
+	if err != nil || stored.Payload != `{"action":"answer","text":"","answers":["Owl","Otter"]}` {
+		t.Fatalf("frozen legacy typed payload=%+v,%v", stored, err)
+	}
+	e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "next", Kind: "question", Options: []string{"Blue", "Green"}, Metadata: map[string]string{"multi_select": "true"}})
+	e.restart(t)
+	replay := e.post(t, "/session/"+info.ID+"/respond", "frozen-choices", body)
+	wantStatus(t, "frozen replay", replay, http.StatusAccepted)
+	if !decodeCommandAnswer(t, replay).Replayed {
+		t.Fatal("same frozen array was not replayed")
+	}
+	changed := e.post(t, "/session/"+info.ID+"/respond", "frozen-choices", `{"request_id":"q","action":"answer","answers":["Otter","Owl"]}`)
+	wantStatus(t, "changed frozen order", changed, http.StatusUnprocessableEntity)
+	if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 1 {
+		t.Fatalf("frozen retry answered another native question: %d", n)
+	}
+	if pending, _ := e.fs.sp.Pending(info.SessionName); pending == nil || pending.RequestID != "next" {
+		t.Fatalf("replay consumed current request: %+v", pending)
+	}
+}
+
 // newControlOpsEnv is an opsEnv whose ops.control and ops.lifecycle gates
 // are control and lifecycle (ops.content stays off).
 func newControlOpsEnv(t *testing.T, control, lifecycle string) *opsEnv {

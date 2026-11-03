@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,6 +20,175 @@ import (
 type claudeQuestionForm struct {
 	Questions []claudeQuestion
 	Index     int
+}
+
+// claudeMultipleChoiceState reads the native checkbox rows. Unknown markers,
+// an existing free-text selection or an edited Other row remain unanswerable.
+func claudeMultipleChoiceState(q *parsedQuestion) ([]string, map[int]bool, error) {
+	choices := slices.Clone(q.Choices)
+	checked := map[int]bool{}
+	for i, label := range choices {
+		if !q.isChoice(i) {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(label, "[ ] "):
+			choices[i], checked[q.Numbers[i]] = strings.TrimPrefix(label, "[ ] "), false
+		case strings.HasPrefix(label, "[✔] "):
+			choices[i], checked[q.Numbers[i]] = strings.TrimPrefix(label, "[✔] "), true
+		default:
+			return nil, nil, fmt.Errorf("%w: native multiple-choice checkbox state is unknown", runtime.ErrInteractionActionUnavailable)
+		}
+	}
+	draft := strings.Join(strings.Fields(q.Draft), " ")
+	if draft != "[ ] Type something" && draft != "[ ] Type something Submit" {
+		return nil, nil, fmt.Errorf("%w: native multiple-choice free-text row is not empty and unchecked", runtime.ErrInteractionActionUnavailable)
+	}
+	return choices, checked, nil
+}
+
+func sameClaudeChecks(a, b map[int]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for number, selected := range a {
+		if actual, ok := b[number]; !ok || actual != selected {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *Tmux) readClaudeMultipleState(target string, expected *parsedQuestion) (*parsedQuestion, error) {
+	dialog, err := t.dialogInPane(target)
+	if err != nil {
+		return nil, err
+	}
+	current := dialog.question
+	if current == nil || !current.MultiSelect || current.NativeID != expected.NativeID || !sameClaudeQuestionForm(current.ClaudeForm, expected.ClaudeForm) {
+		return nil, fmt.Errorf("%w: native multiple-choice request or authored schema changed", runtime.ErrInteractionGone)
+	}
+	return current, nil
+}
+
+func (t *Tmux) waitClaudeMultipleState(ctx context.Context, target string, expected *parsedQuestion, checked map[int]bool) (*parsedQuestion, error) {
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		current, err := t.readClaudeMultipleState(target, expected)
+		if err != nil {
+			return nil, err
+		}
+		if sameClaudeChecks(current.CheckedChoices, checked) {
+			return current, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(respondVerifyInterval):
+		}
+	}
+	return nil, fmt.Errorf("native multiple-choice selection was not confirmed within %s", respondVerifyTimeout)
+}
+
+// respondClaudeMultipleChoices applies one typed desired selection set. Every
+// navigation/toggle/submit remains request and incarnation bound; a changed
+// native schema or unconfirmed checkbox stops before the next key.
+func (t *Tmux) respondClaudeMultipleChoices(ctx context.Context, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
+	if !q.MultiSelect || q.Provider == "codex" || q.ClaudeForm == nil {
+		return fmt.Errorf("%w: this native question does not support typed multiple selections", runtime.ErrInteractionActionUnavailable)
+	}
+	if response.Text != "" || len(response.Answers) == 0 || len(response.Answers) > 32 {
+		return fmt.Errorf("%w: multiple selections require one to 32 authored answer labels and no text", runtime.ErrInteractionResponseInvalid)
+	}
+	wanted := map[int]bool{}
+	seen := map[string]bool{}
+	for _, answer := range response.Answers {
+		if seen[answer] {
+			return fmt.Errorf("%w: duplicate multiple-choice answer", runtime.ErrInteractionResponseInvalid)
+		}
+		seen[answer] = true
+		number, matches := 0, 0
+		for i, label := range q.Choices {
+			if q.isChoice(i) && label == answer {
+				number, matches = q.Numbers[i], matches+1
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("%w: answer is not one unambiguous authored choice", runtime.ErrInteractionActionUnavailable)
+		}
+		wanted[number] = true
+	}
+	for number := range q.CheckedChoices {
+		if _, selected := wanted[number]; !selected {
+			wanted[number] = false
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, respondVerifyTimeout)
+	defer cancel()
+	current := q
+	for _, number := range q.Numbers {
+		selected, authored := wanted[number]
+		if !authored || current.CheckedChoices[number] == selected {
+			continue
+		}
+		if err := t.focusClaudeQuestionRow(ctx, target, current, number); err != nil {
+			return err
+		}
+		focused, err := t.readClaudeMultipleState(target, current)
+		if err != nil {
+			return err
+		}
+		if focused.FocusedNumber != number || !sameClaudeChecks(focused.CheckedChoices, current.CheckedChoices) {
+			return fmt.Errorf("%w: native checkbox state changed before toggle", runtime.ErrInteractionGone)
+		}
+		expected := map[int]bool{}
+		for key, value := range current.CheckedChoices {
+			expected[key] = value
+		}
+		expected[number] = selected
+		if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "Enter"); err != nil {
+			return fmt.Errorf("toggling native question choice: %w", err)
+		}
+		current, err = t.waitClaudeMultipleState(ctx, target, focused, expected)
+		if err != nil {
+			return err
+		}
+	}
+	if !sameClaudeChecks(current.CheckedChoices, wanted) {
+		return fmt.Errorf("%w: native multiple-choice set is not the requested set", runtime.ErrInteractionGone)
+	}
+	if err := t.focusClaudeQuestionRow(ctx, target, current, 0); err != nil {
+		return err
+	}
+	current, err := t.readClaudeMultipleState(target, current)
+	if err != nil {
+		return err
+	}
+	if current.FocusedNumber != 0 || current.Focused != "Submit" || !sameClaudeChecks(current.CheckedChoices, wanted) {
+		return fmt.Errorf("%w: complete native selections and Submit focus were not confirmed", runtime.ErrInteractionGone)
+	}
+	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "Enter"); err != nil {
+		return fmt.Errorf("submitting native multiple selections: %w", err)
+	}
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(respondVerifyInterval):
+		}
+		next, err := t.dialogInPane(target)
+		if err != nil {
+			return err
+		}
+		if next.question != nil && isClaudeQuestionFormReview(next.question) {
+			return t.submitClaudeQuestionFormReview(ctx, target, current, "", response.Answers, next.question)
+		}
+		if next.question == nil || next.question.requestID() != q.requestID() {
+			return nil
+		}
+	}
+	return fmt.Errorf("native multiple selections did not clear within %s; no submit was repeated", respondVerifyTimeout)
 }
 
 func cloneClaudeQuestionForm(questions []claudeQuestion, index int) *claudeQuestionForm {
@@ -136,13 +306,31 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 	}
 	match := ""
 	var form *claudeQuestionForm
+	var multiChoices []string
+	var multiChecks map[int]bool
 	for _, c := range pending {
 		for index, native := range c.Questions {
 			var options []string
 			for _, option := range native.Options {
 				options = append(options, option.Label)
 			}
-			if native.MultiSelect || strings.Join(strings.Fields(native.Question), " ") != strings.Join(strings.Fields(q.Question), " ") || !equalQuestionChoices(options, q.answerChoices()) {
+			choices := q.answerChoices()
+			var normalized []string
+			var checks map[int]bool
+			if native.MultiSelect {
+				var err error
+				normalized, checks, err = claudeMultipleChoiceState(q)
+				if err != nil {
+					continue
+				}
+				choices = nil
+				for i, label := range normalized {
+					if q.isChoice(i) {
+						choices = append(choices, label)
+					}
+				}
+			}
+			if strings.Join(strings.Fields(native.Question), " ") != strings.Join(strings.Fields(q.Question), " ") || !equalQuestionChoices(options, choices) {
 				continue
 			}
 			if match != "" {
@@ -152,6 +340,15 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 			if latestSession != "" && latestPrompt != "" {
 				form = cloneClaudeQuestionForm(c.Questions, index)
 			}
+			if native.MultiSelect {
+				data, err := json.Marshal(c.Questions)
+				if err != nil {
+					return fmt.Errorf("encoding native question schema: %w", err)
+				}
+				digest := sha256.Sum256(data)
+				match += fmt.Sprintf("-multi-%x", digest[:8])
+				multiChoices, multiChecks = normalized, checks
+			}
 			q.Question = native.Question
 		}
 	}
@@ -159,6 +356,24 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 		return fmt.Errorf("%w: visible question has no matching native Claude invocation", runtime.ErrRuntimeUnavailable)
 	}
 	q.NativeID = match
+	if multiChoices != nil {
+		q.MultiSelect, q.CheckedChoices = true, multiChecks
+		q.Choices = multiChoices
+		// The unnumbered Submit row is above Chat about this in the native
+		// pane. Keep navigation in that visible order rather than appending
+		// Submit after every numbered row and waiting for the wrong focus.
+		submitIndex := len(q.Numbers)
+		if index := slices.Index(q.Numbers, q.ChatNumber); q.ChatNumber > 0 && index >= 0 {
+			submitIndex = index
+		}
+		q.Numbers = slices.Insert(q.Numbers, submitIndex, 0)
+		q.Choices = slices.Insert(q.Choices, submitIndex, "Submit")
+		if q.FocusedNumber > 0 {
+			if index := slices.Index(q.Numbers, q.FocusedNumber); index >= 0 {
+				q.Focused = q.Choices[index]
+			}
+		}
+	}
 	q.ClaudeForm = form
 	return nil
 }
@@ -188,8 +403,8 @@ func sameClaudeQuestionForm(a, b *claudeQuestionForm) bool {
 // matchesClaudeQuestionReview requires the whole native review, in authored
 // order, and the last value this explicit response supplied. Previous answers
 // remain the provider's visible values; empty or incomplete reviews are refused.
-func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionForm, answer string) bool {
-	if form == nil || len(form.Questions) < 2 || form.Index != len(form.Questions)-1 ||
+func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionForm, answer string, selections []string) bool {
+	if form == nil || len(form.Questions) == 0 || len(form.Questions) < 2 && !form.Questions[0].MultiSelect || form.Index != len(form.Questions)-1 ||
 		!slices.Equal(review.answerChoices(), []string{"Submit answers", "Cancel"}) || review.FocusedNumber != 1 || review.Focused != "Submit answers" {
 		return false
 	}
@@ -203,9 +418,7 @@ func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionFor
 		return false
 	}
 	for i, question := range form.Questions {
-		if question.MultiSelect {
-			return false
-		}
+
 		remaining, ok = strings.CutPrefix(remaining, "● "+normalize(question.Question)+" → ")
 		if !ok {
 			return false
@@ -220,8 +433,31 @@ func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionFor
 			}
 			remaining = strings.TrimPrefix(marker, " ") + next
 		}
-		if strings.TrimSpace(value) == "" || i == form.Index && normalize(value) != normalize(answer) {
+		if strings.TrimSpace(value) == "" {
 			return false
+		}
+		if i == form.Index {
+			wanted := answer
+			if question.MultiSelect {
+				if len(selections) == 0 {
+					return false
+				}
+				var authored []string
+				for _, option := range question.Options {
+					if slices.Contains(selections, option.Label) {
+						authored = append(authored, option.Label)
+					}
+				}
+				if len(authored) != len(selections) {
+					return false
+				}
+				wanted = strings.Join(authored, ", ")
+			} else if selections != nil {
+				return false
+			}
+			if normalize(value) != normalize(wanted) {
+				return false
+			}
 		}
 	}
 	return true
@@ -231,14 +467,34 @@ func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionFor
 // Pending, binding and background delivery remain read-only. The original
 // invocation/schema and the entire visible review are rechecked before its one
 // fenced Enter; a changed invocation, value, menu or focus authorizes no key.
-func (t *Tmux) submitClaudeQuestionFormReview(ctx context.Context, target string, answered *parsedQuestion, answer string, review *parsedQuestion) error {
+func (t *Tmux) submitClaudeQuestionFormReview(ctx context.Context, target string, answered *parsedQuestion, answer string, selections []string, review *parsedQuestion) error {
 	verify := func(current *parsedQuestion) error {
-		if current == nil || !matchesClaudeQuestionReview(current, answered.ClaudeForm, answer) ||
+		if current == nil || !matchesClaudeQuestionReview(current, answered.ClaudeForm, answer, selections) ||
 			current.Question != review.Question || !slices.Equal(current.Choices, review.Choices) {
 			return fmt.Errorf("%w: native question review changed or is incomplete", runtime.ErrInteractionGone)
 		}
 		probe := *answered
 		probe.NativeID, probe.ClaudeForm = "", nil
+		if probe.MultiSelect {
+			// Reconstruct the original checkbox question for an authority-only
+			// rebind. The visible pane is the independently checked review now;
+			// this probe never navigates or types into it.
+			probe.Choices, probe.Numbers = slices.Clone(answered.Choices), slices.Clone(answered.Numbers)
+			if index := slices.Index(probe.Numbers, 0); index >= 0 {
+				probe.Choices = slices.Delete(probe.Choices, index, index+1)
+				probe.Numbers = slices.Delete(probe.Numbers, index, index+1)
+			}
+			for i, label := range probe.Choices {
+				if probe.isChoice(i) {
+					prefix := "[ ] "
+					if answered.CheckedChoices[probe.Numbers[i]] {
+						prefix = "[✔] "
+					}
+					probe.Choices[i] = prefix + label
+				}
+			}
+			probe.MultiSelect, probe.CheckedChoices = false, nil
+		}
 		if err := t.bindClaudeQuestion(target, &probe); err != nil {
 			return fmt.Errorf("rechecking native question review: %w", err)
 		}
