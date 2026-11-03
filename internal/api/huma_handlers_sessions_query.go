@@ -89,9 +89,11 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
 	}
+	freshness := cacheAgeSeconds(store.Store)
 	return &ListOutput[sessionResponse]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store.Store),
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[sessionResponse]{
 			Items:         page,
 			Total:         total,
@@ -189,10 +191,12 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	if len(s.conversationLaneKinds()) > 0 {
 		resp.Turn = s.observedSessionTurn(id, info.Generation)
 	}
+	freshness := cacheAgeSeconds(raw)
 	return &IndexOutput[sessionResponse]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(raw),
-		Body:      resp,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         resp,
 	}, nil
 }
 
@@ -582,9 +586,11 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 		})
 	}
 
+	freshness := cacheAgeSeconds(store.Store)
 	return &ListOutput[cityPendingEntry]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store.Store),
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[cityPendingEntry]{
 			Items:         entries,
 			Total:         len(entries),

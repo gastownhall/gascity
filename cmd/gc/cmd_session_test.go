@@ -4019,12 +4019,12 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 }
 
-func TestRouteSessionList_StaleBannerOver30s(t *testing.T) {
+func TestRouteSessionList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeSessionListTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{
@@ -4051,9 +4051,7 @@ func TestRouteSessionList_StaleBannerOver30s(t *testing.T) {
 	if code := routeSessionList(cityPath, "", "", c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 // okSessionPeekHandler serves a single-session GET response with a last-

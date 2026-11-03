@@ -185,7 +185,7 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 			return nil
 		},
 		func() int {
-			return renderBeadsListFromAPI(cr.Body.Beads, cr.AgeSeconds, format, filters, c.IsRemote(), stdout)
+			return renderBeadsListFromAPI(cr.Body.Beads, cr.AgeSeconds, cr.Refresh, format, filters, c.IsRemote(), stdout, stderr)
 		},
 		func() int { return doBeadsListFallback(cityPath, format, filters, stdout, stderr) },
 	)
@@ -211,9 +211,9 @@ func beadsListPartialErrorDetail(errs []string, remote bool) string {
 // renderBeadsListFromAPI formats the API-sourced bead list using the same
 // bead_format.go helpers as the fallback path. JSON output is the bare array
 // the fallback prints, except for a remote target (remote), which gets the
-// {beads, _cache_age_s} envelope; human output appends a staleness banner
-// when cache age > 30s.
-func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, format string, filters beadFilters, remote bool, stdout io.Writer) int {
+// {beads, _cache_age_s} envelope; human output is followed by the cache-age
+// footer on stderr when the server's cache is behind (writeCacheAgeFooter).
+func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, refresh api.CacheRefresh, format string, filters beadFilters, remote bool, stdout, stderr io.Writer) int {
 	filtered := filterBeads(bs, filters)
 	sortBeadsForList(filtered)
 	if format == "json" {
@@ -224,9 +224,7 @@ func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, format string, f
 		}
 	} else {
 		writeBeadTable(filtered, stdout, true)
-		if cacheAgeS > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cacheAgeS) //nolint:errcheck // best-effort stdout
-		}
+		writeCacheAgeFooter(stderr, cacheAgeS, refresh)
 	}
 	return 0
 }
@@ -306,16 +304,16 @@ func routeBeadsShow(cityPath string, c *api.Client, nilReason, beadID, format st
 			cr, err = c.GetBead(beadID)
 			return err
 		},
-		func() int { return renderBeadsShowFromAPI(cr, format, c.IsRemote(), stdout) },
+		func() int { return renderBeadsShowFromAPI(cr, format, c.IsRemote(), stdout, stderr) },
 		func() int { return doBeadsShowFallback(cityPath, beadID, format, stdout, stderr) },
 	)
 }
 
 // renderBeadsShowFromAPI formats the API-sourced bead. JSON output is the bare
 // object the fallback prints, except for a remote target (remote), which gets
-// the {bead, _cache_age_s} envelope; human output appends a staleness banner
-// when cache age > 30s.
-func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, remote bool, stdout io.Writer) int {
+// the {bead, _cache_age_s} envelope; human output is followed by the cache-age
+// footer on stderr when the server's cache is behind (writeCacheAgeFooter).
+func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, remote bool, stdout, stderr io.Writer) int {
 	if format == "json" {
 		if remote {
 			writeBeadJSONWithCache(cr.Body, cr.AgeSeconds, stdout)
@@ -324,9 +322,7 @@ func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, remote
 		}
 	} else {
 		writeBeadDetail(cr.Body, stdout)
-		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-		}
+		writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	}
 	return 0
 }

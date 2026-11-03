@@ -467,8 +467,8 @@ func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheck
 // renderConvoyListFromAPI renders the API-sourced convoy list through the
 // same writer as the local route (writeConvoyList), so both print one schema
 // with one content. hidden is the number of synthetic convoys left out. A
-// non-empty human listing appends the stale-cache banner when the cache age
-// exceeds the threshold. Two cases reach it only on a remote target, which
+// non-empty human listing is followed by the cache-age footer on stderr when
+// the server's cache is behind (writeCacheAgeFooter). Two cases reach it only on a remote target, which
 // has no local route, and each is named on stderr: a server that predates
 // child_ids, and sharedIDs, the IDs that more than one store's convoy carries,
 // whose rows all show the one store's progress /convoy/{id}/check reports.
@@ -486,8 +486,8 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 	if code := writeConvoyList(rows, hidden, jsonOut, stdout, stderr); code != 0 {
 		return code
 	}
-	if !jsonOut && len(rows) > 0 && cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if !jsonOut && len(rows) > 0 {
+		writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	}
 	return 0
 }
@@ -1551,8 +1551,8 @@ func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason strin
 // same writers as the local route. Progress is summarized from the members the
 // server returned, exactly as the local route summarizes its own read
 // (convoyProgressFromChildren), so it carries dangling_tracks too. The human
-// output appends the stale-cache banner when the cache age exceeds the
-// threshold.
+// output is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
 func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut bool, stdout, stderr io.Writer) int {
 	convoy := cr.Body.Convoy
 	children := cr.Body.Children
@@ -1561,9 +1561,7 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 		return writeConvoyStatusJSON(convoy, children, progress, stdout, stderr)
 	}
 	writeConvoyStatusText(stdout, convoy, children, progress)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
