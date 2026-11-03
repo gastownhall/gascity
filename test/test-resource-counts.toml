@@ -1863,6 +1863,16 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/api/status_build_cost_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/store_health_test.go"
+resource = "fixed_sleep"
+calls = 3
+
+[[count]]
 path = "internal/api/supervisor_dashboard_test.go"
 resource = "http_test_server"
 calls = 1

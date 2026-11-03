@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
@@ -67,7 +68,7 @@ func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *test
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 	parentRoot := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
-	members, err := convoycore.Members(store, parentRoot.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parentRoot.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestProcessDrainSeparateCreatesDependentItemWorkflowsBlocked(t *testing.T) 
 	writeDrainItemFormula(t, dir)
 	mem, drain := seedDrainWorkflow(t)
 	parentRoot := mustGetBead(t, mem, drain.Metadata["gc.root_bead_id"])
-	members, err := convoycore.Members(mem, parentRoot.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(mem)}, parentRoot.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -626,7 +627,7 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 		t.Fatalf("SetMetadata(exclusive): %v", err)
 	}
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
-	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -791,7 +792,7 @@ func TestProcessDrainExpandingReusesPersistedManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
-	if err := convoycore.TrackItem(store, root.Metadata["gc.input_convoy_id"], extra.ID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], extra.ID); err != nil {
 		t.Fatalf("track late member: %v", err)
 	}
 
@@ -820,7 +821,7 @@ func TestProcessDrainReplayUsesManifestWhenMemberWasDeletedBeforeUnitCreation(t 
 	drain = mustGetBead(t, store, drain.ID)
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
 	parentConvoyID := root.Metadata["gc.input_convoy_id"]
-	members, err := convoycore.Members(store, parentConvoyID, false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parentConvoyID, false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -847,7 +848,7 @@ func TestProcessDrainReplayUsesManifestWhenMemberWasDeletedBeforeUnitCreation(t 
 	if got := unit.Metadata["gc.drain_member_unresolved"]; got != "true" {
 		t.Fatalf("unit metadata = %#v, want unresolved marker", unit.Metadata)
 	}
-	unitMembers, err := convoycore.Members(store, replayed.Rows[0].UnitConvoyID, true)
+	unitMembers, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, replayed.Rows[0].UnitConvoyID, true)
 	if err != nil {
 		t.Fatalf("Members(unit): %v", err)
 	}
@@ -872,7 +873,7 @@ func TestProcessDrainFailsClosedWhenInitialMembershipHasUnresolvedMember(t *test
 	store, drain := seedDrainWorkflow(t)
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
 	parentConvoyID := root.Metadata["gc.input_convoy_id"]
-	members, err := convoycore.Members(store, parentConvoyID, false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parentConvoyID, false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -1036,7 +1037,7 @@ func TestProcessDrainCompleteRepairsEmbeddedSourceMemberDeps(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 	parentRoot := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
-	members, err := convoycore.Members(store, parentRoot.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parentRoot.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -1215,7 +1216,7 @@ func TestProcessDrainPropagatesSourceMemberWorkDirToItemWorkflow(t *testing.T) {
 	writeDrainItemFormula(t, dir)
 	store, drain := seedDrainWorkflow(t)
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
-	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("convoycore.Members: %v", err)
 	}
@@ -1336,7 +1337,7 @@ func TestEnsureDrainUnitConvoyRepairsExistingTrack(t *testing.T) {
 	if created || unit.ID != existing.ID {
 		t.Fatalf("unit=%+v created=%v, want existing %s without create", unit, created, existing.ID)
 	}
-	members, err := convoycore.Members(store, existing.ID, true)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, existing.ID, true)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -1417,7 +1418,7 @@ func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 		t.Fatalf("SetMetadata(exclusive): %v", err)
 	}
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
-	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -1560,7 +1561,7 @@ func seedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead) {
 		t.Fatal(err)
 	}
 	for _, member := range []beads.Bead{first, second} {
-		if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parent.ID, member.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1609,7 +1610,7 @@ func seedReverseOrderedDrainWorkflow(t *testing.T) (*beads.MemStore, beads.Bead,
 		t.Fatal(err)
 	}
 	for _, member := range []beads.Bead{dependent, blocker} {
-		if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parent.ID, member.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2037,7 +2038,7 @@ func TestDrainBehindFailedPredecessorFinalizesRunFailed(t *testing.T) {
 			store, first := seedDrainWorkflow(t)
 			rootID := first.Metadata["gc.root_bead_id"]
 			root := mustGetBead(t, store, rootID)
-			members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+			members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
 			if err != nil {
 				t.Fatalf("Members: %v", err)
 			}
@@ -2177,7 +2178,7 @@ func seedDrainBehindPredecessor(t *testing.T, predecessorMetadata map[string]str
 	}
 	rootID := drain.Metadata["gc.root_bead_id"]
 	root := mustGetBead(t, store, rootID)
-	members, err := convoycore.Members(store, root.Metadata["gc.input_convoy_id"], false)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -2312,7 +2313,7 @@ func seedSplitClassDrainWorkflowIn(t *testing.T, work beads.Store, carryConvoyCo
 		if err != nil {
 			t.Fatalf("create member %s: %v", title, err)
 		}
-		if err := convoycore.TrackItem(work, parent.ID, member.ID); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(work)}, parent.ID, member.ID); err != nil {
 			t.Fatalf("track member %s: %v", title, err)
 		}
 		memberIDs = append(memberIDs, member.ID)
@@ -2401,7 +2402,7 @@ func TestDrainSingleStoreMembershipIsUnchanged(t *testing.T) {
 	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
 	convoyID := root.Metadata["gc.input_convoy_id"]
 
-	want, err := convoycore.Members(store, convoyID, false)
+	want, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoyID, false)
 	if err != nil {
 		t.Fatalf("convoycore.Members: %v", err)
 	}
@@ -2539,7 +2540,7 @@ func TestProcessDrainSplitCityExpandsAndCompletes(t *testing.T) {
 				if unit.Metadata[beadmeta.SyntheticKindMetadataKey] != "drain-unit-convoy" {
 					t.Fatalf("unit convoy %s metadata = %v, want gc.synthetic_kind=drain-unit-convoy", unit.ID, unit.Metadata)
 				}
-				tracked, err := convoycore.HasTrack(work, row.UnitConvoyID, row.MemberID)
+				tracked, err := convoycore.HasTrack(beadstest.Work(work), row.UnitConvoyID, row.MemberID)
 				if err != nil {
 					t.Fatalf("HasTrack(%s, %s): %v", row.UnitConvoyID, row.MemberID, err)
 				}
@@ -2761,7 +2762,7 @@ func TestProcessDrainSplitCityUnitConvoyForAVanishedMember(t *testing.T) {
 			drain = mustGetBead(t, graph, drain.ID)
 			root := mustGetBead(t, graph, drain.Metadata["gc.root_bead_id"])
 			parentConvoyID := root.Metadata["gc.input_convoy_id"]
-			members, err := convoycore.Members(work, parentConvoyID, false)
+			members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(work)}, parentConvoyID, false)
 			if err != nil {
 				t.Fatalf("Members: %v", err)
 			}
@@ -2814,7 +2815,7 @@ func TestProcessDrainSplitCityUnitConvoyForAVanishedMember(t *testing.T) {
 			if got := unit.Metadata[beadmeta.DrainMemberUnresolvedMetadataKey]; tc.wantMint && got != "true" {
 				t.Fatalf("unit convoy metadata = %#v, want the unresolved marker", unit.Metadata)
 			}
-			unitMembers, err := convoycore.Members(work, row.UnitConvoyID, true)
+			unitMembers, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(work)}, row.UnitConvoyID, true)
 			if err != nil {
 				t.Fatalf("Members(unit): %v", err)
 			}
@@ -2882,7 +2883,7 @@ func TestEnsureDrainUnitConvoyPrefersTheWorkStoreOverAnEdgelessBindingCopy(t *te
 	if reused.ID != minted.ID {
 		t.Fatalf("reused unit convoy = %s, want the already-minted %s", reused.ID, minted.ID)
 	}
-	tracked, err := convoycore.HasTrack(work, minted.ID, member.ID)
+	tracked, err := convoycore.HasTrack(beadstest.Work(work), minted.ID, member.ID)
 	if err != nil {
 		t.Fatalf("HasTrack: %v", err)
 	}
@@ -3856,7 +3857,7 @@ func TestProcessDrainItemDerivesConvoyDefaultFromItsUnitConvoy(t *testing.T) {
 			parentConvoyID := root.Metadata["gc.input_convoy_id"]
 			// Persist the parent's runtime vars the way sling stamps them on
 			// the workflow root.
-			inv, err := graphv2.PrepareInvocation(context.Background(), store, "parent", []string{dir}, parentConvoyID, tt.callerVars)
+			inv, err := graphv2.PrepareInvocation(context.Background(), beadstest.Work(store), "parent", []string{dir}, parentConvoyID, tt.callerVars)
 			if err != nil {
 				t.Fatalf("PrepareInvocation(parent): %v", err)
 			}

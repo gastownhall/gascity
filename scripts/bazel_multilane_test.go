@@ -1585,7 +1585,7 @@ func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
 		for _, id := range []string{"lane", "sync-check"} {
 			for _, s := range wf.Jobs[id].Steps {
 				_, syncFlags := s.Env["BAZEL_SYNC_FLAGS"]
-				probe := s.Name == bazelCacheZstdStep || s.Name == "Fork cache remote repo contents cache (read)"
+				probe := s.Name == bazelForkRRCReadStep
 				if s.Uses != setupBazelUses && !syncFlags && !probe {
 					continue
 				}

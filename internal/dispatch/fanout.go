@@ -140,7 +140,8 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if len(existingMapping) > 0 {
 			idMapping = existingMapping
 		} else {
-			inst, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{
+			// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			inst, err := molecule.InstantiateFragment(context.Background(), beads.GraphMolecule(beads.GraphStore{Store: store}), fragment, molecule.FragmentOptions{
 				RootID:       rootID,
 				Vars:         itemVars,
 				ExternalDeps: externalDeps,

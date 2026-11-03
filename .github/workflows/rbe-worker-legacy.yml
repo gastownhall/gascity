@@ -119,4 +119,5 @@ jobs:
           RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
           RBE_WARM_URL: ${{ vars.RBE_WARM_URL || '' }}
           RBE_WARM_EVERY: ${{ vars.RBE_WARM_EVERY || '1' }}
+          CAS_MAX_BYTES: ${{ vars.RBE_CAS_MAX_BYTES || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'

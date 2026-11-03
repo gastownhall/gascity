@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
@@ -358,7 +359,7 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 		t.Fatalf("Create(convoy): %v", err)
 	}
 	for _, id := range []string{first.ID, second.ID} {
-		if err := convoycore.TrackItem(store, convoy.ID, id); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, id); err != nil {
 			t.Fatalf("TrackItem(%s, %s): %v", convoy.ID, id, err)
 		}
 	}
@@ -667,7 +668,7 @@ func TestGraphWorkflowControlLaneUsesOwningStoreScope(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Create(convoy): %v", err)
 			}
-			if err := convoycore.TrackItem(ownerStore, convoy.ID, item.ID); err != nil {
+			if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(ownerStore)}, convoy.ID, item.ID); err != nil {
 				t.Fatalf("TrackItem: %v", err)
 			}
 
@@ -810,14 +811,14 @@ func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
 		"",
 		"rig:fixture",
 		graphroute.GraphRouteBinding{},
-		rigStore,
+		beadstest.Sessions(rigStore),
 		cfg.Workspace.Name,
 		cfg,
 		cliGraphrouteDeps(cityPath),
 	); err != nil {
 		t.Fatalf("decorate rig graph: %v", err)
 	}
-	inst, err := molecule.Instantiate(context.Background(), rigStore, recipe, molecule.Options{})
+	inst, err := molecule.Instantiate(context.Background(), beadstest.GraphMolecule(rigStore), recipe, molecule.Options{})
 	if err != nil {
 		t.Fatalf("instantiate rig graph: %v", err)
 	}

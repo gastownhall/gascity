@@ -881,7 +881,8 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// GraphApplyStore and silently fall back to sequential creation. store stays
 	// the typed wrapper for the order-tracking bead operations below.
 	genericStore := store.Store
-	recipe, effectiveVars, err := prepareOrderWispRecipe(context.Background(), genericStore, a, searchPaths, vars)
+	genericStoreWork := beads.WorkStore{Store: genericStore}
+	recipe, effectiveVars, err := prepareOrderWispRecipe(context.Background(), genericStoreWork, a, searchPaths, vars)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -925,6 +926,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// molecule.Instantiate makes against it.
 	graphStore := resolveGraphStore(cliStorageRoutes(cityPath), genericStore, cfg, cityPath, nil)
 	moleculeStore := moleculeClassStore(recipe, genericStore, graphStore)
+	moleculeStoreMolecule := moleculeClassTarget(recipe, moleculeStore, moleculeStore)
 
 	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, moleculeStore, cityName, cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -938,7 +940,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStoreMolecule, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -949,7 +951,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		// steps, the scope store owns the tracks edges of any input convoy the
 		// root names. Wrapping one store as both legs reads the convoy out of the
 		// ledger it does not live in.
-		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: moleculeStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
+		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: moleculeStore}, genericStoreWork, rootID, "order-run"); err != nil {
 			fmt.Fprintf(stderr, "warning: gc order run: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful order run is preserved
 		}
 	}

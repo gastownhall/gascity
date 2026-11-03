@@ -1507,7 +1507,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 			},
 			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
 		}
-		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+		result, err := molecule.Attach(context.Background(), beadstest.GraphMolecule(graph), recipe, control.ID, molecule.AttachOptions{
 			IdempotencyKey: control.ID + ":attempt:2",
 			ExpectedEpoch:  1,
 		})

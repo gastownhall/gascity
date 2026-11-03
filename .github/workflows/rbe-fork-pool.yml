@@ -103,6 +103,13 @@ jobs:
           # RBE_FORK_WARM_EVERY=N warms one run in N. Rollback: unset it.
           RBE_WARM_URL: ${{ vars.RBE_FORK_WARM_URL || '' }}
           RBE_WARM_EVERY: ${{ vars.RBE_FORK_WARM_EVERY || '1' }}
+          # Local CAS cap, as rbe-worker-pool.yml's RBE_CAS_MAX_BYTES (empty:
+          # 150 GB). Plain decimal bytes matching ^[1-9][0-9]{9,12}$: 400 GB is
+          # 400000000000. 400e9 or 400G makes every fork worker exit 2. Each VM
+          # fixes the value when it starts. Rollback: unset
+          # RBE_FORK_CAS_MAX_BYTES, and new VMs take 150 GB. For an emergency,
+          # also cancel the running fork pool runs.
+          CAS_MAX_BYTES: ${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # As in rbe-worker-pool.yml: drift is reported while the worker serves.

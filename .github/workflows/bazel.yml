@@ -576,22 +576,6 @@ jobs:
             echo 'common --loading_phase_threads=64'
           } >> .bazelrc.local
 
-      # zstd transfers with the anonymous read-only cache (rbe-cache, :8443),
-      # only while it advertises zstd: cache-zstd-probe.sh asks its
-      # GetCapabilities, and any failure means no flag (never a failed step).
-      # A probe, not a repository variable: fork pull_request runs see no
-      # vars. Never for remote execution: rbe-west's trusted schedulers and
-      # the fork edge advertise no compressor, and Bazel then refuses the
-      # remote. Transport only (the line's config is fork-cache, which only
-      # setup-bazel's rc selects), so action keys are unchanged. .bazelrc
-      # try-imports the gitignored .bazelrc.local.
-      - name: Fork cache zstd transfers
-        if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
-        run: |
-          if bash tools/rbe/cache-zstd-probe.sh; then
-            echo 'build:fork-cache --remote_cache_compression' >> .bazelrc.local
-          fi
-
       # The remote repo contents cache, read-only, for the lanes that use
       # fork-cache (engdocs/design/bazel-remote-repo-contents-cache.md):
       # external repositories come from the trees rrc-seed wrote on main
@@ -607,19 +591,30 @@ jobs:
       # time only: once loading is done Bazel fetches the files lazily, and
       # losing rbe-cache mid-run fails the command (R4, bazel#30218). The
       # step summary records the verdict and rbe-cache's TCP connect time.
+      # First, a diagnostic for every fork-cache lane: .bazelrc's fork-cache
+      # asks for zstd, so if rbe-cache stops advertising it
+      # (cache-zstd-probe.sh) Bazel refuses the remote and the lane builds
+      # locally. Then a warning says so, and the reader's lines (which would
+      # only cost lookups) are skipped. Never a failed step.
       - name: Fork cache remote repo contents cache (read)
         if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
         run: |
-          if why=$(bash tools/rbe/cache-rrc-probe.sh 2>&1); then
-            {
-              echo 'startup --experimental_remote_repo_contents_cache'
-              echo 'common --loading_phase_threads=64'
-            } >> .bazelrc.local
-            echo "$why"
-            read=on
+          read=off
+          if zstd_why=$(bash tools/rbe/cache-zstd-probe.sh 2>&1); then
+            echo "$zstd_why"
+            if why=$(bash tools/rbe/cache-rrc-probe.sh 2>&1); then
+              {
+                echo 'startup --experimental_remote_repo_contents_cache'
+                echo 'common --loading_phase_threads=64'
+              } >> .bazelrc.local
+              echo "$why"
+              read=on
+            else
+              echo "::notice title=No remote repo contents cache::$why"
+            fi
           else
-            echo "::notice title=No remote repo contents cache::$why"
-            read=off
+            echo "::warning title=rbe-cache without zstd::$zstd_why (.bazelrc's fork-cache asks for zstd, so Bazel refuses rbe-cache)"
+            why=$zstd_why
           fi
           echo "Fork cache remote repo contents cache read: **$read** (${why#rbe-cache rrc probe: })" >> "$GITHUB_STEP_SUMMARY"
 

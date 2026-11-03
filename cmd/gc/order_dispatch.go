@@ -2370,7 +2370,7 @@ func orderSourceBinding(cfg *config.City, a orders.Order) (string, bool) {
 // the resolved invocation vars alongside it. The caller must thread those vars
 // into molecule.Instantiate; without them every {{var}} referencing a
 // caller-supplied value renders empty on the instantiated beads (#4668).
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
+func prepareOrderWispRecipe(ctx context.Context, store beads.WorkStore, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
 		return nil, nil, err
@@ -2467,6 +2467,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 			return fmt.Errorf("formulas v2 order step %q has no routing target; set order pool or gc.run_target", step.ID)
 		}
 	}
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(b)).
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
 		recipe,
 		routeVars,
@@ -2475,7 +2476,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		scopeRef,
 		storeRef,
 		graphroute.GraphRouteBinding{},
-		store,
+		beads.SessionStore{Store: store},
 		cityName,
 		cfg,
 		cliGraphrouteDeps(cityPath),
@@ -2766,7 +2767,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	vars = orderFormulaVars(m.cfg, a, vars)
 	searchPaths := orderFormulaSearchPaths(m.cfg, a)
-	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, beads.WorkStore{Store: store}, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2848,7 +2849,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	moleculeStore := moleculeClassStore(recipe, store, graphStore)
 	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
-	cookResult, err := molecule.Instantiate(ctx, moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(ctx, moleculeClassTarget(recipe, moleculeStore, moleculeStore), recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

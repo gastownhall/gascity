@@ -1523,7 +1523,8 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if binding, ok := controlRoutes[rigContext]; ok {
 			return binding, nil
 		}
-		binding, err := graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
+		// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+		binding, err := graphroute.ControlDispatcherBinding(beads.SessionStore{Store: store}, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, err
 		}
@@ -1607,6 +1608,8 @@ func graphRouteBindingRigContext(binding graphRouteBinding) string {
 }
 
 func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store beads.Store, storeRef, cityName, cityPath string, cfg *config.City) error {
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+	storeSessions := beads.SessionStore{Store: store}
 	if recipe == nil {
 		return fmt.Errorf("recipe is nil")
 	}
@@ -1619,7 +1622,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 			}
 			scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 			scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 		}
 		binding, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
 		if err != nil {
@@ -1634,7 +1637,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 		}
 		scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 		scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	vars, err := drainItemRecipeVars(recipe)
 	if err != nil {
@@ -1642,11 +1645,11 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 	}
 	scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 	scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(storeSessions, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
 		return err
 	} else if ok {
 		defaultRoute := graphroute.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
-		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
 }
@@ -1684,7 +1687,8 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName,
 		return graphRouteBinding{SessionName: source.Assignee}, nil
 	}
 	rigContext := workflowExecutionRigContext(source)
-	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(beads.SessionStore{Store: store}, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
 		return graphRouteBinding{}, err
 	} else if ok {
 		return binding, nil
@@ -2694,7 +2698,7 @@ func reopenSourceRoute(b beads.Bead) string {
 // reported by the time this runs, so a lookup or convoy-update failure here is
 // surfaced as a warning rather than failing the overall command.
 func reopenTrackingConvoysForReopenedSource(store beads.Store, sourceID string, stdout, stderr io.Writer) {
-	convoys, err := convoycore.TrackingConvoysForItem(store, sourceID)
+	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, sourceID)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: listing tracking convoys for %s: %v\n", sourceID, err)
 		return
@@ -3170,7 +3174,8 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		var roots []beads.Bead
 		err := beads.RelicRead(func() error {
 			var listErr error
-			roots, listErr = sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+			// info.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			roots, listErr = sourceworkflow.ListLiveRootsInCity(beads.GraphMolecule(beads.GraphStore{Store: info.store}), currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 			return listErr
 		})
 		if err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -514,7 +515,7 @@ func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create member: %v", err)
 		}
-		if err := convoycore.TrackItem(scopeStore, convoy.ID, member.ID); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(scopeStore)}, convoy.ID, member.ID); err != nil {
 			t.Fatalf("track member: %v", err)
 		}
 		memberIDs = append(memberIDs, member.ID)
@@ -626,7 +627,7 @@ func TestSourceWorkflowStoresScanTheLedgerThatHoldsWorkflowRoots(t *testing.T) {
 
 	var found []string
 	for _, info := range stores {
-		roots, err := sourceworkflow.ListLiveRoots(info.Store, sourceBeadID, storeRef, storeRef)
+		roots, err := sourceworkflow.ListLiveRoots(beadstest.GraphMolecule(info.Store), sourceBeadID, storeRef, storeRef)
 		if err != nil {
 			t.Fatalf("ListLiveRoots(%s): %v", info.StoreRef, err)
 		}
