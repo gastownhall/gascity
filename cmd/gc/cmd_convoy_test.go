@@ -4196,6 +4196,10 @@ prefix = "fe"
 name = "backend"
 path = "backend"
 prefix = "be"
+
+[[rigs]]
+name = "unbound"
+prefix = "ub"
 `)
 	site := "workspace_name = \"demo\"\nworkspace_prefix = \"demo\"\n\n[[rig]]\nname = \"frontend\"\npath = " +
 		strconv.Quote(filepath.Join(cityDir, "frontend")) + "\n\n[[rig]]\nname = \"backend\"\npath = " +
@@ -4302,6 +4306,7 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 	cityDir := t.TempDir()
 	cfg := &config.City{Rigs: []config.Rig{
 		{Name: "frontend", Path: "frontend", Prefix: "fe"},
+		{Name: "unbound", Prefix: "ub"},
 	}}
 	frontendRoot := resolveStoreScopeRoot(cityDir, "frontend")
 
@@ -4332,6 +4337,26 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 			rigName: " frontend ",
 			wantDir: frontendRoot,
 		},
+		{
+			name:    "unknown name",
+			rigName: "nosuch",
+			wantErr: `rig "nosuch" not found`,
+		},
+		{
+			name:    "declared rig without a path binding",
+			rigName: "unbound",
+			wantErr: "rig \"unbound\" is declared but has no path binding — run `gc rig add <dir> --name unbound` to bind it",
+		},
+		{
+			name:    "name with a trailing slash is not a name",
+			rigName: "frontend/",
+			wantErr: `rig "frontend/" not found`,
+		},
+		{
+			name:    "relative path written with ./ is not a name",
+			rigName: "./frontend",
+			wantErr: `rig "./frontend" not found`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4349,6 +4374,11 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 				t.Fatalf("convoyCreateStoreDir(rig %q, issues %v) = %q, want %q", tc.rigName, tc.issueIDs, got, tc.wantDir)
 			}
 		})
+	}
+
+	if _, err := convoyCreateStoreDir(nil, cityDir, "frontend", nil); err == nil ||
+		!strings.Contains(err.Error(), `rig "frontend" not found`) {
+		t.Fatalf("convoyCreateStoreDir(nil cfg) err = %v, want %q", err, `rig "frontend" not found`)
 	}
 }
 
@@ -4455,4 +4485,88 @@ func TestConvoyCreateRigFlagWithMemberTracksIssue(t *testing.T) {
 		t.Fatalf("openStoreAtForCity(frontend): %v", err)
 	}
 	requireConvoyTrack(t, verifyStore, convoyID, jsonIssue.ID)
+}
+
+// requireNoConvoyInStores asserts no convoy exists in any of the stores at
+// dirs: a refused convoy create must write nothing.
+func requireNoConvoyInStores(t *testing.T, cityDir string, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		store, err := openStoreAtForCity(dir, cityDir)
+		if err != nil {
+			t.Fatalf("openStoreAtForCity(%s): %v", dir, err)
+		}
+		convoys, err := store.List(beads.ListQuery{Type: "convoy", IncludeClosed: true})
+		if err != nil {
+			t.Fatalf("list convoys in %s: %v", dir, err)
+		}
+		if len(convoys) != 0 {
+			t.Fatalf("store at %s holds %d convoy(s) after a refused create; want none", dir, len(convoys))
+		}
+	}
+}
+
+// TestConvoyCreateRigFlagRejectsUnusableRig: a non-empty --rig that names no
+// rig, names a declared rig with no path binding, names the city workspace,
+// or is written as a path where no rig matches, must refuse the create with
+// a contextual error before any store is opened, so nothing is written.
+func TestConvoyCreateRigFlagRejectsUnusableRig(t *testing.T) {
+	cityDir := convoyRigFlagTestCity(t)
+	frontendDir := filepath.Join(cityDir, "frontend")
+	backendDir := filepath.Join(cityDir, "backend")
+
+	cases := []struct {
+		name    string
+		rig     string
+		wantErr string
+	}{
+		{
+			name:    "unknown name",
+			rig:     "nosuch",
+			wantErr: `rig "nosuch" not found`,
+		},
+		{
+			name:    "declared rig without a path binding",
+			rig:     "unbound",
+			wantErr: "rig \"unbound\" is declared but has no path binding — run `gc rig add <dir> --name unbound` to bind it",
+		},
+		{
+			name:    "city workspace name",
+			rig:     "demo",
+			wantErr: `rig "demo" not found`,
+		},
+		{
+			name:    "relative path written with ./",
+			rig:     "./frontend",
+			wantErr: `rig "./frontend" not found`,
+		},
+		{
+			name:    "name with a trailing slash",
+			rig:     "frontend/",
+			wantErr: `rig "frontend/" not found`,
+		},
+		{
+			name:    "bare directory name",
+			rig:     "docs",
+			wantErr: `rig "docs" not found`,
+		},
+		{
+			name:    "absolute directory",
+			rig:     frontendDir,
+			wantErr: `rig "` + frontendDir + `" not found`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--city", cityDir, "--rig", tc.rig, "convoy", "create", "refused batch", "--json"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("run convoy create --rig %q exited 0; want a refusal", tc.rig)
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), tc.wantErr)
+			}
+			requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
+		})
+	}
 }
