@@ -4248,7 +4248,7 @@ func TestAgentSessionCreateBaselineOmitsUnhonoredOptionDefaults(t *testing.T) {
 // persist the controller's command: the base command, the Kimi hook config
 // file, then the schema defaults.
 func TestAgentSessionCreateBaselineAddsKimiHookConfigForProviderAlias(t *testing.T) {
-	const want = "echo --yolo --no-thinking --config-file .kimi/config.toml --model kimi-k2.6"
+	const want = "echo --yolo --config-file .kimi/config.toml --model kimi-k2.6"
 	for _, route := range agentSessionCreateRoutes {
 		t.Run(route.name, func(t *testing.T) {
 			fs := newFakeState(t)

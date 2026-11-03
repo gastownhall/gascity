@@ -269,6 +269,41 @@ func TestProviderTemplateCommandOmitsUnhonoredDefaults(t *testing.T) {
 	}
 }
 
+func TestKimiACPOptionsPrecedeSubcommand(t *testing.T) {
+	rp := &ResolvedProvider{
+		Name:    "kimi",
+		Command: "kimi",
+		ACPArgs: []string{"--yolo", "acp"},
+		OptionsSchema: []ProviderOption{{
+			Key:     "model",
+			Type:    "select",
+			Default: "kimi-code/k3",
+			Choices: []OptionChoice{{
+				Value:    "kimi-code/k3",
+				FlagArgs: []string{"--model", "kimi-code/k3"},
+			}},
+		}},
+		EffectiveDefaults: map[string]string{"model": "kimi-code/k3"},
+	}
+
+	got, err := ProviderTemplateCommand(rp, SessionTransportACP, nil, nil)
+	if err != nil {
+		t.Fatalf("ProviderTemplateCommand: %v", err)
+	}
+	want := "kimi --yolo --model kimi-code/k3 acp"
+	if got != want {
+		t.Fatalf("ProviderTemplateCommand() = %q, want %q", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, map[string]string{"model": "kimi-code/k3"}, SessionTransportACP)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if launch.Command != want {
+		t.Fatalf("BuildProviderLaunchCommand() = %q, want %q", launch.Command, want)
+	}
+}
+
 func TestProviderTemplateCommandAddsKimiHookConfigWhenKimiHooksInstalled(t *testing.T) {
 	kimi := &ResolvedProvider{
 		Name:    "kimi",
