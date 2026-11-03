@@ -835,3 +835,47 @@ func TestFreshCollision(t *testing.T) {
 		}
 	}
 }
+
+// Kills (F-1, PR-3b) a v2-ready Peek that reads only a running box, or
+// reads a failure as an empty screen: through the production seam-backed
+// provider, a dead box's screen is the `peek` op's even though `is-running`
+// is false; exit 66 is runtime.ErrNoScreen, never an empty screen; any
+// other failure (exit 1, exit 2, a failed observe) is an error; a running
+// box's screen is read as before, and no box reads nothing, as the seams
+// answer it. A script that is not v2-ready keeps the
+// seams' Peek: nothing for a box that is not running, and exit 66 is no
+// answer.
+func TestPeekReadsAnyBoxWhenReady(t *testing.T) {
+	for _, c := range []struct {
+		name, state, peek string
+		want              string
+		wantErr, noScreen bool
+	}{
+		{"dead box's screen", `{"state":"dead",` + testObject + `}`, `echo "Usage limit reached"`, "Usage limit reached", false, false},
+		{"dead box, no screen", `{"state":"dead",` + testObject + `}`, `exit 66`, "", true, true},
+		{"no box", `{"state":"absent"}`, `exit 66`, "", false, false},
+		{"peek fails", `{"state":"dead",` + testObject + `}`, `echo boom >&2; exit 1`, "", true, false},
+		{"peek not implemented", `{"state":"dead",` + testObject + `}`, `exit 2`, "", true, false},
+		{"observe fails", `x`, `echo screen`, "", true, false},
+		{"running box", `{"state":"running",` + testObject + `}`, `echo live`, "live", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			script, dir := observePack(t, readyHandshake, map[string]string{
+				"observe":    `cat >/dev/null; echo '` + c.state + `'`,
+				"is-running": `echo false`,
+				"peek":       c.peek,
+			})
+			out, err := NewSeamBacked(script).Peek("s", 10)
+			switch {
+			case c.wantErr != (err != nil), errors.Is(err, runtime.ErrNoScreen) != c.noScreen, out != c.want:
+				t.Fatalf("Peek = %q, %v; want %q (error %v, no screen %v)", out, err, c.want, c.wantErr, c.noScreen)
+			case slices.Contains(opsRan(t, dir), "peek") != (c.name != "observe fails" && c.name != "no box"):
+				t.Fatalf("ops %v: want the peek op exactly for a box", opsRan(t, dir))
+			}
+		})
+	}
+	legacy, dir := observePack(t, "", map[string]string{"is-running": `echo false`, "peek": `exit 66`})
+	if out, err := NewSeamBacked(legacy).Peek("s", 10); out != "" || err != nil || slices.Contains(opsRan(t, dir), "peek") {
+		t.Fatalf("not v2-ready: Peek = %q, %v, ops %v; want the seams' empty answer with no peek op", out, err, opsRan(t, dir))
+	}
+}

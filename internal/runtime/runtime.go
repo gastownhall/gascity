@@ -79,6 +79,16 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
 const ExitCodeTempFail = 75
 
+// ExitCodeNoScreen is sysexits.h EX_NOINPUT: an observe.v1 exec script's
+// `peek` of a name whose box has no screen to read (no box, or a dead box
+// whose screen is gone). It is an answer, not a failure: [ErrNoScreen].
+const ExitCodeNoScreen = 66
+
+// ErrNoScreen reports a Peek answered "no screen": nothing holds a screen
+// for the name, so there is nothing to classify. A caller reads it as a
+// known-empty screen; any other Peek error is unknown.
+var ErrNoScreen = errors.New("no screen")
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"

@@ -658,3 +658,37 @@ func probeObserveInventoryActivity(ctx context.Context, r *runner, hs runtime.Pr
 	}
 	return StatusPass, "last_activity on every running session"
 }
+
+// probeObservePeekNoScreen: v2 reads a dead box's screen through `peek` to
+// tell why it died before recycling it, so "no screen" must be an answer
+// (exit 66, runtime.ExitCodeNoScreen) and never an empty success: a name
+// never started, and one stopped, answer it; a running box's peek
+// succeeds.
+func probeObservePeekNoScreen(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if s, d, ok := observeDeclared(hs); !ok {
+		return s, d
+	}
+	name := r.nextName()
+	noScreen := func(when string) (Status, string, bool) {
+		res := r.op(ctx, "peek", name, "10")
+		if res.unsupported || res.ok() || res.exitCode != runtime.ExitCodeNoScreen {
+			return StatusFail, fmt.Sprintf("peek of %s: exit %d (exit 2: %v), want %d, no screen", when, res.exitCode, res.unsupported, runtime.ExitCodeNoScreen), false
+		}
+		return StatusPass, "", true
+	}
+	if s, d, ok := noScreen("a never-started name"); !ok {
+		return s, d
+	}
+	if s, d := startOrFail(ctx, r, nil, name); s != StatusPass {
+		return s, d
+	}
+	if res := r.op(ctx, "peek", name, "10"); !res.ok() {
+		r.stop(ctx, name)
+		return StatusFail, fmt.Sprintf("peek of a running box failed: %v (exit 2: %v)", res.err, res.unsupported)
+	}
+	r.stop(ctx, name)
+	if s, d, ok := noScreen("a stopped name"); !ok {
+		return s, d
+	}
+	return StatusPass, "a running box's screen; exit 66 for no box"
+}

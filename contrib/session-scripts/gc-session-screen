@@ -789,10 +789,21 @@ case "$op" in
     lines="${3:-0}"
     if [ -z "$name" ]; then exit 0; fi
     valid_name "$name"
-    target "$name" || exit 0
+    # No box, or a dead one (screen cannot read a dead session's screen):
+    # exit 66, no screen. A screen that cannot be read is a failure, never
+    # an empty screen.
+    load_rows || exit 1
+    rc=0; one_row "$name" || rc=$?
+    if [ "$rc" -eq 1 ]; then exit 66; fi
+    [ "$rc" -eq 0 ] || die "peek: $name is held by more than one box"
+    classify "$STATUS"
+    case "$STATE" in
+      dead) exit 66 ;;
+      unknown) die "peek: cannot read $name" ;;
+    esac
     # Use hardcopy to capture the exact session's content.
     tmp=$(mktemp)
-    screen -S "$TARGET" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+    screen -S "$PID.$name" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; die "peek: cannot read the screen of $name"; }
     if [ "$lines" -gt 0 ] 2>/dev/null; then
       tail -n "$lines" "$tmp"
     else

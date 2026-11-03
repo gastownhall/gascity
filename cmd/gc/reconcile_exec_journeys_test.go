@@ -33,8 +33,10 @@ import (
 // execJourneyScript is a stateful observe.v1 exec pack. A box is the
 // directory $S/b/<name>: its object (id, created), its state (running or
 // dead), its agent (alive or dead), its attachment (true, false, or err:
-// unreadable), its pane text and its metadata (meta.<KEY>, the identity
-// keys seeded from the start's env before the box appears). A file
+// unreadable), its pane text (its screen, live or dead: `peek` prints it,
+// and answers exit 66, no screen, for no box or a box holding noscreen) and
+// its metadata (meta.<KEY>, the identity keys seeded from the start's env
+// before the box appears). A file
 // $S/fault.<op> fails that op (exit 1), as a backend outage does; $S/notready
 // drops observe.v1 and report-attachment from the handshake; $S/start.dead
 // starts a box that dies at once; $S/start.collide has another creator take
@@ -107,7 +109,9 @@ case "$op" in
   get-meta) [ -f "$box/meta.$3" ] && cat "$box/meta.$3"; exit 0 ;;
   set-meta) log "$3"; [ -d "$box" ] && printf %%s "$in" > "$box/meta.$3"; exit 0 ;;
   remove-meta) log "$3"; rm -f "$box/meta.$3" ;;
-  peek) log; [ -f "$box/pane" ] && cat "$box/pane"; exit 0 ;;
+  peek)
+    log; [ -d "$box" ] && [ ! -f "$box/noscreen" ] || exit 66
+    cat "$box/pane" ;;
   *) exit 2 ;;
 esac
 `
@@ -206,7 +210,13 @@ func (f *execFixture) write(rel, v string) {
 // provider the fixture's exec pack.
 func execKit(t *testing.T, state string) (*txKit, *execFixture) {
 	t.Helper()
-	k := startKit(t, intentStart, state)
+	return execKitOn(t, state)
+}
+
+// execKitOn is execKit on a row carrying meta too.
+func execKitOn(t *testing.T, state string, meta ...string) (*txKit, *execFixture) {
+	t.Helper()
+	k := startKit(t, intentStart, state, meta...)
 	k.it.Deadline = gatherNow.Add(70 * time.Second)
 	f := newExecFixture(t)
 	k.p.Runtime = f.sp
@@ -565,16 +575,32 @@ func TestExecJourneyOnScreen(t *testing.T) {
 		_ = sp.Stop("s-gc-1")
 		_ = os.RemoveAll(state)
 	})
+	// On a loaded host a real `observe` can run past v2's 4s bound, which
+	// reads unknown: v2 retries such a read on a later pass, and so do these
+	// reads and runs, a few times, never past an unknown.
 	observe := func() runtime.Liveness {
-		l, err := sp.(runtime.LivenessObserverWithError).ObserveLivenessWithError("s-gc-1", []string{"sleep"})
-		if err != nil {
-			t.Fatalf("observe: %v", err)
+		var err error
+		for range 5 {
+			var l runtime.Liveness
+			if l, err = sp.(runtime.LivenessObserverWithError).ObserveLivenessWithError("s-gc-1", []string{"sleep"}); err == nil {
+				return l
+			}
 		}
-		return l
+		t.Fatalf("observe: %v", err)
+		return runtime.Liveness{}
+	}
+	run := func(k *txKit) settlement {
+		var s settlement
+		for range 5 {
+			if s = k.runKind(); s.Outcome != settledRefused || s.Cause != causeLivenessUnknown {
+				break
+			}
+		}
+		return s
 	}
 
 	k := screenKit(t, sp, "asleep", "3", "tok")
-	if s := k.runKind(); s.Outcome != settledLanded {
+	if s := run(k); s.Outcome != settledLanded {
 		t.Fatalf("start: settlement %+v, want landed", s)
 	}
 	first := observe()
@@ -598,7 +624,7 @@ func TestExecJourneyOnScreen(t *testing.T) {
 	}
 
 	k2 := screenKit(t, sp, "asleep", k.meta("generation"), k.meta("instance_token"))
-	if s := k2.runKind(); s.Outcome != settledLanded {
+	if s := run(k2); s.Outcome != settledLanded {
 		t.Fatalf("recycle: settlement %+v, want landed", s)
 	}
 	second := observe()
@@ -644,4 +670,65 @@ func screenAgentPID(t *testing.T, state string) int {
 	}
 	t.Fatalf("no sleep under the window process %s", fields[1])
 	return 0
+}
+
+// Journeys on a dead box's screen (F-1): v2 reads an exec corpse's screen
+// through the script's `peek`, even though the box is not running. A rate
+// limit screen quarantines the row and a terminal provider error parks it:
+// neither is recycled (no kill-object, no start). "No screen" (exit 66)
+// is a known-empty screen: the corpse is recycled. Any other peek failure
+// holds the recycle (refused peek-error, the paced hold the tmux pane
+// errors take): nothing killed, nothing started; the retry after the peek
+// recovers reads the screen and decides on it.
+func TestExecJourneyDeadBoxScreen(t *testing.T) {
+	recent := []string{"last_woke_at", gatherNow.Add(-5 * time.Second).Format(time.RFC3339)}
+	for _, c := range []struct {
+		name, pane, reason string
+		meta               []string
+		noScreen, fault    bool
+		recycled           bool
+		cause              string
+	}{
+		{name: "rate limit quarantines", pane: "Usage limit reached", reason: string(session.SleepReasonRateLimit), meta: recent},
+		{name: "terminal error parks", pane: "Error: model_not_found", reason: string(session.SleepReasonProviderTerminalError)},
+		{name: "no screen recycles", pane: "Usage limit reached", meta: recent, noScreen: true, recycled: true},
+		{name: "a peek failure holds", pane: "Usage limit reached", meta: recent, fault: true, cause: causePeekError},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k, f := execKitOn(t, "asleep", c.meta...)
+			f.box("s-gc-1", "gc-1", "3", "tok", "dead", "")
+			f.set("pane", c.pane)
+			if c.noScreen {
+				f.set("noscreen", "")
+			}
+			f.fault("peek", c.fault)
+			s := k.runKind()
+			if f.count("peek s-gc-1") == 0 {
+				t.Fatalf("settlement %+v, ops %q; want the dead box's screen read by peek", s, f.ops())
+			}
+			kills, starts := f.count("kill-object "), f.count("start ")
+			switch {
+			case c.recycled && (kills != 1 || starts != 1 || s.Outcome != settledLanded):
+				t.Fatalf("settlement %+v, ops %q; want the corpse killed and the start landed", s, f.ops())
+			case !c.recycled && (kills != 0 || starts != 0):
+				t.Fatalf("settlement %+v, ops %q; want nothing killed or started", s, f.ops())
+			case c.reason != "" && (k.meta("sleep_reason") != c.reason || s.Outcome != settledLanded):
+				t.Fatalf("settlement %+v, sleep_reason %q; want %q", s, k.meta("sleep_reason"), c.reason)
+			case c.reason == string(session.SleepReasonRateLimit) && k.meta("quarantined_until") == "":
+				t.Fatal("a rate-limit screen did not quarantine the row")
+			case c.cause != "" && (s.Outcome != settledRefused || s.Cause != c.cause || k.meta("sleep_reason") != ""):
+				t.Fatalf("settlement %+v, sleep_reason %q; want refused %s with the row untouched", s, k.meta("sleep_reason"), c.cause)
+			}
+			if !c.fault {
+				return
+			}
+			// The hold is no wedge: the retry reads the screen again, and once
+			// the peek answers, the row's screen decides (here a rate limit:
+			// quarantined, still not recycled).
+			f.fault("peek", false)
+			if s := k.runKind(); s.Outcome != settledLanded || k.meta("sleep_reason") != string(session.SleepReasonRateLimit) || f.count("kill-object ") != 0 {
+				t.Fatalf("retry after the peek recovered: settlement %+v, sleep_reason %q, ops %q; want quarantined", s, k.meta("sleep_reason"), f.ops())
+			}
+		})
+	}
 }

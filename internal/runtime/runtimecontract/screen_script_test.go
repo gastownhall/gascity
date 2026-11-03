@@ -69,6 +69,7 @@ printf '%s\n' "$*" >> "$F/calls"
 case "$1" in
   -dmS) [ -f "$F/nobox" ] || printf '\t4194999.%s\t(11/02/2026 01:00:00 PM)\t(Detached)\n' "$2" >> "$L" ;;
   -wipe | -S)
+    [ "$4" = hardcopy ] && [ -f "$F/hardcopy.fail" ] && exit 1
     if [ "$1" = -wipe ] || [ "$4" = quit ]; then
       if [ ! -f "$F/sticky" ]; then
         for f in "$F/ls" "$L"; do
@@ -751,5 +752,30 @@ func TestScreenScriptDeadBoxWithALiveAgent(t *testing.T) {
 	}
 	if _, code := f.run("", "stop", "mc-p"); code != 0 || strings.Contains(f.calls(), "kill") || !strings.Contains(f.calls(), "-wipe 4194999.mc-p") {
 		t.Fatalf("stop after a reboot: exit %d, calls %q; want the dead box wiped and no kill", code, f.calls())
+	}
+}
+
+// Kills (F-1, PR-3b) a peek that answers what it cannot read as an empty
+// screen: no box and a dead box answer exit 66, no screen; a listing that
+// cannot be read, a session screen cannot read and a failed hardcopy fail;
+// a running box's screen is the exact session's hardcopy.
+func TestScreenScriptPeekAnswersNoScreen(t *testing.T) {
+	f := newFakeBackend(t)
+	f.rows("4194001.mc-a\tDetached", "4194002.mc-d\tDead ???", "4194003.mc-p\tPrivate")
+	for name, want := range map[string]int{"mc-none": 66, "mc-d": 66, "mc-p": 1, "mc-a": 0} {
+		if _, code := f.run("", "peek", name, "10"); code != want {
+			t.Errorf("peek %s: exit %d, want %d", name, code, want)
+		}
+	}
+	if calls := f.calls(); strings.Count(calls, "hardcopy") != 1 || !strings.Contains(calls, "-S 4194001.mc-a -X hardcopy") {
+		t.Errorf("screen calls %q, want one hardcopy of 4194001.mc-a", calls)
+	}
+	f.file("hardcopy.fail", "")
+	if _, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
+		t.Errorf("a failed hardcopy: exit %d, want a failure", code)
+	}
+	f.file("ls.fail", "")
+	if _, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
+		t.Errorf("an unreadable listing: exit %d, want a failure", code)
 	}
 }

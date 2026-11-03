@@ -118,7 +118,7 @@ const (
 	// script that declares it must pass every one, except the
 	// token-gated ones it does not declare (conformance-faults,
 	// city-scoped, report-attachment, report-activity). See
-	// REQUIREMENTS.md (RUNTIME-RPP-018..024).
+	// REQUIREMENTS.md (RUNTIME-RPP-018..025).
 	ReqObserveDeclaredOpsRespond   Code = "RPP-OBSERVE-001"
 	ReqObserveAbsentNeverStarted   Code = "RPP-OBSERVE-002"
 	ReqObserveRunningWithIdentity  Code = "RPP-OBSERVE-003"
@@ -134,6 +134,7 @@ const (
 	ReqObserveWithinBound          Code = "RPP-OBSERVE-013"
 	ReqObserveCityScoped           Code = "RPP-OBSERVE-014"
 	ReqObserveInventoryHasActivity Code = "RPP-OBSERVE-015"
+	ReqObservePeekNoScreen         Code = "RPP-OBSERVE-016"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -167,6 +168,7 @@ var catalog = []Requirement{
 	{ReqObserveWithinBound, GroupObserve, "observe answers within 4s, v2's probe bound", true},
 	{ReqObserveCityScoped, GroupObserve, "a name started under one GC_EXEC_CITY_PATH is not listed under another (declared city-scoped only)", true},
 	{ReqObserveInventoryHasActivity, GroupObserve, "inventory carries last_activity for every running session when report-activity is declared", true},
+	{ReqObservePeekNoScreen, GroupObserve, "peek reads a running box's screen (exit 0), and answers a name no box holds with exit 66, no screen: never an empty success", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

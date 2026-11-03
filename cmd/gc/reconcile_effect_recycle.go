@@ -69,7 +69,10 @@ type deadPeek struct {
 // agent's to classify: it reads empty, and the recycle removes it by exact
 // object as before (the #7762 review). A zombie's never does: its live pane
 // may be an operator's, which KillZombieObject would kill, so the peek
-// refuses. The screen counts only when a fresh read after the capture, taken
+// refuses. An exec script's "no screen" (runtime.ErrNoScreen: the box holds
+// nothing to read) is a known-empty screen alike; any other peek failure
+// refuses (causePeekError), so the recycle holds rather than relaunch over
+// a screen it could not read. The screen counts only when a fresh read after the capture, taken
 // at the wall clock (so no snapshot from before the capture answers it),
 // still finds the session object the classification read, its id and its
 // created time (tmux reuses ids after a server restart); otherwise the peek
@@ -85,6 +88,8 @@ func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	content, err := v.RT.leaf.Peek(name, rateLimitPeekLines)
 	switch {
 	case errors.Is(err, runtime.ErrTmuxAgentPaneGone) && v.RT.Class == rtCorpse:
+		return deadPeek{read: true}, ctx.Err()
+	case errors.Is(err, runtime.ErrNoScreen):
 		return deadPeek{read: true}, ctx.Err()
 	case err != nil:
 		return deadPeek{}, err

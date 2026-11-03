@@ -43,6 +43,7 @@ var probes = map[Code]probe{
 	ReqObserveWithinBound:          probeObserveWithinBound,
 	ReqObserveCityScoped:           probeObserveCityScoped,
 	ReqObserveInventoryHasActivity: probeObserveInventoryActivity,
+	ReqObservePeekNoScreen:         probeObservePeekNoScreen,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
