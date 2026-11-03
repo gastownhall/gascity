@@ -991,6 +991,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_`, so a URL or path is never split. A binding that two `--include` flags
   claim for different packs fails the add.
 
+- **`control.stalled` now fires for a second disposition, `error_class`
+  `"pending"`, so a subscriber must branch on `error_class` before it treats
+  the event as terminal.** Through 1.5.1 the event carried one value,
+  `"semantic"`: a refusal the control dispatcher quarantined, which closes the
+  control bead and fails its order, so `order.failed` follows. It now also
+  fires with `"pending"` when a drift-pending wait (a rig removed from
+  `city.toml`, a city renamed mid-flight, or a sibling workflow store that
+  cannot be opened) outlasts its loudness horizon. A pending bead stays open
+  and keeps retrying, completes the moment the drift is healed, and emits no
+  `order.failed`. A subscriber that reads every `control.stalled` as "this
+  workflow is dead" now mistakes a healable wait for a dead one: treat only
+  `"semantic"` as terminal, and read `"pending"` as a wait that needs the
+  drift fixed, not the workflow restarted. A subscriber should also ignore an
+  `error_class` it does not know (#6528).
+
 ### Changed
 
 - **API: `GET /v0/city/{cityName}/orders/history` and
