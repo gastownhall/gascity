@@ -16,7 +16,7 @@ type reasonCloserStore struct {
 
 func (s *reasonCloserStore) CloseWithReason(id, reason string) error {
 	s.reasons = append(s.reasons, reason)
-	return s.MemStore.Close(id)
+	return s.Close(id)
 }
 
 // TestCloseWithReasonReachesTheExplicitReasonCloserThroughAHandle pins that
