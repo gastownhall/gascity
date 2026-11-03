@@ -743,6 +743,7 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			UnassignedRoutedPartial: unassignedRoutedPartial,
 			ColdWakeTemplates:       targets.coldWakeTemplates,
 			NamedOnDemandTemplates:  targets.namedOnDemandTemplates,
+			NameOnlyTemplates:       targets.nameOnlyTemplates,
 		}
 		subPhaseStart = trace.demandNow()
 		collected.CustomCounts, collected.CustomPartials = evaluatePendingPoolsMap(cfg, targets.pendingPools, stderr, trace)
@@ -1175,6 +1176,12 @@ type demandTargets struct {
 	// Their pool demand is clamped to 1 at the merge so one pool slot wakes the
 	// session without over-spawning {name}-N phantoms when N routed beads arrive.
 	namedOnDemandTemplates map[string]bool
+	// nameOnlyTemplates marks warm custom-scale_check pools whose default
+	// probe only names work: the merge takes their routed ready rows in claim
+	// order as the work bead ids of the custom count's seats, so a seat for a
+	// row bound to a managed worktree starts in that worktree. The probe never
+	// changes their count or partial retention.
+	nameOnlyTemplates map[string]bool
 }
 
 // probeEnvFunc builds a custom scale_check pool's probe env
@@ -1238,6 +1245,7 @@ func buildDemandTargets(
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 	coldWakeTemplates := map[string]bool{}
 	namedOnDemandTemplates := map[string]bool{}
+	nameOnlyTemplates := map[string]bool{}
 	// activeStores is the set of stores a cold custom-scale_check pool is probed
 	// against (city + every non-suspended rig store), so routed demand a sleeping
 	// rig pool can't see locally — e.g. work queued in the city store — still
@@ -1509,18 +1517,26 @@ func buildDemandTargets(
 			}
 			continue
 		}
-		// Custom-scale_check pools deliberately KEEP the cold-only probe (unlike
+		// Custom-scale_check pools deliberately KEEP the cold-only count (unlike
 		// the default-probe branches above, which count cross-store demand warm
 		// or cold): the custom check is the authoritative count while the pool
-		// is awake, and this probe is clamped to 1 (coldWakeTemplates) so it can
-		// only wake a sleeping pool, never override the custom count. A custom
-		// scale_check that should scale on cross-store routed demand must count
-		// it itself, or the pool will churn at the warm/cold boundary.
-		if store != nil && isCold && !storeScopedControlDispatcher {
+		// is awake, and the cold probe is clamped to 1 (coldWakeTemplates) so it
+		// can only wake a sleeping pool, never override the custom count. A
+		// custom scale_check that should scale on cross-store routed demand
+		// must count it itself, or the pool will churn at the warm/cold
+		// boundary. A warm pool's probe only names the work its custom count's
+		// seats start for (nameOnlyTemplates): without a name a seat starts in
+		// the pool's own directory and leaves every row bound to a managed
+		// worktree, so such work would advance only through cold wakes.
+		if store != nil && !storeScopedControlDispatcher {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref, classBinding: source.classBinding})
 			}
-			coldWakeTemplates[template] = true
+			if isCold {
+				coldWakeTemplates[template] = true
+			} else {
+				nameOnlyTemplates[template] = true
+			}
 		}
 		env, err := queryEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
@@ -1535,6 +1551,7 @@ func buildDemandTargets(
 		defaultNamedScaleTargets: defaultNamedScaleTargets,
 		coldWakeTemplates:        coldWakeTemplates,
 		namedOnDemandTemplates:   namedOnDemandTemplates,
+		nameOnlyTemplates:        nameOnlyTemplates,
 	}
 }
 
@@ -2450,8 +2467,20 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		// legs is not that order. Name demand in the order the claim window
 		// serves it, so the seat placed for a bead finds it in its window.
 		beads.SortBeadsReadyOrder(rows)
-		for _, b := range rows {
+		for rank, b := range rows {
 			storeKey := rowStoreKeys[b.ID]
+			spec, specErr := worktreeSpecForBead(b, storeKey)
+			// A seat for a row bound to a managed worktree starts in that
+			// worktree and takes only that row, so it is useful only while
+			// the row is inside the claim window the seat reads. Behind the
+			// window it would be served only rows bound elsewhere, drain
+			// no_work, and be placed again next pass. Such a row is demand
+			// once claims advance the window to it. A row bound to no
+			// worktree stays demand at any rank: any seat in the pool's own
+			// directory can claim it.
+			if specErr == nil && spec != nil && rank >= config.RoutedReadyClaimWindow {
+				continue
+			}
 			counts[template]++
 			entry := demand[template]
 			entry.Count++
@@ -2482,7 +2511,6 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				}
 				entry.BindingResident[b.ID] = true
 			}
-			spec, specErr := worktreeSpecForBead(b, storeKey)
 			if specErr != nil {
 				if entry.WorktreeErrors == nil {
 					entry.WorktreeErrors = make(map[string]string)
@@ -2526,6 +2554,9 @@ type collectedDemand struct {
 	// (demandTargets).
 	ColdWakeTemplates      map[string]bool
 	NamedOnDemandTemplates map[string]bool
+	// NameOnlyTemplates take default demand only as the work bead ids of
+	// their custom count's seats (demandTargets.nameOnlyTemplates).
+	NameOnlyTemplates map[string]bool
 	// UnassignedRouted, UnassignedRoutedRefs and UnassignedRoutedPartial are
 	// collectOpenUnassignedRoutedWork's index-aligned rows, after the route
 	// repairs the caller applies.
@@ -2558,12 +2589,23 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 	poolScaleCheckPartialTemplates := maps.Clone(in.CustomPartials)
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
 	if in.DefaultProbed {
-		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, in.DefaultPartials)
+		defaultPartials := in.DefaultPartials
+		if len(in.NameOnlyTemplates) > 0 {
+			defaultPartials = maps.Clone(defaultPartials)
+			maps.DeleteFunc(defaultPartials, func(template string, _ bool) bool { return in.NameOnlyTemplates[template] })
+		}
+		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, defaultPartials)
 		if scaleCheckCounts == nil {
 			scaleCheckCounts = make(map[string]int)
 		}
 		scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
 		for template, count := range in.DefaultCounts {
+			if in.NameOnlyTemplates[template] {
+				// The custom count is authoritative; the probe's rows, in
+				// claim order, only name the work of that many seats.
+				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], in.DefaultDemand[template], scaleCheckCounts[template])
+				continue
+			}
 			// A cold-pool wake probe only wakes the pool from zero; clamp its
 			// contribution to 1 so it never overrides a custom scale_check's
 			// authoritative count for the same template.

@@ -88,7 +88,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 	c := &v.Collected
 	c.UnassignedRouted, _, c.UnassignedRoutedRefs, c.UnassignedRoutedPartial = collectOpenUnassignedRoutedWork(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, reads)
-	c.ColdWakeTemplates, c.NamedOnDemandTemplates = targets.coldWakeTemplates, targets.namedOnDemandTemplates
+	c.ColdWakeTemplates, c.NamedOnDemandTemplates, c.NameOnlyTemplates = targets.coldWakeTemplates, targets.namedOnDemandTemplates, targets.nameOnlyTemplates
 	for _, pool := range targets.pendingPools {
 		v.CustomCheckTemplates = append(v.CustomCheckTemplates, env.Cfg.Agents[pool.agentIdx].QualifiedName())
 	}
