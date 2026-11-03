@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/graphv2"
 )
 
 // purgeFixtureCityConfig is the city the purge fixtures' frame is cut over:
@@ -30,19 +31,15 @@ func purgeFrameOverStores(t *testing.T, cfg *config.City, work beads.Store, rigs
 	return frame
 }
 
-// seedPurgedInputWorkflow builds a graph.v2 workflow in store: a root naming
-// an input convoy that tracked one work bead, an open step and an in-progress
-// step under it, and a step that already closed with gc.outcome=pass.
-func seedPurgedInputWorkflow(t *testing.T, store beads.Store) (root, open, inProgress, finished beads.Bead, convoyID string) {
+// seedInputWorkflow builds a graph.v2 workflow in store: a root naming
+// convoyID as its input convoy, an open step and an in-progress step under it,
+// and a step that already closed with gc.outcome=pass.
+func seedInputWorkflow(t *testing.T, store beads.Store, convoyID string) (root, open, inProgress, finished beads.Bead) {
 	t.Helper()
-	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
-	if err != nil {
-		t.Fatalf("create convoy: %v", err)
-	}
-	root, err = store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
+	root, err := store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
 		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
 		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
+		beadmeta.InputConvoyIDMetadataKey:   convoyID,
 		beadmeta.RoutedToMetadataKey:        "worker",
 	}})
 	if err != nil {
@@ -70,7 +67,23 @@ func seedPurgedInputWorkflow(t *testing.T, store beads.Store) (root, open, inPro
 	if err := store.Close(finished.ID); err != nil {
 		t.Fatalf("close finished step: %v", err)
 	}
-	return root, open, inProgress, finished, conv.ID
+	return root, open, inProgress, finished
+}
+
+// seedSyntheticInputWorkflow builds a workflow over the single-item synthetic
+// input convoy a graph.v2 invocation pours for target.
+func seedSyntheticInputWorkflow(t *testing.T, store beads.Store) (target, conv, root, open beads.Bead) {
+	t.Helper()
+	target, err := store.Create(beads.Bead{Title: "the work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	conv, err = graphv2.CreateSingleItemInputConvoy(store, target)
+	if err != nil {
+		t.Fatalf("pour input convoy: %v", err)
+	}
+	root, open, _, _ = seedInputWorkflow(t, store, conv.ID)
+	return target, conv, root, open
 }
 
 // purgeClaimOps are the claim ops of a single-store city over store: the real
@@ -114,8 +127,9 @@ func purgeClaimOps(t *testing.T, store beads.Store, frame workflowInputPurgeFram
 	}
 }
 
-// runPurgeClaim runs one `gc hook --claim` for worker-1 over ops.
-func runPurgeClaim(t *testing.T, ops hookClaimOps) (stdout, stderr string) {
+// runPurgeClaim runs one `gc hook --claim` for worker-1 over ops, requires its
+// exit code (1 is "no work"), and returns its stderr.
+func runPurgeClaim(t *testing.T, ops hookClaimOps, wantCode int) string {
 	t.Helper()
 	var out, errOut bytes.Buffer
 	code := doHookClaim("query", "/rig", hookClaimOptions{
@@ -123,10 +137,10 @@ func runPurgeClaim(t *testing.T, ops hookClaimOps) (stdout, stderr string) {
 		RouteTargets: []string{"worker"},
 		JSON:         true,
 	}, ops, &out, &errOut)
-	if code != 0 {
-		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, errOut.String())
+	if code != wantCode {
+		t.Fatalf("doHookClaim = %d, want %d (stderr=%q)", code, wantCode, errOut.String())
 	}
-	return out.String(), errOut.String()
+	return errOut.String()
 }
 
 func assertRetiredAsInputPurged(t *testing.T, store beads.Store, ids ...string) {
@@ -154,7 +168,12 @@ func assertRetiredAsInputPurged(t *testing.T, store beads.Store, ids ...string) 
 // them, and goes on to claim the next candidate.
 func TestDoHookClaimRetiresWorkflowWhoseInputConvoyWasPurged(t *testing.T) {
 	store := beads.NewMemStore()
-	root, open, inProgress, finished, convoyID := seedPurgedInputWorkflow(t, store)
+	conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	convoyID := conv.ID
+	root, open, inProgress, finished := seedInputWorkflow(t, store, convoyID)
 	other, err := store.Create(beads.Bead{Title: "unrelated work", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
 	if err != nil {
 		t.Fatalf("create other: %v", err)
@@ -166,7 +185,7 @@ func TestDoHookClaimRetiresWorkflowWhoseInputConvoyWasPurged(t *testing.T) {
 
 	claimed := ""
 	ops := purgeClaimOps(t, store, frame, []beads.Bead{open, other}, &claimed)
-	_, stderr := runPurgeClaim(t, ops)
+	stderr := runPurgeClaim(t, ops, 0)
 
 	if claimed != other.ID {
 		t.Fatalf("claimed = %q, want the next candidate %s (stderr=%q)", claimed, other.ID, stderr)
@@ -177,5 +196,55 @@ func TestDoHookClaimRetiresWorkflowWhoseInputConvoyWasPurged(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "input is purged") || !strings.Contains(stderr, convoyID) {
 		t.Fatalf("stderr = %q; want the retirement and its evidence logged", stderr)
+	}
+}
+
+// A purge of the tracked work, not the convoy, leaves the synthetic convoy
+// tracking a dangling edge: membership is one unresolved placeholder. The
+// placeholder and the target the convoy recorded are the evidence, and both
+// proved absent retire the workflow.
+func TestDoHookClaimRetiresWorkflowWhoseSyntheticInputTargetWasPurged(t *testing.T) {
+	store := beads.NewMemStore()
+	target, _, root, open := seedSyntheticInputWorkflow(t, store)
+	if err := store.Delete(target.ID); err != nil {
+		t.Fatalf("purge target: %v", err)
+	}
+	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
+
+	claimed := ""
+	stderr := runPurgeClaim(t, purgeClaimOps(t, store, frame, []beads.Bead{open}, &claimed), 1)
+
+	if claimed != "" {
+		t.Fatalf("claimed %s, a step of a workflow whose input is purged (stderr=%q)", claimed, stderr)
+	}
+	assertRetiredAsInputPurged(t, store, root.ID, open.ID)
+	if !strings.Contains(stderr, target.ID) {
+		t.Fatalf("stderr = %q; want the purged target named as evidence", stderr)
+	}
+}
+
+// A purge that cascaded the tracks edge away leaves the synthetic convoy with
+// no members at all. The target the convoy recorded in its metadata still
+// names what it tracked, and that target proved absent retires the workflow.
+func TestDoHookClaimRetiresWorkflowWhoseRecordedInputTargetWasPurgedWithItsEdge(t *testing.T) {
+	store := beads.NewMemStore()
+	target, conv, root, open := seedSyntheticInputWorkflow(t, store)
+	if err := store.DepRemove(conv.ID, target.ID); err != nil {
+		t.Fatalf("cascade the tracks edge: %v", err)
+	}
+	if err := store.Delete(target.ID); err != nil {
+		t.Fatalf("purge target: %v", err)
+	}
+	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
+
+	claimed := ""
+	stderr := runPurgeClaim(t, purgeClaimOps(t, store, frame, []beads.Bead{open}, &claimed), 1)
+
+	if claimed != "" {
+		t.Fatalf("claimed %s, a step of a workflow whose input is purged (stderr=%q)", claimed, stderr)
+	}
+	assertRetiredAsInputPurged(t, store, root.ID, open.ID)
+	if !strings.Contains(stderr, target.ID) {
+		t.Fatalf("stderr = %q; want the recorded target named as evidence", stderr)
 	}
 }
