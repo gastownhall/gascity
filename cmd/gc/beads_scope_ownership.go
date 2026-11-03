@@ -383,6 +383,15 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 //
 // Fact 2 alone is not enough either: a city that gc managed and an operator
 // has since re-pointed at a hosted server still has its old database on disk.
+//
+// Known limitation (low): fact 1 is existence-only and never expires, because a
+// clean `gc stop` leaves the provider state file behind with running:false. So
+// a previously gc-managed city re-pointed at a hosted server in place still
+// satisfies both facts and is classified gc-managed. A rig has the same twin: a
+// rig whose stale database directory remains in the city's data dir satisfies
+// both facts and is misclassified the same way. One root cause; either real fix
+// covers both: require running:true with a live PID, as currentManagedDoltPort
+// already does, or have the stop path remove the provider state file.
 func scopeStoreLivesInTheCitysManagedDolt(cityPath, scopeRoot string) bool {
 	if !cityCarriesGCDoltRuntimePublication(cityPath) {
 		return false

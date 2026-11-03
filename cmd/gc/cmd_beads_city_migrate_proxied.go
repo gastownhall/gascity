@@ -29,9 +29,10 @@ import (
 // the sidecar, and every refusal here exists because bd cannot see something
 // it needs to.
 //
-// On rc.2 this is the only supported way to migrate a legacy GC-managed city:
-// the journaled ownership handoff needs bd verbs no beads release has yet, and
-// gc ships no driver for it. See engdocs/runbooks/beads-migrate-proxied.md.
+// On bd v1.3.0 this is the only supported way to migrate a legacy GC-managed
+// city: the journaled ownership handoff needs bd verbs no beads release has
+// yet, and gc ships no driver for it. See
+// engdocs/runbooks/beads-migrate-proxied.md.
 
 const (
 	migrateProxiedStatusMigrated = "migrated"
