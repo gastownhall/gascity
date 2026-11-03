@@ -1795,4 +1795,42 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			t.Errorf("Workflow Steps: tells a claimed step to navigate its molecule:\n%s", steps)
 		}
 	})
+
+	t.Run("AC2_graph_steps_continue_through_the_hook", func(t *testing.T) {
+		opening, _, _ := strings.Cut(prompt, "\n## ")
+		if flat := strings.Join(strings.Fields(opening), " "); strings.Contains(flat, "close it, and exit") {
+			t.Errorf("opening tells every worker to exit after one bead; a graph step continues through the hook:\n%s", opening)
+		}
+		if gupp := promptSection(t, prompt, "GUPP"); strings.Contains(gupp, "When you're done, exit.") {
+			t.Errorf("GUPP tells every worker to exit when done; a graph step continues through the hook:\n%s", gupp)
+		}
+
+		work := promptSection(t, prompt, "How to Work")
+		assertTextInOrder(t, "How to Work", work,
+			"gc hook --claim --drain-ack --json",
+			"Classify Your Assignment",
+			"**After a workflow step**",
+			"gc hook --claim --json",
+			`"action":"work"`,
+			"`no_work`",
+			"at most three times",
+			"each in its own tool call",
+			"gc hook --claim --drain-ack --json",
+			"returns `work`")
+		assertTextContains(t, "How to Work", work,
+			"`drain_pending`",
+			"Never wrap the claim in a `sleep`",
+			"never look for your next step with any other query",
+			"told you to end the session",
+			"that instruction wins",
+			"one assignment is your session's whole lifetime")
+
+		tools := promptSection(t, prompt, "Your Tools")
+		assertTextContains(t, "Your Tools", tools,
+			"`gc hook --claim --json` — check the hook for your next workflow step",
+			"`gc hook --claim --drain-ack --json` —")
+
+		restart := promptSection(t, prompt, "Context Exhaustion")
+		assertTextInOrder(t, "Context Exhaustion", restart, "Startup Protocol", "workflow step", "next one from the hook")
+	})
 }
