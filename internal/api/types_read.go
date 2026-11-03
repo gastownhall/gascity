@@ -28,7 +28,7 @@ import (
 // server's bead cache last took in fresh data from its store (the cache's
 // age, not each row's; 0 when the endpoint reports no age), sourced from
 // the X-GC-Cache-Age-S response header (populated by handlers via the
-// cacheFreshnessOf helper). CLI callers surface this as _cache_age_s on
+// cacheAgeSeconds helper). CLI callers surface this as _cache_age_s on
 // the --json envelope, and print a cache-age footer on stderr when the age
 // passes twice the cache's reported re-scan interval (CachedRead.Refresh).
 
@@ -47,7 +47,7 @@ type CachedRead[T any] struct {
 
 // Wire names of the bead-cache freshness response headers (X-GC-Cache-Age-S
 // and CacheRefresh),
-// set by read handlers via the cacheFreshnessOf helper and consumed by CLI
+// set by read handlers via the cacheAgeSeconds helper and consumed by CLI
 // wrappers through cacheAgeFromResponse and cacheRefreshFromResponse.
 const (
 	cacheAgeHeader             = "X-GC-Cache-Age-S"

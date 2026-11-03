@@ -163,7 +163,7 @@ type ListBody[T any] struct {
 // ListOutput is a generic output type for list endpoints. It sets the
 // X-GC-Index header and returns items in the standard list envelope.
 // CacheAgeS and CacheRefresh report the server's bead-cache freshness
-// (cacheFreshnessOf): the seconds since the cache last took in fresh data from
+// (cacheAgeSeconds): the seconds since the cache last took in fresh data from
 // its store (the cache's age, not each row's), its re-scan interval, and what
 // bounds the age. Only a handler whose body is read from the cache sets them,
 // and not every such handler does; they are zero when the handler does not,

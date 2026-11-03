@@ -80,7 +80,7 @@ func TestCacheLiveOr503_NotLiveReturns503(t *testing.T) {
 
 // stubLivenessReporter is a fully controllable livenessReporter for the
 // cache-freshness conformance lane. It embeds a beads.Store so it satisfies
-// the Store type cacheFreshnessOf/cacheLiveOr503 accept; only the two
+// the Store type cacheAgeSeconds/cacheLiveOr503 accept; only the two
 // liveness methods those helpers actually call are implemented.
 type stubLivenessReporter struct {
 	beads.Store
@@ -107,7 +107,7 @@ func (s stubLivenessReporter) Stats() beads.CacheStats {
 	}
 }
 
-func TestCacheFreshnessOf(t *testing.T) {
+func TestCacheAgeSeconds(t *testing.T) {
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
 	defer restore()
@@ -159,8 +159,8 @@ func TestCacheFreshnessOf(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cacheFreshnessOf(tc.store); got != tc.want {
-				t.Errorf("cacheFreshnessOf(%s) = %+v, want %+v", tc.name, got, tc.want)
+			if got := cacheAgeSeconds(tc.store); got != tc.want {
+				t.Errorf("cacheAgeSeconds(%s) = %+v, want %+v", tc.name, got, tc.want)
 			}
 		})
 	}
@@ -168,7 +168,7 @@ func TestCacheFreshnessOf(t *testing.T) {
 
 // A primed real CachingStore behind a closed reconcile gate reports its
 // re-scans paused, at the small-cache cadence, with the exact age.
-func TestCacheFreshnessOfAGatedCachingStore(t *testing.T) {
+func TestCacheAgeSecondsOfAGatedCachingStore(t *testing.T) {
 	cache := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
 	beads.WithReconcileGate(func() bool { return false })(cache)
 	if err := cache.Prime(t.Context()); err != nil {
@@ -181,8 +181,8 @@ func TestCacheFreshnessOfAGatedCachingStore(t *testing.T) {
 	restore := SetLivenessClockForTest(&clock.Fake{Time: lastFresh.Add(12 * time.Second)})
 	defer restore()
 	want := cacheFreshness{ageS: 12, refresh: CacheRefresh{IntervalS: 30, State: CacheRefreshPaused}}
-	if got := cacheFreshnessOf(cache); got != want {
-		t.Errorf("cacheFreshnessOf(gated primed cache) = %+v, want %+v", got, want)
+	if got := cacheAgeSeconds(cache); got != want {
+		t.Errorf("cacheAgeSeconds(gated primed cache) = %+v, want %+v", got, want)
 	}
 }
 
@@ -219,14 +219,14 @@ func (s statsOnlyStore) Stats() beads.CacheStats {
 	return beads.CacheStats{LastFreshAt: s.lastFresh, CurrentReconcileInterval: 30 * time.Second}
 }
 
-func TestCacheFreshnessOfReadsAStoreThatReportsStatsWithoutLiveness(t *testing.T) {
+func TestCacheAgeSecondsReadsAStoreThatReportsStatsWithoutLiveness(t *testing.T) {
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
 	defer restore()
 
 	store := statsOnlyStore{lastFresh: base.Add(-45 * time.Second)}
-	if got := cacheFreshnessOf(store).ageS; got != 45 {
-		t.Errorf("cacheFreshnessOf(stats-only store).ageS = %v, want 45: the age must not depend on the store also reporting liveness", got)
+	if got := cacheAgeSeconds(store).ageS; got != 45 {
+		t.Errorf("cacheAgeSeconds(stats-only store).ageS = %v, want 45: the age must not depend on the store also reporting liveness", got)
 	}
 	if err := cacheLiveOr503(store); err != nil {
 		t.Errorf("cacheLiveOr503(stats-only store) = %v, want nil: a store without IsLive is never gated", err)

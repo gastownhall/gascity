@@ -114,11 +114,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			f := statusCacheFreshness(hit.Body, cacheFreshnessOf(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			f := statusCacheFreshness(hit.Body, cacheFreshnessOf(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
@@ -144,7 +144,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// for it.
 		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
-			f := statusCacheFreshness(hit.Body, cacheFreshnessOf(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
 			if built := age.Seconds(); built > f.ageS {
 				f.ageS, f.refresh.State = built, CacheRefreshRebuilding
 			}
@@ -162,12 +162,12 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
-	f := statusCacheFreshness(resp, cacheFreshnessOf(store))
+	f := statusCacheFreshness(resp, cacheAgeSeconds(store))
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
 }
 
 // statusCacheFreshness is the bead-cache freshness /status reports with body:
-// f, the city store's (cacheFreshnessOf), or the zero value for a body built
+// f, the city store's (cacheAgeSeconds), or the zero value for a body built
 // without reading any bead store (StoresNotRead, a suspended city). A
 // suspended city's cache pauses its re-scans, so its age grows without bound
 // and says nothing about a body that never read it.

@@ -365,7 +365,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 	}
 
-	freshness := cacheFreshnessOf(store)
+	freshness := cacheAgeSeconds(store)
 	out := &OrderHistoryListOutput{
 		CacheAgeS:    freshness.ageS,
 		CacheRefresh: freshness.refresh,

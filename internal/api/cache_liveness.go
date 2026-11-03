@@ -22,14 +22,14 @@ type livenessReporter interface {
 	IsLive() bool
 }
 
-// livenessClock is the clock cacheFreshnessOf reads to compute cache age. It is
+// livenessClock is the clock cacheAgeSeconds reads to compute cache age. It is
 // clock.Real in production; SetLivenessClockForTest swaps it so the
 // CLI-unification characterization harness can freeze the Tier-B cache-age lane
 // (the _cache_age_s field and the CLI's cache-age footer) deterministically.
 // Process-global: bracket clock-sensitive lanes serially, never concurrently.
 var livenessClock clock.Clock = clock.Real{}
 
-// SetLivenessClockForTest overrides the clock cacheFreshnessOf uses and returns a
+// SetLivenessClockForTest overrides the clock cacheAgeSeconds uses and returns a
 // restore func. Test/harness only — production never mutates it.
 func SetLivenessClockForTest(c clock.Clock) (restore func()) {
 	prev := livenessClock
@@ -107,7 +107,7 @@ type cacheFreshness struct {
 	refresh CacheRefresh
 }
 
-// cacheFreshnessOf reports the store's bead-cache freshness: the seconds since
+// cacheAgeSeconds reports the store's bead-cache freshness: the seconds since
 // the cache last took in fresh data from its backing store (a full re-scan, or
 // a write, event or row re-read it applied), the re-scan interval its loop is
 // using, and whether those re-scans are scheduled, paused or failing. The age
@@ -115,7 +115,12 @@ type cacheFreshness struct {
 // city is suspended (re-scans pause). It is the zero value when the store is
 // nil, reports no cache stats, or has never been primed. It reads values only:
 // whether the age is too old is the client's call.
-func cacheFreshnessOf(store beads.Store) cacheFreshness {
+//
+// The storeclass baseline keys this function's raw-store debt (its beads.Store
+// parameter and Stats assertion) by its name: under another name that debt is
+// a new baseline row, a raise only the typed-store coordinator approves. Keep
+// the name until a typed handle retires the debt.
+func cacheAgeSeconds(store beads.Store) cacheFreshness {
 	sr, ok := store.(cacheStatsReporter)
 	if !ok {
 		return cacheFreshness{}

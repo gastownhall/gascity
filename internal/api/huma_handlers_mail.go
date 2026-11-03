@@ -218,7 +218,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
-	freshness := cacheFreshnessOf(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 
 	switch status {
 	case "", "unread":
@@ -373,7 +373,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
 	}
 	result.Message.Rig = result.Rig
-	freshness := cacheFreshnessOf(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 	return &IndexOutput[mail.Message]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
@@ -436,7 +436,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	}
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	rig := input.Rig
-	freshness := cacheFreshnessOf(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)

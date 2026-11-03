@@ -129,7 +129,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
 	sortKeysetDesc(convoys, beadKey)
 
-	freshness := cacheFreshnessOf(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 	// A truncated response always carries next_cursor — cursor-less requests
 	// previously truncated silently, making the remainder unfetchable (the
 	// #3208 defect class the bead list already fixed).
@@ -171,7 +171,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 			return nil, apierr.Internal.Msg("workflow snapshot failed")
 		}
-		freshness := cacheFreshnessOf(cityStore)
+		freshness := cacheAgeSeconds(cityStore)
 		return &IndexOutput[convoyGetResponse]{
 			Index:        index,
 			CacheAgeS:    freshness.ageS,
@@ -210,7 +210,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 		}
 
-		freshness := cacheFreshnessOf(cityStore)
+		freshness := cacheAgeSeconds(cityStore)
 		return &IndexOutput[convoyGetResponse]{
 			Index:        index,
 			CacheAgeS:    freshness.ageS,
@@ -474,7 +474,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
-		freshness := cacheFreshnessOf(cityStore)
+		freshness := cacheAgeSeconds(cityStore)
 		return &IndexOutput[convoyCheckResponse]{
 			Index:        index,
 			CacheAgeS:    freshness.ageS,
