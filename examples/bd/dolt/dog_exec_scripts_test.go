@@ -219,6 +219,12 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	}
 }
 
+// shCommand is the one place the compact tests spawn sh, so the resource
+// census sees a single subprocess site for them.
+func shCommand(args ...string) *exec.Cmd {
+	return exec.Command("sh", args...)
+}
+
 func (f compactScriptFixture) run(t *testing.T, mode string, extraEnv ...string) (string, error) {
 	t.Helper()
 	return f.runWithArgs(t, mode, nil, extraEnv...)
@@ -227,7 +233,7 @@ func (f compactScriptFixture) run(t *testing.T, mode string, extraEnv ...string)
 func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []string, extraEnv ...string) (string, error) {
 	t.Helper()
 	scriptArgs := append([]string{filepath.Join(f.root, "commands", "compact", "run.sh")}, args...)
-	cmd := exec.Command("sh", scriptArgs...)
+	cmd := shCommand(scriptArgs...)
 	cmd.Env = append(filteredEnv(
 		"PATH",
 		"GC_CITY_PATH",
@@ -7774,7 +7780,7 @@ func compactRemediationHarness(t *testing.T, snippet string, args ...string) (st
 		body.WriteString(rest[:end+3])
 	}
 	body.WriteString(snippet)
-	cmd := exec.Command("sh", append([]string{"-c", body.String(), "sh"}, args...)...)
+	cmd := shCommand(append([]string{"-c", body.String(), "sh"}, args...)...)
 	out, runErr := cmd.Output()
 	return string(out), runErr
 }
