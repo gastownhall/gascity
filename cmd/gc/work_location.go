@@ -160,6 +160,7 @@ func (cr *CityRuntime) newSeatWork() *SeatWork {
 	sw := newSeatWork(cr.workLegs())
 	sw.alerts = cr.strandedClaimAlerter()
 	sw.refusals = &cr.closeRefusals
+	sw.rec = cr.rec
 	return sw
 }
 

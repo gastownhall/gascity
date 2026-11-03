@@ -30,6 +30,7 @@ import (
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -51,6 +52,10 @@ type SeatWork struct {
 	// refusals logs each row's close refusal once per episode across ticks
 	// (closeSeat); nil logs every refusal.
 	refusals *closeRefusalLog
+	// rec records the typed events a close decision raises (the
+	// reconfigured-named gate's session.named_reconfigured_blocked); nil
+	// records nothing.
+	rec events.Recorder
 
 	once sync.Once
 	read []seatWorkLeg

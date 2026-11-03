@@ -327,6 +327,13 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
+	// SessionNamedReconfiguredBlocked fires when the reconfigured-named gate
+	// declines to close a named session bead because it holds assigned work.
+	// It fires once per refusal episode, on entry: the ticks that follow while
+	// the bead stays blocked record nothing, and a bead that closes cleanly
+	// never raises it. Emitted by the session-bead sync; the envelope's
+	// Subject carries the named identity and SessionID the session bead.
+	SessionNamedReconfiguredBlocked = "session.named_reconfigured_blocked"
 	// SessionConversationReset fires when the reconciler resets a committed
 	// manual conversation, so that its next start is a fresh conversation
 	// rather than a resume. The payload's reason names the cause: stale-key,

@@ -2130,6 +2130,7 @@ go_test(
         "session_model_phase0_workflow_spec_test.go",
         "session_model_phase2_pin_spec_test.go",
         "session_name_lookup_test.go",
+        "session_named_reconfigured_blocked_event_test.go",
         "session_observation_uncertainty_test.go",
         "session_overrides_test.go",
         "session_ownership_test.go",
