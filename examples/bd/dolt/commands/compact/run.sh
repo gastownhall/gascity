@@ -2166,6 +2166,73 @@ ensure_repair_marker_paths_writable() {
   return 0
 }
 
+# compact_remediation_command DB
+#   Prints the supported retry/report command for DB. The shape is static and
+#   DB must pass valid_database_name; marker text is never part of the command.
+#   An unsafe DB fails closed: nothing is printed and the rc is 1.
+compact_remediation_command() {
+  _rc_db="$1"
+  valid_database_name "$_rc_db" || return 1
+  printf 'gc dolt compact --only-db %s\n' "$_rc_db"
+}
+
+# compact_state_is_valid STATE
+compact_state_is_valid() {
+  case "$1" in
+    verified|failed|unattainable) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# compact_pending_push_state HEAD VERIFIED HINT
+#   verification_state for a pending-push marker. HINT (failed|unattainable)
+#   is the call site's own knowledge of the proof and wins. Without a hint,
+#   only a non-blank head with expected_remote_head_verified=1 is verified;
+#   a blank proof is unattainable, never an implicit success or negative.
+compact_pending_push_state() {
+  case "${3:-}" in
+    failed|unattainable)
+      printf '%s\n' "$3"
+      return 0
+      ;;
+  esac
+  if [ -n "${1:-}" ] && [ "${2:-0}" = "1" ]; then
+    printf 'verified\n'
+  else
+    printf 'unattainable\n'
+  fi
+}
+
+# compact_quarantine_state PRE_HASH POST_HASH HINT
+#   Same contract for a quarantine marker: HINT wins; otherwise a blank hash is
+#   unattainable, differing hashes are failed, and equal non-blank hashes are
+#   verified.
+compact_quarantine_state() {
+  case "${3:-}" in
+    failed|unattainable)
+      printf '%s\n' "$3"
+      return 0
+      ;;
+  esac
+  if [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
+    printf 'unattainable\n'
+  elif [ "$1" != "$2" ]; then
+    printf 'failed\n'
+  else
+    printf 'verified\n'
+  fi
+}
+
+# compact_state_remediation STATE DB
+#   Prints the remediation command for a marker in STATE: nothing for
+#   verified, the static command for DB otherwise. An invalid STATE or an
+#   unsafe DB fails closed (rc 1, no output).
+compact_state_remediation() {
+  compact_state_is_valid "$1" || return 1
+  [ "$1" = "verified" ] && return 0
+  compact_remediation_command "$2"
+}
+
 write_pending_push_marker() {
   db="$1"
   remote="$2"
@@ -2175,6 +2242,13 @@ write_pending_push_marker() {
   reason="$6"
   local_branch="${7:-main}"
   remote_branch="${8:-$local_branch}"
+  verification_hint="${9:-}"
+
+  _wp_state=$(compact_pending_push_state "$expected_remote_head" "$expected_remote_head_verified" "$verification_hint")
+  _wp_remediation=$(compact_state_remediation "$_wp_state" "$db") || {
+    printf 'compact: db=%s cannot render a safe remediation_command for pending_push marker — not writing it\n' "$db" >&2
+    return 1
+  }
 
   write_compact_marker "${push_marker_dir:-$pending_push_dir}" "${push_marker_key:-$db}" "$reason" \
     "remote=$remote" \
@@ -2182,7 +2256,9 @@ write_pending_push_marker() {
     "expected_remote_head_verified=$expected_remote_head_verified" \
     "compacted_from_head=$compacted_from_head" \
     "local_branch=$local_branch" \
-    "remote_branch=$remote_branch"
+    "remote_branch=$remote_branch" \
+    "verification_state=$_wp_state" \
+    "remediation_command=$_wp_remediation"
 }
 
 write_pending_gc_marker() {
@@ -2223,14 +2299,71 @@ compact_marker_summary_value() {
   fi
 }
 
+# compact_marker_effective_state KIND DIR DB
+#   verification_state to report for an existing marker (KIND quarantine or
+#   pending_push). A recorded state is used only when it is exactly one of the
+#   three values. A marker without one (written before the field existed, or
+#   hand-edited) is read conservatively from its own evidence: an observed
+#   mismatch is failed, anything else, including an empty proof, is
+#   unattainable. It is never verified for want of a field. Marker values are
+#   only compared, never evaluated.
+compact_marker_effective_state() {
+  _es_kind="$1"
+  _es_dir="$2"
+  _es_db="$3"
+  _es_recorded=$(compact_marker_value "$_es_dir" "$_es_db" verification_state || true)
+  if compact_state_is_valid "$_es_recorded"; then
+    printf '%s\n' "$_es_recorded"
+    return 0
+  fi
+  case "$_es_kind" in
+    quarantine)
+      _es_drift="$(compact_marker_value "$_es_dir" "$_es_db" integrity_table_drift || true)$(compact_marker_value "$_es_dir" "$_es_db" database_value_hash_drift || true)"
+      _es_pre=$(compact_marker_value "$_es_dir" "$_es_db" preflight_db_value_hash || true)
+      _es_post=$(compact_marker_value "$_es_dir" "$_es_db" postflight_db_value_hash || true)
+      if [ -n "$_es_drift" ]; then
+        printf 'failed\n'
+      elif [ -n "$_es_pre" ] && [ -n "$_es_post" ] && [ "$_es_pre" != "$_es_post" ]; then
+        printf 'failed\n'
+      else
+        printf 'unattainable\n'
+      fi
+      ;;
+    *)
+      _es_reason=$(compact_marker_value "$_es_dir" "$_es_db" reason || true)
+      case "$_es_reason" in
+        *"remote has unique commits not in local history"|*"remote HEAD changed before push")
+          printf 'failed\n'
+          ;;
+        *)
+          printf 'unattainable\n'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+# compact_marker_state_summary KIND DIR DB
+#   " verification_state=S" plus, for a non-verified S whose database name is
+#   safe, " remediation_command=<static command>". The command is rendered
+#   here, never copied from the marker.
+compact_marker_state_summary() {
+  _ss_state=$(compact_marker_effective_state "$1" "$2" "$3")
+  printf ' verification_state=%s' "$_ss_state"
+  if _ss_cmd=$(compact_state_remediation "$_ss_state" "$3") && [ -n "$_ss_cmd" ]; then
+    printf ' remediation_command=%s' "$_ss_cmd"
+  fi
+}
+
 print_existing_quarantine_marker() {
   db="$1"
   marker="$2"
   reason="$3"
   created_at="$4"
 
-  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
+  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
     "$db" "$marker" "${reason:-<unknown>}" "${created_at:-<unknown>}" \
+    "$(compact_marker_state_summary quarantine "$quarantine_dir" "$db")" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" integrity_table_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" database_value_hash_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_preflight_head)" \
@@ -2242,10 +2375,22 @@ print_existing_quarantine_marker() {
     "$db" "$marker" "$db" >&2
 }
 
+# write_quarantine_marker DB REASON HINT [EXTRA_FIELD...]
+#   HINT (failed|unattainable) is the call site's verdict on the proof: failed
+#   when it positively observed a mismatch (a table-level mismatch is failed
+#   even though the database hash was never taken), unattainable when the
+#   proof could not run or returned nothing usable.
 write_quarantine_marker() {
   db="$1"
   reason="$2"
-  shift 2
+  verification_hint="$3"
+  shift 3
+
+  _wq_state=$(compact_quarantine_state "${preflight_hash:-}" "${postflight_hash:-}" "$verification_hint")
+  _wq_remediation=$(compact_state_remediation "$_wq_state" "$db") || {
+    printf 'compact: db=%s cannot render a safe remediation_command for quarantine marker — not writing it\n' "$db" >&2
+    return 1
+  }
 
   write_compact_marker "$quarantine_dir" "$db" "$reason" \
     "flatten_preflight_head=${head:-}" \
@@ -2256,6 +2401,8 @@ write_quarantine_marker() {
     "postflight_db_value_hash=${postflight_hash:-}" \
     "decision=preserve_marker_manual_review_required" \
     "clear_decision=clear_only_after_clean_worktree_reachable_server_healthy_bead_queries_and_diff_hash_evidence_proves_no_loss" \
+    "verification_state=$_wq_state" \
+    "remediation_command=$_wq_remediation" \
     "$@"
 }
 
@@ -2524,7 +2671,7 @@ push_remote_after_compaction() {
     printf 'compact: db=%s remote=%s — skip-fetch set, deferring remote push after local compaction\n' \
       "$db" "$remote"
     write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-      "flatten and full GC succeeded but remote push deferred by skip-fetch" "$local_branch" "$remote_branch" || return 1
+      "flatten and full GC succeeded but remote push deferred by skip-fetch" "$local_branch" "$remote_branch" "unattainable" || return 1
     return 0
   fi
 
@@ -2537,7 +2684,7 @@ push_remote_after_compaction() {
     emit_error_file "$db" "$fetch_err_tmp"
     rm -f "$fetch_err_tmp"
     write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-      "flatten and full GC succeeded but remote fetch before push failed" "$local_branch" "$remote_branch" || return 1
+      "flatten and full GC succeeded but remote fetch before push failed" "$local_branch" "$remote_branch" "unattainable" || return 1
     return 0
   fi
   rm -f "$fetch_err_tmp"
@@ -2546,7 +2693,7 @@ push_remote_after_compaction() {
     printf 'compact: db=%s remote=%s HEAD probe failed before push after local compaction\n' \
       "$db" "$remote" >&2
     write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-      "flatten and full GC succeeded but remote HEAD probe before push failed" "$local_branch" "$remote_branch" || return 1
+      "flatten and full GC succeeded but remote HEAD probe before push failed" "$local_branch" "$remote_branch" "unattainable" || return 1
     return 0
   fi
   if [ -n "$latest_remote_head" ]; then
@@ -2555,7 +2702,7 @@ push_remote_after_compaction() {
         printf 'compact: db=%s remote=%s returned invalid HEAD=%s before push — fail\n' \
           "$db" "$remote" "$latest_remote_head" >&2
         write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-          "flatten and full GC succeeded but remote HEAD before push was invalid" "$local_branch" "$remote_branch" || return 1
+          "flatten and full GC succeeded but remote HEAD before push was invalid" "$local_branch" "$remote_branch" "unattainable" || return 1
         return 0
         ;;
     esac
@@ -2571,7 +2718,7 @@ push_remote_after_compaction() {
         printf 'compact: db=%s remote=%s HEAD changed during pending push retry expected_HEAD=%s got_HEAD=<empty> — deferred for next run; manual reconciliation required if this persists\n' \
           "$db" "$remote" "${expected_remote_head:-<empty>}" >&2
         write_pending_push_marker "$db" "$remote" "" 0 "$compacted_from_head" \
-          "remote push retry deferred: remote HEAD changed during pending push retry" "$local_branch" "$remote_branch" || return 1
+          "remote push retry deferred: remote HEAD changed during pending push retry" "$local_branch" "$remote_branch" "unattainable" || return 1
         return 1
       fi
       printf 'compact: db=%s remote=%s HEAD changed during pending push retry expected_HEAD=%s got_HEAD=%s — verifying latest remote HEAD\n' \
@@ -2582,7 +2729,7 @@ push_remote_after_compaction() {
       printf 'compact: db=%s remote=%s HEAD changed before push expected_HEAD=%s got_HEAD=%s — leaving local compaction pending remote repair\n' \
         "$db" "$remote" "${expected_remote_head:-<empty>}" "${latest_remote_head:-<empty>}" >&2
       write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-        "flatten and full GC succeeded but remote HEAD changed before push" "$local_branch" "$remote_branch" || return 1
+        "flatten and full GC succeeded but remote HEAD changed before push" "$local_branch" "$remote_branch" "failed" || return 1
       return 0
     fi
   fi
@@ -2596,7 +2743,7 @@ push_remote_after_compaction() {
         printf 'compact: db=%s remote=%s HEAD=%s ancestry probe failed before push after local compaction\n' \
           "$db" "$remote" "$latest_remote_head" >&2
         write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-          "flatten and full GC succeeded but remote ancestry probe before push failed" "$local_branch" "$remote_branch" || return 1
+          "flatten and full GC succeeded but remote ancestry probe before push failed" "$local_branch" "$remote_branch" "unattainable" || return 1
         return 0
       fi
       case "$in_local" in
@@ -2610,20 +2757,20 @@ push_remote_after_compaction() {
             printf 'compact: db=%s remote=%s HEAD=%s remains absent from local history — deferred for next run; manual reconciliation required if this persists\n' \
               "$db" "$remote" "$latest_remote_head" >&2
             write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-              "remote push retry deferred: remote has unique commits not in local history" "$local_branch" "$remote_branch" || return 1
+              "remote push retry deferred: remote has unique commits not in local history" "$local_branch" "$remote_branch" "failed" || return 1
             return 1
           fi
           printf 'compact: db=%s remote=%s HEAD=%s was not verified in local history before flatten — leaving local compaction pending remote repair\n' \
             "$db" "$remote" "$latest_remote_head" >&2
           write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-            "flatten and full GC succeeded but remote has unique commits not in local history" "$local_branch" "$remote_branch" || return 1
+            "flatten and full GC succeeded but remote has unique commits not in local history" "$local_branch" "$remote_branch" "failed" || return 1
           return 0
           ;;
         *)
           printf 'compact: db=%s remote=%s ancestry probe returned invalid value=%s before push after local compaction\n' \
             "$db" "$remote" "$in_local" >&2
           write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-            "flatten and full GC succeeded but remote ancestry probe returned invalid result" "$local_branch" "$remote_branch" || return 1
+            "flatten and full GC succeeded but remote ancestry probe returned invalid result" "$local_branch" "$remote_branch" "unattainable" || return 1
           return 0
           ;;
       esac
@@ -3290,10 +3437,12 @@ flatten_database() {
       ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
     fi
     if [ -n "$dry_run" ]; then
-      printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
+      printf 'compact: db=%s pending_push=present%s — dry-run (would retry remote push)\n' \
+        "$db" "$(compact_marker_state_summary pending_push "$pending_push_dir" "$db")"
       return 0
     fi
-    printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
+    printf 'compact: db=%s pending_push=present%s — retrying remote push before threshold check\n' \
+      "$db" "$(compact_marker_state_summary pending_push "$pending_push_dir" "$db")"
     push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?
   fi
@@ -3566,7 +3715,7 @@ flatten_database() {
   if [ -z "$flatten_head" ]; then
     printf 'compact: db=%s post-flatten HEAD probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_quarantine_marker "$db" "post-flatten HEAD probe failed" || {
+    write_quarantine_marker "$db" "post-flatten HEAD probe failed" unattainable || {
       rm -f "$preflight_tmp"
       return 1
     }
@@ -3723,7 +3872,11 @@ flatten_database() {
     fi
     printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (%s)\n' \
       "$db" "$integrity_guidance" >&2
-    write_quarantine_marker "$db" "$integrity_reason" \
+    case "$integrity_reason" in
+      *"probe failed") integrity_verification_hint=unattainable ;;
+      *) integrity_verification_hint=failed ;;
+    esac
+    write_quarantine_marker "$db" "$integrity_reason" "$integrity_verification_hint" \
       "integrity_table_drift=${verify_counts_drift_details#;}" \
       "integrity_failure_guidance=$integrity_guidance" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
@@ -3738,7 +3891,7 @@ flatten_database() {
   if ! postflight_hash=$(db_value_hash "$db"); then
     printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_quarantine_marker "$db" "post-flatten value hash probe failed" || {
+    write_quarantine_marker "$db" "post-flatten value hash probe failed" unattainable || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -3750,7 +3903,7 @@ flatten_database() {
   if [ -z "$postflight_hash" ]; then
     printf 'compact: db=%s post-flatten value hash probe returned empty value — quarantine and investigate before GC\n' \
       "$db" >&2
-    write_quarantine_marker "$db" "post-flatten value hash probe returned empty value" || {
+    write_quarantine_marker "$db" "post-flatten value hash probe returned empty value" unattainable || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -3820,7 +3973,7 @@ flatten_database() {
       # default here; revisit only if a real incident shows this path reachable.
       printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_quarantine_marker "$db" "post-flatten value hash changed with row-count increase" \
+      write_quarantine_marker "$db" "post-flatten value hash changed with row-count increase" failed \
         "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=row_count_gain_db_hash_drift" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
         rm -f "$preflight_tmp"
@@ -3852,7 +4005,7 @@ flatten_database() {
       fi
       printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_quarantine_marker "$db" "post-flatten value hash changed without row-count increase" \
+      write_quarantine_marker "$db" "post-flatten value hash changed without row-count increase" failed \
         "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=same_row_count_db_hash_drift" \
         "db_root_drift_stat_tables=${db_root_drift_stat_tables:-unavailable}" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
