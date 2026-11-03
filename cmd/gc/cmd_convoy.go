@@ -99,29 +99,21 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".
+also be added later with "gc convoy add", which finds them in the
+convoy's own store.
 
-A convoy and the issues it tracks share one bead store, and "gc convoy
-add" only adds issues from the convoy's store. With --rig, the convoy is
-created in that rig's store, and every issue's ID prefix must route to
-that store. --rig takes a rig's exact name or a path inside the rig's
-directory; a relative path must be . or .. or start with ./ or ../.
-Without --rig, the convoy is created in the first issue's store, or in
-the city store when no issues are given; GC_RIG and the working
-directory do not choose it.`,
+The convoy lands in the store of the rig named by --rig (a rig name,
+matched without regard to case). Every issue's ID prefix must route to
+that same store. Without --rig it lands in the first issue's store, or
+in the city store when no issues are given; GC_RIG and the working
+directory do not choose the store.`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
-  gc convoy create frontend-batch --rig frontend
+  gc --rig frontend convoy create frontend-batch
   gc convoy create deploy --owner mayor --notify mayor --merge mr
   gc convoy create auth-rewrite --owned --target integration/auth-rewrite`,
 		Args: cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// An empty --rig, often an unset variable in a script, must not
-			// fall back to the placement used without --rig.
-			if cmd.Flags().Changed("rig") && strings.TrimSpace(rigFlag) == "" {
-				fmt.Fprintln(stderr, "gc convoy create: --rig requires a non-empty value") //nolint:errcheck // best-effort stderr
-				return errExit
-			}
+		RunE: func(_ *cobra.Command, args []string) error {
 			opts := convoyCreateOptions{
 				Fields: ConvoyFields{
 					Owner:  owner,
@@ -208,6 +200,34 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 	return cityPath
 }
 
+// convoyCreateStoreDir picks the store a new convoy lands in. A non-empty
+// rigName selects that rig's store, matched by name as gc bd and gc formula
+// match --rig, and every issue must route to that same store root. Without
+// one the convoy shares the first issue's store, so convoy and issues share
+// a database, else it lands in the city store.
+func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
+	if name := strings.TrimSpace(rigName); name != "" {
+		rig, ok := rigByName(cfg, name)
+		if !ok {
+			return "", fmt.Errorf("rig %q not found", name)
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
+		}
+		root := resolveStoreScopeRoot(cityPath, rig.Path)
+		for _, id := range issueIDs {
+			if routed := convoyCreateStoreRoot(cfg, cityPath, id); !samePath(routed, root) {
+				return "", fmt.Errorf("--rig %q conflicts with issue %s, which routes to store %q; a convoy and its issues must share one store", name, id, routed)
+			}
+		}
+		return root, nil
+	}
+	if len(issueIDs) > 0 {
+		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
+	}
+	return cityPath, nil
+}
+
 func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs []string) error {
 	if cfg == nil || cityPath == "" || len(issueIDs) < 2 {
 		return nil
@@ -220,119 +240,6 @@ func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs 
 		}
 	}
 	return nil
-}
-
-// convoyCreateStoreDir picks the store a new convoy is created in. A convoy
-// and the issues it tracks share one store, because gc convoy add looks an
-// issue up in the convoy's own store. An explicit --rig places the convoy in
-// the store it names, and every issue's ID prefix must route to that store.
-// Without --rig the convoy goes to the first issue's store, or to the city
-// store when no issues are given.
-func convoyCreateStoreDir(cfg *config.City, cityPath, scope string, issueIDs []string) (string, error) {
-	if scope == "" {
-		if len(issueIDs) > 0 {
-			return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
-		}
-		return cityPath, nil
-	}
-	root, err := convoyCreateRigRoot(cfg, cityPath, scope)
-	if err != nil {
-		return "", err
-	}
-	for _, id := range issueIDs {
-		if !samePath(convoyCreateStoreRoot(cfg, cityPath, id), root) {
-			return "", fmt.Errorf("--rig %q conflicts with issue %s, whose prefix routes it to %s; a convoy and its issues must share one store", scope, id, convoyIssueStoreName(cfg, id))
-		}
-	}
-	return root, nil
-}
-
-// rigFlagPathSeparators holds both separator spellings a --rig value may use.
-const rigFlagPathSeparators = "/" + string(filepath.Separator)
-
-// convoyCreateRigRoot resolves an explicit --rig value to a store root: a rig's
-// exact name, as context resolution matches names, else a value written as a
-// path (see rigHoldingPath). The city's own name, which gc rig list prints as
-// the HQ row, is refused rather than mapped to the city store. Context
-// resolution reads the raw flag before this runs and can accept a value this
-// refuses; such a value fails here, before anything is written.
-func convoyCreateRigRoot(cfg *config.City, cityPath, scope string) (string, error) {
-	rig, ok := convoyRigByExactName(cfg, scope)
-	if !ok {
-		if city := cfg.EffectiveCityName(); city != "" && scope == city {
-			return "", fmt.Errorf("--rig %q names the city, not a rig; omit --rig for the default placement (the first issue's store, else the city store)", scope)
-		}
-		var err error
-		if rig, ok, err = rigHoldingPath(cfg, cityPath, scope); err != nil {
-			return "", err
-		}
-	}
-	if !ok {
-		return "", fmt.Errorf("rig %q not found (--rig takes a rig's exact name, or a path inside a rig's directory such as /abs/dir or ./dir)", scope)
-	}
-	if strings.TrimSpace(rig.Path) == "" {
-		return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before creating convoys in it", rig.Name, rig.Name)
-	}
-	return resolveStoreScopeRoot(cityPath, rig.Path), nil
-}
-
-// convoyRigByExactName returns the rig named exactly name. Rig names are
-// case-sensitive, so "Frontend" and "frontend" can both exist.
-func convoyRigByExactName(cfg *config.City, name string) (config.Rig, bool) {
-	for _, rig := range cfg.Rigs {
-		if rig.Name == name {
-			return rig, true
-		}
-	}
-	return config.Rig{}, false
-}
-
-// rigHoldingPath returns the rig whose directory holds path, the deepest one
-// when rigs nest. Only a value written as a path counts: absolute, ".", "..",
-// or starting with "./" or "../". A relative one is read from the working
-// directory, as the global --rig flag reads it, and need not exist yet.
-// Anything else, such as "docs", "frontend/src" or an unexpanded "~/dir", is
-// not a path, so a mistyped rig name never resolves to the rig the working
-// directory sits in.
-func rigHoldingPath(cfg *config.City, cityPath, path string) (config.Rig, bool, error) {
-	if !isWrittenAsPath(path) {
-		return config.Rig{}, false, nil
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return config.Rig{}, false, fmt.Errorf("resolving --rig %q: %w", path, err)
-	}
-	rigs := append([]config.Rig(nil), cfg.Rigs...)
-	resolveRigPaths(cityPath, rigs)
-	name, _, ok := findEnclosingRig(abs, rigs)
-	if !ok {
-		return config.Rig{}, false, nil
-	}
-	rig, ok := convoyRigByExactName(cfg, name)
-	return rig, ok, nil
-}
-
-// isWrittenAsPath reports whether a --rig value is written as a path:
-// absolute, ".", "..", or starting with "./" or "../".
-func isWrittenAsPath(value string) bool {
-	if filepath.IsAbs(value) || value == "." || value == ".." {
-		return true
-	}
-	for _, sep := range rigFlagPathSeparators {
-		if strings.HasPrefix(value, "."+string(sep)) || strings.HasPrefix(value, ".."+string(sep)) {
-			return true
-		}
-	}
-	return false
-}
-
-// convoyIssueStoreName names the store beadID's prefix routes it to, for
-// error messages.
-func convoyIssueStoreName(cfg *config.City, beadID string) string {
-	if rig, ok := findRigByPrefix(cfg, beadPrefix(cfg, beadID)); ok && strings.TrimSpace(rig.Path) != "" {
-		return fmt.Sprintf("rig %q", rig.Name)
-	}
-	return "the city store"
 }
 
 func doConvoyCreateWithOptions(store beads.Store, rec events.Recorder, args []string, opts convoyCreateOptions, stdout, stderr io.Writer) int {
@@ -372,9 +279,9 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 	}
 
 	for _, id := range issueIDs {
-		// Resolve the store this child's prefix routes to. The CLI created
-		// the convoy in that same store (convoyCreateStoreDir), so the
-		// tracks dep lands beside both beads.
+		// Resolve the correct store for this child bead. Children may
+		// live in a rig store (different from the city root store where
+		// the convoy was created).
 		childStore := store
 		if cfg != nil {
 			if rd := rigDirForBead(cfg, id); rd != "" {
