@@ -18,11 +18,17 @@ import (
 
 // seedCLIStorageRoutes installs routes for cityPath in the one-shot memo, so a
 // test can drive the CLI class resolvers without standing up a real binding.
+// The answer is settled and resolved, as a resolution leaves one, so a
+// controller boot judges it as it would a resolved answer
+// (retireStaleCLIStorageRoutes) rather than as one still in flight.
 func seedCLIStorageRoutes(t *testing.T, cityPath string, routes *storageRoutes) {
 	t.Helper()
 	resetCLIStorageRoutes(t)
 	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
-	entry.once.Do(func() { entry.routes = routes })
+	entry.once.Do(func() {
+		entry.routes = routes
+		entry.resolved.Store(true)
+	})
 }
 
 // newOrphanControlFixture writes a control bead whose workflow root was

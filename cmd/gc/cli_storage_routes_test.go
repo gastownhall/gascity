@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // resetCLIStorageRoutes gives a test the process-scoped funnel in its start
@@ -324,6 +326,49 @@ func bootCityRoutesAsController(t *testing.T, cityPath string, cfg *config.City)
 	})
 }
 
+// splitOneShotCLICity splits cityPath, a city with no [storage], the way an
+// operator does while it is stopped: city.toml gains the whole-split [storage]
+// section and `gc storage migrate --from-work` converges it. It returns the
+// split config.
+func splitOneShotCLICity(t *testing.T, cityPath string) *config.City {
+	t.Helper()
+	writeOneShotCityTOML(t, cityPath, filepath.Join(t.TempDir(), "store"))
+	stubInfraControllerPing(t, 0)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the split city config: %v", err)
+	}
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the split did not converge (%s): %s", report.Outcome, log.String())
+	}
+	return cfg
+}
+
+// holdCLIStorageResolution runs start in the background and returns once the
+// funnel resolution it begins has its answer and has not yet published it: a
+// resolution that read the city just before a controller boot. Later
+// resolutions run as usual; release lets the held one publish.
+func holdCLIStorageResolution(t *testing.T, start func()) (release func()) {
+	t.Helper()
+	resolve := cliStorageRoutesResolve
+	held, released := make(chan struct{}), make(chan struct{})
+	cliStorageRoutesResolve = func(cityPath string) (*storageRoutes, bool) {
+		routes, unsettled := resolve(cityPath)
+		close(held)
+		<-released
+		return routes, unsettled
+	}
+	t.Cleanup(func() { cliStorageRoutesResolve = resolve })
+	var once sync.Once
+	release = func() { once.Do(func() { close(released) }) }
+	t.Cleanup(release)
+	go start()
+	<-held
+	cliStorageRoutesResolve = resolve
+	return release
+}
+
 // TestSupervisorSeesASplitMadeWhileItRan is ga-d17a71: a city split while the
 // machine supervisor keeps running (gc stop, gc storage migrate --from-work,
 // gc start, which reloads the city in the SAME supervisor process). The
@@ -340,25 +385,15 @@ func TestSupervisorSeesASplitMadeWhileItRan(t *testing.T) {
 	cityPath := oneShotCLICity(t, "")
 	captureCLIStorageStderr(t)
 	work := beads.NewMemStore()
-	if got := cliSessionStore(work, nil, cityPath); got != beads.Store(work) {
-		t.Fatalf("fixture: the unsplit city's session route is %p, want the work store %p", got, work)
-	}
+	// The fixture checks the funnel's answer rather than the session route:
+	// under the split-strict gate a class resolver hands back a view over the
+	// work store, never the work store itself.
 	if routes := cliStorageRoutes(cityPath); routes != nil {
 		t.Fatalf("fixture: the unsplit city resolved routes %+v", routes)
 	}
 
 	// The split, with the city stopped and the supervisor still running.
-	bindingRoot := filepath.Join(t.TempDir(), "store")
-	writeOneShotCityTOML(t, cityPath, bindingRoot)
-	stubInfraControllerPing(t, 0)
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err != nil {
-		t.Fatalf("loading the split city config: %v", err)
-	}
-	var log bytes.Buffer
-	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
-		t.Fatalf("the split did not converge (%s): %s", report.Outcome, log.String())
-	}
+	cfg := splitOneShotCLICity(t, cityPath)
 
 	// gc start: the supervisor boots the city's controller again.
 	bootCityRoutesAsController(t, cityPath, cfg)
@@ -399,17 +434,128 @@ func TestControllerRebootKeepsAFunnelAnswerThatStillMatches(t *testing.T) {
 	}
 }
 
+// TestControllerBootRetiresAFunnelAnswerForAMovedBinding: a binding moved while
+// the city was stopped — copied to a new path under the same name, with the
+// served-binding note removed as the operator's attestation — keeps its name
+// and its classes, so only where it serves from tells the funnel's answer from
+// the controller's boot routes. The boot retires the answer for the old path,
+// the next funnel call serves the new one, and the retired answer's binding is
+// closed with the rest at process end.
+func TestControllerBootRetiresAFunnelAnswerForAMovedBinding(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	old := mustResolveInfraTarget(t, cityPath, cfg)
+	movedRoot := filepath.Join(t.TempDir(), "moved")
+	if err := os.CopyFS(movedRoot, os.DirFS(old.Root)); err != nil {
+		t.Fatalf("copying the binding to its new path: %v", err)
+	}
+	work := beads.NewMemStore()
+	retired := cliSessionStore(work, nil, cityPath)
+	if retired == beads.Store(work) {
+		t.Fatal("fixture: the migrated city's session route is the work store")
+	}
+
+	// The move, with the city stopped and the supervisor still running.
+	writeOneShotCityTOML(t, cityPath, movedRoot)
+	if err := os.Remove(bornSplitServedNotePath(cityPath)); err != nil {
+		t.Fatalf("removing the served-binding note: %v", err)
+	}
+	moved, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the moved city config: %v", err)
+	}
+
+	bootCityRoutesAsController(t, cityPath, moved)
+	created, err := cliSessionStore(work, nil, cityPath).Create(beads.Bead{Title: "named session", Type: "session", Labels: []string{"gc:session"}})
+	if err != nil {
+		t.Fatalf("creating a session bead through the funnel: %v", err)
+	}
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the funnel (the retired answer included): %v", err)
+	}
+	if _, err := retired.Get(created.ID); !errors.Is(err, beads.ErrStoreClosed) {
+		t.Errorf("the retired answer's binding answered a read after the funnel closed (%v); a retired answer must be closed with the rest", err)
+	}
+	if _, err := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, moved)).Get(created.ID); err != nil {
+		t.Fatalf("the session bead written through the funnel is not at the binding's new path: %v", err)
+	}
+	if _, err := openMigratedDestination(t, old).Get(created.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("reading %s at the binding's old path: %v, want %v", created.ID, err, beads.ErrNotFound)
+	}
+}
+
+// TestControllerBootRetiresAFunnelAnswerStillBeingResolved: a funnel
+// resolution that read the city just before its controller booted on a split,
+// and publishes its answer just after, must not become the answer for every
+// later call. The boot retires an answer still being resolved: the call that
+// began it gets it, and the next call resolves the split.
+func TestControllerBootRetiresAFunnelAnswerStillBeingResolved(t *testing.T) {
+	cityPath := oneShotCLICity(t, "")
+	stderr := captureCLIStorageStderr(t)
+	inFlight := make(chan *storageRoutes, 1)
+	release := holdCLIStorageResolution(t, func() { inFlight <- cliStorageRoutes(cityPath) })
+
+	cfg := splitOneShotCLICity(t, cityPath)
+	bootCityRoutesAsController(t, cityPath, cfg)
+	release()
+	if routes := <-inFlight; routes != nil {
+		t.Fatal("fixture: the held resolution read the split city, not the city before the split")
+	}
+
+	routes := cliStorageRoutes(cityPath)
+	if routes == nil {
+		t.Fatal("after the controller booted on the split, the funnel still answers for the unsplit city: a resolution that read the city before the boot and published after it was kept")
+	}
+	if routes.refused {
+		t.Fatalf("the funnel refused the split city its controller booted on: %s", stderr.String())
+	}
+}
+
+// TestControllerBootKeepsAHeldDerivationOutOfTheBindingsMemo is the same race
+// one layer up: the binding grouping derived from a funnel answer
+// (cliResidencyBindings) must not memoize an answer the controller's boot
+// retired while the derivation ran.
+func TestControllerBootKeepsAHeldDerivationOutOfTheBindingsMemo(t *testing.T) {
+	cityPath := oneShotCLICity(t, "")
+	stderr := captureCLIStorageStderr(t)
+	inFlight := make(chan []storeref.ClassBinding, 1)
+	release := holdCLIStorageResolution(t, func() {
+		bindings, _ := cliResidencyBindings(cityPath)
+		inFlight <- bindings
+	})
+
+	cfg := splitOneShotCLICity(t, cityPath)
+	bootCityRoutesAsController(t, cityPath, cfg)
+	release()
+	if bindings := <-inFlight; len(bindings) != 0 {
+		t.Fatalf("fixture: the held derivation read the split city (%d binding(s)), not the city before the split", len(bindings))
+	}
+
+	bindings, err := cliResidencyBindings(cityPath)
+	if err != nil {
+		t.Fatalf("deriving the split city's bindings: %v (%s)", err, stderr.String())
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("after the controller booted on the split, the city's binding grouping holds %d binding(s), want the split's 1: the memo kept a derivation from the answer the boot retired", len(bindings))
+	}
+}
+
 // TestSameCLIStorageRoutingJudgesWhereEachClassIsServed pins the comparison a
 // controller boot retires a funnel answer by: identity answers match each
 // other only, a refused answer never matches a booted one, and served answers
-// match on binding and relocated classes.
+// match on binding, provider, location and relocated classes.
 func TestSameCLIStorageRoutingJudgesWhereEachClassIsServed(t *testing.T) {
 	store := beads.NewMemStore()
+	const location = "/city/store/graph/beads.sqlite"
 	served := func(binding string, classes ...coordclass.Class) *storageRoutes {
-		r := &storageRoutes{stores: map[coordclass.Class]beads.Store{}, binding: binding}
+		r := &storageRoutes{stores: map[coordclass.Class]beads.Store{}, binding: binding, provider: config.StorageProviderSQLiteBeads, location: location}
 		for _, c := range classes {
 			r.stores[c] = store
 		}
+		return r
+	}
+	from := func(provider, at string, r *storageRoutes) *storageRoutes {
+		r.provider, r.location = provider, at
 		return r
 	}
 	all := []coordclass.Class{}
@@ -429,6 +575,8 @@ func TestSameCLIStorageRoutingJudgesWhereEachClassIsServed(t *testing.T) {
 		{"split then unsplit", served("infra", all...), nil, false},
 		{"same split", served("infra", all...), served("infra", all...), true},
 		{"other binding", served("infra", all...), served("graph", all...), false},
+		{"same binding, other location", served("infra", all...), from(config.StorageProviderSQLiteBeads, "/moved/graph/beads.sqlite", served("infra", all...)), false},
+		{"same binding, other provider", served("infra", all...), from(config.StorageProviderBeadsWorkspace, location, served("infra", all...)), false},
 		{"other classes", served("infra", all[0]), served("infra", all...), false},
 		{"refused then served", refusingStorageRoutes("infra", errors.New("unconverged")), served("infra", all...), false},
 	} {

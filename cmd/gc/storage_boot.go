@@ -88,9 +88,14 @@ type storageRoutes struct {
 	// closers owns the durable resources the opened bindings hold, in open
 	// order. The process closes them once, on shutdown.
 	closers []io.Closer
-	// binding names the non-work binding these routes were opened from, for
-	// diagnostics.
-	binding string
+	// binding names the non-work binding these routes were opened from, and
+	// provider and location say where it serves from, as the boot that opened
+	// these routes recorded them in the served-binding note
+	// (recordServedBinding). sameCLIStorageRouting compares all three: a
+	// binding re-pointed under the same name differs from its old routes only
+	// in provider or location.
+	binding            string
+	provider, location string
 	// refused marks routes whose every relocated class refuses
 	// (refusingStorageRoutes): the one-shot funnel's answer for a city this
 	// build must not serve.
@@ -457,9 +462,11 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err != nil {
 		return nil, err
 	}
-	if err := recordServedBinding(plan, cityPath, storage, target); err != nil {
+	served, err := recordServedBinding(plan, cityPath, storage, target)
+	if err != nil {
 		return nil, errors.Join(fmt.Errorf("%s: %w", logPrefix, err), routes.close())
 	}
+	routes.provider, routes.location = served.Provider, served.Location
 	// One read, here, because this is the single funnel both planes pass
 	// through — the controller's boot and the one-shot CLI's memoized routes.
 	// Taking it anywhere downstream would put a store read inside a per-tick
@@ -529,17 +536,20 @@ func revertHoldingNote(shape storageSplitShape, cityPath string) (infraMigration
 // the note exists so a later genesis cannot bless an empty store while the
 // city's real state sits in a binding, and a binding that never opened holds
 // no state to orphan.
-func recordServedBinding(plan *storebinding.StoragePlan, cityPath string, storage config.StorageConfig, target infraBindingTarget) error {
+//
+// It returns the note it recorded, which the boot gate stamps on the routes it
+// opened.
+func recordServedBinding(plan *storebinding.StoragePlan, cityPath string, storage config.StorageConfig, target infraBindingTarget) (bornSplitServedNote, error) {
 	bindingCfg := storage.Bindings[target.Binding]
 	location, err := servedBindingLocation(plan, target.Binding, bindingCfg)
 	if err != nil {
-		return err
+		return bornSplitServedNote{}, err
 	}
 	note := bornSplitServedNote{Binding: target.Binding, Provider: bindingCfg.Provider, Location: location}
 	if err := writeServedBindingNote(cityPath, note); err != nil {
-		return fmt.Errorf("recording the served-binding note, the durable record of which binding serves this city's infrastructure classes: %w", err)
+		return bornSplitServedNote{}, fmt.Errorf("recording the served-binding note, the durable record of which binding serves this city's infrastructure classes: %w", err)
 	}
-	return nil
+	return note, nil
 }
 
 // writeServedBindingNote is the durable write of the served-binding note.

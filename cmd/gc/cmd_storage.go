@@ -553,7 +553,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// work store (split-default R1, re-review probe P3). The note is the one
 	// the boot gate writes (recordServedBinding), so the first boot finds it
 	// already current.
-	if err := recordServedBinding(plan, request.CityPath, request.Cfg.EffectiveStorage(), target); err != nil {
+	if _, err := recordServedBinding(plan, request.CityPath, request.Cfg.EffectiveStorage(), target); err != nil {
 		fmt.Fprintf(stderr, "%s: recording the served binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

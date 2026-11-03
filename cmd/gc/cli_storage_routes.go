@@ -32,11 +32,14 @@ package main
 // a funnel answer taken before the split (ga-d17a71). Where a city serves its
 // classes changes only while it is stopped, and takes effect when its
 // controller boots again, so that boot is the trigger: registering the booted
-// routes (registerResidencyRoutes) retires a settled funnel answer whose
-// routing no longer matches them, and the next funnel call resolves the city
-// as it is now. A retired answer's binding stays open until the process ends,
-// because a caller may still hold a store it handed out; an answer that still
-// matches is kept, so a restart does not open a second handle.
+// routes (registerResidencyRoutes) retires a funnel answer that no longer
+// routes every class where they do — another binding, the same binding moved to
+// another provider or location, other classes — and an answer still being
+// resolved, which may have read the city before the change. The next funnel
+// call resolves the city as it is now. A retired answer's binding stays open
+// until the process ends, because a caller may still hold a store it handed
+// out; an answer that still matches is kept, so a restart does not open a
+// second handle.
 //
 // # It resolves the config itself
 //
@@ -153,7 +156,7 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	clean := filepath.Clean(cityPath)
 	resolve := func(entry *cliStorageRoutesEntry) {
 		entry.once.Do(func() {
-			entry.routes, entry.unsettled = resolveCLIStorageRoutes(cityPath)
+			entry.routes, entry.unsettled = cliStorageRoutesResolve(cityPath)
 			if entry.unsettled {
 				entry.expires = time.Now().Add(cliStorageRoutesUnsettledTTL)
 			}
@@ -169,6 +172,10 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	}
 	return entry.routes
 }
+
+// cliStorageRoutesResolve is the resolution cliStorageRoutes memoizes: a seam,
+// so a test can hold one between reading the city and publishing its answer.
+var cliStorageRoutesResolve = resolveCLIStorageRoutes
 
 // cliStorageRefusalsPrinted holds every refusal this process has already put
 // on stderr, so a re-resolution that reaches the same refusal does not repeat
@@ -211,12 +218,18 @@ func forgetCLIStorageRoutesEntry(cityPath string, entry *cliStorageRoutesEntry) 
 	}
 }
 
-// retireStaleCLIStorageRoutes drops cityPath's funnel answer when it no longer
-// matches booted, the routes the city's controller just booted with in this
-// process, so the next funnel call resolves the city again (see "A controller
-// boot re-decides it" above). An answer still being resolved is left alone: it
-// is reading the city as it is now. The retired answer is not closed here, since
-// a caller may still hold a store from it; closeCLIStorageRoutes closes it.
+// retireStaleCLIStorageRoutes drops cityPath's funnel answer unless it still
+// routes every class where booted does — booted being the routes the city's
+// controller just booted with in this process — so the next funnel call
+// resolves the city again (see "A controller boot re-decides it" above).
+//
+// An answer still being resolved is retired too. It may have read the city
+// before the change this boot serves, and once it settles nothing would retire
+// it: the callers already waiting on it get it, and every later call resolves
+// again. An unsettled answer is kept; it expires on its own.
+//
+// The retired answer is not closed here, since a caller may still hold a store
+// from it; closeCLIStorageRoutes closes it.
 func retireStaleCLIStorageRoutes(cityPath string, booted *storageRoutes) {
 	if cityPath == "" {
 		return
@@ -225,7 +238,14 @@ func retireStaleCLIStorageRoutes(cityPath string, booted *storageRoutes) {
 	cliStorageRoutesMu.Lock()
 	defer cliStorageRoutesMu.Unlock()
 	entry, ok := cliStorageRoutesByCity[key]
-	if !ok || !entry.resolved.Load() || entry.unsettled || sameCLIStorageRouting(entry.routes, booted) {
+	if !ok {
+		return
+	}
+	// resolved is read first: routes and unsettled are the resolver's to write
+	// until it is set. The funnel's own answer, which a one-shot `gc start`
+	// registers as its booted routes, is kept even as a refusal, which
+	// sameCLIStorageRouting matches with nothing.
+	if entry.resolved.Load() && (entry.routes == booted || entry.unsettled || sameCLIStorageRouting(entry.routes, booted)) {
 		return
 	}
 	delete(cliStorageRoutesByCity, key)
@@ -233,15 +253,17 @@ func retireStaleCLIStorageRoutes(cityPath string, booted *storageRoutes) {
 }
 
 // sameCLIStorageRouting reports whether a funnel answer routes every class
-// where booted, a controller's boot routes, does: the same binding, the same
-// relocated classes, and none of them refused. A nil or empty routes value is
-// the identity answer, every class on the work store.
+// where booted, a controller's boot routes, does: the same binding, served by
+// the same provider from the same location, the same relocated classes, and
+// none of them refused. A nil or empty routes value is the identity answer,
+// every class on the work store.
 func sameCLIStorageRouting(funnel, booted *storageRoutes) bool {
 	identity := func(r *storageRoutes) bool { return r == nil || len(r.stores) == 0 }
 	if identity(funnel) || identity(booted) {
 		return identity(funnel) && identity(booted)
 	}
-	if funnel.refused || funnel.binding != booted.binding || len(funnel.stores) != len(booted.stores) {
+	if funnel.refused || funnel.binding != booted.binding || funnel.provider != booted.provider ||
+		funnel.location != booted.location || len(funnel.stores) != len(booted.stores) {
 		return false
 	}
 	for class := range funnel.stores {

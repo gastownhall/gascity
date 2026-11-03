@@ -420,8 +420,10 @@ learn it.
 `gc start` under a machine supervisor that kept running through the split
 needs no supervisor restart. The city's controller booting again is what makes
 the supervisor re-resolve where the city serves its classes, so commands it
-runs for the city (`gc session reset` through the controller socket, among
-them) read the binding from that boot on.
+serves for the city through the controller socket (`gc session reset`, among
+them) read the binding from that boot on. Session routing for that first boot
+is the exception: the supervisor sets it up from the work store's sessions
+before the controller boots, and the controller's first pass corrects it.
 
 ## gc bd on split cities
 

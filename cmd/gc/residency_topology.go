@@ -181,10 +181,16 @@ func registeredCityWorkStore(cityPath string) beads.Store {
 // this file memoizes, so a later resolution re-reads the registry instead of a
 // pre-registration answer. The one-shot cliStorageRoutes funnel keeps its
 // answer when it still routes every class where these routes do; one that does
-// not (the city was split, or unsplit, while this process ran) is retired so
-// the next funnel call resolves the city again (retireStaleCLIStorageRoutes,
-// ga-d17a71). A handle the funnel already opened stays open until the process
-// ends either way.
+// not (the city was split, unsplit or re-pointed while this process ran), or
+// that is still being resolved, is retired so the next funnel call resolves the
+// city again (retireStaleCLIStorageRoutes, ga-d17a71). A handle the funnel
+// already opened stays open until the process ends either way.
+//
+// The funnel answer is retired first and the derived grouping dropped second,
+// so no derivation can memoize a retired answer: one that reads the funnel
+// after the drop finds that answer already gone, and one that read it before
+// either memoized in time for the drop to clear it or sees the drop and leaves
+// the memo alone (cliResidencyBindings).
 // work is the runtime's city WORK-store accessor, read lazily (see
 // registeredCityWorkStore); pass nil from a caller that has none.
 func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func() beads.Store) {
@@ -198,8 +204,8 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func()
 	}
 	residencyRoutesByCity[key] = residencyRegistration{routes: routes, work: work}
 	residencyRoutesMu.Unlock()
-	dropCLIResidencyBindings(key)
 	retireStaleCLIStorageRoutes(key, routes)
+	dropCLIResidencyBindings(key)
 }
 
 // unregisterResidencyRoutes drops a runtime's registration, and ONLY its own.
@@ -264,6 +270,9 @@ type cliResidencyBindingsEntry struct {
 var (
 	cliResidencyBindingsMu     sync.Mutex
 	cliResidencyBindingsByCity map[string]*cliResidencyBindingsEntry
+	// cliResidencyBindingsDrops counts dropCLIResidencyBindings calls, for any
+	// city, so a derivation can tell that a drop happened while it ran.
+	cliResidencyBindingsDrops uint64
 )
 
 // cliResidencyBindings memoizes the binding derivation per city.
@@ -287,6 +296,7 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 		cliResidencyBindingsByCity = make(map[string]*cliResidencyBindingsEntry, 1)
 	}
 	entry, ok := cliResidencyBindingsByCity[key]
+	drops := cliResidencyBindingsDrops
 	cliResidencyBindingsMu.Unlock()
 	if ok {
 		return entry.bindings, entry.refused
@@ -308,6 +318,14 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	// bindings over stores closeCLIStorageRoutes has already closed. The answer
 	// is still correct for THIS caller, so it is returned unmemoized.
 	if cliResidencyBindingsByCity == nil {
+		return bindings, refused
+	}
+	// A drop while this derivation ran means a runtime registered or
+	// unregistered routes meanwhile, and a registration retires the funnel
+	// answer this derivation may have read (registerResidencyRoutes). The
+	// answer still goes to THIS caller, which asked before the registration;
+	// memoized, it would go to every later one.
+	if cliResidencyBindingsDrops != drops {
 		return bindings, refused
 	}
 	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused}
@@ -395,6 +413,7 @@ func resetCLIResidencyBindings() {
 func dropCLIResidencyBindings(key string) {
 	cliResidencyBindingsMu.Lock()
 	delete(cliResidencyBindingsByCity, key)
+	cliResidencyBindingsDrops++
 	cliResidencyBindingsMu.Unlock()
 	dropProvenRelicRefs(key)
 }
