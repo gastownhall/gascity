@@ -198,13 +198,81 @@ func (m *Manager) Reload() error {
 			continue
 		}
 		if e.inst != nil {
-			if err := e.inst.Close(); err != nil && firstErr == nil {
-				firstErr = err
+			if err := e.inst.Close(); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				if replacement, replaced := next[name]; replaced && replacement.inst != nil {
+					m.stopReplacementOfUnreaped(name, e.spec, replacement.inst, now)
+				}
+			}
+			continue
+		}
+		// A failed construction can leave a generation whose reap was never
+		// confirmed and no instance to settle it. A replacement under the
+		// same state root settles it before it starts; otherwise it is
+		// settled here.
+		if key, ok := proxyProcessRootKey(m.rt, e.spec); ok {
+			if replacement, replaced := next[name]; replaced {
+				if replacementKey, ok := proxyProcessRootKey(m.rt, replacement.spec); ok && replacementKey == key {
+					continue
+				}
+			}
+			if err := settleServiceReaps(key); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("workspacesvc: %s: %w", name, err)
 			}
 		}
 	}
 
 	return firstErr
+}
+
+// proxyProcessRootKey is the reap-registry key of a proxy_process service's
+// state root, and false for any other kind of service.
+func proxyProcessRootKey(rt RuntimeContext, svc config.Service) (string, bool) {
+	if svc.KindOrDefault() != "proxy_process" {
+		return "", false
+	}
+	return serviceRootKey(proxyProcessStateRoot(rt, svc)), true
+}
+
+// stopReplacementOfUnreaped stops replacement, the generation a refresh
+// started for name before closing the one it replaces, when that one's tree
+// could not be confirmed reaped. Whatever survives it may still be running,
+// and the replacement would run beside it. The entry is left without an
+// instance for Tick to construct again after the restart backoff; construction
+// waits until the reap is confirmed, so until then the service is down rather
+// than running twice. A refresh therefore still starts the new generation
+// first, and only a failed reap costs availability.
+//
+// Only a replacement under the same state root is stopped: its construction is
+// what waits on that root's reap. Where a release does no work, nothing is ever
+// pending, and nothing is stopped.
+func (m *Manager) stopReplacementOfUnreaped(name string, replaced config.Service, replacement Instance, now time.Time) {
+	key, ok := proxyProcessRootKey(m.rt, replaced)
+	if !ok || !serviceRootPending(key) {
+		return
+	}
+	m.mu.Lock()
+	cur, ok := m.entries[name]
+	if !ok || cur.inst != replacement {
+		m.mu.Unlock()
+		return
+	}
+	if curKey, isProxy := proxyProcessRootKey(m.rt, cur.spec); !isProxy || curKey != key {
+		m.mu.Unlock()
+		return
+	}
+	cur.inst = nil
+	cur.status.State = "degraded"
+	cur.status.LocalState = "degraded"
+	cur.status.Reason = "the previous generation's process tree is not confirmed reaped; its replacement is stopped until it is"
+	cur.status.UpdatedAt = now
+	cur.nextConstructionRetry = now.Add(proxyProcessRestartBackoff)
+	m.mu.Unlock()
+	if err := replacement.Close(); err != nil {
+		log.Printf("workspacesvc: stop the replacement of proxy process %s whose previous generation is not confirmed reaped: %v", name, err)
+	}
 }
 
 // Tick runs one service reconciliation pass.
@@ -293,6 +361,7 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 			}
 			if err := old.Close(); err != nil {
 				log.Printf("workspacesvc: close proxy process %s after restart: %v", e.spec.Name, err)
+				m.stopReplacementOfUnreaped(e.spec.Name, e.spec, restarted, now)
 			}
 			continue
 		}
@@ -316,6 +385,10 @@ func (m *Manager) Close() error {
 	m.mu.Lock()
 	m.closed = true
 	targets := make([]closeTarget, 0, len(m.entries))
+	// A proxy_process service without an instance may still have a
+	// generation, left by a failed construction, whose reap was never
+	// confirmed; nothing but its state root can settle it.
+	instanceless := map[string]config.Service{}
 	for name, e := range m.entries {
 		if e.inst != nil {
 			targets = append(targets, closeTarget{name: name, inst: e.inst})
@@ -329,14 +402,12 @@ func (m *Manager) Close() error {
 		e.status.LocalState = "stopped"
 		e.status.Reason = "service_closed"
 		e.status.UpdatedAt = now
+		instanceless[name] = e.spec
 	}
 	m.mu.Unlock()
-	if len(targets) == 0 {
-		return nil
-	}
 
 	var firstErr error
-	results := make(map[string]error, len(targets))
+	results := make(map[string]error, len(targets)+len(instanceless))
 	for _, target := range targets {
 		if err := target.inst.Close(); err != nil {
 			results[target.name] = err
@@ -345,10 +416,35 @@ func (m *Manager) Close() error {
 			}
 		}
 	}
+	for name, spec := range instanceless {
+		key, ok := proxyProcessRootKey(m.rt, spec)
+		if !ok {
+			continue
+		}
+		if err := settleServiceReaps(key); err != nil {
+			results[name] = err
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if len(targets) == 0 && len(results) == 0 {
+		return nil
+	}
 
 	now = time.Now().UTC()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for name := range instanceless {
+		e, ok := m.entries[name]
+		if !ok || results[name] == nil {
+			continue
+		}
+		e.status.State = "degraded"
+		e.status.LocalState = "close_error"
+		e.status.Reason = results[name].Error()
+		e.status.UpdatedAt = now
+	}
 	for _, target := range targets {
 		e, ok := m.entries[target.name]
 		if !ok {
