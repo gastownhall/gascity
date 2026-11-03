@@ -2,10 +2,14 @@ package tmux
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -145,6 +149,102 @@ func TestCodexQuestionEditorGlyphRequiresMatchingNativeOccurrence(t *testing.T) 
 	}
 	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "answer", Text: "Owl"}); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		t.Fatalf("unbound editor=%v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestCodexQuestionEditorMismatchReportsBoundShapesWithoutSendingKeys(t *testing.T) {
+	for name, pane := range map[string]string{
+		"title":   strings.ReplaceAll(codexQuestionEditorGlyphScreen, "Which animal should be the qualification mascot?", "Which different animal?"),
+		"choices": strings.ReplaceAll(codexQuestionEditorGlyphScreen, "2. Owl", "2. Heron"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm, ex := nativeQuestionTmux(t, codexQuestionGlyphNativeScreen)
+			path := codexGlyphQuestionRollout(t)
+			tm.codexRolloutHeld = func(int) string { return path }
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil {
+				t.Fatalf("collapsed request=%+v err=%v", pending, err)
+			}
+			ex.pane = pane
+			visible := codexQuestionPanel(strings.Split(pane, "\n"))
+			if visible == nil {
+				t.Fatal("fixture has no editor")
+			}
+			for operation, probe := range map[string]func() error{
+				"pending": func() error { _, err := tm.Pending("q"); return err },
+				"answer": func() error {
+					return tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Owl"})
+				},
+				"ordinary message guard": func() error { return tm.checkNoApprovalPrompt("q") },
+			} {
+				err := probe()
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("%s did not preserve unavailable sentinel: %v", operation, err)
+				}
+				for _, fragment := range []string{
+					"question editor has no matching native request",
+					fmt.Sprintf("visible={title=%q", visible.Question),
+					fmt.Sprintf("choices=%q", visible.answerChoices()),
+					"native_count=1",
+					`native_shapes=[{title="Which animal should be the qualification mascot?" choices=["Otter" "Owl"]`,
+				} {
+					if !strings.Contains(err.Error(), fragment) {
+						t.Errorf("%s diagnostic lacks %q: %v", operation, fragment, err)
+					}
+				}
+				requireNoKeys(t, ex.calls, false)
+			}
+		})
+	}
+}
+
+func TestCodexQuestionEditorMismatchDiagnosticsBoundOnlyQuestionShapes(t *testing.T) {
+	tm, ex := nativeQuestionTmux(t, codexQuestionEditorGlyphScreen)
+	path := codexGlyphQuestionRollout(t)
+	tm.codexRolloutHeld = func(int) string { return path }
+	var questions []map[string]any
+	for i := range 6 {
+		questions = append(questions, map[string]any{
+			"title":   fmt.Sprintf("native-title-%d-", i) + strings.Repeat("界\n", 1024),
+			"options": []string{strings.Repeat("甲\n", 128), "two", "three", "four", "PRIVATE_OMITTED_CHOICE"},
+		})
+	}
+	args, err := json.Marshal(map[string]any{"questions": questions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := json.Marshal(map[string]any{
+		"type": "response_item", "private_metadata": "PRIVATE_NATIVE_METADATA",
+		"payload": map[string]any{"type": "function_call", "name": "request_user_input_async", "call_id": "PRIVATE_NATIVE_CALL_ID", "arguments": string(args)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(record, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	visible := &parsedQuestion{
+		Question: strings.Repeat("見\n", 1024), Choices: []string{strings.Repeat("選\n", 128), "two", "three", "four", "PRIVATE_OMITTED_CHOICE"},
+		Numbers: []int{1, 2, 3, 4, 5}, Header: "PRIVATE_HEADER", Draft: "PRIVATE_DRAFT", NativeID: "PRIVATE_VISIBLE_ID",
+	}
+	_, err = tm.codexNativeQuestions("q", visible, 0)
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("mismatch=%v", err)
+	}
+	text := err.Error()
+	if !utf8.ValidString(text) || utf8.RuneCountInString(text) > 2800 || strings.Contains(text, "\n") {
+		t.Fatalf("diagnostic must be bounded, valid and escaped: runes=%d", utf8.RuneCountInString(text))
+	}
+	for _, want := range []string{"native_count=6", "native-title-0-", "native-title-3-", "choice_count=5", "…"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("diagnostic lacks %q", want)
+		}
+	}
+	for _, private := range []string{path, "PRIVATE_", "native-title-4-", "native-title-5-"} {
+		if strings.Contains(text, private) {
+			t.Errorf("diagnostic exposed data outside bounded shapes: %q", private)
+		}
 	}
 	requireNoKeys(t, ex.calls, false)
 }

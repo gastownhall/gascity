@@ -129,7 +129,7 @@ func (t *Tmux) codexNativeQuestions(target string, visible *parsedQuestion, coun
 			}
 		}
 		if found == nil {
-			return nil, fmt.Errorf("%w: question editor has no matching native request", runtime.ErrRuntimeUnavailable)
+			return nil, codexQuestionMismatch(visible, questions)
 		}
 		visible.NativeID = found.NativeID
 		return visible, nil
@@ -138,6 +138,38 @@ func (t *Tmux) codexNativeQuestions(target string, visible *parsedQuestion, coun
 		return nil, fmt.Errorf("%w: Codex queue and native requests disagree", runtime.ErrRuntimeUnavailable)
 	}
 	return questions[0], nil
+}
+
+// codexQuestionMismatch describes only the parsed question shapes needed to
+// diagnose a refused native binding. It never includes the pane, rollout path,
+// native call IDs, draft answers or unrelated transcript fields. Bound both
+// the fields and the escaped summaries so control characters cannot expand an
+// arbitrarily large error while exact matching above remains unchanged.
+func codexQuestionMismatch(visible *parsedQuestion, native []*parsedQuestion) error {
+	shapes := make([]string, 0, min(len(native), 4))
+	for _, question := range native[:min(len(native), 4)] {
+		shapes = append(shapes, codexQuestionDiagnosticShape(question))
+	}
+	return fmt.Errorf("%w: question editor has no matching native request (visible=%s; native_count=%d; native_shapes=[%s])",
+		runtime.ErrRuntimeUnavailable, codexQuestionDiagnosticShape(visible), len(native), strings.Join(shapes, "; "))
+}
+
+func codexQuestionDiagnosticShape(question *parsedQuestion) string {
+	choices := question.answerChoices()
+	labels := make([]string, 0, min(len(choices), 4))
+	for _, choice := range choices[:min(len(choices), 4)] {
+		labels = append(labels, codexQuestionDiagnosticText(choice, 48))
+	}
+	shape := fmt.Sprintf("{title=%q choices=%q choice_count=%d}", codexQuestionDiagnosticText(question.Question, 96), labels, len(choices))
+	return codexQuestionDiagnosticText(shape, 512)
+}
+
+func codexQuestionDiagnosticText(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) > limit {
+		return string(runes[:limit-1]) + "…"
+	}
+	return text
 }
 
 func equalQuestionChoices(a, b []string) bool {
