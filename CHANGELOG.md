@@ -1146,11 +1146,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from that listing; a failed or partial listing still falls back to one
   listing per pool. In a benchmark shaped like that city, at 1 ms per
   listing, a `/status` build drops from about 717 ms to under 2 ms and
-  `/agents` from 2.99 s to 2.25 s. A failed StoreHealth measurement is also
-  kept for the store-health cache TTL (3 minutes) instead of being retried
-  on every full `/status` build, saving about 1 s per build on cities whose
-  remote bead backend cannot count closed history. The response bodies are
-  unchanged.
+  `/agents` from 2.99 s to 2.25 s. A StoreHealth measurement whose
+  closed-history list fallback outlasts its 1 s read budget is also kept for
+  the store-health cache TTL (3 minutes) instead of being retried on every
+  full `/status` build, saving about 1 s per build on cities whose remote
+  bead backend cannot count closed history. Every other StoreHealth failure
+  is still retried on the next build, so a transient store error clears as
+  soon as the store recovers. The response bodies are unchanged.
 
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
