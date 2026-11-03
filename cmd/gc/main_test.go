@@ -516,8 +516,39 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != dir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, dir)
+		want := canonicalTestPath(dir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
+		}
+	})
+
+	// This explicit linked fixture protects the cross-platform discovery
+	// invariant. It does not claim a currently reproduced live macOS failure.
+	t.Run("canonical_resolves_symlinked_fixture", func(t *testing.T) {
+		root := t.TempDir()
+		realCity := filepath.Join(root, "real-city")
+		if err := os.MkdirAll(filepath.Join(realCity, "nested"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(realCity, "city.toml"), []byte("[workspace]\nname = \"linked\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		linkedCity := filepath.Join(root, "linked-city")
+		if err := os.Symlink(realCity, linkedCity); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		want := canonicalTestPath(realCity)
+		if linkedCity == want {
+			t.Fatalf("invalid symlink fixture: linked path %q equals resolved target %q", linkedCity, want)
+		}
+		start := filepath.Join(linkedCity, "nested")
+		got, err := findCity(start)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", start, err)
+		}
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want resolved canonical target %q (not raw link %q)", start, got, want, linkedCity)
 		}
 	})
 
@@ -573,8 +604,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", nested, err)
 		}
-		if got != parent {
-			t.Errorf("findCity(%q) = %q, want %q", nested, got, parent)
+		want := canonicalTestPath(parent)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", nested, got, want)
 		}
 	})
 
@@ -612,8 +644,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != homeDir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, homeDir)
+		want := canonicalTestPath(homeDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -660,8 +693,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != cityDir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, cityDir)
+		want := canonicalTestPath(cityDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -683,8 +717,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", homeDir, err)
 		}
-		if got != homeDir {
-			t.Errorf("findCity(%q) = %q, want %q", homeDir, got, homeDir)
+		want := canonicalTestPath(homeDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", homeDir, got, want)
 		}
 	})
 
@@ -727,8 +762,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", ceiling, err)
 		}
-		if got != ceiling {
-			t.Errorf("findCity(%q) = %q, want %q", ceiling, got, ceiling)
+		want := canonicalTestPath(ceiling)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", ceiling, got, want)
 		}
 	})
 
@@ -771,8 +807,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != parent {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, parent)
+		want := canonicalTestPath(parent)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
