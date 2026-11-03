@@ -119,6 +119,21 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--type": true, "--updated-after": true, "--updated-before": true,
 		"--wisp-type": true,
 	},
+	// Sourced from `bd search --help` (the pinned bd 1.3.2 inventory and the
+	// installed bd 1.3.1 agree flag for flag, 2026-11-02). Needed by name:
+	// search is one of the selector verbs cmd/gc routes store scope by
+	// filter values (bdSelectorStoreVerbs), and bdByIDSubcommand only
+	// resolves verbs this manifest keys.
+	"search": {
+		"-a": true, "--assignee": true, "--closed-after": true, "--closed-before": true,
+		"--created-after": true, "--created-before": true, "--desc-contains": true,
+		"--external-contains": true, "--has-metadata-key": true, "-l": true,
+		"--label": true, "--label-any": true, "-n": true, "--limit": true,
+		"--metadata-field": true, "--notes-contains": true, "--priority-max": true,
+		"--priority-min": true, "--query": true, "-s": true, "--status": true,
+		"--sort": true, "-t": true, "--type": true, "--updated-after": true,
+		"--updated-before": true,
+	},
 	"show": {
 		"--as-of": true, "--id": true, "--comments-tail": true,
 	},
@@ -186,6 +201,10 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,
 		"--pretty": true, "--ready": true, "-r": true, "--reverse": true,
 		"--skip-labels": true, "--tree": true, "-w": true, "--watch": true,
+	},
+	"search": {
+		"--empty-description": true, "--long": true, "--no-assignee": true,
+		"--no-labels": true, "-r": true, "--reverse": true,
 	},
 	"show": {
 		"--brief-deps": true, "--children": true, "--current": true, "--include-comments": true,

@@ -306,7 +306,13 @@ Run a bd command routed to the correct rig directory.
 When beads belong to a rig (not the city root), bd must run from the
 rig directory to find the correct .beads database. This command resolves
 the rig automatically from the --rig flag or by detecting the bead prefix
-in the arguments.
+in the arguments. A selector read ("list", "ready", "search") whose
+store-naming filter values ("--id", "--assignee", "--parent", "--mol",
+"--spec") all carry one registered prefix routes to that store too: the
+same query answered from another store is a confident empty result, not
+a truthful one. Values that name no store (unprefixed identities, labels,
+free text) leave the store to the usual chain, and an explicit --rig or
+--city still wins.
 
 Use --rig &lt;name&gt; to pin a specific rig store, or --city &lt;path&gt; to pin the
 city (HQ) store. An explicit --city is a true scope override: it forces the

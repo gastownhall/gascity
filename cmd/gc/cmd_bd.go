@@ -1156,6 +1156,17 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return target, nil
 	}
 
+	// A selector read (list, ready, search) whose store-naming filter values
+	// all name one bound store routes there too. The by-id reads above route
+	// because their verb addresses the id; a selector quotes its values — but
+	// a quoted prefix still names the store whose rows the query is about,
+	// and the same query answered from another store is a confident [] (the
+	// queue-starvation scan's --assignee=gk/… read 0 assigned for every rig
+	// agent for as long as it ran against the city store).
+	if target, ok := bdSelectorPrefixTarget(cfg, cityTarget, cityPath, args); ok {
+		return target, nil
+	}
+
 	// Bead-ID auto-detect accepts a candidate store only when the id actually
 	// exists there, which costs a full bd round trip per probe. A probe can only
 	// matter when some outcome differs from another, so when every candidate
