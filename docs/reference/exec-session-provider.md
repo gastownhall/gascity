@@ -710,8 +710,9 @@ box gc runs `peek` itself. The script must:
   doubling, at most every 5 minutes) until `peek` answers, the box goes
   away, or the session is stopped, which removes a dead box by its object
   without reading its screen. The hold has no deadline of its own; once
-  its backoff reaches the cap, gc raises a `peek-held` alert naming the
-  session, the error and that remedy.
+  its refusals reach the backoff's cap with the latest a peek failure, gc
+  raises a `peek-held` alert naming the session, the error and that
+  remedy, and repeats it about every 30 minutes while it lasts.
 
 Its exit 2 is a failure, not the unknown-op no-op.
 

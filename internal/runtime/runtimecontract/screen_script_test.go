@@ -74,6 +74,12 @@ case "$1" in
     # hardcopy, as real screen: -X exits 0 once the command is sent, and
     # SCREEN writes the capture (a blank screen's empty lines included)
     # unless it cannot (hardcopy.fail: nothing written, still exit 0).
+    # hardcopy.slow: SCREEN writes a long capture in two parts; the fake
+    # sleep appends the second during the reader's second pause, after it
+    # first measured the capture.
+    if [ "$4" = hardcopy ] && [ -f "$F/hardcopy.slow" ]; then
+      printf 'head of %s\n' "$2" > "$6"; printf '%s' "$6" > "$F/hardcopy.path"; : > "$F/hardcopy.pauses"; exit 0
+    fi
     if [ "$4" = hardcopy ]; then [ -f "$F/hardcopy.fail" ] || printf 'screen of %s\n\n' "$2" > "$6"; exit 0; fi
     if [ "$1" = -wipe ] || [ "$4" = quit ]; then
       if [ ! -f "$F/sticky" ]; then
@@ -112,6 +118,19 @@ esac
 	write("kill", `printf 'kill %s\n' "$*" >> "$F/calls"
 for last; do :; done
 [ -f "$F/unkillable" ] || echo "$last" >> "$F/gone"
+`)
+	// sleep sleeps as sleep does; under hardcopy.slow, the second pause
+	// after a hardcopy appends the capture's second part (SCREEN still
+	// writing it).
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not installed")
+	}
+	write("sleep", `if [ -f "$F/hardcopy.slow" ] && [ -f "$F/hardcopy.pauses" ]; then
+  echo x >> "$F/hardcopy.pauses"
+  if [ "$(wc -l < "$F/hardcopy.pauses")" -eq 2 ]; then printf 'tail of the capture\n' >> "$(cat "$F/hardcopy.path")"; fi
+fi
+exec `+fmt.Sprintf("%q", sleepBin)+` "$@"
 `)
 	write("uname", `if [ "$1" = -n ] && [ -f "$F/host" ]; then cat "$F/host"; exit 0; fi
 exec `+fmt.Sprintf("%q", uname)+` "$@"
@@ -971,6 +990,15 @@ func TestScreenScriptPeekAnswersNoScreen(t *testing.T) {
 	if out, code := f.run("", "peek", "mc-a", "10"); code != 0 || !strings.Contains(out, "screen of 4194001.mc-a") {
 		t.Errorf("peek of a running box = %q (%d), want its capture", out, code)
 	}
+	// A capture SCREEN is still writing is read once its size settles, never
+	// as its partial head.
+	f.file("hardcopy.slow", "")
+	if out, code := f.run("", "peek", "mc-a", "10"); code != 0 || !strings.Contains(out, "head of") || !strings.Contains(out, "tail of the capture") {
+		t.Errorf("peek of a capture written in two parts = %q (%d), want both parts", out, code)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "hardcopy.slow")); err != nil {
+		t.Fatal(err)
+	}
 	// screen exits 0 for a hardcopy SCREEN never writes: the empty capture
 	// is a failure, never an empty screen.
 	f.file("hardcopy.fail", "")
@@ -1021,5 +1049,14 @@ func TestScreenScriptInventoryForgetsStaleRecords(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(meta, "mc-live.window")); err != nil {
 		t.Fatalf("the live window's record was forgotten: %v", err)
+	}
+
+	// An empty record proves nothing (a start may have removed the record
+	// the inventory read, and be seeding the name now): nothing is forgotten.
+	f.file(filepath.Join(meta, "mc-new.window"), "")
+	f.file(filepath.Join(meta, "mc-new.meta.GC_SESSION_ID"), "sid-new")
+	f.run("", "inventory")
+	if _, err := os.Stat(filepath.Join(meta, "mc-new.meta.GC_SESSION_ID")); err != nil {
+		t.Fatalf("an empty record's name lost its metadata: %v", err)
 	}
 }

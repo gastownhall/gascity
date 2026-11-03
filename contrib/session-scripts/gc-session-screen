@@ -435,7 +435,9 @@ forget_stale() {
     exec 9>"$META/$1.lock"
     flock -n 9 || exit 0
     read_into "$META/$1.window"
-    [ "$REPLY" = "$2" ] || exit 0
+    # An empty record proves nothing: a start may have removed the one
+    # inventory read.
+    [ -n "$2" ] && [ "$REPLY" = "$2" ] || exit 0
     if window_alive "$1"; then exit 0; fi
     forget "$1"
   ) || true
@@ -878,15 +880,22 @@ case "$op" in
     esac
     # Use hardcopy to capture the exact session's content. screen -X exits
     # 0 once the command is sent, whether or not SCREEN writes the file (it
-    # cannot write the path, or it is stopped), and a blank screen still
-    # writes its empty lines: a capture that stays empty is a failure.
+    # cannot write the path, or it is stopped), and SCREEN may still be
+    # writing it (a long scrollback); a blank screen still writes its empty
+    # lines. So the capture counts once it is non-empty and its size holds
+    # across 50ms; one that stays empty, or never settles within about 1s,
+    # is a failure, never an empty or partial screen.
     tmp=$(mktemp)
     screen -S "$PID.$name" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; die "peek: cannot read the screen of $name"; }
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      [ -s "$tmp" ] && break
-      sleep 0.1
+    size="" settled=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      sleep 0.05
+      [ -s "$tmp" ] || continue
+      now=$(wc -c < "$tmp")
+      if [ "$now" = "$size" ]; then settled=y; break; fi
+      size=$now
     done
-    [ -s "$tmp" ] || { rm -f "$tmp"; die "peek: screen wrote no capture of $name"; }
+    [ -n "$settled" ] || { rm -f "$tmp"; die "peek: screen wrote no settled capture of $name"; }
     if [ "$lines" -gt 0 ] 2>/dev/null; then
       tail -n "$lines" "$tmp"
     else
