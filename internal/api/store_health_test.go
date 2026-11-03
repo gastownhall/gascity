@@ -792,7 +792,6 @@ func TestStatusFullBuildsReuseAFailedStoreHealthMeasurement(t *testing.T) {
 		s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
 
 		first := s.buildStatusBody(context.Background(), false)
-		time.Sleep(2 * time.Second)
 		second := s.buildStatusBody(context.Background(), false)
 		if got := store.retainedLists.Load(); got != 1 {
 			t.Errorf("retained-row lists across two builds inside the TTL = %d, want 1", got)

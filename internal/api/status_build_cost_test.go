@@ -77,13 +77,19 @@ type costProvider struct {
 	prefixes []string
 }
 
+// payLatency models the wall-clock cost of one runtime fork or store read
+// in the large-city cost model; zero costs nothing.
+func payLatency(d time.Duration) {
+	if d > 0 {
+		time.Sleep(d)
+	}
+}
+
 func (p *costProvider) ListRunning(prefix string) ([]string, error) {
 	p.mu.Lock()
 	p.prefixes = append(p.prefixes, prefix)
 	p.mu.Unlock()
-	if p.latency > 0 {
-		time.Sleep(p.latency)
-	}
+	payLatency(p.latency)
 	if p.failFullListing && prefix == "" {
 		return nil, errors.New("full listing refused")
 	}
@@ -95,7 +101,7 @@ func (p *costProvider) ListRunning(prefix string) ([]string, error) {
 // GetAllEnvironment models tmux's one show-environment fork per session.
 func (p *costProvider) GetAllEnvironment(name string) (map[string]string, error) {
 	p.envReads.Add(1)
-	time.Sleep(p.probeLatency)
+	payLatency(p.probeLatency)
 	suspended, _ := p.GetMeta(name, "suspended")
 	id, _ := p.GetMeta(name, "GC_SESSION_ID")
 	return map[string]string{"suspended": suspended, "GC_SESSION_ID": id}, nil
@@ -111,7 +117,7 @@ func (p *costProvider) SessionRoster() (map[string]runtime.SessionRosterEntry, e
 	roster := make(map[string]runtime.SessionRosterEntry, len(names))
 	for _, name := range names {
 		p.rosterReads.Add(1)
-		time.Sleep(p.probeLatency)
+		payLatency(p.probeLatency)
 		roster[name] = runtime.SessionRosterEntry{}
 	}
 	return roster, nil
@@ -141,7 +147,7 @@ type costStore struct {
 
 func (s costStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.lists.Add(1)
-	time.Sleep(s.latency)
+	payLatency(s.latency)
 	return s.Store.List(query)
 }
 
