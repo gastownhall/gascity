@@ -501,3 +501,97 @@ func TestCompactScriptLiveGateNeverProbesWithoutARewrite(t *testing.T) {
 		}
 	})
 }
+
+func TestCompactScriptLiveGateKeepsOrdinaryRewriteFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mode          string
+		wantOut       []string
+		probeAfter    string
+		wantPendingGC bool
+		wantTally     string
+	}{
+		{
+			name:       "flatten reset fails",
+			mode:       "flatten_failure",
+			wantOut:    []string{"reset exploded", "already at pre-flatten HEAD=headcommit"},
+			probeAfter: "DOLT_RESET('--soft'",
+			wantTally:  "compact: 2 database(s) failed compaction",
+		},
+		{
+			name:       "flatten commit fails and HEAD is restored",
+			mode:       "commit_failure_after_reset",
+			wantOut:    []string{"commit rejected after reset", "restored pre-flatten HEAD=headcommit"},
+			probeAfter: "DOLT_RESET('--hard', 'headcommit')",
+			wantTally:  "compact: 2 database(s) failed compaction",
+		},
+		{
+			name:          "post-flatten full GC fails",
+			mode:          "gc_failure",
+			wantOut:       []string{"gc exploded"},
+			probeAfter:    "CALL DOLT_GC(",
+			wantPendingGC: true,
+			wantTally:     "compact: 2 database(s) failed compaction",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+				t.Fatalf("mkdir zed data dir: %v", err)
+			}
+
+			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("compact exit = %v, want exit status 1:\n%s", err, out)
+			}
+			for _, want := range tc.wantOut {
+				if !strings.Contains(out, want) {
+					t.Fatalf("compact output missing %q:\n%s", want, out)
+				}
+			}
+			if !strings.Contains(out, tc.wantTally) {
+				t.Fatalf("compact output missing the failure tally %q:\n%s", tc.wantTally, out)
+			}
+			if strings.Contains(out, "aborting the run") {
+				t.Fatalf("an ordinary rewrite failure aborted the run:\n%s", out)
+			}
+			if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
+				t.Fatalf("an ordinary rewrite failure quarantined a live database (stat err=%v):\n%s", err, out)
+			}
+			_, pendingErr := os.Stat(compactBeadsPendingGCMarkerPath(fixture))
+			if tc.wantPendingGC != (pendingErr == nil) {
+				t.Fatalf("pending-GC marker present=%v, want %v (stat err=%v):\n%s", pendingErr == nil, tc.wantPendingGC, pendingErr, out)
+			}
+
+			// A multi-statement query continues on the log lines after its
+			// db= line, so the failed step is located in the raw log. beads
+			// runs first, so its step is the first match.
+			log := readCompactDoltLog(t, fixture)
+			lines := strings.Split(log, "\n")
+			failedAt := -1
+			for i, line := range lines {
+				if strings.Contains(line, tc.probeAfter) {
+					failedAt = i
+					break
+				}
+			}
+			if failedAt < 0 {
+				t.Fatalf("compact never issued %q:\n%s", tc.probeAfter, log)
+			}
+			probed := false
+			for _, line := range lines[failedAt+1:] {
+				if line == "db=beads query="+compactLiveProbeQuery {
+					probed = true
+					break
+				}
+			}
+			if !probed {
+				t.Fatalf("compact did not probe beads after the failed rewrite step %q:\n%s", tc.probeAfter, log)
+			}
+			if len(compactDoltLogQueries(log, "zed", "")) == 0 {
+				t.Fatalf("compact did not go on to zed after beads failed:\n%s", log)
+			}
+		})
+	}
+}
