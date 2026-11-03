@@ -1002,9 +1002,10 @@ var supervisorProcessWatch = func(pid int) func() bool {
 	if pid <= 0 {
 		return nil
 	}
-	if !pidutil.AliveWithCmdline(pid, func(argv []string) bool {
+	matched, err := pidutil.AliveWithCmdline(pid, func(argv []string) bool {
 		return pidutil.ArgvContainsSequence(argv, "supervisor", "run")
-	}) {
+	})
+	if err != nil || !matched {
 		return nil
 	}
 	startTime, err := pidutil.StartTime(pid)

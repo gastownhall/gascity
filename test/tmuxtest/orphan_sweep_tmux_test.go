@@ -1,3 +1,8 @@
+//go:build unix
+
+// This file drives a real tmux server and escalates to SIGKILL by bare PID,
+// neither of which exists on Windows.
+
 package tmuxtest
 
 import (
@@ -73,7 +78,7 @@ func TestSweepOrphanPIDPrefixedDirsKillsLiveTmuxServerBeforeRemoval(t *testing.T
 		// client call to such a peer stalls the whole package until the outer
 		// go-test timeout instead of failing here.
 		_ = killTmuxServerAtSocket(socket)
-		if pidutil.AliveWithStartTime(serverPID, serverStart) && pidutil.AliveWithCmdline(serverPID, isTmuxArgv) {
+		if isTmux, err := pidutil.AliveWithCmdline(serverPID, isTmuxArgv); err == nil && isTmux && pidutil.AliveWithStartTime(serverPID, serverStart) {
 			_ = syscall.Kill(serverPID, syscall.SIGKILL)
 		}
 	})
