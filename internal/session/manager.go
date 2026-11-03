@@ -775,17 +775,23 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
 // yet.
+// orphanScanErrorLogs paces the pre-start orphan scan's error line per city
+// (ga-zpcphq): a Manager is built per session operation, so this state must
+// live here to survive reconstructed managers, and the user-manager helpers
+// excused by the scan's structural proof are the errors that remain.
+var orphanScanErrorLogs = &proctable.ScanErrorLog{}
+
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
+	if err != nil && orphanScanErrorLogs.Report(cityPath, err, m.now()) {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
-	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {

@@ -3,8 +3,11 @@ package proctable
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // entryErrors builds per-entry failures for pids the way a scan does: one
@@ -137,5 +140,70 @@ func TestScanErrorShapeIgnoresCountsAndPIDs(t *testing.T) {
 	}
 	if ScanErrorShape(b) == ScanErrorShape(c) || ScanErrorShape(b) == ScanErrorShape(d) {
 		t.Fatal("a new kind, or a whole-scan failure, left the shape unchanged")
+	}
+}
+
+// pacesEntryScanError is a scan error of unreadable entries at pids.
+func pacesEntryScanError(msg string, pids ...int) error {
+	var err error
+	for _, pid := range pids {
+		err = errors.Join(err, &EntryError{PID: pid, Err: errors.New(strings.ReplaceAll(msg, "PID", strings.Repeat("9", pid%5+1)))})
+	}
+	return err
+}
+
+// TestScanErrorLogPacesUnreadableEntries (mc-ygved, ga-zpcphq): a caller
+// using the zero-value pacer logs a scan of unreadable entries once per
+// shape and key, again after ScanErrorLogRepeat or when the shape changes,
+// and a failure of the whole scan is logged every time, as it can hide a
+// root from the results. Independent instances, sharing a key, pace
+// independently: each caller owns its own reporting state.
+func TestScanErrorLogPacesUnreadableEntries(t *testing.T) {
+	l := &ScanErrorLog{}
+	t0 := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	perm := pacesEntryScanError("reading environ for pid PID: permission denied", 11, 12)
+	steps := []struct {
+		name string
+		key  string
+		err  error
+		at   time.Time
+		want bool
+	}{
+		{"first", "/c", perm, t0, true},
+		{"same shape, other pids and count", "/c", pacesEntryScanError("reading environ for pid PID: permission denied", 13, 14, 15), t0.Add(time.Minute), false},
+		{"another city", "/d", perm, t0.Add(time.Minute), true},
+		{"a new kind", "/c", pacesEntryScanError("reading owner for pid PID: no such device", 16), t0.Add(2 * time.Minute), true},
+		{"the new kind again", "/c", pacesEntryScanError("reading owner for pid PID: no such device", 17), t0.Add(3 * time.Minute), false},
+		{"after the repeat window", "/c", pacesEntryScanError("reading owner for pid PID: no such device", 18), t0.Add(2*time.Minute + ScanErrorLogRepeat), true},
+		{"a whole-scan failure", "/c", errors.New("enumerating /proc: permission denied"), t0.Add(13 * time.Minute), true},
+		{"the whole-scan failure again", "/c", errors.New("enumerating /proc: permission denied"), t0.Add(13*time.Minute + time.Second), true},
+	}
+	for _, s := range steps {
+		if got := l.Report(s.key, s.err, s.at); got != s.want {
+			t.Fatalf("%s: report = %t, want %t", s.name, got, s.want)
+		}
+	}
+	// An independent instance sharing a key reports independently of the one
+	// above: the sweep's pacer and a caller's pacer never share state.
+	independent := &ScanErrorLog{}
+	if !independent.Report("/c", perm, t0) {
+		t.Fatal("an independent instance's first report = false, want true")
+	}
+	// Concurrent reports through one shared instance are safe; each key's
+	// first report lands.
+	var wg sync.WaitGroup
+	keys := make([]bool, 8)
+	for i := range keys {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			keys[i] = l.Report(strconv.Itoa(i), perm, t0)
+		}(i)
+	}
+	wg.Wait()
+	for i, reported := range keys {
+		if !reported {
+			t.Fatalf("concurrent report for key %d = false, want true", i)
+		}
 	}
 }

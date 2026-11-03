@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
@@ -174,4 +176,46 @@ func collectScanErrors(err error, entries *[]*EntryError, other *[]string) {
 
 func oneLine(msg string) string {
 	return strings.ReplaceAll(msg, "\n", "; ")
+}
+
+// ScanErrorLogRepeat is how often a scan-error logger repeats a scan error
+// of an unchanged shape: unreadable entries recur on every scan of a busy
+// host and say nothing new (mc-ygved).
+const ScanErrorLogRepeat = time.Minute * 10
+
+// ScanErrorLog paces the reporting of scan errors per key — one city, or
+// whatever a caller's keys divide. Its zero value is ready for use; its map
+// is initialized lazily under its mutex, and it must not be copied once in
+// use. Only logging is at stake; the caller decides what a suppressed
+// message still does.
+type ScanErrorLog struct {
+	mu   sync.Mutex
+	last map[string]scanErrorLogged
+}
+
+type scanErrorLogged struct {
+	shape string
+	at    time.Time
+}
+
+// Report reports whether err should be logged now: a failure of the whole
+// scan always is ([HasWholeScanFailure]) — it can hide a root from the
+// results and must never be hidden — while entry failures are, the first
+// time their shape ([ScanErrorShape]) is seen for the key, and again once
+// [ScanErrorLogRepeat] has passed. Call it only with a non-nil error.
+func (l *ScanErrorLog) Report(key string, err error, now time.Time) bool {
+	if HasWholeScanFailure(err) {
+		return true
+	}
+	shape := ScanErrorShape(err)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if prev, ok := l.last[key]; ok && prev.shape == shape && now.Sub(prev.at) < ScanErrorLogRepeat {
+		return false
+	}
+	if l.last == nil {
+		l.last = map[string]scanErrorLogged{}
+	}
+	l.last[key] = scanErrorLogged{shape: shape, at: now}
+	return true
 }
