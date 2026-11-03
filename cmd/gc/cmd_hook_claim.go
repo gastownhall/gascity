@@ -3090,20 +3090,6 @@ func hookClaimWorkerTrees(bead beads.Bead, store hookClaimStoreHead) []hookClaim
 	return trees
 }
 
-// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
-// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
-// gc.work_branch before it will treat a bead as a fully managed workspace.
-var worktreeOwnershipEvidenceKeys = []string{
-	beadmeta.WorktreeRepoMetadataKey,
-	beadmeta.WorktreeRootMetadataKey,
-	beadmeta.WorktreeBaseRefMetadataKey,
-	beadmeta.WorktreeBaseSHAMetadataKey,
-	beadmeta.WorktreeCreatorMetadataKey,
-	beadmeta.WorktreeOwnerMetadataKey,
-	beadmeta.WorktreeGenerationMetadataKey,
-	beadmeta.WorktreeLifecycleMetadataKey,
-}
-
 // hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
 // eight worktree-ownership keys are either all present or all absent. A claim
 // must not be the thing that first introduces a partial (1-7 of 8) ownership
@@ -3115,12 +3101,12 @@ var worktreeOwnershipEvidenceKeys = []string{
 // just keeping the branch in sync).
 func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 	present := 0
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) != "" {
 			present++
 		}
 	}
-	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+	return present == 0 || present == len(beadmeta.WorktreeOwnershipEvidenceKeys)
 }
 
 // hookClaimManagedWorktreeDir returns the checkout a bead's complete
@@ -3145,7 +3131,7 @@ func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
 	if path == "" || strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return "", false
 	}
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) == "" {
 			return "", false
 		}

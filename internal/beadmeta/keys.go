@@ -782,6 +782,34 @@ var KnownMetadataPrefixes = []string{
 	IdemPrefix,
 }
 
+// WorktreeOwnershipEvidenceKeys are the eight worktree-ownership keys a
+// provisioner publishes onto a bead after `gc worktree ensure` succeeds. With
+// a work dir (WorkDirMetadataKey or LegacyWorkDirMetadataKey) and
+// WorkBranchMetadataKey they are the complete evidence the controller turns
+// into the verified spec it starts that bead's session in. Their presence is
+// what makes a bead's work dir a managed worktree rather than a plain
+// directory.
+var WorktreeOwnershipEvidenceKeys = []string{
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+}
+
+// ManagedWorktreeEvidenceKeys are every key of a bead's managed-worktree
+// evidence: the work dir pair, the branch and the eight ownership keys. The
+// evidence binds that one bead (the worktree's provenance names it), so a
+// bead cloned from it must not inherit any of them.
+var ManagedWorktreeEvidenceKeys = append([]string{
+	WorkDirMetadataKey,
+	LegacyWorkDirMetadataKey,
+	WorkBranchMetadataKey,
+}, WorktreeOwnershipEvidenceKeys...)
+
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
 // particular live session through continuation-group routing. They must be
 // cleared together whenever work is rerouted off its original session without a
