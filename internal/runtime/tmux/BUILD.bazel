@@ -196,6 +196,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/citylayout",
         "//internal/execenv",
         "//internal/runtime",

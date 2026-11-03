@@ -187,7 +187,7 @@ func (s *Store) ClearContentHold(id, seen string) (cleared bool, standing string
 	if strings.TrimSpace(seen) == "" {
 		return false, b.Metadata[ContentHoldKey], nil
 	}
-	writer, ok := beads.MetadataCASWriterFor(s.store.Store)
+	writer, ok := beads.As[beads.MetadataCASWriter](s.store)
 	if !ok {
 		return false, "", fmt.Errorf("releasing content of session %q: %w", id, beads.ErrConditionalWriteUnsupported)
 	}

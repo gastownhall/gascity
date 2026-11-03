@@ -861,7 +861,7 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 			return syncOpResult(opjournal.KindInterrupt, err, minted), humaStopError(err)
 		}
 	}
-	if err := s.sessionManager(store).StopTurn(id); err != nil {
+	if err := s.sessionManager(beads.SessionStore{Store: store}).StopTurn(id); err != nil {
 		return syncOpResult(opjournal.KindInterrupt, err, minted), humaSessionManagerError(err)
 	}
 	res := syncOpResult(opjournal.KindInterrupt, nil, minted)
@@ -916,7 +916,7 @@ func (s *Server) respondSession(ctx context.Context, target, key string, resp ru
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	if s.laneExecutes(opjournal.KindRespond) {
 		return s.respondSessionLane(ctx, mgr, store.Store, id, key, resp)
 	}

@@ -6005,7 +6005,7 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 			// the pool bead is created without a public alias and sync records
 			// pool_alias_conflict. An unanswerable reservation query is different:
 			// it is not proof of a collision and must fail the entire create closed.
-			aliasErr := session.EnsureAliasAvailableWithConfig(v.store, v.city, alias, "")
+			aliasErr := session.EnsureAliasAvailableWithConfig(beads.SessionStore{Store: v.store}, v.city, alias, "")
 			if aliasErr == nil {
 				aliasErr = poolAliasCollisionFromInfos(availabilityInfos, alias)
 			}
@@ -6253,7 +6253,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
 		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
+			(!isPoolManagedSessionInfo(sbInfo) || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
 			!workDirStampWouldClobberEvidence(cfg, wb.Metadata, workDir) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
@@ -6267,7 +6267,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !isPoolManagedSessionInfo(sbInfo), stampedRoots, stderr)
 	}
 }
 

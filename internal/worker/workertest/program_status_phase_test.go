@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	worker "github.com/gastownhall/gascity/internal/worker"
@@ -41,7 +42,7 @@ func checkProgramStatusPhase(t *testing.T, profile Profile) Result {
 	t.Helper()
 	code := RequirementProgramStatusPhase
 	fake := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), runtime.FullFake{Fake: fake},
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), runtime.FullFake{Fake: fake},
 		sessionpkg.WithCityPath(t.TempDir()),
 		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{Manager: manager, Session: worker.SessionSpec{

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -87,7 +89,7 @@ func TestCreateWithInitialMessageQueuesBehindPending(t *testing.T) {
 	if success == nil {
 		t.Fatal("expected a session create success event")
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), provider, session.WithCityPath(fs.cityPath))
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)
