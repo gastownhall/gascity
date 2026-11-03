@@ -595,3 +595,60 @@ func TestCompactScriptLiveGateKeepsOrdinaryRewriteFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestCompactScriptLiveProbeSettingsAreValidatedBeforeAnyQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{name: "zero attempts", key: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS", value: "0", want: "must be a positive integer"},
+		{name: "all-zero attempts", key: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS", value: "000", want: "must be a positive integer"},
+		{name: "negative attempts", key: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS", value: "-1", want: "must be a positive integer"},
+		{name: "word attempts", key: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS", value: "three", want: "must be a positive integer"},
+		{name: "overlong attempts", key: "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS", value: "99999999999999999999", want: "must be a positive integer"},
+		{name: "negative delay", key: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS", value: "-1", want: "must be a non-negative integer"},
+		{name: "fractional delay", key: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS", value: "1.5", want: "must be a non-negative integer"},
+		{name: "overlong delay", key: "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS", value: "99999999999999999999", want: "must be a non-negative integer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+
+			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", tc.key+"="+tc.value)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("compact exit = %v, want exit status 2:\n%s", err, out)
+			}
+			want := "compact: invalid " + tc.key + "=" + tc.value + " (" + tc.want + ")"
+			if !strings.Contains(out, want) {
+				t.Fatalf("compact output missing %q:\n%s", want, out)
+			}
+			if log := readCompactDoltLog(t, fixture); strings.TrimSpace(log) != "" {
+				t.Fatalf("compact queried Dolt before rejecting %s:\n%s", tc.key, log)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name      string
+		env       []string
+		recovered string
+	}{
+		{name: "empty values mean the defaults", env: []string{"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS="}, recovered: "recovered on attempt 2/3"},
+		{name: "leading zeros are decimal", env: []string{"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=09", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=00"}, recovered: "recovered on attempt 2/9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			setCompactBeadsLiveFault(t, fixture, "gc", "transient:1")
+
+			out, err := fixture.run(t, "success", append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.env...)...)
+			if err != nil {
+				t.Fatalf("compact rejected a valid live-probe setting: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "compact: db=beads live probe "+tc.recovered) {
+				t.Fatalf("compact output missing %q:\n%s", tc.recovered, out)
+			}
+		})
+	}
+}

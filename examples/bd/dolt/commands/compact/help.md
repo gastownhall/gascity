@@ -194,8 +194,12 @@ must name the database (in any case) and a resolvable HEAD; the HEAD may
 differ from the one before the rewrite. The probe is tried up to
 `GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`), waiting
 `GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds (default `2`) between tries,
-and each try gets at most 30 seconds. A server that answers within those tries
-is live, and the rewrite's own result decides whether the database succeeded.
+and each try gets at most 30 seconds. An empty setting means its default. Any
+other value must be a whole number of at most nine digits, read as decimal
+(`08` is 8), and the attempts must be at least 1; otherwise compact exits 2
+before it takes its lock or queries Dolt. A server that answers within those
+tries is live, and the rewrite's own result decides whether the database
+succeeded.
 When the entry existed before and is gone after, or every try fails, compact:
 
 - writes a quarantine marker with reason

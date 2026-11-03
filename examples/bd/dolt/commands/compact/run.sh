@@ -460,6 +460,28 @@ case "$push_timeout" in
     ;;
 esac
 
+# live_probe_setting NAME VALUE MIN RULE validates a live-probe setting and
+# leaves it in live_probe_setting_value without leading zeros, so 08 reads as
+# decimal. A value with more than nine digits is refused so the retry
+# arithmetic cannot overflow.
+live_probe_setting() {
+  live_probe_setting_value=$(printf '%s' "$2" | sed 's/^0*//')
+  case "$2" in
+    ''|*[!0-9]*) live_probe_setting_value=invalid ;;
+  esac
+  [ -n "$live_probe_setting_value" ] || live_probe_setting_value=0
+  if [ "$live_probe_setting_value" = invalid ] || [ "${#live_probe_setting_value}" -gt 9 ] ||
+    [ "$live_probe_setting_value" -lt "$3" ]; then
+    printf 'compact: invalid %s=%s (%s)\n' "$1" "$2" "$4" >&2
+    exit 2
+  fi
+}
+
+live_probe_setting GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS "$live_probe_attempts" 1 "must be a positive integer"
+live_probe_attempts="$live_probe_setting_value"
+live_probe_setting GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS "$live_probe_delay" 0 "must be a non-negative integer"
+live_probe_delay="$live_probe_setting_value"
+
 # The live-database probe is a single cheap SELECT, so it gets at most 30s even
 # when the per-call ceiling is the GC-sized default. The comparison runs on the
 # value without leading zeros and only when it has at most two digits, so a long
