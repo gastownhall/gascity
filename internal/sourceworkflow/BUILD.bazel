@@ -19,6 +19,7 @@ go_test(
     name = "sourceworkflow_test",
     srcs = [
         "atomic_root_close_test.go",
+        "live_read_through_target_test.go",
         "owned_test.go",
         "sourceworkflow_test.go",
         "testenv_import_test.go",

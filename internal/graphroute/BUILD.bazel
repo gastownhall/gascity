@@ -23,9 +23,11 @@ go_test(
         "graphroute_test.go",
         "session_stamp_test.go",
         "testenv_import_test.go",
+        "zero_session_store_test.go",
     ],
     embed = [":graphroute"],
     deps = [
+        "//internal/agent",
         "//internal/agentutil",
         "//internal/beadmeta",
         "//internal/beads",

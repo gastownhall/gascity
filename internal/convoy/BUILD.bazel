@@ -23,6 +23,7 @@ go_test(
     name = "convoy_test",
     srcs = [
         "classes_test.go",
+        "close_reason_test.go",
         "convoy_fields_test.go",
         "convoy_test.go",
         "testenv_import_test.go",
