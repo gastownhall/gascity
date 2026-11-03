@@ -116,6 +116,27 @@ Bazel does not serve, such as the macOS jobs. Workflow jobs that still run a
 Go-native suite call these `-go` names explicitly, so each workflow says
 which engine it uses.
 
+`make check-affected` is the pre-flight sized to a branch. It diffs the
+working tree against the merge base with `AFFECTED_BASE` (default
+`origin/HEAD`), untracked files included, and runs:
+
+- `make check-go`'s shell guards, with formatting limited to the changed Go files;
+- nogo over the changed packages and every package that imports them (`make lint-targets`);
+- `go test` over the changed packages, test targets that list a changed file, importers while
+  there are at most `AFFECTED_MAX_RDEP_TESTS` (5), and test targets that read a changed file
+  through a filegroup, such as the repository-wide scanners, while there are at most
+  `AFFECTED_MAX_READER_TESTS` (5) (`make test-go-pkgs`); a selected test target that `go test`
+  cannot run goes to `make test-bazel-targets`.
+
+A diff that touches the Go module, Bazel's module or workspace configuration,
+a `.bzl` file, `tools/`, `third_party/`, the Makefile, the linter
+configuration, the root BUILD file, or a BUILD file outside a Go package runs
+the full `make check-go` instead. The same holds for a Go file outside every
+package and for any selection step that fails. A changed package without a
+BUILD file fails the run until `make bazel-sync` writes one.
+`make check-affected AFFECTED_ACTION=plan` prints the selection without
+running it. The selector is `scripts/affected-preflight`.
+
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`
 with `GC_FAST_UNIT=0`:
