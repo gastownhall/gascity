@@ -388,10 +388,8 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		if err := infraClearBeforeDelete(id); err != nil {
 			return result, err
 		}
-		for _, edge := range entry.Deps {
-			if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return result, fmt.Errorf("removing dep %s from the work store: %w", edge, err)
-			}
+		if err := detachInfraClearedRow(source, entry, session); err != nil {
+			return result, err
 		}
 		if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return result, fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
@@ -435,6 +433,41 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	result.LostCrossEdges = note.LostCrossEdges
 	return result, nil
+}
+
+// detachInfraClearedRow removes every edge touching a row before the row is
+// deleted, so the delete has no neighbor to follow. A native-Dolt or bd work
+// store's delete rewrites each linked neighbor's mention of the deleted id to
+// "[deleted:<id>]" (ga-w4p3pw); the row is moved, not deleted, and a work bead
+// that cites it must keep its text. The row's own edges and its dependents
+// outside the session are in its backup entry; a dependent inside the session
+// is a row this clear also removes, whose edge its own entry records. The kept
+// cross edges are re-added after the delete loop (infraRestoreKeptEdge). An
+// edge the backup does not record refuses the delete rather than lose it.
+func detachInfraClearedRow(source beads.Store, entry infraBackupEntry, session map[string]bool) error {
+	id := entry.Bead.ID
+	for _, edges := range [][]infraBackupEdge{entry.Deps, entry.Dependents} {
+		for _, edge := range edges {
+			if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+				return fmt.Errorf("removing dep %s from the work store: %w", edge, err)
+			}
+		}
+	}
+	for _, dir := range []string{"down", "up"} {
+		live, err := source.DepList(id, dir)
+		if err != nil {
+			return fmt.Errorf("listing the remaining edges of %s: %w", id, err)
+		}
+		for _, d := range live {
+			if dir == "down" || !session[d.IssueID] {
+				return fmt.Errorf("removing the retained copy %s from the work store: it still has the edge %s -[%s]-> %s, which its backup entry does not record; deleting it would drop the edge and rewrite the text of %s. Nothing was removed for this row", id, d.IssueID, d.Type, d.DependsOnID, d.IssueID)
+			}
+			if err := source.DepRemove(d.IssueID, d.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+				return fmt.Errorf("removing dep %s -[%s]-> %s from the work store: %w", d.IssueID, d.Type, d.DependsOnID, err)
+			}
+		}
+	}
+	return nil
 }
 
 // announceInfraCrossEdges prints, before any row is removed, every edge from a

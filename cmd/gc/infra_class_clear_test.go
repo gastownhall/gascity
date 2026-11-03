@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -608,5 +609,140 @@ func TestRevertingToTheWorkBindingAfterAClearRefusesBoot(t *testing.T) {
 	}
 	if _, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{}); err != nil {
 		t.Fatalf("after the operator's attestation the revert of an earlier-build city still refuses: %v", err)
+	}
+}
+
+// referenceRewritingStore models the delete of a native-Dolt or bd work store
+// (`bd delete --force`, the issueops Deleter): it finds the deleted row's
+// neighbors by their edges, in both directions, rewrites every word-boundary
+// mention of the deleted id in their text to "[deleted:<id>]", and drops the
+// edges. refuseDangling adds bd's refusal of an edge to a bead the store does
+// not hold.
+type referenceRewritingStore struct {
+	*beads.MemStore
+	refuseDangling bool
+}
+
+func (s referenceRewritingStore) Delete(id string) error {
+	mention := regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `\b`)
+	for _, dir := range []string{"up", "down"} {
+		deps, err := s.DepList(id, dir)
+		if err != nil {
+			return err
+		}
+		for _, d := range deps {
+			other := d.IssueID
+			if other == id {
+				other = d.DependsOnID
+			}
+			row, err := s.Get(other)
+			if err != nil {
+				return err
+			}
+			text := mention.ReplaceAllString(row.Description, "[deleted:"+id+"]")
+			if text != row.Description {
+				if err := s.Update(other, beads.UpdateOpts{Description: &text}); err != nil {
+					return err
+				}
+			}
+			_ = s.DepRemove(d.IssueID, d.DependsOnID)
+		}
+	}
+	return s.MemStore.Delete(id)
+}
+
+func (s referenceRewritingStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if s.refuseDangling {
+		if _, err := s.Get(dependsOnID); err != nil {
+			return errors.New(`no issue found matching "` + dependsOnID + `"`)
+		}
+	}
+	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
+}
+
+// TestTheClearNeverRewritesWorkBeadText is ga-w4p3pw: the clear moves the
+// infrastructure rows, it does not delete beads anyone cites. A native-Dolt
+// work store's delete rewrites each linked neighbor's mention of the deleted
+// id to "[deleted:<id>]", so a work bead that depends on (or is related to) a
+// moved bead and names it in its text must keep that text byte for byte. The
+// rehearsal of the trust split rewrote 84 work beads this way, 28 of them
+// mirrored to Linear. A work bead that names a moved bead without an edge was
+// never a neighbor and is the control.
+func TestTheClearNeverRewritesWorkBeadText(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		refuseDangling bool
+	}{
+		{name: "store keeps dangling edges"},
+		{name: "bd-like store refuses dangling edges", refuseDangling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubInfraControllerPing(t, 0)
+			source := referenceRewritingStore{MemStore: beads.NewMemStore(), refuseDangling: tc.refuseDangling}
+			prev := openInfraMigrationSource
+			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+			t.Cleanup(func() { openInfraMigrationSource = prev })
+
+			moved := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+			movedClosed := mustCreateInfraBead(t, source, beads.Bead{Title: "graft finished", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+			if err := source.Close(movedClosed.ID); err != nil {
+				t.Fatal(err)
+			}
+			texts := map[string]string{}
+			work := func(title, text string) beads.Bead {
+				b := mustCreateInfraBead(t, source, beads.Bead{Title: title, Type: "task", Description: text})
+				texts[b.ID] = text
+				return b
+			}
+			blocked := work("blocked on the running graft", "Four were P1: tr-l0py1, tr-rikgb, tr-wso41, "+moved.ID+".")
+			released := work("waited on the finished graft", "follow-up of "+movedClosed.ID+"; see "+movedClosed.ID+" notes")
+			related := work("related to the running graft", moved.ID+" is the graft this tracks")
+			work("cites the graft with no edge", "context: "+moved.ID)
+			for _, edge := range []beads.Dep{
+				{IssueID: blocked.ID, DependsOnID: moved.ID, Type: "blocks"},
+				{IssueID: released.ID, DependsOnID: movedClosed.ID, Type: "blocks"},
+				{IssueID: related.ID, DependsOnID: moved.ID, Type: "related"},
+			} {
+				if err := source.MemStore.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+					t.Fatalf("seeding %v: %v", edge, err)
+				}
+			}
+
+			request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+			var log bytes.Buffer
+			report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
+			if report.Outcome != infraMigrationConverged {
+				t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
+			}
+			if report.Clear.Cleared != 2 {
+				t.Fatalf("cleared %d rows, want both moved beads: %s", report.Clear.Cleared, log.String())
+			}
+			for id, want := range texts {
+				got, err := source.Get(id)
+				if err != nil {
+					t.Fatalf("Get(%s): %v", id, err)
+				}
+				if got.Description != want {
+					t.Errorf("work bead %s text rewritten by the clear:\n got %q\nwant %q", id, got.Description, want)
+				}
+			}
+			if len(report.Clear.Released) != 1 || report.Clear.Released[0].IssueID != released.ID {
+				t.Errorf("released = %+v, want exactly %s", report.Clear.Released, released.ID)
+			}
+			if tc.refuseDangling {
+				if len(report.Clear.Unrestorable) != 2 {
+					t.Errorf("unrestorable = %v, want the two kept edges a bd-like store refuses", report.Clear.Unrestorable)
+				}
+				return
+			}
+			deps, err := source.DepList(blocked.ID, "down")
+			if err != nil || len(deps) != 1 || deps[0].DependsOnID != moved.ID || deps[0].Type != "blocks" {
+				t.Errorf("%s deps = %+v (%v); the kept blocking edge must survive the clear", blocked.ID, deps, err)
+			}
+			deps, err = source.DepList(related.ID, "down")
+			if err != nil || len(deps) != 1 || deps[0].DependsOnID != moved.ID || deps[0].Type != "related" {
+				t.Errorf("%s deps = %+v (%v); the kept related edge must survive the clear", related.ID, deps, err)
+			}
+		})
 	}
 }
