@@ -1,1 +1,8 @@
+internal/executionevent
+internal/extmsg
+internal/mail
+internal/mail/beadmail
+internal/nudgequeue
+internal/opjournal
+internal/session
 internal/workladder

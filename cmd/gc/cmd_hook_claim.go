@@ -2228,6 +2228,10 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
 			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// A pin runs the sibling in this seat's directory, so a sibling
+			// whose evidence binds it to another managed worktree is left
+			// routed for a seat in that worktree, as a fresh claim leaves it.
+			hookClaimWorktreeHeldElsewhere(sibling, opts.PoolSeat.WorkDir) ||
 			stoppedSibling(sibling) {
 			continue
 		}
@@ -3086,20 +3090,6 @@ func hookClaimWorkerTrees(bead beads.Bead, store hookClaimStoreHead) []hookClaim
 	return trees
 }
 
-// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
-// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
-// gc.work_branch before it will treat a bead as a fully managed workspace.
-var worktreeOwnershipEvidenceKeys = []string{
-	beadmeta.WorktreeRepoMetadataKey,
-	beadmeta.WorktreeRootMetadataKey,
-	beadmeta.WorktreeBaseRefMetadataKey,
-	beadmeta.WorktreeBaseSHAMetadataKey,
-	beadmeta.WorktreeCreatorMetadataKey,
-	beadmeta.WorktreeOwnerMetadataKey,
-	beadmeta.WorktreeGenerationMetadataKey,
-	beadmeta.WorktreeLifecycleMetadataKey,
-}
-
 // hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
 // eight worktree-ownership keys are either all present or all absent. A claim
 // must not be the thing that first introduces a partial (1-7 of 8) ownership
@@ -3111,12 +3101,12 @@ var worktreeOwnershipEvidenceKeys = []string{
 // just keeping the branch in sync).
 func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 	present := 0
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) != "" {
 			present++
 		}
 	}
-	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+	return present == 0 || present == len(beadmeta.WorktreeOwnershipEvidenceKeys)
 }
 
 // hookClaimManagedWorktreeDir returns the checkout a bead's complete
@@ -3141,7 +3131,7 @@ func hookClaimManagedWorktreeDir(bead beads.Bead) (string, bool) {
 	if path == "" || strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return "", false
 	}
-	for _, key := range worktreeOwnershipEvidenceKeys {
+	for _, key := range beadmeta.WorktreeOwnershipEvidenceKeys {
 		if strings.TrimSpace(bead.Metadata[key]) == "" {
 			return "", false
 		}
@@ -3284,8 +3274,12 @@ func hookSeatManaged(label, seatWorkDir string, probe func(string) (bool, error)
 // hookClaimSeatInManagedWorktree reports whether seatWorkDir is a managed
 // worktree: its private git directory holds the provenance a completed
 // `gc worktree ensure` published, which worktree.Verify checked before the
-// controller started a pool seat there (verifiedPoolTriggerWorkDir). git
-// finding no repository there, and a git directory without a record, establish
+// controller started a pool seat there (verifiedPoolTriggerWorkDir), and the
+// record names seatWorkDir itself as the worktree's root. The controller only
+// starts a seat for bound work at that root, so a directory nested inside a
+// managed worktree (a configured work_dir or pack workspace subdirectory)
+// shares its git directory but is not one. git finding no repository there, a
+// git directory without a record, and a record naming another path establish
 // that it is not. A git that timed out or could not run, and a record that
 // could not be read or decoded, establish nothing and return an error.
 func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
@@ -3306,7 +3300,7 @@ func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(provenance.BeadID) != "", nil
+	return strings.TrimSpace(provenance.BeadID) != "" && pathutil.SamePath(provenance.Path, seatWorkDir), nil
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
@@ -3342,7 +3336,7 @@ func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, 
 	}
 	// The hook's bd context owns both the claimed graph step and its workflow
 	// root; EmitLifecycle verifies the root is graph.v2 before recording.
-	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
+	_ = executionevent.EmitLifecycle(rec, beads.GraphStore{Store: hookClaimBdStore(dir, env, assignee)}, events.ExecutionStepStarted, step, eventActor())
 }
 
 // stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING
@@ -4187,9 +4181,10 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Wri
 	// (see openOwnedNudgeBeadStore), and read session beads from the session
 	// class, not the nudges class.
 	store, opened := openOwnedNudgeBeadStore(cityPath)
+	var sessStore beads.Store
 	if opened != nil {
 		defer closeBeadStoreHandle(opened) //nolint:errcheck
-		sessStore := cliSessionStore(opened, cfg, cityPath)
+		sessStore = cliSessionStore(opened, cfg, cityPath)
 		if id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, assignee); err == nil {
 			if info, err := sessionFrontDoor(sessStore).Get(id); err == nil {
 				target = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
@@ -4199,7 +4194,7 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Wri
 			target = withNudgeTargetFence(sessStore, target)
 		}
 	}
-	if rootID != "" && cliLaneExecutesMessage(cfg) {
+	if rootID != "" && (cliLaneMessageListed(cfg) || cliLaneExecutesMessage(cfg, sessStore)) {
 		// A lane that may serve the session takes the notice or refuses it;
 		// only a session no lane serves takes the queue path below.
 		if continuationLaneNoticeIn(cityPath, cfg, target, opened, rootID, stderr) {

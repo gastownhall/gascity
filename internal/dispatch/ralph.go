@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1438,6 +1439,26 @@ func clearRetryEphemera(meta map[string]string) {
 		"design_review.verdict",
 		"code_review.verdict",
 	} {
+		delete(meta, key)
+	}
+	clearManagedWorktreeEvidence(meta)
+}
+
+// clearManagedWorktreeEvidence drops a cloned attempt's managed-worktree
+// evidence when the attempt it was cloned from carried any ownership key. That
+// evidence names the predecessor's worktree, whose provenance names the
+// predecessor, so the controller would refuse to seat the clone and every seat
+// outside that worktree would leave it. The clone is born unbound, as an
+// attempt minted from a recipe is, for a provisioner to stamp. A work dir and
+// branch with no ownership key are a plain directory (a drain member's, or a
+// claim's ambient branch stamp) and are kept.
+func clearManagedWorktreeEvidence(meta map[string]string) {
+	if !slices.ContainsFunc(beadmeta.WorktreeOwnershipEvidenceKeys, func(key string) bool {
+		return strings.TrimSpace(meta[key]) != ""
+	}) {
+		return
+	}
+	for _, key := range beadmeta.ManagedWorktreeEvidenceKeys {
 		delete(meta, key)
 	}
 }

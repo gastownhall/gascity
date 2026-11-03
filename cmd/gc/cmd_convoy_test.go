@@ -3105,39 +3105,53 @@ func assertRouteLog(t *testing.T, stderrStr, wantRoute, wantReason string) {
 	}
 }
 
-func TestRouteConvoyList_StaleBannerOver30s(t *testing.T) {
+func TestRouteConvoyList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeConvoyTestCity(t)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/convoys") {
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0}) //nolint:errcheck
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
+	for _, rows := range []int{0, 1} {
+		t.Run(fmt.Sprintf("rows=%d", rows), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				setBehindCacheHeaders(w)
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/convoys"):
+					items := []map[string]any{}
+					if rows > 0 {
+						items = append(items, map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"})
+					}
+					json.NewEncoder(w).Encode(map[string]any{"items": items, "total": len(items)}) //nolint:errcheck
+				case strings.HasSuffix(r.URL.Path, "/convoy/gc-1/check"):
+					json.NewEncoder(w).Encode(map[string]any{"convoy_id": "gc-1", "total": 0, "closed": 0, "complete": false}) //nolint:errcheck
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	var stdout, stderr bytes.Buffer
-	if code := routeConvoyList(cityPath, c, "", convoyListOptions{}, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
-	}
-	// Zero-convoy list prints "No open convoys" and returns early without
-	// surfacing the cache-age banner. Assert the empty case path is correct
-	// and that the stale banner appears when there is at least one row.
-	if !strings.Contains(stdout.String(), "No open convoys") {
-		t.Errorf("empty list output missing marker:\n%s", stdout.String())
+			var stdout, stderr bytes.Buffer
+			if code := routeConvoyList(cityPath, c, "", convoyListOptions{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+			}
+			// The zero-convoy list prints "No open convoys" and no footer.
+			if rows == 0 {
+				if !strings.Contains(stdout.String(), "No open convoys") {
+					t.Errorf("empty list output missing marker:\n%s", stdout.String())
+				}
+				assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
+				return
+			}
+			assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
+		})
 	}
 }
 
-func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
+func TestRouteConvoyStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"convoy":   map[string]any{"id": "gc-1", "title": "old", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
@@ -3153,9 +3167,7 @@ func TestRouteConvoyStatus_StaleBannerOver30s(t *testing.T) {
 	if code := routeConvoyStatus(cityPath, "gc-1", c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -987,7 +988,7 @@ func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *te
 	if err != nil {
 		t.Fatalf("Create(wait): %v", err)
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := extmsg.ConversationRef{
 		ScopeID:        "test-city",
 		Provider:       "discord",
@@ -2162,7 +2163,7 @@ func TestSyncSessionBeads_StaleManualPlanDoesNotRecreateClosedSession(t *testing
 		},
 	}
 	city := t.TempDir()
-	manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(city))
+	manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city))
 	if _, err := manager.CloseDetailed(context.Background(), testOperatorIn(t, city), bead.ID); err != nil {
 		t.Fatalf("close manual session: %v", err)
 	}
@@ -2509,7 +2510,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	if err != nil {
 		t.Fatalf("create loser wait: %v", err)
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := extmsg.ConversationRef{
 		ScopeID:        "test-city",
 		Provider:       "discord",
@@ -7989,7 +7990,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	}
 
 	// The freed alias must now be available for a successor on the same slot.
-	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(store), "gascity-packs/codex-1", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
 	}
 }
@@ -9522,7 +9523,7 @@ func setupSessionWithExtmsgMembership(t *testing.T, store beads.Store, state ses
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
 	group, err := fabric.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
 		RootConversation: extmsg.ConversationRef{
@@ -10886,4 +10887,19 @@ func TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow(t *testing.T) {
 			t.Errorf("a keyless row in state %q: session_key %q after sync, want minted %v; stderr=%s", tc.state, key, tc.mint, stderr.String())
 		}
 	}
+}
+
+// findClosedNamedSessionBead is session.FindClosedNamedSessionBead over a
+// single store serving the sessions class, ignoring the error.
+func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBead(beadstest.Sessions(store), identity)
+	return bead, ok
+}
+
+// findClosedNamedSessionBeadForSessionName is
+// session.FindClosedNamedSessionBeadForSessionName over a single store serving
+// the sessions class, ignoring the error.
+func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
+	return bead, ok
 }

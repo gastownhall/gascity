@@ -71,11 +71,12 @@ type StatusInput struct {
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
 //
-// Read-path gate: refuses to serve while the city-scope CachingStore is
-// priming (cacheLiveOr503 → typed 503) so the CLI falls back to its local
-// snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
-// age of the latest fresh observation so `gc status` can append a staleness
-// banner when the supervisor is lagging.
+// Read-path gate: cacheLiveOr503 refuses only a store that reports liveness.
+// The controller's city store is the bead-policy layer, which does not, so the
+// gate passes while the city cache primes and the not-live cache answers from
+// its backing store. CacheAgeS and CacheRefresh surface the cache's age,
+// cadence and refresh state so `gc status` can flag a cache that is behind, except on a
+// body built without reading any bead store (statusCacheFreshness).
 //
 // The gate and the age both read the WORK store, which is the class the body's
 // expensive legs come from (work counts, store health). It deliberately does
@@ -113,10 +114,12 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -131,19 +134,25 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// build below, same as before this change.
 		//
 		// CacheAgeS reports the GREATER of the two staleness signals: how
-		// long ago this response entry was built, and cacheAgeSeconds(store)
-		// — the age of the CachingStore snapshot the body was built from.
-		// Reporting only the response-entry age would let a recently built
-		// entry sitting on top of a lagging reconciler under-report true
-		// staleness and suppress the banner `gc status` renders above
-		// cacheAgeBannerThresholdSeconds; reporting only the store age would
-		// hide the SWR delay. The max preserves both.
+		// long ago this response entry was built, and the age of the
+		// CachingStore snapshot the body was built from (0 when it read
+		// none). Reporting only the response-entry age would let a recently
+		// built entry sitting on top of a lagging cache under-report true
+		// staleness; reporting only the store age would hide the SWR delay.
+		// When the saved entry's age is the greater, the refresh state says
+		// so (rebuilding), so a client does not blame the cache's re-scans
+		// for it.
 		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			if built := age.Seconds(); built > f.ageS {
+				f.ageS, f.refresh.State = built, CacheRefreshRebuilding
+			}
 			return &IndexOutput[StatusBody]{
-				Index:     hit.Index,
-				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      hit.Body,
+				Index:        hit.Index,
+				CacheAgeS:    f.ageS,
+				CacheRefresh: f.refresh,
+				Body:         hit.Body,
 			}, nil
 		}
 	}
@@ -153,7 +162,20 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
-	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+	f := statusCacheFreshness(resp, cacheAgeSeconds(store))
+	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
+}
+
+// statusCacheFreshness is the bead-cache freshness /status reports with body:
+// f, the city store's (cacheAgeSeconds), or the zero value for a body built
+// without reading any bead store (StoresNotRead, a suspended city). A
+// suspended city's cache pauses its re-scans, so its age grows without bound
+// and says nothing about a body that never read it.
+func statusCacheFreshness(body StatusBody, f cacheFreshness) cacheFreshness {
+	if body.StoresNotRead {
+		return cacheFreshness{}
+	}
+	return f
 }
 
 // refreshStatusResponseInBackground kicks a detached rebuild of the /status

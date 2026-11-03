@@ -29,7 +29,8 @@ func (s *Server) humaHandleWaitList(_ context.Context, input *WaitListInput) (*W
 		return nil, err
 	}
 	waits, err := session.NewStore(store).ListWaits(input.State, input.Session)
-	out := &WaitListOutput{CacheAgeS: cacheAgeSeconds(store.Store)}
+	freshness := cacheAgeSeconds(store.Store)
+	out := &WaitListOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	if err != nil {
 		switch {
 		case beads.IsLookupLimitError(err):
@@ -76,7 +77,8 @@ func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*Wai
 		}
 		return nil, humaStoreError(err)
 	}
-	out := &WaitGetOutput{CacheAgeS: cacheAgeSeconds(store.Store)}
+	freshness := cacheAgeSeconds(store.Store)
+	out := &WaitGetOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	out.Body = waitViewFromInfo(w)
 	return out, nil
 }

@@ -1087,6 +1087,7 @@ func TestClientListSessions(t *testing.T) {
 						"template":     "mayor",
 						"state":        "active",
 						"title":        "Overseer",
+						"agent_name":   "mayor",
 						"session_name": "mayor",
 						"provider":     "claude",
 						"created_at":   "2026-04-23T10:00:00Z",
@@ -1108,6 +1109,7 @@ func TestClientListSessions(t *testing.T) {
 						"template":     "polecat",
 						"state":        "active",
 						"title":        "Worker",
+						"agent_name":   "polecat",
 						"session_name": "polecat",
 						"provider":     "claude",
 						"created_at":   "2026-04-23T09:00:00Z",
@@ -1127,15 +1129,15 @@ func TestClientListSessions(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListSessions("active", "mayor", false)
+	got, err := c.ListSessions(ListSessionsOpts{State: "active", Template: "mayor"})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(got.Body) != 2 {
-		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body))
+	if len(got.Body.Sessions) != 2 {
+		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body.Sessions))
 	}
-	if got.Body[0].ID != "gc-abc" || got.Body[1].ID != "gc-def" {
-		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body[0].ID, got.Body[1].ID)
+	if got.Body.Sessions[0].ID != "gc-abc" || got.Body.Sessions[1].ID != "gc-def" {
+		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body.Sessions[0].ID, got.Body.Sessions[1].ID)
 	}
 	if got.AgeSeconds != 2.5 {
 		t.Errorf("AgeSeconds = %v, want 2.5 (first page's age)", got.AgeSeconds)
@@ -1155,7 +1157,7 @@ func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListSessions("", "", false)
+	_, err := c.ListSessions(ListSessionsOpts{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1500,6 +1502,56 @@ func TestCacheAgeFromResponse(t *testing.T) {
 	}
 }
 
+func TestCacheRefreshFromResponse(t *testing.T) {
+	cases := []struct {
+		name, interval, state string
+		want                  CacheRefresh
+	}{
+		{"absent", "", "", CacheRefresh{}},
+		{"scheduled", "30", "scheduled", CacheRefresh{IntervalS: 30, State: CacheRefreshScheduled}},
+		{"paused", "60", "paused", CacheRefresh{IntervalS: 60, State: CacheRefreshPaused}},
+		{"failing", "120", "failing", CacheRefresh{IntervalS: 120, State: CacheRefreshFailing}},
+		{"rebuilding", "0", "rebuilding", CacheRefresh{State: CacheRefreshRebuilding}},
+		{"unknown state reads as unreported", "30", "bogus", CacheRefresh{IntervalS: 30}},
+		{"negative interval", "-1", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+		{"non-numeric interval", "abc", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+		{"NaN interval", "NaN", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+		{"infinite interval", "+Inf", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &http.Response{Header: http.Header{}}
+			if tc.interval != "" {
+				r.Header.Set("X-GC-Cache-Refresh-Interval-S", tc.interval)
+			}
+			if tc.state != "" {
+				r.Header.Set("X-GC-Cache-Refresh", tc.state)
+			}
+			if got := cacheRefreshFromResponse(r); got != tc.want {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	if got := cacheRefreshFromResponse(nil); got != (CacheRefresh{}) {
+		t.Errorf("nil response: got %+v, want the zero value", got)
+	}
+}
+
+func TestCachedReadOf(t *testing.T) {
+	r := &http.Response{Header: http.Header{}}
+	r.Header.Set("X-GC-Cache-Age-S", "75")
+	r.Header.Set("X-GC-Cache-Refresh-Interval-S", "30")
+	r.Header.Set("X-GC-Cache-Refresh", "failing")
+	got := cachedReadOf("body", r)
+	want := CachedRead[string]{Body: "body", AgeSeconds: 75, Refresh: CacheRefresh{IntervalS: 30, State: CacheRefreshFailing}}
+	if got != want {
+		t.Errorf("cachedReadOf = %+v, want %+v", got, want)
+	}
+	if got := cachedReadOf(7, nil); got != (CachedRead[int]{Body: 7}) {
+		t.Errorf("cachedReadOf(nil response) = %+v, want only the body", got)
+	}
+}
+
 func TestClientListMailInbox(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1825,8 +1877,12 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 		switch r.URL.Query().Get("cursor") {
 		case "":
 			id, next = "ga-1", "c1"
+			w.Header().Set("X-GC-Cache-Refresh-Interval-S", "30")
+			w.Header().Set("X-GC-Cache-Refresh", "paused")
 		case "c1":
 			id, next = "ga-2", "c2"
+			w.Header().Set("X-GC-Cache-Refresh-Interval-S", "120")
+			w.Header().Set("X-GC-Cache-Refresh", "failing")
 		case "c2":
 			id, next = "ga-3", ""
 		default:
@@ -1854,6 +1910,9 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&reqs); n != 3 {
 		t.Fatalf("requests = %d, want 3", n)
+	}
+	if want := (CacheRefresh{IntervalS: 30, State: CacheRefreshPaused}); res.Refresh != want {
+		t.Fatalf("Refresh = %+v, want page 1's %+v", res.Refresh, want)
 	}
 }
 

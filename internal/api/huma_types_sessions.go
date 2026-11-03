@@ -18,6 +18,9 @@ type SessionListInput struct {
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
 	Peek     bool   `query:"peek" required:"false" doc:"Include last output preview."`
+	// WakeReasons asks for each open session's wake reasons. They cost a
+	// runtime probe per session, so only a caller that renders them asks.
+	WakeReasons bool `query:"wake_reasons" required:"false" doc:"Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session."`
 }
 
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.

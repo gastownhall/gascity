@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -237,6 +236,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// and the start-wait front door), so route the whole flow through the session
 	// coordination-class store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessions := beads.SessionStore{Store: sessStore}
 
 	sp, err := newSessionProvider()
 	if err != nil {
@@ -358,15 +358,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		}
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, alias, "", configuredOwner); err != nil {
 				return err
 			}
 			if reserveConcreteIdentity && sessionQualifiedName != alias {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 					return err
 				}
 			}
-			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, explicitName, "", configuredOwner); err != nil {
 				return err
 			}
 			var createErr error
@@ -492,15 +492,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, alias, "", configuredOwner); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && sessionQualifiedName != alias {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, explicitName, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -781,22 +781,41 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List chat sessions",
-		Long: `List all chat sessions. By default shows active and suspended sessions.
+		Long: `List all chat sessions. By default lists every open session; --state
+closed or --state all also lists closed ones.
 
 With --json the output is one JSON document that validates against
-"gc session list --json-schema=result". It has one of two renderings, and
-the route a command takes decides which one it gets:
+"gc session list --json-schema=result" and has the same shape on every
+route: schema_version "1", ok true, filters, sessions ([] when empty) and
+summary. Each row carries id, template, state, created_at, last_active,
+attached and closed. A closed session has state "closed" and closed true.
+last_active is "" for a session that has not been active. Timestamps are
+RFC 3339 in UTC.
 
-  - Local rendering (a supervisor-hosted city, a city with no reachable
-    API, or GC_NO_API set for a local target; a remote target rejects
-    GC_NO_API): filters, sessions and summary. Each row carries closed, and
-    agent_name when the session has one, and no liveness.
-  - API rendering (a remote target such as --city-url, a standalone
-    controller's [api] port, or a supervisor serving a city that has no
-    controller): _cache_age_s and sessions. Each row carries running, and no
-    agent_name or closed.
+When the city's API serves the read (a supervisor-hosted city, a standalone
+controller's [api] port, or a remote target such as --city-url), the
+document also carries _cache_age_s, and each row carries running (the
+server's own observation) plus reason and program_status when the server
+reports them. A local read omits those fields; the CLI never computes
+running itself. The API does not report command, session_key or the
+resume_* fields, so only a local read carries them.
 
-Both carry schema_version "1" and ok true, and an empty list renders as [].`,
+For a local target the read is local when GC_NO_API is set, when no API is
+reachable, when the supervisor requires grants, when the API gives an
+answer the CLI falls back from (its cache is not live, a server error), or
+when the supervisor still runs a gc that predates agent_name on session
+rows (restart it after upgrading). A local target also reads locally when
+the state filter lists closed sessions (--state closed, --state all): the
+API reads the city's whole session history again for every page it
+serves, where the local read reads it once. A remote target never reads
+locally: an older server's rows print without agent_name, transport,
+worker_dir and wake reasons, with a note on stderr. A partial API answer
+fails as a failed local read does: exit 1 and, with --json, the
+session_list_failed error document.
+
+The REASON column shows a session's lifecycle reason (a hold, sleep,
+quarantine or open circuit), else the reasons it is kept awake (session,
+config, create, attached, pin, ...), else "-", on every route.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdSessionList(stateFilter, templateFilter, jsonOutput, stdout, stderr) != 0 {
@@ -812,64 +831,109 @@ Both carry schema_version "1" and ok true, and an empty list renders as [].`,
 }
 
 // sessionListAPIClient returns (client, "") when the API path is available,
-// or (nil, reason) when the caller should fall back. A supervisor-hosted city
-// always falls back: the local listing is the session list contract
-// (localWhenSupervisorHostedAPIClient). Indirected through a var so tests
-// inject a client pointed at httptest.Server or force a specific fallback
-// reason without spinning up a real controller.
-var sessionListAPIClient = localWhenSupervisorHostedAPIClient
+// or (nil, reason) when the caller should fall back. It routes as apiClient
+// does: a supervisor-hosted city lists through the supervisor API, and a
+// supervisor that requires grants sends the listing local. A state filter
+// that can keep a closed session (session.StateFilterIncludesClosed) lists
+// locally wherever the API would have served it, with reason
+// sessionListClosedHistoryReason. Both routes print the same document
+// (writeSessionListJSON).
+func sessionListAPIClient(cityPath, stateFilter string) (*api.Client, string) {
+	c := apiClient(cityPath)
+	if c == nil {
+		return nil, apiClientFallbackReason(cityPath)
+	}
+	if session.StateFilterIncludesClosed(stateFilter) {
+		return nil, sessionListClosedHistoryReason
+	}
+	return c, ""
+}
+
+// sessionListClosedHistoryReason is the fallback reason for a local target's
+// listing whose state filter can keep a closed session. The API serves no
+// closed row from its cache, so it reads the city's whole session history
+// from the store for every page it serves, and ListSessions walks every page
+// of up to 1000 rows. The local read reads that history once.
+const sessionListClosedHistoryReason = "session-list-closed-history"
 
 // routeSessionList dispatches `session list` to the API when
 // sessionListAPIClient resolved a client; otherwise falls back to the local
-// iterator. Emits exactly one route=... log line per exit path (gated on
-// GC_DEBUG).
+// iterator. A partial API answer fails as a partial local read does. A local
+// target whose supervisor predates agent_name falls back to the local read; a
+// remote target prints that server's rows and says what they lack. Emits
+// exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
-	var cr api.CachedRead[[]api.SessionView]
+	var cr api.CachedRead[api.SessionList]
 	return routeRead(c, "session list", nilReason, stderr,
 		func() error {
 			var err error
-			cr, err = c.ListSessions(stateFilter, templateFilter, false)
-			return err
+			// Only the table renders wake reasons; they cost the server runtime
+			// probes per session, so --json does not ask for them.
+			cr, err = c.ListSessions(api.ListSessionsOpts{State: stateFilter, Template: templateFilter, WakeReasons: !jsonOutput})
+			if err != nil {
+				return err
+			}
+			if cr.Body.Partial {
+				msg := sessionListPartialMessage(cr.Body.PartialErrors)
+				return &reportedErrorAfterFetch{Detail: msg, Report: func() int {
+					return writeSessionListReadFailure(msg, jsonOutput, stdout, stderr)
+				}}
+			}
+			if cr.Body.AgentNameMissing && !c.IsRemote() {
+				return fallbackAfterFetch{Reason: sessionListPredatesAgentNameReason}
+			}
+			return nil
 		},
-		func() int { return renderSessionListFromAPI(cr, jsonOutput, stdout) },
+		func() int {
+			if cr.Body.AgentNameMissing {
+				fmt.Fprintln(stderr, sessionListPredatesAgentNameNotice) //nolint:errcheck // best-effort stderr
+			}
+			return renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: cr.Body.Sessions, AgeSeconds: cr.AgeSeconds, Refresh: cr.Refresh}, stateFilter, templateFilter, jsonOutput, stdout, stderr)
+		},
 		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
 	)
 }
 
-// sessionListJSONEnvelope is the API-path --json output shape for
-// `gc session list`. It wraps the items array so _cache_age_s can sit
-// alongside at the envelope level — the shape documented in the
-// ga-h6w designer's D5 contract.
-type sessionListJSONEnvelope struct {
-	SchemaVersion string        `json:"schema_version"`
-	OK            bool          `json:"ok"`
-	CacheAgeS     float64       `json:"_cache_age_s"`
-	Sessions      []SessionView `json:"sessions"`
+// sessionListPredatesAgentNameReason is the fallback reason for a local
+// target whose supervisor answered GET /sessions without agent_name: it runs
+// a gc older than this one, so the CLI reads the city directly instead.
+const sessionListPredatesAgentNameReason = "session-list-predates-agent-name"
+
+// sessionListPredatesAgentNameNotice tells the operator of a remote target,
+// which has no local read, what that older server's rows leave out.
+const sessionListPredatesAgentNameNotice = "gc session list: this city's API predates agent_name; agent_name, transport, worker_dir and the REASON column's wake reasons are left out (restart its supervisor)"
+
+// sessionListPartialMessage is the failure message for a partial API answer:
+// the local read's listing-failure message carrying the server's errors.
+func sessionListPartialMessage(partialErrors []string) string {
+	detail := strings.Join(partialErrors, "; ")
+	if detail == "" {
+		detail = "the city API answered with a partial session list without naming the failed read"
+	}
+	return "gc session list: listing sessions: " + detail
 }
 
-// SessionView mirrors api.SessionView for CLI JSON output. Defined as an
-// alias so cmd/gc/ can document the JSON shape without exposing genclient.
-type SessionView = api.SessionView
-
-// renderSessionListFromAPI formats the API-sourced session list. On --json
-// the output is the sessionListJSONEnvelope with _cache_age_s; human output
-// mirrors the fallback tabwriter format and appends a staleness banner when
-// the supervisor cache age crosses the threshold.
-func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool, stdout io.Writer) int {
+// writeSessionListReadFailure reports a failed session read on either route
+// and returns exit code 1: the session_list_failed error document under
+// --json, the message on stderr otherwise.
+func writeSessionListReadFailure(message string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
-		env := sessionListJSONEnvelope{
-			SchemaVersion: "1",
-			OK:            true,
-			CacheAgeS:     cr.AgeSeconds,
-			Sessions:      cr.Body,
-		}
-		if env.Sessions == nil {
-			env.Sessions = []SessionView{}
-		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(env) //nolint:errcheck // best-effort stdout
-		return 0
+		return writeJSONError(stdout, stderr, "session_list_failed", message, 1)
+	}
+	fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
+// renderSessionListFromAPI formats the API-sourced session list. On --json it
+// prints the same document as the local read (writeSessionListJSON) plus the
+// API-only _cache_age_s and per-row fields; human output mirrors the local
+// table and is followed by the cache-age footer on stderr when the server's
+// cache is behind (writeCacheAgeFooter). The cache's age is one whole-read
+// value, not a measure of how far a row's STATE lags the runtime.
+func renderSessionListFromAPI(cr api.CachedRead[[]api.SessionListView], stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		age := cr.AgeSeconds
+		return writeSessionListJSON(sessionListJSONRowsFromAPI(cr.Body), stateFilter, templateFilter, &age, stdout, stderr)
 	}
 
 	if len(cr.Body) == 0 {
@@ -884,7 +948,7 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	for _, s := range cr.Body {
 		withStatus = withStatus || s.ProgramStatus != nil
 	}
-	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE"}
+	header := []string{"ID", "TEMPLATE", "STATE", "REASON", "TARGET", "TITLE", "WORKDIR", "AGE", "LAST ACTIVE", "LAST NUDGE"}
 	if withStatus {
 		header = slices.Insert(header, 3, "STATUS")
 	}
@@ -894,13 +958,13 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	for _, s := range cr.Body {
 		state := s.State
 		if state == "" {
-			state = "closed"
+			state = string(session.StateClosed)
 		}
-		reason := s.Reason
-		if reason == "" {
-			reason = "-"
+		row := []string{
+			s.ID, s.Template, state, sessionListReasonCell(s.Reason, s.WakeReasons),
+			sessionListTargetOf(s.Alias, s.SessionName), sessionListTitleOf(s.Title), sessionListDisplayValue(s.WorkDir),
+			sessionListAge(s.CreatedAt, now), sessionListAgo(s.LastActive, now), sessionListAgo(s.LastNudgeDeliveredAt, now),
 		}
-		row := []string{s.ID, s.Template, state, reason, sessionViewTarget(s), sessionViewTitle(s), sessionViewWorkDir(s), sessionViewAge(s.CreatedAt), sessionViewLastActive(s.LastActive)}
 		if withStatus {
 			row = slices.Insert(row, 3, sessionViewProgramStatus(s.ProgramStatus, now))
 		}
@@ -908,90 +972,26 @@ func renderSessionListFromAPI(cr api.CachedRead[[]SessionView], jsonOutput bool,
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
-	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "STATE")) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
-// sessionStateCacheAgeBannerThresholdSeconds is the cache-age cutoff for the
-// session list and peek cache-age banner. It is session-scoped (NOT the
-// shared cacheAgeBannerThresholdSeconds) and intentionally lower — 15s vs 30s —
-// because the session values it flags (the STATE column, the cached pane
-// output) most often lag inside the post-wake reconciler poll window (#3755).
-// Scoping the lower cutoff to just these two views keeps the generic
-// "reconciler may be lagging" footer on every other command at 30s.
-const sessionStateCacheAgeBannerThresholdSeconds = 15.0
-
-// sessionCacheAgeBanner is the human-output footer for the session list and peek
-// views when the supervisor read-cache age exceeds
-// sessionStateCacheAgeBannerThresholdSeconds. Unlike the generic cache-age
-// banner, it names the specific cached value most likely to lag a just-woken
-// session within the reconciler poll window and points operators at out-of-band
-// ground truth. subject identifies that value per view — the STATE column on the
-// session list, the cached pane output on peek — so the footer never names a
-// STATE column peek does not render. cr.AgeSeconds is a single whole-read value,
-// so this stays a low-noise footer rather than a per-row marker (true per-row
-// freshness needs a SessionView state_updated_at field — out of scope, follow-up
-// gco-cyt3).
-func sessionCacheAgeBanner(ageSeconds float64, subject string) string {
-	return fmt.Sprintf("(cache age: %.0fs — %s may lag the runtime; verify a just-woken session via transcript / bead state)", ageSeconds, subject)
-}
-
-// sessionViewTarget mirrors sessionListTarget's fallback behavior, but
-// against the SessionView shape the API returns.
-func sessionViewTarget(s SessionView) string {
-	if s.Alias != "" {
-		return s.Alias
-	}
-	if s.SessionName != "" {
-		return s.SessionName
-	}
-	return "-"
-}
-
-// sessionViewTitle mirrors sessionListTitle against the API-returned shape.
-func sessionViewTitle(s SessionView) string {
-	title := s.Title
-	if title == "" {
+// sessionListAge formats a session's age for the list table; a zero creation
+// time renders as "-".
+func sessionListAge(createdAt, now time.Time) string {
+	if createdAt.IsZero() {
 		return "-"
 	}
-	if len(title) > 30 {
-		return title[:27] + "..."
-	}
-	return title
+	return formatDuration(now.Sub(createdAt))
 }
 
-func sessionViewWorkDir(s SessionView) string {
-	return sessionListDisplayValue(s.WorkDir)
-}
-
-// sessionViewAge formats a CreatedAt RFC3339 string the same way the
-// fallback formats time.Since(s.CreatedAt). Empty or unparseable strings
-// render as "-".
-func sessionViewAge(createdAt string) string {
-	if createdAt == "" {
+// sessionListAgo formats a past timestamp as "<duration> ago" for the list
+// table; a zero time renders as "-".
+func sessionListAgo(at, now time.Time) string {
+	if at.IsZero() {
 		return "-"
 	}
-	t, err := time.Parse(time.RFC3339, createdAt)
-	if err != nil {
-		return "-"
-	}
-	return formatDuration(time.Since(t))
-}
-
-// sessionViewLastActive formats a LastActive RFC3339 string the same way
-// the fallback formats time.Since. Empty or unparseable strings render as
-// "-".
-func sessionViewLastActive(lastActive string) string {
-	if lastActive == "" {
-		return "-"
-	}
-	t, err := time.Parse(time.RFC3339, lastActive)
-	if err != nil {
-		return "-"
-	}
-	return formatDuration(time.Since(t)) + " ago"
+	return formatDuration(now.Sub(at)) + " ago"
 }
 
 // sessionViewProgramStatus formats the STATUS column: the state the session
@@ -1013,10 +1013,13 @@ func sessionViewProgramStatus(ps *api.SessionProgramStatus, now time.Time) strin
 }
 
 // cmdSessionList is the CLI entry point for "gc session list". It routes
-// through the API when sessionListAPIClient resolves a client and falls back
-// to the local iterator otherwise.
+// through the API when sessionListAPIClient resolves a client for the state
+// filter and falls back to the local iterator otherwise.
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	return routeReadCmd("session list", stderr, sessionListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+	localClient := func(cityPath string) (*api.Client, string) {
+		return sessionListAPIClient(cityPath, stateFilter)
+	}
+	return routeReadCmd("session list", stderr, localClient, func(cityPath string, c *api.Client, nilReason string) int {
 		return routeSessionList(cityPath, stateFilter, templateFilter, c, nilReason, jsonOutput, stdout, stderr)
 	})
 }
@@ -1083,11 +1086,7 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	// CLI); it loads unsorted, so restore the created-desc order below.
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
-		}
-		fmt.Fprintf(stderr, "gc session list: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return writeSessionListReadFailure(fmt.Sprintf("gc session list: listing sessions: %v", err), jsonOutput, stdout, stderr)
 	}
 
 	sp, err := withSessionProviderConstructionContext(
@@ -1109,11 +1108,15 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sessions := catalog.ListFromInfos(sessionBeads.OpenInfos(), stateFilter, templateFilter)
+	infos, err := sessionListInfos(sessionFrontDoor(sessStore), sessionBeads, stateFilter)
+	if err != nil {
+		return writeSessionListReadFailure(fmt.Sprintf("gc session list: %v", err), jsonOutput, stdout, stderr)
+	}
+	sessions := catalog.ListFromInfos(infos, stateFilter, templateFilter)
 	sortSessionsCreatedDesc(sessions)
 
 	if jsonOutput {
-		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
+		return writeSessionListJSON(sessionListJSONRows(sessions), stateFilter, templateFilter, nil, stdout, stderr)
 	}
 
 	// Build the per-session reason-projection index from the one snapshot (no
@@ -1131,30 +1134,12 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	if waitRes.err != nil {
 		fmt.Fprintf(stderr, "gc session list: ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
 	}
-	readyWaitSet := waitRes.set
-	cfg := providerCtx.cfg
-	poolDesired := cliPoolDesired(cfg)
-
-	// Build attachment cache. Active sessions already have Info.Attached
-	// populated by ListFullFromBeads; for inactive sessions, query the
-	// provider directly while preserving the old "running and attached"
-	// semantics. Going through workerSessionTargetAttachedWithConfig here
-	// triggered 2-3 extra bd show subprocess lookups per session.
-	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
-		if info.State == session.StateActive || sp == nil {
-			return info.Attached, nil
-		}
-		return sessionAttachedForWakeReason(sp, info.SessionName), nil
-	})
 
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No sessions found.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
-
-	// Wrap sp with an attachment cache to avoid redundant IsAttached calls
-	// in wakeReasonsInfo.
-	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
+	reasonInputs := newSessionListReasonInputs(sessions, infoIndex, providerCtx.cfg, sp, waitRes.set)
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tWORKDIR\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
@@ -1163,25 +1148,47 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 		if s.State == "" {
 			state = "closed"
 		}
-		reason := sessionReason(s, infoIndex, cfg, cachedSP, poolDesired, readyWaitSet)
+		reason := reasonInputs.cell(s)
 		target := sessionListTarget(s)
 		title := sessionListTitle(s)
 		workDir := sessionListWorkDir(s)
-		age := formatDuration(time.Since(s.CreatedAt))
-		lastActive := "-"
-		if !s.LastActive.IsZero() {
-			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
-		}
-		lastNudge := "-"
-		if !s.LastNudgeDeliveredAt.IsZero() {
-			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
-		}
+		now := time.Now()
+		age := formatDuration(now.Sub(s.CreatedAt))
+		lastActive := sessionListAgo(s.LastActive, now)
+		lastNudge := sessionListAgo(s.LastNudgeDeliveredAt, now)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, workDir, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
 }
 
+// sessionListInfos returns the sessions the local read lists before
+// filtering: the open snapshot, or, when the state filter asks for closed
+// sessions (session.StateFilterIncludesClosed), the full history including
+// closed beads (listSessionHistory), read once for this call. A partial read
+// is an error.
+func sessionListInfos(front *session.Store, snapshot *sessionBeadSnapshot, stateFilter string) ([]session.Info, error) {
+	if !session.StateFilterIncludesClosed(stateFilter) {
+		return snapshot.OpenInfos(), nil
+	}
+	infos, err := listSessionHistory(front)
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions including closed history: %w", err)
+	}
+	return infos, nil
+}
+
+// listSessionHistory lists every session, closed ones included, newest
+// first. A variable so tests can fail the local read's closed-history
+// listing.
+var listSessionHistory = func(front *session.Store) ([]session.Info, error) {
+	return front.ListAll(session.ListAllOptions{IncludeClosed: true, Sort: beads.SortCreatedDesc})
+}
+
+// sessionListJSONRow is one `gc session list --json` row. Both routes print
+// it: a local read fills command, session_key and the resume fields, which
+// the API redacts; an API-served read fills running, reason, last_output and
+// program_status, which only the server observes.
 type sessionListJSONRow struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name,omitempty"`
@@ -1202,21 +1209,34 @@ type sessionListJSONRow struct {
 	// legacy work_dir is stamped at create/dispatch and is often the agent
 	// home (depth-1) or empty, which is why the worktree reaper's liveness
 	// gate needs the canonical value (gastownhall/gascity#4492 accept-crit #1).
-	WorkerDir            string     `json:"worker_dir,omitempty"`
-	SessionName          string     `json:"session_name,omitempty"`
-	SessionKey           string     `json:"session_key,omitempty"`
-	ResumeFlag           string     `json:"resume_flag,omitempty"`
-	ResumeStyle          string     `json:"resume_style,omitempty"`
-	ResumeCommand        string     `json:"resume_command,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	LastActive           time.Time  `json:"last_active"`
+	WorkerDir     string    `json:"worker_dir,omitempty"`
+	SessionName   string    `json:"session_name,omitempty"`
+	SessionKey    string    `json:"session_key,omitempty"`
+	ResumeFlag    string    `json:"resume_flag,omitempty"`
+	ResumeStyle   string    `json:"resume_style,omitempty"`
+	ResumeCommand string    `json:"resume_command,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	// LastActive is RFC 3339 (sessionListLastActive), "" when the session has
+	// not been active.
+	LastActive           string     `json:"last_active"`
 	LastNudgeDeliveredAt *time.Time `json:"last_nudge_delivered_at,omitempty"`
 	Attached             bool       `json:"attached"`
 	Closed               bool       `json:"closed"`
+
+	// Running, Reason, LastOutput and ProgramStatus are set only on an
+	// API-served read: they are the server's own observations, and the CLI
+	// never computes them.
+	Running       *bool                     `json:"running,omitempty"`
+	Reason        string                    `json:"reason,omitempty"`
+	LastOutput    string                    `json:"last_output,omitempty"`
+	ProgramStatus *api.SessionProgramStatus `json:"program_status,omitempty"`
 }
 
+// sessionListJSON is the `gc session list --json` document on every route.
+// CacheAgeS is set only when the API served the read.
 type sessionListJSON struct {
 	SchemaVersion string               `json:"schema_version"`
+	CacheAgeS     *float64             `json:"_cache_age_s,omitempty"`
 	Filters       sessionListFilters   `json:"filters"`
 	Sessions      []sessionListJSONRow `json:"sessions"`
 	Summary       sessionListSummary   `json:"summary"`
@@ -1234,10 +1254,15 @@ type sessionListSummary struct {
 	Closed    int `json:"closed"`
 }
 
-func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, stdout, stderr io.Writer) int {
-	rows := sessionListJSONRows(sessions)
+// writeSessionListJSON writes the one `gc session list --json` document for
+// rows built by either route. cacheAgeS is nil on a local read.
+func writeSessionListJSON(rows []sessionListJSONRow, stateFilter, templateFilter string, cacheAgeS *float64, stdout, stderr io.Writer) int {
+	if rows == nil {
+		rows = []sessionListJSONRow{}
+	}
 	result := sessionListJSON{
 		SchemaVersion: "1",
+		CacheAgeS:     cacheAgeS,
 		Filters:       sessionListFilters{State: stateFilter, Template: templateFilter},
 		Sessions:      rows,
 		Summary:       summarizeSessionList(rows),
@@ -1281,57 +1306,131 @@ func writeSessionNewJSON(stdout, stderr io.Writer, result sessionNewJSON) error 
 	return writeCLIJSONLineOrErr(stdout, stderr, "gc session new", result)
 }
 
+// sessionListJSONRows builds the local read's rows. It fills the fields the
+// API redacts (command, session_key, resume_*) and leaves the API-only
+// fields empty.
 func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 	rows := make([]sessionListJSONRow, len(sessions))
 	for i, s := range sessions {
 		rows[i] = sessionListJSONRow{
-			ID:            s.ID,
-			Name:          sessionListJSONName(s),
-			Template:      s.Template,
-			State:         s.State,
-			Closed:        s.Closed,
-			Title:         s.Title,
-			Rig:           sessionListJSONRig(s),
-			Alias:         s.Alias,
-			AgentName:     s.AgentName,
-			Provider:      s.Provider,
-			Transport:     s.Transport,
-			Command:       s.Command,
-			WorkDir:       s.WorkDir,
-			WorkerDir:     strings.TrimSpace(s.WorkerDir),
-			SessionName:   s.SessionName,
-			SessionKey:    s.SessionKey,
-			ResumeFlag:    s.ResumeFlag,
-			ResumeStyle:   s.ResumeStyle,
-			ResumeCommand: s.ResumeCommand,
-			CreatedAt:     s.CreatedAt,
-			LastActive:    s.LastActive,
-			Attached:      s.Attached,
-		}
-		if !s.LastNudgeDeliveredAt.IsZero() {
-			stamp := s.LastNudgeDeliveredAt.UTC()
-			rows[i].LastNudgeDeliveredAt = &stamp
+			ID:                   s.ID,
+			Name:                 sessionListJSONName(s.Alias, s.SessionName, s.ID),
+			Template:             s.Template,
+			State:                sessionListJSONState(s.State, s.Closed),
+			Closed:               s.Closed,
+			Title:                s.Title,
+			Rig:                  sessionListJSONRig(s.Template, s.SessionName),
+			Alias:                s.Alias,
+			AgentName:            s.AgentName,
+			Provider:             s.Provider,
+			Transport:            s.Transport,
+			Command:              s.Command,
+			WorkDir:              s.WorkDir,
+			WorkerDir:            strings.TrimSpace(s.WorkerDir),
+			SessionName:          s.SessionName,
+			SessionKey:           s.SessionKey,
+			ResumeFlag:           s.ResumeFlag,
+			ResumeStyle:          s.ResumeStyle,
+			ResumeCommand:        s.ResumeCommand,
+			CreatedAt:            sessionListTime(s.CreatedAt),
+			LastActive:           sessionListLastActive(s.LastActive),
+			LastNudgeDeliveredAt: sessionListNudge(s.LastNudgeDeliveredAt),
+			Attached:             s.Attached,
 		}
 	}
 	return rows
 }
 
-func sessionListJSONName(s session.Info) string {
-	if s.Alias != "" {
-		return s.Alias
+// sessionListJSONRowsFromAPI builds an API-served read's rows with the same
+// derivations as the local read (name, rig, state, timestamps). It never
+// fills the fields the API redacts, and carries the server's running,
+// reason, last_output and program_status.
+func sessionListJSONRowsFromAPI(views []api.SessionListView) []sessionListJSONRow {
+	rows := make([]sessionListJSONRow, len(views))
+	for i, v := range views {
+		running := v.Running
+		rows[i] = sessionListJSONRow{
+			ID:                   v.ID,
+			Name:                 sessionListJSONName(v.Alias, v.SessionName, v.ID),
+			Template:             v.Template,
+			State:                sessionListJSONState(session.State(v.State), v.Closed),
+			Closed:               v.Closed,
+			Title:                v.Title,
+			Rig:                  sessionListJSONRig(v.Template, v.SessionName),
+			Alias:                v.Alias,
+			AgentName:            v.AgentName,
+			Provider:             v.Provider,
+			Transport:            v.Transport,
+			WorkDir:              v.WorkDir,
+			WorkerDir:            strings.TrimSpace(v.WorkerDir),
+			SessionName:          v.SessionName,
+			CreatedAt:            sessionListTime(v.CreatedAt),
+			LastActive:           sessionListLastActive(v.LastActive),
+			LastNudgeDeliveredAt: sessionListNudge(v.LastNudgeDeliveredAt),
+			Attached:             v.Attached,
+			Running:              &running,
+			Reason:               v.Reason,
+			LastOutput:           v.LastOutput,
+			ProgramStatus:        v.ProgramStatus,
+		}
 	}
-	if s.SessionName != "" {
-		return s.SessionName
-	}
-	return s.ID
+	return rows
 }
 
-func sessionListJSONRig(s session.Info) string {
-	template := strings.TrimSpace(s.Template)
+// sessionListJSONState is the state a list row prints: session.StateClosed
+// for a closed session (session.Info blanks State on a closed bead).
+func sessionListJSONState(state session.State, closed bool) session.State {
+	if closed {
+		return session.StateClosed
+	}
+	return state
+}
+
+// sessionListTime normalizes a list timestamp to UTC at second precision,
+// the precision the API wire carries, so both routes print the same value.
+func sessionListTime(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Second)
+}
+
+// sessionListLastActive renders last_active: "" when the session has not
+// been active, otherwise RFC 3339 in UTC at second precision.
+func sessionListLastActive(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return sessionListTime(t).Format(time.RFC3339)
+}
+
+// sessionListNudge renders last_nudge_delivered_at: nil (omitted) for the zero
+// time, otherwise the normalized stamp.
+func sessionListNudge(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	stamp := sessionListTime(t)
+	return &stamp
+}
+
+// sessionListJSONName is the row's display name: the alias, else the session
+// name, else the id.
+func sessionListJSONName(alias, sessionName, id string) string {
+	if alias != "" {
+		return alias
+	}
+	if sessionName != "" {
+		return sessionName
+	}
+	return id
+}
+
+// sessionListJSONRig derives the row's rig: the template's leading segment
+// before the first '/', else the session name's prefix before "--".
+func sessionListJSONRig(template, sessionName string) string {
+	template = strings.TrimSpace(template)
 	if before, _, ok := strings.Cut(template, "/"); ok {
 		return before
 	}
-	name := strings.TrimSpace(s.SessionName)
+	name := strings.TrimSpace(sessionName)
 	if before, _, ok := strings.Cut(name, "--"); ok {
 		return before
 	}
@@ -1339,17 +1438,28 @@ func sessionListJSONRig(s session.Info) string {
 }
 
 func sessionListTarget(s session.Info) string {
-	if s.Alias != "" {
-		return s.Alias
+	return sessionListTargetOf(s.Alias, s.SessionName)
+}
+
+// sessionListTargetOf is the TARGET column: the alias, else the session name,
+// else "-".
+func sessionListTargetOf(alias, sessionName string) string {
+	if alias != "" {
+		return alias
 	}
-	if s.SessionName != "" {
-		return s.SessionName
+	if sessionName != "" {
+		return sessionName
 	}
 	return "-"
 }
 
 func sessionListTitle(s session.Info) string {
-	title := s.Title
+	return sessionListTitleOf(s.Title)
+}
+
+// sessionListTitleOf is the TITLE column: "-" when empty, truncated to 30
+// characters.
+func sessionListTitleOf(title string) string {
 	if title == "" {
 		title = "-"
 	}
@@ -1480,13 +1590,80 @@ const (
 	circuitOpenReason  = session.LifecycleReasonCircuitOpen
 )
 
+// sessionListReasonInputs are the reads the REASON column needs beyond the
+// session itself, shared by the local read and the supervisor's
+// SessionListWakeReasons so both routes print the same cell.
+type sessionListReasonInputs struct {
+	infoIndex    map[string]session.Info
+	cfg          *config.City
+	sp           runtime.Provider
+	poolDesired  map[string]int
+	readyWaitSet map[string]bool
+}
+
+// newSessionListReasonInputs builds the REASON inputs for listed. infoIndex
+// is the open sessions' persisted Info by id. The provider is wrapped with an
+// attachment cache built from listed: active sessions already carry
+// Info.Attached from the runtime overlay, and inactive ones are asked once,
+// keeping the "running and attached" semantics, so wakeReasonsInfo does not
+// repeat IsAttached per session. The pool counts are the static config
+// maximums (cliPoolDesired), not the controller's live demand, so the local
+// read and the API route print the same thing.
+func newSessionListReasonInputs(listed []session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, readyWaitSet map[string]bool) sessionListReasonInputs {
+	attachedSet := buildAttachmentCache(listed, func(info session.Info) (bool, error) {
+		if info.State == session.StateActive || sp == nil {
+			return info.Attached, nil
+		}
+		return sessionAttachedForWakeReason(sp, info.SessionName), nil
+	})
+	return sessionListReasonInputs{
+		infoIndex:    infoIndex,
+		cfg:          cfg,
+		sp:           &attachmentCachingProvider{Provider: sp, cache: attachedSet},
+		poolDesired:  cliPoolDesired(cfg),
+		readyWaitSet: readyWaitSet,
+	}
+}
+
+// parts returns s's REASON parts (sessionListReasonParts).
+func (in sessionListReasonInputs) parts(s session.Info) (string, []string) {
+	return sessionListReasonParts(s, in.infoIndex, in.cfg, in.sp, in.poolDesired, in.readyWaitSet)
+}
+
+// cell returns s's REASON cell.
+func (in sessionListReasonInputs) cell(s session.Info) string {
+	return sessionListReasonCell(in.parts(s))
+}
+
 // sessionReason computes the REASON column for a session in gc session list.
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
 // For asleep sessions, shows the sleep reason (e.g., "user-hold", "quarantine").
 // For closed sessions, shows "-".
 func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) string {
+	return sessionListReasonCell(sessionListReasonParts(s, infoIndex, cfg, sp, poolDesired, readyWaitSet))
+}
+
+// sessionListReasonCell renders the REASON cell from its parts: the
+// lifecycle reason when there is one, else the wake reasons joined by ",",
+// else "-". The API route renders the server's reason and wake_reasons
+// through it too.
+func sessionListReasonCell(lifecycle string, wake []string) string {
+	if lifecycle != "" {
+		return lifecycle
+	}
+	if len(wake) > 0 {
+		return strings.Join(wake, ",")
+	}
+	return "-"
+}
+
+// sessionListReasonParts computes the two parts of s's REASON cell: the
+// lifecycle (sleep, hold, circuit) reason, and otherwise the reasons the
+// session is kept awake. A closed session, one without typed session data in
+// infoIndex, and an archived session outside continuity have neither.
+func sessionListReasonParts(s session.Info, infoIndex map[string]session.Info, cfg *config.City, sp runtime.Provider, poolDesired map[string]int, readyWaitSet map[string]bool) (string, []string) {
 	if s.State == "" {
-		return "-" // closed
+		return "", nil // closed
 	}
 
 	// info is the typed reason source of truth — the full snapshot Info projection
@@ -1496,7 +1673,7 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	// wrong REASON cell).
 	info, ok := infoIndex[s.ID]
 	if !ok {
-		return "-" // no typed session data available
+		return "", nil // no typed session data available
 	}
 
 	now := time.Now().UTC()
@@ -1504,7 +1681,7 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	lcInput.Now = now
 	lifecycle := session.ProjectLifecycle(lcInput)
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
-		return "-"
+		return "", nil
 	}
 	var isRunning func(string) bool
 	if sp != nil {
@@ -1513,26 +1690,26 @@ func sessionReason(s session.Info, infoIndex map[string]session.Info, cfg *confi
 	// WI-6 R5: the display reason now reads Info.SessionCircuitState (added this
 	// wave) and the other lifecycle markers off the typed snapshot Info.
 	if reason := session.LifecycleDisplayReasonWithLivenessInfo(info, now, isRunning); reason != "" {
-		return reason
+		return reason, nil
 	}
 
 	// If config is available and no lifecycle reason blocks display, compute
 	// full wake reasons (including WakeConfig).
-	if cfg != nil {
-		reasons := wakeReasonsInfo(info, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
-		if pinAwakeWakeReasonVisible(info, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
-			reasons = append(reasons, WakePin)
-		}
-		if len(reasons) > 0 {
-			parts := make([]string, len(reasons))
-			for i, r := range reasons {
-				parts[i] = string(r)
-			}
-			return strings.Join(parts, ",")
-		}
+	if cfg == nil {
+		return "", nil
 	}
-
-	return "-"
+	reasons := wakeReasonsInfo(info, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
+	if pinAwakeWakeReasonVisible(info, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
+		reasons = append(reasons, WakePin)
+	}
+	if len(reasons) == 0 {
+		return "", nil
+	}
+	wake := make([]string, len(reasons))
+	for i, r := range reasons {
+		wake[i] = string(r)
+	}
+	return "", wake
 }
 
 func pinAwakeWakeReasonVisible(info session.Info, cfg *config.City, now time.Time) bool {
@@ -2415,10 +2592,10 @@ func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason stri
 	return doSessionPeekFallback(target, lines, jsonOutput, stdout, stderr)
 }
 
-// renderSessionPeekFromAPI writes the API-sourced peek output to stdout,
-// appending a staleness banner on stderr-or-stdout when the supervisor
-// cache age crosses the threshold. Matches the fallback path's text output
-// semantics: trailing newline if the preview doesn't already end in one.
+// renderSessionPeekFromAPI writes the API-sourced peek output to stdout.
+// Matches the fallback path's text output semantics: trailing newline if the
+// preview doesn't already end in one. It prints no cache-age footer because
+// the server reads pane output live from the runtime, not from the bead cache.
 func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
 	output := cr.Body.LastOutput
 	if jsonOutput {
@@ -2438,9 +2615,6 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
 	if !strings.HasSuffix(output, "\n") {
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
-	}
-	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds, "cached pane output")) //nolint:errcheck
 	}
 	return 0
 }
@@ -2959,7 +3133,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	}
 
 	gateCfg, gateErr := loadCityConfig(cityPath, io.Discard)
-	if gateErr == nil && cliLaneExecutesMessage(gateCfg) {
+	if gateErr == nil && cliLaneExecutesMessageAt(cityPath, gateCfg) {
 		return submitSessionLane(&sessionSubmitLane{
 			cityPath: cityPath, target: target, message: message, intent: intent, key: key,
 			asJSON: jsonOutput, stdout: stdout, stderr: stderr,

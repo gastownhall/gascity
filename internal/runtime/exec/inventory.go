@@ -89,8 +89,11 @@ func readableName(name string) bool {
 
 // inventoryEntry maps one listed session's attributes (§4.5). Without a
 // readable state of running or dead and its object, or with a dead box
-// whose agent lives, it has none. Each other attribute that is null,
-// missing or malformed is unknown on its own.
+// whose agent lives, it has none. Its incarnation is the object,
+// "<id>:<created>", so a later `observe` of the same box matches it. Each
+// other attribute that is null, missing or malformed is unknown on its
+// own, and so is a last_activity at or before the epoch (a Go adapter's
+// zero time.Time), as tmux reads an activity of 0.
 func inventoryEntry(fields map[string]json.RawMessage) (runtime.InventoryEntry, bool) {
 	var state, agent string
 	var object observeObject
@@ -107,7 +110,7 @@ func inventoryEntry(fields map[string]json.RawMessage) (runtime.InventoryEntry, 
 	if state == stateDead && agent == agentAlive {
 		return runtime.InventoryEntry{}, false
 	}
-	e := runtime.InventoryEntry{Incarnation: object.ID + "@" + object.Created, DeadKnown: true, AllPanesDead: state == stateDead}
+	e := runtime.InventoryEntry{Incarnation: object.ID + ":" + object.Created, DeadKnown: true, AllPanesDead: state == stateDead}
 	if state == stateRunning && (agent == agentAlive || agent == agentDead) {
 		e.ProcessKnown, e.ProcessAlive = true, agent == agentAlive
 	}
@@ -117,7 +120,7 @@ func inventoryEntry(fields map[string]json.RawMessage) (runtime.InventoryEntry, 
 	}
 	var activity *string
 	if json.Unmarshal(fields["last_activity"], &activity) == nil && activity != nil {
-		if at, err := time.Parse(time.RFC3339, *activity); err == nil {
+		if at, err := time.Parse(time.RFC3339, *activity); err == nil && at.Unix() > 0 {
 			e.ActivityKnown, e.LastActivity = true, at
 		}
 	}

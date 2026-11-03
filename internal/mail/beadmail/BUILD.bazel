@@ -32,6 +32,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/coordclass",
         "//internal/mail",
         "//internal/mail/mailtest",

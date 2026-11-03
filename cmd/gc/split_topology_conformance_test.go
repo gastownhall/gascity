@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -1514,7 +1515,7 @@ func conformanceWarmTickDemand(t *testing.T, e splitEnv) {
 		}
 	}
 
-	after, err := session.ListAllSessionBeads(e.sessionsStore(), beads.ListQuery{})
+	after, err := session.ListAllSessionBeads(beadstest.Sessions(e.sessionsStore()), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("list session beads after warm ticks: %v", err)
 	}

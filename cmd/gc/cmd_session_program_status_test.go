@@ -14,12 +14,12 @@ import (
 // renders an unknown status as idle, drops the blocked kind, or leaves
 // program_status out of its JSON.
 func TestCLISessionListStatusColumn(t *testing.T) {
-	row := func(id string, ps *api.SessionProgramStatus) SessionView {
-		return SessionView{ID: id, Template: "worker", State: "active", CreatedAt: "2026-10-31T09:00:00Z", ProgramStatus: ps}
+	row := func(id string, ps *api.SessionProgramStatus) api.SessionListView {
+		return api.SessionListView{ID: id, Template: "worker", State: "active", CreatedAt: time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC), ProgramStatus: ps}
 	}
 
 	var plain bytes.Buffer
-	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{Body: []SessionView{row("gc-1", nil)}}, false, &plain); code != 0 {
+	if code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: []api.SessionListView{row("gc-1", nil)}}, "", "", false, &plain, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("render = %d", code)
 	}
 	header, _, _ := strings.Cut(plain.String(), "\n")
@@ -30,7 +30,7 @@ func TestCLISessionListStatusColumn(t *testing.T) {
 	since := time.Now().Add(-3*time.Minute - 5*time.Second)
 	blocked := &api.SessionProgramStatus{State: "blocked", Kind: "permission", App: "codex", Since: since}
 	var out bytes.Buffer
-	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{Body: []SessionView{row("gc-1", blocked), row("gc-2", nil)}}, false, &out); code != 0 {
+	if code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: []api.SessionListView{row("gc-1", blocked), row("gc-2", nil)}}, "", "", false, &out, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("render = %d", code)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -45,7 +45,7 @@ func TestCLISessionListStatusColumn(t *testing.T) {
 	}
 
 	var js bytes.Buffer
-	if code := renderSessionListFromAPI(api.CachedRead[[]SessionView]{Body: []SessionView{row("gc-1", blocked), row("gc-2", nil)}}, true, &js); code != 0 {
+	if code := renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: []api.SessionListView{row("gc-1", blocked), row("gc-2", nil)}}, "", "", true, &js, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("render --json = %d", code)
 	}
 	validateJSONAgainstBuiltinSchema(t, []string{"session", "list"}, js.Bytes())

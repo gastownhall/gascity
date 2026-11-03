@@ -143,6 +143,53 @@ func TestLaneTakesTheBatchedProcessFact(t *testing.T) {
 	}
 }
 
+// Kills (PAR-EXEC §5 item 5): the probe fallback of a v2-ready exec box
+// whose inventory left its agent unknown discarding the probe's answer, as
+// it does when the inventory's incarnation is not led by the object an
+// `observe` of the same box reports (probedIncarnation): the agent stays
+// unknown every pass, and a zombie is never read dead. An answer for
+// another object is still discarded. Through the production seam-backed
+// provider and the lane's own pass steps.
+func TestLaneTakesTheExecProbeAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name, object string
+		known        bool
+	}{
+		{"same object", `{"id":"c","created":"t"}`, true},
+		{"another object", `{"id":"c","created":"t2"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := writeRPPScript(t, `case "$1" in
+  protocol) echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}' ;;
+  inventory) echo '{"complete":true,"sessions":[{"name":"mc-a","state":"running","object":{"id":"c","created":"t"},"agent":"unknown","identity":{"GC_SESSION_ID":"gc-1","GT_PROCESS_NAMES":"claude"}}]}' ;;
+  observe) cat >/dev/null; echo '{"state":"running","object":`+tc.object+`,"agent":"dead"}' ;;
+  *) exit 2 ;;
+esac
+`)
+			listing := listInventoryBackends(sessionexec.NewSeamBacked(script), "exec")
+			backends := []BackendPass{classifyInventoryBackend(listing.leaves[0])}
+			l := &runtimeInventoryLane{clock: &clock.Fake{Time: obsTestEpoch}, interval: time.Minute, identity: map[string]inventoryIdentity{}}
+			attrs, hosts, _, errs := l.enrich(context.Background(), listing.leaves, backends)
+			if len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			l.readIdentities(context.Background(), attrs, hosts)
+			if n := probeProcesses(context.Background(), attrs, hosts, 4); n != 1 {
+				t.Fatalf("probeProcesses probed %d names, want the one the inventory left unknown", n)
+			}
+			a := attrs["mc-a"]
+			if got, want := [3]bool{a.ProcessProbed, a.ProcessKnown, a.ProcessAlive}, [3]bool{true, tc.known, false}; got != want {
+				t.Fatalf("probed/known/alive = %v, want %v (incarnation %q)", got, want, a.Incarnation)
+			}
+			obs := RuntimeObservation{}
+			applyInventoryAttrs(&obs, a, obsTestEpoch)
+			if (obs.ProcessAlive.Value == ObsNo) != tc.known {
+				t.Fatalf("process alive = %+v, want a dead agent exactly when the probe answered for the listed object", obs.ProcessAlive)
+			}
+		})
+	}
+}
+
 // Kills (PAR-EXEC §5 item 5): a batched identity that spends the identity
 // read budget, or is not taken at all: a Known identity in the inventory
 // is the name's identity for that incarnation with no read, even with the
@@ -320,7 +367,7 @@ esac
 	backends := []BackendPass{classifyInventoryBackend(listing.leaves[0])}
 	l := &runtimeInventoryLane{}
 	attrs, _, _, errs := l.enrich(context.Background(), listing.leaves, backends)
-	if len(errs) != 0 || attrs["mc-a"].Incarnation != "c@t" {
+	if len(errs) != 0 || attrs["mc-a"].Incarnation != "c:t" {
 		t.Fatalf("enrich = %+v, %v; want the listing's inventory", attrs, errs)
 	}
 	data, err := os.ReadFile(ops)

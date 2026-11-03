@@ -525,18 +525,20 @@ gc serves its own `release-if-current` itself.
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
 - A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
-  a `create --graph` plan, the `import` source) is copied to a private
-  temporary file once judged, and bd is pointed at the copy, which is removed
-  when `gc bd` returns. bd writes exactly what gc judged: a file rewritten
-  after gc read it changes nothing. A pipe (`<(...)`, `/dev/stdin`) given to
-  `batch --file`, `delete --from-file`, `create --graph` or `import` is
-  drained by gc's read, and bd gets the drained bytes. bd names the copy, not
-  your file, in what it prints. Every spelling of the `import` source bd
-  accepts (a short-flag run such as `-qia.jsonl`, a name after `--`) is
-  pointed at the copy. On every city, single-store or split, a
-  `--metadata @file` of `create`, `new` or `update` is read once, before any
-  check, so every check and bd read the same bytes and a pipe works there
-  too.
+  a `create --graph` plan, the `import` source) is copied, under its own file
+  name, into a private directory under `TMPDIR` (or `/tmp`) once judged, and bd
+  is pointed at the copy, which is removed when `gc bd` returns. bd writes
+  exactly what gc judged: a file rewritten after gc read it changes nothing.
+  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`,
+  `delete --from-file`, `create --graph` or `import` is drained by gc's read,
+  and bd gets the drained bytes. bd prints the copy's path; where it records
+  only a file name (an `import`'s history entry), that is your file's name. A
+  write gc cannot copy (`TMPDIR` missing, unwritable or full) is refused.
+  Every spelling of the `import` source bd accepts (a short-flag run such as
+  `-qia.jsonl`, a name after `--`) is pointed at the copy. On every city,
+  single-store or split, a `--metadata @file` of `create`, `new` or `update`
+  is read once, before any check, so every check and bd read the same bytes
+  and a pipe works there too.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
 - `config set` and `config unset`: only `types.custom`, `types.infra`,

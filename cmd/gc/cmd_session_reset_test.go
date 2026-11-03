@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -947,7 +948,7 @@ func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed: reset left the unfinished create holding its claim (pending_create_claim=%q)", got.Status, got.Metadata["pending_create_claim"])
 	}
-	if err := session.EnsureAliasAvailable(reloaded, "sky", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(reloaded), "sky", ""); err != nil {
 		t.Fatalf("alias still held after reset: %v", err)
 	}
 }
