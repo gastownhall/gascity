@@ -76,11 +76,28 @@ filesystem search. If no command exists for what you need, file a bead.
 
 ## Molecules — STOP, check BEFORE you start working
 
-**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
-section. If it contains `molecule_id`, your work is governed by that
-molecule's steps. Do NOT just read the description and start coding.
+This section is for an assignment whose METADATA has `molecule_id` and
+no `gc.root_bead_id` (see "Classify Your Assignment"). A workflow step that
+also carries `molecule_id` is still one step: follow "Workflow Steps".
 
-Run `gc bd mol current <molecule-id>` to see your steps:
+**CRITICAL — read the molecule's root first.** `molecule_id` alone does not
+say whether it names a legacy molecule or a workflow the orchestrator runs as
+a graph. Before anything else, run:
+
+```bash
+gc bd show <molecule-id>
+```
+
+- If the root's METADATA has `gc.formula_contract=graph.v2` or
+  `gc.kind=workflow`, it is a graph workflow: do NOT run `gc bd mol current`
+  on it, and do not execute or close its steps or its root. Escalate (see
+  "Escalation").
+- If the root cannot be read (it is missing or the command fails), that is an
+  error, not a legacy molecule: escalate instead of navigating it.
+- Otherwise it is a legacy molecule, and your work is governed by its steps.
+  Do NOT just read the description and start coding.
+
+For a legacy molecule, run `gc bd mol current <molecule-id>` to see your steps:
 
 - `[done]` — step is complete
 - `[current]` — step is in progress (you are here)
@@ -96,6 +113,10 @@ Run `gc bd mol current <molecule-id>` to see your steps:
    step that cannot be done (see "Closing a Bead").
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
+A step you reach this way stays a molecule step even if it carries
+`gc.root_bead_id`: if you cannot finish it, leave it open unless its own
+instructions say how to close it (see "Closing a Bead").
+
 Do NOT read the parent bead description and do everything at once.
 Do NOT skip steps. Do NOT close steps you didn't execute.
 
@@ -107,8 +128,8 @@ the bead description directly.
 - `gc hook --claim --drain-ack --json` — find and atomically claim work, or acknowledge drain when there is none
 - `gc hook --claim --json` — check the hook for your next workflow step; it acknowledges nothing
 - `gc bd show <id>` — see details of a work item or step
-- `gc bd mol current <molecule-id>` — show position in molecule workflow
-- `gc bd mol progress <molecule-id>` — show molecule progress summary
+- `gc bd mol current <molecule-id>` — show position in a legacy molecule, after reading its root (see "Molecules")
+- `gc bd mol progress <molecule-id>` — show legacy molecule progress summary
 - `gc bd update <id> --set-metadata gc.outcome=pass` — record a successful outcome before you close finished work ("Closing a Bead" covers work that cannot succeed)
 - `gc bd close <id> --reason "<outcome>"` — mark work as done, after its outcome is recorded
 - `gc mail inbox` — check for messages

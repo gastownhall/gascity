@@ -1833,4 +1833,44 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 		restart := promptSection(t, prompt, "Context Exhaustion")
 		assertTextInOrder(t, "Context Exhaustion", restart, "Startup Protocol", "workflow step", "next one from the hook")
 	})
+
+	t.Run("AC3_molecule_root_is_read_before_navigation", func(t *testing.T) {
+		molecules := promptSection(t, prompt, "Molecules")
+		// A step that also carries molecule_id is sent back to Workflow Steps.
+		assertTextInOrder(t, "Molecules", molecules,
+			"no `gc.root_bead_id`", "Workflow Steps")
+		// The root read comes before the first mol current, and graph roots
+		// and unreadable roots are rejected before the legacy loop starts.
+		assertTextInOrder(t, "Molecules", molecules,
+			"gc bd show <molecule-id>",
+			"`gc.formula_contract=graph.v2` or `gc.kind=workflow`",
+			"do NOT run `gc bd mol current`",
+			"Escalation",
+			"cannot be read",
+			"not a legacy molecule",
+			"Otherwise it is a legacy molecule",
+			"gc bd mol current <molecule-id>")
+		first := strings.Index(molecules, "gc bd mol current <molecule-id>")
+		if show := strings.Index(molecules, "gc bd show <molecule-id>"); show < 0 || first < show {
+			t.Errorf("Molecules: gc bd mol current runs before the molecule root is read:\n%s", molecules)
+		}
+		// Verified legacy execution and its failure handling remain.
+		assertTextInOrder(t, "Molecules", molecules,
+			"`[ready]`",
+			"gc bd show <step-id>",
+			"gc bd update <step-id> --set-metadata gc.outcome=pass",
+			"gc bd close <step-id> --reason",
+			"Closing a Bead",
+			"gc bd mol current <molecule-id>` — check your position")
+		assertTextContains(t, "Molecules", molecules,
+			"stays a molecule step even if it carries `gc.root_bead_id`",
+			"Do NOT close steps you didn't execute")
+		if strings.Contains(molecules, "in step 4") {
+			t.Errorf("Molecules: refers to a How to Work step number that no longer reads the bead:\n%s", molecules)
+		}
+		closing := promptSection(t, prompt, "Closing a Bead")
+		assertTextContains(t, "Closing a Bead", closing,
+			"a molecule step you reached through `gc bd mol current`",
+			"closing a molecule step unblocks the steps after it")
+	})
 }
