@@ -1896,6 +1896,19 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC5_startup_drain_semantics_distinguish_drain_ack_from_polls", func(t *testing.T) {
+		startup := promptSection(t, prompt, "Startup Protocol")
+		assertTextInOrder(t, "Startup Protocol", startup,
+			"A `--drain-ack` call that exits 0", "exit",
+			"`drain_acknowledged: true`", "without that field",
+			"A `--drain-ack` call that exits non-zero", "run `gc runtime drain-ack`, then exit",
+			"A plain `gc hook --claim --json` poll acknowledges nothing", "exits non-zero with a `drain` line",
+			"prints no JSON line", "not a drain")
+		if strings.Contains(startup, "the drain was acknowledged for you") {
+			t.Errorf("Startup Protocol: says every drain answer was acknowledged; a plain poll or a failed acknowledgement leaves drain unacknowledged:\n%s", startup)
+		}
+	})
 }
 
 // TestPoolWorkerPromptDoesNotDenyMaterializedGraphSteps pins that the

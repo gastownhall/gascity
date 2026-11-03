@@ -81,3 +81,32 @@ func TestDogPromptNamesTheHookClaimCommand(t *testing.T) {
 		t.Error("agent.toml nudge says to check the hook but the prompt never names a gc hook command")
 	}
 }
+
+// TestDogPromptDistinguishesDrainAwareCallsFromPlainPolls pins the drain
+// answer in the dog's copy of the claim protocol: a --drain-ack call that
+// exits 0 is done (a tolerated acknowledgement refusal exits 0 without
+// drain_acknowledged), one that exits non-zero still owes gc runtime
+// drain-ack, and a plain poll acknowledges nothing. The sync assertion in
+// TestDogPromptNamesTheHookClaimCommand keeps this text identical to the core
+// fragment.
+func TestDogPromptDistinguishesDrainAwareCallsFromPlainPolls(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "agents", "dog", "prompt.template.md"))
+	if err != nil {
+		t.Fatalf("ReadFile prompt: %v", err)
+	}
+	prompt := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{
+		"A `--drain-ack` call that exits 0",
+		"`drain_acknowledged: true`",
+		"A `--drain-ack` call that exits non-zero",
+		"run `gc runtime drain-ack`, then exit",
+		"A plain `gc hook --claim --json` poll acknowledges nothing",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("dog prompt missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "the drain was acknowledged for you") {
+		t.Error("dog prompt says every drain answer was acknowledged; a failed acknowledgement leaves the drain unacknowledged")
+	}
+}
