@@ -191,8 +191,12 @@ flatten and after each GC, whether that rewrite succeeded or failed, it checks
 the entry again and asks the server
 `SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` on that database. The answer
 must name the database (in any case) and a resolvable HEAD; the HEAD may
-differ from the one before the rewrite. When the entry existed before and is
-gone after, or the probe fails, compact:
+differ from the one before the rewrite. The probe is tried up to
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`), waiting
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds (default `2`) between tries,
+and each try gets at most 30 seconds. A server that answers within those tries
+is live, and the rewrite's own result decides whether the database succeeded.
+When the entry existed before and is gone after, or every try fails, compact:
 
 - writes a quarantine marker with reason
   `live database unavailable after compaction`, the steps that ran, the step

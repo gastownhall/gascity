@@ -13,6 +13,9 @@ import (
 // database it rewrote stops being served.
 const compactLiveGateReason = "live database unavailable after compaction"
 
+// compactLiveProbeQuery is the served-HEAD probe the live-database gate issues.
+const compactLiveProbeQuery = "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"
+
 func compactBeadsQuarantineMarkerPath(fixture compactScriptFixture) string {
 	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 }
@@ -227,7 +230,7 @@ func TestCompactScriptLiveGateValidatesServedDatabaseAndHead(t *testing.T) {
 		if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
 			t.Fatalf("compact quarantined a live database (stat err=%v):\n%s", err, out)
 		}
-		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); len(probes) != 2 {
+		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", compactLiveProbeQuery); len(probes) != 2 {
 			t.Fatalf("live probes after flatten and full GC = %d, want 2: %q", len(probes), probes)
 		}
 	})
@@ -268,7 +271,7 @@ func TestCompactScriptLiveGateFailureAbortsTheRun(t *testing.T) {
 			// The failed gate's own probe is the last statement the run issues.
 			lines := strings.Split(strings.TrimSpace(readCompactDoltLog(t, fixture)), "\n")
 			last := lines[len(lines)-1]
-			if last != "db=beads query=SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))" {
+			if last != "db=beads query="+compactLiveProbeQuery {
 				t.Fatalf("compact issued statements after the failed gate; last statement %q\nlog:\n%s", last, strings.Join(lines, "\n"))
 			}
 			for _, db := range []string{"yak", "zed"} {
@@ -278,4 +281,68 @@ func TestCompactScriptLiveGateFailureAbortsTheRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompactScriptLiveGateRetriesATransientProbeFailure(t *testing.T) {
+	t.Run("recovery keeps a successful rewrite successful", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		setCompactBeadsLiveFault(t, fixture, "gc", "transient:2")
+
+		out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err != nil {
+			t.Fatalf("compact failed although the server recovered within the attempts: %v\n%s", err, out)
+		}
+		if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
+			t.Fatalf("compact quarantined a database that recovered (stat err=%v):\n%s", err, out)
+		}
+		for _, want := range []string{
+			"compact: db=beads live probe attempt 1/3 failed: probe failed rc=1: cannot resolve default branch head for database beads",
+			"compact: db=beads live probe attempt 2/3 failed:",
+			"compact: db=beads live probe recovered on attempt 3/3",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("compact output missing %q:\n%s", want, out)
+			}
+		}
+		// One probe after the flatten, three after the full GC.
+		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", compactLiveProbeQuery); len(probes) != 4 {
+			t.Fatalf("live probes = %d, want 4: %q", len(probes), probes)
+		}
+	})
+
+	t.Run("recovery leaves a failed rewrite an ordinary failure", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		setCompactBeadsLiveFault(t, fixture, "gc", "transient:1")
+
+		out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err == nil {
+			t.Fatalf("compact succeeded despite the failed full GC:\n%s", out)
+		}
+		if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
+			t.Fatalf("compact quarantined a database that recovered (stat err=%v):\n%s", err, out)
+		}
+		if _, err := os.Stat(compactBeadsPendingGCMarkerPath(fixture)); err != nil {
+			t.Fatalf("failed full GC on a live database left no pending-GC marker: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "compact: 1 database(s) failed compaction") {
+			t.Fatalf("compact output missing the ordinary failure tally:\n%s", out)
+		}
+	})
+
+	t.Run("every configured attempt failing quarantines", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		setCompactBeadsLiveFault(t, fixture, "gc", "transient:2")
+
+		out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS=2")
+		if err == nil {
+			t.Fatalf("compact succeeded although every live probe attempt failed:\n%s", out)
+		}
+		assertCompactBeadsLiveGateMarker(t, fixture, map[string]string{
+			"live_gate_failed_step": "post-flatten full GC",
+			"live_gate_failure":     "served-HEAD probe failed",
+		})
+		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", compactLiveProbeQuery); len(probes) != 3 {
+			t.Fatalf("live probes = %d, want 1 after the flatten and 2 after the full GC: %q", len(probes), probes)
+		}
+	})
 }

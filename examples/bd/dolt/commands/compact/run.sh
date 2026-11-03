@@ -117,6 +117,12 @@
 #     (default: 120) — wall-clock bound for remote compare-and-push
 #                     after local compaction. Push failures are recorded for
 #                     repair but do not fail local compaction.
+#   GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS
+#     (default: 3) — how many times the live-database gate asks the server
+#                   for a rewritten database's HEAD before quarantining it.
+#   GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS
+#     (default: 2) — seconds the live-database gate waits between those
+#                   attempts.
 #   GC_DOLT_RIG_LIST_TIMEOUT_SECS
 #     (default: 30) — wall-clock bound for `gc rig list --json` rig
 #                     discovery. Shared with the health command; the
@@ -365,6 +371,8 @@ host="${GC_DOLT_HOST:-127.0.0.1}"
 threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
 push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
+live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
+live_probe_delay="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
 pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
 compact_renotify_backstop_secs="${GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS:-86400}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
@@ -2576,6 +2584,31 @@ live_gate_probe() {
   return 0
 }
 
+# live_gate_probe_served DB runs live_gate_probe up to live_probe_attempts
+# times, waiting live_probe_delay seconds between attempts, so a server that
+# recovers from a brief stall after a rewrite is not quarantined. It logs each
+# failed attempt and a recovery, and leaves live_probe_failure set to the last
+# failure when every attempt fails.
+live_gate_probe_served() {
+  _lg_attempt=1
+  while :; do
+    if live_gate_probe "$1"; then
+      if [ "$_lg_attempt" -gt 1 ]; then
+        printf 'compact: db=%s live probe recovered on attempt %s/%s\n' \
+          "$1" "$_lg_attempt" "$live_probe_attempts" >&2
+      fi
+      return 0
+    fi
+    printf 'compact: db=%s live probe attempt %s/%s failed: %s\n' \
+      "$1" "$_lg_attempt" "$live_probe_attempts" "$live_probe_failure" >&2
+    if [ "$_lg_attempt" -ge "$live_probe_attempts" ]; then
+      return 1
+    fi
+    sleep "$live_probe_delay"
+    _lg_attempt=$((_lg_attempt + 1))
+  done
+}
+
 # live_gate_arm DB STEP PRE_HEAD records the pre-rewrite evidence the first
 # time a pass arms the gate; later arms in the same pass keep that baseline and
 # only append STEP to the list of rewrites the pass ran.
@@ -2607,7 +2640,7 @@ live_gate_check() {
     live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "data-dir entry $_lg_entry disappeared"
     return 1
   fi
-  if live_gate_probe "$_lg_db"; then
+  if live_gate_probe_served "$_lg_db"; then
     return 0
   fi
   live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "served-HEAD probe failed"
