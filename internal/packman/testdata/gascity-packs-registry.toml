@@ -47,17 +47,10 @@ schema = 1
     description = "Release graph.v2 review/build prompt fixes validated by gascity RC gates."
 
   [[pack.release]]
-    version = "0.1.7"
-    ref = "main"
-    commit = "5bf643ca55bd20f080994cc31414ee4596015a0c"
-    hash = "sha256:7393797bcb064030eef5f0c024d120a4edae29c06d8104465426855f5837771e"
-    description = "Route every shipped bead command through gc, so role workers, workflow pages and check scripts reach graph steps on split-store cities (no raw bd), and carry the graph.v2 prompt, check-script and workflow fixes on main since 0.1.6."
-
-  [[pack.release]]
     version = "0.0.8191"
     ref = "feat/rfc-8191-gascity-only"
-    commit = "02039579a40ae20aea47060d96027fc924333ef5"
-    hash = "sha256:c76f4d0c5ca60c859961e416c124a85226da93ec14620f9e4df8dffdf4a11de0"
+    commit = "aa5dcf701a70ca5db19228811e9ee822d852006c"
+    hash = "sha256:3866f060329663762ec4fc0c6349e21219251d65526cee191c9092fac4faedaa"
     description = "RFC8191 qualification candidate on the original compatible module baseline; stable catalog selection is unchanged."
 
 [[pack]]
@@ -209,13 +202,6 @@ schema = 1
     hash = "sha256:8b9d25324fe9af487398a6237a6f8d1614a5b32e85fceec935450c7b4d523d00"
     description = "Refresh Slack pack release pin."
 
-  [[pack.release]]
-    version = "0.0.3"
-    ref = "main"
-    commit = "23605740d0dd0d7dcd0bfcedbac347980547648c"
-    hash = "sha256:2d2255e68175b7d464845100654839a0956e8cd6fefa259e85cd03915213186b"
-    description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark pack scripts/tests executable to align release hash with materialized modes."
-
 [[pack]]
   name = "slack-channel"
   description = "Shared Slack channel routing and session identity pack for Gas City."
@@ -229,13 +215,6 @@ schema = 1
     hash = "sha256:dfcb2d64eede2c939b8f157e47348b8d103ff149b8945d91774770844abb752d"
     description = "Initial Slack channel pack release with canonical content hash."
 
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "23605740d0dd0d7dcd0bfcedbac347980547648c"
-    hash = "sha256:e8da9a9dab6e6d3ce8a3cded94104a1c64d88f39130e63b09653ce3e7457dd36"
-    description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark schema test executable to align release hash with materialized modes."
-
 [[pack]]
   name = "slack-mini"
   description = "Minimal Slack mention bridge and outbound message pack for Gas City."
@@ -248,149 +227,3 @@ schema = 1
     commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
     hash = "sha256:fff2523a9ab32e0812815c8d2addb08e6349d3885052d095bd76600eec87921a"
     description = "Initial Slack mini pack release with canonical content hash."
-
-[[pack]]
-  name = "pr-pipeline"
-  description = "Author-side PR discipline as a pack: planning, blast-radius mapping, outgoing-PR scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship)."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/pr-pipeline"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "26614e665705b33f586c8bc41ef73592548114fd"
-    hash = "sha256:92b4debf702222eb5fbb516e78ebd6397b1bdb98c67df2e542522a8faaa337fe"
-    description = "Initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands."
-
-[[pack]]
-  name = "contributing"
-  description = "The external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a PR, map its blast radius, and self-review against the codebase audit. Each step produces an artifact you act on; the pack stops before pushing — opening the PR is your call. Self-contained: gas-city's actual standards (the B-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/contributing"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "16f8297d4e62e143456bfbe4a00e0980a7d9400e"
-    hash = "sha256:8ee58fba7a87a2390fe707ccb593eec3f25b303782696d836d800e68992beeef"
-    description = "Initial contributing pack release."
-
-  [[pack.release]]
-    version = "0.2.0"
-    ref = "main"
-    commit = "7dd57dd9be7d286f19f74c27a00a4359392734a4"
-    hash = "sha256:3ba4ad08c81ab8d2cb9bd591a0f546435e14a9132b1d4d4745bde03d0feb94ad"
-    description = "Self-contained gas-city contributor lifecycle: drops the pr-pipeline import, bakes in the B-rule adoption-review audit, blast-radius dimensions, and test-tier strategy (7 skills, zero imports)."
-
-  [[pack.release]]
-    version = "0.2.1"
-    ref = "main"
-    commit = "5b7c5c1320ee6537f5b9c661d2e52712140320df"
-    hash = "sha256:3757a3dee523efb29e7cf1f9927c70c9bf491eba6d8416e147430aa6130702cf"
-    description = "YAML-safe skill front matter (0.2.0 had an unquoted colon that broke parsing) plus a durability pass — removes time-pinned references (PR-number citations, dated product names, build-timeout numbers, drift-prone counts) so the skills resist staleness. No behavior change."
-
-[[pack]]
-  name = "oversight-rig"
-  description = "Disaggregates project-level work scoping out of the mayor — adds one always-on, rig-scoped project-lead per rig that triages its rig and dispatches its own ready work directly, with deterministic severity-based escalation (no relay agent). Composes with any slack adapter pack; ships only the oversight role and its escalation machinery, not a slack bridge."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/oversight-rig"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "a1490ecf90238f3af52ab2e7f24e30b5b62cbfc2"
-    hash = "sha256:c06f30e61407994cef7e16aafecbc71afbbc9f8cdfd0d506146fdf95837333cf"
-    description = "Initial oversight-rig release: rig-scoped project-lead + deterministic escalation machinery."
-
-[[pack]]
-  name = "bmad"
-  description = "BMAD Method delivery process (PRD, architecture, epics and stories, readiness, adversarial review) as a Gas City build factory."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/bmad"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
-    hash = "sha256:cb81d9e35fe4ca2263922e901eac34aec6183d92832aa0695e43ff038462087d"
-    description = "First registry release of the BMAD build factory."
-
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
-    hash = "sha256:f59ebe28181a208086a7018d1c6df4396894c22be9bd272e025312feb7879a0a"
-    description = "Implementer commits in the source-anchor worktree (only real changes); code review records a validated review report on the workflow root; apply-findings keeps artifacts schema-valid; picks up newer gascity pack commits (do-work now needs an origin remote)."
-
-[[pack]]
-  name = "compound-engineering"
-  description = "Every Inc.'s Compound Engineering methodology as a Gas City build factory, with the widest reviewer-persona fanout in the catalog."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/compound-engineering"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
-    hash = "sha256:7981abfa28021a99accacc097d32a04e2d28c344f09ebf17e3f0ca51768140af"
-    description = "First registry release of the Compound Engineering build factory."
-
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
-    hash = "sha256:12bf7fbd2ab86d0fc2a866ac7562bc957908eae408c779e539af3c3d14ede4b9"
-    description = "Implementer commits in the source-anchor worktree; code review and compound resolution record validated report paths on the workflow root; apply-findings keeps artifacts schema-valid and the plan is re-validated after plan review; picks up newer gascity pack commits (do-work now needs an origin remote)."
-
-[[pack]]
-  name = "gstack"
-  description = "garrytan/gstack founder sprint (office hours, autoplan, QA, security, release readiness) as a Gas City build factory."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/gstack"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
-    hash = "sha256:4f180f1327933239a29918e661c0cd3a54ff3de84ab981324665e776de2eff8f"
-    description = "First registry release of the gstack build factory."
-
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
-    hash = "sha256:ed74c2b288875a5f563d2b0d2a5afffab048a4136b237fb94d6e7baf60031cba"
-    description = "Implementer commits in the source-anchor worktree; code review records a validated review report on the workflow root; apply-findings keeps artifacts schema-valid and the plan is re-validated after plan review; picks up newer gascity pack commits (do-work now needs an origin remote)."
-
-[[pack]]
-  name = "superpowers"
-  description = "obra/superpowers TDD-first skill library as a Gas City build factory."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/superpowers"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "636fdfaaf54195b293e8e56d5e9c30e4b8d5a9ef"
-    hash = "sha256:ba0428bf51627bf465a693f2426cf6be0cef70ae81b043fce3ce6761a4772290"
-    description = "First registry release of the superpowers build factory."
-
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "390cac1a8a0478b6dfde603dae00a43ed9748d13"
-    hash = "sha256:4358803ef87a4209a90f0c000fdcc58d7f92d04a9db471474d0b0ce2f0054223"
-    description = "Requirements spec carries requirements.v1 front matter and repairs from validator errors; code review records a validated review report on the workflow root; plan re-validated after plan review; vendors systematic-debugging; picks up newer gascity pack commits (do-work now needs an origin remote)."
-
-[[pack]]
-  name = "runtime-cloudflare"
-  description = "The Cloudflare session runtime, shipped as a pack so it versions independently of the gc binary. Declares [runtimes.cloudflare] backed by the gc-runtime-cloudflare RPP v0 provider, replacing the deleted gascity builtin."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/runtime-cloudflare"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "ffcb02933f878c7c9ac2df470338c28a5e5d829d"
-    hash = "sha256:432a1f917c400a3497f1be7466e0297d108b5e2174eed4d7ae4a87579e45d2d1"
-    description = "First registry release of the Cloudflare session runtime as an RPP v0 pack."
