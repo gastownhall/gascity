@@ -23,6 +23,7 @@ go_test(
     ],
     embed = [":graphv2"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/convoy",
         "//internal/coordclass",

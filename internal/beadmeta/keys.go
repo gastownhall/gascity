@@ -243,6 +243,7 @@ const (
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
+	InputTargetIDMetadataKey             = "gc.input_target_id" // synthetic input convoy's target, recorded apart from the tracks edge a purge cascades away
 	InstantiatingMetadataKey             = "gc.instantiating"
 	IterationMetadataKey                 = "gc.iteration"
 	ItemRootKeyMetadataKey               = "gc.item_root_key"
@@ -675,6 +676,7 @@ var KnownMetadataKeys = []string{
 	IdempotencyKeyMetadataKey,
 	InitiatorMetadataKey,
 	InputConvoyIDMetadataKey,
+	InputTargetIDMetadataKey,
 	InstantiatingMetadataKey,
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,

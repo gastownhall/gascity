@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -444,7 +445,8 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 		return beads.Bead{}, fmt.Errorf("input convoy target id is empty")
 	}
 	metadata := map[string]string{
-		syntheticMetadataKey: "true",
+		syntheticMetadataKey:              "true",
+		beadmeta.InputTargetIDMetadataKey: target.ID,
 	}
 	created, err := store.Create(beads.Bead{
 		Title:    "input convoy for " + target.ID,
@@ -464,6 +466,23 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 		return beads.Bead{}, fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
 	}
 	return created, nil
+}
+
+// RecordedInputTargetIDs returns the distinct bead ids an input convoy's own
+// metadata records as its targets: the single-item target stamped at creation
+// (beadmeta.InputTargetIDMetadataKey) and the drain member a drain item convoy
+// carries (beadmeta.DrainMemberIDMetadataKey). Unlike the convoy's tracks
+// edges, these survive a purge of the target.
+func RecordedInputTargetIDs(inputConvoy beads.Bead) []string {
+	var ids []string
+	for _, key := range []string{beadmeta.InputTargetIDMetadataKey, beadmeta.DrainMemberIDMetadataKey} {
+		id := strings.TrimSpace(inputConvoy.Metadata[key])
+		if id == "" || slices.Contains(ids, id) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // PreparePreviewInvocation validates graph.v2 preview inputs without creating
