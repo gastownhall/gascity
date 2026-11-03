@@ -21,6 +21,12 @@ function mkAgent(state: string, overrides: Partial<AgentResponse> = {}): AgentRe
     running: state === 'active' || state === 'running',
     suspended: false,
     pack_derived: false,
+    provider_options: {
+      resolution: 'unknown',
+      reason: 'resolution_failed',
+      scope: 'session_start',
+      supports_per_turn_options: false,
+    },
     state,
     ...overrides,
   };

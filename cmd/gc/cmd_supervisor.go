@@ -2949,6 +2949,9 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 }
 
 func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	if err := resumeInitInfrastructure(context.Background(), cityPath); err != nil {
+		return nil, nil, fmt.Errorf("native infrastructure initialization incomplete; run gc start to resume: %w", err)
+	}
 	return loadCityConfigWithBuiltinPacks(cityPath)
 }
 

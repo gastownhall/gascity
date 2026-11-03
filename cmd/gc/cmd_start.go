@@ -1227,6 +1227,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 }
 
 func loadStartCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	if !dryRunMode {
+		if err := resumeInitInfrastructure(context.Background(), cityPath); err != nil {
+			return nil, nil, fmt.Errorf("native infrastructure initialization incomplete; run gc start to resume: %w", err)
+		}
+	}
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 

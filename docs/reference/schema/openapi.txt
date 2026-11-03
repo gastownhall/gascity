@@ -678,6 +678,56 @@
         },
         "type": "object"
       },
+      "AgentProviderOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "configured_defaults": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Resolved declarative defaults for a new session. Missing values defer to provider-owned configuration; do not infer a model or effort from curated choices.",
+            "type": "object"
+          },
+          "options_schema": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderOptionDTO"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Stable reason when defaults are unknown: custom_start_command, custom_arguments, unhonored_defaults or resolution_failed.",
+            "type": "string"
+          },
+          "resolution": {
+            "description": "Whether GC can project configured session-start defaults. Never an observation of the running provider.",
+            "enum": [
+              "resolved",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "description": "Options apply to creation of a new session, not one turn of an existing conversation.",
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          "supports_per_turn_options": {
+            "description": "Whether GC accepts model/effort overrides atomically for one turn. False in this contract; session-start options must not be presented as per-turn controls.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "resolution",
+          "scope",
+          "supports_per_turn_options"
+        ],
+        "type": "object"
+      },
       "AgentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -742,6 +792,10 @@
           "provider": {
             "type": "string"
           },
+          "provider_options": {
+            "$ref": "#/components/schemas/AgentProviderOptions",
+            "description": "Configured session-start options resolved for this agent; not observed actual runtime settings."
+          },
           "rig": {
             "type": "string"
           },
@@ -766,6 +820,7 @@
           "name",
           "running",
           "suspended",
+          "provider_options",
           "pack_derived",
           "state",
           "available"
@@ -7185,6 +7240,10 @@
       "ProviderOptionDTO": {
         "additionalProperties": false,
         "properties": {
+          "accepts_custom_values": {
+            "description": "True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed.",
+            "type": "boolean"
+          },
           "choices": {
             "items": {
               "$ref": "#/components/schemas/OptionChoiceDTO"
@@ -7212,7 +7271,8 @@
           "label",
           "type",
           "default",
-          "choices"
+          "choices",
+          "accepts_custom_values"
         ],
         "type": "object"
       },
@@ -7442,9 +7502,22 @@
             "additionalProperties": {
               "type": "string"
             },
+            "description": "Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration.",
             "type": "object"
           },
           "name": {
+            "type": "string"
+          },
+          "options_reason": {
+            "description": "Stable reason when declared defaults cannot be projected.",
+            "type": "string"
+          },
+          "options_resolution": {
+            "description": "Whether GC resolved the provider's declared option defaults.",
+            "enum": [
+              "resolved",
+              "unknown"
+            ],
             "type": "string"
           },
           "options_schema": {
@@ -7455,12 +7528,26 @@
               "array",
               "null"
             ]
+          },
+          "options_scope": {
+            "description": "These options configure a new session rather than a turn in an existing conversation.",
+            "enum": [
+              "session_start"
+            ],
+            "type": "string"
+          },
+          "supports_per_turn_options": {
+            "description": "False: GC does not accept atomic per-turn model/effort settings in this contract.",
+            "type": "boolean"
           }
         },
         "required": [
           "name",
           "builtin",
-          "city_level"
+          "city_level",
+          "options_resolution",
+          "options_scope",
+          "supports_per_turn_options"
         ],
         "type": "object"
       },
@@ -41288,6 +41375,21 @@
               }
             },
             "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

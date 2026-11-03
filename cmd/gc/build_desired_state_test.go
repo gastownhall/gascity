@@ -2990,7 +2990,8 @@ func TestBuildDesiredState_InstallsGeminiHooksBeforeFingerprinting(t *testing.T)
 	}
 
 	firstCfg := templateParamsToConfig(firstTP)
-	wantRelDst := path.Join("worker", ".gemini", "settings.json")
+	// Local runtimes copy relative to the session workdir, not the city root.
+	wantRelDst := path.Join(".gemini", "settings.json")
 	foundHook := false
 	for _, entry := range firstCfg.CopyFiles {
 		if entry.RelDst != wantRelDst {

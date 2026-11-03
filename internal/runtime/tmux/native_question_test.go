@@ -620,3 +620,183 @@ func TestNativeClaudeChoiceDoesNotUseAutoSubmittingDigit(t *testing.T) {
 		t.Fatalf("must focus and confirm before one submit: literal=%q keys=%q", ex.literal, ex.keys)
 	}
 }
+
+// These three panes follow the retained native Claude2.1.308 two-question
+// trial: the second question, its complete review, and the received answer.
+const nativeClaudeFormColor = `←  ☒ Animal  ☐ Color  ✔ Submit  →
+Which qualification color?
+❯ 1. Blue
+     Choose blue
+  2. Green
+     Choose green
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+
+const nativeClaudeFormReview = `←  ☒ Animal  ☒ Color  ✔ Submit  →
+Review your answers
+ ● Which qualification animal?
+   → Owl
+ ● Which qualification color?
+   → Green
+Ready to submit your answers?
+❯ 1. Submit answers
+  2. Cancel
+`
+
+func nativeClaudeTwoFormProjection(t *testing.T) claudeQuestionProjection {
+	t.Helper()
+	var projection claudeQuestionProjection
+	if err := json.Unmarshal([]byte(`{"version":1,"session_id":"native-form-session","prompt_id":"native-form-prompt","tool_use_id":"toolu_native_form","questions":[{"header":"Animal","question":"Which qualification animal?","options":[{"label":"Otter"},{"label":"Owl"}],"multiSelect":false},{"header":"Color","question":"Which qualification color?","options":[{"label":"Blue"},{"label":"Green"}],"multiSelect":false}]}`), &projection); err != nil {
+		t.Fatal(err)
+	}
+	return projection
+}
+
+type nativeClaudeFormExecutor struct {
+	nativeAnswerExecutor
+	entered     int
+	review      string
+	afterAnswer func()
+}
+
+func (e *nativeClaudeFormExecutor) execute(args []string) (string, error) {
+	if slices.Contains(args, "send-keys") && !slices.Contains(args, "-X") && args[len(args)-1] == "Enter" {
+		e.entered++
+		e.keys = append(e.keys, "Enter")
+		if e.entered == 1 {
+			e.pane = e.review
+			if e.afterAnswer != nil {
+				e.afterAnswer()
+			}
+		} else {
+			e.pane = "● Answers received.\n❯ "
+		}
+		return e.paneExecutor.execute(args)
+	}
+	return e.nativeAnswerExecutor.execute(args)
+}
+
+func (e *nativeClaudeFormExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func nativeClaudeFormTmux(t *testing.T, review string) (*Tmux, *nativeClaudeFormExecutor, *claudeQuestionProjection) {
+	t.Helper()
+	ex := &nativeClaudeFormExecutor{nativeAnswerExecutor: nativeAnswerExecutor{paneExecutor: paneExecutor{pane: nativeClaudeFormColor, inMode: "0"}}, review: review}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	projection := nativeClaudeTwoFormProjection(t)
+	tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-form-session","promptId":"native-form-prompt","message":{"content":"ask this native form"}}` + "\n", nil
+	}
+	tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return []claudeQuestionProjection{projection}, nil }
+	return tm, ex, &projection
+}
+
+func TestNativeClaudeLastFormAnswerSubmitsItsBoundReview(t *testing.T) {
+	tm, ex, _ := nativeClaudeFormTmux(t, nativeClaudeFormReview)
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["answer_action"] != "answer" {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Green"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ex.keys, []string{"Down", "Enter", "Enter"}) || len(ex.literal) != 0 {
+		t.Fatalf("last answer must submit only its own complete review once: keys=%q literal=%q", ex.keys, ex.literal)
+	}
+}
+
+func TestNativeClaudeReviewRemainsReadOnlyToPendingAndNudges(t *testing.T) {
+	tm, ex, _ := nativeClaudeFormTmux(t, nativeClaudeFormReview)
+	ex.pane = nativeClaudeFormReview
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Kind != "question" {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("nudge guard=%v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeLastFormAnswerRefusesChangedReviewOrInvocation(t *testing.T) {
+	for _, scenario := range []string{"changed last answer", "incomplete form", "cancel focused", "new native invocation", "changed native schema"} {
+		t.Run(scenario, func(t *testing.T) {
+			review := nativeClaudeFormReview
+			switch scenario {
+			case "changed last answer":
+				review = strings.ReplaceAll(review, "→ Green", "→ Blue")
+			case "incomplete form":
+				review = strings.ReplaceAll(review, " ● Which qualification animal?\n   → Owl\n", "")
+			case "cancel focused":
+				review = strings.ReplaceAll(review, "❯ 1. Submit answers", "  1. Submit answers")
+				review = strings.ReplaceAll(review, "  2. Cancel", "❯ 2. Cancel")
+			}
+			tm, ex, projection := nativeClaudeFormTmux(t, review)
+			if scenario == "new native invocation" {
+				ex.afterAnswer = func() { projection.ToolUseID = "toolu_next_form" }
+			}
+			if scenario == "changed native schema" {
+				ex.afterAnswer = func() { projection.Questions[0].Question = "A different first question?" }
+			}
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil {
+				t.Fatalf("Pending=%+v,%v", pending, err)
+			}
+			err = tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Green"})
+			if err == nil {
+				t.Fatal("unverified or changed review was reported submitted")
+			}
+			if !slices.Equal(ex.keys, []string{"Down", "Enter"}) {
+				t.Fatalf("review was answered without its proof: %q", ex.keys)
+			}
+		})
+	}
+}
+
+func TestNativeClaudeFormReviewSubmitStaysUnderIncarnationFence(t *testing.T) {
+	m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+	stage, focused := 0, false
+	m.screen = func(*fenceModel) string {
+		if stage >= 2 {
+			return "● Answers received.\n❯ "
+		}
+		if stage == 1 {
+			return nativeClaudeFormReview
+		}
+		if focused {
+			return strings.ReplaceAll(strings.ReplaceAll(nativeClaudeFormColor, "❯ 1. Blue", "  1. Blue"), "  2. Green", "❯ 2. Green")
+		}
+		return nativeClaudeFormColor
+	}
+	m.onEvent = func(_ *fenceModel, event string) {
+		focused = focused || event == "key:Down"
+		if event == "key:Enter" {
+			stage++
+		}
+	}
+	m.beforeGuard = func(m *fenceModel, n int) {
+		if n == 3 {
+			m.dead = true
+		}
+	}
+	provider := fenceModelProvider(m)
+	projection := nativeClaudeTwoFormProjection(t)
+	provider.tm.claudeQuestionTranscript = func(string) (string, error) {
+		return `{"type":"user","sessionId":"native-form-session","promptId":"native-form-prompt","message":{"content":"ask"}}` + "\n", nil
+	}
+	provider.tm.claudeQuestionProjections = func(string) ([]claudeQuestionProjection, error) { return []claudeQuestionProjection{projection}, nil }
+	pending, err := provider.Pending(fenceModelSession)
+	if err != nil || pending == nil {
+		t.Fatalf("Pending=%+v,%v", pending, err)
+	}
+	err = provider.RespondFenced(context.Background(), fenceModelSession, testFence, runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Green"})
+	var miss *runtime.FenceMismatchError
+	bare, events, _ := m.snapshot()
+	if !errors.As(err, &miss) || len(bare) != 0 || !slices.Equal(events, []string{"key:Down", "key:Enter"}) {
+		t.Fatalf("review submit escaped incarnation guard: error=%v bare=%q events=%q", err, bare, events)
+	}
+}

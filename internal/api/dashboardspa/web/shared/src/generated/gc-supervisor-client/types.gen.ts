@@ -185,6 +185,32 @@ export type AgentPatchSetInputBody = {
     work_dir?: string;
 };
 
+export type AgentProviderOptions = {
+    /**
+     * Resolved declarative defaults for a new session. Missing values defer to provider-owned configuration; do not infer a model or effort from curated choices.
+     */
+    configured_defaults?: {
+        [key: string]: string;
+    };
+    options_schema?: Array<ProviderOptionDto> | null;
+    /**
+     * Stable reason when defaults are unknown: custom_start_command, custom_arguments, unhonored_defaults or resolution_failed.
+     */
+    reason?: string;
+    /**
+     * Whether GC can project configured session-start defaults. Never an observation of the running provider.
+     */
+    resolution: 'resolved' | 'unknown';
+    /**
+     * Options apply to creation of a new session, not one turn of an existing conversation.
+     */
+    scope: 'session_start';
+    /**
+     * Whether GC accepts model/effort overrides atomically for one turn. False in this contract; session-start options must not be presented as per-turn controls.
+     */
+    supports_per_turn_options: boolean;
+};
+
 export type AgentResponse = {
     active_bead?: string;
     activity?: string;
@@ -215,6 +241,10 @@ export type AgentResponse = {
      */
     program_status?: SessionProgramStatus;
     provider?: string;
+    /**
+     * Configured session-start options resolved for this agent; not observed actual runtime settings.
+     */
+    provider_options: AgentProviderOptions;
     rig?: string;
     running: boolean;
     session?: SessionInfo;
@@ -3016,6 +3046,10 @@ export type ProviderCreatedOutputBody = {
 };
 
 export type ProviderOptionDto = {
+    /**
+     * True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed.
+     */
+    accepts_custom_values: boolean;
     choices: Array<OptionChoiceDto> | null;
     default: string;
     key: string;
@@ -3107,11 +3141,30 @@ export type ProviderPublicResponse = {
     builtin: boolean;
     city_level: boolean;
     display_name?: string;
+    /**
+     * Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration.
+     */
     effective_defaults?: {
         [key: string]: string;
     };
     name: string;
+    /**
+     * Stable reason when declared defaults cannot be projected.
+     */
+    options_reason?: string;
+    /**
+     * Whether GC resolved the provider's declared option defaults.
+     */
+    options_resolution: 'resolved' | 'unknown';
     options_schema?: Array<ProviderOptionDto> | null;
+    /**
+     * These options configure a new session rather than a turn in an existing conversation.
+     */
+    options_scope: 'session_start';
+    /**
+     * False: GC does not accept atomic per-turn model/effort settings in this contract.
+     */
+    supports_per_turn_options: boolean;
 };
 
 export type ProviderReadiness = {
@@ -15620,6 +15673,10 @@ export type PostV0CityByCityNameExtmsgInboundErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

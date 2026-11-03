@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -439,11 +440,36 @@ func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
 	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
 		t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
 	}
-	if log := got.Metadata[beadmeta.AttemptLogMetadataKey]; !strings.Contains(log, "chdir") {
-		t.Fatalf("gc.attempt_log = %q, want the failed start inside the removed work_dir", log)
+	// The OS may report this as either chdir or fork/exec ENOENT. Pin the
+	// durable failed-start result rather than one platform's error wording.
+	var attempts []struct {
+		Action  string `json:"action"`
+		Outcome string `json:"outcome"`
+		Reason  string `json:"reason"`
+	}
+	log := got.Metadata[beadmeta.AttemptLogMetadataKey]
+	if err := json.Unmarshal([]byte(log), &attempts); err != nil {
+		t.Fatalf("decode gc.attempt_log %q: %v", log, err)
+	}
+	if len(attempts) != 1 || attempts[0].Action != "error" || attempts[0].Outcome != "error" || attempts[0].Reason == "" {
+		t.Fatalf("gc.attempt_log = %q, want one recorded failed start", log)
 	}
 	if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
 		t.Errorf("gc.check_infra_retry = %q, want empty (a failed start is graded, not an infrastructure re-run)", r)
+	}
+
+	// Prove that the same store-root script can start once the workdir exists:
+	// the first failure must not pass because the fixture itself is unlaunchable.
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repairedStore, repairedControl := newUnlaunchableCheckRalphControl(t, checkPath)
+	if err := repairedStore.SetMetadata(repairedControl.ID, beadmeta.WorkDirMetadataKey, workDir); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := ProcessControl(repairedStore, mustGet(t, repairedStore, repairedControl.ID), ProcessOptions{CityPath: cityPath})
+	if err != nil || repaired.Action != "pass" {
+		t.Fatalf("ProcessControl with the workdir restored = %+v, %v; want pass", repaired, err)
 	}
 }
 

@@ -18,6 +18,39 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for AgentProviderOptionsResolution.
+const (
+	AgentProviderOptionsResolutionResolved AgentProviderOptionsResolution = "resolved"
+	AgentProviderOptionsResolutionUnknown  AgentProviderOptionsResolution = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the AgentProviderOptionsResolution enum.
+func (e AgentProviderOptionsResolution) Valid() bool {
+	switch e {
+	case AgentProviderOptionsResolutionResolved:
+		return true
+	case AgentProviderOptionsResolutionUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AgentProviderOptionsScope.
+const (
+	AgentProviderOptionsScopeSessionStart AgentProviderOptionsScope = "session_start"
+)
+
+// Valid indicates whether the value is a known member of the AgentProviderOptionsScope enum.
+func (e AgentProviderOptionsScope) Valid() bool {
+	switch e {
+	case AgentProviderOptionsScopeSessionStart:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AgentResponseActivitySource.
 const (
 	AgentResponseActivitySourceProgram    AgentResponseActivitySource = "program"
@@ -645,6 +678,39 @@ func (e OpsRecordingDegradedPayloadSurface) Valid() bool {
 	case Api:
 		return true
 	case Controller:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProviderPublicResponseOptionsResolution.
+const (
+	ProviderPublicResponseOptionsResolutionResolved ProviderPublicResponseOptionsResolution = "resolved"
+	ProviderPublicResponseOptionsResolutionUnknown  ProviderPublicResponseOptionsResolution = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the ProviderPublicResponseOptionsResolution enum.
+func (e ProviderPublicResponseOptionsResolution) Valid() bool {
+	switch e {
+	case ProviderPublicResponseOptionsResolutionResolved:
+		return true
+	case ProviderPublicResponseOptionsResolutionUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProviderPublicResponseOptionsScope.
+const (
+	ProviderPublicResponseOptionsScopeSessionStart ProviderPublicResponseOptionsScope = "session_start"
+)
+
+// Valid indicates whether the value is a known member of the ProviderPublicResponseOptionsScope enum.
+func (e ProviderPublicResponseOptionsScope) Valid() bool {
+	switch e {
+	case ProviderPublicResponseOptionsScopeSessionStart:
 		return true
 	default:
 		return false
@@ -2308,6 +2374,31 @@ type AgentPatchSetInputBody struct {
 	WorkDir *string `json:"work_dir,omitempty"`
 }
 
+// AgentProviderOptions defines model for AgentProviderOptions.
+type AgentProviderOptions struct {
+	// ConfiguredDefaults Resolved declarative defaults for a new session. Missing values defer to provider-owned configuration; do not infer a model or effort from curated choices.
+	ConfiguredDefaults *map[string]string   `json:"configured_defaults,omitempty"`
+	OptionsSchema      *[]ProviderOptionDTO `json:"options_schema,omitempty"`
+
+	// Reason Stable reason when defaults are unknown: custom_start_command, custom_arguments, unhonored_defaults or resolution_failed.
+	Reason *string `json:"reason,omitempty"`
+
+	// Resolution Whether GC can project configured session-start defaults. Never an observation of the running provider.
+	Resolution AgentProviderOptionsResolution `json:"resolution"`
+
+	// Scope Options apply to creation of a new session, not one turn of an existing conversation.
+	Scope AgentProviderOptionsScope `json:"scope"`
+
+	// SupportsPerTurnOptions Whether GC accepts model/effort overrides atomically for one turn. False in this contract; session-start options must not be presented as per-turn controls.
+	SupportsPerTurnOptions bool `json:"supports_per_turn_options"`
+}
+
+// AgentProviderOptionsResolution Whether GC can project configured session-start defaults. Never an observation of the running provider.
+type AgentProviderOptionsResolution string
+
+// AgentProviderOptionsScope Options apply to creation of a new session, not one turn of an existing conversation.
+type AgentProviderOptionsScope string
+
 // AgentResponse defines model for AgentResponse.
 type AgentResponse struct {
 	ActiveBead *string `json:"active_bead,omitempty"`
@@ -2327,13 +2418,14 @@ type AgentResponse struct {
 	PackDerived    bool                         `json:"pack_derived"`
 
 	// Pool Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
-	Pool          *string               `json:"pool,omitempty"`
-	PoolLimits    *PoolLimits           `json:"pool_limits,omitempty"`
-	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty"`
-	Provider      *string               `json:"provider,omitempty"`
-	Rig           *string               `json:"rig,omitempty"`
-	Running       bool                  `json:"running"`
-	Session       *SessionInfo          `json:"session,omitempty"`
+	Pool            *string               `json:"pool,omitempty"`
+	PoolLimits      *PoolLimits           `json:"pool_limits,omitempty"`
+	ProgramStatus   *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider        *string               `json:"provider,omitempty"`
+	ProviderOptions AgentProviderOptions  `json:"provider_options"`
+	Rig             *string               `json:"rig,omitempty"`
+	Running         bool                  `json:"running"`
+	Session         *SessionInfo          `json:"session,omitempty"`
 
 	// State Agent state: suspended, quarantined, stopped, working, waiting, idle, blocked or error. blocked and error come only from the session program's own status report, under the city's program_status switch on.
 	State             string  `json:"state"`
@@ -4783,11 +4875,13 @@ type ProviderCreatedOutputBody struct {
 
 // ProviderOptionDTO defines model for ProviderOptionDTO.
 type ProviderOptionDTO struct {
-	Choices *[]OptionChoiceDTO `json:"choices"`
-	Default string             `json:"default"`
-	Key     string             `json:"key"`
-	Label   string             `json:"label"`
-	Type    string             `json:"type"`
+	// AcceptsCustomValues True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed.
+	AcceptsCustomValues bool               `json:"accepts_custom_values"`
+	Choices             *[]OptionChoiceDTO `json:"choices"`
+	Default             string             `json:"default"`
+	Key                 string             `json:"key"`
+	Label               string             `json:"label"`
+	Type                string             `json:"type"`
 }
 
 // ProviderPatch defines model for ProviderPatch.
@@ -4856,13 +4950,33 @@ type ProviderPublicListBody struct {
 
 // ProviderPublicResponse defines model for ProviderPublicResponse.
 type ProviderPublicResponse struct {
-	Builtin           bool                 `json:"builtin"`
-	CityLevel         bool                 `json:"city_level"`
-	DisplayName       *string              `json:"display_name,omitempty"`
-	EffectiveDefaults *map[string]string   `json:"effective_defaults,omitempty"`
-	Name              string               `json:"name"`
-	OptionsSchema     *[]ProviderOptionDTO `json:"options_schema,omitempty"`
+	Builtin     bool    `json:"builtin"`
+	CityLevel   bool    `json:"city_level"`
+	DisplayName *string `json:"display_name,omitempty"`
+
+	// EffectiveDefaults Configured declarative session-start defaults, not observed actual settings. Unset model/effort values defer to provider-owned configuration.
+	EffectiveDefaults *map[string]string `json:"effective_defaults,omitempty"`
+	Name              string             `json:"name"`
+
+	// OptionsReason Stable reason when declared defaults cannot be projected.
+	OptionsReason *string `json:"options_reason,omitempty"`
+
+	// OptionsResolution Whether GC resolved the provider's declared option defaults.
+	OptionsResolution ProviderPublicResponseOptionsResolution `json:"options_resolution"`
+	OptionsSchema     *[]ProviderOptionDTO                    `json:"options_schema,omitempty"`
+
+	// OptionsScope These options configure a new session rather than a turn in an existing conversation.
+	OptionsScope ProviderPublicResponseOptionsScope `json:"options_scope"`
+
+	// SupportsPerTurnOptions False: GC does not accept atomic per-turn model/effort settings in this contract.
+	SupportsPerTurnOptions bool `json:"supports_per_turn_options"`
 }
+
+// ProviderPublicResponseOptionsResolution Whether GC resolved the provider's declared option defaults.
+type ProviderPublicResponseOptionsResolution string
+
+// ProviderPublicResponseOptionsScope These options configure a new session rather than a turn in an existing conversation.
+type ProviderPublicResponseOptionsScope string
 
 // ProviderReadiness defines model for ProviderReadiness.
 type ProviderReadiness struct {
@@ -42429,6 +42543,7 @@ type PostV0CityByCityNameExtmsgInboundResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
@@ -51033,6 +51148,13 @@ func ParsePostV0CityByCityNameExtmsgInboundResponse(rsp *http.Response) (*PostV0
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

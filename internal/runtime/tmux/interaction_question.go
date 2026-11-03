@@ -121,6 +121,7 @@ type parsedQuestion struct {
 	Draft         string
 	FocusedNumber int
 	Collapsed     bool
+	ClaudeForm    *claudeQuestionForm
 }
 
 // parseAskUserQuestion returns the open AskUserQuestion dialog the pane lines
@@ -584,6 +585,9 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 				return nil
 			}
 			return fmt.Errorf("verifying question answer: %w", err)
+		}
+		if next.question != nil && q.ClaudeForm != nil && isClaudeQuestionFormReview(next.question) {
+			return t.submitClaudeQuestionFormReview(ctx, target, q, response.Text, next.question)
 		}
 		if next.question == nil || next.question.requestID() != q.requestID() {
 			return nil

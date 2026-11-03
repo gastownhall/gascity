@@ -1,15 +1,33 @@
 package tmux
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+// claudeQuestionForm is the authored native invocation observed while binding
+// one question. Only an explicit answer uses it to complete a matching review.
+type claudeQuestionForm struct {
+	Questions []claudeQuestion
+	Index     int
+}
+
+func cloneClaudeQuestionForm(questions []claudeQuestion, index int) *claudeQuestionForm {
+	form := &claudeQuestionForm{Questions: slices.Clone(questions), Index: index}
+	for i := range form.Questions {
+		form.Questions[i].Options = slices.Clone(form.Questions[i].Options)
+	}
+	return form
+}
 
 // bindClaudeQuestion names the native tool invocation, so an identical question
 // raised again cannot accept a response to the first one. Older runtimes with
@@ -117,6 +135,7 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 		}
 	}
 	match := ""
+	var form *claudeQuestionForm
 	for _, c := range pending {
 		for index, native := range c.Questions {
 			var options []string
@@ -130,6 +149,9 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 				return fmt.Errorf("%w: native Claude question is ambiguous", runtime.ErrRuntimeUnavailable)
 			}
 			match = fmt.Sprintf("tmux-question-%s-%s-%s-%d", latestSession, latestPrompt, c.ID, index)
+			if latestSession != "" && latestPrompt != "" {
+				form = cloneClaudeQuestionForm(c.Questions, index)
+			}
 			q.Question = native.Question
 		}
 	}
@@ -137,7 +159,123 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 		return fmt.Errorf("%w: visible question has no matching native Claude invocation", runtime.ErrRuntimeUnavailable)
 	}
 	q.NativeID = match
+	q.ClaudeForm = form
 	return nil
+}
+
+func isClaudeQuestionFormReview(q *parsedQuestion) bool {
+	return q.Provider != "codex" && strings.HasPrefix(strings.Join(strings.Fields(q.Question), " "), "Review your answers ")
+}
+
+func sameClaudeQuestionForm(a, b *claudeQuestionForm) bool {
+	if a == nil || b == nil || a.Index != b.Index || len(a.Questions) != len(b.Questions) {
+		return false
+	}
+	for i, left := range a.Questions {
+		right := b.Questions[i]
+		if left.Header != right.Header || left.Question != right.Question || left.MultiSelect != right.MultiSelect || len(left.Options) != len(right.Options) {
+			return false
+		}
+		for j := range left.Options {
+			if left.Options[j].Label != right.Options[j].Label {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// matchesClaudeQuestionReview requires the whole native review, in authored
+// order, and the last value this explicit response supplied. Previous answers
+// remain the provider's visible values; empty or incomplete reviews are refused.
+func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionForm, answer string) bool {
+	if form == nil || len(form.Questions) < 2 || form.Index != len(form.Questions)-1 ||
+		!slices.Equal(review.answerChoices(), []string{"Submit answers", "Cancel"}) || review.FocusedNumber != 1 || review.Focused != "Submit answers" {
+		return false
+	}
+	normalize := func(text string) string { return strings.Join(strings.Fields(text), " ") }
+	remaining, ok := strings.CutPrefix(normalize(review.Question), "Review your answers ")
+	if !ok {
+		return false
+	}
+	remaining, ok = strings.CutSuffix(remaining, " Ready to submit your answers?")
+	if !ok {
+		return false
+	}
+	for i, question := range form.Questions {
+		if question.MultiSelect {
+			return false
+		}
+		remaining, ok = strings.CutPrefix(remaining, "● "+normalize(question.Question)+" → ")
+		if !ok {
+			return false
+		}
+		value := remaining
+		if i+1 < len(form.Questions) {
+			marker := " ● " + normalize(form.Questions[i+1].Question) + " → "
+			var next string
+			value, next, ok = strings.Cut(remaining, marker)
+			if !ok {
+				return false
+			}
+			remaining = strings.TrimPrefix(marker, " ") + next
+		}
+		if strings.TrimSpace(value) == "" || i == form.Index && normalize(value) != normalize(answer) {
+			return false
+		}
+	}
+	return true
+}
+
+// submitClaudeQuestionFormReview runs only after a request-bound last answer.
+// Pending, binding and background delivery remain read-only. The original
+// invocation/schema and the entire visible review are rechecked before its one
+// fenced Enter; a changed invocation, value, menu or focus authorizes no key.
+func (t *Tmux) submitClaudeQuestionFormReview(ctx context.Context, target string, answered *parsedQuestion, answer string, review *parsedQuestion) error {
+	verify := func(current *parsedQuestion) error {
+		if current == nil || !matchesClaudeQuestionReview(current, answered.ClaudeForm, answer) ||
+			current.Question != review.Question || !slices.Equal(current.Choices, review.Choices) {
+			return fmt.Errorf("%w: native question review changed or is incomplete", runtime.ErrInteractionGone)
+		}
+		probe := *answered
+		probe.NativeID, probe.ClaudeForm = "", nil
+		if err := t.bindClaudeQuestion(target, &probe); err != nil {
+			return fmt.Errorf("rechecking native question review: %w", err)
+		}
+		if probe.NativeID != answered.NativeID || !sameClaudeQuestionForm(probe.ClaudeForm, answered.ClaudeForm) {
+			return fmt.Errorf("%w: native question invocation changed before review submission", runtime.ErrInteractionGone)
+		}
+		return nil
+	}
+	if err := verify(review); err != nil {
+		return err
+	}
+	current, err := t.dialogInPane(target)
+	if err != nil {
+		return fmt.Errorf("reading native question review before submission: %w", err)
+	}
+	if err := verify(current.question); err != nil {
+		return err
+	}
+	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "Enter"); err != nil {
+		return fmt.Errorf("submitting native question review: %w", err)
+	}
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(respondVerifyInterval):
+		}
+		next, err := t.dialogInPane(target)
+		if err != nil {
+			return fmt.Errorf("verifying native question review submission: %w", err)
+		}
+		if next.question == nil || !isClaudeQuestionFormReview(next.question) || next.question.Question != review.Question {
+			return nil
+		}
+	}
+	return fmt.Errorf("native question review did not clear within %s; no submit was repeated", respondVerifyTimeout)
 }
 
 func (t *Tmux) readClaudeQuestionTranscript(target string) (string, error) {

@@ -1425,6 +1425,12 @@ func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer
 }
 
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
+	// Only this bundled factory scaffold opts into born-split infrastructure.
+	// Authored/file/directory composition and explicit topology choices retain
+	// their existing storage policy without an initializer making it implicit.
+	infraFresh := wiz.configName == defaultInitTemplate && !wiz.hostedDolt.enabled() && !wiz.hostedDolt.selectorRequested() &&
+		freshInitInfrastructureCandidate(fs, cityPath, preserveExisting || initAdoptStoreFlag)
+
 	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
 	tomlPath := filepath.Join(cityPath, citylayout.CityConfigFile)
 	if cityHasScaffoldFS(fs, cityPath) {
@@ -1628,6 +1634,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			fmt.Fprintf(stderr, "gc init: bootstrapping file bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+	}
+
+	if err := recordFreshInitInfrastructure(fs, cityPath, infraFresh); err != nil {
+		fmt.Fprintf(stderr, "gc init: recording native infrastructure intent: %v\n", err) //nolint:errcheck // initialization diagnostic
+		return 1
 	}
 
 	switch {

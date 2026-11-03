@@ -1516,11 +1516,21 @@ export const zProviderCreatedOutputBody = z.object({
 });
 
 export const zProviderOptionDto = z.object({
+    accepts_custom_values: z.boolean(),
     choices: z.array(zOptionChoiceDto).nullable(),
     default: z.string(),
     key: z.string(),
     label: z.string(),
     type: z.string()
+});
+
+export const zAgentProviderOptions = z.object({
+    configured_defaults: z.record(z.string(), z.string()).optional(),
+    options_schema: z.array(zProviderOptionDto).nullish(),
+    reason: z.string().optional(),
+    resolution: z.enum(['resolved', 'unknown']),
+    scope: z.enum(['session_start']),
+    supports_per_turn_options: z.boolean()
 });
 
 export const zProviderPatch = z.object({
@@ -1568,7 +1578,11 @@ export const zProviderPublicResponse = z.object({
     display_name: z.string().optional(),
     effective_defaults: z.record(z.string(), z.string()).optional(),
     name: z.string(),
-    options_schema: z.array(zProviderOptionDto).nullish()
+    options_reason: z.string().optional(),
+    options_resolution: z.enum(['resolved', 'unknown']),
+    options_schema: z.array(zProviderOptionDto).nullish(),
+    options_scope: z.enum(['session_start']),
+    supports_per_turn_options: z.boolean()
 });
 
 export const zProviderPublicListBody = z.object({
@@ -2265,6 +2279,7 @@ export const zAgentResponse = z.object({
     pool_limits: zPoolLimits.optional(),
     program_status: zSessionProgramStatus.optional(),
     provider: z.string().optional(),
+    provider_options: zAgentProviderOptions,
     rig: z.string().optional(),
     running: z.boolean(),
     session: zSessionInfo.optional(),

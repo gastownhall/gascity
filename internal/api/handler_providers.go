@@ -25,11 +25,12 @@ type providerResponse struct {
 }
 
 type providerOptionDTO struct {
-	Key     string            `json:"key"`
-	Label   string            `json:"label"`
-	Type    string            `json:"type"`
-	Default string            `json:"default"`
-	Choices []optionChoiceDTO `json:"choices"`
+	Key                 string            `json:"key"`
+	Label               string            `json:"label"`
+	Type                string            `json:"type"`
+	Default             string            `json:"default"`
+	Choices             []optionChoiceDTO `json:"choices"`
+	AcceptsCustomValues bool              `json:"accepts_custom_values" doc:"True accepts nonempty values beyond the curated choices. False restricts values to listed choices. GC validation remains authoritative; no CLI flag templates are exposed."`
 }
 
 type optionChoiceDTO struct {
@@ -63,35 +64,16 @@ func optionalStringSlice(values []string) *[]string {
 	return &cloned
 }
 
-// toProviderPublicResponse builds the browser-safe DTO from a MERGED
-// provider spec. The spec must already be the result of
-// MergeProviderOverBuiltin so it carries the correct OptionsSchema and
-// OptionDefaults (including inherited builtins).
-func toProviderPublicResponse(name string, spec config.ProviderSpec, builtin, cityLevel bool) ProviderPublicResponse {
-	resp := ProviderPublicResponse{
-		Name:        name,
-		DisplayName: spec.DisplayName,
-		Builtin:     builtin,
-		CityLevel:   cityLevel,
+// toProviderPublicResponse projects the resolved declarative session-start
+// settings. EffectiveDefaults is kept for wire compatibility; it has never
+// observed provider-owned configuration or the effective model of a live turn.
+func toProviderPublicResponse(name string, spec config.ProviderSpec, builtin, cityLevel bool, options *AgentProviderOptions) ProviderPublicResponse {
+	return ProviderPublicResponse{
+		Name: name, DisplayName: spec.DisplayName, Builtin: builtin, CityLevel: cityLevel,
+		OptionsSchema: options.OptionsSchema, EffectiveDefaults: options.ConfiguredDefaults,
+		OptionsResolution: options.Resolution, OptionsReason: options.Reason, OptionsScope: options.Scope,
+		SupportsPerTurnOptions: options.SupportsPerTurnOptions,
 	}
-	if len(spec.OptionsSchema) > 0 {
-		resp.OptionsSchema = make([]providerOptionDTO, len(spec.OptionsSchema))
-		for i, opt := range spec.OptionsSchema {
-			choices := make([]optionChoiceDTO, len(opt.Choices))
-			for j, c := range opt.Choices {
-				choices[j] = optionChoiceDTO{Value: c.Value, Label: c.Label}
-			}
-			resp.OptionsSchema[i] = providerOptionDTO{
-				Key:     opt.Key,
-				Label:   opt.Label,
-				Type:    opt.Type,
-				Default: opt.Default,
-				Choices: choices,
-			}
-		}
-		resp.EffectiveDefaults = config.ComputeEffectiveDefaults(spec.OptionsSchema, spec.OptionDefaults, nil)
-	}
-	return resp
 }
 
 // isBuiltinProvider checks if a name is a known builtin provider.

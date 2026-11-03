@@ -129,6 +129,57 @@ Several endpoints report an agent count, and each counts something different:
 | `GET /v0/city/{cityName}/rigs`, `GET /v0/city/{cityName}/rig/{name}` | `agent_count` on each rig | That rig's agent rows: every slot of a bounded pool, and the running sessions of an unlimited pool. |
 | `GET /v0/city/{cityName}/config` | `patches.agent_count` | The `[[patches.agent]]` blocks the config declares, not agents. `/config/defaults` reports no `patches`. |
 
+## Configured session options
+
+Agent list and detail responses include `provider_options`: the selected
+agent's resolved `options_schema` and `configured_defaults` for
+`scope: "session_start"`. These describe configuration for a new session.
+They do not establish the model or effort an existing native turn used.
+
+When a custom launch command, opaque arguments or invalid defaults prevent
+resolution, `resolution: "unknown"` includes a stable `reason` and omits
+guessed defaults. Provider catalog `effective_defaults` is also a configured
+session-start projection; it does not include agent overrides.
+
+An option's `accepts_custom_values` distinguishes open values with curated
+suggestions from a closed choice list. Upstream providers may still reject a
+model/effort combination that GC's schema accepts.
+
+`supports_per_turn_options: false` means delivery cannot bind model/effort
+overrides to one turn. Use the session's `submission_capabilities.supports_steer`
+for actual target steering support. Interrupt-and-send and boundary queueing
+do not establish true steering.
+
+## Durable public delivery
+
+`POST /v0/city/{cityName}/extmsg/inbound` supports durable admission with a
+normalized `message`, a nonempty `request_key` and explicit `deliveries`.
+Each delivery selects a concrete city session or configured named agent and
+its message policy. Recipients must belong to the conversation or its binding.
+Both the Messaging writer and Sessions lane must support guarded writes;
+unready storage returns 503 before appending public history.
+
+The key is scoped to the conversation and actor. Retry the same frozen message,
+recipients, policy and key to recover its admission and delivery identities.
+Changed content under the same identity returns 409. A replay recovers the
+original receipt before reading current routing or membership.
+
+Admission records one public transcript entry and durable recipient intents.
+The GC relay hands each intent to its deterministic Sessions operation; clients
+must not also submit the message separately. `admitted` reports operation
+handoff, not a finished native turn. Follow the operation for execution outcomes.
+Native execution uses `at_most_once`; an unknown handoff is not proof of success.
+
+To request cancellation of an existing admission, resend its unchanged frozen
+body with `cancel_deliveries: true`. A missing admission returns 404 and creates
+nothing. Cancellation flags commit together in Messaging; they are not atomic
+with Sessions execution, and an already-completed operation retains its outcome.
+
+`extmsg.inbound` and `extmsg.public_delivery_changed` are at-least-once
+invalidations. Reconcile using admission/transcript IDs and delivery
+`state_version`; notification retries do not create another public entry or
+operation.
+
 ## Request and response headers
 
 Every operation's header contract appears in the OpenAPI spec — if a
