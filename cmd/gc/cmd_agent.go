@@ -164,6 +164,7 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 		return
 	}
 	seen := make(map[string]struct{}, len(prov.Warnings))
+	filtered := make([]string, 0, len(prov.Warnings))
 	for _, warning := range prov.Warnings {
 		if !shouldEmitLoadCityConfigWarning(warning) {
 			continue
@@ -172,8 +173,89 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 			continue
 		}
 		seen[warning] = struct{}{}
+		filtered = append(filtered, warning)
+	}
+	// The always+fresh wake-mode advisory is emitted once per matching named
+	// session, so a town that deliberately runs several restart-per-cycle
+	// actors prints the same line — up to the session/template names — in
+	// front of every command's real output. Print the first verbatim (its
+	// substrings are the stable surface tooling keys on) and summarize the
+	// remaining sessions in one indented continuation line right after it.
+	// prov.Warnings keeps every per-session entry for the strict, doctor,
+	// and acceptance consumers.
+	printedAlwaysFresh := false
+	for _, warning := range filtered {
+		if config.IsAlwaysFreshWakeModeWarning(warning) {
+			if printedAlwaysFresh {
+				continue
+			}
+			printedAlwaysFresh = true
+			fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
+			if continuation := alwaysFreshAdvisoryContinuation(filtered, warning); continuation != "" {
+				fmt.Fprint(w, continuation) //nolint:errcheck // best-effort warning emission
+			}
+			continue
+		}
 		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
 	}
+}
+
+// alwaysFreshAdvisoryContinuation renders the suppression note for the
+// always+fresh wake-mode advisories after the first one in filtered. It counts
+// every later advisory (whether the session name is recoverable or not) so the
+// arithmetic in the "(xN)" summary always matches what was suppressed.
+func alwaysFreshAdvisoryContinuation(filtered []string, first string) string {
+	var names []string
+	unnamed := 0
+	after := false
+	for _, warning := range filtered {
+		if warning == first {
+			after = true
+			continue
+		}
+		if !config.IsAlwaysFreshWakeModeWarning(warning) {
+			continue
+		}
+		if !after {
+			// An earlier duplicate that the exact-dedup pass already
+			// removed cannot happen; treat any residual as suppressed.
+			continue
+		}
+		if name, ok := alwaysFreshAdvisorySessionName(warning); ok {
+			names = append(names, name)
+		} else {
+			unnamed++
+		}
+	}
+	if len(names) == 0 && unnamed == 0 {
+		return ""
+	}
+	total := 1 + len(names) + unnamed
+	list := strings.Join(names, ", ")
+	if unnamed > 0 {
+		if list != "" {
+			list += ", "
+		}
+		list += fmt.Sprintf("%d unnamed", unnamed)
+	}
+	return fmt.Sprintf("  (x%d named sessions share this advisory: %s)\n", total, list)
+}
+
+// alwaysFreshAdvisorySessionName extracts the qualified named-session id from
+// an always+fresh wake-mode advisory. Config emits them as
+// `named_session "<id>": mode "always" with wake_mode "fresh" ...`; fmt %q
+// escapes any quote inside the id, so the first closing quote ends the name.
+func alwaysFreshAdvisorySessionName(warning string) (string, bool) {
+	const prefix = `named_session "`
+	if !config.IsAlwaysFreshWakeModeWarning(warning) || !strings.HasPrefix(warning, prefix) {
+		return "", false
+	}
+	rest := warning[len(prefix):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return "", false
+	}
+	return rest[:end], true
 }
 
 // Alias-only warnings, deferred future-surface keys, and tombstone attachment

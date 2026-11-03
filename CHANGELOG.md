@@ -1137,6 +1137,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc` no longer prints one identical always+fresh wake-mode advisory per
+  named session in front of every command's output.** The advisory is
+  intentional config lint — a town that deliberately runs several
+  restart-per-cycle actors (`mode "always"` with `wake_mode "fresh"`)
+  produced N near-identical stderr lines on every CLI invocation. The
+  first advisory now prints verbatim (its substrings stay the stable
+  surface tooling keys on) and the remaining sessions collapse into one
+  indented continuation line with the total count and their names, e.g.
+  `  (x4 named sessions share this advisory: …)`. Only the CLI presentation
+  collapses: `Provenance.Warnings` keeps every per-session entry, so the
+  strict-mode, doctor, and acceptance consumers are unchanged, and JSON
+  mode still discards advisory warnings entirely.
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped
