@@ -2103,8 +2103,7 @@ func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead, allIDs
 			read[d.IssueID] = append(read[d.IssueID], d)
 		}
 	}
-	under, _, _ := unwrapBeadPolicyStore(source)
-	batchReader, _ := beads.As[beads.DepMetadataBatchReader](under)
+	batchReader, _ := beads.As[beads.DepMetadataBatchReader](source)
 	got, err := readInfraPayloads(batchReader, reader, read, func(beads.Dep) bool { return true })
 	if err != nil {
 		return plan, err
@@ -2549,8 +2548,7 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 	want := map[beads.DepPair]string{}
 	if _, blind := beads.DepMetadataAbsent(source); !blind {
 		srcReader, _ := beads.As[beads.DepMetadataReader](source)
-		under, _, _ := unwrapBeadPolicyStore(source)
-		srcBatch, _ := beads.As[beads.DepMetadataBatchReader](under)
+		srcBatch, _ := beads.As[beads.DepMetadataBatchReader](source)
 		if want, err = readInfraPayloads(srcBatch, srcReader, wantDeps, internal); err != nil {
 			return nil, fmt.Errorf("re-reading the work store's edge payloads: %w", err)
 		}

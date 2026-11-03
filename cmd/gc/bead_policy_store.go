@@ -273,6 +273,18 @@ func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, er
 	return batch.DepListBatch(ids)
 }
 
+// DepMetadataBatch forwards the inner store's batched edge-payload read
+// (beads.DepMetadataBatchReader), for the reason DepListBatch is forwarded. An
+// inner store without it reports beads.ErrDepMetadataUnsupported, and the
+// caller reads edge by edge through DepMetadata.
+func (s *beadPolicyStore) DepMetadataBatch(ids []string) (map[beads.DepPair]string, error) {
+	reader, ok := beads.As[beads.DepMetadataBatchReader](s.Store)
+	if !ok {
+		return nil, beads.ErrDepMetadataUnsupported
+	}
+	return reader.DepMetadataBatch(ids)
+}
+
 // ReadyPreferCache forwards the cache-preferred ready read with the policy's
 // expanded read tier, exactly as Ready and both handles do. An inner store
 // with no ready cache is read live, as beads.ReadyPreferCache reads any

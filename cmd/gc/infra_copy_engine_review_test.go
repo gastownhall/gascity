@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -194,5 +195,36 @@ func TestVerifyInfraCopyRefusesAPayloadOnlyTheBindingCarries(t *testing.T) {
 	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored)
 	if err == nil || !strings.Contains(err.Error(), edge[0]) || !strings.Contains(err.Error(), "invented") {
 		t.Fatalf("verifyInfraCopy = %v, want a refusal naming the payload only the binding carries on %s -> %s", err, edge[0], edge[1])
+	}
+}
+
+// TestPolicyWrappedStoreForwardsTheBatchedPayloadRead (review S2): the
+// bead-policy wrapper every production open returns forwards the batched
+// payload read, so the engine reads a SQLite or native work store's payloads
+// in batches without peeling the wrapper; over a store without it, the
+// wrapper reports ErrDepMetadataUnsupported and the engine reads per edge.
+func TestPolicyWrappedStoreForwardsTheBatchedPayloadRead(t *testing.T) {
+	city := newMCShapedInfraCity(t, 60)
+	wrapped := city.sqliteSource(t)
+	reader, ok := beads.As[beads.DepMetadataBatchReader](wrapped)
+	if !ok {
+		t.Fatal("the policy-wrapped SQLite store has no batched payload read")
+	}
+	ids := make([]string, 0, len(city.rows))
+	for _, b := range city.rows {
+		ids = append(ids, b.ID)
+	}
+	got, err := reader.DepMetadataBatch(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(city.payloads) {
+		t.Fatalf("the forwarded batch read %d payloads, want the fixture's %d", len(got), len(city.payloads))
+	}
+	plain := wrapStoreWithBeadPolicies(beads.NewMemStore(), nil)
+	if over, ok := beads.As[beads.DepMetadataBatchReader](plain); !ok {
+		t.Fatal("the policy wrapper does not advertise the forward")
+	} else if _, err := over.DepMetadataBatch([]string{"x"}); !errors.Is(err, beads.ErrDepMetadataUnsupported) {
+		t.Fatalf("the forward over a store without the batch = %v, want ErrDepMetadataUnsupported", err)
 	}
 }

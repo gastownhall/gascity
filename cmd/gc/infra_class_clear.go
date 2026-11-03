@@ -346,8 +346,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		payloads := map[beads.DepPair]string{}
 		if _, blind := beads.DepMetadataAbsent(source); !blind {
 			reader, _ := beads.As[beads.DepMetadataReader](source)
-			under, _, _ := unwrapBeadPolicyStore(source)
-			batchReader, _ := beads.As[beads.DepMetadataBatchReader](under)
+			batchReader, _ := beads.As[beads.DepMetadataBatchReader](source)
 			wanted := infraBackupEdgeFilter(fresh, retainedIDs)
 			if payloads, err = readInfraPayloads(batchReader, reader, down, wanted); err != nil {
 				return result, err
@@ -423,14 +422,10 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	// then removes the chunk in one call, one commit on Dolt; any other
 	// deletes row by row. The budget is checked between chunks; a paused
 	// clear leaves the note pending, and the same command finishes it from
-	// the session the note names. Whether the store deletes in batches is
-	// asked of the store under the bead-policy wrapper, which forwards
-	// DeleteBatch whatever its store can do; the delete goes through the
-	// wrapper.
-	under, _, _ := unwrapBeadPolicyStore(source)
-	_, canBatch := beads.As[beads.BatchDeleter](under)
-	deleter, _ := beads.As[beads.BatchDeleter](source)
-	canBatch = canBatch && deleter != nil
+	// the session the note names. A wrapper that forwards DeleteBatch over a
+	// store without it reports beads.ErrBatchDeleteUnsupported, and the rows
+	// then go one by one.
+	deleter, canBatch := beads.As[beads.BatchDeleter](source)
 	err = runInfraBatches(infraEngineClockFor(cityPath), "clearing", len(entries), infraClearChunk, func(start, end int) error {
 		chunk := entries[start:end]
 		ids := make([]string, 0, len(chunk))
