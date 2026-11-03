@@ -222,6 +222,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
 )
 
@@ -593,9 +594,19 @@ func infraMigrationClassList() string {
 }
 
 // openInfraMigrationSource opens the work store the infrastructure beads are
-// copied out of. Overridden by tests.
+// copied out of. Overridden by tests. Inside a maintenance window
+// (storage_maintenance.go) it takes the window's configuration and native
+// transport, and records the lane the open took.
 var openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
-	return openStoreAtForCity(cityPath, cityPath)
+	cfg, transport := migrationWindowOpen(cityPath)
+	result, err := openStoreResultAtForCityWithConfig(cityPath, cityPath, cfg, gate.ModeUnset, false, false, false, transport)
+	if err != nil {
+		return nil, err
+	}
+	if transport != nil {
+		recordMigrationLane(cityPath, result.Diagnostic)
+	}
+	return result.Store, nil
 }
 
 // openInfraDestination opens the binding's Beads engine at the component path
@@ -1344,9 +1355,14 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// has to be here rather than left to infraCopyDepEdge: by the time the
 	// import writes its first edge, prepareInfraDestination has already deleted
 	// the rows an interrupted earlier attempt stamped.
-	carrying, err := infraSourceEdgePayloadRefusal(source, rows)
+	carrying, blind, err := infraSourceEdgePayloadRefusal(source, rows)
 	if err != nil {
-		return fail(err)
+		return fail(migrationWindowPayloadRefusal(cityPath, err))
+	}
+	var annotations []string
+	if blind != "" {
+		annotations = append(annotations, infraManifestPayloadBlindPrefix+blind)
+		fmt.Fprintf(stderr, "%s: the work store is a %s store, whose protocol carries no dependency payload, so its edges are copied carrying none\n", logPrefix, blind) //nolint:errcheck // best-effort stderr
 	}
 	if err := infraDestinationEdgePayloadRefusal(writer, carrying); err != nil {
 		return fail(err)
@@ -1376,7 +1392,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// mistaken for the one copied (see infra_copy_manifest.go). The snapshot
 	// is the right source for it: the equality stage just proved the source
 	// still holds exactly these rows.
-	if err := writeInfraCopyManifestRecord(target, proven, infraManifestRecordCreated(nil, rows, proven), generation); err != nil {
+	if err := writeInfraCopyManifestRecord(target, proven, infraManifestRecordCreated(nil, rows, proven), generation, annotations...); err != nil {
 		return fail(err)
 	}
 	current, err := currentWorkStoreIdentity(cityPath)
@@ -1933,9 +1949,9 @@ func readInfraSnapshotWithIDs(source beads.Store, gen coordclass.Generation) ([]
 	return infra, ids, nil
 }
 
-// infraSourceEdgePayloadRefusal walks the source's within-infra edges and
-// returns whether any of them CARRIES a payload, plus the refusal for a source
-// whose payloads this copy cannot READ.
+// infraSourceEdgePayloadRefusal walks the source's edges and returns whether
+// any within-infra one CARRIES a payload, plus the refusal for a source whose
+// payloads this copy or the clear after it cannot READ.
 //
 // It answers both from one walk because the caller needs both and the read is
 // the expensive part: whether any payload exists at all is what decides whether
@@ -1972,43 +1988,62 @@ func readInfraSnapshotWithIDs(source beads.Store, gen coordclass.Generation) ([]
 // refusal that lived only in the import would be one the rehearsal could not
 // reach.
 //
-// The scope is edges whose BOTH endpoints are infra, matching what the copy
-// actually re-adds. A cross-boundary edge into work is not carried at all — it
-// stays metadata linkage resolved by the owning-store read on each side — so
-// its payload is not something this copy touches, and refusing on it would
-// block cities over an edge the migration never re-adds.
-func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) (bool, error) {
+// carrying looks only at edges whose BOTH endpoints are infra, matching what
+// the copy re-adds: a cross-boundary edge into work is not carried, so its
+// payload never asks anything of the destination. The read, though, covers
+// every edge the clear backs up with its payload after the marker
+// (infraBackupEntryFor): each infra row's edges down, and its edges up from a
+// row outside the slice. A source that cannot answer one of those would pass
+// here and fail in the clear, past the point the cutover can be abandoned, so
+// it is refused now, before anything is written.
+//
+// A source whose protocol carries no payload at all (a generic exec store,
+// beads.DepMetadataAbsentByProtocol) is the one source that cannot be asked
+// and is not refused: nothing can have stored a payload through it. blind names
+// that protocol, for the manifest and the operator.
+func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) (carrying bool, blind string, err error) {
+	if protocol, absent := beads.DepMetadataAbsent(source); absent {
+		return false, protocol, nil
+	}
 	reader, ok := source.(beads.DepMetadataReader)
 	if !ok {
-		return false, fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace", source)
+		return false, "", fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace (%w)", source, beads.ErrDepMetadataUnsupported)
 	}
 	infraIDs := make(map[string]bool, len(rows))
 	for _, b := range rows {
 		infraIDs[b.ID] = true
 	}
-	carrying := false
 	for _, b := range rows {
-		deps, err := source.DepList(b.ID, "down")
+		down, err := source.DepList(b.ID, "down")
 		if err != nil {
-			return false, fmt.Errorf("listing deps of %s to check for edge payloads: %w", b.ID, err)
+			return false, "", fmt.Errorf("listing deps of %s to check for edge payloads: %w", b.ID, err)
 		}
-		for _, dep := range deps {
-			if !infraIDs[dep.DependsOnID] {
-				continue
-			}
-			payload, carried, err := reader.DepMetadata(dep.IssueID, dep.DependsOnID)
+		for _, dep := range down {
+			payload, carried, err := reader.DepMetadata(b.ID, dep.DependsOnID)
 			if err != nil {
-				return false, fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+				return false, "", fmt.Errorf("reading the payload on dep %s -> %s: %w", b.ID, dep.DependsOnID, err)
 			}
 			// The same normalization infraReadEdgePayload applies, so an
 			// engine's spelling of "no payload" does not make the copy demand a
 			// writer it has nothing to write with.
-			if carried && beads.DepMetadataCarries(payload) {
+			if infraIDs[dep.DependsOnID] && carried && beads.DepMetadataCarries(payload) {
 				carrying = true
 			}
 		}
+		up, err := source.DepList(b.ID, "up")
+		if err != nil {
+			return false, "", fmt.Errorf("listing dependents of %s to check for edge payloads: %w", b.ID, err)
+		}
+		for _, dep := range up {
+			if infraIDs[dep.IssueID] {
+				continue // read above, from its own row
+			}
+			if _, _, err := reader.DepMetadata(dep.IssueID, b.ID); err != nil {
+				return false, "", fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, b.ID, err)
+			}
+		}
 	}
-	return carrying, nil
+	return carrying, "", nil
 }
 
 // infraDestinationEdgePayloadRefusal returns the refusal for a destination that
@@ -2062,7 +2097,13 @@ type infraEdgePayload struct {
 // other reader, and it is what lets infraCopyDepEdge write nothing rather than
 // writing "{}" into the destination's sidecar, where it would read back as a
 // payload the source never had.
+//
+// A store whose protocol carries no payload (beads.DepMetadataAbsentByProtocol)
+// answers "carries none" for every edge: that is what its declaration says.
 func infraReadEdgePayload(store beads.Store, issueID, dependsOnID string) (infraEdgePayload, error) {
+	if _, absent := beads.DepMetadataAbsent(store); absent {
+		return infraEdgePayload{}, nil
+	}
 	reader, ok := store.(beads.DepMetadataReader)
 	if !ok {
 		return infraEdgePayload{}, infraEdgePayloadUnanswerable(fmt.Sprintf("%T", store), issueID, dependsOnID)

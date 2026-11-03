@@ -160,6 +160,7 @@ go_test(
         "cross_store_refs_test.go",
         "delete_if_match_local_strings_internal_test.go",
         "dep_metadata_test.go",
+        "dolt_sessions_integration_test.go",
         "doltlite_count_test.go",
         "doltlite_namespace_census_test.go",
         "doltlite_read_store_graph_ready_test.go",
