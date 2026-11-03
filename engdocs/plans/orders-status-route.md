@@ -32,14 +32,21 @@ this scope, consistent with ruling D4. The closed schema at
 
 If the operator instead requires machine-readable Orders here, record that
 choice explicitly. It requires an optional declared addition on both routes,
-schema and compatibility checks, and reconciliation of existing
-work. The architect has closed `ga-k6ofaz.3` as abandoned under D4; its
-older implementation spec must stay retired. `ga-kbwrop.1` remains an open
-builder vehicle and needs reconciliation against that ruling before any
-JSON implementation. A newly approved C1 JSON extension would need a named
-child against the current schema, with parity coverage for both routes.
-An optional field on the HTTP status response alone does not authorize a
-new key in CLI `StatusJSON`.
+schema and compatibility checks. The architect has closed both `ga-k6ofaz.3`
+and `ga-kbwrop.1` as abandoned under D4; no JSON implementation vehicle is
+open. Keep both older specs retired.
+
+Under C1, an approved JSON extension requires one new named child after the
+controller's typed optional field is available. That child covers the schema
+addition, the key on both routes, and parity tests showing the same rows on
+both routes. Status and Severity use the existing doctor string conversions,
+never raw doctor integers. An optional field on the HTTP status response
+alone does not authorize a new key in CLI `StatusJSON`.
+
+Under C2, the data stays CLI-side, so a JSON key would run the order leg on a
+polled command. D4 excludes that cost unless the operator explicitly accepts
+child B's bounded cost for JSON. Settle that within the same route-and-JSON
+decision before creating work.
 
 Scripts can already use `gc doctor --json --check order-firing-current
 --check order-outcome-healthy`. Child A adds typed non-OK findings and child
@@ -107,6 +114,6 @@ releases its claim while waiting. Mayor acknowledged the request in
 `gm-wisp-ky7gf1`, added it to the morning operator message, and will record
 the actual answer with its source; no choice has been accepted. After the
 decision, PM updates this plan,
-reconciles architectural details and existing JSON scopes, creates the chosen
+reconciles architectural details, creates the chosen
 work packages, verifies their handoffs, and closes planning only after the
 artifact is committed and clean.
