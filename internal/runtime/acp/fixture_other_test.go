@@ -19,6 +19,3 @@ func decodeCapturedArgs(out string) ([]string, error) {
 	}
 	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00"), nil
 }
-
-// fixtureIdleAgentCommand runs until its stdin closes and answers nothing.
-const fixtureIdleAgentCommand = `cat >/dev/null`
