@@ -6388,7 +6388,7 @@ func TestDoltDoctorScriptUsesExplicitSQLTarget(t *testing.T) {
 }
 
 // spawnStormReadyArm answers the read spawn-storm-detect takes its candidates
-// from, `gc ready --status open --unassigned --json`. It logs the argv to
+// from, `gc ready --unassigned --json`. It logs the argv to
 // $GC_CALL_LOG, then answers $SPAWN_STORM_READY_JSON (default []), or writes
 // $SPAWN_STORM_READY_ERR to stderr and exits $SPAWN_STORM_READY_EXIT when that
 // is set.
@@ -6414,6 +6414,21 @@ func writeSpawnStormGCStub(t *testing.T, path, body string) {
 		t.Fatalf("gc stub must start with %q", strings.TrimSpace(shebang))
 	}
 	writeMaintenanceGCStub(t, path, shebang+spawnStormReadyArm+strings.TrimPrefix(body, shebang))
+}
+
+// readSpawnStormLedger reads the spawn-storm ledger at path. It must stay a
+// plain {id: count} map, the shape every older copy of the script reads.
+func readSpawnStormLedger(t *testing.T, path string) map[string]int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(data, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, data)
+	}
+	return counts
 }
 
 func TestSpawnStormDetectPersistsNewLedgerCounts(t *testing.T) {
@@ -6465,6 +6480,11 @@ exit 0
 	}
 	if !strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x") {
 		t.Fatalf("gc log missing spawn storm notification:\n%s", gcData)
+	}
+	// The one bead the ledger tracks is in the pool, so nothing can be pruned
+	// and the rig list, a read that probes every rig's sessions, is not taken.
+	if strings.Contains(string(gcData), "rig list") {
+		t.Fatalf("read the rig list with no ledger entry outside the pool\ngc log:\n%s", gcData)
 	}
 }
 
@@ -6704,7 +6724,9 @@ exit 0
 // half of the edge trigger. With -eq, a count left sitting AT the threshold
 // never equals it again, so a sweep whose alert could not be delivered has to
 // put the count back where it was or the storm is never reported at all. The
-// failure must also reach the controller log, which takes a non-zero exit.
+// failure must also reach the controller log, which takes a non-zero exit. A
+// bead that waits in the pool counts only once, so the rollback must also undo
+// that this sweep found it, or the retry never counts it again.
 func TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -6719,10 +6741,11 @@ case "$1" in
 esac
 exit 0
 `)
-	// Every mail send fails the way an unreachable backend does.
+	// While SPAWN_STORM_MAIL_FAIL is set, every mail send fails the way an
+	// unreachable backend does.
 	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "${1:-}" = "mail" ]; then
+if [ "${1:-}" = "mail" ] && [ -n "${SPAWN_STORM_MAIL_FAIL:-}" ]; then
   printf 'mail backend unavailable\n' >&2
   exit 1
 fi
@@ -6735,7 +6758,8 @@ exit 0
 		"GC_PACK_STATE_DIR":      stateDir,
 		"GC_CALL_LOG":            gcLog,
 		"SPAWN_STORM_THRESHOLD":  "1",
-		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","updated_at":"2026-11-03T07:00:00Z","metadata":{"recovered":"true"}}]`,
+		"SPAWN_STORM_MAIL_FAIL":  "1",
 		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
@@ -6766,6 +6790,21 @@ exit 0
 	}
 	if !strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x") {
 		t.Fatalf("gc log missing the attempted spawn storm notification:\n%s", gcData)
+	}
+
+	// The mail backend is back and the bead still waits in the pool, unchanged:
+	// the next sweep counts it again and delivers the alert.
+	delete(env, "SPAWN_STORM_MAIL_FAIL")
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+	if retried := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))["ga-loop"]; retried != 1 {
+		t.Fatalf("ledger count for ga-loop after the retry = %d, want 1", retried)
+	}
+	gcData, err = os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if sent := strings.Count(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x"); sent != 2 {
+		t.Fatalf("spawn storm notification sent %d times, want 2 (the failed attempt, then the retry)\ngc log:\n%s", sent, gcData)
 	}
 }
 
@@ -6957,7 +6996,7 @@ exit 0
 // gc bd list answers from one store, the city store for this city-scoped order,
 // and bd leaves the wisp plane out of a plain list. A bead reset in a rig
 // store, in the graph store a split city keeps workflow steps in, or on the
-// wisp plane never reached the count. gc ready --status open reads them all.
+// wisp plane never reached the count. gc ready --unassigned reads them all.
 func TestSpawnStormDetectCountsResetBeadsInEveryStore(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -7005,8 +7044,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
-	if !strings.Contains(string(gcData), "ready --status open --unassigned --json") {
-		t.Fatalf("sweep did not read with gc ready --status open --unassigned --json\ngc log:\n%s", gcData)
+	if !strings.Contains(string(gcData), "ready --unassigned --json") {
+		t.Fatalf("sweep did not read with gc ready --unassigned --json\ngc log:\n%s", gcData)
 	}
 	for _, id := range []string{"gcg-12", "rig-7", "hq-wisp-3"} {
 		if got := counts[id]; got != 1 {
@@ -7103,19 +7142,162 @@ exit 0
 // quiescence. The ledger can hold beads of any rig the sweep counted, and a
 // suspended rig is left cold: a bd read of one of its beads restarts the
 // store proxy the controller retired. Such a bead keeps its count, unread,
-// until the rig resumes; the other ledger entries are pruned as before.
+// until the rig resumes; the other ledger entries are pruned as before. A bead
+// belongs to the HQ or rig with the longest prefix its id starts with, in any
+// case, as gc bd routes it: a prefix can hold a hyphen, so the first
+// dash-separated token of an id is not its prefix. A bead this sweep found in
+// the pool is open, so it is not read either.
 func TestSpawnStormDetectLeavesSuspendedRigBeadsUnread(t *testing.T) {
-	cityDir := t.TempDir()
-	binDir := t.TempDir()
-	stateDir := t.TempDir()
-	gcLog := filepath.Join(t.TempDir(), "gc.log")
-	ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
-	if err := os.WriteFile(ledger, []byte(`{"cold-abc":2,"ga-closed":1}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	const hq = `{"name":"city","prefix":"ga","hq":true,"suspended":false}`
+	for _, tc := range []struct {
+		name string
+		rigs string
+		// cold is a tracked bead of the suspended rig: kept, unread.
+		cold string
+		// closed is a closed tracked bead of a live rig or the HQ: read and
+		// pruned.
+		closed string
+	}{
+		{
+			name:   "rig prefix",
+			rigs:   `{"rigs":[` + hq + `,{"name":"warm","prefix":"warm","hq":false,"suspended":false},{"name":"cold","prefix":"cold","hq":false,"suspended":true}]}`,
+			cold:   "cold-abc",
+			closed: "ga-closed",
+		},
+		{
+			name:   "hyphenated rig prefix",
+			rigs:   `{"rigs":[` + hq + `,{"name":"agent-diagnostics","prefix":"agent-diagnostics","hq":false,"suspended":true}]}`,
+			cold:   "agent-diagnostics-hnn",
+			closed: "ga-closed",
+		},
+		{
+			name:   "suspended rig whose prefix begins a live rig's",
+			rigs:   `{"rigs":[` + hq + `,{"name":"agent","prefix":"agent","hq":false,"suspended":true},{"name":"agent-diagnostics","prefix":"agent-diagnostics","hq":false,"suspended":false}]}`,
+			cold:   "agent-x1",
+			closed: "agent-diagnostics-hnn",
+		},
+		{
+			name:   "prefix in another case",
+			rigs:   `{"rigs":[` + hq + `,{"name":"cold","prefix":"Cold","hq":false,"suspended":true}]}`,
+			cold:   "cold-abc",
+			closed: "ga-closed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+			if err := os.WriteFile(ledger, []byte(`{"`+tc.cold+`":2,"`+tc.closed+`":1}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	// Were cold-abc read, it would answer not found and be pruned.
-	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+			// Were the cold bead read, it would answer not found and be pruned.
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    case "$2" in
+      "$SPAWN_STORM_COLD")
+        printf 'issue not found\n' >&2
+        exit 1
+        ;;
+      "$SPAWN_STORM_CLOSED")
+        printf '[{"id":"%s","status":"closed","title":"Closed bead"}]\n' "$2"
+        ;;
+      *)
+        printf '[{"id":"%s","status":"open","title":"Open bead"}]\n' "$2"
+        ;;
+    esac
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"GC_CITY":                cityDir,
+				"GC_CITY_PATH":           cityDir,
+				"GC_PACK_STATE_DIR":      stateDir,
+				"GC_CALL_LOG":            gcLog,
+				"SPAWN_STORM_THRESHOLD":  "99",
+				"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+				"SPAWN_STORM_COLD":       tc.cold,
+				"SPAWN_STORM_CLOSED":     tc.closed,
+				"FAKE_RIG_LIST_JSON":     tc.rigs,
+				"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+			counts := readSpawnStormLedger(t, ledger)
+			if got := counts[tc.cold]; got != 2 {
+				t.Fatalf("suspended rig's bead %s count = %d, want 2 (kept, unread)\nledger: %v", tc.cold, got, counts)
+			}
+			if _, ok := counts[tc.closed]; ok {
+				t.Fatalf("closed bead %s was not pruned: %v", tc.closed, counts)
+			}
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if strings.Contains(string(gcData), "show "+tc.cold+" ") {
+				t.Fatalf("read %s, a bead of a suspended rig\ngc log:\n%s", tc.cold, gcData)
+			}
+			if strings.Contains(string(gcData), "show ga-loop ") {
+				t.Fatalf("read ga-loop, which this sweep found in the pool\ngc log:\n%s", gcData)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectLeavesTheLedgerUnprunedWhenTheRigListFails pins the
+// prune step's fail-safe. Which rigs are suspended comes from gc rig list, a
+// read separate from gc ready that can fail on its own. Taken as "no rig is
+// suspended", a failed rig list sent the sweep into the beads of cold rigs,
+// waking their retired store proxies, pruned their counts and exited 0. The
+// sweep must read no bead, keep every count and the record of when each was
+// last found in the pool, save what it counted, and exit non-zero saying why.
+func TestSpawnStormDetectLeavesTheLedgerUnprunedWhenTheRigListFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "rig list fails",
+			env:  map[string]string{"FAKE_RIG_LIST_FAIL": "1", "FAKE_RIG_LIST_ERR": "gc rig list: session provider unavailable"},
+			want: "gc rig list: session provider unavailable",
+		},
+		{
+			name: "answer is not a rig list",
+			env:  map[string]string{"FAKE_RIG_LIST_JSON": `{"schema_version":"1","ok":false,"error":{"code":"config_load_failed"}}`},
+			want: "did not answer a rig list",
+		},
+		{
+			name: "answer is not JSON",
+			env:  map[string]string{"FAKE_RIG_LIST_JSON": `not-json`},
+			want: "did not answer a rig list",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+			if err := os.WriteFile(ledger, []byte(`{"cold-abc":2,"ga-closed":1}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seen := filepath.Join(stateDir, "spawn-storm-seen.json")
+			if err := os.WriteFile(seen, []byte(`{"cold-abc":""}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Were either tracked bead read, it would be pruned.
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
 case "$1" in
   show)
     case "$2" in
@@ -7134,44 +7316,196 @@ case "$1" in
 esac
 exit 0
 `)
-	writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			env := map[string]string{
+				"GC_CITY":                cityDir,
+				"GC_CITY_PATH":           cityDir,
+				"GC_PACK_STATE_DIR":      stateDir,
+				"GC_CALL_LOG":            gcLog,
+				"SPAWN_STORM_THRESHOLD":  "99",
+				"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
+				"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+
+			out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
+			if err == nil {
+				t.Fatalf("spawn-storm-detect exited 0 with an unread rig list; want non-zero so the controller logs it\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.want) {
+				t.Fatalf("output does not say why the ledger was not pruned (want %q):\n%s", tc.want, out)
+			}
+			counts := readSpawnStormLedger(t, ledger)
+			for id, want := range map[string]int{"cold-abc": 2, "ga-closed": 1, "ga-loop": 1} {
+				if got := counts[id]; got != want {
+					t.Errorf("ledger count for %s = %d, want %d\nledger: %v", id, got, want, counts)
+				}
+			}
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if strings.Contains(string(gcData), "bd show") {
+				t.Fatalf("read a tracked bead without knowing which rigs are suspended\ngc log:\n%s", gcData)
+			}
+			// cold-abc was found in the pool before its rig was suspended, and a
+			// sweep that cannot tell whether it reads cold-abc must not forget it.
+			seenData, err := os.ReadFile(seen)
+			if err != nil {
+				t.Fatalf("ReadFile(seen): %v", err)
+			}
+			var records map[string]string
+			if err := json.Unmarshal(seenData, &records); err != nil {
+				t.Fatalf("Unmarshal(seen): %v\n%s", err, seenData)
+			}
+			if got, ok := records["cold-abc"]; !ok || got != "" {
+				t.Fatalf("record for cold-abc = %q (present %v), want it kept as \"\"\nrecords: %s", got, ok, seenData)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectReadsOnlyClaimableBeads pins the read to the pool, the
+// beads a worker can claim. gc ready --status open also lists beads no worker
+// can claim (deferred, blocked, or parked in a custom status), which bd reads
+// as open, and one that carries an old rejection is not coming back to the
+// pool. The stub behaves like gc ready: --status open adds the parked row.
+func TestSpawnStormDetectReadsOnlyClaimableBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "ready" ]; then
+  case " $* " in
+    *" --status "*)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-parked","status":"open","defer_until":"2099-01-01T00:00:00Z","metadata":{"rejection_reason":"tests red"}}]\n'
+      ;;
+    *)
+      printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+      ;;
+  esac
+fi
 exit 0
 `)
 
 	env := map[string]string{
-		"GC_CITY":                cityDir,
-		"GC_CITY_PATH":           cityDir,
-		"GC_PACK_STATE_DIR":      stateDir,
-		"GC_CALL_LOG":            gcLog,
-		"SPAWN_STORM_THRESHOLD":  "99",
-		"SPAWN_STORM_READY_JSON": `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`,
-		"FAKE_RIG_LIST_JSON":     `{"rigs":[{"name":"warm","prefix":"warm","hq":false,"suspended":false},{"name":"cold","prefix":"cold","hq":false,"suspended":true}]}`,
-		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
 
-	ledgerData, err := os.ReadFile(ledger)
-	if err != nil {
-		t.Fatalf("ReadFile(ledger): %v", err)
+	counts := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if _, ok := counts["ga-parked"]; ok {
+		t.Fatalf("ledger counted ga-parked, which no worker can claim; the read must be ready work, not --status open\nledger: %v", counts)
 	}
-	var counts map[string]int
-	if err := json.Unmarshal(ledgerData, &counts); err != nil {
-		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	if got := counts["ga-pool"]; got != 1 {
+		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %v", got, counts)
 	}
-	if got := counts["cold-abc"]; got != 2 {
-		t.Fatalf("suspended rig's bead count = %d, want 2 (kept, unread)\nledger: %s", got, ledgerData)
+}
+
+// TestSpawnStormDetectCountsComebacksNotSweeps pins what one count is: a bead
+// coming back to the pool, not a sweep finding it there. Counting sweeps made
+// one recovery that waited through two 5m sweeps mail a storm. Every reset is
+// a write, so a comeback carries a new updated_at; a bead that waits in the
+// pool, or leaves it and comes back unwritten, carries the one it had. A row
+// with no updated_at, which a bd store leaves off many rows, counts when the
+// last sweep that read it did not find it in the pool. A sweep of an empty
+// pool reads it; one that leaves it unread, its rig suspended, does not.
+func TestSpawnStormDetectCountsComebacksNotSweeps(t *testing.T) {
+	type sweep struct {
+		pool string
+		// rigs is the gc rig list answer, when the sweep reads one.
+		rigs string
 	}
-	if _, ok := counts["ga-closed"]; ok {
-		t.Fatalf("closed bead was not pruned: %s", ledgerData)
-	}
-	gcData, err := os.ReadFile(gcLog)
-	if err != nil {
-		t.Fatalf("ReadFile(gc log): %v", err)
-	}
-	if strings.Contains(string(gcData), "show cold-abc") {
-		t.Fatalf("read a bead of a suspended rig\ngc log:\n%s", gcData)
+	var (
+		reset      = sweep{pool: `[{"id":"ga-loop","status":"open","updated_at":"2026-11-03T07:00:00Z","metadata":{"recovered":"true"}}]`}
+		resetAgain = sweep{pool: `[{"id":"ga-loop","status":"open","updated_at":"2026-11-03T07:12:00Z","metadata":{"recovered":"true"}}]`}
+		untimed    = sweep{pool: `[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]`}
+		elsewhere  = sweep{pool: `[{"id":"ga-other","status":"open","updated_at":"2026-11-03T07:00:00Z"}]`}
+		empty      = sweep{pool: `[]`}
+		suspended  = sweep{pool: `[]`, rigs: `{"rigs":[{"name":"city","prefix":"gc","hq":true,"suspended":false},{"name":"loop","prefix":"ga","hq":false,"suspended":true}]}`}
+	)
+	for _, tc := range []struct {
+		name   string
+		sweeps []sweep
+		want   int
+	}{
+		{name: "waits in the pool", sweeps: []sweep{reset, reset, reset}, want: 1},
+		{name: "claimed and reset again between two sweeps", sweeps: []sweep{reset, resetAgain}, want: 2},
+		{name: "leaves the pool and comes back reset again", sweeps: []sweep{reset, elsewhere, resetAgain}, want: 2},
+		{name: "leaves the pool and comes back unwritten", sweeps: []sweep{reset, elsewhere, reset}, want: 1},
+		{name: "no updated_at, waits in the pool", sweeps: []sweep{untimed, untimed}, want: 1},
+		{name: "no updated_at, leaves the pool and comes back", sweeps: []sweep{untimed, empty, untimed}, want: 2},
+		{name: "no updated_at, its rig suspended and resumed", sweeps: []sweep{untimed, suspended, untimed}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+			writeSpawnStormGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+			env := map[string]string{
+				"GC_CITY":               cityDir,
+				"GC_CITY_PATH":          cityDir,
+				"GC_PACK_STATE_DIR":     stateDir,
+				"GC_CALL_LOG":           gcLog,
+				"SPAWN_STORM_THRESHOLD": "2",
+				"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for _, sw := range tc.sweeps {
+				env["SPAWN_STORM_READY_JSON"] = sw.pool
+				delete(env, "FAKE_RIG_LIST_JSON")
+				if sw.rigs != "" {
+					env["FAKE_RIG_LIST_JSON"] = sw.rigs
+				}
+				runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+			}
+
+			counts := readSpawnStormLedger(t, filepath.Join(stateDir, "spawn-storm-counts.json"))
+			if got := counts["ga-loop"]; got != tc.want {
+				t.Fatalf("ledger count for ga-loop = %d after %d sweeps, want %d\nledger: %v", got, len(tc.sweeps), tc.want, counts)
+			}
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			if mailed := strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 2x"); mailed != (tc.want == 2) {
+				t.Fatalf("storm mailed = %v, want %v at count %d with threshold 2\ngc log:\n%s", mailed, tc.want == 2, tc.want, gcData)
+			}
+		})
 	}
 }
 
@@ -7622,7 +7956,7 @@ const maintenanceBdAppliedIDsJSON = `    if [ -n "${BD_CLOSE_FAIL:-}" ]; then
 //     scope as GC_FAKE_SCOPE.
 //
 // `gc rig list --json` prints FAKE_RIG_LIST_JSON (default: no rigs), or fails
-// when FAKE_RIG_LIST_FAIL is set.
+// when FAKE_RIG_LIST_FAIL is set, writing FAKE_RIG_LIST_ERR to stderr.
 func writeMaintenanceGCStub(t *testing.T, path, body string) {
 	t.Helper()
 	const shebang = "#!/bin/sh\n"
@@ -7649,6 +7983,9 @@ const maintenanceGCScopeRoute = `if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" 
     printf '%s\n' "$*" >> "$GC_CALL_LOG"
   fi
   if [ -n "${FAKE_RIG_LIST_FAIL:-}" ]; then
+    if [ -n "${FAKE_RIG_LIST_ERR:-}" ]; then
+      printf '%s\n' "$FAKE_RIG_LIST_ERR" >&2
+    fi
     exit 1
   fi
   if [ -n "${FAKE_RIG_LIST_JSON:-}" ]; then
