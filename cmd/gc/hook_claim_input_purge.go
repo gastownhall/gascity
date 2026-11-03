@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -40,9 +41,11 @@ type workflowInputVerdict struct {
 }
 
 // workflowInputAbsenceProver reports whether every one of ids is proven to
-// exist in no store of the city. false is "not proven" — a hit anywhere, or
-// a store the prover could not or would not read — and never authorizes a
-// purge. A nil prover proves nothing.
+// exist in no store of the city. false with no error is a store that still
+// holds one of them; a proof that could not finish — a store it could not
+// read, or one that could hold an id but stays unread — is an error naming
+// the id and the store. Neither ever authorizes a purge. A nil prover proves
+// nothing.
 type workflowInputAbsenceProver func(ctx context.Context, ids []string) (bool, error)
 
 // workflowInputPurgedFailureReason is the gc.failure_reason a purged-input
@@ -69,13 +72,14 @@ func workflowRootPurgeable(root beads.Bead) bool {
 		!convoy.IsTerminalStatus(root.Status)
 }
 
-// workflowInputAbsent reports whether every one of ids misses in work and in
-// graph and prove then proves it absent from the rest of the city. A hit in
-// either store is "not absent" without asking prove; a read error other than
-// not-found, or ctx ending between reads, is returned.
-func workflowInputAbsent(ctx context.Context, graph, work workflowInputReader, ids []string, prove workflowInputAbsenceProver) (bool, error) {
+// workflowInputAbsent reports whether every one of ids misses in each of legs
+// (the stores the claim reads that have not yet answered for it) and prove
+// then proves it absent from the rest of the city. A hit in a leg is "not
+// absent" without asking prove; a read error other than not-found, or ctx
+// ending first, is returned.
+func workflowInputAbsent(ctx context.Context, legs []workflowInputReader, ids []string, prove workflowInputAbsenceProver) (bool, error) {
 	for _, id := range ids {
-		for _, store := range []workflowInputReader{work, graph} {
+		for _, store := range legs {
 			if err := ctx.Err(); err != nil {
 				return false, fmt.Errorf("reading workflow input %s: %w", id, err)
 			}
@@ -88,11 +92,26 @@ func workflowInputAbsent(ctx context.Context, graph, work workflowInputReader, i
 			}
 		}
 	}
+	joined := strings.Join(ids, ", ")
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("proving workflow input %s absent: %w", joined, err)
+	}
 	absent, err := prove(ctx, ids)
 	if err != nil {
-		return false, fmt.Errorf("proving workflow input %s absent: %w", strings.Join(ids, ", "), err)
+		return false, fmt.Errorf("proving workflow input %s absent: %w", joined, err)
 	}
 	return absent, nil
+}
+
+// purgedIfProven returns pending as a purged verdict naming ids as the missing
+// input when workflowInputAbsent proves them absent from legs and the rest of
+// the city, and pending unchanged otherwise.
+func purgedIfProven(ctx context.Context, pending workflowInputVerdict, legs []workflowInputReader, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+	absent, err := workflowInputAbsent(ctx, legs, ids, prove)
+	if err != nil || !absent {
+		return pending, err
+	}
+	return workflowInputVerdict{RootID: pending.RootID, State: workflowInputPurged, MissingIDs: ids}, nil
 }
 
 // unresolvedMemberIDs returns the ids of the convoy members no store the
@@ -108,11 +127,15 @@ func unresolvedMemberIDs(members []beads.Bead) []string {
 }
 
 // proveInputAbsentAcrossCity proves each of ids absent from every store of the
-// city at cityPath: no class binding owns it, and every store a by-id lookup
-// of it would read opens and answers not-found. A hit is "not proven", and so
-// is a suspended rig's store, which the proof leaves unopened (as a by-id
-// probe does, byIDSuspendedStoreRoots) to keep it quiescent; a binding, open
-// or read failure is an error naming the id and the store.
+// city at cityPath that could hold it: no class binding owns it, and every
+// store a by-id lookup of it reads opens and answers not-found. That leaves a
+// suspended rig's store unopened, to keep it quiescent (byIDStoreOpener),
+// unless the id's prefix routes to that rig: an id carries the prefix of the
+// store that minted it, and a by-id lookup never reads another suspended rig
+// for it either. An id whose prefix routes to no store could be in any of
+// them, so for it a suspended or unbound rig leaves the proof incomplete
+// (workflowInputAbsenceGap). A hit is "not proven"; an incomplete proof, or a
+// binding, open or read failure, is an error naming the id and the store.
 func proveInputAbsentAcrossCity(ctx context.Context, cityPath string, cfg *config.City, ids []string) (bool, error) {
 	return proveInputAbsentAcrossCityWith(ctx, cityPath, cfg, ids, func(dir string) (workflowInputReader, error) {
 		return openStoreAtForCityWithConfig(dir, cityPath, cfg)
@@ -120,48 +143,113 @@ func proveInputAbsentAcrossCity(ctx context.Context, cityPath string, cfg *confi
 }
 
 // proveInputAbsentAcrossCityWith is proveInputAbsentAcrossCity reading each
-// candidate store through open. A nil reader with no error is a store open
-// declined to hand out, which leaves the proof incomplete.
+// candidate store through open. The ids are one proof: the first id a store
+// still holds ends it.
 func proveInputAbsentAcrossCityWith(ctx context.Context, cityPath string, cfg *config.City, ids []string, open func(dir string) (workflowInputReader, error)) (bool, error) {
 	if cfg == nil {
-		return false, nil
+		return false, errors.New("no city config names the stores to read")
 	}
 	for _, id := range ids {
-		if err := ctx.Err(); err != nil {
+		held, err := workflowInputHeldInCity(ctx, cityPath, cfg, id, open)
+		if err != nil || held {
 			return false, err
-		}
-		_, owned, err := cliByIDBindingOwner(cityPath, id)
-		if err != nil {
-			return false, fmt.Errorf("resolving binding owner of %s: %w", id, err)
-		}
-		if owned {
-			return false, nil
-		}
-		asleep := byIDSuspendedStoreRoots(cfg, cityPath, id)
-		for _, dir := range convoyStoreCandidates(cfg, cityPath, id) {
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			if len(asleep[normalizePathForCompare(dir)]) > 0 {
-				return false, nil
-			}
-			store, err := open(dir)
-			if err != nil {
-				return false, fmt.Errorf("opening store %s to look for %s: %w", dir, id, err)
-			}
-			if store == nil {
-				return false, nil
-			}
-			_, err = store.Get(id)
-			if err == nil {
-				return false, nil
-			}
-			if !errors.Is(err, beads.ErrNotFound) {
-				return false, fmt.Errorf("reading %s from store %s: %w", id, dir, err)
-			}
 		}
 	}
 	return true, nil
+}
+
+// workflowInputHeldInCity reports whether a store of the city holds id: a
+// class binding that owns it, or a hit in a store the proof reads (every store
+// a by-id lookup of id reads, the suspended ones it leaves unopened aside). A
+// miss everywhere it reads is an error when a store that could hold id stays
+// unread (workflowInputAbsenceGap).
+func workflowInputHeldInCity(ctx context.Context, cityPath string, cfg *config.City, id string, open func(dir string) (workflowInputReader, error)) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	_, owned, err := cliByIDBindingOwner(cityPath, id)
+	if err != nil {
+		return false, fmt.Errorf("resolving binding owner of %s: %w", id, err)
+	}
+	if owned {
+		return true, nil
+	}
+	asleep := byIDSuspendedStoreRoots(cfg, cityPath, id)
+	for _, dir := range convoyStoreCandidates(cfg, cityPath, id) { // residency:allow — the list openConvoyStores walks for a by-id lookup of id, minus the suspended stores byIDStoreOpener leaves unopened; an absence proof reads every one, so it decides no binding, namespace or leg order
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if len(asleep[normalizePathForCompare(dir)]) > 0 {
+			continue
+		}
+		held, err := workflowInputHeldInStore(open, dir, id)
+		if err != nil || held {
+			return held, err
+		}
+	}
+	return false, workflowInputAbsenceGap(cfg, cityPath, id, asleep)
+}
+
+// workflowInputHeldInStore reports whether the store at dir holds id. A store
+// that will not open, opens no handle, or fails the read is an error naming
+// id and dir.
+func workflowInputHeldInStore(open func(dir string) (workflowInputReader, error), dir, id string) (bool, error) {
+	store, err := open(dir)
+	if err != nil {
+		return false, fmt.Errorf("opening store %s to look for %s: %w", dir, id, err)
+	}
+	if store == nil {
+		return false, fmt.Errorf("opening store %s to look for %s: no store handle", dir, id)
+	}
+	_, err = store.Get(id)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		return false, fmt.Errorf("reading %s from store %s: %w", id, dir, err)
+	}
+	return false, nil
+}
+
+// workflowInputAbsenceGap names a store that could hold id but that the
+// absence proof leaves unread, as an error, or returns nil when there is
+// none. A store could hold id when id's prefix routes to it; when the prefix
+// routes to no store, every store of the city could. A rig with no path
+// binding is unread, and so is a suspended rig in asleep (the suspended store
+// roots the proof leaves unopened).
+func workflowInputAbsenceGap(cfg *config.City, cityPath, id string, asleep map[string][]string) error {
+	prefix := beadPrefix(cfg, id)
+	routed := sling.IsHQPrefix(cfg, prefix)
+	for _, rig := range cfg.Rigs {
+		if prefix == "" || !strings.EqualFold(rig.EffectivePrefix(), prefix) {
+			continue
+		}
+		routed = true
+		if why := unreadRigStore(cityPath, rig, asleep); why != "" {
+			return fmt.Errorf("rig %q, which %s's prefix routes to, %s", rig.Name, id, why)
+		}
+	}
+	if routed {
+		return nil
+	}
+	for _, rig := range cfg.Rigs {
+		if why := unreadRigStore(cityPath, rig, asleep); why != "" {
+			return fmt.Errorf("%s's prefix routes to no store, so rig %q could hold it, and that rig %s", id, rig.Name, why)
+		}
+	}
+	return nil
+}
+
+// unreadRigStore says why the absence proof leaves rig's store unread, or
+// returns "" when the proof reads it.
+func unreadRigStore(cityPath string, rig config.Rig, asleep map[string][]string) string {
+	if strings.TrimSpace(rig.Path) == "" {
+		return "has no path binding, so its store cannot be read"
+	}
+	if len(asleep[normalizePathForCompare(resolveStoreScopeRoot(cityPath, rig.Path))]) > 0 {
+		return "is suspended, so its store is not read"
+	}
+	return ""
 }
 
 // failPurgedWorkflow retires the workflow rooted at rootID whose input no

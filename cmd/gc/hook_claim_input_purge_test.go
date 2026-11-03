@@ -68,6 +68,22 @@ func seedPurgedInputWorkflow(t *testing.T, store beads.Store, convoyID string) p
 	return w
 }
 
+// seedInputStampedStep adds to w an open routed step that carries the input
+// convoy id beside its root id, as a formula's step metadata may stamp it; such
+// a step is still judged by its root.
+func seedInputStampedStep(t *testing.T, store beads.Store, w purgedInputWorkflow) beads.Bead {
+	t.Helper()
+	step, err := store.Create(beads.Bead{Title: "stamped step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    w.root.ID,
+		beadmeta.InputConvoyIDMetadataKey: w.root.Metadata[beadmeta.InputConvoyIDMetadataKey],
+		beadmeta.RoutedToMetadataKey:      "worker",
+	}})
+	if err != nil {
+		t.Fatalf("create stamped step: %v", err)
+	}
+	return step
+}
+
 // assertPurgeRetired checks that every id closed with the purge disposition.
 func assertPurgeRetired(t *testing.T, store beads.Store, ids ...string) {
 	t.Helper()
@@ -124,13 +140,15 @@ func (p *recordingProver) prove(_ context.Context, ids []string) (bool, error) {
 }
 
 // A graph.v2 workflow whose input convoy is proven absent reads as purged,
-// naming the convoy as the missing input.
+// naming the convoy as the missing input, for the root and for any of its
+// steps, including one that carries the input convoy id itself.
 func TestWorkflowInputVerdictPurgedWhenConvoyProvenAbsent(t *testing.T) {
 	store := beads.NewMemStore()
 	w := seedPurgedInputWorkflow(t, store, "gc-gone")
+	stamped := seedInputStampedStep(t, store, w)
 	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
 
-	for _, candidate := range []beads.Bead{w.root, w.open} {
+	for _, candidate := range []beads.Bead{w.root, w.open, stamped} {
 		verdict, err := workflowInputDone(context.Background(), store, candidate, nil, prover.prove)
 		if err != nil {
 			t.Fatalf("workflowInputDone(%s): %v", candidate.ID, err)
@@ -226,35 +244,44 @@ func purgeClaimOps(t *testing.T, cityDir string, cfg *config.City, store beads.S
 // graph.v2 workflow whose input convoy no store in the city holds is retired
 // before any claim — root and open steps closed fail/hard/input_purged, the
 // finished step's outcome kept — and the hook drains instead of handing the
-// step out again.
+// step out again. A step that carries the input convoy id itself retires the
+// same workflow through its root.
 func TestDoHookClaimRetiresWorkflowWhoseInputWasPurged(t *testing.T) {
-	cityDir, cfg := purgeProofCity(t, "")
-	store := openPurgeProofStore(t, cityDir)
-	w := seedPurgedInputWorkflow(t, store, "OP-purged")
-	ops, claimed := purgeClaimOps(t, cityDir, cfg, store, []beads.Bead{w.open})
+	for _, stamped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("step stamped with the input id=%t", stamped), func(t *testing.T) {
+			cityDir, cfg := purgeProofCity(t, "")
+			store := openPurgeProofStore(t, cityDir)
+			w := seedPurgedInputWorkflow(t, store, "OP-purged")
+			candidate := w.open
+			if stamped {
+				candidate = seedInputStampedStep(t, store, w)
+			}
+			ops, claimed := purgeClaimOps(t, cityDir, cfg, store, []beads.Bead{candidate})
 
-	var stdout, stderr bytes.Buffer
-	code := doHookClaim("query", cityDir, hookClaimOptions{
-		Assignee:           "worker-1",
-		IdentityCandidates: []string{"worker-1"},
-		RouteTargets:       []string{"worker"},
-		DrainAck:           true,
-		JSON:               true,
-	}, ops, &stdout, &stderr)
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", cityDir, hookClaimOptions{
+				Assignee:           "worker-1",
+				IdentityCandidates: []string{"worker-1"},
+				RouteTargets:       []string{"worker"},
+				DrainAck:           true,
+				JSON:               true,
+			}, ops, &stdout, &stderr)
 
-	if code != 0 {
-		t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
-	}
-	if len(*claimed) != 0 {
-		t.Fatalf("claimed %v; the workflow's input no longer exists anywhere", *claimed)
-	}
-	if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
-		t.Fatalf("stdout = %q, want no_work drain", stdout.String())
-	}
-	assertPurgeRetired(t, store, w.root.ID, w.open.ID, w.active.ID)
-	assertFinishedOutcomeKept(t, store, w.finished.ID)
-	if !strings.Contains(stderr.String(), w.root.ID) || !strings.Contains(stderr.String(), "OP-purged") {
-		t.Fatalf("stderr = %q, want the retired root and the missing input named", stderr.String())
+			if code != 0 {
+				t.Fatalf("doHookClaim = %d, want 0 (stderr=%q)", code, stderr.String())
+			}
+			if len(*claimed) != 0 {
+				t.Fatalf("claimed %v; the workflow's input no longer exists anywhere", *claimed)
+			}
+			if !strings.Contains(stdout.String(), `"reason":"no_work"`) {
+				t.Fatalf("stdout = %q, want no_work drain", stdout.String())
+			}
+			assertPurgeRetired(t, store, w.root.ID, w.open.ID, w.active.ID, candidate.ID)
+			assertFinishedOutcomeKept(t, store, w.finished.ID)
+			if !strings.Contains(stderr.String(), w.root.ID) || !strings.Contains(stderr.String(), "OP-purged") {
+				t.Fatalf("stderr = %q, want the retired root and the missing input named", stderr.String())
+			}
+		})
 	}
 }
 
@@ -307,33 +334,65 @@ func TestWorkflowInputPurgedEveryTrackedMemberAbsent(t *testing.T) {
 	}
 }
 
-// TestHookInputPurgeLeavesSuspendedRigUnreadAndUnproven: a suspended rig's
-// store is one the absence proof will not open — suspension is quiescence —
-// so input it could still hold is never proven absent: the workflow is not
-// retired and its step is claimed as before.
-func TestHookInputPurgeLeavesSuspendedRigUnreadAndUnproven(t *testing.T) {
-	cityDir, cfg := purgeProofCity(t, `
+// suspendPurgeProofRig suspends the rig named name in the city at cityDir.
+func suspendPurgeProofRig(t *testing.T, cityDir, name string) {
+	t.Helper()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, name, &suspended); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dormantRigTOML declares the dormant rig (prefix DM) a purgeProofCity
+// suspends.
+const dormantRigTOML = `
 [[rigs]]
 name = "dormant"
 path = "dormant"
 prefix = "DM"
-`, "dormant")
-	suspended := true
-	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "dormant", &suspended); err != nil {
-		t.Fatal(err)
-	}
+`
+
+// TestDoHookClaimRetiresPurgedInputPastAnUnrelatedSuspendedRig: the proof
+// leaves a suspended rig the input's prefix does not route to unread
+// (suspension is quiescence), as a by-id lookup does, and still finishes: the
+// workflow is retired as purged.
+func TestDoHookClaimRetiresPurgedInputPastAnUnrelatedSuspendedRig(t *testing.T) {
+	cityDir, cfg := purgeProofCity(t, dormantRigTOML, "dormant")
+	suspendPurgeProofRig(t, cityDir, "dormant")
 	store := openPurgeProofStore(t, cityDir)
 	w := seedPurgedInputWorkflow(t, store, "OP-purged")
 
-	claimed, _ := runPurgeClaim(t, cityDir, cfg, store, w.open)
+	claimed, stderr := runPurgeClaim(t, cityDir, cfg, store, w.open)
+
+	if len(claimed) != 0 {
+		t.Fatalf("claimed %v (stderr=%q); a suspended rig OP-purged's prefix does not route to must not block its proof", claimed, stderr)
+	}
+	assertPurgeRetired(t, store, w.root.ID, w.open.ID, w.active.ID)
+}
+
+// TestDoHookClaimReportsInputASuspendedRigCouldHold: input whose prefix
+// routes to no store could be in any store, so a suspended rig's unread store
+// leaves its absence unproven: the step is claimed as before, nothing closes,
+// and one stderr line names the input and the rig that blocked the proof.
+func TestDoHookClaimReportsInputASuspendedRigCouldHold(t *testing.T) {
+	cityDir, cfg := purgeProofCity(t, dormantRigTOML, "dormant")
+	suspendPurgeProofRig(t, cityDir, "dormant")
+	store := openPurgeProofStore(t, cityDir)
+	w := seedPurgedInputWorkflow(t, store, "XX-purged")
+
+	claimed, stderr := runPurgeClaim(t, cityDir, cfg, store, w.open)
 
 	if !slices.Equal(claimed, []string{w.open.ID}) {
-		t.Fatalf("claimed %v, want [%s]: a suspended rig's store was not read, so the input is not proven absent", claimed, w.open.ID)
+		t.Fatalf("claimed %v, want [%s]: the suspended rig's store could hold XX-purged", claimed, w.open.ID)
 	}
 	for _, id := range []string{w.root.ID, w.open.ID} {
 		if got, err := store.Get(id); err != nil || convoy.IsTerminalStatus(got.Status) {
 			t.Fatalf("%s = %+v, %v; want it left open", id, got, err)
 		}
+	}
+	want := "gc hook --claim: checking input convoy for " + w.open.ID + `: proving workflow input XX-purged absent: XX-purged's prefix routes to no store, so rig "dormant" could hold it, and that rig is suspended, so its store is not read`
+	if strings.Count(stderr, "XX-purged absent") != 1 || !strings.Contains(stderr, want) {
+		t.Fatalf("stderr = %q, want the one line %q", stderr, want)
 	}
 }
 
@@ -556,7 +615,7 @@ func TestWorkflowInputAbsentReadsTheClaimStoresBeforeTheCity(t *testing.T) {
 			}
 			prover := &recordingProver{absent: map[string]bool{held.ID: true}}
 
-			absent, err := workflowInputAbsent(context.Background(), graph, work, []string{held.ID}, prover.prove)
+			absent, err := workflowInputAbsent(context.Background(), []workflowInputReader{work, graph}, []string{held.ID}, prover.prove)
 
 			if err != nil || absent {
 				t.Fatalf("workflowInputAbsent = %v, %v; want not absent: the %s handle holds %s", absent, err, leg, held.ID)
@@ -588,7 +647,6 @@ func TestWorkflowInputMemberSurvivingInTheGraphHandleBlocksPurge(t *testing.T) {
 	prover := &recordingProver{absent: map[string]bool{survivor.ID: true}}
 
 	verdict, err := workflowInputDoneAcross(context.Background(), graph, work, w.open, nil, prover.prove)
-
 	if err != nil {
 		t.Fatalf("workflowInputDoneAcross: %v", err)
 	}
@@ -597,6 +655,62 @@ func TestWorkflowInputMemberSurvivingInTheGraphHandleBlocksPurge(t *testing.T) {
 	}
 	if len(prover.calls) != 0 {
 		t.Fatalf("prover calls = %v; a member the graph handle holds must not reach the city-wide proof", prover.calls)
+	}
+}
+
+// A convoy the work leg no longer holds but the workflow's graph handle does
+// is not purged, and the city-wide prover is never asked.
+func TestWorkflowInputConvoyHeldByTheGraphHandleBlocksPurge(t *testing.T) {
+	graph, work := beads.NewMemStore(), beads.NewMemStore()
+	held, err := graph.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := seedPurgedInputWorkflow(t, graph, held.ID)
+	prover := &recordingProver{absent: map[string]bool{held.ID: true}}
+
+	verdict, err := workflowInputDoneAcross(context.Background(), graph, work, w.open, nil, prover.prove)
+	if err != nil {
+		t.Fatalf("workflowInputDoneAcross: %v", err)
+	}
+	if verdict.State != workflowInputPending || verdict.RootID != w.root.ID {
+		t.Fatalf("verdict = %+v, want pending for root %s: the graph handle holds %s", verdict, w.root.ID, held.ID)
+	}
+	if len(prover.calls) != 0 {
+		t.Fatalf("prover calls = %v; a convoy the graph handle holds must not reach the city-wide proof", prover.calls)
+	}
+}
+
+// idGetCountingStore counts the reads of one id.
+type idGetCountingStore struct {
+	beads.Store
+	id   string
+	gets int
+}
+
+func (s *idGetCountingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.gets++
+	}
+	return s.Store.Get(id)
+}
+
+// A claim that passes one store as both handles reads a missing input convoy
+// from it once: that miss is the claim's whole answer, and the proof goes on
+// to the rest of the city.
+func TestWorkflowInputMissingConvoyIsReadOnceFromOneClaimStore(t *testing.T) {
+	mem := beads.NewMemStore()
+	w := seedPurgedInputWorkflow(t, mem, "gc-gone")
+	store := &idGetCountingStore{Store: mem, id: "gc-gone"}
+	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
+
+	verdict, err := workflowInputDone(context.Background(), store, w.open, nil, prover.prove)
+
+	if err != nil || verdict.State != workflowInputPurged {
+		t.Fatalf("workflowInputDone = %+v, %v; want purged", verdict, err)
+	}
+	if store.gets != 1 {
+		t.Fatalf("gc-gone read %d times from the claim's one store, want 1", store.gets)
 	}
 }
 
@@ -669,8 +783,10 @@ func TestPurgeRetirementWritesNothingAfterCancellation(t *testing.T) {
 		}
 	}
 	prover := &recordingProver{absent: map[string]bool{"gc-gone": true}}
-	if absent, err := workflowInputAbsent(ctx, store, store, []string{"gc-gone"}, prover.prove); absent || !errors.Is(err, context.Canceled) {
-		t.Fatalf("workflowInputAbsent = %v, %v; want not absent, context.Canceled", absent, err)
+	for _, legs := range [][]workflowInputReader{{store}, nil} {
+		if absent, err := workflowInputAbsent(ctx, legs, []string{"gc-gone"}, prover.prove); absent || !errors.Is(err, context.Canceled) {
+			t.Fatalf("workflowInputAbsent over %d legs = %v, %v; want not absent, context.Canceled", len(legs), absent, err)
+		}
 	}
 	if len(prover.calls) != 0 {
 		t.Fatalf("prover calls = %v after cancellation", prover.calls)
@@ -740,28 +856,28 @@ func TestProveInputAbsentAcrossCityDisprovenByAHitInAnyStore(t *testing.T) {
 	}
 }
 
-// A store the proof does not read leaves it incomplete: a declined (nil)
-// handle is not-proven with no error, and a store that will not open or read
-// is an error naming the id and the store.
+// A store the proof cannot read leaves it incomplete: a store that opens no
+// handle, will not open, or fails the read is an error naming the id and the
+// store, never a proof.
 func TestProveInputAbsentAcrossCityTreatsUnreadCoverageAsNotProven(t *testing.T) {
 	cityDir, cfg := purgeProofCity(t, "")
 	rigDir := purgeProofRigDir(t, cityDir, cfg, "OP-sought")
 	fault := errors.New("store offline")
 	for _, tc := range []struct {
-		name    string
-		rig     func() (workflowInputReader, error)
-		wantErr bool
+		name  string
+		rig   func() (workflowInputReader, error)
+		cause error
 	}{{
-		name: "declined handle",
+		name: "no store handle",
 		rig:  func() (workflowInputReader, error) { return nil, nil },
 	}, {
-		name:    "open failure",
-		rig:     func() (workflowInputReader, error) { return nil, fault },
-		wantErr: true,
+		name:  "open failure",
+		rig:   func() (workflowInputReader, error) { return nil, fault },
+		cause: fault,
 	}, {
-		name:    "read failure",
-		rig:     func() (workflowInputReader, error) { return &proveAbsentGetStore{id: "OP-sought", readErr: fault}, nil },
-		wantErr: true,
+		name:  "read failure",
+		rig:   func() (workflowInputReader, error) { return &proveAbsentGetStore{id: "OP-sought", readErr: fault}, nil },
+		cause: fault,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			open := func(dir string) (workflowInputReader, error) {
@@ -773,17 +889,101 @@ func TestProveInputAbsentAcrossCityTreatsUnreadCoverageAsNotProven(t *testing.T)
 
 			absent, err := proveInputAbsentAcrossCityWith(context.Background(), cityDir, cfg, []string{"OP-sought"}, open)
 
-			if absent {
-				t.Fatal("unread coverage answered proven absent")
+			if absent || err == nil {
+				t.Fatalf("proveInputAbsentAcrossCityWith = %v, %v; unread coverage must be an error, never a proof", absent, err)
 			}
-			if !tc.wantErr {
-				if err != nil {
-					t.Fatalf("err = %v, want none for a declined handle", err)
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Fatalf("err = %v, want it to wrap %v", err, tc.cause)
+			}
+			if !strings.Contains(err.Error(), "OP-sought") || !strings.Contains(err.Error(), rigDir) {
+				t.Fatalf("err = %v, want it to name OP-sought and %s", err, rigDir)
+			}
+		})
+	}
+}
+
+// The proof reads the stores that could hold the id. A suspended or unbound
+// rig the id's prefix does not route to is skipped unread, and the suspended
+// rig it does route to is read. An unbound rig the prefix routes to, or, for a
+// prefix that routes to no store, any rig left unread, makes the proof an
+// error naming the id and that rig.
+func TestProveInputAbsentAcrossCityCoversTheStoresThatCouldHoldTheID(t *testing.T) {
+	rigs := dormantRigTOML + `
+[[rigs]]
+name = "away"
+prefix = "AW"
+`
+	for _, tc := range []struct {
+		name     string
+		suspend  bool
+		id       string
+		held     bool   // the dormant rig's store holds id
+		wantRead bool   // the dormant rig's store is read
+		wantErr  string // "" for a proof that finishes
+	}{{
+		name:    "unrelated suspended and unbound rigs",
+		suspend: true,
+		id:      "OP-sought",
+	}, {
+		name:     "suspended rig the prefix routes to",
+		suspend:  true,
+		id:       "DM-sought",
+		wantRead: true,
+	}, {
+		name:     "suspended rig the prefix routes to holds the id",
+		suspend:  true,
+		id:       "DM-sought",
+		held:     true,
+		wantRead: true,
+	}, {
+		name:     "unbound rig the prefix routes to",
+		id:       "AW-sought",
+		wantRead: true,
+		wantErr:  `rig "away", which AW-sought's prefix routes to, has no path binding, so its store cannot be read`,
+	}, {
+		name:    "prefix routes to no store, past a suspended rig",
+		suspend: true,
+		id:      "XX-sought",
+		wantErr: `XX-sought's prefix routes to no store, so rig "dormant" could hold it, and that rig is suspended, so its store is not read`,
+	}, {
+		name:     "prefix routes to no store, past an unbound rig",
+		id:       "XX-sought",
+		wantRead: true,
+		wantErr:  `XX-sought's prefix routes to no store, so rig "away" could hold it, and that rig has no path binding, so its store cannot be read`,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, cfg := purgeProofCity(t, rigs, "dormant")
+			if tc.suspend {
+				suspendPurgeProofRig(t, cityDir, "dormant")
+			}
+			dormantDir := normalizePathForCompare(filepath.Join(cityDir, "dormant"))
+			read := false
+			open := func(dir string) (workflowInputReader, error) {
+				if normalizePathForCompare(dir) == dormantDir {
+					read = true
+					return &proveAbsentGetStore{id: tc.id, present: tc.held}, nil
 				}
-				return
+				return &proveAbsentGetStore{id: tc.id}, nil
 			}
-			if !errors.Is(err, fault) || !strings.Contains(err.Error(), "OP-sought") || !strings.Contains(err.Error(), rigDir) {
-				t.Fatalf("err = %v, want the fault naming OP-sought and %s", err, rigDir)
+
+			absent, err := proveInputAbsentAcrossCityWith(context.Background(), cityDir, cfg, []string{tc.id}, open)
+
+			if read != tc.wantRead {
+				t.Errorf("dormant rig store read = %v, want %v", read, tc.wantRead)
+			}
+			switch {
+			case tc.wantErr != "":
+				if absent || err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("proveInputAbsentAcrossCityWith = %v, %v; want not proven with %q", absent, err, tc.wantErr)
+				}
+			case tc.held:
+				if absent || err != nil {
+					t.Fatalf("proveInputAbsentAcrossCityWith = %v, %v; want not proven: the dormant rig holds %s", absent, err, tc.id)
+				}
+			default:
+				if !absent || err != nil {
+					t.Fatalf("proveInputAbsentAcrossCityWith = %v, %v; want proven absent", absent, err)
+				}
 			}
 		})
 	}

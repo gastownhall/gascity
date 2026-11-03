@@ -98,6 +98,21 @@ func newDoneWorkflowSplitFixture(t *testing.T, sourceClosed bool) doneWorkflowSp
 	return f
 }
 
+// stampedStep adds to the binding an open routed step that carries the input
+// convoy id beside its root id, as a formula's step metadata may stamp it.
+func (f doneWorkflowSplitFixture) stampedStep(t *testing.T) beads.Bead {
+	t.Helper()
+	step, err := f.binding.Create(beads.Bead{Title: "stamped step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    f.root.ID,
+		beadmeta.InputConvoyIDMetadataKey: f.convoyID,
+		beadmeta.RoutedToMetadataKey:      "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return step
+}
+
 // baseOps are the work-scope seams: the production functions over the work
 // store, the way the default seams run them over the agent's bd store.
 func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
@@ -167,18 +182,27 @@ func (f doneWorkflowSplitFixture) assertOpen(t *testing.T, ids ...string) {
 
 // A step of a binding-resident workflow whose input work is terminal is
 // retired: the root and its open steps close as skipped in the binding, and
-// the candidate is dropped.
+// the candidate is dropped. A step that carries the input convoy id itself
+// retires the same workflow through its root.
 func TestClassRoutedHookRetiresABindingResidentDoneWorkflow(t *testing.T) {
-	f := newDoneWorkflowSplitFixture(t, true)
-	ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+	for _, stamped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("step stamped with the input id=%t", stamped), func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, true)
+			candidate := f.step
+			if stamped {
+				candidate = f.stampedStep(t)
+			}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
 
-	kept, stderr := f.retire(t, ops, f.step)
-	if len(kept) != 0 {
-		t.Fatalf("candidate %s kept (stderr=%q); its workflow %s has terminal input work and must be retired", f.step.ID, stderr, f.root.ID)
-	}
-	f.assertSkipped(t, f.root.ID, f.step.ID)
-	if src, err := f.work.Get(f.source.ID); err != nil || src.Status != "closed" {
-		t.Errorf("source %s: status=%q err=%v; the retirement must not touch the work store", f.source.ID, src.Status, err)
+			kept, stderr := f.retire(t, ops, candidate)
+			if len(kept) != 0 {
+				t.Fatalf("candidate %s kept (stderr=%q); its workflow %s has terminal input work and must be retired", candidate.ID, stderr, f.root.ID)
+			}
+			f.assertSkipped(t, f.root.ID, f.step.ID, candidate.ID)
+			if src, err := f.work.Get(f.source.ID); err != nil || src.Status != "closed" {
+				t.Errorf("source %s: status=%q err=%v; the retirement must not touch the work store", f.source.ID, src.Status, err)
+			}
+		})
 	}
 }
 
@@ -241,12 +265,18 @@ func TestClassRoutedHookRetiresPurgedInput(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		absentInCity bool
+		stamped      bool // the candidate is a step carrying the input convoy id
 	}{
 		{name: "input in another store", absentInCity: false},
 		{name: "input absent everywhere", absentInCity: true},
+		{name: "input absent everywhere, step stamped with the input id", absentInCity: true, stamped: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDoneWorkflowSplitFixture(t, false)
+			candidate := f.step
+			if tc.stamped {
+				candidate = f.stampedStep(t)
+			}
 			if err := f.work.Delete(f.convoyID); err != nil {
 				t.Fatalf("purging the input convoy %s: %v", f.convoyID, err)
 			}
@@ -254,21 +284,21 @@ func TestClassRoutedHookRetiresPurgedInput(t *testing.T) {
 			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
 			ops.ProveInputAbsent = prover.prove
 
-			kept, stderr := f.retire(t, ops, f.step)
+			kept, stderr := f.retire(t, ops, candidate)
 			if len(prover.calls) != 1 || !slices.Equal(prover.calls[0], []string{f.convoyID}) {
 				t.Fatalf("prover calls = %v, want one proof of [%s]", prover.calls, f.convoyID)
 			}
 			if !tc.absentInCity {
 				if len(kept) != 1 {
-					t.Fatalf("candidate %s dropped (stderr=%q); its input convoy still exists in another store", f.step.ID, stderr)
+					t.Fatalf("candidate %s dropped (stderr=%q); its input convoy still exists in another store", candidate.ID, stderr)
 				}
 				f.assertOpen(t, f.root.ID, f.step.ID)
 				return
 			}
 			if len(kept) != 0 {
-				t.Fatalf("candidate %s kept (stderr=%q); its input convoy %s exists in no store", f.step.ID, stderr, f.convoyID)
+				t.Fatalf("candidate %s kept (stderr=%q); its input convoy %s exists in no store", candidate.ID, stderr, f.convoyID)
 			}
-			assertPurgeRetired(t, f.binding, f.root.ID, f.step.ID)
+			assertPurgeRetired(t, f.binding, f.root.ID, f.step.ID, candidate.ID)
 			if !strings.Contains(stderr, f.root.ID) || !strings.Contains(stderr, f.convoyID) {
 				t.Errorf("stderr = %q, want it to name the retired root %s and the absent convoy %s", stderr, f.root.ID, f.convoyID)
 			}
