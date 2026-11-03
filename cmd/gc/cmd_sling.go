@@ -1918,7 +1918,10 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 				Source:   "sling",
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
-			if nudgeErr == nil && result.Delivered {
+			// A nudge whose submit drained the composer but never showed busy
+			// (runtime.ErrNudgeDeliveredUnobserved) was delivered: queueing it
+			// again would deliver the reminder twice.
+			if (nudgeErr == nil && result.Delivered) || errors.Is(nudgeErr, runtime.ErrNudgeDeliveredUnobserved) {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 				var sessFront *session.Store
 				if store != nil {
