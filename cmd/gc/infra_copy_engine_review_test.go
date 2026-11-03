@@ -228,3 +228,33 @@ func TestPolicyWrappedStoreForwardsTheBatchedPayloadRead(t *testing.T) {
 		t.Fatalf("the forward over a store without the batch = %v, want ErrDepMetadataUnsupported", err)
 	}
 }
+
+// batchListFailingSource lists edges one row at a time and fails to list them
+// in batches, so a reader that took the batched path says so.
+type batchListFailingSource struct{ *beads.MemStore }
+
+var errBatchedEdgeListFailed = errors.New("the batched edge list failed in this test")
+
+func (batchListFailingSource) DepListBatch([]string) (map[string][]beads.Dep, error) {
+	return nil, errBatchedEdgeListFailed
+}
+
+// TestPreflightReadsTheEdgesTheWayTheCopyWill (review S1): the preflight hands
+// the edge-payload refusal the same id set the migration does, so a work store
+// that lists edges in batches is read in batches in the rehearsal too, and a
+// batched read that fails in the window fails in the preflight first.
+func TestPreflightReadsTheEdgesTheWayTheCopyWill(t *testing.T) {
+	request, _, _ := preflightReadyCity(t, 0)
+	source := batchListFailingSource{beads.NewMemStore()}
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session"})
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	var stdout, stderr bytes.Buffer
+	if code := doStoragePreflight(request, &stdout, &stderr); code == 0 {
+		t.Fatalf("preflight cleared a city whose batched edge read fails: %q", stdout.String())
+	}
+	if said := stdout.String() + stderr.String(); !strings.Contains(said, errBatchedEdgeListFailed.Error()) {
+		t.Fatalf("preflight blocks without naming the batched read that failed: %q", said)
+	}
+}
