@@ -45,7 +45,31 @@ type backfillTarget struct {
 	runTarget string
 }
 
+// rootMatcher reports whether a workflow root needs repair. hasChildren asks
+// lazily whether any step other than the root itself names it in
+// gc.root_bead_id, so a matcher that never calls it never pays for the
+// listing. The matcher takes no store, which is what lets a second check share
+// this walk without a second raw-store parameter.
+type rootMatcher func(root beads.Bead, hasChildren func() (bool, error)) (bool, error)
+
+// matchRunTargetBackfill selects roots that carry gc.run_target but no
+// gc.routed_to and are still claimable through the fallback.
+func matchRunTargetBackfill(b beads.Bead, _ func() (bool, error)) (bool, error) {
+	if strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey]) == "" || strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+		return false, nil
+	}
+	// An expanded root is neither demanded nor claimable: routing it
+	// again resurrects it (#5900, NEW-5).
+	return workflowRunTargetFallbackEligible(b), nil
+}
+
 func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, skipped []string) {
+	return c.collectMatching(matchRunTargetBackfill)
+}
+
+// collectMatching walks the city, its non-suspended rigs and the graph binding,
+// and returns the workflow roots the matcher selects.
+func (c *runTargetRoutedToBackfillCheck) collectMatching(match rootMatcher) (targets []backfillTarget, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -67,16 +91,27 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 			return
 		}
 		for _, b := range items {
-			runTarget := strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
-			if runTarget == "" || strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+			hasChildren := func() (bool, error) {
+				steps, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: b.ID}, IncludeClosed: true, TierMode: beads.TierBoth})
+				if err != nil {
+					return false, err
+				}
+				for _, step := range steps {
+					if step.ID != b.ID {
+						return true, nil
+					}
+				}
+				return false, nil
+			}
+			ok, err := match(b, hasChildren)
+			if err != nil {
+				skipped = append(skipped, fmt.Sprintf("%s skipped: root %s: %v", label, b.ID, err))
 				continue
 			}
-			// An expanded root is neither demanded nor claimable: routing it
-			// again resurrects it (#5900, NEW-5).
-			if !workflowRunTargetFallbackEligible(b) {
+			if !ok {
 				continue
 			}
-			targets = append(targets, backfillTarget{label: label, store: store, beadID: b.ID, runTarget: runTarget})
+			targets = append(targets, backfillTarget{label: label, store: store, beadID: b.ID, runTarget: strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])})
 		}
 	}
 	for _, sc := range scopes {

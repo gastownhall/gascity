@@ -79,6 +79,7 @@ v2-routed-to-namespace
 executor-identity-residue
 census-owner-liveness
 run-target-routed-to-backfill
+workflow-expanded-backfill
 route-recovery-quarantine
 cross-store-gates
 storage-rigs

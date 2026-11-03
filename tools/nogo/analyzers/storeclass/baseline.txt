@@ -892,7 +892,7 @@ cmd/gc/doctor_routed_to_checks.go	v2RoutedToNamespaceCheck.collect	raw-field	1
 cmd/gc/doctor_run_target_backfill.go	backfillTarget	raw-field	1
 cmd/gc/doctor_run_target_backfill.go	newRunTargetRoutedToBackfillCheck	raw-param	1
 cmd/gc/doctor_run_target_backfill.go	runTargetRoutedToBackfillCheck	raw-field	1
-cmd/gc/doctor_run_target_backfill.go	runTargetRoutedToBackfillCheck.collect	raw-param	1
+cmd/gc/doctor_run_target_backfill.go	runTargetRoutedToBackfillCheck.collectMatching	raw-param	1
 cmd/gc/doctor_session_model.go	loadSessionModelDoctorBeads	raw-param	2
 cmd/gc/doctor_session_model.go	sessionModelDoctorCheck	raw-field	1
 cmd/gc/doctor_startup_health.go	newStartupHealthEpisodesCheck	raw-param	1

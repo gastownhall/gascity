@@ -489,6 +489,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newExecutorIdentityResidueCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newWorkflowExpandedBackfillCheck(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory)))
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newStorageRigsCheck(cfg, cityPath))
