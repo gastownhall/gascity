@@ -162,12 +162,14 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		}
 	}
 
-	// Determine which store to use: if children are provided, use the
-	// first child's rig store so convoy and children share a database.
+	// Determine which store to use: an explicit --rig selects that rig's
+	// store; otherwise, if children are provided, the first child's rig
+	// store is used so the convoy and its children share a database.
 	// This avoids cross-store parent references that bd can't resolve.
-	storeDir := cityPath
-	if len(issueIDs) > 0 {
-		storeDir = convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+	storeDir, err := convoyCreateStoreDir(cfg, cityPath, rigFlag, issueIDs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
@@ -192,6 +194,32 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 		}
 	}
 	return cityPath
+}
+
+// convoyCreateStoreDir picks the store directory for a new convoy. An
+// explicit --rig name selects that rig's store, resolving the name the way
+// gc bd and gc formula do (case-insensitive exact match, refusing a
+// declared rig with no path binding); without one, placement is unchanged:
+// the first issue's store when issues are given, else the city store, so
+// ambient rig selection (GC_RIG, cwd) never chooses the convoy store.
+func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
+	if name := strings.TrimSpace(rigName); name != "" {
+		if cfg == nil {
+			return "", fmt.Errorf("rig %q not found", name)
+		}
+		rig, ok := rigByName(cfg, name)
+		if !ok {
+			return "", fmt.Errorf("rig %q not found", name)
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
+		}
+		return resolveStoreScopeRoot(cityPath, rig.Path), nil
+	}
+	if len(issueIDs) > 0 {
+		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
+	}
+	return cityPath, nil
 }
 
 func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs []string) error {

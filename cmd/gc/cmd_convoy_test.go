@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -4109,5 +4110,243 @@ func TestConvoyStatusStoreOpensReuseTheLoadedConfig(t *testing.T) {
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
 		t.Fatalf("resolving %s across the convoy stores loaded the city config %d more times, want 0", convoy.ID, grew)
+	}
+}
+
+// TestConvoyCreateRigFlagPlacesEmptyConvoyInRigStore: an empty convoy
+// created with an explicit --rig must land in that rig's store, so later
+// `gc convoy add` of the rig's beads can resolve them (ga-84bnjr, #8696).
+func TestConvoyCreateRigFlagPlacesEmptyConvoyInRigStore(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\npath = " + strconv.Quote(rigDir) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run convoy create --rig frontend = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	var created struct {
+		ConvoyID string `json:"convoy_id"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil || created.ConvoyID == "" {
+		t.Fatalf("stdout is not a convoy create JSON result: %v\n%s", err, stdout.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, err := rigStore.Get(created.ConvoyID); err != nil {
+		cityStore, cerr := openStoreAtForCity(cityDir, cityDir)
+		where := "unknown"
+		if cerr == nil {
+			if _, gerr := cityStore.Get(created.ConvoyID); gerr == nil {
+				where = "city store"
+			}
+		}
+		t.Fatalf("convoy %s created with --rig frontend is not in the frontend rig store (found in: %s): %v", created.ConvoyID, where, err)
+	}
+}
+
+// convoyRigFlagTestCity builds a file-store city named "demo" with a
+// "frontend" rig (prefix fe) and a "backend" rig (prefix be), each with its
+// own scope-local store, plus a site binding that names the frontend rig.
+// It is the fixture for gc convoy create's --rig flag tests: convoy create
+// must land the convoy in the store the explicit flag names.
+func convoyRigFlagTestCity(t *testing.T) string {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, cityDir, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+
+[[rigs]]
+name = "backend"
+path = "backend"
+prefix = "be"
+`)
+	site := "workspace_name = \"demo\"\nworkspace_prefix = \"demo\"\n\n[[rig]]\nname = \"frontend\"\npath = " +
+		strconv.Quote(filepath.Join(cityDir, "frontend")) + "\n"
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(site), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{cityDir, filepath.Join(cityDir, "frontend"), filepath.Join(cityDir, "backend")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cityDir
+}
+
+// convoyCreateRunJSON runs a gc invocation expected to create a convoy and
+// returns the created convoy's ID from its JSON result line.
+func convoyCreateRunJSON(t *testing.T, args []string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(%v) = %d; stdout=%s stderr=%s", args, code, stdout.String(), stderr.String())
+	}
+	var created struct {
+		ConvoyID string `json:"convoy_id"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil || created.ConvoyID == "" {
+		t.Fatalf("stdout is not a convoy create JSON result: %v\n%s", err, stdout.String())
+	}
+	return created.ConvoyID
+}
+
+// requireConvoyInStore asserts the convoy ID resolves in the scope-local
+// store at dir.
+func requireConvoyInStore(t *testing.T, cityDir, dir, convoyID string) {
+	t.Helper()
+	store, err := openStoreAtForCity(dir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(%s): %v", dir, err)
+	}
+	if _, err := store.Get(convoyID); err != nil {
+		t.Fatalf("convoy %s not in the store at %s: %v", convoyID, dir, err)
+	}
+}
+
+// requireConvoyNotInStore asserts the convoy ID does not resolve in the
+// scope-local store at dir.
+func requireConvoyNotInStore(t *testing.T, cityDir, dir, convoyID string) {
+	t.Helper()
+	store, err := openStoreAtForCity(dir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(%s): %v", dir, err)
+	}
+	if _, err := store.Get(convoyID); err == nil {
+		t.Fatalf("convoy %s found in the store at %s; want it absent", convoyID, dir)
+	}
+}
+
+// TestConvoyCreateRigFlag drives the real CLI: an explicit --rig must place
+// the convoy in that rig's store and never the city store, resolving the
+// name the way the rest of gc does (case-insensitive, whitespace-padded),
+// and it must work without an explicit --city when the local city's site
+// binding names the rig.
+func TestConvoyCreateRigFlag(t *testing.T) {
+	assertPlacedInFrontendRigStore := func(t *testing.T, convoyID, cityDir string) {
+		t.Helper()
+		requireConvoyInStore(t, cityDir, filepath.Join(cityDir, "frontend"), convoyID)
+		requireConvoyNotInStore(t, cityDir, cityDir, convoyID)
+	}
+
+	t.Run("explicit --city with exact name", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", "--json"})
+		assertPlacedInFrontendRigStore(t, convoyID, cityDir)
+	})
+
+	t.Run("case-insensitive name", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", "FRONTEND", "convoy", "create", "frontend batch", "--json"})
+		assertPlacedInFrontendRigStore(t, convoyID, cityDir)
+	})
+
+	t.Run("padded name", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", " frontend ", "convoy", "create", "frontend batch", "--json"})
+		assertPlacedInFrontendRigStore(t, convoyID, cityDir)
+	})
+
+	t.Run("no --city: rig from the local city site binding", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		t.Setenv("GC_CITY", cityDir)
+		convoyID := convoyCreateRunJSON(t, []string{"--rig", "frontend", "convoy", "create", "frontend batch", "--json"})
+		assertPlacedInFrontendRigStore(t, convoyID, cityDir)
+	})
+}
+
+// TestConvoyCreateStoreDir exercises the store-directory resolver behind
+// gc convoy create's --rig handling: name resolution shared with gc bd and
+// gc formula, and the no-flag default placement.
+func TestConvoyCreateStoreDir(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "frontend", Path: "frontend", Prefix: "fe"},
+	}}
+	frontendRoot := resolveStoreScopeRoot(cityDir, "frontend")
+
+	cases := []struct {
+		name     string
+		rigName  string
+		issueIDs []string
+		wantDir  string
+		wantErr  string
+	}{
+		{
+			name:    "empty flag without issues keeps the city store",
+			rigName: "",
+			wantDir: cityDir,
+		},
+		{
+			name:    "exact name selects the rig store",
+			rigName: "frontend",
+			wantDir: frontendRoot,
+		},
+		{
+			name:    "case-insensitive name",
+			rigName: "FRONTEND",
+			wantDir: frontendRoot,
+		},
+		{
+			name:    "padded name",
+			rigName: " frontend ",
+			wantDir: frontendRoot,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convoyCreateStoreDir(cfg, cityDir, tc.rigName, tc.issueIDs)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("convoyCreateStoreDir(rig %q, issues %v) err = %v, want containing %q", tc.rigName, tc.issueIDs, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("convoyCreateStoreDir(rig %q, issues %v): %v", tc.rigName, tc.issueIDs, err)
+			}
+			if !samePath(got, tc.wantDir) {
+				t.Fatalf("convoyCreateStoreDir(rig %q, issues %v) = %q, want %q", tc.rigName, tc.issueIDs, got, tc.wantDir)
+			}
+		})
 	}
 }
