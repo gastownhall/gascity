@@ -875,6 +875,15 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_WARM_EVERY"], "${{ vars.RBE_WARM_EVERY || '1' }}"; got != want {
 				t.Errorf("worker step RBE_WARM_EVERY = %q, want %q", got, want)
 			}
+			// The read-only R2 hot tier (needs zstd): off unless the
+			// repository variable names it (rollback: unset it); one run in
+			// RBE_HOT_EVERY, by the warm set's run-id parity.
+			if got, want := step.Env["RBE_HOT_URL"], "${{ vars.RBE_HOT_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_HOT_URL = %q, want %q", got, want)
+			}
+			if got, want := step.Env["RBE_HOT_EVERY"], "${{ vars.RBE_HOT_EVERY || '1' }}"; got != want {
+				t.Errorf("worker step RBE_HOT_EVERY = %q, want %q", got, want)
+			}
 			// The local CAS cap: empty is the script's 150 GB default, so
 			// merging changes nothing; rollback is unsetting the variable.
 			if got, want := step.Env["CAS_MAX_BYTES"], "${{ vars.RBE_CAS_MAX_BYTES || '' }}"; got != want {
