@@ -2519,16 +2519,23 @@ func cmdMailReadWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 		return code
 	}
 	rec := openCityRecorder(stderr)
-	return doMailReadWithJSON(mp, rec, args, jsonOut, stdout, stderr)
+	return doMailReadWithJSON(mp, rec, mailReader{}, args, jsonOut, stdout, stderr)
+}
+
+// mailReader is who is running gc mail read: the routes of the caller's own
+// mailbox, or why they could not be resolved.
+type mailReader struct {
+	routes []string
+	err    error
 }
 
 // doMailRead displays a message and marks it as read. Accepts an injected
 // provider and recorder for testability.
-func doMailRead(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
-	return doMailReadWithJSON(mp, rec, args, false, stdout, stderr)
+func doMailRead(mp mail.Provider, rec events.Recorder, reader mailReader, args []string, stdout, stderr io.Writer) int {
+	return doMailReadWithJSON(mp, rec, reader, args, false, stdout, stderr)
 }
 
-func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, _ mailReader, args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail read: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1

@@ -2147,7 +2147,7 @@ func TestMailReadSuccess(t *testing.T) {
 	mp.Send("human", "mayor", "Hello", "hey, are you still there?") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
-	code := doMailRead(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	code := doMailRead(mp, events.Discard, mailReader{routes: []string{"mayor"}}, []string{"gc-1"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailRead = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2178,12 +2178,89 @@ func TestMailReadSuccess(t *testing.T) {
 	}
 }
 
+// gc mail read marks a message read only for its recipient: anyone else (the
+// sender checking delivery, a third party) gets peek semantics.
+func TestMailReadMarksReadOnlyForRecipient(t *testing.T) {
+	cases := []struct {
+		name         string
+		reader       mailReader
+		wantRead     bool
+		wantEvents   int
+		wantStderr   string
+		wantNoStderr bool
+	}{
+		{name: "recipient", reader: mailReader{routes: []string{"mayor"}}, wantRead: true, wantEvents: 1, wantNoStderr: true},
+		{name: "recipient by another route", reader: mailReader{routes: []string{"gc-77", "mayor"}}, wantRead: true, wantEvents: 1, wantNoStderr: true},
+		{name: "sender", reader: mailReader{routes: []string{"builder"}}, wantStderr: "gc mail peek"},
+		{name: "third party", reader: mailReader{routes: []string{"witness"}}, wantStderr: "gc mail peek"},
+		{name: "no mailbox routes", reader: mailReader{}, wantStderr: "gc mail peek"},
+		{name: "unresolved identity", reader: mailReader{err: errors.New("identity boom")}, wantStderr: "identity boom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			mp := newTestBeadMail(store)
+			mp.Send("builder", "mayor", "Hello", "delivery check") //nolint:errcheck
+			rec := events.NewFake()
+
+			var stdout, stderr bytes.Buffer
+			code := doMailRead(mp, rec, tc.reader, []string{"gc-1"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("doMailRead = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "delivery check") {
+				t.Errorf("stdout missing the message body:\n%s", stdout.String())
+			}
+			msg, err := mp.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if msg.Read != tc.wantRead {
+				t.Errorf("message Read = %v, want %v", msg.Read, tc.wantRead)
+			}
+			inbox, _ := mp.Inbox("mayor")
+			if !tc.wantRead && len(inbox) != 1 {
+				t.Errorf("recipient inbox = %d messages, want 1 (a non-recipient read must not consume it)", len(inbox))
+			}
+			if len(rec.Events) != tc.wantEvents {
+				t.Errorf("recorded events = %d, want %d: %#v", len(rec.Events), tc.wantEvents, rec.Events)
+			}
+			if tc.wantNoStderr && stderr.Len() > 0 {
+				t.Errorf("unexpected stderr: %q", stderr.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+}
+
+func TestMailReadByNonRecipientJSONStillShowsUnreadMessage(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := newTestBeadMail(store)
+	mp.Send("builder", "mayor", "Hello", "read json") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailReadWithJSON(mp, events.Discard, mailReader{routes: []string{"builder"}}, []string{"gc-1"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailReadWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got mailMessageJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.Message.ID != "gc-1" || got.Message.Read {
+		t.Fatalf("JSON message = %+v, want gc-1 still unread", got.Message)
+	}
+	validateJSONResultSchema(t, []string{"mail", "read"}, stdout.Bytes())
+}
+
 func TestMailReadMissingID(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := newTestBeadMail(store)
 
 	var stderr bytes.Buffer
-	code := doMailRead(mp, events.Discard, nil, &bytes.Buffer{}, &stderr)
+	code := doMailRead(mp, events.Discard, mailReader{}, nil, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doMailRead = %d, want 1", code)
 	}
@@ -2197,7 +2274,7 @@ func TestMailReadNotFound(t *testing.T) {
 	mp := newTestBeadMail(store)
 
 	var stderr bytes.Buffer
-	code := doMailRead(mp, events.Discard, []string{"gc-999"}, &bytes.Buffer{}, &stderr)
+	code := doMailRead(mp, events.Discard, mailReader{}, []string{"gc-999"}, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doMailRead = %d, want 1", code)
 	}
@@ -2214,7 +2291,7 @@ func TestMailReadAlreadyRead(t *testing.T) {
 
 	// Reading an already-read message should still display it without error.
 	var stdout, stderr bytes.Buffer
-	code := doMailRead(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	code := doMailRead(mp, events.Discard, mailReader{routes: []string{"mayor"}}, []string{"gc-1"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailRead = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2229,7 +2306,7 @@ func TestMailReadJSON(t *testing.T) {
 	mp.Send("human", "mayor", "Hello", "read json") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
-	code := doMailReadWithJSON(mp, events.Discard, []string{"gc-1"}, true, &stdout, &stderr)
+	code := doMailReadWithJSON(mp, events.Discard, mailReader{routes: []string{"mayor"}}, []string{"gc-1"}, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailReadWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2253,7 +2330,7 @@ func TestMailReadJSONRecordsEventWhenOutputFails(t *testing.T) {
 	rec := events.NewFake()
 
 	var stderr bytes.Buffer
-	code := doMailReadWithJSON(mp, rec, []string{"gc-1"}, true, failingWriter{}, &stderr)
+	code := doMailReadWithJSON(mp, rec, mailReader{routes: []string{"mayor"}}, []string{"gc-1"}, true, failingWriter{}, &stderr)
 	if code != 1 {
 		t.Fatalf("doMailReadWithJSON = %d, want 1", code)
 	}
