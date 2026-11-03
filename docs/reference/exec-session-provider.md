@@ -648,10 +648,12 @@ Reconciler v2 starts, stops and recycles sessions only on fresh, exact
 answers: "this box is absent", "this is the box, and this is whose", "kill
 exactly that box". A script opts into giving them by declaring `observe.v1`
 in its handshake. A script that declares `observe.v1` **and**
-`report-attachment` is v2-ready; `gc runtime conformance` reports
-`v2-ready: yes` or the capabilities it lacks. A script that declares
-neither keeps today's behavior exactly. Declaring `observe.v1` obliges the
-script to:
+`report-attachment` is v2-ready: gc reads it through observe.v1 on the
+handshake alone. `gc runtime conformance` reports `v2-ready: yes` only for a
+script that also passes every requirement; otherwise it names the
+capabilities the script lacks and the requirements it failed. A script that
+declares neither keeps today's behavior exactly. Declaring `observe.v1`
+obliges the script to:
 
 1. Implement `observe`, `inventory` and `kill-object` (below).
 2. Honor `fresh_only` on `start` (and `provision`, if declared).
@@ -749,8 +751,10 @@ zombie, and v2 recycles it with `kill-object`. Answer `dead` only when sure:
   point's command and argv[0]), and `gc` also matches the base name of the
   gc binary the session runs (its `GC_BIN`, which differs when gc is
   renamed or wrapped, for example `.gc-wrapped`).
-- Read one process snapshot (for example `ps -eo pid=,ppid=,args=` and
-  `ps -eo pid=,comm=`) for every box, not one probe per box.
+- Read one process snapshot (for example `ps -ww -eo pid=,ppid=,args=` and
+  `ps -eo pid=,comm=`) for every box, not one probe per box. Without `-ww`,
+  procps cuts each line to `COLUMNS` even into a pipe, and an agent with a
+  long command line reads dead.
 - When the snapshot cannot be read, or the box has no process names, omit
   `agent` (unknown): gc then does not recycle the box, and `kill-object`'s
   zombie mode re-checks the agent before it kills.
