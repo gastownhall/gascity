@@ -116,10 +116,11 @@ func (c *conn) Begin() (driver.Tx, error) {
 	return nil, errors.New("proxyendpointtest: the scripted pool is read-only")
 }
 
-// QueryContext answers any statement that asks for DOLT_HASHOF('HEAD'),
-// followed by one COUNT(*) per information_schema.tables sub-select (one
-// argument each, the table) and one per information_schema.columns sub-select
-// (two arguments each, table then column), in that order.
+// QueryContext answers the bare HEAD read, the plane statement (HEAD, then
+// the GROUP_CONCAT of the present tables among the bound table names, NULL
+// when none exists) and SHOW COLUMNS FROM <table> LIKE '<column>' (one row
+// naming the column when the table carries it; an error, as the server gives,
+// when the table is absent).
 func (c *conn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.db.mu.Lock()
 	c.db.statements = append(c.db.statements, query)
@@ -133,39 +134,55 @@ func (c *conn) QueryContext(_ context.Context, query string, args []driver.Named
 	if failure != nil {
 		return nil, failure
 	}
+	if strings.HasPrefix(query, "SHOW COLUMNS FROM ") {
+		rest := strings.TrimPrefix(query, "SHOW COLUMNS FROM ")
+		table, like, _ := strings.Cut(rest, " ")
+		_, pattern, _ := strings.Cut(like, "LIKE ")
+		column := strings.Trim(strings.TrimSpace(pattern), "'")
+		if state.AbsentTables[table] {
+			return nil, fmt.Errorf("table not found (Error 1146 (42S02)): %s", table)
+		}
+		if state.AbsentColumns[table+"."+column] {
+			return &rows{columns: showColumns, done: true}, nil
+		}
+		return &rows{columns: showColumns, values: []driver.Value{[]byte(column), []byte("varchar(255)"), []byte("YES"), []byte(""), nil, []byte("")}}, nil
+	}
 	if !strings.Contains(query, "DOLT_HASHOF('HEAD')") {
 		return nil, fmt.Errorf("proxyendpointtest: no answer for %q", query)
 	}
 	values := []driver.Value{state.Head}
-	tables := strings.Count(query, "information_schema.tables")
-	columns := strings.Count(query, "information_schema.columns")
-	if len(args) != tables+2*columns {
-		return nil, fmt.Errorf("proxyendpointtest: %d argument(s) for %d table and %d column sub-select(s)",
-			len(args), tables, columns)
+	if !strings.Contains(query, "information_schema") {
+		return &rows{values: values}, nil
 	}
-	for i := 0; i < tables; i++ {
-		values = append(values, exists(!state.AbsentTables[fmt.Sprint(args[i].Value)]))
+	if strings.Count(query, "information_schema.tables") != 1 || strings.Contains(query, "information_schema.columns") || len(args) == 0 {
+		return nil, fmt.Errorf("proxyendpointtest: %q is not the plane statement (one tables scan, the bound names, no columns scan)", query)
 	}
-	for i := 0; i < columns; i++ {
-		key := fmt.Sprint(args[tables+2*i].Value) + "." + fmt.Sprint(args[tables+2*i+1].Value)
-		values = append(values, exists(!state.AbsentColumns[key]))
+	var present []string
+	for _, arg := range args {
+		if table := fmt.Sprint(arg.Value); !state.AbsentTables[table] {
+			present = append(present, table)
+		}
 	}
-	return &rows{values: values}, nil
+	var concat driver.Value
+	if len(present) > 0 {
+		concat = strings.Join(present, ",")
+	}
+	return &rows{values: append(values, concat)}, nil
 }
 
-func exists(present bool) int64 {
-	if present {
-		return 1
-	}
-	return 0
-}
+// showColumns is SHOW COLUMNS' result shape.
+var showColumns = []string{"Field", "Type", "Null", "Key", "Default", "Extra"}
 
 type rows struct {
-	values []driver.Value
-	done   bool
+	values  []driver.Value
+	columns []string
+	done    bool
 }
 
 func (r *rows) Columns() []string {
+	if r.columns != nil {
+		return r.columns
+	}
 	columns := make([]string, len(r.values))
 	for i := range columns {
 		columns[i] = fmt.Sprintf("c%d", i)
