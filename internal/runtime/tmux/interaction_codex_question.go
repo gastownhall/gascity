@@ -85,7 +85,10 @@ func codexQuestionCount(lines []string) int {
 		if m := codexQueuedQuestionCount.FindStringSubmatch(row); m != nil {
 			count, _ = strconv.Atoi(m[1])
 		}
-		hint = hint || strings.Contains(row, "shift+← to answer")
+		// Codex renders the same Shift-Left shortcut as a keyboard glyph on
+		// macOS. Both forms still require the live queue heading and count;
+		// the owned native request below remains the answer authority.
+		hint = hint || strings.Contains(row, "shift+← to answer") || strings.Contains(row, "⇧← to answer")
 	}
 	if !hint {
 		return 0
