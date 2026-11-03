@@ -6,11 +6,13 @@ each durable GC session to its native provider conversation. Unknown evidence
 fails qualification. The caller supplies its existing lesson deadline.
 """
 from __future__ import annotations
+import base64
 import json
 from pathlib import Path
 import re
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -22,6 +24,28 @@ def remaining(deadline):
     return min(15, left)
 
 
+NATIVE_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+
+def canonical_native_identity(provider, history):
+    """A supported continuous native conversation, independent of path aliases."""
+    assert provider in ('claude', 'codex'), "Native provider identity is unsupported"
+    assert isinstance(history, dict) and (history.get('continuity') or {}).get('status') == 'continuous' and not (history.get('continuity') or {}).get('has_branches'), "Native history continuity is not qualified"
+    native = history.get('provider_session_id')
+    assert isinstance(native, str) and native, "Native conversation identity is unavailable"
+    name = native.replace('\\', '/').rsplit('/', 1)[-1]
+    if name.endswith('.jsonl'):
+        name = name[:-6]
+    if provider == 'codex' and name.startswith('rollout-'):
+        match = re.fullmatch(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(" + NATIVE_UUID + r")", name)
+    else:
+        match = re.fullmatch('(' + NATIVE_UUID + ')', name)
+    assert match, "Native conversation identity is not an actual supported UUID"
+    canonical = match.group(1).lower()
+    assert canonical.replace('-', '').strip('0'), "Native conversation identity is the nil UUID"
+    return canonical
+
+
 def prove_review(*, base, city, city_root, source, root, record, evidence, deadline):
     """Save GET receipts and reject a shared or unknown native reviewer."""
     evidence = Path(evidence)
@@ -29,8 +53,18 @@ def prove_review(*, base, city, city_root, source, root, record, evidence, deadl
 
     def read(label, suffix):
         url = base + '/v0/city/' + urllib.parse.quote(city, safe='') + '/' + suffix
-        with urllib.request.urlopen(url, timeout=remaining(deadline)) as response:
-            row = json.load(response)
+        try:
+            with urllib.request.urlopen(url, timeout=remaining(deadline)) as response:
+                row = json.load(response)
+        except urllib.error.HTTPError as error:
+            try:
+                body = error.read()
+            finally:
+                error.close()
+            receipt = {'url': url, 'status': error.code, 'body_base64': base64.b64encode(body).decode('ascii'),
+                       'body_text': body.decode('utf-8', errors='replace')}
+            (evidence / (urllib.parse.quote(label, safe='') + '.http-error.json')).write_text(json.dumps(receipt, indent=2) + '\n')
+            raise
         (evidence / (urllib.parse.quote(label, safe='') + '.json')).write_text(json.dumps(row, indent=2) + '\n')
         return row
 
@@ -83,40 +117,76 @@ def prove_review(*, base, city, city_root, source, root, record, evidence, deadl
         if meta.get('gc.scope_role') == 'control' and meta.get('gc.kind') in ('scope-check', 'fanout'):
             continue
         assert meta.get('gc.run_target') == roles[role], "Native step target differs from quick-start's declared role"
+        assert meta.get('gc.root_bead_id') == root, "Native actor step belongs to another workflow root"
+        if bead.get('assignee'):
+            assert meta.get('gc.session_id') == bead['assignee'], "Native actor claim is not bound to its assignee"
+        else:
+            assert step.get('status') in ('skipped', 'canceled'), "Unclaimed actor cannot establish execution proof"
         iteration = meta.get('gc.iteration')
         assert isinstance(iteration, str) and re.fullmatch('[1-3]', iteration), "Unknown native review iteration"
         assert step.get('assignee') == bead.get('assignee'), "Projected/native step assignee differs"
-        assert step.get('status') == 'completed', "Native implementation/review step is not completed"
-        assert bead.get('status') == 'closed' and meta.get('gc.outcome') == 'pass', "Step completion was not a native pass"
+        assert step.get('status') in ('completed', 'failed', 'skipped', 'canceled') and bead.get('status') == 'closed', "Actor step is not terminal"
         group = groups.setdefault(int(iteration), {})
         assert role not in group, "Ambiguous implementation/review occurrence"
-        group[role] = step
+        group[role] = {'step': step, 'metadata': meta}
     assert groups, "No actual implementation/review step assignees observed"
     final_iteration = max(groups)
     pair = groups[final_iteration]
     assert set(pair) == set(roles), "Final native iteration lacks completed implementation and review"
-    identities = {}
-    for role, step in pair.items():
-        sid = step.get('assignee')
-        assert isinstance(sid, str) and sid, "Native step has no durable assignee"
-        session = item('session', sid, '?exact_id=true')
-        transcript = read('transcript-' + sid, 'session/' + urllib.parse.quote(sid, safe='') + '/transcript?format=structured')
-        assert transcript.get('id') == sid and transcript.get('format') == 'structured', "Missing authoritative structured transcript"
-        history = transcript.get('history') or {}
-        assert history.get('gc_session_id') == sid, "Transcript belongs to another GC session"
-        native = history.get('provider_session_id')
-        assert isinstance(native, str) and native, "Native conversation identity is unavailable"
-        assert transcript.get('provider') == session.get('provider') and session.get('provider'), "Provider identity differs"
-        assert transcript.get('structured_messages'), "Native conversation has no retained evidence"
-        identities[role] = {'step': step['id'], 'gc_session_id': sid,
-                            'provider': session['provider'], 'provider_session_id': native,
-                            'logical_conversation_id': history.get('logical_conversation_id'),
-                            'template': session.get('template')}
-    implement, reviewer = identities['implement'], identities['inspect']
-    assert implement['gc_session_id'] != reviewer['gc_session_id'], "Implementer reviewed its own work in the same GC session"
-    assert (implement['provider'], implement['provider_session_id']) != (reviewer['provider'], reviewer['provider_session_id']), "Implementer and reviewer share one native conversation"
+    for entry in pair.values():
+        assert entry['step'].get('status') == 'completed' and entry['metadata'].get('gc.outcome') == 'pass', "Final implementation/review pair did not complete with native pass"
+    observed = {}
+    cached = {}
+    for iteration, group in sorted(groups.items()):
+        observed[iteration] = {}
+        for role, entry in group.items():
+            step = entry['step']
+            sid = step.get('assignee')
+            identity = {'step': step['id'], 'status': step['status'], 'outcome': entry['metadata'].get('gc.outcome'), 'gc_session_id': sid}
+            if not sid:
+                identity['native_unavailable'] = 'unclaimed terminal row; not execution or reviewer evidence'
+                observed[iteration][role] = identity
+                continue
+            assert isinstance(sid, str), "Native step has no durable assignee"
+            if sid not in cached:
+                session = item('session', sid, '?exact_id=true')
+                transcript = read('transcript-' + sid, 'session/' + urllib.parse.quote(sid, safe='') + '/transcript?format=structured')
+                assert transcript.get('id') == sid and transcript.get('format') == 'structured', "Missing authoritative structured transcript"
+                cached[sid] = (session, transcript)
+            session, transcript = cached[sid]
+            history = transcript.get('history') or {}
+            if not transcript.get('structured_messages') and iteration != final_iteration and step['status'] != 'completed':
+                identity['native_unavailable'] = 'historical nonpassing actor has no retained native messages; not reviewer evidence'
+                observed[iteration][role] = identity
+                continue
+            assert history.get('gc_session_id') == sid, "Transcript belongs to another GC session"
+            assert transcript.get('provider') == session.get('provider') and session.get('provider'), "Provider identity differs"
+            native = canonical_native_identity(session['provider'], history)
+            assert transcript.get('structured_messages'), "Native conversation has no retained evidence"
+            identity.update(provider=session['provider'], provider_session_id=history['provider_session_id'], native_uuid=native,
+                            logical_conversation_id=history.get('logical_conversation_id'), template=session.get('template'))
+            observed[iteration][role] = identity
+    implementations = [row['implement'] for row in observed.values() if 'implement' in row]
+    reviewers = [row['inspect'] for row in observed.values() if 'inspect' in row]
+    implement_sessions = {row['gc_session_id'] for row in implementations if row.get('gc_session_id')}
+    review_sessions = {row['gc_session_id'] for row in reviewers if row.get('gc_session_id')}
+    assert not implement_sessions & review_sessions, "Implementer reviewed its own work in the same GC session across iterations"
+    implement_native = {(row['provider'], row['native_uuid']) for row in implementations if row.get('native_uuid')}
+    review_native = {(row['provider'], row['native_uuid']) for row in reviewers if row.get('native_uuid')}
+    assert not implement_native & review_native, "Implementer and reviewer share one native conversation across iterations"
+    identities = observed[final_iteration]
+    assert all(row.get('native_uuid') for row in identities.values()), "Final pair lacks proven native identities"
+    remaining(deadline)  # Last read, parsing and retained receipts must fit the original bound.
     proof = {'status': 'PASS', 'root': root, 'source': source, 'iteration': final_iteration,
-             'accepted_sha': accepted, 'actual_repository_head': head, 'identities': identities,
+             'accepted_sha': accepted, 'actual_repository_head': head, 'identities': identities, 'observed_iterations': observed,
+             'causality_limit': 'The delivery record binds the accepted SHA to this root/source/repository/worktree, and actor claims bind the observed native sessions to its steps. GC history has no first-class per-review actor/SHA attestation; this proof does not infer one from transcript text.',
              'basis': 'Actual quick-start child metadata and assignees, retained supervisor session/structured-history identities, exact reviewed/tested/integrated delivery SHA. This is execution separation; semantic review quality remains a native acceptance observation.'}
-    (evidence / 'proof.json').write_text(json.dumps(proof, indent=2) + '\n')
+    receipt = evidence / 'proof.json'
+    receipt.write_text(json.dumps(proof, indent=2) + '\n')
+    try:
+        remaining(deadline)
+    except TimeoutError:
+        proof.update(status='FAILED', error='Original lesson deadline exceeded while writing the proof receipt')
+        receipt.write_text(json.dumps(proof, indent=2) + '\n')
+        raise
     return proof
