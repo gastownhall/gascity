@@ -478,6 +478,59 @@ func TestCompactScriptLiveGateSkipsProbeWhenNothingRewritten(t *testing.T) {
 	}
 }
 
+// TestCompactScriptRewriteFailureWithLiveDatabaseKeepsExistingBehavior
+// asserts a rewrite that fails while the database stays served is handled
+// exactly as before the gate: the flatten failure restores HEAD, the GC
+// failure leaves its pending-GC marker, nothing is quarantined, and the
+// run still processes the databases after it.
+func TestCompactScriptRewriteFailureWithLiveDatabaseKeepsExistingBehavior(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		stderrHit string
+		pendingGC bool
+	}{
+		{name: "gc failure", mode: "gc_failure", stderrHit: "gc exploded", pendingGC: true},
+		{name: "flatten failure", mode: "flatten_failure", stderrHit: "reset exploded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			if err := os.MkdirAll(filepath.Join(fixture.dataDir, "zed", ".dolt"), 0o755); err != nil {
+				t.Fatalf("mkdir second dolt db: %v", err)
+			}
+			out, err := fixture.run(t, tt.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("compact succeeded despite the %s:\n%s", tt.name, out)
+			}
+			if !strings.Contains(out, tt.stderrHit) {
+				t.Fatalf("output missing the %s stderr:\n%s", tt.name, out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			// The gate checked and passed — the database stayed served — so
+			// the failure is the rewrite's own, not a liveness loss.
+			if !strings.Contains(string(logData), "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))") {
+				t.Fatalf("the gate must still probe after a failed rewrite:\n%s", logData)
+			}
+			if _, statErr := os.Stat(compactQuarantineMarkerPath(fixture)); !os.IsNotExist(statErr) {
+				t.Fatalf("a live database must not be quarantined for a failed rewrite (stat err=%v):\n%s", statErr, out)
+			}
+			if tt.pendingGC {
+				if _, statErr := os.Stat(filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")); statErr != nil {
+					t.Fatalf("a failed GC with a live database must still write the pending-GC marker: %v\n%s", statErr, out)
+				}
+			}
+			// The run went on to the next database.
+			if !strings.Contains(string(logData), "db=zed") {
+				t.Fatalf("a failed rewrite with a live database must not stop the run:\n%s", logData)
+			}
+		})
+	}
+}
+
 // installDoltShim wraps the fixture's fake dolt with a shell shim so a test
 // can mutate the data dir after a chosen rewrite command succeeds while the
 // server keeps answering SQL.
