@@ -594,15 +594,18 @@ have left the server without the database. It records `live_gate_steps` (the
 rewrites that ran), `live_gate_failed_step`, `live_gate_failure`,
 `live_gate_probe_failure` (the server's answer to the served-HEAD probe),
 `live_gate_data_dir_entry` with its `_before` and `_after` states, and
-`live_gate_pre_compaction_head`. Compact leaves no pending-GC marker for that
-database and ends the run with exit 1 without touching another database; its
-last line lists the selected databases it did not reach. To recover:
+`live_gate_pre_compaction_head`. Compact writes no new pending-GC marker for
+that database (a pending-GC retry keeps the marker it retried) and ends the
+run with exit 1 without touching another database; its last line lists the
+selected databases it did not reach. To recover:
 
-1. Restore the database, from the safety backup or by restarting the server
-   if the entry is still on disk, until `<data_dir>/<database>/.dolt` exists.
+1. If `<data_dir>/<database>/.dolt` is gone, restore the database from the
+   safety backup. If it is still on disk, restart the server
+   (`gc dolt restart`) instead: a restore from backup discards every write
+   since that backup.
 2. Verify the HEAD resolves, with
-   `gc dolt sql --db <database> -q "SELECT HASHOF('HEAD')"`, and that bead
-   data is healthy, with `bd list --limit 1` in that rig. Compare the HEAD
+   `gc dolt sql -q "USE <database>; SELECT HASHOF('HEAD')"`, and that bead
+   data is healthy, with `gc bd list --rig <rig> --limit 1`. Compare the HEAD
    with `live_gate_pre_compaction_head` to tell whether the flatten landed.
 3. Remove the quarantine marker, and any pending-GC or pending-push marker
    under `.gc/runtime/packs/dolt/` that predates the restore.

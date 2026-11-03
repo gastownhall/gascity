@@ -103,13 +103,18 @@ func TestCompactScriptLiveGateQuarantineRefusalShowsEvidenceAndRestoreGuidance(t
 		t.Fatalf("compact reclaimed a database quarantined by the live gate:\n%s", out)
 	}
 	marker := compactBeadsQuarantineMarkerPath(fixture)
+	entry := filepath.Join(fixture.dataDir, "beads", ".dolt")
 	for _, want := range []string{
 		"reason=" + compactLiveGateReason,
 		"live_gate_failed_step=post-flatten full GC",
 		"live_gate_failure=data-dir entry",
 		"live_gate_data_dir_entry_after=absent",
 		"live_gate_pre_compaction_head=headcommit",
-		"compact: db=beads quarantine recovery: restore the database",
+		"compact: db=beads quarantine recovery: restore the database from a backup only if " + entry + " is gone",
+		"restart the Dolt server (gc dolt restart) instead",
+		`gc dolt sql -q "USE beads; SELECT HASHOF('HEAD')"`,
+		"pre-compaction HEAD=headcommit",
+		"gc bd list --rig <rig> --limit 1",
 		"then remove " + marker,
 		"Compact Quarantine Reasons",
 	} {
@@ -119,6 +124,11 @@ func TestCompactScriptLiveGateQuarantineRefusalShowsEvidenceAndRestoreGuidance(t
 	}
 	if strings.Contains(out, "rerun gc dolt compact --gc-only") {
 		t.Fatalf("quarantine refusal told the operator to GC a database that is not served:\n%s", out)
+	}
+	// The pre-compaction HEAD only tells whether the flatten landed: rolling
+	// the database back to it discards the flatten and every later write.
+	if strings.Contains(out, "to its pre-compaction HEAD") {
+		t.Fatalf("quarantine refusal told the operator to roll the database back to its pre-compaction HEAD:\n%s", out)
 	}
 }
 

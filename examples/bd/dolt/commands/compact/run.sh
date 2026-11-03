@@ -2291,8 +2291,8 @@ print_existing_quarantine_marker() {
     "$(compact_marker_summary_value "$quarantine_dir" "$db" live_gate_pre_compaction_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
   if [ "$reason" = "$live_gate_quarantine_reason" ]; then
-    printf 'compact: db=%s quarantine recovery: restore the database to its pre-compaction HEAD=%s from a backup or the Dolt server data dir, confirm the server serves it (SELECT HASHOF('"'"'HEAD'"'"') and bd list --limit 1), then remove %s and any obsolete pending markers and rerun gc dolt compact --dry-run --only-db %s; see "Compact Quarantine Reasons" in docs/troubleshooting/dolt-bloat-recovery.md\n' \
-      "$db" "$(compact_marker_value "$quarantine_dir" "$db" live_gate_pre_compaction_head || true)" "$marker" "$db" >&2
+    printf 'compact: db=%s quarantine recovery: restore the database from a backup only if %s is gone; if it is still on disk, restart the Dolt server (gc dolt restart) instead. Confirm the server serves it with gc dolt sql -q "USE %s; SELECT HASHOF('"'"'HEAD'"'"')" (compare that HEAD with the pre-compaction HEAD=%s) and gc bd list --rig <rig> --limit 1, then remove %s and any pending-GC or pending-push marker that predates the restore, and rerun gc dolt compact --dry-run --only-db %s; see "Compact Quarantine Reasons" in docs/troubleshooting/dolt-bloat-recovery.md\n' \
+      "$db" "$(live_gate_data_dir_entry "$db")" "$db" "$(compact_marker_value "$quarantine_dir" "$db" live_gate_pre_compaction_head || true)" "$marker" "$db" >&2
     return 0
   fi
   printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
