@@ -2087,6 +2087,7 @@ go_test(
         "session_index_test.go",
         "session_key_guard_test.go",
         "session_keys_test.go",
+        "session_kill_events_test.go",
         "session_kill_fence_reconcile_test.go",
         "session_level_converge_test.go",
         "session_lifecycle_chaos_test.go",
