@@ -367,8 +367,8 @@ func probeObserveInventoryComplete(ctx context.Context, r *runner, hs runtime.Pr
 		switch {
 		case !ok:
 			return StatusFail, fmt.Sprintf("a complete inventory omits the running %s, or lists it without its state and object", name)
-		case e.Incarnation != o.ObjectID+"@"+o.ObjectCreated:
-			return StatusFail, fmt.Sprintf("inventory object for %s = %q, want observe's %q", name, e.Incarnation, o.ObjectID+"@"+o.ObjectCreated)
+		case e.Incarnation != o.ObjectID+":"+o.ObjectCreated:
+			return StatusFail, fmt.Sprintf("inventory object for %s = %q, want observe's %q", name, e.Incarnation, o.ObjectID+":"+o.ObjectCreated)
 		case !e.IdentityKnown || !sameIdentity(e.Identity, o.Identity):
 			return StatusFail, fmt.Sprintf("inventory identity for %s differs from observe's", name)
 		}
