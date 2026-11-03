@@ -128,11 +128,12 @@ func TestPromptQueriesForCityScopedAgentReachRigStores(t *testing.T) {
 
 		// Site 1: gc prime's context builder (also drives the prompt-delivery
 		// doctor through the same function).
-		ctx := buildAgentPromptContext(cityPath, cfg.Workspace.Name, agent, rigs, topo, io.Discard)
-		assertFederatedDiscoveryQuery(t, "prime WorkQuery", ctx.WorkQuery)
-		assertFederatedDiscoveryQuery(t, "prime AssignedInProgressQuery", ctx.AssignedInProgressQuery)
-		assertFederatedDiscoveryQuery(t, "prime AssignedReadyQuery", ctx.AssignedReadyQuery)
-		assertFederatedDiscoveryQuery(t, "prime RoutedPoolQuery", ctx.RoutedPoolQuery)
+		ctx := buildAgentPromptContext(cityPath, cfg.Workspace.Name, agent, rigs, io.Discard)
+		// The placeholders render compact; each tier runs the federated query.
+		tierTopo := promptQueryTopology(topo, agent, rigs)
+		for _, tier := range promptQueryPinTiers {
+			assertFederatedDiscoveryQuery(t, "gc hook query "+tier, hookQueryCommand(agent, tierTopo, tier))
+		}
 
 		// Site 2: the controller's session-start render. The placeholders come
 		// back inside the rendered prompt, so recover them between the
@@ -155,7 +156,6 @@ func TestPromptQueriesForCityScopedAgentReachRigStores(t *testing.T) {
 			if got == "" {
 				t.Fatalf("controller render lost the %s placeholder; prompt:\n%s", pair.marker, tp.Prompt)
 			}
-			assertFederatedDiscoveryQuery(t, "controller "+pair.marker, got)
 			if got != pair.want {
 				t.Fatalf("controller %s differs from the gc prime render:\ncontroller: %q\nprime:      %q", pair.marker, got, pair.want)
 			}
@@ -208,9 +208,10 @@ func TestPromptQueriesForCityScopedAgentReachRigStores(t *testing.T) {
 			t.Fatal("fixture precondition: this city relocates no coordination class")
 		}
 
-		ctx := buildAgentPromptContext(cityPath, cfg.Workspace.Name, mayor, cfg.Rigs, topo, io.Discard)
-		assertFederatedDiscoveryQuery(t, "gastown mayor WorkQuery", ctx.WorkQuery)
-		assertFederatedDiscoveryQuery(t, "gastown mayor AssignedInProgressQuery", ctx.AssignedInProgressQuery)
+		ctx := buildAgentPromptContext(cityPath, cfg.Workspace.Name, mayor, cfg.Rigs, io.Discard)
+		mayorTopo := promptQueryTopology(topo, mayor, cfg.Rigs)
+		assertFederatedDiscoveryQuery(t, "gastown mayor work tier", hookQueryCommand(mayor, mayorTopo, "work"))
+		assertFederatedDiscoveryQuery(t, "gastown mayor assigned-in-progress tier", hookQueryCommand(mayor, mayorTopo, "assigned-in-progress"))
 
 		tp, err := resolveTemplate(promptQueryTestParams(cityPath, cfg), mayor, mayor.QualifiedName(), nil)
 		if err != nil {
@@ -266,7 +267,7 @@ func TestCityScopedPromptDiscoveryFailsLoudOnABrokenRigStore(t *testing.T) {
 			t.Fatal("fixture precondition: this city relocates no coordination class")
 		}
 		agent := &config.Agent{Name: "planner", Scope: "city"}
-		query := buildAgentPromptContext(cityDir, cfg.Workspace.Name, agent, cfg.Rigs, topo, io.Discard).AssignedInProgressQuery
+		query := hookQueryCommand(agent, promptQueryTopology(topo, agent, cfg.Rigs), "assigned-in-progress")
 		if !strings.Contains(query, "gc ready --status in_progress") {
 			t.Fatalf("the city-scoped AssignedInProgressQuery does not read through the federated reader: %q", query)
 		}

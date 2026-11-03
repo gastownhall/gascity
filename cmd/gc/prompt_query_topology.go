@@ -5,12 +5,13 @@ import (
 )
 
 // promptQueryTopology is the topology the four discovery placeholders of an
-// agent's prompt render against. A cross-store-eligible agent's `gc hook`
-// already fans out over the city and every rig store, so its query stays the
-// single-store `bd` form and runs once per store. Its placeholders run
-// verbatim in the agent's own shell with no such fan-out, so on a city with
-// rigs they read through the federated `gc ready` instead of one bd store —
-// the only reader that spans the stores a routed bead may live in.
+// agent's prompt read with. They render as `gc hook query <tier>`, and
+// hookTierQuery applies this topology when the agent runs them. A
+// cross-store-eligible agent's plain `gc hook` already fans out over the city
+// and every rig store, so its query stays the single-store `bd` form and runs
+// once per store. A placeholder answers one discovery read instead, so on a
+// city with rigs it reads through the federated `gc ready` rather than one bd
+// store — the only reader that spans the stores a routed bead may live in.
 //
 // The trigger is CONFIGURED rigs, not serving rigs: suspension is runtime
 // state, and keying on it would make the rendered prompt flip on every
@@ -35,8 +36,8 @@ import (
 //
 // The result is a per-agent topology for rendering the prompt, not a city fact.
 // Nothing that reads FederatedReady as "this city is split" may be handed it —
-// FederationBlindOverrides, singleStoreHookWorkQuery, the hook's store scoping
-// — or it would take a city-scoped agent's rig city for a split one.
+// FederationBlindOverrides, plain `gc hook`'s store scoping — or it would take
+// a city-scoped agent's rig city for a split one.
 func promptQueryTopology(topo config.QueryTopology, a *config.Agent, rigs []config.Rig) config.QueryTopology {
 	if !topo.FederatedReady && agentIsCrossStoreEligible(a) && len(rigs) > 0 {
 		topo.FederatedReady = true

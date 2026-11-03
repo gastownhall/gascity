@@ -560,9 +560,8 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		qualifiedName = "lint-agent"
 	}
 	providerKey := agentCfg.Provider
-	// The zero query topology is right and not a shortcut: `gc lint` renders a
-	// PACK, which is not deployed to any city, so there is no storage
-	// arrangement to read. It lints the command's SHAPE.
+	// Hook commands resolve deployment topology at execution time; lint only
+	// needs the compact command shape.
 	return PromptContext{
 		CityRoot:                packDir,
 		AgentName:               qualifiedName,
@@ -576,10 +575,10 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		IssuePrefix:             "lint",
 		Branch:                  "feature/lint",
 		DefaultBranch:           "main",
-		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryFor(config.QueryTopology{}),
-		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryFor(config.QueryTopology{}),
-		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryFor(config.QueryTopology{}),
-		WorkQuery:               agentCfg.EffectiveWorkQueryFor(config.QueryTopology{}),
+		AssignedInProgressQuery: promptHookQuery(&agentCfg, "assigned-in-progress"),
+		AssignedReadyQuery:      promptHookQuery(&agentCfg, "assigned-ready"),
+		RoutedPoolQuery:         promptHookQuery(&agentCfg, "routed-pool"),
+		WorkQuery:               promptHookQuery(&agentCfg, "work"),
 		SlingQuery:              agentCfg.EffectiveSlingQuery(),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayNameFor(providerKey, providers),

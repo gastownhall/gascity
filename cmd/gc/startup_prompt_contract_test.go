@@ -449,7 +449,7 @@ func TestBuildPrimeContextForReadsSessionIdentityFromTheEnvironment(t *testing.T
 			for key, value := range tc.env {
 				t.Setenv(key, value)
 			}
-			ctx := buildPrimeContextFor(t.TempDir(), "test-city", agent, rigs, config.QueryTopology{}, nil)
+			ctx := buildPrimeContext(t.TempDir(), "test-city", agent, rigs, nil)
 			got := identity{ctx.AgentName, ctx.WorkDir, ctx.RigName, ctx.RigRoot, ctx.Branch}
 			if got != tc.want {
 				t.Errorf("identity = %+v, want %+v", got, tc.want)

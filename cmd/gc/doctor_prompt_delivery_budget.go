@@ -58,7 +58,6 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 	}
 
 	cityName := c.cfg.Workspace.Name
-	topo := cityQueryTopology(c.cityPath, c.cfg)
 	suspendState := loadSuspensionStateBestEffort(c.cityPath)
 
 	agents := make([]config.Agent, len(c.cfg.Agents))
@@ -116,7 +115,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		// as out of scope rather than an error.
 		resolved, _ := config.ResolveProvider(&a, &c.cfg.Workspace, c.cfg.Providers, c.lookPath)
 
-		ctx := buildAgentPromptContext(c.cityPath, cityName, &a, c.cfg.Rigs, topo, io.Discard)
+		ctx := buildAgentPromptContext(c.cityPath, cityName, &a, c.cfg.Rigs, io.Discard)
 		// Render with the workdir launch would use. The unvalidated resolver
 		// is a pure path computation, so doctor creates no directory.
 		if wd, err := resolveConfiguredWorkDirPathUnvalidated(c.cityPath, cityName, a.QualifiedName(), &a, c.cfg.Rigs); err == nil {
