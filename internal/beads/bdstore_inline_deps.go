@@ -32,6 +32,10 @@ type inlineDependencyProjection struct {
 	// vouch for, and the cost of being wrong is offering the control dispatcher
 	// work whose gate has not opened.
 	contradicted atomic.Bool
+	// unprojected latches on the first listed row that carried no
+	// dependency_count. Such a row cannot testify either way, which is not the
+	// same as testifying "no edges": see inlineDependenciesUntrusted.
+	unprojected atomic.Bool
 }
 
 // noteInlineDependencyProjection records what one page of bd output proved
@@ -112,4 +116,26 @@ func (s *BdStore) listIncludesCompleteDependencies() bool {
 		return false
 	}
 	return s.inlineDeps.witnessed.Load()
+}
+
+// inlineDependenciesUntrusted reports whether the dependency rows this store has
+// listed are known, or cannot be shown, to be the complete set for their issue:
+// bd's own count disagreed with them (contradicted), or bd never projected a
+// count and nothing has since vouched for the projection (unprojected and not
+// witnessed).
+//
+// It is NOT the negation of listIncludesCompleteDependencies. A ledger with no
+// blocks edges never witnesses, yet its count agrees with its (empty) edges on
+// every row, so nothing about the projection is in doubt and its inline edges —
+// waits-for and conditional-blocks included — are used as they are, at no extra
+// cost. Only a projection that is proven short, or unable to testify, sends
+// readiness consumers to a dependency read of their own.
+func (s *BdStore) inlineDependenciesUntrusted() bool {
+	if s == nil {
+		return false
+	}
+	if s.inlineDeps.contradicted.Load() {
+		return true
+	}
+	return s.inlineDeps.unprojected.Load() && !s.inlineDeps.witnessed.Load()
 }

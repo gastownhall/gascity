@@ -3558,34 +3558,44 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // is for stores with no prior bd verdict to layer onto; it is deliberately
 // NOT reused here for that reason.
 //
-// Dependency edges come from whichever source is trustworthy. When this
-// store has witnessed bd projecting complete dependency data inline onto
-// list/ready rows (listIncludesCompleteDependencies), each candidate's own
-// Dependencies field — already fetched by the very "bd ready" call that
-// produced candidates — is used directly, at zero extra subprocess cost.
-// Otherwise this check is skipped entirely: candidates pass through
-// unfiltered rather than paying for an extra "bd dep list" subprocess call
-// just to find out. listIncludesCompleteDependencies exists specifically so
-// this narrow override never has to fetch its own dependency data — a
-// ledger with no dependencies at all (a common case) can never become
-// witnessed, and forcing a live fetch in that case would defeat the whole
-// point of the witnessing mechanism (see bdstore_inline_deps.go's "adds
-// ZERO subprocesses" design note and TestCachingStoreBdPrimeAndReconcileSkipFullDepScan,
-// which pins the zero-dep-scan invariant this fallback used to violate).
-// This mirrors the "unsupported backend degrades to no evidence of
-// blocking" reasoning already used for DepListBatch callers elsewhere
-// (e.g. the Postgres backend's IssueRelations gap, ga-7i7ts), just applied
-// before spending the subprocess call instead of after.
+// Dependency edges come from whichever source is trustworthy. Unless the
+// inline projection is untrusted (inlineDependenciesUntrusted), each
+// candidate's own Dependencies field — already fetched by the very "bd ready"
+// call that produced candidates — is used directly, at zero extra subprocess
+// cost. A ledger with no edges has nothing to look up and spends nothing, and
+// a ledger whose only gates are waits-for or conditional-blocks edges (which
+// dependency_count does not count, so the store never witnesses) is still
+// checked from its inline edges.
+//
+// When the projection is untrusted — bd's count contradicted its edges, or bd
+// never projected a count — the candidates' edges are read with DepListBatch
+// instead. If that read fails, including ErrDepListBatchUnsupported on the
+// bd/Postgres backend (ga-7i7ts), the error is returned: passing candidates
+// through would make "could not check" look exactly like "no blocked
+// prerequisite", which is the silent bypass this function used to have
+// (ga-t12rsn). The ceiling is that Ready stalls on such a store until bd's
+// projection is trustworthy again.
 func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil
 	}
-	if !s.listIncludesCompleteDependencies() {
-		return candidates, nil
-	}
 	depsByID := make(map[string][]Dep, len(candidates))
-	for _, c := range candidates {
-		depsByID[c.ID] = c.Dependencies
+	if s.inlineDependenciesUntrusted() {
+		ids := make([]string, len(candidates))
+		for i, c := range candidates {
+			ids[i] = c.ID
+		}
+		fetched, err := s.DepListBatch(ids)
+		if err != nil {
+			return nil, fmt.Errorf("checking blocking dependency outcomes: reading dependencies of ready candidates: %w", err)
+		}
+		for _, id := range ids {
+			depsByID[id] = fetched[id]
+		}
+	} else {
+		for _, c := range candidates {
+			depsByID[c.ID] = c.Dependencies
+		}
 	}
 	blockerIDSet := make(map[string]bool)
 	for _, deps := range depsByID {
