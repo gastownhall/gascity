@@ -1633,8 +1633,11 @@ func (s undeppableInfraSource) DepList(id, direction string) ([]beads.Dep, error
 	if s.seen == nil {
 		return nil, s.err
 	}
-	s.seen[id]++
-	if s.seen[id] > 1 {
+	// Per direction: the source refusal reads each row's edges both ways
+	// once, and the import's second read down is the one that fails.
+	key := id + " " + direction
+	s.seen[key]++
+	if s.seen[key] > 1 {
 		return nil, s.err
 	}
 	return s.Store.DepList(id, direction)

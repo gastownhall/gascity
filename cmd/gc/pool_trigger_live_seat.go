@@ -284,11 +284,17 @@ func (bp *agentBuildParams) retirePoolSeat(id string) {
 // when no fresh session can start (selectOrPlanPoolSessionBeadAvoiding), so
 // the seat's claim decides whether it runs that work there: it leaves it from
 // inside a managed worktree. The request's evidence is still verified first,
-// so unusable evidence skips the item as before.
+// so unusable evidence skips the item as before. A live seat whose name was
+// refused (SessionRequest.NameRefused) gets no work dir and is bound unnamed
+// where it runs; one that is not alive moves to the pool's own directory
+// (poolSeatBindingPatch).
 func poolTriggerBindWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (string, error) {
 	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
 	if err != nil || workDir == "" {
 		return workDir, err
+	}
+	if request.NameRefused && poolSeatAlive(bp, cfgAgent, info) {
+		return "", nil
 	}
 	at, placed := poolSeatPlacedElsewhere(bp, cfgAgent, info, request)
 	if !placed || !poolSeatAlive(bp, cfgAgent, info) {
