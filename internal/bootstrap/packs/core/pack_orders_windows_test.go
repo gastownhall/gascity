@@ -12,13 +12,14 @@ import (
 )
 
 // TestCoreOrdersRefusedOnWindowsAreTheScriptOrders pins which of the core
-// pack's orders Windows refuses to run: the twelve whose program is a POSIX
-// shell script, until they are ported, and none of the three that run gc.
+// pack's orders Windows refuses to run: the thirteen whose program is a POSIX
+// shell script, until they are ported, and none of the four that run gc.
 func TestCoreOrdersRefusedOnWindowsAreTheScriptOrders(t *testing.T) {
 	want := []string{
 		"cascade-nudge-on-blocker-close", "cross-rig-deps", "gate-sweep", "jsonl-export",
-		"notify-on-human-gate-creation", "nudge-on-route", "orphan-sweep", "prune-branches",
-		"reaper", "renudge-stale-human-gates", "spawn-storm-detect", "wisp-compact",
+		"notify-on-claims-resumed", "notify-on-claims-stalled", "notify-on-human-gate-creation",
+		"nudge-on-route", "orphan-sweep", "prune-branches", "reaper", "renudge-stale-human-gates",
+		"spawn-storm-detect",
 	}
 	entries, err := fs.ReadDir(PackFS, "orders")
 	if err != nil {
@@ -39,7 +40,7 @@ func TestCoreOrdersRefusedOnWindowsAreTheScriptOrders(t *testing.T) {
 	if !slices.Equal(refused, want) {
 		t.Errorf("Windows refuses %q; want the script orders %q", refused, want)
 	}
-	if runnable := strings.Join(runnable, " "); runnable != "beads-health nudge-mail-sweep order-tracking-sweep" {
-		t.Errorf("Windows runs %q; want the three gc orders", runnable)
+	if runnable := strings.Join(runnable, " "); runnable != "beads-health convoy-autoclose-backstop nudge-mail-sweep order-tracking-sweep" {
+		t.Errorf("Windows runs %q; want the four gc orders", runnable)
 	}
 }
