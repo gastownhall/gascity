@@ -439,7 +439,7 @@ func resolveStorageOperatorRequest() (storageOperatorRequest, error) {
 // unless the city already converged and nothing is copied, the rig census,
 // because a bead this city's own scopes hold outside the work store is one the
 // copy will never see; and only then the copy itself.
-func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) int {
+func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) (code int) {
 	const logPrefix = "gc storage migrate"
 
 	// A split the boot gate would refuse to serve (a reserved HQ or rig
@@ -491,26 +491,9 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
 		return 1
 	}
-	// The maintenance window (storage_maintenance.go), once every check that
-	// reads no store has passed (the controller, the shared-store identity and
-	// its co-tenants' locks, the attestation), and before the first that opens
-	// the work store (the shared-store row check). Closed before the
-	// co-tenants and the lock are released.
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defer window.closeReporting(logPrefix, stderr)
-	if shared.Attested && !request.FromBackup {
-		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
-
-	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
-
+	// The guard, the last check that reads no store: a purge or a dry-run
+	// recover-stranded holds it without the controller lock, and a run it
+	// refuses must not start the provider under that holder, nor stop it.
 	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -521,6 +504,25 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	// The maintenance window (storage_maintenance.go), once every check that
+	// reads no store has passed (the controller, the shared-store identity and
+	// its co-tenants' locks, the attestation, the guard), and before the first
+	// that opens the work store (the shared-store row check). Closed before
+	// the guard, the co-tenants and the lock are released.
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr, &code)
+	if shared.Attested && !request.FromBackup {
+		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
 
 	// No rig census here (S4b). A rig's graph rows no longer block the city
 	// cutover: the relic legs keep them readable, and `--from-rigs` moves
@@ -566,12 +568,19 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered))
+	// The window closes before the run reports: a provider its stop left
+	// running fails the run, and the report then says to start nothing.
+	window.closeReporting(logPrefix, stderr, &code)
+	startCity := " Start the city with `gc start`."
+	if code != 0 {
+		startCity = ""
+	}
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s.%s\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered), startCity)
 	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
 		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
 	}
-	return 0
+	return code
 }
 
 // acquireStorageMigrationGuard takes the city's storage migration guard, with

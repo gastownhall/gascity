@@ -117,7 +117,7 @@ The checks that most often stop a real cutover, and what each wants from you:
 | `shared store` | Another registered city uses this city's work store. Under `--force=shared-store:<identity>` it still blocks on rows that name another city's scope, and on an attestation that finds no registered city on the store. | If this city is the only writer of what it migrates, attest the identity the block prints. Move rows that name another city's scope first: no attestation covers them. Register an unregistered co-tenant again (`gc register <path>`). |
 | `rig scopes` | A rig's graph rows have a shape the rig import cannot move without a cross-store edge (an open `tracks`/`parent-child` edge between a graph row and rig work, open work blocked by an open graph row), or a rig store cannot be read. | Do what the named fix says (close the workflow or convoy, finish the work, or remove the edge), or restore access to the rig. Rig history, closed or suspended, no longer blocks: each rig is a `[note]` with what its import would move. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
-| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Rehearse on the running city: preflight opens the work store as it finds it, and a stopped managed or proxied city has no server to read. The migration itself starts the provider for its run (Step 4). A store that stays on the bd CLI lane is refused there by the reason it stayed: executable bd hooks (remove or disable them for the window, or wait for ga-qcpgy), schema skew (`bd migrate`), or `GC_BEADS_FORCE_FALLBACK=1` (unset it). The migration probes every edge it and its clear read, cross-store edges included, before writing anything. A generic exec store (one not backed by bd: not `gc-beads-bd`, not `gc-beads-k8s`) is not refused: its protocol carries no payload, so its edges are copied carrying none and the manifest records `#gc:source-payload-blind exec`. |
+| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Rehearse on the running city: preflight opens the work store as it finds it, and a stopped managed or proxied city has no server to read. The migration itself starts the provider for its run (Step 4). A store that stays on the bd CLI lane is refused there by the reason it stayed: executable bd hooks (remove or disable them for the window, or wait for ga-qcpgy), schema skew (`bd migrate`), or `GC_BEADS_FORCE_FALLBACK=1` (unset it). The migration probes every edge it and its clear read, cross-store edges included, before writing anything. A generic exec store (one not backed by bd: not `gc-beads-bd`, not `gc-beads-k8s`) is not refused: its protocol carries no payload, so its edges are copied carrying none and the manifest records `#gc:source-payload-blind exec`. A `gc-beads-k8s` store with an edge to read is refused: bd holds payloads the exec protocol cannot report, and no native lane serves it yet, so keep that city unsplit. |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
 
 The `shared store` row judges the city as the migration will, with the city
@@ -196,18 +196,25 @@ What the command does, in order:
    refuses if a controller answers the city's socket, and without
    `--fleet-stopped`. None of these reads the work store, and a run they
    refuse never touches the bead-store provider.
-3. Opens the maintenance window, once those checks have passed:
+3. Takes a migration guard over the city, so a second migrator cannot run. It
+   reads no store either, and a run it refuses never touches the provider: a
+   dry run or a `--purge-type` run of `gc storage recover-stranded` holds the
+   guard without the lock above, and the provider is not started or stopped
+   under it.
+4. Opens the maintenance window, once those checks have passed:
    - `gc stop` stopped the city's bead-store provider, and a managed bd/Dolt,
      proxied or bd-contract exec city has no server to read without it. The
      window starts the provider the way `gc start` does (no agents, no nudge
      pollers), recording that it did in `.gc/storage-window.json` first, and
-     stops it again before the lock is released. A provider that was already
-     up is left as it was, except a bd-owned proxy: bd restarts it on any
-     read, so the window always starts the city's proxied scope (and, for
-     `--from-rigs`, the proxied scope of each rig it reads) and stops every
-     provider-owned scope at the end, as `gc stop` does. A provider a
-     killed run started is stopped by the next run, whoever has started it
-     since: the city is stopped and locked.
+     stops it again before the guard and the lock are released. If that stop
+     fails, the run exits non-zero, keeps the record, and does not tell you to
+     start the city: stop the bead store with `gc stop` first. A provider that
+     was already up is left as it was, except a bd-owned proxy: bd restarts it
+     on any read, so the window always starts the city's proxied scope (and,
+     for `--from-rigs`, the proxied scope of each rig it reads) and stops every
+     provider-owned scope at the end, as `gc stop` does. A provider a killed
+     run started is stopped by the next run, whoever has started it since: the
+     city is stopped and locked.
    - Inside the window the migration's own opens of the work store take the
      native lane: the proxied-native lane is forced on and
      `beads.native_transport = "off"` is overridden, for those opens only, with
@@ -221,7 +228,6 @@ What the command does, in order:
 
    Under `--force=shared-store`, it then refuses rows that name another city's
    scope, the one check here that reads the work store.
-4. Takes a migration guard over the city, so a second migrator cannot run.
 5. Does not census rig scopes. A rig's graph rows stay readable through its
    relic legs and move with `gc storage migrate --from-rigs` once the binding
    has converged; the success message names every rig still awaiting that.

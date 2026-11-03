@@ -1484,7 +1484,7 @@ func deleteChunks(store beads.Store, chunks [][]string, between func() error) er
 const rigImportLogPrefix = "gc storage migrate --from-rigs"
 
 // doStorageMigrateFromRigs is `gc storage migrate --from-rigs`.
-func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorRequest, rigNames []string, stdout, stderr io.Writer) int {
+func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorRequest, rigNames []string, stdout, stderr io.Writer) (code int) {
 	const logPrefix = rigImportLogPrefix
 	if err := config.ReservedPrefixSplitRefusal(request.Cfg); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1528,20 +1528,6 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// The maintenance window (storage_maintenance.go), once every check that
-	// reads no store has passed, and before anything opens one: the city's
-	// provider serves its rigs' stores too, and the rigs bd owns a proxied
-	// scope for are started with it.
-	rigRoots := make([]string, 0, len(rigs))
-	for _, rig := range rigs {
-		rigRoots = append(rigRoots, resolveStoreScopeRoot(request.CityPath, rig.Path))
-	}
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, rigRoots...)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defer window.closeReporting(logPrefix, stderr)
 	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1552,6 +1538,21 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	// The maintenance window (storage_maintenance.go), once every check that
+	// reads no store has passed, the guard last, and before anything opens
+	// one: the city's provider serves its rigs' stores too, and the rigs bd
+	// owns a proxied scope for are started with it. It closes before the guard
+	// is released.
+	rigRoots := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		rigRoots = append(rigRoots, resolveStoreScopeRoot(request.CityPath, rig.Path))
+	}
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, rigRoots...)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr, &code)
 	// A shared-store attestation is recorded per rig, where it lifts that
 	// rig's refusal (importRig).
 	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)

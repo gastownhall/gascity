@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // migrationWindowProvider stubs the provider lifecycle and the session list
@@ -127,7 +128,10 @@ func TestMigrationSourceLaneRefusalNamesTheGate(t *testing.T) {
 		{name: "proxied", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameNativeDoltStore, NativeStoreEligible: true, Proxied: &beads.ProxiedDiagnostic{}}},
 		{name: "library backend", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameLibraryBackendStore, NativeStoreEligible: true}},
 		{name: "file", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameFileStore}},
-		{name: "generic exec", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameExecStore}},
+		// A generic exec store never reaches the lane refusal: it is
+		// payload-blind, and the source probe asks it nothing. An exec store
+		// that does is backed by bd, and no native lane serves it.
+		{name: "bd-backed exec", diag: beads.BeadsDiagnostic{Store: beads.BeadsStoreNameExecStore}, want: []string{"ExecStore", "gc-beads-k8s", "No native lane serves", "Nothing was written"}},
 		{name: "bd hooks", diag: bd(beads.BeadsGateBdHooks, "bd hooks are installed"), want: []string{"gate bd_hooks", ".beads/hooks", "ga-qcpgy"}},
 		{name: "schema skew", diag: bd(string(contract.PreflightCheckVersionCompat), "schema behind"), want: []string{"gate version_compat", "`bd migrate`"}},
 		{name: "forced fallback", diag: bd(beads.BeadsGateForceFallback, "GC_BEADS_FORCE_FALLBACK=1"), want: []string{"Unset it"}},
@@ -731,6 +735,91 @@ func TestStorageMigrateFromRigsRunsInsideTheMaintenanceWindow(t *testing.T) {
 	}
 }
 
+// TestStorageVerbsFailWhenTheProviderTheyStartedWillNotStop: in each of the
+// three verbs, a run that did its work but whose window could not stop the
+// provider it started reports the work, exits non-zero, keeps the record, and
+// says to stop the bead store before starting the city; the migration then
+// tells no one to start the city. The same run with a stop that succeeds exits
+// zero.
+func TestStorageVerbsFailWhenTheProviderTheyStartedWillNotStop(t *testing.T) {
+	verbs := []struct {
+		name string
+		// reports is what the run's stdout says once its work is done.
+		reports string
+		// run runs the verb on a city of its own.
+		run func(t *testing.T) (cityPath string, code int, stdout, stderr string)
+	}{
+		{name: "migrate", reports: "Migrated.", run: func(t *testing.T) (string, int, string, string) {
+			request, _ := exclusionCity(t)
+			request.FleetStopped = true
+			var stdout, stderr bytes.Buffer
+			code := doStorageMigrate(context.Background(), request, &stdout, &stderr)
+			return request.CityPath, code, stdout.String(), stderr.String()
+		}},
+		{name: "recover-stranded", reports: "nothing to recover", run: func(t *testing.T) (string, int, string, string) {
+			cityPath := recoveryCityPath(t)
+			cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+			source := stubInfraMigrationSource(t)
+			mustCreateInfraBead(t, source, beads.Bead{Title: "carried", Type: "session"})
+			stubInfraControllerPing(t, 0)
+			stubSessionInventory(t, nil, true, nil)
+			stubOtherCities(t)
+			if report := migrateInfraClasses(t, cityPath, cfg, &bytes.Buffer{}); report.Outcome != infraMigrationConverged {
+				t.Fatalf("cutover = %v", report.Outcome)
+			}
+			var stdout, stderr bytes.Buffer
+			code := doStorageRecoverStranded(context.Background(), storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: true}, strandedRecoveryOptions{}, &stdout, &stderr)
+			return cityPath, code, stdout.String(), stderr.String()
+		}},
+		{name: "from-rigs", reports: "packs", run: func(t *testing.T) (string, int, string, string) {
+			f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+			f.seed("packs", []beads.Bead{graphRow("gp-root1", "gp-root1", "closed", map[string]string{beadmeta.RootStoreRefMetadataKey: "rig:packs", "gc.kind": "workflow"})}, nil)
+			code, stdout, stderr := f.importRigs()
+			return f.request.CityPath, code, stdout, stderr
+		}},
+	}
+	for _, v := range verbs {
+		for _, stopFails := range []bool{false, true} {
+			name := v.name + "/stop succeeds"
+			if stopFails {
+				name = v.name + "/stop fails"
+			}
+			t.Run(name, func(t *testing.T) {
+				provider := &migrationWindowProvider{down: true}
+				if stopFails {
+					provider.stopErr = errors.New("dolt would not stop")
+				}
+				stubMigrationWindowProvider(t, provider)
+				cityPath, code, stdout, stderr := v.run(t)
+				if provider.starts != 1 || provider.stops != 1 || !strings.Contains(stdout, v.reports) {
+					t.Fatalf("starts = %d, stops = %d; want one start, one stop, and the work reported (%q): %s %s", provider.starts, provider.stops, v.reports, stdout, stderr)
+				}
+				kept := fileExists(migrationWindowRecordPath(cityPath))
+				if !stopFails {
+					if code != 0 || kept {
+						t.Fatalf("exit %d, record kept %v; want a clean run: %s %s", code, kept, stdout, stderr)
+					}
+					return
+				}
+				if code == 0 {
+					t.Fatalf("exit 0 although the provider this run started is still running: %s %s", stdout, stderr)
+				}
+				if !kept {
+					t.Fatal("the record was removed although the provider it names is still running")
+				}
+				for _, want := range []string{"dolt would not stop", "Stop the city's bead store with `" + storageStopCommand + "` before starting the city"} {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("stderr does not name %q: %s", want, stderr)
+					}
+				}
+				if strings.Contains(stdout, "Start the city") {
+					t.Errorf("the run told the operator to start the city over the provider still running: %s", stdout)
+				}
+			})
+		}
+	}
+}
+
 // TestRigImportRefusesAPayloadBlindRigWithAnEdgeToRead (S4): the rig import
 // does not take the payload-blind declaration, so a generic exec rig with an
 // edge on a row it moves is refused before anything is written, and one with
@@ -785,21 +874,24 @@ func TestEmittingClassStoreForwardsThePayloadBlindDeclaration(t *testing.T) {
 
 // TestStorageVerbsTouchNoProviderBeforeTheirChecksPass (R2-M1): a run refused
 // by a check that reads no store (here the missing --fleet-stopped
-// attestation, and a controller that still answers) never starts or stops the
-// provider, in each of the three verbs.
+// attestation, a controller that still answers, and the migration guard
+// another storage verb holds, as a purge holds it without the controller lock)
+// never starts or stops the provider, in each of the three verbs.
 func TestStorageVerbsTouchNoProviderBeforeTheirChecksPass(t *testing.T) {
 	type verb struct {
 		name string
-		run  func(t *testing.T, fleetStopped bool, livePID int) (int, string)
+		// run runs the verb on a city of its own, after hold has run on it.
+		run func(t *testing.T, fleetStopped bool, livePID int, hold func(t *testing.T, cityPath string)) (int, string)
 	}
 	verbs := []verb{
-		{name: "migrate", run: func(t *testing.T, fleetStopped bool, livePID int) (int, string) {
+		{name: "migrate", run: func(t *testing.T, fleetStopped bool, livePID int, hold func(*testing.T, string)) (int, string) {
 			request, _ := exclusionCity(t)
 			request.FleetStopped = fleetStopped
 			stubInfraControllerPing(t, livePID)
+			hold(t, request.CityPath)
 			return migrateFor(t, request)
 		}},
-		{name: "recover-stranded", run: func(t *testing.T, fleetStopped bool, livePID int) (int, string) {
+		{name: "recover-stranded", run: func(t *testing.T, fleetStopped bool, livePID int, hold func(*testing.T, string)) (int, string) {
 			cityPath := recoveryCityPath(t)
 			cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
 			source := stubInfraMigrationSource(t)
@@ -811,32 +903,45 @@ func TestStorageVerbsTouchNoProviderBeforeTheirChecksPass(t *testing.T) {
 				t.Fatalf("cutover = %v", report.Outcome)
 			}
 			stubInfraControllerPing(t, livePID)
+			hold(t, cityPath)
 			var stdout, stderr bytes.Buffer
 			code := doStorageRecoverStranded(context.Background(), storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: fleetStopped}, strandedRecoveryOptions{}, &stdout, &stderr)
 			return code, stderr.String()
 		}},
-		{name: "from-rigs", run: func(t *testing.T, fleetStopped bool, livePID int) (int, string) {
+		{name: "from-rigs", run: func(t *testing.T, fleetStopped bool, livePID int, hold func(*testing.T, string)) (int, string) {
 			f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 			f.request.FleetStopped = fleetStopped
 			stubInfraControllerPing(t, livePID)
+			hold(t, f.request.CityPath)
 			code, stdout, stderr := f.importRigs()
 			return code, stdout + stderr
 		}},
+	}
+	holdNothing := func(*testing.T, string) {}
+	holdGuard := func(t *testing.T, cityPath string) {
+		t.Helper()
+		held, err := storebinding.AcquireMigrationGuard(context.Background(), cityMigrationGuardDirectory(cityPath), storageMigrationGeneration)
+		if err != nil {
+			t.Fatalf("taking the migration guard: %v", err)
+		}
+		t.Cleanup(func() { _ = held.Release() })
 	}
 	for _, v := range verbs {
 		for _, tc := range []struct {
 			name         string
 			fleetStopped bool
 			livePID      int
+			hold         func(*testing.T, string)
 			want         string
 		}{
-			{name: "no attestation", want: "--" + storageFleetStoppedFlag},
-			{name: "live controller", fleetStopped: true, livePID: 4242, want: "controller PID 4242"},
+			{name: "no attestation", hold: holdNothing, want: "--" + storageFleetStoppedFlag},
+			{name: "live controller", fleetStopped: true, livePID: 4242, hold: holdNothing, want: "controller PID 4242"},
+			{name: "guard held", fleetStopped: true, hold: holdGuard, want: "holds this city"},
 		} {
 			t.Run(v.name+"/"+tc.name, func(t *testing.T) {
 				provider := &migrationWindowProvider{down: true}
 				stubMigrationWindowProvider(t, provider)
-				code, said := v.run(t, tc.fleetStopped, tc.livePID)
+				code, said := v.run(t, tc.fleetStopped, tc.livePID, tc.hold)
 				if code == 0 || !strings.Contains(said, tc.want) {
 					t.Fatalf("exit %d, output %q; want a refusal naming %q", code, said, tc.want)
 				}

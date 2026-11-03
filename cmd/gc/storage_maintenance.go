@@ -30,8 +30,11 @@ package main
 //
 // Every check that reads no store runs before the window opens: the
 // controller, the shared-store identity and its co-tenants' locks, the
-// --fleet-stopped attestation and, for a rig import, the convergence and the
-// rig names. A run those refuse never touches the provider.
+// --fleet-stopped attestation, for a rig import the convergence and the rig
+// names, and last the migration guard, which a purge or a dry-run
+// recover-stranded holds without the controller lock. A run those refuse
+// never touches the provider, and the window closes before the guard is
+// released.
 //
 // A gc-managed Dolt server the window started has, a moment later, no client
 // but this process: any other session is a writer nothing proved stopped, and
@@ -45,10 +48,11 @@ package main
 // recorded.
 //
 // The window records that it started the provider in .gc/storage-window.json
-// before the start, and removes the record once the provider is stopped. A run
-// killed in between leaves the record, and the next window stops the provider
-// it finds, whoever has started it since: the city is stopped and its lock is
-// held, so nothing of the city's own is using it.
+// before the start, and removes the record once the provider is stopped. A
+// stop that fails keeps the record and fails the run, whatever the run did. A
+// run killed in between leaves the record, and the next window stops the
+// provider it finds, whoever has started it since: the city is stopped and its
+// lock is held, so nothing of the city's own is using it.
 //
 // The design's openMigrationSource returns the opened store. This one returns
 // the window, and the verbs keep opening the work store where they did, through
@@ -323,10 +327,13 @@ func (w *migrationSourceWindow) Close() error {
 	return w.stopProvider()
 }
 
-// closeReporting is Close for a defer, naming a failure on stderr.
-func (w *migrationSourceWindow) closeReporting(logPrefix string, stderr io.Writer) {
+// closeReporting is Close for a verb whose exit status is *code. A stop that
+// failed leaves running a provider the verb was to leave stopped, so it is
+// named on stderr and fails the run.
+func (w *migrationSourceWindow) closeReporting(logPrefix string, stderr io.Writer, code *int) {
 	if err := w.Close(); err != nil {
 		fmt.Fprintf(stderr, "%s: closing the maintenance window: %v. Stop the city's bead store with `%s` before starting the city\n", logPrefix, err, storageStopCommand) //nolint:errcheck // best-effort stderr
+		*code = 1
 	}
 }
 
@@ -403,15 +410,21 @@ func migrationWindowPayloadRefusal(cityPath string, err error) error {
 
 // migrationSourceLaneRefusal is the refusal for a work store whose lane cannot
 // answer a payload read, by the gate that put it there, or nil for a lane that
-// can: native Dolt (the proxied lane included), a library backend, the file
-// store, and a generic exec store, whose protocol carries no payload.
+// can: native Dolt (the proxied lane included), a library backend and the file
+// store.
+//
+// An exec store outside the bd contract opens with no gate. A generic one
+// never gets here: its protocol carries no payload, it declares so
+// (beads.DepMetadataAbsent), and the source probe asks it nothing. One that
+// gets here is backed by bd (gc-beads-k8s), which holds payloads the exec
+// protocol cannot report, and no native lane serves it.
 func migrationSourceLaneRefusal(diag beads.BeadsDiagnostic) error {
 	switch diag.Store {
 	case beads.BeadsStoreNameNativeDoltStore, beads.BeadsStoreNameLibraryBackendStore, beads.BeadsStoreNameFileStore:
 		return nil
 	case beads.BeadsStoreNameExecStore:
 		if diag.PreflightGate == "" {
-			return nil
+			return fmt.Errorf("the work store opened as an exec store (%s) of a provider backed by bd, such as gc-beads-k8s, and the exec protocol cannot report the payloads bd holds on its dependency edges. No native lane serves such a provider yet. Nothing was written; keep this city unsplit until one does", diag.Store)
 		}
 	}
 	lane := fmt.Sprintf("the work store opened on the bd CLI lane (%s, gate %s: %s), which cannot report the payloads on its dependency edges", diag.Store, diag.PreflightGate, diag.PreflightReason)
