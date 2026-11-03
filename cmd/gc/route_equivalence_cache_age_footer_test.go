@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -18,6 +17,9 @@ import (
 // The clock is frozen 75 s past the city cache's last fresh data, past twice
 // its 30 s re-scan interval: the API route prints the footer on stderr, the
 // local route, which reads no cache, prints none, and stdout is identical.
+// Order history is pinned separately: TestOrderHistoryRouteEquivalence holds
+// its stdout equal and TestRouteOrderHistory_CacheAgeFooterOnStderr puts its
+// footer on stderr.
 func TestCacheAgeFooterLeavesRouteStdoutEqual(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	var beadID string
@@ -27,29 +29,7 @@ func TestCacheAgeFooterLeavesRouteStdoutEqual(t *testing.T) {
 			t.Fatalf("seed bead: %v", err)
 		}
 		beadID = b.ID
-		for i := range 2 {
-			run, err := store.Create(beads.Bead{
-				Title:  fmt.Sprintf("digest run %d", i),
-				Type:   "task",
-				Labels: []string{"order-tracking", "order-run:digest"},
-			})
-			if err != nil {
-				t.Fatalf("seed order run: %v", err)
-			}
-			if err := store.Close(run.ID); err != nil {
-				t.Fatalf("close order run: %v", err)
-			}
-		}
 	})
-	writeRouteEquivalenceOrder(t, h.cityPath)
-	cfg, err := loadCityConfig(h.cityPath, io.Discard)
-	if err != nil {
-		t.Fatalf("load city config: %v", err)
-	}
-	aa, code := loadAllOrders(h.cityPath, cfg, io.Discard, "test")
-	if code != 0 {
-		t.Fatalf("loadAllOrders = %d", code)
-	}
 	cache := cityCacheOf(t, h.cs)
 	t.Cleanup(api.SetLivenessClockForTest(&clock.Fake{Time: cache.Stats().LastFreshAt.Add(75 * time.Second)}))
 	client := registryReadsAPIClient(t, h)
@@ -63,9 +43,6 @@ func TestCacheAgeFooterLeavesRouteStdoutEqual(t *testing.T) {
 		}},
 		{"beads show", func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 			return routeBeadsShow(h.cityPath, c, nilReason, beadID, "text", stdout, stderr)
-		}},
-		{"order history", func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
-			return routeOrderHistory(h.cityPath, cfg, "digest", "", aa, c, nilReason, orderHistoryBounds{Limit: 10}, false, stdout, stderr)
 		}},
 	} {
 		t.Run(tc.cmd, func(t *testing.T) {
