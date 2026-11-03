@@ -195,9 +195,10 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if !owned {
 		return runtime.LiveRuntime{}, false, nil
 	}
+	environReadStartedAt := time.Now()
 	env, err := parseEnvironFile(filepath.Join(root, entryName, "environ"))
 	if err != nil {
-		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, err)
+		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, environReadStartedAt, os.Geteuid(), err)
 	}
 	if root == "/proc" && pid == os.Getpid() {
 		env = mergeCurrentEnv(env)
@@ -280,9 +281,19 @@ func unreadableOwnerScanError(root string, pid int, incarnationStartedAt time.Ti
 // unreadableEnvironScanError returns the error a process whose environment
 // could not be read adds to the scan, or nil when the process is proven to
 // predate incarnationStartedAt. A process proven outside the incarnation by its
-// tmux-spawn parent is skipped too, but a failed age proof still leaves the
-// scan incomplete.
-func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readErr error) error {
+// tmux-spawn parent, or, when the read was refused permission, proven to be in
+// the scanner's own user manager scope (unreadableProcessInUserManagerScope),
+// is skipped too, but a failed earlier proof still leaves the scan incomplete.
+// environReadStartedAt is when the failed read began and euid is the
+// scanner's effective uid.
+func unreadableEnvironScanError(
+	root string,
+	pid int,
+	id string,
+	incarnationStartedAt, environReadStartedAt time.Time,
+	euid int,
+	readErr error,
+) error {
 	irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt)
 	if irrelevant {
 		return nil
@@ -298,7 +309,136 @@ func unreadableEnvironScanError(root string, pid int, id string, incarnationStar
 	if proofErr != nil {
 		errs = append(errs, fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
 	}
+	if errors.Is(readErr, fs.ErrPermission) {
+		irrelevant, proofErr = unreadableProcessInUserManagerScope(root, pid, euid, environReadStartedAt)
+		if irrelevant {
+			return errors.Join(errs...)
+		}
+		if proofErr != nil {
+			errs = append(errs, fmt.Errorf("proving user manager scope for pid %d: %w", pid, proofErr))
+		}
+	}
 	return errors.Join(append(errs, fmt.Errorf("reading environ for pid %d: %w", pid, readErr))...)
+}
+
+// unreadableProcessInUserManagerScope reports whether the process at pid,
+// whose environment the scanner was refused permission to read, is proven to
+// sit in the init.scope of the scanner's own systemd user manager
+// (ownUserManagerInitScope), which holds only systemd --user and its
+// (sd-pam) helper: both are non-dumpable, so a same-uid scanner cannot read
+// their environment, and neither is a runtime. The proof is bound to the
+// failed read: the process must have started before environReadStartedAt
+// (userManagerScopeCandidate) and still carry the same identity afterwards
+// (unifiedIdentityStillCurrent), so a pid recycled before or during the proof
+// abandons it.
+//
+// This rests on ordinary systemd placement, not on a guarantee: systemd starts
+// every unit, scope and login session elsewhere, but cgroup v2 lets a same-uid
+// process migrate itself into the leaf, so a custom PAM workload or a process
+// moved there by hand would be skipped too. A namespace-relative cgroup path
+// never matches and stays unproven.
+func unreadableProcessInUserManagerScope(root string, pid, euid int, environReadStartedAt time.Time) (bool, error) {
+	candidate, ok, err := userManagerScopeCandidate(root, pid, euid, environReadStartedAt)
+	if err != nil || !ok {
+		return false, err
+	}
+	return unifiedIdentityStillCurrent(root, candidate)
+}
+
+// ownUserManagerInitScope is the unified cgroup path systemd gives the user
+// manager of uid euid and its (sd-pam) helper.
+func ownUserManagerInitScope(euid int) string {
+	return fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/init.scope", euid, euid)
+}
+
+// userManagerScopeCandidate takes the first census of the user manager scope
+// proof: ok is true only when pid's unified cgroup is exactly euid's
+// ownUserManagerInitScope and the process definitely started before
+// environReadStartedAt. A vanished process, any other path, or a start time
+// inside /proc's quantization of the read leaves it unproven.
+func userManagerScopeCandidate(root string, pid, euid int, environReadStartedAt time.Time) (processIdentity, bool, error) {
+	candidate, exists, err := readUnifiedProcessIdentity(root, pid)
+	if err != nil || !exists {
+		return processIdentity{}, false, err
+	}
+	if candidate.Cgroup != ownUserManagerInitScope(euid) {
+		return processIdentity{}, false, nil
+	}
+	bootedAt, err := readBootTime(root)
+	if err != nil {
+		return processIdentity{}, false, err
+	}
+	if !processDefinitelyPredatesIncarnation(processStartedAt(bootedAt, candidate.StartTicks), environReadStartedAt) {
+		return processIdentity{}, false, nil
+	}
+	return candidate, true, nil
+}
+
+// unifiedIdentityStillCurrent takes the second census and reports whether the
+// process still has identity's pid, parent, start ticks and unified cgroup. A
+// process that vanished or changed abandons the proof.
+func unifiedIdentityStillCurrent(root string, identity processIdentity) (bool, error) {
+	after, exists, err := readUnifiedProcessIdentity(root, identity.PID)
+	if err != nil || !exists {
+		return false, err
+	}
+	return after == identity, nil
+}
+
+// readUnifiedProcessIdentity reads pid's stat identity and its unified cgroup
+// path (readUnifiedCgroup). exists is false when either is missing.
+func readUnifiedProcessIdentity(root string, pid int) (processIdentity, bool, error) {
+	stat, exists, err := readProcessStat(root, pid)
+	if err != nil || !exists {
+		return processIdentity{}, exists, err
+	}
+	cgroup, exists, err := readUnifiedCgroup(root, pid)
+	if err != nil || !exists {
+		return processIdentity{}, exists, err
+	}
+	return processIdentity{
+		PID:        stat.PID,
+		PPID:       stat.PPID,
+		StartTicks: stat.StartTicks,
+		Cgroup:     cgroup,
+	}, true, nil
+}
+
+// readUnifiedCgroup returns pid's cgroup v2 path, unchanged: the path of the
+// cgroup file's one "0::" entry. v1 controller entries are ignored, so a
+// hybrid host reads as a pure-v2 one. exists is false when the file or its
+// unified entry is missing; an unreadable file, a malformed line, an empty
+// unified path, or a second unified entry is an error.
+func readUnifiedCgroup(root string, pid int) (string, bool, error) {
+	path := filepath.Join(root, strconv.Itoa(pid), "cgroup")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var (
+		cgroup string
+		found  bool
+	)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 || fields[0] == "" {
+			return "", false, fmt.Errorf("malformed cgroup file %s", path)
+		}
+		if fields[0] != "0" {
+			continue
+		}
+		if fields[1] != "" || fields[2] == "" || found {
+			return "", false, fmt.Errorf("malformed unified cgroup entry in %s", path)
+		}
+		cgroup, found = fields[2], true
+	}
+	return cgroup, found, nil
 }
 
 const (

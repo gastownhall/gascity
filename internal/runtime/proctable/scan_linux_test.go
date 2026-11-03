@@ -1062,3 +1062,91 @@ func TestOrphanCandidate(t *testing.T) {
 		}
 	}
 }
+
+// ownUserManagerScope is the unified cgroup of the scanner's own systemd user
+// manager: the leaf that holds systemd --user and its (sd-pam) helper.
+func ownUserManagerScope() string {
+	euid := strconv.Itoa(os.Geteuid())
+	return "/user.slice/user-" + euid + ".slice/user@" + euid + ".service/init.scope"
+}
+
+// unifiedCgroupFile is a pure cgroup v2 host's cgroup file for path.
+func unifiedCgroupFile(path string) string {
+	return "0::" + path + "\n"
+}
+
+// hybridCgroupFile is a hybrid v1/v2 host's cgroup file for path: v1
+// controller entries, the named systemd hierarchy, then the unified entry.
+func hybridCgroupFile(path string) string {
+	return "12:pids:" + filepath.Dir(path) + "\n" +
+		"3:cpu,cpuacct:/\n" +
+		"1:name=systemd:" + path + "\n" +
+		"0::" + path + "\n"
+}
+
+// requireUnprivileged skips a test whose 0o000 fixtures root could read.
+func requireUnprivileged(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so a 0o000 environ would stay readable")
+	}
+}
+
+// buildUnreadableProc writes a same-uid process at pid, a child of init that
+// started startTicks after boot, whose cgroup file is cgroupFile verbatim and
+// whose environ the scanner cannot read (mode 0o000).
+func buildUnreadableProc(t *testing.T, root string, pid int, comm string, startTicks uint64, cgroupFile string) {
+	t.Helper()
+	buildFakeProcUnder(t, root, pid, 1, comm, nil)
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	writeFakeProcessStat(t, dir, pid, 1, startTicks)
+	if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroupFile), 0o644); err != nil {
+		t.Fatalf("write cgroup: %v", err)
+	}
+	environ := filepath.Join(dir, "environ")
+	if err := os.Chmod(environ, 0o000); err != nil {
+		t.Fatalf("chmod environ: %v", err)
+	}
+	if _, err := os.ReadFile(environ); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("reading fixture environ = %v, want a permission error", err)
+	}
+}
+
+// TestUnreadableEnvironUserManagerScope (ga-zpcphq): a same-uid process the
+// scanner cannot read the environment of, sitting in its own user manager's
+// init.scope and started before the read, such as (sd-pam), adds no entry
+// error to either unbounded scan, on a pure-v2 host or a hybrid one.
+func TestUnreadableEnvironUserManagerScope(t *testing.T) {
+	for _, tc := range []struct{ name, cgroup string }{
+		{"pure v2", unifiedCgroupFile(ownUserManagerScope())},
+		{"hybrid", hybridCgroupFile(ownUserManagerScope())},
+	} {
+		t.Run(tc.name+"/permission error", func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeBootTime(t, root, time.Unix(1_700_000_000, 0))
+			buildFakeProcUnder(t, root, 2642, 1, "(sd-pam)", nil)
+			dir := filepath.Join(root, "2642")
+			writeFakeProcessStat(t, dir, 2642, 1, 100)
+			if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(tc.cgroup), 0o644); err != nil {
+				t.Fatalf("write cgroup: %v", err)
+			}
+			readErr := fmt.Errorf("open environ: %w", &fs.PathError{Op: "open", Path: filepath.Join(dir, "environ"), Err: syscall.EACCES})
+			if err := unreadableEnvironScanError(root, 2642, "ga-target", time.Time{}, time.Now(), os.Geteuid(), readErr); err != nil {
+				t.Fatalf("unreadableEnvironScanError = %v, want the manager helper excused", err)
+			}
+		})
+		t.Run(tc.name+"/scans", func(t *testing.T) {
+			requireUnprivileged(t)
+			root := t.TempDir()
+			writeFakeBootTime(t, root, time.Unix(1_700_000_000, 0))
+			buildUnreadableProc(t, root, 2642, "(sd-pam)", 100, tc.cgroup)
+
+			if got, err := scanWithRoot(root, "ga-target"); err != nil || len(got) != 0 {
+				t.Fatalf("scanWithRoot = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+			}
+			if got, err := scanOrphanCandidatesWithRoot(root, 0); err != nil || len(got) != 0 {
+				t.Fatalf("scanOrphanCandidatesWithRoot = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+			}
+		})
+	}
+}
