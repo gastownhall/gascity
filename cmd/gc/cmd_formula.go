@@ -740,6 +740,9 @@ city's work store, copy them into the binding with
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 			}
+			// store is the scope's work store; the convoy and invocation calls below
+			// take it as the work class.
+			storeWork := beads.WorkStore{Store: store}
 			// A graph.v2 cook materializes a workflow root and its steps, and
 			// every one of those beads is GRAPH class (molecule.Instantiate
 			// stamps gc.root_bead_id on each member of a graph pour). On a city
@@ -885,7 +888,7 @@ city's work store, copy them into the binding with
 					// input convoy that workflow tracks.
 					wired := false
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
-						inv, err := graphv2.PrepareInvocation(cmd.Context(), beads.WorkStore{Store: store}, args[0], scope.searchPaths, attach, cookVars)
+						inv, err := graphv2.PrepareInvocation(cmd.Context(), storeWork, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare formulas v2 invocation: %w", err)
 						}
@@ -955,7 +958,7 @@ city's work store, copy them into the binding with
 							}
 							return err
 						}
-						emitFormulaCookExecutionFacts(store, beads.WorkStore{Store: store}, cityPath, result, stderr)
+						emitFormulaCookExecutionFacts(store, storeWork, cityPath, result, stderr)
 						wired, err = wireFormulaCookGraphV2AttachRoot(store, attach, result.RootID, rootMeta)
 						return err
 					})
@@ -967,7 +970,7 @@ city's work store, copy them into the binding with
 						// comes after the wiring, when the live workflow tracks that
 						// convoy, so it stays open.
 						if !wired {
-							graphv2.CloseSyntheticInputConvoy(beads.WorkStore{Store: store}, syntheticInputConvoyID, attach)
+							graphv2.CloseSyntheticInputConvoy(storeWork, syntheticInputConvoyID, attach)
 						}
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
@@ -1000,7 +1003,7 @@ city's work store, copy them into the binding with
 				// the store it is handed only has to be able to LOAD the
 				// formula. That is exactly why this arm can serve a class-owned
 				// attach bead when the graph.v2 arm above cannot.
-				inv, err := graphv2.PrepareInvocation(cmd.Context(), beads.WorkStore{Store: store}, args[0], scope.searchPaths, attach, cookVars)
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), storeWork, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
@@ -1079,7 +1082,7 @@ city's work store, copy them into the binding with
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("load formula %q: %w", args[0], err))
 			}
-			inv, err := graphv2.PrepareInvocation(cmd.Context(), beads.WorkStore{Store: store}, args[0], scope.searchPaths, "", cookVars)
+			inv, err := graphv2.PrepareInvocation(cmd.Context(), storeWork, args[0], scope.searchPaths, "", cookVars)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 			}
@@ -1139,7 +1142,7 @@ city's work store, copy them into the binding with
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
-				emitFormulaCookExecutionFacts(rootStore, beads.WorkStore{Store: store}, cityPath, result, stderr)
+				emitFormulaCookExecutionFacts(rootStore, storeWork, cityPath, result, stderr)
 			} else {
 				// The legacy compiler still emits a graph-class root for a
 				// root-only formula: `phase = "vapor"` (or no [[steps]]) compiles

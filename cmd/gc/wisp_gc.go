@@ -306,8 +306,7 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 	purged := 0
 	var deleteErr error
 	if m.ttl > 0 {
-		// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(beads.GraphMolecule(beads.GraphStore{Store: store}), sourceworkflow.WorkflowSpecSidecarClosedReason)
+		closedSpecs, specErr := sourceworkflow.CloseSpecSidecarsForClosedRoots(beads.GraphMolecule(graphStore), sourceworkflow.WorkflowSpecSidecarClosedReason)
 		if specErr != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated spec sidecars for closed workflow roots: %w", specErr))
 		} else if closedSpecs > 0 {

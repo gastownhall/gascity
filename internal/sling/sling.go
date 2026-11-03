@@ -1601,8 +1601,7 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 	if key == "" {
 		return graphV2ReplacementSnapshot{}, nil
 	}
-	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	if err := closeFailedGraphV2RootsByKey(beads.GraphMolecule(beads.GraphStore{Store: store}), key); err != nil {
+	if err := closeFailedGraphV2RootsByKey(storeMolecule, key); err != nil {
 		return graphV2ReplacementSnapshot{}, err
 	}
 	matches, err := sourceworkflow.KeyedRoots(storeMolecule, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)

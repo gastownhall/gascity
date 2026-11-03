@@ -551,7 +551,7 @@ cmd/gc/cmd_formula.go	ensureFormulaCookAttachDep	raw-param	1
 cmd/gc/cmd_formula.go	existingFormulaCookGraphV2Root	mint	1
 cmd/gc/cmd_formula.go	existingFormulaCookGraphV2Root	raw-param	1
 cmd/gc/cmd_formula.go	formulaCookLiveInputConvoyGraphRoots	raw-param	1
-cmd/gc/cmd_formula.go	newFormulaCookCmd	mint	8
+cmd/gc/cmd_formula.go	newFormulaCookCmd	mint	3
 cmd/gc/cmd_formula.go	stampFormulaCookRootMetadata	raw-param	1
 cmd/gc/cmd_formula.go	wireFormulaCookGraphV2AttachRoot	raw-param	1
 cmd/gc/cmd_github.go	attachGitHubPRRepairWorkflow	raw-var	1
@@ -1647,7 +1647,6 @@ cmd/gc/wisp_gc.go	isRelocatedSQLiteSessionLedger	raw-param	2
 cmd/gc/wisp_gc.go	liveBackingStore	cap-assert	1
 cmd/gc/wisp_gc.go	liveBackingStore	raw-param	1
 cmd/gc/wisp_gc.go	liveBackingStore	raw-result	1
-cmd/gc/wisp_gc.go	memoryWispGC.runGC	mint	1
 cmd/gc/wisp_gc.go	memoryWispGC.runGC	unwrap	4
 cmd/gc/wisp_gc.go	openWispGCRootCandidates	raw-param	1
 cmd/gc/wisp_gc.go	openWispGCRootCandidates	read-marker	1
@@ -2223,7 +2222,7 @@ internal/dispatch/runtime.go	loadScopeSnapshotInView	raw-param	1
 internal/dispatch/runtime.go	loadScopeSnapshotWithBody	raw-param	1
 internal/dispatch/runtime.go	preflightSourceBeadChain	raw-param	1
 internal/dispatch/runtime.go	processScopeCheck	raw-param	1
-internal/dispatch/runtime.go	processWorkflowFinalize	mint	2
+internal/dispatch/runtime.go	processWorkflowFinalize	mint	1
 internal/dispatch/runtime.go	processWorkflowFinalize	raw-param	1
 internal/dispatch/runtime.go	propagateSourceBeadTerminalMetadata	raw-param	1
 internal/dispatch/runtime.go	reconcileClosedScopeMember	raw-param	1
@@ -2288,7 +2287,7 @@ internal/sling/sling.go	graphWorkflowAttachmentInGraphStore	read-marker	1
 internal/sling/sling.go	materializeCompiledSlingFormula	mint	2
 internal/sling/sling.go	rollbackGraphV2ReplacementLaunch	mint	1
 internal/sling/sling.go	rollbackGraphV2ReplacementLaunch	raw-param	1
-internal/sling/sling.go	snapshotGraphV2ReplacementRoot	mint	2
+internal/sling/sling.go	snapshotGraphV2ReplacementRoot	mint	1
 internal/sling/sling.go	snapshotGraphV2ReplacementRoot	raw-param	1
 internal/sling/sling_attachment.go	AttachedBead	raw-field	1
 internal/sling/sling_attachment.go	CheckBatchNoMoleculeChildren	raw-param	1

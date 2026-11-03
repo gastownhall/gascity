@@ -1150,8 +1150,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: loading workflow root: %w", rootID, err))
 	}
 	if rootFound {
-		// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-		canceled, err := workflowCanceled(beads.GraphMolecule(beads.GraphStore{Store: store}), root)
+		canceled, err := workflowCanceled(storeMolecule, root)
 		if err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: reading workflow cancellation: %w", rootID, err))
 		}
