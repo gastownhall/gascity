@@ -293,15 +293,16 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale and prune closed order-tracking beads",
-		Long: `Close stale open order-tracking beads and prune expired closed history.
+		Long: fmt.Sprintf(`Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
-The manual command runs to completion; controller startup and watchdog sweeps
-use bounded cleanup to avoid spending an unbounded tick on stale work.
+Each invocation deletes at most %d expired closed tracking beads so the
+maintenance order finishes inside its exec timeout; later invocations drain
+a backlog. Controller startup and the retention watchdog also bound each pass.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -311,7 +312,7 @@ order-scoped to avoid scanning unrelated beads.
 When the number of eligible closed-bead deletions exceeds
 GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
 proceed. This guard prevents accidental mass-deletes without an explicit
-operator acknowledgement.`,
+operator acknowledgement.`, orderTrackingSweepRetentionDeleteBudget),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
@@ -1987,23 +1988,38 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		// Fail-closed: a store read error blocks deletion rather than proceeding
 		// unguarded — a degraded store is exactly when accidental mass deletion
 		// is most dangerous.
+		// --confirm is the unattended maintenance order. Skip the preview count
+		// (a second full read) and prune at most one bounded batch.
 		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
-		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
-		threshold := bulkDeleteConfirmThreshold()
-		switch {
-		case countErr != nil:
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc order sweep-tracking: cannot count eligible beads for confirm gate: %v — aborting to avoid unguarded bulk delete\n",
-				countErr)
-			confirmGateBlocked = true
-		case eligible > threshold && !confirm:
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
-				eligible, threshold)
-			confirmGateBlocked = true
-		default:
-			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
-			result.trackingDeleted = retentionResult.deleted
+		runRetention := confirm
+		if !confirm {
+			eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
+			threshold := bulkDeleteConfirmThreshold()
+			switch {
+			case countErr != nil:
+				fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+					"gc order sweep-tracking: cannot count eligible beads for confirm gate: %v — aborting to avoid unguarded bulk delete\n",
+					countErr)
+				confirmGateBlocked = true
+			case eligible > threshold:
+				fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+					"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
+					eligible, threshold)
+				confirmGateBlocked = true
+			default:
+				runRetention = true
+			}
+		}
+		if runRetention {
+			n, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+				context.Background(), stores, now, retentionPolicy, onlyOrders,
+				orderTrackingSweepRetentionDeleteBudget)
+			retentionResult.deleted = n
+			retentionErr = err
+			if err == nil || n > 0 {
+				retentionResult.storesSwept = 1
+			}
+			result.trackingDeleted = n
 		}
 	}
 	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {

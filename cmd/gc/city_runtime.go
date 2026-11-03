@@ -2347,7 +2347,7 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now t
 
 	policy := orderTrackingRetentionPolicyForConfig(cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		context.Background(), stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}

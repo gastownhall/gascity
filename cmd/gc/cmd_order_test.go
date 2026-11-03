@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -4526,6 +4527,14 @@ func TestPackagedOrderTrackingSweepPassesConfirm(t *testing.T) {
 	// The flag the exec line passes must still exist on the command.
 	if flag := newOrderSweepTrackingCmd(io.Discard, io.Discard).Flags().Lookup("confirm"); flag == nil {
 		t.Fatal("gc order sweep-tracking has no --confirm flag, but the packaged order passes one")
+	}
+}
+
+func TestOrderSweepTrackingHelpStatesRetentionBudget(t *testing.T) {
+	cmd := newOrderSweepTrackingCmd(io.Discard, io.Discard)
+	budget := strconv.Itoa(orderTrackingSweepRetentionDeleteBudget)
+	if !strings.Contains(cmd.Long, budget) {
+		t.Fatalf("Long = %q, want the retention delete budget %s", cmd.Long, budget)
 	}
 }
 
