@@ -22,6 +22,14 @@
 // agent's root session, every subagent child session the task tool opens and
 // any other session in the directory share this module's closure, so all
 // per-turn state below is keyed by session id.
+//
+// OpenCode loads this file for every OpenCode launch in the work dir,
+// including a developer's personal session started by hand. The plugin
+// therefore registers hooks only when gc's session identity is present in
+// the environment. Outside a gc session the injection commands have nothing
+// to return and gc handoff exits 1, so the hooks would only spawn gc every
+// turn and log a failed handoff on every compaction, in a session Gas City
+// does not own.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -29,8 +37,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
+// COMMAND_TIMEOUT_MS bounds every gc call the plugin makes. A failed call is
+// reported with how long it ran against it (see logRunFailure).
+const COMMAND_TIMEOUT_MS = 30000;
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
@@ -39,7 +50,9 @@ const PATH_PREFIX =
 // to tell a new turn from a late update to an earlier message (see openTurn).
 const RECENT_USER_MESSAGES = 64;
 
+// runCommand returns gc's trimmed stdout, or null if the call failed.
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
+  const startedAt = performance.now();
   try {
     // execFile always gives the child a stdin pipe and never closes it, so a
     // gc subcommand that reads hook stdin waits for an EOF that never arrives
@@ -50,7 +63,7 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     const pending = execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
-      timeout: 30000,
+      timeout: COMMAND_TIMEOUT_MS,
       env: {
         ...process.env,
         ...extraEnv,
@@ -63,31 +76,32 @@ async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
     return stdout.trim();
   } catch (err) {
     if (warnOnFailure) {
-      logRunFailure(args, directory, err);
+      logRunFailure(args, directory, err, performance.now() - startedAt);
     }
-    return "";
+    return null;
   }
-}
-
-async function run(directory, ...args) {
-  return runCommand(directory, args, false);
 }
 
 async function runWithWarning(directory, ...args) {
   return runCommand(directory, args, true);
 }
 
-function logRunFailure(args, directory, err) {
+// logRunFailure reports a failed gc call, how long it ran and what gc wrote to
+// stderr. A timeout ends the child with SIGTERM, as other terminations can,
+// so the elapsed time against COMMAND_TIMEOUT_MS is what tells it apart.
+function logRunFailure(args, directory, err, elapsedMs) {
   try {
     const detail =
       (err && (err.code || err.signal || err.message)) || "unknown error";
+    const stderr = String(err?.stderr || "").trim();
     console.warn(
       "gascity opencode plugin:",
       `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       directory,
-      "failed:",
+      `failed after ${Math.round(elapsedMs)}ms (timeout ${COMMAND_TIMEOUT_MS}ms):`,
       detail,
+      ...(stderr ? [stderr] : []),
     );
   } catch {
     return;
@@ -123,6 +137,24 @@ function sessionIDFromEvent(event) {
     event?.properties?.message?.info?.sessionID ||
     ""
   );
+}
+
+// managedSessionIdentityPresent reports whether this process carries the
+// session identity gc puts in the environment of every session it starts:
+// GC_SESSION_ID and GC_SESSION_NAME always, with GC_ALIAS, GC_AGENT and
+// GC_TEMPLATE where the session has them. A process started from inside a gc
+// session inherits that identity and counts as managed. These are the session
+// keys of gc's hookHasManagedIdentity (cmd/gc/cmd_prime.go). Its other key,
+// GC_MANAGED_SESSION_HOOK, marks gc's own hook commands rather than a session,
+// so it says nothing about the process this plugin runs in.
+function managedSessionIdentityPresent() {
+  return [
+    "GC_SESSION_ID",
+    "GC_SESSION_NAME",
+    "GC_ALIAS",
+    "GC_AGENT",
+    "GC_TEMPLATE",
+  ].some((key) => String(process.env[key] || "").trim() !== "");
 }
 
 function providerSessionEnv(sessionID) {
@@ -163,7 +195,14 @@ async function mirrorTranscript(directory, client, sessionID) {
 }
 
 export default async function gascityPlugin({ directory, client }) {
+  if (!managedSessionIdentityPresent()) {
+    return {};
+  }
+  // cachedPrime is the last prompt `gc prime --hook` returned, an empty one
+  // included; null until a read succeeds. primeRead is the unforced read in
+  // flight, shared by generations that ask at once.
   let cachedPrime = null;
+  let primeRead = null;
 
   // experimental.chat.system.transform fires once per model generation, not
   // once per user turn: OpenCode triggers it from LLM.stream, so every tool
@@ -192,11 +231,46 @@ export default async function gascityPlugin({ directory, client }) {
   // `gc prime --hook` as the provider resume key.
   const childSessions = new Set();
 
-  async function readPrime(force = false, extraEnv = {}) {
-    if (force || cachedPrime === null) {
-      cachedPrime = await runCommand(directory, ["prime", "--hook"], false, extraEnv);
+  // readPrime returns the role prompt from `gc prime --hook`, read once and
+  // again when forced (session start, compaction). Whatever gc prints is kept,
+  // an empty prompt included: gc prints none on purpose for a client's
+  // provider chat or a suspended agent. A failed read is not kept, so it does
+  // not leave the session without its role. A forced refresh that fails keeps
+  // the last prime. With none yet, a session whose read failed asks again once
+  // its next turn opens, so a gc that keeps failing or hangs costs it one call
+  // per turn, not one per generation; a generation whose turn is unknown asks
+  // every time, as readTurnVolatile drains every time. A forced read owns the
+  // cache: an unforced read only fills an empty one.
+  async function readPrime(force = false, extraEnv = {}, sessionID = "") {
+    if (force) {
+      const prime = await runCommand(directory, ["prime", "--hook"], true, extraEnv);
+      if (prime !== null) {
+        cachedPrime = prime;
+      }
+      return cachedPrime ?? "";
     }
-    return cachedPrime;
+    if (cachedPrime !== null) {
+      return cachedPrime;
+    }
+    if (!primeRead) {
+      const state = turns.get(String(sessionID || ""));
+      const turn = state?.currentTurnID || "";
+      if (turn && state.primeFailedTurn === turn) {
+        return "";
+      }
+      primeRead = runCommand(directory, ["prime", "--hook"], true, extraEnv).then((prime) => {
+        primeRead = null;
+        if (prime === null) {
+          if (turn) {
+            state.primeFailedTurn = turn;
+          }
+        } else if (cachedPrime === null) {
+          cachedPrime = prime;
+        }
+        return cachedPrime ?? "";
+      });
+    }
+    return primeRead;
   }
 
   function prependText(existing, prefix) {
@@ -206,9 +280,13 @@ export default async function gascityPlugin({ directory, client }) {
   // readVolatile returns the per-turn text: `gc nudge drain --inject` emits a
   // `Current time: ...` line on every call even with an empty queue, and
   // unread mail changes as it arrives. Neither may sit ahead of stable text.
+  // The two reads are independent, so they run at the same time, and a read
+  // that fails is reported instead of silently dropped.
   async function readVolatile() {
-    const nudges = await run(directory, "nudge", "drain", "--inject");
-    const mail = await run(directory, "mail", "check", "--inject");
+    const [nudges, mail] = await Promise.all([
+      runWithWarning(directory, "nudge", "drain", "--inject"),
+      runWithWarning(directory, "mail", "check", "--inject"),
+    ]);
     return [nudges, mail].filter(Boolean).join("\n\n");
   }
 
@@ -224,6 +302,7 @@ export default async function gascityPlugin({ directory, client }) {
         drainedTurnID: null,
         volatile: Promise.resolve(""),
         userMessageIDs: new Set(),
+        primeFailedTurn: "",
       };
       turns.set(sessionID, state);
     }
@@ -379,7 +458,7 @@ export default async function gascityPlugin({ directory, client }) {
     // stable header and undoes the split below. It is not needed to open
     // the turn either; message.updated precedes the first generation.
     "experimental.chat.system.transform": async (input, output) => {
-      const prime = await readPrime();
+      const prime = await readPrime(false, {}, input?.sessionID);
       const volatile = await readTurnVolatile(input?.sessionID);
       prependStableSystem(output.system, prime);
       appendVolatileSystem(output.system, volatile);

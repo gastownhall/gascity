@@ -11,7 +11,7 @@
 // reads its hook input to EOF and then emits `Current time: ...` even when
 // the queue is empty.
 
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -61,15 +61,40 @@ const plugins = [
 // `prime --hook` call appends the GC_PROVIDER_SESSION_ID it was given to the
 // prime log, and GC_FAKE_PRIME_STAMP marks the output the way the real
 // command bakes the current time into its beacon, so a test can tell a
-// refreshed prime from the cached one.
+// refreshed prime from the cached one. Every call of any kind appends its
+// arguments to the call log. `handoff --auto` fails when GC_ALIAS,
+// GC_SESSION_ID and GC_AGENT are all blank, the first check the real command
+// makes (cmd/gc/session_target.go). GC_FAKE_PRIME_FAIL makes `prime --hook`
+// fail and GC_FAKE_PRIME_EMPTY makes it print nothing, as it does in a
+// suspended city; both are still logged. GC_FAKE_MAIL_FAIL makes `mail check`
+// fail. With GC_FAKE_RENDEZVOUS naming a directory, `nudge drain` and
+// `mail check` each wait up to 5s for the other to start and fail if it never
+// does, so calling them one after the other fails.
 function writeFakeGc(dir) {
   const counter = path.join(dir, "drain-count");
   const drainLog = path.join(dir, "drain-log");
   const primeLog = path.join(dir, "prime-log");
+  const callLog = path.join(dir, "call-log");
   const script = `#!/bin/sh
+printf '%s\\n' "$*" >> "${callLog}"
+rendezvous() {
+  [ -n "\${GC_FAKE_RENDEZVOUS:-}" ] || return 0
+  : > "\${GC_FAKE_RENDEZVOUS}/$1"
+  waited=0
+  while [ ! -e "\${GC_FAKE_RENDEZVOUS}/$2" ]; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 50 ]; then
+      printf '%s\\n' "$1 ran without $2" >&2
+      exit 3
+    fi
+    sleep 0.1
+  done
+}
 case "$1 $2" in
   "prime --hook")
     printf '%s\\n' "\${GC_PROVIDER_SESSION_ID:-<unset>}" >> "${primeLog}"
+    if [ -n "\${GC_FAKE_PRIME_FAIL:-}" ]; then exit 1; fi
+    if [ -n "\${GC_FAKE_PRIME_EMPTY:-}" ]; then exit 0; fi
     printf '%s' '${ROLE}'
     if [ -n "\${GC_FAKE_PRIME_STAMP:-}" ]; then printf ' (stamp %s)' "\${GC_FAKE_PRIME_STAMP}"; fi
     ;;
@@ -77,6 +102,7 @@ case "$1 $2" in
     # Read the hook input to EOF first, as the real command does: a plugin
     # that leaves the child's stdin open blocks here (#5562).
     while IFS= read -r line; do :; done
+    rendezvous nudge mail
     printf 'drain\\n' >> "${drainLog}"
     if [ "\${GC_INJECT_CLOCK:-}" = "0" ]; then exit 0; fi
     n=0
@@ -86,7 +112,16 @@ case "$1 $2" in
     printf '%s%s (epoch %s)' '${CLOCK_PREFIX}' "$n" "$n"
     ;;
   "mail check")
+    if [ -n "\${GC_FAKE_MAIL_FAIL:-}" ]; then exit 1; fi
+    rendezvous mail nudge
     if [ -n "\${GC_FAKE_MAIL:-}" ]; then printf '%s' "\${GC_FAKE_MAIL}"; fi
+    ;;
+  "handoff --auto")
+    if [ -z "$(printf '%s' "\${GC_ALIAS:-}\${GC_SESSION_ID:-}\${GC_AGENT:-}" | tr -d '[:space:]')" ]; then
+      printf '%s\\n' 'gc handoff: not in session context (GC_ALIAS/GC_SESSION_ID not set)' >&2
+      exit 1
+    fi
+    printf '%s' 'Handoff: sent auto mail (restart skipped).'
     ;;
   *)
     ;;
@@ -94,7 +129,7 @@ esac
 `;
   const bin = path.join(dir, "gc");
   fs.writeFileSync(bin, script, { mode: 0o755 });
-  return { bin, counter, drainLog, primeLog };
+  return { bin, counter, drainLog, primeLog, callLog };
 }
 
 function readLines(file) {
@@ -157,6 +192,9 @@ function countOccurrences(haystack, needle) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gc-plugin-test-"));
 const fake = writeFakeGc(tmp);
 process.env.GC_BIN = fake.bin;
+// The plugins register hooks only in a session gc started, so the suite runs
+// as one.
+process.env.GC_SESSION_ID = "managed-test-session";
 // Both plugins mirror session transcripts through the client, and MiMo Code
 // mirrors by default into the user's Gas City data directory, so keep every
 // mirror under the suite's temp dir.
@@ -686,5 +724,253 @@ for (const plugin of plugins) {
       await hooks.event(sessionEvent("session.compacted", "ses_unknown"));
       assert.deepEqual(readPrimeLog(fake), ["ses_unknown"]);
     });
+  });
+
+  describe(`${plugin.name} plugin optional injection`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    let hooks;
+    let warnings;
+    let savedWarn;
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      const { default: gascityPlugin } = await import(pathToFileURL(staged).href);
+      hooks = await gascityPlugin({ directory: tmp, client: {} });
+    });
+
+    beforeEach(() => {
+      resetDrains(fake);
+      warnings = [];
+      savedWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+    });
+
+    afterEach(() => {
+      console.warn = savedWarn;
+      delete process.env.GC_FAKE_MAIL;
+      delete process.env.GC_FAKE_MAIL_FAIL;
+      delete process.env.GC_FAKE_RENDEZVOUS;
+    });
+
+    // With no session id the transform reads the per-turn text every time.
+    async function transform() {
+      const output = { system: [HEADER] };
+      await hooks["experimental.chat.system.transform"]({ model: {} }, output);
+      return output.system;
+    }
+
+    it("runs nudge drain and mail check at the same time", async () => {
+      process.env.GC_FAKE_RENDEZVOUS = fs.mkdtempSync(path.join(tmp, "rendezvous-"));
+      process.env.GC_FAKE_MAIL = MAIL;
+      const system = await transform();
+      assert.deepEqual(
+        { volatile: system[1], warnings },
+        { volatile: `${CLOCK_PREFIX}1 (epoch 1)\n\n${MAIL}`, warnings: [] },
+      );
+    });
+
+    it("reports a failed read and how long it ran against the timeout", async () => {
+      process.env.GC_FAKE_MAIL_FAIL = "1";
+      const system = await transform();
+      assert.equal(system[1], `${CLOCK_PREFIX}1 (epoch 1)`, "the drain must still land");
+      assert.equal(warnings.length, 1, `want one warning, got ${JSON.stringify(warnings)}`);
+      assert.match(
+        warnings[0],
+        new RegExp(`^gascity ${plugin.name} plugin: \\S+ mail check --inject cwd \\S+ failed after \\d+ms \\(timeout 30000ms\\): 1$`),
+      );
+    });
+  });
+
+  describe(`${plugin.name} plugin prime cache`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    // Each test makes its own plugin instance: the prime cache is per
+    // instance.
+    let gascityPlugin;
+    let warnings;
+    let savedWarn;
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      ({ default: gascityPlugin } = await import(pathToFileURL(staged).href));
+    });
+
+    beforeEach(() => {
+      resetDrains(fake);
+      fs.rmSync(fake.primeLog, { force: true });
+      warnings = [];
+      savedWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+    });
+
+    afterEach(() => {
+      console.warn = savedWarn;
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      delete process.env.GC_FAKE_PRIME_EMPTY;
+      delete process.env.GC_FAKE_PRIME_STAMP;
+    });
+
+    async function stableSystem(hooks, sessionID = "ses_prime") {
+      const output = { system: [HEADER] };
+      await hooks["experimental.chat.system.transform"]({ sessionID, model: {} }, output);
+      return output.system[0];
+    }
+
+    it("asks for the prime again on the next turn after a failed read, not before", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      await hooks.event(userMessageEvent("ses_prime", "msg_p1"));
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      assert.equal(await stableSystem(hooks), HEADER);
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      // A later generation of the same turn does not ask again, so a gc that
+      // keeps failing or hangs costs one call per turn.
+      assert.equal(await stableSystem(hooks), HEADER);
+      assert.equal(readPrimeLog(fake).length, 1, "the failed turn asked for the prime again");
+      await hooks.event(userMessageEvent("ses_prime", "msg_p2"));
+      const next = await stableSystem(hooks);
+      assert.ok(next.startsWith(ROLE), `the next turn has no role: ${JSON.stringify(next)}`);
+      assert.equal(readPrimeLog(fake).length, 2);
+    });
+
+    it("asks again every generation while the session's turn is unknown", async () => {
+      // No message.updated reached the plugin, so it cannot tell turns apart;
+      // like readTurnVolatile it then asks every time rather than never.
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      assert.equal(await stableSystem(hooks), HEADER);
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      const next = await stableSystem(hooks);
+      assert.ok(next.startsWith(ROLE), `the next generation has no role: ${JSON.stringify(next)}`);
+      assert.equal(readPrimeLog(fake).length, 2);
+    });
+
+    it("remembers a failed read's turn per session", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      await hooks.event(userMessageEvent("ses_prime", "msg_parent"));
+      await hooks.event(userMessageEvent("ses_sub", "msg_sub"));
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      await stableSystem(hooks, "ses_prime");
+      await stableSystem(hooks, "ses_sub");
+      // The subagent's failure must not clear the parent's: the parent's next
+      // generation in the same turn does not ask again.
+      await stableSystem(hooks, "ses_prime");
+      assert.equal(readPrimeLog(fake).length, 2);
+    });
+
+    it("keeps an empty prime, which gc prints on purpose for some sessions", async () => {
+      // A client's provider chat and a suspended agent get no prompt; asking
+      // again every generation would only repeat that answer's store work.
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_EMPTY = "1";
+      assert.equal(await stableSystem(hooks), HEADER);
+      delete process.env.GC_FAKE_PRIME_EMPTY;
+      await hooks.event(userMessageEvent("ses_prime", "msg_e2"));
+      assert.equal(await stableSystem(hooks), HEADER);
+      assert.deepEqual({ reads: readPrimeLog(fake).length, warnings }, { reads: 1, warnings: [] });
+    });
+
+    it("shares one prime read between generations that ask at once", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      const [first, second] = await Promise.all([stableSystem(hooks), stableSystem(hooks)]);
+      assert.ok(first.startsWith(ROLE), first);
+      assert.equal(second, first);
+      assert.equal(readPrimeLog(fake).length, 1);
+    });
+
+    it("keeps the last prime when a refresh fails", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_STAMP = "created";
+      await hooks.event(sessionEvent("session.created", "ses_prime", { directory: tmp }));
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      await hooks.event(sessionEvent("session.compacted", "ses_prime"));
+      delete process.env.GC_FAKE_PRIME_FAIL;
+      const system0 = await stableSystem(hooks);
+      assert.ok(system0.startsWith(`${ROLE} (stamp created)`), `the failed refresh dropped the role: ${JSON.stringify(system0)}`);
+      assert.deepEqual(readPrimeLog(fake), ["ses_prime", "ses_prime"], "the cached prime must not be read again");
+    });
+
+    it("reports a failed prime read", async () => {
+      const hooks = await gascityPlugin({ directory: tmp, client: {} });
+      process.env.GC_FAKE_PRIME_FAIL = "1";
+      await stableSystem(hooks);
+      assert.equal(warnings.length, 1, `want one warning, got ${JSON.stringify(warnings)}`);
+      assert.match(
+        warnings[0],
+        new RegExp(`^gascity ${plugin.name} plugin: \\S+ prime --hook cwd \\S+ failed after \\d+ms \\(timeout 30000ms\\): 1$`),
+      );
+    });
+  });
+
+  describe(`${plugin.name} plugin outside a gc-managed session`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    // gc puts GC_SESSION_ID and GC_SESSION_NAME in every session it starts,
+    // with GC_ALIAS, GC_AGENT and GC_TEMPLATE where the session has them. A
+    // session started by hand in the same work dir has none of them, and the
+    // provider loads this plugin for it all the same.
+    const identityKeys = ["GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "GC_AGENT", "GC_TEMPLATE"];
+    let gascityPlugin;
+    let savedIdentity;
+
+    function setIdentity(values) {
+      for (const key of identityKeys) {
+        if (values[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = values[key];
+        }
+      }
+    }
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      ({ default: gascityPlugin } = await import(pathToFileURL(staged).href));
+    });
+
+    beforeEach(() => {
+      savedIdentity = Object.fromEntries(identityKeys.map((key) => [key, process.env[key]]));
+      fs.rmSync(fake.callLog, { force: true });
+    });
+
+    afterEach(() => {
+      setIdentity(savedIdentity);
+    });
+
+    it("registers no hooks, runs no gc and logs nothing in a session started by hand", async () => {
+      const registered = [];
+      const warnings = [];
+      const savedWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+      try {
+        // Unset, empty and whitespace-only all mean no identity, as in gc.
+        for (const value of [undefined, "", " \t\n"]) {
+          setIdentity(Object.fromEntries(identityKeys.map((key) => [key, value])));
+          const hooks = await gascityPlugin({ directory: tmp, client: {} });
+          registered.push(...Object.keys(hooks));
+          // Drive whatever was registered the way the provider drives a
+          // session: creation, a user turn and its generation, a compaction.
+          await hooks.event?.(sessionEvent("session.created", "ses_human", { directory: tmp }));
+          await hooks.event?.(userMessageEvent("ses_human", "msg_h1"));
+          await hooks["experimental.chat.system.transform"]?.(
+            { sessionID: "ses_human", model: {} },
+            { system: [HEADER] },
+          );
+          await hooks["experimental.session.compacting"]?.({ sessionID: "ses_human" }, { context: [] });
+        }
+      } finally {
+        console.warn = savedWarn;
+      }
+      assert.deepEqual(
+        { registered, gcCalls: readLines(fake.callLog), warnings },
+        { registered: [], gcCalls: [], warnings: [] },
+      );
+    });
+
+    for (const key of identityKeys) {
+      it(`registers its hooks when only ${key} is set`, async () => {
+        setIdentity({ [key]: "managed-test-session" });
+        const hooks = await gascityPlugin({ directory: tmp, client: {} });
+        assert.deepEqual(Object.keys(hooks).sort(), [
+          "event",
+          "experimental.chat.system.transform",
+          "experimental.session.compacting",
+        ]);
+      });
+    }
   });
 }
