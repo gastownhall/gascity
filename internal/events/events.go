@@ -495,13 +495,14 @@ const (
 	MoleculeResolved = "molecule.resolved"
 
 	// External messaging events.
-	ExtMsgBound          = "extmsg.bound"
-	ExtMsgUnbound        = "extmsg.unbound"
-	ExtMsgGroupCreated   = "extmsg.group_created"
-	ExtMsgAdapterAdded   = "extmsg.adapter_added"
-	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
-	ExtMsgInbound        = "extmsg.inbound"
-	ExtMsgOutbound       = "extmsg.outbound"
+	ExtMsgBound                 = "extmsg.bound"
+	ExtMsgUnbound               = "extmsg.unbound"
+	ExtMsgGroupCreated          = "extmsg.group_created"
+	ExtMsgAdapterAdded          = "extmsg.adapter_added"
+	ExtMsgAdapterRemoved        = "extmsg.adapter_removed"
+	ExtMsgInbound               = "extmsg.inbound"
+	ExtMsgPublicDeliveryChanged = "extmsg.public_delivery_changed"
+	ExtMsgOutbound              = "extmsg.outbound"
 
 	// ExtMsgOutboundChannelMismatch fires when a session attempts to publish
 	// to a conversation that is bound to a different session. The publish is
@@ -718,7 +719,7 @@ var KnownEventTypes = []string{
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
-	ExtMsgInbound, ExtMsgOutbound,
+	ExtMsgInbound, ExtMsgPublicDeliveryChanged, ExtMsgOutbound,
 	ExtMsgOutboundChannelMismatch,
 	WebhookReceived, WebhookRejected,
 	EventsRotated,

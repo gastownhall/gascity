@@ -175,7 +175,7 @@ func resolveCapability[T any](s Store) (T, bool) {
 // method set. A capability added later is vetted until it is listed.
 func passesClassGate[T any]() bool {
 	switch any((*T)(nil)).(type) {
-	case *Counter, *NamespaceCensus, *DependencyBatchLister, *DepMetadataReader, *DepMetadataBatchReader,
+	case *IDPrefixReporter, *Counter, *NamespaceCensus, *DependencyBatchLister, *DepMetadataReader, *DepMetadataBatchReader,
 		*GraphOnlyReadyStore, *ContextReadyReader, *OrderedReadyReader, *CachePreferredReadyReader,
 		*ChildrenBatchLister, *ExactBatchGetter, *CachedReadExact, *ReadOnlyReporter,
 		*RowWitness, *ParentProjectionWaiter, *AbsentBlockedReader,

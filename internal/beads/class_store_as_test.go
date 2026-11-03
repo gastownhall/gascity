@@ -640,3 +640,25 @@ func TestPhysicalStoreKey(t *testing.T) {
 		t.Errorf("a non-pointer store: PhysicalStoreKey = %q, want %q", got, want)
 	}
 }
+
+type testPrefixStore struct{ *MemStore }
+
+func (testPrefixStore) IDPrefix() string { return "gcg" }
+
+func TestIDPrefixReporterCrossesClassGateWithoutWriter(t *testing.T) {
+	raw := testPrefixStore{NewMemStore()}
+	gated := MailStore{Store: testGate{Store: raw}}
+	p, ok := As[IDPrefixReporter](gated)
+	if !ok || p.IDPrefix() != "gcg" {
+		t.Fatalf("prefix reporter=%v,%v", p, ok)
+	}
+	if _, ok := As[GuardedBatcher](gated); ok {
+		t.Fatal("namespace reporting exposed a raw guarded writer")
+	}
+	if _, ok := As[Store](gated); ok {
+		t.Fatal("namespace reporting exposed raw CRUD")
+	}
+	if _, ok := As[interface{ IDPrefix() string }](gated); ok {
+		t.Fatal("anonymous interface bypassed the exact capability allowlist")
+	}
+}

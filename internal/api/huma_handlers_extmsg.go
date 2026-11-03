@@ -55,6 +55,21 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 		DefaultAgentForConversation: s.extmsgDefaultAgentForConversation(),
 	}
 
+	// Durable public admission is an explicit transport contract. It never
+	// executes the legacy append+notify path in addition to its recipient outbox.
+	if input.Body.RequestKey != "" && durablePublicKey(input.Body.RequestKey) == "" {
+		return nil, apierr.InvalidRequest.Msg("request_key must not be blank")
+	}
+	if key := durablePublicKey(input.Body.RequestKey); key != "" {
+		if input.Body.Message == nil {
+			return nil, apierr.InvalidRequest.Msg("request_key requires a pre-normalized message")
+		}
+		return s.admitExtMsgPublic(ctx, svc, *input.Body.Message, key, input.Body.Deliveries, input.Body.CancelDeliveries)
+	}
+	if len(input.Body.Deliveries) > 0 || input.Body.CancelDeliveries {
+		return nil, apierr.InvalidRequest.Msg("deliveries require request_key")
+	}
+
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)

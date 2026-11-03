@@ -3569,6 +3569,9 @@
             "$ref": "#/components/schemas/ProviderUnresolvedPayload"
           },
           {
+            "$ref": "#/components/schemas/PublicDeliveryChangedPayload"
+          },
+          {
             "$ref": "#/components/schemas/Record"
           },
           {
@@ -4014,6 +4017,20 @@
             "description": "Account ID for raw payloads (required when message is absent).",
             "type": "string"
           },
+          "cancel_deliveries": {
+            "description": "Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves.",
+            "type": "boolean"
+          },
+          "deliveries": {
+            "description": "Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent.",
+            "items": {
+              "$ref": "#/components/schemas/PublicRecipient"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "message": {
             "$ref": "#/components/schemas/ExternalInboundMessage",
             "description": "Pre-normalized inbound message."
@@ -4025,6 +4042,10 @@
           },
           "provider": {
             "description": "Provider name for raw payloads (required when message is absent).",
+            "type": "string"
+          },
+          "request_key": {
+            "description": "Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message.",
             "type": "string"
           }
         },
@@ -4902,6 +4923,9 @@
           "actor": {
             "type": "string"
           },
+          "admission_id": {
+            "type": "string"
+          },
           "conversation_id": {
             "type": "string"
           },
@@ -4912,6 +4936,9 @@
             "type": "string"
           },
           "target_session": {
+            "type": "string"
+          },
+          "transcript_id": {
             "type": "string"
           }
         },
@@ -4943,6 +4970,18 @@
           },
           "TranscriptEntry": {
             "$ref": "#/components/schemas/ConversationTranscriptRecord"
+          },
+          "admission": {
+            "$ref": "#/components/schemas/PublicReceipt"
+          },
+          "deliveries": {
+            "items": {
+              "$ref": "#/components/schemas/PublicDelivery"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -7733,6 +7772,252 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "PublicDelivery": {
+        "additionalProperties": false,
+        "properties": {
+          "after_delivery_id": {
+            "type": "string"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationRef"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "error_detail": {
+            "type": "string"
+          },
+          "explicit_target_session_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "native_payload": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "operation_key": {
+            "type": "string"
+          },
+          "operation_outcome": {
+            "type": "string"
+          },
+          "operation_reason": {
+            "type": "string"
+          },
+          "operation_status": {
+            "type": "string"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "recipient": {
+            "$ref": "#/components/schemas/PublicRecipient"
+          },
+          "recipient_key": {
+            "type": "string"
+          },
+          "resolved_session_id": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "description": "GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.",
+            "enum": [
+              "queued",
+              "admission_pending",
+              "admission_unknown",
+              "admitted",
+              "failed",
+              "cancel_requested",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "state_version": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "receipt_id",
+          "transcript_id",
+          "conversation",
+          "recipient",
+          "operation_key",
+          "sequence",
+          "recipient_key",
+          "state",
+          "state_version"
+        ],
+        "type": "object"
+      },
+      "PublicDeliveryChangedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_id": {
+            "type": "string"
+          },
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_id": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "operation_outcome": {
+            "type": "string"
+          },
+          "operation_reason": {
+            "type": "string"
+          },
+          "operation_status": {
+            "type": "string"
+          },
+          "recipient_key": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "state_version": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "admission_id",
+          "transcript_id",
+          "delivery_id",
+          "state_version",
+          "state",
+          "recipient_key"
+        ],
+        "type": "object"
+      },
+      "PublicMessagePolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "now_generation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "now_turn": {
+            "type": "string"
+          },
+          "on_unsupported": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "wake": {
+            "type": "string"
+          },
+          "when": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PublicReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "delivery_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "request_key": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "target_agent": {
+            "type": "string"
+          },
+          "target_session": {
+            "type": "string"
+          },
+          "transcript_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "request_key",
+          "payload_digest",
+          "transcript_id",
+          "sequence",
+          "delivery_ids"
+        ],
+        "type": "object"
+      },
+      "PublicRecipient": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PublicMessagePolicy"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy"
+        ],
         "type": "object"
       },
       "PublishReceipt": {
@@ -14919,6 +15204,7 @@
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
+            "extmsg.public_delivery_changed": "#/components/schemas/TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
             "fact.recorded": "#/components/schemas/TypedEventStreamEnvelopeFactRecorded",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
@@ -15140,6 +15426,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
@@ -17136,6 +17425,7 @@
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
+                "extmsg.public_delivery_changed",
                 "extmsg.outbound",
                 "extmsg.outbound_channel_mismatch",
                 "webhook.received",
@@ -18145,6 +18435,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.outbound_channel_mismatch",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PublicDeliveryChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.public_delivery_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope extmsg.public_delivery_changed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgUnbound": {
@@ -22927,6 +23274,7 @@
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
+            "extmsg.public_delivery_changed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
             "fact.recorded": "#/components/schemas/TypedTaggedEventStreamEnvelopeFactRecorded",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
@@ -23148,6 +23496,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
@@ -25259,6 +25610,7 @@
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
+                "extmsg.public_delivery_changed",
                 "extmsg.outbound",
                 "extmsg.outbound_channel_mismatch",
                 "webhook.received",
@@ -26337,6 +26689,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PublicDeliveryChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "extmsg.public_delivery_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope extmsg.public_delivery_changed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgUnbound": {

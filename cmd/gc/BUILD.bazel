@@ -64,6 +64,7 @@ go_library(
         "allocator_plan.go",
         "allocator_scalecheck_lane.go",
         "allocator_snapshot.go",
+        "api_extmsg_public.go",
         "api_state.go",
         "api_state_conditional_writes.go",
         "api_state_emergency_relay.go",

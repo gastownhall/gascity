@@ -651,6 +651,39 @@ func (e OpsRecordingDegradedPayloadSurface) Valid() bool {
 	}
 }
 
+// Defines values for PublicDeliveryState.
+const (
+	PublicDeliveryStateAdmissionPending PublicDeliveryState = "admission_pending"
+	PublicDeliveryStateAdmissionUnknown PublicDeliveryState = "admission_unknown"
+	PublicDeliveryStateAdmitted         PublicDeliveryState = "admitted"
+	PublicDeliveryStateCancelRequested  PublicDeliveryState = "cancel_requested"
+	PublicDeliveryStateCanceled         PublicDeliveryState = "canceled"
+	PublicDeliveryStateFailed           PublicDeliveryState = "failed"
+	PublicDeliveryStateQueued           PublicDeliveryState = "queued"
+)
+
+// Valid indicates whether the value is a known member of the PublicDeliveryState enum.
+func (e PublicDeliveryState) Valid() bool {
+	switch e {
+	case PublicDeliveryStateAdmissionPending:
+		return true
+	case PublicDeliveryStateAdmissionUnknown:
+		return true
+	case PublicDeliveryStateAdmitted:
+		return true
+	case PublicDeliveryStateCancelRequested:
+		return true
+	case PublicDeliveryStateCanceled:
+		return true
+	case PublicDeliveryStateFailed:
+		return true
+	case PublicDeliveryStateQueued:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestAcceptedPayloadOperation.
 const (
 	RequestAcceptedPayloadOperationSessionCreate  RequestAcceptedPayloadOperation = "session.create"
@@ -969,39 +1002,39 @@ const (
 // Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
 func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	switch e {
-	case ClaimNudgeHold:
+	case SessionProgramStatusShadowPayloadPointClaimNudgeHold:
 		return true
-	case DrainReminder:
+	case SessionProgramStatusShadowPayloadPointDrainReminder:
 		return true
-	case EscapeResend:
+	case SessionProgramStatusShadowPayloadPointEscapeResend:
 		return true
-	case ExecutionBackstop:
+	case SessionProgramStatusShadowPayloadPointExecutionBackstop:
 		return true
-	case InterruptSettle:
+	case SessionProgramStatusShadowPayloadPointInterruptSettle:
 		return true
-	case Observation:
+	case SessionProgramStatusShadowPayloadPointObservation:
 		return true
-	case Pending:
+	case SessionProgramStatusShadowPayloadPointPending:
 		return true
-	case ProvedIdle:
+	case SessionProgramStatusShadowPayloadPointProvedIdle:
 		return true
-	case QueuedDelivery:
+	case SessionProgramStatusShadowPayloadPointQueuedDelivery:
 		return true
-	case Readiness:
+	case SessionProgramStatusShadowPayloadPointReadiness:
 		return true
-	case StartupLadder:
+	case SessionProgramStatusShadowPayloadPointStartupLadder:
 		return true
 	case StarvedBypass:
 		return true
 	case SubmitConfirm:
 		return true
-	case TypingGate:
+	case SessionProgramStatusShadowPayloadPointTypingGate:
 		return true
-	case WaitForIdle:
+	case SessionProgramStatusShadowPayloadPointWaitForIdle:
 		return true
-	case WaitIdlePreread:
+	case SessionProgramStatusShadowPayloadPointWaitIdlePreread:
 		return true
-	case WorkLadder:
+	case SessionProgramStatusShadowPayloadPointWorkLadder:
 		return true
 	default:
 		return false
@@ -3517,14 +3550,23 @@ type ExtMsgGroupEnsureInputBody struct {
 // ExtMsgInboundInputBody defines model for ExtMsgInboundInputBody.
 type ExtMsgInboundInputBody struct {
 	// AccountId Account ID for raw payloads (required when message is absent).
-	AccountId *string                 `json:"account_id,omitempty"`
-	Message   *ExternalInboundMessage `json:"message,omitempty"`
+	AccountId *string `json:"account_id,omitempty"`
+
+	// CancelDeliveries Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves.
+	CancelDeliveries *bool `json:"cancel_deliveries,omitempty"`
+
+	// Deliveries Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent.
+	Deliveries *[]PublicRecipient      `json:"deliveries,omitempty"`
+	Message    *ExternalInboundMessage `json:"message,omitempty"`
 
 	// Payload Raw payload bytes.
 	Payload *string `json:"payload,omitempty"`
 
 	// Provider Provider name for raw payloads (required when message is absent).
 	Provider *string `json:"provider,omitempty"`
+
+	// RequestKey Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message.
+	RequestKey *string `json:"request_key,omitempty"`
 }
 
 // ExtMsgOutboundInputBody defines model for ExtMsgOutboundInputBody.
@@ -3836,10 +3878,12 @@ type HookClaimReclaimedStalePayload struct {
 // InboundEventPayload defines model for InboundEventPayload.
 type InboundEventPayload struct {
 	Actor          string  `json:"actor"`
+	AdmissionId    *string `json:"admission_id,omitempty"`
 	ConversationId string  `json:"conversation_id"`
 	Provider       string  `json:"provider"`
 	TargetAgent    *string `json:"target_agent,omitempty"`
 	TargetSession  string  `json:"target_session"`
+	TranscriptId   *string `json:"transcript_id,omitempty"`
 }
 
 // InboundResult defines model for InboundResult.
@@ -3850,6 +3894,8 @@ type InboundResult struct {
 	TargetAgentName string                        `json:"TargetAgentName"`
 	TargetSessionID string                        `json:"TargetSessionID"`
 	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
+	Admission       *PublicReceipt                `json:"admission,omitempty"`
+	Deliveries      *[]PublicDelivery             `json:"deliveries,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -4927,6 +4973,85 @@ type ProxiedEndpointStamp struct {
 	Generation *string `json:"generation,omitempty"`
 	Pid        *int64  `json:"pid,omitempty"`
 	Port       *int64  `json:"port,omitempty"`
+}
+
+// PublicDelivery defines model for PublicDelivery.
+type PublicDelivery struct {
+	AfterDeliveryId         *string         `json:"after_delivery_id,omitempty"`
+	CancelRequested         *bool           `json:"cancel_requested,omitempty"`
+	Conversation            ConversationRef `json:"conversation"`
+	ErrorCode               *string         `json:"error_code,omitempty"`
+	ErrorDetail             *string         `json:"error_detail,omitempty"`
+	ExplicitTargetSessionId *string         `json:"explicit_target_session_id,omitempty"`
+	Id                      string          `json:"id"`
+	NativePayload           *string         `json:"native_payload,omitempty"`
+	OperationId             *string         `json:"operation_id,omitempty"`
+	OperationKey            string          `json:"operation_key"`
+	OperationOutcome        *string         `json:"operation_outcome,omitempty"`
+	OperationReason         *string         `json:"operation_reason,omitempty"`
+	OperationStatus         *string         `json:"operation_status,omitempty"`
+	ReceiptId               string          `json:"receipt_id"`
+	Recipient               PublicRecipient `json:"recipient"`
+	RecipientKey            string          `json:"recipient_key"`
+	ResolvedSessionId       *string         `json:"resolved_session_id,omitempty"`
+	Retryable               *bool           `json:"retryable,omitempty"`
+	Sequence                int64           `json:"sequence"`
+
+	// State GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.
+	State        PublicDeliveryState `json:"state"`
+	StateVersion int64               `json:"state_version"`
+	TranscriptId string              `json:"transcript_id"`
+}
+
+// PublicDeliveryState GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.
+type PublicDeliveryState string
+
+// PublicDeliveryChangedPayload defines model for PublicDeliveryChangedPayload.
+type PublicDeliveryChangedPayload struct {
+	AdmissionId      string  `json:"admission_id"`
+	CancelRequested  *bool   `json:"cancel_requested,omitempty"`
+	DeliveryId       string  `json:"delivery_id"`
+	ErrorCode        *string `json:"error_code,omitempty"`
+	OperationId      *string `json:"operation_id,omitempty"`
+	OperationOutcome *string `json:"operation_outcome,omitempty"`
+	OperationReason  *string `json:"operation_reason,omitempty"`
+	OperationStatus  *string `json:"operation_status,omitempty"`
+	RecipientKey     string  `json:"recipient_key"`
+	Retryable        *bool   `json:"retryable,omitempty"`
+	SessionId        *string `json:"session_id,omitempty"`
+	State            string  `json:"state"`
+	StateVersion     int64   `json:"state_version"`
+	TranscriptId     string  `json:"transcript_id"`
+}
+
+// PublicMessagePolicy defines model for PublicMessagePolicy.
+type PublicMessagePolicy struct {
+	NowGeneration *int64  `json:"now_generation,omitempty"`
+	NowTurn       *string `json:"now_turn,omitempty"`
+	OnUnsupported *string `json:"on_unsupported,omitempty"`
+	Role          *string `json:"role,omitempty"`
+	Wake          *string `json:"wake,omitempty"`
+	When          *string `json:"when,omitempty"`
+}
+
+// PublicReceipt defines model for PublicReceipt.
+type PublicReceipt struct {
+	CancelRequested *bool     `json:"cancel_requested,omitempty"`
+	DeliveryIds     *[]string `json:"delivery_ids"`
+	Id              string    `json:"id"`
+	PayloadDigest   string    `json:"payload_digest"`
+	RequestKey      string    `json:"request_key"`
+	Sequence        int64     `json:"sequence"`
+	TargetAgent     *string   `json:"target_agent,omitempty"`
+	TargetSession   *string   `json:"target_session,omitempty"`
+	TranscriptId    string    `json:"transcript_id"`
+}
+
+// PublicRecipient defines model for PublicRecipient.
+type PublicRecipient struct {
+	AgentIdentity *string             `json:"agent_identity,omitempty"`
+	Policy        PublicMessagePolicy `json:"policy"`
+	SessionId     *string             `json:"session_id,omitempty"`
 }
 
 // PublishReceipt defines model for PublishReceipt.
@@ -8466,6 +8591,22 @@ type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
 	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged defines model for TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged.
+type TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          PublicDeliveryChangedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExtmsgUnbound defines model for TypedEventStreamEnvelopeExtmsgUnbound.
 type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Actor            string                   `json:"actor"`
@@ -10579,6 +10720,23 @@ type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
 	Ts               time.Time                      `json:"ts"`
 	Type             string                         `json:"type"`
 	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged defines model for TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged.
+type TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          PublicDeliveryChangedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgUnbound defines model for TypedTaggedEventStreamEnvelopeExtmsgUnbound.
@@ -14841,6 +14999,32 @@ func (t *EventPayload) MergeProviderUnresolvedPayload(v ProviderUnresolvedPayloa
 	return err
 }
 
+// AsPublicDeliveryChangedPayload returns the union data inside the EventPayload as a PublicDeliveryChangedPayload
+func (t EventPayload) AsPublicDeliveryChangedPayload() (PublicDeliveryChangedPayload, error) {
+	var body PublicDeliveryChangedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPublicDeliveryChangedPayload overwrites any union data inside the EventPayload as the provided PublicDeliveryChangedPayload
+func (t *EventPayload) FromPublicDeliveryChangedPayload(v PublicDeliveryChangedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePublicDeliveryChangedPayload performs a merge with any union data inside the EventPayload, using the provided PublicDeliveryChangedPayload
+func (t *EventPayload) MergePublicDeliveryChangedPayload(v PublicDeliveryChangedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsRecord returns the union data inside the EventPayload as a Record
 func (t EventPayload) AsRecord() (Record, error) {
 	var body Record
@@ -18764,6 +18948,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutboundCh
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged() (TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged, error) {
+	var body TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExtmsgUnbound returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgUnbound
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgUnbound() (TypedEventStreamEnvelopeExtmsgUnbound, error) {
 	var body TypedEventStreamEnvelopeExtmsgUnbound
@@ -21222,6 +21434,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
 		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
+	case "extmsg.public_delivery_changed":
+		return t.AsTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
 	case "fact.recorded":
@@ -22653,6 +22867,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
 	v.Type = "extmsg.outbound_channel_mismatch"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged() (TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged(v TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged) error {
+	v.Type = "extmsg.public_delivery_changed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -25121,6 +25363,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
 	case "extmsg.outbound_channel_mismatch":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
+	case "extmsg.public_delivery_changed":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
 	case "fact.recorded":

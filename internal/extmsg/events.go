@@ -13,6 +13,8 @@ import "github.com/gastownhall/gascity/internal/events"
 // resolved recipient session and TargetAgent the bound agent identity for
 // agent-bound conversations (both empty if no routing match).
 type InboundEventPayload struct {
+	AdmissionID    string `json:"admission_id,omitempty"`
+	TranscriptID   string `json:"transcript_id,omitempty"`
 	Provider       string `json:"provider"`
 	ConversationID string `json:"conversation_id"`
 	Actor          string `json:"actor"`
@@ -22,6 +24,29 @@ type InboundEventPayload struct {
 
 // IsEventPayload marks InboundEventPayload as an events.Payload variant.
 func (InboundEventPayload) IsEventPayload() {}
+
+// PublicDeliveryChangedPayload is an at-least-once public outbox state
+// invalidation. DeliveryID+StateVersion is the stable logical identity.
+// It carries no native prompt, provider credentials or application state.
+type PublicDeliveryChangedPayload struct {
+	AdmissionID      string              `json:"admission_id"`
+	TranscriptID     string              `json:"transcript_id"`
+	DeliveryID       string              `json:"delivery_id"`
+	StateVersion     uint64              `json:"state_version"`
+	State            PublicDeliveryState `json:"state"`
+	RecipientKey     string              `json:"recipient_key"`
+	SessionID        string              `json:"session_id,omitempty"`
+	OperationID      string              `json:"operation_id,omitempty"`
+	ErrorCode        string              `json:"error_code,omitempty"`
+	Retryable        bool                `json:"retryable,omitempty"`
+	CancelRequested  bool                `json:"cancel_requested,omitempty"`
+	OperationStatus  string              `json:"operation_status,omitempty"`
+	OperationOutcome string              `json:"operation_outcome,omitempty"`
+	OperationReason  string              `json:"operation_reason,omitempty"`
+}
+
+// IsEventPayload marks the registered public delivery state variant.
+func (PublicDeliveryChangedPayload) IsEventPayload() {}
 
 // OutboundEventPayload is emitted on "extmsg.outbound" events.
 type OutboundEventPayload struct {
@@ -99,6 +124,7 @@ func init() {
 	events.RegisterPayload(events.ExtMsgAdapterAdded, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgAdapterRemoved, AdapterEventPayload{})
 	events.RegisterPayload(events.ExtMsgInbound, InboundEventPayload{})
+	events.RegisterPayload(events.ExtMsgPublicDeliveryChanged, PublicDeliveryChangedPayload{})
 	events.RegisterPayload(events.ExtMsgOutbound, OutboundEventPayload{})
 	events.RegisterPayload(events.ExtMsgOutboundChannelMismatch, OutboundChannelMismatchPayload{})
 }

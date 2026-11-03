@@ -847,13 +847,6 @@ export const zExternalInboundMessage = z.object({
     text: z.string()
 });
 
-export const zExtMsgInboundInputBody = z.object({
-    account_id: z.string().optional(),
-    message: zExternalInboundMessage.optional(),
-    payload: z.string().optional(),
-    provider: z.string().optional()
-});
-
 export const zExtmsgAdapterInfo = z.object({
     account_id: z.string(),
     name: z.string(),
@@ -1015,10 +1008,12 @@ export const zHookClaimReclaimedStalePayload = z.object({
 
 export const zInboundEventPayload = z.object({
     actor: z.string(),
+    admission_id: z.string().optional(),
     conversation_id: z.string(),
     provider: z.string(),
     target_agent: z.string().optional(),
-    target_session: z.string()
+    target_session: z.string(),
+    transcript_id: z.string().optional()
 });
 
 export const zListBodyBead = z.object({
@@ -1674,6 +1669,93 @@ export const zBeadsDiagnostic = z.object({
     preflight_gate: z.string().optional(),
     preflight_reason: z.string().optional(),
     proxied: zProxiedDiagnostic.optional()
+});
+
+export const zPublicDeliveryChangedPayload = z.object({
+    admission_id: z.string(),
+    cancel_requested: z.boolean().optional(),
+    delivery_id: z.string(),
+    error_code: z.string().optional(),
+    operation_id: z.string().optional(),
+    operation_outcome: z.string().optional(),
+    operation_reason: z.string().optional(),
+    operation_status: z.string().optional(),
+    recipient_key: z.string(),
+    retryable: z.boolean().optional(),
+    session_id: z.string().optional(),
+    state: z.string(),
+    state_version: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    transcript_id: z.string()
+});
+
+export const zPublicMessagePolicy = z.object({
+    now_generation: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    now_turn: z.string().optional(),
+    on_unsupported: z.string().optional(),
+    role: z.string().optional(),
+    wake: z.string().optional(),
+    when: z.string().optional()
+});
+
+export const zPublicReceipt = z.object({
+    cancel_requested: z.boolean().optional(),
+    delivery_ids: z.array(z.string()).nullable(),
+    id: z.string(),
+    payload_digest: z.string(),
+    request_key: z.string(),
+    sequence: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    target_agent: z.string().optional(),
+    target_session: z.string().optional(),
+    transcript_id: z.string()
+});
+
+export const zPublicRecipient = z.object({
+    agent_identity: z.string().optional(),
+    policy: zPublicMessagePolicy,
+    session_id: z.string().optional()
+});
+
+export const zExtMsgInboundInputBody = z.object({
+    account_id: z.string().optional(),
+    cancel_deliveries: z.boolean().optional(),
+    deliveries: z.array(zPublicRecipient).nullish(),
+    message: zExternalInboundMessage.optional(),
+    payload: z.string().optional(),
+    provider: z.string().optional(),
+    request_key: z.string().optional()
+});
+
+export const zPublicDelivery = z.object({
+    after_delivery_id: z.string().optional(),
+    cancel_requested: z.boolean().optional(),
+    conversation: zConversationRef,
+    error_code: z.string().optional(),
+    error_detail: z.string().optional(),
+    explicit_target_session_id: z.string().optional(),
+    id: z.string(),
+    native_payload: z.string().optional(),
+    operation_id: z.string().optional(),
+    operation_key: z.string(),
+    operation_outcome: z.string().optional(),
+    operation_reason: z.string().optional(),
+    operation_status: z.string().optional(),
+    receipt_id: z.string(),
+    recipient: zPublicRecipient,
+    recipient_key: z.string(),
+    resolved_session_id: z.string().optional(),
+    retryable: z.boolean().optional(),
+    sequence: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    state: z.enum([
+        'queued',
+        'admission_pending',
+        'admission_unknown',
+        'admitted',
+        'failed',
+        'cancel_requested',
+        'canceled'
+    ]),
+    state_version: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    transcript_id: z.string()
 });
 
 export const zPublishReceipt = z.object({
@@ -3910,7 +3992,9 @@ export const zInboundResult = z.object({
     Message: zExternalInboundMessage,
     TargetAgentName: z.string(),
     TargetSessionID: z.string(),
-    TranscriptEntry: zConversationTranscriptRecord.optional()
+    TranscriptEntry: zConversationTranscriptRecord.optional(),
+    admission: zPublicReceipt.optional(),
+    deliveries: z.array(zPublicDelivery).nullish()
 });
 
 export const zListBodyConversationTranscriptRecord = z.object({
@@ -4135,6 +4219,7 @@ export const zEventPayload = z.union([
     zOutboundEventPayload,
     zProjectIdentityStampedPayload,
     zProviderUnresolvedPayload,
+    zPublicDeliveryChangedPayload,
     zRecord,
     zRequestAcceptedPayload,
     zRequestFailedPayload,
@@ -5089,6 +5174,24 @@ export const zTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('extmsg.outbound_channel_mismatch'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope extmsg.public_delivery_changed
+ */
+export const zTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zPublicDeliveryChangedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('extmsg.public_delivery_changed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6637,6 +6740,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeExtmsgInbound.extend({ type: z.literal('extmsg.inbound') }),
     zTypedEventStreamEnvelopeExtmsgOutbound.extend({ type: z.literal('extmsg.outbound') }),
     zTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch.extend({ type: z.literal('extmsg.outbound_channel_mismatch') }),
+    zTypedEventStreamEnvelopeExtmsgPublicDeliveryChanged.extend({ type: z.literal('extmsg.public_delivery_changed') }),
     zTypedEventStreamEnvelopeExtmsgUnbound.extend({ type: z.literal('extmsg.unbound') }),
     zTypedEventStreamEnvelopeFactRecorded.extend({ type: z.literal('fact.recorded') }),
     zTypedEventStreamEnvelopeGcStoreDiskCritical.extend({ type: z.literal('gc.store.disk_critical') }),
@@ -7618,6 +7722,25 @@ export const zTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = z.ob
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('extmsg.outbound_channel_mismatch'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.public_delivery_changed
+ */
+export const zTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zPublicDeliveryChangedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('extmsg.public_delivery_changed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -9249,6 +9372,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeExtmsgInbound.extend({ type: z.literal('extmsg.inbound') }),
     zTypedTaggedEventStreamEnvelopeExtmsgOutbound.extend({ type: z.literal('extmsg.outbound') }),
     zTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch.extend({ type: z.literal('extmsg.outbound_channel_mismatch') }),
+    zTypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged.extend({ type: z.literal('extmsg.public_delivery_changed') }),
     zTypedTaggedEventStreamEnvelopeExtmsgUnbound.extend({ type: z.literal('extmsg.unbound') }),
     zTypedTaggedEventStreamEnvelopeFactRecorded.extend({ type: z.literal('fact.recorded') }),
     zTypedTaggedEventStreamEnvelopeGcStoreDiskCritical.extend({ type: z.literal('gc.store.disk_critical') }),

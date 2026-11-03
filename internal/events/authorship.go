@@ -261,6 +261,7 @@ var builtinAuthorship = map[string]Authorship{
 	ExtMsgAdapterAdded:            AuthorController,
 	ExtMsgAdapterRemoved:          AuthorController,
 	ExtMsgInbound:                 AuthorController,
+	ExtMsgPublicDeliveryChanged:   AuthorController,
 	ExtMsgOutbound:                AuthorController,
 	ExtMsgOutboundChannelMismatch: AuthorController,
 	WebhookReceived:               AuthorController,

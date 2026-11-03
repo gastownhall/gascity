@@ -437,6 +437,10 @@ func StartPprof(addr string) (*http.Server, error) {
 
 // Serve accepts connections on lis. Blocks until stopped.
 func (sm *SupervisorMux) Serve(lis net.Listener) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); sm.maintainPublicRelays(ctx) }()
+	defer func() { cancel(); <-done }()
 	return sm.server.Serve(lis)
 }
 

@@ -54,6 +54,9 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
+	if prefix, batcher, ok := s.guardedTranscriptPrefix(); ok {
+		return s.appendGuarded(ctx, input, ref, kind, provenance, createdAt, providerMessageID, text, prefix, batcher)
+	}
 	var out ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.ensureStateLocked(ref)
@@ -774,12 +777,16 @@ func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref Conv
 		"hydration_status":            string(HydrationLiveOnly),
 		"max_retained_entries":        "0",
 	}
-	created, err := w.Create(beads.Bead{
+	stateBead := beads.Bead{
 		Title:    conversationTitle(ref) + "/state",
 		Type:     "task",
 		Labels:   []string{"gc:extmsg-transcript-state", labelTranscriptStateBase, transcriptStateLabel(ref)},
 		Metadata: fields,
-	})
+	}
+	if prefix, _, ok := s.guardedTranscriptPrefix(); ok {
+		stateBead.ID = prefix + "-xs-" + publicHash(ref)[:32]
+	}
+	created, err := w.Create(stateBead)
 	if err != nil {
 		return ConversationTranscriptStateRecord{}, fmt.Errorf("create transcript state: %w", err)
 	}

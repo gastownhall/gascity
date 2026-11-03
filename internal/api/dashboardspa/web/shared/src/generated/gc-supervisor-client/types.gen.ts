@@ -1587,6 +1587,14 @@ export type ExtMsgInboundInputBody = {
      */
     account_id?: string;
     /**
+     * Monotonically cancel all deliveries of an existing admission. Requires the same original request_key/message/deliveries; never creates a missing admission. Prepared or unknown lane writes remain cancel_requested until the original operation/tombstone resolves.
+     */
+    cancel_deliveries?: boolean;
+    /**
+     * Frozen qualified recipient identities and native message policies for durable admission. Lane guarantee is at_most_once; ambiguous native outcomes are not resent.
+     */
+    deliveries?: Array<PublicRecipient> | null;
+    /**
      * Pre-normalized inbound message.
      */
     message?: ExternalInboundMessage;
@@ -1598,6 +1606,10 @@ export type ExtMsgInboundInputBody = {
      * Provider name for raw payloads (required when message is absent).
      */
     provider?: string;
+    /**
+     * Opt-in durable admission key, scoped by conversation and actor. Requires explicit deliveries and pre-normalized message.
+     */
+    request_key?: string;
 };
 
 export type ExtMsgOutboundInputBody = {
@@ -1940,10 +1952,12 @@ export type HookClaimReclaimedStalePayload = {
 
 export type InboundEventPayload = {
     actor: string;
+    admission_id?: string;
     conversation_id: string;
     provider: string;
     target_agent?: string;
     target_session: string;
+    transcript_id?: string;
 };
 
 export type InboundResult = {
@@ -1953,6 +1967,8 @@ export type InboundResult = {
     TargetAgentName: string;
     TargetSessionID: string;
     TranscriptEntry?: ConversationTranscriptRecord;
+    admission?: PublicReceipt;
+    deliveries?: Array<PublicDelivery> | null;
 };
 
 export type ListBodyAgentPatch = {
@@ -3214,6 +3230,78 @@ export type ProxiedEndpointStamp = {
     generation?: string;
     pid?: number;
     port?: number;
+};
+
+export type PublicDelivery = {
+    after_delivery_id?: string;
+    cancel_requested?: boolean;
+    conversation: ConversationRef;
+    error_code?: string;
+    error_detail?: string;
+    explicit_target_session_id?: string;
+    id: string;
+    native_payload?: string;
+    operation_id?: string;
+    operation_key: string;
+    operation_outcome?: string;
+    operation_reason?: string;
+    operation_status?: string;
+    receipt_id: string;
+    recipient: PublicRecipient;
+    recipient_key: string;
+    resolved_session_id?: string;
+    retryable?: boolean;
+    sequence: number;
+    /**
+     * GC handoff state; admitted means the existing Sessions operation is authoritative, not model completion.
+     */
+    state: 'queued' | 'admission_pending' | 'admission_unknown' | 'admitted' | 'failed' | 'cancel_requested' | 'canceled';
+    state_version: number;
+    transcript_id: string;
+};
+
+export type PublicDeliveryChangedPayload = {
+    admission_id: string;
+    cancel_requested?: boolean;
+    delivery_id: string;
+    error_code?: string;
+    operation_id?: string;
+    operation_outcome?: string;
+    operation_reason?: string;
+    operation_status?: string;
+    recipient_key: string;
+    retryable?: boolean;
+    session_id?: string;
+    state: string;
+    state_version: number;
+    transcript_id: string;
+};
+
+export type PublicMessagePolicy = {
+    now_generation?: number;
+    now_turn?: string;
+    on_unsupported?: string;
+    role?: string;
+    wake?: string;
+    when?: string;
+};
+
+export type PublicReceipt = {
+    cancel_requested?: boolean;
+    delivery_ids: Array<string> | null;
+    id: string;
+    payload_digest: string;
+    request_key: string;
+    sequence: number;
+    target_agent?: string;
+    target_session?: string;
+    transcript_id: string;
+};
+
+export type PublicRecipient = {
+    agent_identity?: string;
+    policy: PublicMessagePolicy;
+    session_id?: string;
 };
 
 export type PublishReceipt = {
@@ -6676,6 +6764,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.outbound_channel_mismatch';
 } & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
+    type: 'extmsg.public_delivery_changed';
+} & TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'fact.recorded';
@@ -7668,6 +7758,24 @@ export type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
     subject?: string;
     ts: string;
     type: 'extmsg.outbound_channel_mismatch';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope extmsg.public_delivery_changed
+ */
+export type TypedEventStreamEnvelopeExtmsgPublicDeliveryChanged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PublicDeliveryChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.public_delivery_changed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -9243,6 +9351,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.outbound_channel_mismatch';
 } & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
+    type: 'extmsg.public_delivery_changed';
+} & TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
     type: 'fact.recorded';
@@ -10281,6 +10391,25 @@ export type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch = {
     subject?: string;
     ts: string;
     type: 'extmsg.outbound_channel_mismatch';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope extmsg.public_delivery_changed
+ */
+export type TypedTaggedEventStreamEnvelopeExtmsgPublicDeliveryChanged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: PublicDeliveryChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'extmsg.public_delivery_changed';
     workflow?: WorkflowEventProjection;
 };
 
