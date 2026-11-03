@@ -50,6 +50,14 @@ type orphanReleaseCountingStore struct {
 	writes atomic.Int32
 }
 
+// ConditionalWritesResolveTarget lets the fenced release find the in-memory
+// store's conditional-write capabilities through this counting wrapper, as it
+// does through every production wrapper; without it the release is refused as
+// unfenceable and no test that expects a release could pass.
+func (s *orphanReleaseCountingStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.Store
+}
+
 func (s *orphanReleaseCountingStore) Get(id string) (beads.Bead, error) {
 	s.reads.Add(1)
 	return s.Store.Get(id)
@@ -400,6 +408,18 @@ func TestOrphanReleaseLane_BackstopRetainsLiveAndProtectedWork(t *testing.T) {
 	})
 	t.Run("control: a stale empty published set releases W2", func(t *testing.T) {
 		fx := newOrphanReleaseFixture(t)
+		// W2's bare-template assignee is served by the live "worker" session the
+		// fixture holds for W1, so the sweep keeps it with or without the protected
+		// set. Strand it on a dead session name — the shape the wake-protected set
+		// exists for — so the set is the only thing that can retain it.
+		if err := fx.work.Store.Update(fx.w2.ID, beads.UpdateOpts{Assignee: stringPtr("worker-w2-gone")}); err != nil {
+			t.Fatalf("strand w2: %v", err)
+		}
+		w2, err := fx.work.Store.Get(fx.w2.ID)
+		if err != nil {
+			t.Fatalf("get w2: %v", err)
+		}
+		fx.w2 = w2
 		lane := fx.cr.orphanReleaseLaneOf()
 		lane.publish(fx.inputs(nil))
 		report := lane.backstopPass(backstopReasonCadence, nil)

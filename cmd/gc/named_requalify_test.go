@@ -1153,7 +1153,7 @@ func TestLegacyRenamedRowOwnsAClaimUnderItsNamedRuntimeName(t *testing.T) {
 				// No wake-candidate protection: the seat's ownership of its
 				// claims must keep them on its own, as it does a born-qualified
 				// seat's.
-				if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, beads.SessionStore{Store: store}, cfg, cityPath, snapshot.OpenInfos(), ds, rigStores, nil, nil, nil); len(released) != 0 {
+				if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, beads.SessionStore{Store: store}, cfg, cityPath, snapshot.OpenInfos(), ds, rigStores, nil, nil); len(released) != 0 {
 					t.Errorf("released %+v, want the seat's claims under %q kept", released, requalifyQualifiedRuntime)
 				}
 				for _, w := range []struct {

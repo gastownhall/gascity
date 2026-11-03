@@ -187,6 +187,12 @@ type CityRuntime struct {
 	detachedOrphan     *detachedOrphanLane
 	detachedOrphanOnce sync.Once
 
+	// orphanRelease is the orphaned-pool-assignment release lane: an in-tick
+	// delta over assignees that lost a session, plus an off-tick backstop that
+	// reads the inputs the tick published (ga-8uf72n, ruled in ga-57er0d).
+	orphanRelease     *orphanReleaseLane
+	orphanReleaseOnce sync.Once
+
 	// claimLoop is the claim-loop guard (claim_loop_guard.go), fed by the same
 	// journal feed as the delta lanes; created on first use.
 	claimLoop     *claimLoopGuard
@@ -3406,10 +3412,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// arm of this very tick is about to act on (the release-first ordering plus
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase, &cr.deadAssigneeKeeps)
-	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
-		"released_count": len(released),
-	})
+	released := cr.runOrphanReleaseDelta(store != nil, sessStore, result, sessionBeads.OpenInfos(), protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), phaseStart, recordPhase)
 	if len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
@@ -3713,6 +3716,41 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
+}
+
+// runOrphanReleaseDelta is the tick's share of the orphan-release sweep: it
+// feeds the lane this tick's session transitions, publishes the inputs the
+// off-tick backstop reads, and runs the delta pass over only the assignees whose
+// session just went away. A steady tick has no such assignee and reads nothing.
+// The returned releases index into result.AssignedWorkBeads.
+func (cr *CityRuntime) runOrphanReleaseDelta(haveStore bool, sessStore beads.SessionStore, result DesiredStateResult, openInfos []sessionpkg.Info, protected map[storeScopedBeadKey]struct{}, phaseStart time.Time, recordPhase func(TraceSiteCode, string, time.Time, map[string]any)) []releasedPoolAssignment {
+	lane := cr.orphanReleaseLaneOf()
+	var report orphanReleaseReport
+	if !haveStore {
+		report = orphanReleaseReport{lane: "delta", skipped: "no-store"}
+	} else {
+		if !result.SessionQueryPartial {
+			// A partial session snapshot would read as every missing session
+			// having gone away; diff only complete observations.
+			lane.observeSessions(openInfos, cr.cfg)
+		}
+		in := orphanReleaseInputs{
+			store:        cr.cityWorkStore(),
+			sessionStore: sessStore,
+			cfg:          cr.cfg,
+			cityPath:     cr.cityPath,
+			openInfos:    openInfos,
+			result:       result,
+			protected:    protected,
+		}
+		lane.publish(in)
+		report = lane.deltaPass(in, &cr.deadAssigneeKeeps)
+	}
+	fields := report.fields()
+	at, reason, ran := lane.lastBackstop()
+	addBackstopAgeFields(fields, at, reason, ran)
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, fields)
+	return report.released
 }
 
 // runDetachedHandoffOrphansDelta runs and records the detached handoff

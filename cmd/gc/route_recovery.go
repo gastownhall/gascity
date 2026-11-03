@@ -300,6 +300,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	go cr.runCrossStoreGateLoop(ctx)
 	go cr.runCompletionsSweepLoop(ctx, completions)
 	go cr.runDetachedOrphanBackstopLoop(ctx, orphans)
+	go cr.runOrphanReleaseBackstopLoop(ctx, cr.orphanReleaseLaneOf())
 }
 
 // runRouteRecoveryBackstopLoop polls the route-recovery cadence off-tick.

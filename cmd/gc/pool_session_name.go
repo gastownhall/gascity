@@ -158,7 +158,6 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
-	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 	keeps *deadAssigneeKeepLog,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
@@ -167,7 +166,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, nil, keeps)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
