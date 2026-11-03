@@ -6753,6 +6753,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.named_reconfigured_blocked';
+} & TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked) | ({
     type: 'session.pending';
 } & TypedEventStreamEnvelopeSessionPending) | ({
     type: 'session.pending_cleared';
@@ -8435,6 +8437,24 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.named_reconfigured_blocked
+ */
+export type TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.named_reconfigured_blocked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.pending
  */
 export type TypedEventStreamEnvelopeSessionPending = {
@@ -9300,6 +9320,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.named_reconfigured_blocked';
+} & TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked) | ({
     type: 'session.pending';
 } & TypedTaggedEventStreamEnvelopeSessionPending) | ({
     type: 'session.pending_cleared';
@@ -11067,6 +11089,25 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.named_reconfigured_blocked
+ */
+export type TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.named_reconfigured_blocked';
     workflow?: WorkflowEventProjection;
 };
 

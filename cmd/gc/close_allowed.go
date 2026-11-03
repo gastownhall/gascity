@@ -19,7 +19,9 @@ package main
 // shares the pure part, closePermitted, and keeps its own transaction close
 // as its CommitClose. The pending-create rollback
 // (RollbackPendingCreateAtomically) keeps its own premise, the create lease.
-// A refusal is logged once per episode, with its cause.
+// A refusal is logged once per episode, with its cause. The reconfigured-named
+// gate's refusal for held work also raises session.named_reconfigured_blocked,
+// on the same episode entry.
 
 import (
 	"fmt"
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -54,6 +57,10 @@ const (
 // causeKeepsSlot refuses a free-slot close: an operator's suspend keeps the
 // slot. causeHasWork is the drain's.
 const causeKeepsSlot = "keeps-slot"
+
+// closeReasonReconfigured is the reason of the reconfigured-named gate's close:
+// the bead's identity is configured under another session name.
+const closeReasonReconfigured = "reconfigured"
 
 // closeWhy is why a legacy close closes: its reason, its gate, a gate's own
 // work filter (the drain finalize excludes the seat's own drain step), and
@@ -117,7 +124,10 @@ func closeSeatFor(store beads.Store, sw *SeatWork, info sessionpkg.Info, why clo
 		stderr = io.Discard
 	}
 	cause, err := closeAllowed(sw, info, why)
-	sw.closeRefusals().log(stderr, info.ID, cause, err)
+	entered := sw.closeRefusals().log(stderr, info.ID, cause, err)
+	if entered && cause == causeHasWork && why.reason == closeReasonReconfigured {
+		sw.recordNamedReconfiguredBlocked(info)
+	}
 	switch {
 	case cause != "":
 		return false, cause
@@ -128,35 +138,47 @@ func closeSeatFor(store beads.Store, sw *SeatWork, info sessionpkg.Info, why clo
 }
 
 // closeRefusalLog is each row's last logged close refusal, so a refusal is
-// logged once per episode: when its cause first appears or changes, and again
-// after a close was allowed. Its owner (the controller) keeps it across
-// ticks; a nil log logs every refusal. A refusal written to no one (a nil or
-// discarded writer) records nothing, so a caller that can print still does.
+// logged once per episode (the log) and each episode is entered once (the
+// return of log): a row's refusals share an episode until a different cause
+// or an allowed close ends it. The owner keeps one across ticks; a nil one
+// logs every refusal and enters no episode.
 type closeRefusalLog struct {
-	mu   sync.Mutex
-	last map[string]string
+	mu      sync.Mutex
+	last    map[string]string // by row ID: the cause last written to a log
+	entered map[string]string // by row ID: the cause of the row's open episode
 }
 
 // log logs id's refusal cause to w unless the episode already said it; an
-// allowed close ("") ends the episode.
-func (l *closeRefusalLog) log(w io.Writer, id, cause string, err error) {
+// allowed close ("") ends the episode. A discarded w does not say it, so the
+// next tick that does log still does. It reports whether this call entered a
+// refusal episode, which is independent of w.
+func (l *closeRefusalLog) log(w io.Writer, id, cause string, err error) bool {
+	entered := false
 	if l != nil {
 		l.mu.Lock()
 		defer l.mu.Unlock()
-		switch {
-		case cause == "":
+		if cause == "" {
 			delete(l.last, id)
-			return
-		case l.last[id] == cause:
-			return
+			delete(l.entered, id)
+			return false
+		}
+		if l.entered[id] != cause {
+			if l.entered == nil {
+				l.entered = map[string]string{}
+			}
+			l.entered[id] = cause
+			entered = true
+		}
+		if l.last[id] == cause {
+			return entered
 		}
 	}
-	if cause == "" || w == io.Discard {
-		return
-	}
-	if err != nil {
+	switch {
+	case cause == "" || w == io.Discard:
+		return entered
+	case err != nil:
 		fmt.Fprintf(w, "session beads: close of %s refused (%s): %v\n", id, cause, err) //nolint:errcheck
-	} else {
+	default:
 		fmt.Fprintf(w, "session beads: close of %s refused (%s)\n", id, cause) //nolint:errcheck
 	}
 	if l != nil {
@@ -165,4 +187,25 @@ func (l *closeRefusalLog) log(w io.Writer, id, cause string, err error) {
 		}
 		l.last[id] = cause
 	}
+	return entered
+}
+
+// recordNamedReconfiguredBlocked raises session.named_reconfigured_blocked for
+// info, the named session bead the reconfigured-named gate declined to close
+// because it holds assigned work. A SeatWork without a recorder raises nothing.
+func (sw *SeatWork) recordNamedReconfiguredBlocked(info sessionpkg.Info) {
+	if sw == nil || sw.rec == nil {
+		return
+	}
+	identity := info.ConfiguredNamedIdentity
+	if identity == "" {
+		identity = info.Alias
+	}
+	sw.rec.Record(events.Event{
+		Type:      events.SessionNamedReconfiguredBlocked,
+		Actor:     "gc",
+		Subject:   identity,
+		Message:   fmt.Sprintf("named session %s (%s) holds assigned work; its reconfigured close is refused", identity, info.ID),
+		SessionID: info.ID,
+	})
 }

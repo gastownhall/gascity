@@ -9095,6 +9095,22 @@ type TypedEventStreamEnvelopeSessionMaxAgeKilled struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked defines model for TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked.
+type TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionPending defines model for TypedEventStreamEnvelopeSessionPending.
 type TypedEventStreamEnvelopeSessionPending struct {
 	Actor            string                   `json:"actor"`
@@ -11206,6 +11222,23 @@ type TypedTaggedEventStreamEnvelopeSessionIdleKilled struct {
 
 // TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.
 type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked defines model for TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked.
+type TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked struct {
 	Actor            string                   `json:"actor"`
 	City             string                   `json:"city"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
@@ -19788,6 +19821,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionMaxAgeKil
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked() (TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked, error) {
+	var body TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked(v TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked) error {
+	v.Type = "session.named_reconfigured_blocked"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked(v TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked) error {
+	v.Type = "session.named_reconfigured_blocked"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionPending returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPending
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPending() (TypedEventStreamEnvelopeSessionPending, error) {
 	var body TypedEventStreamEnvelopeSessionPending
@@ -21072,6 +21133,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.named_reconfigured_blocked":
+		return t.AsTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked()
 	case "session.pending":
 		return t.AsTypedEventStreamEnvelopeSessionPending()
 	case "session.pending_cleared":
@@ -23627,6 +23690,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked() (TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked(v TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked) error {
+	v.Type = "session.named_reconfigured_blocked"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked(v TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked) error {
+	v.Type = "session.named_reconfigured_blocked"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionPending returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPending
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPending() (TypedTaggedEventStreamEnvelopeSessionPending, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionPending
@@ -24911,6 +25002,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.named_reconfigured_blocked":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked()
 	case "session.pending":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionPending()
 	case "session.pending_cleared":

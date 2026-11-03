@@ -14871,6 +14871,7 @@
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.named_reconfigured_blocked": "#/components/schemas/TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked",
             "session.pending": "#/components/schemas/TypedEventStreamEnvelopeSessionPending",
             "session.pending_cleared": "#/components/schemas/TypedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
@@ -15176,6 +15177,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPending"
@@ -16900,6 +16904,7 @@
                 "session.demand_claim_divergence",
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
+                "session.named_reconfigured_blocked",
                 "session.conversation_reset",
                 "session.pending",
                 "session.pending_cleared",
@@ -20497,6 +20502,63 @@
         "title": "TypedEventStreamEnvelope session.max_age_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionNamedReconfiguredBlocked": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.named_reconfigured_blocked",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.named_reconfigured_blocked",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionPending": {
         "additionalProperties": false,
         "properties": {
@@ -22755,6 +22817,7 @@
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.named_reconfigured_blocked": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked",
             "session.pending": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending",
             "session.pending_cleared": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
@@ -23060,6 +23123,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending"
@@ -24895,6 +24961,7 @@
                 "session.demand_claim_divergence",
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
+                "session.named_reconfigured_blocked",
                 "session.conversation_reset",
                 "session.pending",
                 "session.pending_cleared",
@@ -28735,6 +28802,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.named_reconfigured_blocked",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.named_reconfigured_blocked",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionPending": {

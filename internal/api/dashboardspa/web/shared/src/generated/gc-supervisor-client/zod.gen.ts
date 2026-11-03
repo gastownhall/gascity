@@ -5838,6 +5838,24 @@ export const zTypedEventStreamEnvelopeSessionMaxAgeKilled = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.named_reconfigured_blocked
+ */
+export const zTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zNoPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.named_reconfigured_blocked'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.pending
  */
 export const zTypedEventStreamEnvelopeSessionPending = z.object({
@@ -6615,6 +6633,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
     zTypedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
+    zTypedEventStreamEnvelopeSessionNamedReconfiguredBlocked.extend({ type: z.literal('session.named_reconfigured_blocked') }),
     zTypedEventStreamEnvelopeSessionPending.extend({ type: z.literal('session.pending') }),
     zTypedEventStreamEnvelopeSessionPendingCleared.extend({ type: z.literal('session.pending_cleared') }),
     zTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.extend({ type: z.literal('session.pool_slot_retired_at_drain_deadline') }),
@@ -8372,6 +8391,25 @@ export const zTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.named_reconfigured_blocked
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zNoPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.named_reconfigured_blocked'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.pending
  */
 export const zTypedTaggedEventStreamEnvelopeSessionPending = z.object({
@@ -9187,6 +9225,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
     zTypedTaggedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
+    zTypedTaggedEventStreamEnvelopeSessionNamedReconfiguredBlocked.extend({ type: z.literal('session.named_reconfigured_blocked') }),
     zTypedTaggedEventStreamEnvelopeSessionPending.extend({ type: z.literal('session.pending') }),
     zTypedTaggedEventStreamEnvelopeSessionPendingCleared.extend({ type: z.literal('session.pending_cleared') }),
     zTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.extend({ type: z.literal('session.pool_slot_retired_at_drain_deadline') }),
