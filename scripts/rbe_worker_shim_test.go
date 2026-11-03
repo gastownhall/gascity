@@ -875,6 +875,11 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_WARM_EVERY"], "${{ vars.RBE_WARM_EVERY || '1' }}"; got != want {
 				t.Errorf("worker step RBE_WARM_EVERY = %q, want %q", got, want)
 			}
+			// The local CAS cap: empty is the script's 150 GB default, so
+			// merging changes nothing; rollback is unsetting the variable.
+			if got, want := step.Env["CAS_MAX_BYTES"], "${{ vars.RBE_CAS_MAX_BYTES || '' }}"; got != want {
+				t.Errorf("worker step CAS_MAX_BYTES = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
