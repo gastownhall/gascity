@@ -1309,7 +1309,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		return fail(fmt.Errorf("controller PID %d is live on this city and is still writing infrastructure beads to the work store; the copy cannot be proven against a source under mutation. Stop it (gc stop) and start again", pid))
 	}
 
-	var source beads.Store
+	var source, work beads.Store
 	// The classifier generation the new manifest records. A copy out of the
 	// work store selects with the current classifier. The backup holds exactly
 	// the rows the clear selected under the manifest being replaced, so a
@@ -1330,12 +1330,20 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		if err != nil {
 			return fail(fmt.Errorf("opening the retained-source backup: %w", err))
 		}
+		// The work beads a backed-up row waits on stay in the work store, which
+		// is where planInfraCopyHolds reads whether they are finished.
+		work, err = openInfraMigrationSource(cityPath)
+		if err != nil {
+			return fail(fmt.Errorf("opening work store: %w", err))
+		}
+		defer closeBeadStoreHandle(work) //nolint:errcheck // best-effort close
 	} else {
 		source, err = openInfraMigrationSource(cityPath)
 		if err != nil {
 			return fail(fmt.Errorf("opening work store: %w", err))
 		}
 		defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
+		work = source
 	}
 
 	writer, err := openInfraDestination(target)
@@ -1367,10 +1375,20 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := infraDestinationEdgePayloadRefusal(writer, carrying); err != nil {
 		return fail(err)
 	}
+	// Every hold on a carried bead crosses, or the copy refuses before the
+	// destination is touched (infra_class_holds.go).
+	gates, err := planInfraCopyHolds(source, work, rows, time.Now())
+	if err != nil {
+		return fail(err)
+	}
 	if err := prepareInfraDestination(writer); err != nil {
 		return fail(err)
 	}
 	imported, err := importInfraSnapshot(writer, source, rows)
+	if err != nil {
+		return fail(err)
+	}
+	gates, err = mintInfraCopyGates(writer, gates)
 	if err != nil {
 		return fail(err)
 	}
@@ -1382,7 +1400,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		return fail(fmt.Errorf("closing binding %q at %s after the copy: %w", target.Binding, target.Database, err))
 	}
 	writer = nil
-	proven, err := verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(target) }, source)
+	proven, err := verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(target) }, source, gates)
 	if err != nil {
 		return fail(fmt.Errorf("equality check: %w", err))
 	}
@@ -1404,6 +1422,9 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
 		logPrefix, target.Database, imported)
+	for _, g := range gates {
+		fmt.Fprintf(stderr, "%s: %s waits on open work %s through cross-store gate %s\n", logPrefix, g.Owner.ID, g.Blocker, g.ID) //nolint:errcheck // best-effort stderr
+	}
 	// The manifest's size rather than the import count: the manifest is what
 	// every later verdict re-reads, so reporting anything else here would make
 	// the cutover's own event disagree with every boot that follows it.
@@ -2336,7 +2357,7 @@ func infraMigrationRow(b beads.Bead) beads.Bead {
 // could answer out of state the file does not carry. Taking a beads.Store would
 // make handing the writer back in a one-line refactor away, and the resulting
 // proof would look identical while proving something weaker.
-func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.Store) ([]string, error) {
+func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.Store, gates []infraCopyGate) ([]string, error) {
 	rows, err := readInfraSnapshot(source)
 	if err != nil {
 		return nil, err
@@ -2358,13 +2379,23 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 	if err != nil {
 		return nil, fmt.Errorf("listing binding: %w", err)
 	}
+	// The cross-store gates the copy minted are the binding's own rows, proven
+	// against the plan rather than the source (infra_class_holds.go).
+	gateIDs := make(map[string]bool, len(gates))
+	for _, g := range gates {
+		gateIDs[g.ID] = true
+		if err := verifyInfraCopyGate(destination, g); err != nil {
+			return nil, err
+		}
+	}
+	gatesOf := infraCopyGatesByOwner(gates)
 	for _, b := range copied {
-		if !infraIDs[b.ID] {
+		if !infraIDs[b.ID] && !gateIDs[b.ID] {
 			return nil, fmt.Errorf("binding holds %s, which the work store's infrastructure slice does not", b.ID)
 		}
 	}
-	if len(copied) != len(rows) {
-		return nil, fmt.Errorf("binding holds %d beads, want %d", len(copied), len(rows))
+	if len(copied) != len(rows)+len(gates) {
+		return nil, fmt.Errorf("binding holds %d beads, want %d (%d copied, %d cross-store gate(s))", len(copied), len(rows)+len(gates), len(rows), len(gates))
 	}
 	for _, want := range rows {
 		got, err := destination.Get(want.ID)
@@ -2384,6 +2415,10 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		gotDeps, err := destination.DepList(want.ID, "down")
 		if err != nil {
 			return nil, fmt.Errorf("listing copied deps of %s: %w", want.ID, err)
+		}
+		gotDeps, err = withoutInfraCopyGateEdges(want.ID, gotDeps, gatesOf[want.ID])
+		if err != nil {
+			return nil, err
 		}
 		if diff := infraDepDifference(want.ID, wantDeps, gotDeps, infraIDs); diff != "" {
 			return nil, errors.New(diff)
