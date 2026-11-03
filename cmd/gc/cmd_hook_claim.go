@@ -938,7 +938,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			hookClaimCandidateIsMessage(candidate) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
-			hookCandidateBudgetDeferred(candidate, now) {
+			hookCandidateBudgetDeferred(candidate, now) ||
+			// A bead this session already handed off (stamped marker, assignee
+			// still a spelling of ours because the handoff write lagged or a
+			// stale row revived it) is awaiting the refinery, not waiting to be
+			// re-promoted. gk-nmxnj hazard B: the re-run stomps the marker.
+			hookCandidateHandedOff(candidate) {
 			continue
 		}
 		// F-B. Promoting a ready assignment is a status CAS — a mutation — so it
@@ -1154,6 +1159,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
+		// A workflow root handed out WHOLE while its own steps are mid-flight
+		// under other seats is a second worker pointed at a molecule someone
+		// else is running: the duplicate-push/PR churn and the handoff-marker
+		// stomping recorded on gk-nmxnj. The stop gate above only walks
+		// UPWARD and skips roots (a root names itself), so nothing else looks
+		// down at live foreign-held steps. Withhold the root; leave it routed
+		// for the next poll, when the holding seats have settled.
+		if hookClaimForeignWorkflowHold(ctx, candidate, opts, ops, dir, stderr) {
+			continue
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
@@ -1255,15 +1270,41 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 	return claimed
 }
 
+// handoffStageMetadataKey is the formula-side terminal-handoff marker a
+// polecat's submit step stamps on its work bead (mol-polecat-work
+// submit-and-exit step 5) at the moment it reassigns the bead to the
+// refinery. It is written by the rig formula, not by gc, so it lives here as
+// a literal the claim fences agree to respect.
+const handoffStageMetadataKey = "handoff_stage"
+
+// hookCandidateHandedOff reports whether a candidate carries a recorded
+// terminal handoff. A bead whose submit already ran is awaiting the
+// refinery's verdict, not pool demand: whoever next clears its assignee —
+// reconciler, witness, an operator re-sling — must not make it claimable by
+// a polecat again without moving it out of the handoff state, or the new
+// holder's workspace-setup will stomp the marker and re-run the molecule on
+// finished work (gk-nmxnj: a handed-off bead reached the pool with its
+// handoff_stage intact and a fresh session claimed it; the PR, branch and
+// handoff metadata were already landed by the previous one).
+//
+// Rejection deliberately clears the marker (the refinery re-pools rejected
+// work with handoff_stage unset), so resume-after-rejection work stays
+// claimable; only an UNSET marker is evidence of "not handed off".
+func hookCandidateHandedOff(candidate beads.Bead) bool {
+	return strings.TrimSpace(candidate.Metadata[handoffStageMetadataKey]) != ""
+}
+
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
 // fresh claim: it has an id, is currently unassigned, matches one of this
-// session's route targets, and is not still within a build-budget deferral
-// window (see hookCandidateBudgetDeferred).
+// session's route targets, is not still within a build-budget deferral
+// window (see hookCandidateBudgetDeferred), and does not carry a recorded
+// terminal handoff (see hookCandidateHandedOff).
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
-		!hookCandidateBudgetDeferred(candidate, now)
+		!hookCandidateBudgetDeferred(candidate, now) &&
+		!hookCandidateHandedOff(candidate)
 }
 
 // hookCandidateBudgetDeferred reports whether a candidate is still within a
@@ -1296,7 +1337,8 @@ func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, n
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) != "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
-		!hookCandidateBudgetDeferred(candidate, now)
+		!hookCandidateBudgetDeferred(candidate, now) &&
+		!hookCandidateHandedOff(candidate)
 }
 
 // hookClaimWorkflowLinked reports whether a candidate has workflow ancestry for
@@ -1354,6 +1396,80 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 	}
 	fmt.Fprintf(stderr, "gc hook --claim: closed %s as %s: %s\n", candidate.ID, stop.Outcome(), reason) //nolint:errcheck
 	return true
+}
+
+// hookClaimForeignWorkflowHold reports whether a work-query candidate is a
+// workflow root (it names no other root, or itself) whose member steps show
+// live work by a DIFFERENT seat: any step of the root is in_progress and
+// carries an assignee — or, with the assignee already cleared but the step
+// not yet reopened, the gc.session_name / gc.session_id claim provenance —
+// that does not resolve to this session's identity set.
+//
+// It guards the one hand-out path where the rest of the pipeline is blind:
+// a mol-polecat-work root stays open, unassigned and route-matched while its
+// convoy's work bead and step wisps are in_progress under other sessions, so
+// the eligible tier sees executable demand and would mint a receipt naming
+// the root to a third polecat. The third session's workspace-setup then
+// stomps the handoff metadata another session already stamped and re-runs
+// the molecule on finished or foreign-held work (gk-nmxnj, observed twice
+// 2026-11-03 on the gk rig).
+//
+// A hit is evidence of ALIVE ownership elsewhere, not of a stopped workflow,
+// so the candidate is withheld (the caller moves to the next one) and never
+// closed — unlike the stop gate, there is nothing here to settle. Siblings
+// this session pinned for its own continuation, and steps recorded under any
+// spelling of this session's identity, pass; only foreign non-terminal
+// holders block. A missing seam, a non-root candidate, or a store read error
+// fails OPEN with a stderr note, exactly as the stop gate does: a store
+// hiccup must not idle every seat, and withholding is only ever justified on
+// positive evidence.
+func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	if ops.WorkflowStore == nil {
+		return false
+	}
+	// Scoped to the latch the pool demand filter itself uses: only a
+	// gc.kind=workflow bead is ever "a molecule handed out whole", so an
+	// ordinary task candidate is skipped without a store read.
+	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindWorkflow {
+		return false
+	}
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID != "" && rootID != strings.TrimSpace(candidate.ID) {
+		// A step, not a root handed out whole: its siblings' ownership is the
+		// job of the step-level fences, not this gate.
+		return false
+	}
+	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+	steps, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: candidate.ID},
+		TierMode:      beads.TierBoth,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: foreign-hold check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
+		return false
+	}
+	for _, step := range steps {
+		if step.ID == "" || step.ID == candidate.ID ||
+			!strings.EqualFold(strings.TrimSpace(step.Status), "in_progress") {
+			continue
+		}
+		holder := strings.TrimSpace(step.Assignee)
+		if holder == "" {
+			if name := strings.TrimSpace(step.Metadata[beadmeta.SessionNameMetadataKey]); name != "" {
+				holder = name
+			} else {
+				holder = strings.TrimSpace(step.Metadata[beadmeta.SessionIDMetadataKey])
+			}
+		}
+		if holder == "" || hookClaimHasIdentity(holder, opts.IdentityCandidates) {
+			continue
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: not serving workflow root %s: step %s is in_progress under %s, not this session (%s)\n",
+			candidate.ID, step.ID, holder, opts.Assignee) //nolint:errcheck
+		return true
+	}
+	return false
 }
 
 // hookClaimStoppedAdoption runs the stop gate over a bead offered for
