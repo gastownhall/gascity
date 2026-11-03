@@ -1175,6 +1175,145 @@ func TestCreateConfirmsStartedStateWithoutControllerDriftHash(t *testing.T) {
 	}
 }
 
+// directCreateStartBarrier exposes the interval between a live runtime and
+// Start's resolution. The runtime identity is already visible, as with a tmux
+// composer during startup, but no caller may treat that as a committed create.
+type directCreateStartBarrier struct {
+	*runtime.Fake
+	entered chan string
+	release chan struct{}
+	once    sync.Once
+	fail    bool
+	lostAck bool
+}
+
+func (p *directCreateStartBarrier) allow() { p.once.Do(func() { close(p.release) }) }
+
+func (p *directCreateStartBarrier) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	for _, key := range []string{"GC_SESSION_ID", runtime.InstanceTokenEnv} {
+		if err := p.SetMeta(name, key, cfg.Env[key]); err != nil {
+			return err
+		}
+	}
+	p.entered <- cfg.Env["GC_SESSION_ID"]
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.release:
+	}
+	if p.fail {
+		// A removed native runtime no longer answers its identity read.
+		for _, key := range []string{"GC_SESSION_ID", runtime.InstanceTokenEnv} {
+			if err := p.RemoveMeta(name, key); err != nil {
+				return err
+			}
+		}
+		if err := p.Stop(name); err != nil {
+			return err
+		}
+		return runtime.ErrSessionDiedDuringStartup
+	}
+	if p.lostAck {
+		return errors.New("start acknowledgment lost after native runtime creation")
+	}
+	return nil
+}
+
+func TestCreateStartedHoldsContentUntilStartupResolves(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fail    bool
+		lostAck bool
+	}{
+		{name: "confirmed startup"},
+		{name: "failed startup", fail: true},
+		{name: "unknown acknowledgment converges on owned runtime", lostAck: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := &directCreateStartBarrier{Fake: runtime.NewFake(), entered: make(chan string, 1), release: make(chan struct{}), fail: tc.fail, lostAck: tc.lostAck}
+			clk := &clock.Fake{Time: time.Date(2026, 11, 3, 15, 40, 52, 0, time.UTC)}
+			mgr := newTestManager(t, store, sp, WithClock(clk))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type result struct {
+				info Info
+				err  error
+			}
+			resultC := make(chan result, 1)
+			done := make(chan struct{})
+			workDir := t.TempDir()
+			go func() {
+				defer close(done)
+				info, err := mgr.CreateSession(ctx, CreateOptions{Template: "codex", Command: "codex", WorkDir: workDir, Provider: "codex"})
+				resultC <- result{info, err}
+			}()
+			t.Cleanup(func() {
+				sp.allow()
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(goroutineHangBudget):
+					t.Error("direct create did not finish during cleanup")
+				}
+			})
+			var id string
+			select {
+			case id = <-sp.entered:
+			case <-time.After(goroutineHangBudget):
+				t.Fatal("direct create did not reach provider Start")
+			}
+			pending, err := mgr.Get(id)
+			if err != nil {
+				t.Fatalf("Get while Start unresolved: %v", err)
+			}
+			if !sp.IsRunning(pending.SessionName) {
+				t.Fatal("fixture did not expose a live runtime during unresolved Start")
+			}
+			if got := ContentGate(pending, StopRequest{}, true, clk.Now(), GateContentAny); got != ContentGateStarting {
+				t.Fatalf("content gate while Start unresolved = %q, want %q", got, ContentGateStarting)
+			}
+			if pending.MetadataState != string(StateCreating) || !pending.PendingCreateClaim || pending.PendingCreateStartedAt != pendingCreateStartedAt(clk.Now()) || pending.CreationCompleteAt != "" {
+				t.Fatalf("unresolved direct create lacks its startup barrier: %+v", pending)
+			}
+			beforeGeneration, beforeToken := pending.Generation, pending.InstanceToken
+			sp.allow()
+			var got result
+			select {
+			case got = <-resultC:
+			case <-time.After(goroutineHangBudget):
+				t.Fatal("direct create did not resolve")
+			}
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("Get after Start resolution: %v", err)
+			}
+			if tc.fail {
+				if got.err == nil || b.Status != "closed" || sp.IsRunning(pending.SessionName) || b.Metadata["creation_complete_at"] != "" {
+					t.Fatalf("failed startup was not closed without confirmation: result=%+v bead=%+v", got, b)
+				}
+				return
+			}
+			if got.err != nil {
+				t.Fatalf("CreateSession: %v", got.err)
+			}
+			confirmed := mgr.infoFromBead(b)
+			if confirmed.MetadataState != string(StateActive) || confirmed.PendingCreateClaim || confirmed.PendingCreateStartedAt != "" || confirmed.CreationCompleteAt == "" || confirmed.StateReason != "creation_complete" {
+				t.Fatalf("resolved startup did not atomically confirm/clear the claim: %+v", confirmed)
+			}
+			if confirmed.Generation != beforeGeneration || confirmed.InstanceToken != beforeToken || got.info.ID != id {
+				t.Fatal("startup confirmation changed the owned session incarnation")
+			}
+			if got := ContentGate(confirmed, StopRequest{}, true, clk.Now(), GateContentAny); got != "" {
+				t.Fatalf("confirmed startup still holds content: %q", got)
+			}
+		})
+	}
+}
+
 func TestCreateDefaultsTitleToTemplate(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

@@ -585,7 +585,7 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return interactionAnswerUnconfirmed(ctx.Err())
 		case <-time.After(respondVerifyInterval):
 		}
 		next, err := t.dialogInPane(target)
@@ -593,16 +593,16 @@ func (t *Tmux) respondQuestion(ctx context.Context, target string, q *parsedQues
 			if errors.Is(err, ErrSessionNotFound) {
 				return nil
 			}
-			return fmt.Errorf("verifying question answer: %w", err)
+			return interactionAnswerUnconfirmed(fmt.Errorf("verifying question answer: %w", err))
 		}
 		if next.question != nil && q.ClaudeForm != nil && isClaudeQuestionFormReview(next.question) {
-			return t.submitClaudeQuestionFormReview(ctx, target, q, response.Text, nil, next.question)
+			return interactionAnswerUnconfirmed(t.submitClaudeQuestionFormReview(ctx, target, q, response.Text, nil, next.question))
 		}
 		if next.question == nil || next.question.requestID() != q.requestID() {
 			return nil
 		}
 	}
-	return fmt.Errorf("question did not clear within %s of the answer", respondVerifyTimeout)
+	return interactionAnswerUnconfirmed(fmt.Errorf("question did not clear within %s of the answer", respondVerifyTimeout))
 }
 
 // focusClaudeQuestionRow navigates without answering. Numeric shortcuts in

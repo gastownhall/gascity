@@ -45,6 +45,13 @@ Violating any fails the build; full rationale is in the architecture docs.
   `nudgequeue.StateFileQueue`. Enforced by
   `TestAPIReachesTheNudgeQueueOnlyThroughState`.
 
+## Interrupted response streams
+
+Mux recovery rethrows the exact `http.ErrAbortHandler` sentinel so `net/http`
+can abort a service-proxy response without appending Problem Details or logging
+an application panic. Other panic values, including wrapped or same-text errors,
+retain the ordinary logged 500 recovery path.
+
 ## Configuration publication
 
 API config edits, validation, snapshot publication and city-config rollback
@@ -662,6 +669,11 @@ and contents. An absent external destination or a relative path escaping the
 city is rejected before provisioning. Keep city containment for managed clones,
 provision manifests and physical teardown; registration grants no ownership of
 an external directory's creation or deletion.
+
+Refuse a canonical project path already bound under another rig name with the
+existing typed conflict before provisioning. Check both the composed snapshot
+and the authoritative raw config under the transaction fence; relative paths
+and symlink spellings must not evade the check or reach adoption writes.
 
 The rig-create `adopt` field forwards to native `rig.ProvisionRequest.Adopt`.
 Infer and validate the existing namespace before any writes, preserve queue

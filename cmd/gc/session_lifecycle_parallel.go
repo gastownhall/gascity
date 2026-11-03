@@ -1677,12 +1677,21 @@ func parseSessionTemplateOverridesForLaunch(info sessionpkg.Info) map[string]str
 }
 
 func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, sessionID string, overrides map[string]string) {
+	if err := resolveSchemaOptionOverridesForLaunch(agentCfg, tp, overrides); err != nil {
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, err)
+	}
+}
+
+// resolveSchemaOptionOverridesForLaunch shares the launch's pure schema
+// validation and command resolution with template/metadata projection. The
+// caller owns diagnostics; invalid options leave the fresh template unchanged.
+func resolveSchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, overrides map[string]string) error {
 	if agentCfg == nil || tp == nil || len(overrides) == 0 {
-		return
+		return nil
 	}
 	resolved := tp.ResolvedProvider
 	if resolved == nil || len(resolved.OptionsSchema) == 0 {
-		return
+		return nil
 	}
 	fullOptions := make(map[string]string, len(resolved.EffectiveDefaults))
 	for k, v := range resolved.EffectiveDefaults {
@@ -1696,8 +1705,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 	args, resolveErr := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions)
 	if resolveErr != nil {
-		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, resolveErr)
-		return
+		return resolveErr
 	}
 	if len(args) > 0 {
 		agentCfg.Command = replaceSchemaFlags(agentCfg.Command, resolved.OptionsSchema, args)
@@ -1707,6 +1715,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 		dup.ResumeCommand = command
 		tp.ResolvedProvider = &dup
 	}
+	return nil
 }
 
 // trigger, when non-nil, is the residency-correct by-id reader the start path

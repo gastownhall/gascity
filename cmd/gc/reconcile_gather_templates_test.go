@@ -260,7 +260,7 @@ func TestTemplateMemoKeyCoversResolverReads(t *testing.T) {
 		"ID": true, "Template": true, "CommonName": true, "SessionNameMetadata": true, "SessionNameExplicit": true,
 		"AgentName": true, "Alias": true, "SessionOrigin": true, "ManualSessionMetadata": true, "PoolSlot": true,
 		"ConfiguredNamedIdentity": true, "ConfiguredNamedSession": true, "PoolManaged": true, "DependencyOnly": true,
-		"TriggerBeadID": true, "TriggerBeadStoreRef": true, "Pack": true, "Closed": true,
+		"TriggerBeadID": true, "TriggerBeadStoreRef": true, "Pack": true, "Closed": true, "TemplateOverrides": true,
 	}
 	c.cfg.Agents = append(c.cfg.Agents,
 		config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
@@ -310,6 +310,43 @@ func TestTemplateMemoKeyCoversResolverReads(t *testing.T) {
 	relabelled.Labels = []string{"agent:polecat-3"}
 	if templateMemoKeyOf(unnamed) == templateMemoKeyOf(relabelled) {
 		t.Error("a row's agent label, its name without agent_name, is not in the key")
+	}
+}
+
+func TestTemplateMemoInvalidatesSameSessionOptionChanges(t *testing.T) {
+	cfg := identityCity()
+	env := &reconcileEnv{Gen: 1, Cfg: cfg, SP: runtime.NewFake()}
+	resolved := 0
+	e := gatherEnv{
+		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				resolved++
+				return templateResolution{TP: TemplateParams{Command: info.TemplateOverrides}}
+			}}
+		},
+	}
+	info := session.Info{ID: "gc-same", Template: "worker", TemplateOverrides: `{"model":"opus"}`}
+	row := censusRow{Key: rowKey{Leg: "city:test-city", ID: info.ID}, Info: info}
+	var memo gatherMemo
+	memo.refresh(e, env, templatesNow, []censusRow{row}, nil)
+	memo.refresh(e, env, templatesNow, []censusRow{row}, nil)
+	if resolved != 1 {
+		t.Fatalf("unchanged session did not reuse its memo: resolutions=%d", resolved)
+	}
+	row.Info.TemplateOverrides = `{"model":"sonnet"}`
+	memo.refresh(e, env, templatesNow, []censusRow{row}, nil)
+	got, ok := memo.templates.Load().lookup(row.Info)
+	if !ok || resolved != 2 || got.TP.Command != row.Info.TemplateOverrides {
+		t.Fatalf("same-session option update kept stale resolution: ok=%v resolutions=%d command=%q", ok, resolved, got.TP.Command)
+	}
+	other := row
+	other.Key.ID, other.Info.ID, other.Info.TemplateOverrides = "gc-other", "gc-other", `{"effort":"low"}`
+	memo.refresh(e, env, templatesNow, []censusRow{row, other}, nil)
+	first, firstOK := memo.templates.Load().lookup(row.Info)
+	second, secondOK := memo.templates.Load().lookup(other.Info)
+	if !firstOK || !secondOK || resolved != 3 || first.TP.Command != row.Info.TemplateOverrides || second.TP.Command != other.Info.TemplateOverrides {
+		t.Fatalf("distinct sessions shared an option resolution: first=%+v second=%+v resolutions=%d", first, second, resolved)
 	}
 }
 

@@ -10,6 +10,12 @@ import (
 // no longer shows: none is pending, or another one is. Nothing was sent.
 var ErrInteractionGone = errors.New("the interaction the response names is no longer pending")
 
+// ErrInteractionOutcomeUnknown reports that an answer key was sent, but its
+// consumption could not be confirmed. The answer may have reached the provider
+// and must not be replayed. It takes precedence over any wrapped diagnostic
+// refusal or runtime-unavailable error, which does not establish an unsent answer.
+var ErrInteractionOutcomeUnknown = errors.New("interaction answer outcome unknown")
+
 // FencedInteractionProvider is implemented by runtimes that can answer a
 // pending interaction only in the incarnation an input fence names (DES-O1
 // §6.2): the answer's keys are conditional on the fence, as

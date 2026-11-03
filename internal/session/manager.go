@@ -980,21 +980,26 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 
 		// Create the bead first to get the ID. The create is the mint of the
-		// row's first incarnation (generation 1, a fresh token).
+		// row's first incarnation (generation 1, a fresh token). Keep its
+		// pending-start barrier until ConfirmStartedPatch commits the Start:
+		// a runtime may expose a live pane before its startup resolves, and
+		// conversation input must not race the provider's startup sequence.
 		token := NewInstanceToken()
 		meta := map[string]string{
-			"template":           template,
-			"state":              string(StateActive),
-			"provider":           provider,
-			"work_dir":           workDir,
-			"command":            command,
-			"resume_flag":        resume.ResumeFlag,
-			"resume_style":       resume.ResumeStyle,
-			"resume_command":     resume.ResumeCommand,
-			"session_id_flag":    resume.SessionIDFlag,
-			"generation":         fmt.Sprintf("%d", DefaultGeneration),
-			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-			"instance_token":     token,
+			"template":                  template,
+			"state":                     string(StateCreating),
+			"provider":                  provider,
+			"work_dir":                  workDir,
+			"command":                   command,
+			"resume_flag":               resume.ResumeFlag,
+			"resume_style":              resume.ResumeStyle,
+			"resume_command":            resume.ResumeCommand,
+			"session_id_flag":           resume.SessionIDFlag,
+			"generation":                fmt.Sprintf("%d", DefaultGeneration),
+			"continuation_epoch":        fmt.Sprintf("%d", DefaultContinuationEpoch),
+			"instance_token":            token,
+			"pending_create_claim":      "true",
+			"pending_create_started_at": pendingCreateStartedAt(m.now().UTC()),
 		}
 		// provider_kind may be injected via extraMeta when the caller has
 		// resolved the canonical builtin kind for a custom provider alias.

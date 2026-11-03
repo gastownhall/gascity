@@ -1041,7 +1041,9 @@ var (
 // (another prompt, or none) runtime.ErrInteractionGone, and an action the
 // menu does not offer runtime.ErrInteractionActionUnavailable (or, for an
 // action no prompt offers, runtime.ErrInteractionResponseInvalid). An answer
-// naming no request when no prompt shows is a no-op.
+// naming no request when no prompt shows is a no-op. Once an answer key was
+// sent, a verification error wraps runtime.ErrInteractionOutcomeUnknown and
+// must not be treated as an unsent refusal, even if its diagnostic wraps one.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
 	return t.respond(context.Background(), name, response)
 }
@@ -1119,7 +1121,7 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 
 		cleared, err := t.respondCleared(target, current)
 		if err != nil {
-			return err
+			return interactionAnswerUnconfirmed(err)
 		}
 		if cleared {
 			t.approvalDedup().clear(name)
@@ -1127,7 +1129,17 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 		}
 	}
 
-	return fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout)
+	return interactionAnswerUnconfirmed(fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout))
+}
+
+// interactionAnswerUnconfirmed marks an error only after a successful answer
+// key send. Keep the underlying diagnostic, but make the uncertain outcome
+// authoritative so callers never replay an answer as an unsent refusal.
+func interactionAnswerUnconfirmed(err error) error {
+	if err == nil || errors.Is(err, runtime.ErrInteractionOutcomeUnknown) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", runtime.ErrInteractionOutcomeUnknown, err)
 }
 
 // respondCleared reports whether the approval Respond answered has left
@@ -1136,11 +1148,11 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 func (t *Tmux) respondCleared(target string, answered *parsedApproval) (bool, error) {
 	next, err := t.approvalInPane(target)
 	switch {
-	case errors.Is(err, errPaneGeometry):
-		return false, fmt.Errorf("verifying the answer: %w", err)
-	case err != nil:
+	case errors.Is(err, ErrSessionNotFound), errors.Is(err, runtime.ErrSessionNotFound):
 		// Pane gone — session ended, treat as success.
 		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("verifying the answer: %w", err)
 	}
 	// Success once the prompt we answered is gone, even if the next tool
 	// call has already raised a different one.

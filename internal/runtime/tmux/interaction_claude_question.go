@@ -174,21 +174,21 @@ func (t *Tmux) respondClaudeMultipleChoices(ctx context.Context, target string, 
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return interactionAnswerUnconfirmed(ctx.Err())
 		case <-time.After(respondVerifyInterval):
 		}
 		next, err := t.dialogInPane(target)
 		if err != nil {
-			return err
+			return interactionAnswerUnconfirmed(err)
 		}
 		if next.question != nil && isClaudeQuestionFormReview(next.question) {
-			return t.submitClaudeQuestionFormReview(ctx, target, current, "", response.Answers, next.question)
+			return interactionAnswerUnconfirmed(t.submitClaudeQuestionFormReview(ctx, target, current, "", response.Answers, next.question))
 		}
 		if next.question == nil || next.question.requestID() != q.requestID() {
 			return nil
 		}
 	}
-	return fmt.Errorf("native multiple selections did not clear within %s; no submit was repeated", respondVerifyTimeout)
+	return interactionAnswerUnconfirmed(fmt.Errorf("native multiple selections did not clear within %s; no submit was repeated", respondVerifyTimeout))
 }
 
 func cloneClaudeQuestionForm(questions []claudeQuestion, index int) *claudeQuestionForm {
@@ -520,18 +520,18 @@ func (t *Tmux) submitClaudeQuestionFormReview(ctx context.Context, target string
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return interactionAnswerUnconfirmed(ctx.Err())
 		case <-time.After(respondVerifyInterval):
 		}
 		next, err := t.dialogInPane(target)
 		if err != nil {
-			return fmt.Errorf("verifying native question review submission: %w", err)
+			return interactionAnswerUnconfirmed(fmt.Errorf("verifying native question review submission: %w", err))
 		}
 		if next.question == nil || !isClaudeQuestionFormReview(next.question) || next.question.Question != review.Question {
 			return nil
 		}
 	}
-	return fmt.Errorf("native question review did not clear within %s; no submit was repeated", respondVerifyTimeout)
+	return interactionAnswerUnconfirmed(fmt.Errorf("native question review did not clear within %s; no submit was repeated", respondVerifyTimeout))
 }
 
 func (t *Tmux) readClaudeQuestionTranscript(target string) (string, error) {

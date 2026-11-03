@@ -593,6 +593,124 @@ func TestLaneExecDeliversFencedRequest(t *testing.T) {
 	}
 }
 
+// laneDirectCreateStart keeps a runtime visibly alive while its owning
+// Manager's Start has not resolved, matching a composer that appears before
+// the startup hooks and readiness checks finish.
+type laneDirectCreateStart struct {
+	*runtime.Fake
+	entered chan string
+	release chan struct{}
+	once    sync.Once
+	fail    bool
+}
+
+func (p *laneDirectCreateStart) allow() { p.once.Do(func() { close(p.release) }) }
+
+func (p *laneDirectCreateStart) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	p.entered <- cfg.Env["GC_SESSION_ID"]
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.release:
+	}
+	if p.fail {
+		if err := p.Stop(name); err != nil {
+			return err
+		}
+		return runtime.ErrSessionDiedDuringStartup
+	}
+	return nil
+}
+
+// TestLaneExecHoldsActualDirectCreateUntilStartupResolves joins the real
+// Manager create protocol to the actual conversation lane. It never stamps
+// artificial passing state: success is the Manager's fenced confirmation,
+// failure its rollback, and the queued message retains the original op.
+func TestLaneExecHoldsActualDirectCreateUntilStartupResolves(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("startup failure=%v", fail), func(t *testing.T) {
+			f := &laneFixture{dir: t.TempDir(), cfg: &config.City{}, store: newLaneTestStore(), sp: runtime.NewFake(), clk: &laneTestClock{now: laneT0}}
+			sp := &laneDirectCreateStart{Fake: f.sp, entered: make(chan string, 1), release: make(chan struct{}), fail: fail}
+			mgr := session.NewManagerWithOptions(f.store, sp, session.WithCityPath(f.dir), session.WithClock(f.clk))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type createResult struct {
+				info session.Info
+				err  error
+			}
+			resultC, done := make(chan createResult, 1), make(chan struct{})
+			go func() {
+				defer close(done)
+				info, err := mgr.CreateSession(ctx, session.CreateOptions{Template: "worker", Command: "run-worker", WorkDir: f.dir})
+				resultC <- createResult{info, err}
+			}()
+			t.Cleanup(func() {
+				sp.allow()
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("direct create did not settle during cleanup")
+				}
+			})
+			select {
+			case f.id = <-sp.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("direct create did not reach provider Start")
+			}
+			b, err := f.store.Get(f.id)
+			if err != nil {
+				t.Fatalf("Get unresolved create: %v", err)
+			}
+			f.name, f.token, f.started = b.Metadata["session_name"], b.Metadata["instance_token"], true
+			f.sp.SetActivity(f.name, time.Now().Add(-time.Minute))
+			st := f.laneStore(t)
+			l := f.lane(t, st)
+			op := f.propose(t, st, f.msg("initial-question", opjournal.RolePrompt, "ask the native question"))
+			res, err := f.pass(context.Background(), t, l, st, nil)
+			if err != nil || res.Took != opjournal.TakeNone || len(res.Waits) != 1 || res.Waits[0].Reason != opjournal.WaitContentBlock || res.Waits[0].Detail != session.ContentGateStarting {
+				t.Fatalf("Pass during unresolved direct Start = %+v, %v; want content_block/starting with nothing taken", res, err)
+			}
+			if got := f.get(t, st, op.ID); got.Status != opjournal.StatusSubmitted || got.Attempt != 0 || len(f.nudges()) != 0 {
+				t.Fatalf("unresolved startup admitted native input: op=%+v nudges=%d", got, len(f.nudges()))
+			}
+			sp.allow()
+			var created createResult
+			select {
+			case created = <-resultC:
+			case <-time.After(5 * time.Second):
+				t.Fatal("direct create did not resolve")
+			}
+			if fail != (created.err != nil) {
+				t.Fatalf("create failure = %v, want %v", created.err, fail)
+			}
+			res, err = f.pass(context.Background(), t, l, st, nil)
+			if err != nil {
+				t.Fatalf("Pass after startup resolved: %v", err)
+			}
+			got := f.get(t, st, op.ID)
+			if fail {
+				if got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSkipped || got.Outcome.Reason != opjournal.ReasonConversationClosed || got.Attempt != 0 || len(f.nudges()) != 0 {
+					t.Fatalf("failed startup did not close queued input without delivery: op=%+v nudges=%d", got, len(f.nudges()))
+				}
+				return
+			}
+			if res.Done != opjournal.DoneAccepted || got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSucceeded || got.Attempt != 1 || len(f.nudges()) != 1 {
+				t.Fatalf("confirmed startup did not deliver exactly once: result=%+v op=%+v nudges=%d", res, got, len(f.nudges()))
+			}
+			if created.info.ID != f.id || created.info.InstanceToken != f.token || created.info.Generation != b.Metadata["generation"] {
+				t.Fatal("startup completion changed the queued message's conversation incarnation")
+			}
+			if _, err := f.pass(context.Background(), t, l, st, nil); err != nil || len(f.nudges()) != 1 {
+				t.Fatalf("another lane pass repeated initial input: %v; nudges=%d", err, len(f.nudges()))
+			}
+		})
+	}
+}
+
 // TestLaneExecUnfencedRuntime proves a runtime that cannot fence still
 // delivers, and the op closes succeeded with unfenced_delivery.
 func TestLaneExecUnfencedRuntime(t *testing.T) {

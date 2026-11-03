@@ -165,7 +165,10 @@ func (t *Tmux) codexNativeQuestions(target string, visible *parsedQuestion, coun
 
 func codexQuestionPositionMatches(native, visible *parsedQuestion) bool {
 	if visible.CodexTotal == 0 {
-		return native.CodexTotal == 1
+		// Codex drops the counter when advancing within an async batch, before
+		// the earlier reply is necessarily recorded. The caller still requires
+		// one unique exact native title/choice match in the proven editor.
+		return true
 	}
 	return native.CodexPosition == visible.CodexPosition && native.CodexTotal == visible.CodexTotal
 }

@@ -467,6 +467,56 @@ func TestLaneRespondResultMapping(t *testing.T) {
 	}
 }
 
+func TestLaneRespondUnknownAfterAnswerNeverRetriesOrBecomesStale(t *testing.T) {
+	for _, diagnostic := range []error{
+		runtime.ErrRuntimeUnavailable, runtime.ErrInteractionGone, runtime.ErrInteractionActionUnavailable,
+		fmt.Errorf("%w: %w", session.ErrInteractionMismatch, runtime.ErrInteractionGone),
+	} {
+		t.Run(diagnostic.Error(), func(t *testing.T) {
+			unknown := fmt.Errorf("verifying question answer: %w: %w", runtime.ErrInteractionOutcomeUnknown, diagnostic)
+			mapped, ok := laneRespondResult(context.Background(), unknown, false).(opjournal.Unknown)
+			if !ok || !errors.Is(mapped.Cause, runtime.ErrInteractionOutcomeUnknown) || !errors.Is(mapped.Cause, diagnostic) {
+				t.Fatalf("post-answer error was treated as an unsent refusal: %#v", mapped)
+			}
+			f := newLaneFixture(t)
+			st := f.laneStore(t)
+			l := f.lane(t, st)
+			f.prompt(laneTestRequest)
+			op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
+			f.sp.RespondErrors[f.name] = unknown
+			if _, err := f.pass(context.Background(), t, l, st, nil); err != nil {
+				t.Fatal(err)
+			}
+			got := f.get(t, st, op.ID)
+			if got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmFailed || got.Outcome.Reason != opjournal.ReasonAmbiguousDelivery || got.MaybeDelivered != 1 {
+				t.Fatalf("post-answer uncertainty lost: status=%s outcome=%+v maybe=%d", got.Status, got.Outcome, got.MaybeDelivered)
+			}
+			// Keep the original prompt visible, then remove it. Neither a later
+			// successful provider nor a cleared prompt can retry/relabel this op.
+			delete(f.sp.RespondErrors, f.name)
+			for range 2 {
+				f.clk.Advance(time.Minute)
+				if _, err := f.pass(context.Background(), t, l, st, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.sp.SetPendingInteraction(f.name, nil)
+			if _, err := f.pass(context.Background(), t, l, st, nil); err != nil {
+				t.Fatal(err)
+			}
+			if calls := f.responses(); len(calls) != 1 {
+				t.Fatalf("answer was replayed after uncertain outcome: %v", calls)
+			}
+			if after := f.get(t, st, op.ID); after.Outcome.Reason != opjournal.ReasonAmbiguousDelivery || after.MaybeDelivered != 1 {
+				t.Fatalf("later prompt clearing relabeled the original answer: %+v", after)
+			}
+			if latest, found, err := st.LatestRaising(f.id, 1, laneTestRequest); err != nil || !found || !latest.Resolved || latest.Raised.ID != raised.ID {
+				t.Fatalf("uncertain answer did not resolve its original occurrence: latest=%+v found=%v err=%v", latest, found, err)
+			}
+		})
+	}
+}
+
 // TestLaneExecRespondRestartDoesNotReplayTheAnswer proves an answer made
 // before the runtime stopped never reaches the identical prompt it raises
 // after a restart in the same generation: the pass that saw the runtime not

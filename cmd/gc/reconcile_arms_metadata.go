@@ -190,7 +190,7 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, 
 			}
 		}
 	}
-	refreshLaunchKeys(id.Meta, tp, raw)
+	refreshLaunchKeys(id.Meta, sessionTemplateWithOptionOverrides(tp, info), raw)
 	id.NeedsKey = raw["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" &&
 		!sessionStateMayBeRunning(info.MetadataState)
 	id.Type = info.Type == "" && session.IsSessionBeadOrRepairableInfo(info)

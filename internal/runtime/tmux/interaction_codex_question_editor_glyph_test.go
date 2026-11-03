@@ -356,7 +356,6 @@ func TestCodexQuestionEditorCounterRefusesWrongOrAmbiguousNativePosition(t *test
 		{"wrong index", "2 of 2", codexCounterNativeCall(t, "call-two", []map[string]any{animal, color})},
 		{"wrong total", "1 of 3", codexCounterNativeCall(t, "call-two", []map[string]any{animal, color})},
 		{"out of range", "3 of 2", codexCounterNativeCall(t, "call-two", []map[string]any{animal, color})},
-		{"missing counter", "", codexCounterNativeCall(t, "call-two", []map[string]any{animal, color})},
 		{"already answered", "1 of 2", append(codexCounterNativeCall(t, "call-two", []map[string]any{animal, color}), codexCounterNativeReply(t, "call-two", 0)...)},
 		{"ambiguous calls", "1 of 2", append(codexCounterNativeCall(t, "call-two", []map[string]any{animal, color}), codexCounterNativeCall(t, "call-next", []map[string]any{animal, color})...)},
 		{"different batch totals", "1 of 2", append(codexCounterNativeCall(t, "call-two", []map[string]any{animal, color}), codexCounterNativeCall(t, "call-next", []map[string]any{animal, color, color})...)},
@@ -429,5 +428,284 @@ func TestCodexQuestionEditorCounterDistinguishesRepeatedNativeTitles(t *testing.
 			t.Fatalf("different occurrence was not refused: %v", err)
 		}
 		requireNoKeys(t, ex.calls, false)
+	}
+}
+
+type codexCounterlessAdvanceExecutor struct {
+	paneExecutor
+	next string
+}
+
+func (e *codexCounterlessAdvanceExecutor) execute(args []string) (string, error) {
+	if slices.Contains(args, "send-keys") && slices.Contains(args, "-l") && args[len(args)-1] == "2" {
+		e.pane = e.next
+	}
+	return e.paneExecutor.execute(args)
+}
+
+func (e *codexCounterlessAdvanceExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// The 404 native diagnostic showed the first answer was sent and the next
+// editor had the exact color title/choices but no counter. Both original
+// questions were still pending in the rollout while its reply record lagged.
+func TestCodexQuestionAnswerVerifiesCounterlessNextPanelDuringReplyLogLag(t *testing.T) {
+	ex := &codexCounterlessAdvanceExecutor{
+		paneExecutor: paneExecutor{pane: codexCounterEditor("1 of 2", "Which qualification animal?", []string{"Otter", "Owl"}), inMode: "0"},
+		next:         codexCounterEditor("", "Which qualification color?", []string{"Blue", "Green"}),
+	}
+	path := codexGlyphQuestionRollout(t)
+	data := codexCounterNativeCall(t, "call-two", []map[string]any{
+		{"title": "Which qualification animal?", "options": []string{"Otter", "Owl"}},
+		{"title": "Which qualification color?", "options": []string{"Blue", "Green"}},
+	})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, codexRolloutHeld: func(int) string { return path }}
+	first, err := tm.Pending("q")
+	if err != nil || first == nil || first.RequestID != "tmux-codex-question-call-two-0" {
+		t.Fatalf("first native question=%+v err=%v", first, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "answer", Text: "Owl"}); err != nil {
+		t.Fatalf("sent first answer advanced to the exact next native question: %v", err)
+	}
+	next, err := tm.Pending("q")
+	if err != nil || next == nil || next.RequestID != "tmux-codex-question-call-two-1" || !slices.Equal(next.Options, []string{"Blue", "Green"}) {
+		t.Fatalf("counterless next native question=%+v err=%v", next, err)
+	}
+	beforeStale := len(ex.calls)
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "answer", Text: "Owl"}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("previous question answer was not stale: %v", err)
+	}
+	requireNoKeys(t, ex.calls[beforeStale:], false)
+	var sent [][]string
+	for _, call := range ex.calls {
+		if sendsKeys(call) {
+			sent = append(sent, call)
+		}
+	}
+	if len(sent) != 1 || !slices.Contains(sent[0], "-l") || sent[0][len(sent[0])-1] != "2" {
+		t.Fatalf("answer or verification sent extra keys: %v", sent)
+	}
+}
+
+func TestCodexCounterlessQuestionEditorRequiresUniqueExactNativeShape(t *testing.T) {
+	animal := map[string]any{"title": "Which qualification animal?", "options": []string{"Otter", "Owl"}}
+	color := map[string]any{"title": "Which qualification color?", "options": []string{"Blue", "Green"}}
+	for _, tc := range []struct {
+		name, title string
+		choices     []string
+		data        []byte
+	}{
+		{"duplicate in batch", "Which qualification animal?", []string{"Otter", "Owl"}, codexCounterNativeCall(t, "call-two", []map[string]any{animal, animal})},
+		{"duplicate across calls", "Which qualification animal?", []string{"Otter", "Owl"}, append(codexCounterNativeCall(t, "call-first", []map[string]any{animal}), codexCounterNativeCall(t, "call-next", []map[string]any{animal})...)},
+		{"wrong title", "Which other animal?", []string{"Otter", "Owl"}, codexCounterNativeCall(t, "call-two", []map[string]any{animal, color})},
+		{"wrong choices", "Which qualification animal?", []string{"Otter", "Heron"}, codexCounterNativeCall(t, "call-two", []map[string]any{animal, color})},
+		{"already answered", "Which qualification animal?", []string{"Otter", "Owl"}, append(codexCounterNativeCall(t, "call-two", []map[string]any{animal, color}), codexCounterNativeReply(t, "call-two", 0)...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm, ex := nativeQuestionTmux(t, codexCounterEditor("", tc.title, tc.choices))
+			path := codexGlyphQuestionRollout(t)
+			if err := os.WriteFile(path, tc.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tm.codexRolloutHeld = func(int) string { return path }
+			pending, err := tm.Pending("q")
+			if pending != nil || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("counterless mismatched or ambiguous editor was answerable: pending=%+v err=%v", pending, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: "tmux-codex-question-call-two-0", Action: "answer", Text: "Owl"}); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("unbound counterless response=%v", err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+type questionOutcomeFailureExecutor struct {
+	nativeAnswerExecutor
+	failure    error
+	failBefore bool
+	submitted  bool
+}
+
+func (e *questionOutcomeFailureExecutor) execute(args []string) (string, error) {
+	if slices.Contains(args, "capture-pane") && (e.failBefore || e.submitted) {
+		e.calls = append(e.calls, slices.Clone(args))
+		return "", e.failure
+	}
+	out, err := e.nativeAnswerExecutor.execute(args)
+	if err == nil && slices.Contains(args, "send-keys") && ((e.codex && slices.Contains(args, "-l") && args[len(args)-1] == "2") || (!e.codex && args[len(args)-1] == "Enter")) {
+		e.submitted = true
+	}
+	return out, err
+}
+
+func (e *questionOutcomeFailureExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func TestQuestionReadFailurePreservesAnswerOutcomePhase(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		for _, phase := range []string{"before answer", "after answer"} {
+			t.Run(provider+"/"+phase, func(t *testing.T) {
+				cause := errors.New("owned capture unavailable")
+				pane := nativeClaudeQuestion
+				if provider == "codex" {
+					pane = nativeCodexQuestion
+				}
+				ex := &questionOutcomeFailureExecutor{
+					nativeAnswerExecutor: nativeAnswerExecutor{codex: provider == "codex", paneExecutor: paneExecutor{pane: pane, inMode: "0"}},
+					failure:              fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, cause),
+				}
+				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+				installNativeClaudeRecord(t, tm, pane)
+				if provider == "codex" {
+					path := nativeQuestionRollout(t)
+					tm.codexRolloutHeld = func(int) string { return path }
+				}
+				pending, err := tm.Pending("q")
+				if err != nil || pending == nil {
+					t.Fatalf("Pending=%+v err=%v", pending, err)
+				}
+				ex.failBefore = phase == "before answer"
+				err = tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Owl"})
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, cause) {
+					t.Fatalf("read diagnostic identity lost: %v", err)
+				}
+				if unknown := errors.Is(err, runtime.ErrInteractionOutcomeUnknown); unknown != (phase == "after answer") {
+					t.Fatalf("answer outcome phase=%s submitted=%v err=%v", phase, ex.submitted, err)
+				}
+				if phase == "before answer" {
+					requireNoKeys(t, ex.calls, false)
+				} else {
+					answers := 0
+					for _, call := range ex.calls {
+						if slices.Contains(call, "send-keys") && ((provider == "codex" && slices.Contains(call, "-l") && call[len(call)-1] == "2") || (provider == "claude" && call[len(call)-1] == "Enter")) {
+							answers++
+						}
+					}
+					if !ex.submitted || answers != 1 {
+						t.Fatalf("submitted=%v answers=%d, want exactly one answer before verification failure", ex.submitted, answers)
+					}
+				}
+			})
+		}
+	}
+}
+
+type postSubmitCaptureFailureExecutor struct {
+	inner   executor
+	after   func() bool
+	failure error
+}
+
+func (e *postSubmitCaptureFailureExecutor) execute(args []string) (string, error) {
+	if slices.Contains(args, "capture-pane") && e.after() {
+		return "", e.failure
+	}
+	return e.inner.execute(args)
+}
+
+func (e *postSubmitCaptureFailureExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if slices.Contains(args, "capture-pane") && e.after() {
+		return "", e.failure
+	}
+	return e.inner.executeCtx(ctx, args)
+}
+
+func TestNativeResponsePostSubmitReadErrorsPreserveUnknownOutcome(t *testing.T) {
+	requireUnknown := func(t *testing.T, err, diagnostic error) {
+		t.Helper()
+		if !errors.Is(err, runtime.ErrInteractionOutcomeUnknown) || !errors.Is(err, diagnostic) {
+			t.Fatalf("successful submit lost its outcome phase or diagnostic: %v", err)
+		}
+	}
+	t.Run("native approval", func(t *testing.T) {
+		tail := nativeClaudeApprovalRecords(t, "toolu_phase", nativeClaudeApprovalCommand)
+		tm, original := nativeClaudeApprovalTmux(t, &tail)
+		ex := &nativeClaudeApprovalAnswerExecutor{nativeClaudeApprovalExecutor: *original}
+		cause := errors.New("post-approval geometry unavailable")
+		tm.exec = &postSubmitCaptureFailureExecutor{inner: ex, after: func() bool { return len(sentKeys(ex.calls)) > 0 }, failure: fmt.Errorf("%w: %w", errPaneGeometry, cause)}
+		pending, err := tm.Pending("q")
+		if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" {
+			t.Fatalf("native approval=%+v err=%v", pending, err)
+		}
+		requireUnknown(t, tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"}), cause)
+		if keys := sentKeys(ex.calls); !slices.Equal(keys, []string{"1"}) {
+			t.Fatalf("approval submit was repeated: %v", keys)
+		}
+	})
+	t.Run("native multiple selection submit", func(t *testing.T) {
+		tm, ex, _ := nativeMultipleTmux(t)
+		cause := errors.New("post-selection observation unavailable")
+		tm.exec = &postSubmitCaptureFailureExecutor{inner: ex, after: func() bool { return ex.stage > 0 }, failure: fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, cause)}
+		pending, err := tm.Pending("q")
+		if err != nil || pending == nil {
+			t.Fatalf("native selections=%+v err=%v", pending, err)
+		}
+		requireUnknown(t, tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Answers: []string{"Otter"}}), cause)
+		if ex.stage != 1 {
+			t.Fatalf("selection submit progressed after failed verification: stage=%d keys=%v", ex.stage, ex.keys)
+		}
+		enters := 0
+		for _, key := range ex.keys {
+			if key == "Enter" {
+				enters++
+			}
+		}
+		if enters != 2 {
+			t.Fatalf("want one checkbox toggle and one Submit, keys=%v", ex.keys)
+		}
+	})
+	t.Run("native complete review submit", func(t *testing.T) {
+		tm, ex, _ := nativeClaudeFormTmux(t, nativeClaudeFormReview)
+		cause := errors.New("post-review observation unavailable")
+		tm.exec = &postSubmitCaptureFailureExecutor{inner: ex, after: func() bool { return ex.entered == 2 }, failure: fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, cause)}
+		pending, err := tm.Pending("q")
+		if err != nil || pending == nil {
+			t.Fatalf("native review=%+v err=%v", pending, err)
+		}
+		requireUnknown(t, tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Green"}), cause)
+		if ex.entered != 2 || !slices.Equal(ex.keys, []string{"Down", "Enter", "Enter"}) {
+			t.Fatalf("review submit was repeated: entered=%d keys=%v", ex.entered, ex.keys)
+		}
+	})
+}
+
+func TestNativeApprovalPostSubmitReadDistinguishesUnavailableFromGone(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		diagnostic error
+		gone       bool
+	}{
+		{"runtime unavailable", runtime.ErrRuntimeUnavailable, false},
+		{"transport read failed", errors.New("owned post-answer capture failed"), false},
+		{"tmux session gone", ErrSessionNotFound, true},
+		{"runtime session gone", runtime.ErrSessionNotFound, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tail := nativeClaudeApprovalRecords(t, "toolu_read_outcome", nativeClaudeApprovalCommand)
+			tm, original := nativeClaudeApprovalTmux(t, &tail)
+			ex := &nativeClaudeApprovalAnswerExecutor{nativeClaudeApprovalExecutor: *original}
+			tm.exec = &postSubmitCaptureFailureExecutor{inner: ex, after: func() bool { return len(sentKeys(ex.calls)) > 0 }, failure: tc.diagnostic}
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" {
+				t.Fatalf("native approval=%+v err=%v", pending, err)
+			}
+			err = tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "approve"})
+			if tc.gone {
+				if err != nil {
+					t.Fatalf("proven session disappearance changed existing success behavior: %v", err)
+				}
+			} else if !errors.Is(err, runtime.ErrInteractionOutcomeUnknown) || !errors.Is(err, tc.diagnostic) {
+				t.Fatalf("unavailable observation falsely established approval success: %v", err)
+			}
+			if keys := sentKeys(ex.calls); !slices.Equal(keys, []string{"1"}) {
+				t.Fatalf("approval was replayed while verifying its outcome: %v", keys)
+			}
+		})
 	}
 }

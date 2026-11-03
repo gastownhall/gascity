@@ -4944,7 +4944,7 @@ func setTemplateEnvIdentity(tp *TemplateParams, identity string) {
 }
 
 // resolveTemplateForSessionBeadInfo resolves the TemplateParams for a session bead
-// from its session.Info. It reads only session_name, the trigger stamp, and
+// from its session.Info. It reads only session_name, template_overrides, the trigger stamp, and
 // pack — all verbatim raw mirrors on session.Info. A stamped row gets only the
 // presence-only demand marker (sessionDemandSpawnEnv), never the trigger id: the
 // stamp is controller-side demand bookkeeping, not the bead the session claims.
@@ -4965,6 +4965,7 @@ func resolveTemplateForSessionBeadInfo(
 	if err != nil {
 		return tp, err
 	}
+	tp = sessionTemplateWithOptionOverrides(tp, info)
 	if demand := sessionDemandSpawnEnv(info); demand != nil {
 		if tp.Env == nil {
 			tp.Env = make(map[string]string)
@@ -4975,6 +4976,24 @@ func resolveTemplateForSessionBeadInfo(
 		}
 	}
 	return tp, nil
+}
+
+// sessionTemplateWithOptionOverrides resolves the same persistent option pins
+// as a normal launch, starting from the freshly configured template command.
+// It preserves template/setup arguments, excludes one-shot initial_message,
+// and lets the launch resolver clone a provider before changing its explicit
+// resume command. Neither the shared defaults nor Info.Command are mutated.
+func sessionTemplateWithOptionOverrides(tp TemplateParams, info session.Info) TemplateParams {
+	overrides, err := session.ParseTemplateOverridesFromInfo(info)
+	if err != nil || len(overrides) == 0 {
+		return tp
+	}
+	cfg := runtime.Config{Command: tp.Command}
+	if err := resolveSchemaOptionOverridesForLaunch(&cfg, &tp, overrides); err != nil {
+		return tp
+	}
+	tp.Command = cfg.Command
+	return tp
 }
 
 // canonicalSessionIdentity returns the agent and qualified name to use when

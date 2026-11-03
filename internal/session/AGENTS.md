@@ -85,6 +85,10 @@ evidence from tests, source, an issue, or a commit.
 
 ## Startup Fencing Pitfalls
 
+- Keep a direct create `creating` with its pending-create claim until the
+  provider's `Start` resolves and the fenced `ConfirmStartedPatch` commits.
+  A live pane can precede startup completion; queued content stays behind
+  `ContentGateStarting` during that interval (SESSION-START-026).
 - `Store.Tx` groups rollback writes but cannot read, so it does not fence a
   stale creating snapshot against completion. `WithPendingCreateRollback` and
   `CommitStartedIfCurrent` share `WithSessionMutationLock` with incarnation

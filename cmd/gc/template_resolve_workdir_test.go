@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func writeTemplateResolveCityConfig(t *testing.T, cityPath, beadsProvider string) {
@@ -24,6 +25,43 @@ func writeTemplateResolveCityConfig(t *testing.T, cityPath, beadsProvider string
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
+	}
+}
+
+func TestResolveSessionTemplatePreservesSchemaOptionOverrides(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	params := &agentBuildParams{
+		cityName: "city", cityPath: cityPath, workspace: &config.Workspace{Provider: "test"},
+		providers: map[string]config.ProviderSpec{"test": {
+			Command: "/bin/echo", Args: []string{"--custom", "keep"}, PromptMode: "none",
+			OptionsSchema: optionSchemaProvider().OptionsSchema, OptionDefaults: map[string]string{"model": "opus", "effort": "low"},
+			ResumeFlag: "--resume", ResumeCommand: "/bin/echo --resume {{.SessionKey}} --model claude-opus-4-8 --effort low",
+		}},
+		lookPath: func(string) (string, error) { return "/bin/echo", nil }, fs: fsys.OSFS{},
+		beaconTime: time.Unix(0, 0), beadNames: make(map[string]string), stderr: io.Discard,
+	}
+	agent := &config.Agent{Name: "worker"}
+	for _, tc := range []struct {
+		name, overrides, want, resume string
+	}{
+		{"pinned", `{"model":"sonnet","effort":"high","initial_message":"not a flag"}`, "/bin/echo --custom keep --model claude-sonnet-4-6 --effort high", "/bin/echo --resume {{.SessionKey}} --model claude-sonnet-4-6 --effort high"},
+		{"other session defaults", "", "/bin/echo --custom keep --model claude-opus-4-8 --effort low", "/bin/echo --resume {{.SessionKey}} --model claude-opus-4-8 --effort low"},
+		{"invalid metadata", "{", "/bin/echo --custom keep --model claude-opus-4-8 --effort low", "/bin/echo --resume {{.SessionKey}} --model claude-opus-4-8 --effort low"},
+		{"invalid option", `{"model":"unknown"}`, "/bin/echo --custom keep --model claude-opus-4-8 --effort low", "/bin/echo --resume {{.SessionKey}} --model claude-opus-4-8 --effort low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp, err := resolveTemplateForSessionBeadInfo(params, agent, "worker", nil, session.Info{ID: "gc-test", SessionNameMetadata: "s-test", TemplateOverrides: tc.overrides})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tp.Command != tc.want || tp.ResolvedProvider == nil || tp.ResolvedProvider.ResumeCommand != tc.resume {
+				t.Fatalf("resolved command=%q resume=%+v, want command=%q resume=%q", tp.Command, tp.ResolvedProvider, tc.want, tc.resume)
+			}
+		})
+	}
+	if params.providers["test"].OptionDefaults["model"] != "opus" || params.providers["test"].ResumeCommand != "/bin/echo --resume {{.SessionKey}} --model claude-opus-4-8 --effort low" {
+		t.Fatal("session template resolution changed shared configured provider")
 	}
 }
 

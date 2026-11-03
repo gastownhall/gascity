@@ -128,13 +128,19 @@ func recordSupervisorRequest(audit requestAuditConfig, r *http.Request, status i
 	})
 }
 
-// withRecovery catches panics and returns an RFC 9457 Problem Details 500.
+// withRecovery returns Problem Details for application panics and preserves
+// net/http's exact abort sentinel for interrupted response streams.
 // Stays outermost at the mux level so it covers non-Huma routes (e.g.
 // /svc/* service proxy) that Huma's own recovery wouldn't reach.
 func withRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if err := recover(); err != nil {
+			switch err := recover(); err {
+			case nil:
+				return
+			case http.ErrAbortHandler:
+				panic(err)
+			default:
 				log.Printf("api: panic: %v\n%s", err, debug.Stack())
 				problemInternalServerError.writeTo(w)
 			}

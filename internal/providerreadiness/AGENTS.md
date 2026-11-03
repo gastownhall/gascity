@@ -37,6 +37,16 @@ occurrence and matching live queue/editor before answering; a completed model
 turn alone does not dismiss queued user input. Preserve stale-response refusal
 and the ordinary-message guard while a native interaction owns input.
 
-Bind native editor batch counters to the owned question occurrence and preserve
-authored title text. An unsupported counter or ambiguous invocation remains
-unavailable; it never authorizes guessing an answer target.
+Bind a present native editor counter to the owned request's original batch
+position and total, preserving authored title text. A counter-free next panel
+can bind only one unique exact pending native title/choice shape, even while
+an earlier reply record lags. Ambiguous, stale or mismatched shapes remain
+unavailable and authorize no answer keys.
+
+After a successful answer or Submit key, failed verification is
+`ErrInteractionOutcomeUnknown`, preserving its diagnostic identity. Classify
+that marker before any wrapped stale/refusal/unavailable error and retain the
+lane's at-most-once outcome. For approval verification, preserve success only
+for a proven missing session; an unavailable observation proves neither success
+nor an unsent answer. See `internal/runtime/REQUIREMENTS.md`,
+RUNTIME-CONTRACT-020 and RUNTIME-CONTRACT-021.

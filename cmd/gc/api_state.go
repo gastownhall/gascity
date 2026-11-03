@@ -3167,6 +3167,9 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, adopt bool, onStep f
 	if err := cs.assertRigNameAvailableSnapshot(r.Name); err != nil {
 		return config.Rig{}, err
 	}
+	if err := cs.assertRigPathAvailableSnapshot(r.Path); err != nil {
+		return config.Rig{}, err
+	}
 
 	var depOnStep func(rig.ProvisionStep)
 	if onStep != nil {
@@ -3196,6 +3199,35 @@ func (cs *controllerState) assertRigNameAvailableSnapshot(name string) error {
 	cs.mu.RUnlock()
 	if rigConfigHasRigNamed(cfg, name) {
 		return fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, name)
+	}
+	return nil
+}
+
+// assertRigPathAvailableSnapshot rejects a second binding of a project before
+// provisioning. The raw-config check in provisionRigWrite is authoritative;
+// this snapshot check also covers rigs contributed by composed configuration.
+func (cs *controllerState) assertRigPathAvailableSnapshot(path string) error {
+	cs.mu.RLock()
+	cfg := cs.cfg
+	cs.mu.RUnlock()
+	return assertRigPathAvailable(cfg, cs.cityPath, path)
+}
+
+// assertRigPathAvailable treats symlink and relative spellings of a registered
+// project as the same binding. The API refuses the conflict with its existing
+// typed 409 vocabulary; CLI re-add semantics remain owned by rig.Provision.
+func assertRigPathAvailable(cfg *config.City, cityPath, path string) error {
+	if cfg == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	resolved := resolveStoreScopeRoot(cityPath, path)
+	for _, existing := range cfg.Rigs {
+		if strings.TrimSpace(existing.Path) == "" {
+			continue
+		}
+		if pathutil.SamePath(resolveStoreScopeRoot(cityPath, existing.Path), resolved) {
+			return fmt.Errorf("%w: rig path %q is already registered as rig %q", configedit.ErrAlreadyExists, path, existing.Name)
+		}
 	}
 	return nil
 }
@@ -3237,6 +3269,12 @@ func (cs *controllerState) provisionRigWrite(r config.Rig, adopt bool, depOnStep
 	// re-add idempotency is owned by the C4 request_id state machine.
 	if rigConfigHasRigNamed(editCfg, r.Name) {
 		return config.Rig{}, fmt.Errorf("%w: rig %q", configedit.ErrAlreadyExists, r.Name)
+	}
+	// A concurrent create or local CLI edit may not be in cs.cfg yet. Refuse
+	// its canonical path under the same transaction before any store/rig
+	// provisioning can interpret the collision as an untyped adoption error.
+	if err := assertRigPathAvailable(editCfg, cs.cityPath, r.Path); err != nil {
+		return config.Rig{}, err
 	}
 	// Register the city dolt config so the beads-init path can read the
 	// process-global lifecycle fields — but only if absent: the controller owns a

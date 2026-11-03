@@ -6,9 +6,18 @@ package main
 // It needs no macOS and no GOTMPDIR emulation — it creates its own symlink.
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestAssertRigPathWithinCityAcceptsResolvedTargetUnderSymlinkedCity pins that a
@@ -77,5 +86,90 @@ func TestAssertRigPathWithinCityAcceptsWhenBothSidesResolved(t *testing.T) {
 	}
 	if err := assertRigPathWithinCity(resolvedCity, resolveStoreScopeRoot(cityPath, rigPath)); err != nil {
 		t.Fatalf("assertRigPathWithinCity(%q, ...) = %v, want nil", resolvedCity, err)
+	}
+}
+
+// A second API binding of the same project is a typed 409 conflict, including
+// when the composed snapshot has not yet observed the first registration.
+// The authoritative raw-config check must run before store provisioning.
+func TestControllerStateCreateRigRejectsCanonicalPathConflict(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	for _, stale := range []bool{false, true} {
+		for _, alias := range []bool{false, true} {
+			for _, adopt := range []bool{false, true} {
+				t.Run(fmt.Sprintf("stale=%v/symlink=%v/adopt=%v", stale, alias, adopt), func(t *testing.T) {
+					root := t.TempDir()
+					city := filepath.Join(root, "city")
+					project := filepath.Join(root, "projects", "existing")
+					for _, path := range []string{city, filepath.Join(project, ".beads")} {
+						if err := os.MkdirAll(path, 0o755); err != nil {
+							t.Fatal(err)
+						}
+					}
+					requestPath := project
+					if alias {
+						requestPath = filepath.Join(root, "project-link")
+						if err := os.Symlink(project, requestPath); err != nil {
+							t.Fatalf("creating the test symlink: %v", err)
+						}
+					}
+					// Exercise a stored relative path as well as an absolute request;
+					// comparing either against the daemon CWD would miss the holder.
+					storedPath, err := filepath.Rel(city, project)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cityFile := filepath.Join(city, "city.toml")
+					protected := map[string]string{
+						cityFile:                                             fmt.Sprintf("[workspace]\nname=\"city1\"\n[[rigs]]\nname=\"existing-project\"\npath=%q\nprefix=\"kept\"\n", filepath.ToSlash(storedPath)),
+						filepath.Join(project, "dirty.txt"):                  "existing dirty bytes\n",
+						filepath.Join(project, "untracked.txt"):              "existing untracked bytes\n",
+						filepath.Join(project, ".beads", "metadata.json"):    "{}\n",
+						filepath.Join(project, ".beads", "config.yaml"):      "issue-prefix: kept\n",
+						filepath.Join(project, ".beads", "history.sentinel"): "existing queue history\n",
+					}
+					for path, text := range protected {
+						if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cfg := &config.City{Workspace: config.Workspace{Name: "city1"}}
+					if !stale {
+						cfg.Rigs = []config.Rig{{Name: "existing-project", Path: storedPath, Prefix: "kept"}}
+					}
+					cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", city)
+					initCalls := 0
+					oldInit := controllerStateInitRigDirIfReady
+					controllerStateInitRigDirIfReady = func(_, _, _ string) (bool, error) {
+						initCalls++
+						return false, errors.New("duplicate project reached store provisioning")
+					}
+					defer func() { controllerStateInitRigDirIfReady = oldInit }()
+					err = cs.CreateRig(config.Rig{Name: "duplicate-path", Path: requestPath}, adopt)
+					if !errors.Is(err, configedit.ErrAlreadyExists) {
+						t.Fatalf("same canonical project under another name = %v, want typed ErrAlreadyExists (HTTP409)", err)
+					}
+					if !strings.Contains(err.Error(), "existing-project") {
+						t.Fatalf("path conflict omits the owning rig: %v", err)
+					}
+					if initCalls != 0 {
+						t.Fatalf("duplicate path reached store initialization %d times", initCalls)
+					}
+					for path, want := range protected {
+						got, err := os.ReadFile(path)
+						if err != nil || string(got) != want {
+							t.Fatalf("conflict changed retained file %s: %q, %v", path, got, err)
+						}
+					}
+					if alias {
+						if target, err := os.Readlink(requestPath); err != nil || target != project {
+							t.Fatalf("conflict changed the project symlink: %q, %v", target, err)
+						}
+					}
+				})
+			}
+		}
 	}
 }
