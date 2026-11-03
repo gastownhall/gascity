@@ -152,7 +152,7 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 // with no busy indicator on two consecutive observations, and implements
 // [runtime.IdleWaitProvider]. Each observation captures the last
 // tmux.PromptObservationLines lines over the exec connection and applies
-// tmux.PaneShowsIdlePrompt, so the boundary is the one local tmux uses.
+// tmux.ClassifyIdlePane, so the boundary is the one local tmux uses.
 //
 // A pack that does not declare report-activity, report-attachment and
 // proc.exec gets [runtime.ErrInteractionUnsupported] without any op being run.
@@ -160,8 +160,9 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 // timeout is a hard upper bound: the ready-prompt read (see
 // readyPromptPrefix) and every capture run under a context that expires at
 // the deadline, and WaitForIdle returns at the deadline even if one is still
-// in flight. On expiry the error wraps
-// context.DeadlineExceeded; a canceled ctx returns ctx.Err().
+// in flight. On expiry the error wraps context.DeadlineExceeded, and
+// [runtime.ErrWaitUnobserved] as well unless a capture read busy; a canceled
+// ctx returns ctx.Err().
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	if !p.idleBoundaryDeclared() {
 		return runtime.ErrInteractionUnsupported
@@ -183,7 +184,7 @@ func (p *Provider) waitForIdle(ctx context.Context, c runtime.Carrier, name stri
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return fmt.Errorf("exec provider: %q not idle within %s: %w (reading the ready prompt used the whole timeout)", name, timeout, context.DeadlineExceeded)
+		return fmt.Errorf("exec provider: %q not idle within %s: %w (reading the ready prompt used the whole timeout)", name, timeout, unobservedTimeout())
 	}
 	return waitForPaneIdle(ctx, c, time.Now, name, prefix, remaining)
 }
@@ -193,10 +194,13 @@ func (p *Provider) waitForIdle(ctx context.Context, c runtime.Carrier, name stri
 // ctx cancellation, or now() reaching start+timeout. Its twin is the tmux
 // provider's (*tmux.Tmux).WaitForIdle loop, which applies the same prompt
 // check, observation count and poll interval without bounding a capture by
-// the deadline; change the two together.
+// the deadline; change the two together. Each capture is classified by
+// tmux.ClassifyIdlePane; at the deadline the error wraps
+// [runtime.ErrWaitUnobserved] as well unless a capture read busy.
 func waitForPaneIdle(ctx context.Context, c runtime.Carrier, now func() time.Time, name, promptPrefix string, timeout time.Duration) error {
 	deadline := now().Add(timeout)
 	consecutive := 0
+	sawBusy := false
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
@@ -218,16 +222,21 @@ func waitForPaneIdle(ctx context.Context, c runtime.Carrier, now func() time.Tim
 			}
 			break
 		}
-		switch {
-		case err != nil:
+		if err != nil {
 			lastErr, consecutive = err, 0
-		case tmux.PaneShowsIdlePrompt(paneLines(out), promptPrefix):
-			consecutive++
-			if consecutive >= tmux.IdleRequiredObservations {
-				return nil
+		} else {
+			idle, classifyErr := tmux.ClassifyIdlePane(paneLines(out), promptPrefix)
+			switch {
+			case idle:
+				consecutive++
+				if consecutive >= tmux.IdleRequiredObservations {
+					return nil
+				}
+			case classifyErr == nil:
+				consecutive, sawBusy = 0, true
+			default:
+				consecutive = 0
 			}
-		default:
-			consecutive = 0
 		}
 		wait := min(execIdlePollInterval, deadline.Sub(now()))
 		if wait <= 0 {
@@ -241,10 +250,20 @@ func waitForPaneIdle(ctx context.Context, c runtime.Carrier, now func() time.Tim
 		case <-timer.C:
 		}
 	}
-	if lastErr != nil {
-		return fmt.Errorf("exec provider: %q not idle within %s: %w (last capture: %w)", name, timeout, context.DeadlineExceeded, lastErr)
+	timedOut := unobservedTimeout()
+	if sawBusy {
+		timedOut = context.DeadlineExceeded
 	}
-	return fmt.Errorf("exec provider: %q not idle within %s: %w", name, timeout, context.DeadlineExceeded)
+	if lastErr != nil {
+		return fmt.Errorf("exec provider: %q not idle within %s: %w (last capture: %w)", name, timeout, timedOut, lastErr)
+	}
+	return fmt.Errorf("exec provider: %q not idle within %s: %w", name, timeout, timedOut)
+}
+
+// unobservedTimeout is the timeout of a wait that read nothing showing the
+// session busy: context.DeadlineExceeded wrapping [runtime.ErrWaitUnobserved].
+func unobservedTimeout() error {
+	return fmt.Errorf("%w: %w", context.DeadlineExceeded, runtime.ErrWaitUnobserved)
 }
 
 // boundedPeek captures the pane under a context that expires after limit and
@@ -309,17 +328,30 @@ func paneLines(out string) []string {
 // via `script is-attached <name>`, separating "no client" from "could not
 // tell", and implements [runtime.AttachmentObserverWithError]. A pack that did
 // not declare report-attachment answers (false, nil) without running an op.
-// An op failure, meaning any non-zero exit including 2, wraps
-// [runtime.ErrRuntimeUnavailable], which callers gating a destructive action
-// treat as attached. A pack reports a session that does not exist by printing
-// "false" and exiting 0.
+// An op failure, meaning any non-zero exit including 2, or an answer other
+// than exactly `true` or `false`, wraps [runtime.ErrRuntimeUnavailable],
+// which callers gating a destructive action treat as attached. A pack
+// reports a session that does not exist by printing "false" and exiting 0.
+// On a v2-ready pack the op runs under probeOpTimeout, inside v2's fence
+// bound.
 func (p *Provider) IsAttachedWithError(name string) (bool, error) {
 	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
 		return false, nil
 	}
-	out, err := p.run(nil, "is-attached", name)
+	timeout := p.timeout
+	if p.v2Ready() {
+		timeout = probeOpTimeout
+	}
+	out, err := p.runWithTimeout(timeout, nil, "is-attached", name)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 	}
-	return strings.TrimSpace(out) == "true", nil
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%w: exec provider %s is-attached %s: answer is neither true nor false (%d bytes)", runtime.ErrRuntimeUnavailable, p.script, name, len(out))
+	}
 }

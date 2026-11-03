@@ -207,11 +207,17 @@ func fakeBdDir(t *testing.T, stdout string, code int) string {
 		t.Fatalf("the graph worker script needs jq: %v", err)
 	}
 	dir := t.TempDir()
+	writeFakeBd(t, dir, stdout, code)
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// writeFakeBd writes into dir a bd stub that prints stdout and exits with code.
+func writeFakeBd(t *testing.T, dir, stdout string, code int) {
+	t.Helper()
 	body := "#!/bin/sh\ncat <<'JSON'\n" + stdout + "\nJSON\nexit " + strconv.Itoa(code) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "bd"), []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
 }
 
 // TestGraphDispatchReadBeadStateReadsAllFieldsInOneCall pins read_bead_state,
@@ -219,7 +225,7 @@ func fakeBdDir(t *testing.T, stdout string, code int) string {
 // in the graph worker: every field lands in its own variable, including when
 // a field in the middle is empty, and a failed read leaves all three empty.
 func TestGraphDispatchReadBeadStateReadsAllFieldsInOneCall(t *testing.T) {
-	fns := graphDispatchFuncs(t, "json_payload", "read_bead_state")
+	fns := graphDispatchFuncs(t, "bounded", "json_payload", "read_bead_state")
 	cases := []struct {
 		name   string
 		stdout string
@@ -269,7 +275,7 @@ func TestGraphDispatchReadBeadStateReadsAllFieldsInOneCall(t *testing.T) {
 // unassigned and non-epic), so a bead on a hold:* dispatch label is dropped,
 // and an empty or failed read reports no work.
 func TestGraphDispatchRoutedQueueServesOnlyUnheldWork(t *testing.T) {
-	fns := graphDispatchFuncs(t, "json_payload", "fetch_routed_queue")
+	fns := graphDispatchFuncs(t, "bounded", "json_payload", "fetch_routed_queue")
 	cases := []struct {
 		name   string
 		stdout string
@@ -300,6 +306,66 @@ func TestGraphDispatchRoutedQueueServesOnlyUnheldWork(t *testing.T) {
 			}
 			if got != want {
 				t.Fatalf("fetch_routed_queue served %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// hostToolsPath returns a PATH holding a fake bd that prints stdout and only
+// the named host tools (name -> host tool it links to), so a test controls
+// which of timeout, gtimeout and python3 the graph worker script can find.
+func hostToolsPath(t *testing.T, stdout string, tools map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFakeBd(t, dir, stdout, 0)
+	for name, host := range tools {
+		found, err := exec.LookPath(host)
+		if err != nil {
+			t.Skipf("host tool %s: %v", host, err)
+		}
+		if err := os.Symlink(found, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestGraphDispatchBoundedWithoutGNUTimeout pins bounded, the graph worker's
+// wall-clock limit around bd and gc calls. macOS has no GNU timeout (only
+// Homebrew's gtimeout, when installed), and a bare timeout there exits 127,
+// which every caller swallowed as an empty read. bounded falls back from
+// timeout to gtimeout to python3: each still serves the read, and each still
+// bounds a command that overruns.
+func TestGraphDispatchBoundedWithoutGNUTimeout(t *testing.T) {
+	fns := graphDispatchFuncs(t, "bounded", "json_payload", "read_bead_state")
+	base := map[string]string{"jq": "jq", "awk": "awk", "cat": "cat", "sleep": "sleep"}
+	cases := []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "timeout", extra: map[string]string{"timeout": "timeout"}},
+		{name: "gtimeout only", extra: map[string]string{"gtimeout": "timeout"}},
+		{name: "python3 only", extra: map[string]string{"python3": "python3"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tools := map[string]string{}
+			for k, v := range base {
+				tools[k] = v
+			}
+			for k, v := range tc.extra {
+				tools[k] = v
+			}
+			path := hostToolsPath(t, `{"id":"gc-1","status":"open","assignee":"worker","metadata":{"gc.outcome":"pass"}}`, tools)
+			out, err := runGraphDispatchShell("set -euo pipefail\n"+fns+
+				`read_bead_state gc-1; printf '%s|%s|%s' "$BEAD_STATUS" "$BEAD_OUTCOME" "$BEAD_ASSIGNEE"`,
+				[]string{"PATH=" + path})
+			if err != nil || out != "open|pass|worker" {
+				t.Fatalf("read_bead_state = %q (%v), want %q", out, err, "open|pass|worker")
+			}
+			out, err = runGraphDispatchShell(fns+`bounded 1 sleep 30; echo "exit=$?"`, []string{"PATH=" + path})
+			if err != nil || strings.TrimSpace(out) != "exit=124" {
+				t.Fatalf("bounded 1 sleep 30 = %q (%v), want exit=124", out, err)
 			}
 		})
 	}

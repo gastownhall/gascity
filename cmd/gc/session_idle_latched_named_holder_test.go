@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -56,6 +57,9 @@ type idleLatchedHolderWork struct {
 	// holder's identity: NamedSessionDemand counts it, the awake set's
 	// assigned-work pass does not.
 	blockedAssigned bool
+	// beforeReconcile runs on the idle-latched holder just before the
+	// reconcile, to record demand through a real command path.
+	beforeReconcile func(t *testing.T, cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, holder beads.Bead)
 }
 
 func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, work idleLatchedHolderWork, holderMeta map[string]string) idleLatchedNamedHolderResult {
@@ -148,6 +152,9 @@ func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, work idleLatchedHo
 	}
 	if !configWakeSuppressedInfo(latchedInfo, policy, sp, clk) {
 		t.Fatal("precondition: the holder must be idle-latched (configWakeSuppressedInfo = true)")
+	}
+	if work.beforeReconcile != nil {
+		work.beforeReconcile(t, cityPath, cfg, store, sp, holder)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -253,6 +260,38 @@ func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderHonorsExplicitWa
 		"wake_request":      string(sessionpkg.WakeCauseExplicit),
 		"wake_requested_at": "2026-09-22T21:52:00Z",
 	})
+	assertIdleLatchedHolderWoke(t, res)
+}
+
+// TestMailNotifyWakeWakesIdleLatchedNamedHolder: the explicit wake that gc
+// mail send --notify itself records on an idle-latched holder is one the
+// reconciler honors, so the holder starts. In v1.5.x the idle latch dropped
+// that wake and only a pin woke the session (gastownhall/gascity#7629).
+func TestMailNotifyWakeWakesIdleLatchedNamedHolder(t *testing.T) {
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{beforeReconcile: func(t *testing.T, cityPath string, cfg *config.City, store beads.Store, sp runtime.Provider, holder beads.Bead) {
+		prevManaged, prevPoke, prevWarn := nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter
+		pokes := 0
+		var warnings bytes.Buffer
+		nudgeCityUsesManagedReconciler = func(path string) bool { return path == cityPath }
+		nudgePokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
+		nudgeWarningWriter = &warnings
+		t.Cleanup(func() {
+			nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter = prevManaged, prevPoke, prevWarn
+		})
+		agent := cfg.Agents[0]
+		target := nudgeTarget{cityPath: cityPath, cfg: cfg, alias: agent.Name, sessionID: holder.ID, sessionName: holder.Metadata["session_name"], identity: agent.Name, agent: agent}
+		if err := sendMailNotifyWithWorker(target, store, sp, ""); err != nil {
+			t.Fatalf("sendMailNotifyWithWorker: %v", err)
+		}
+		got, err := store.Get(holder.ID)
+		if err != nil {
+			t.Fatalf("Get(holder): %v", err)
+		}
+		if got.Metadata["wake_request"] != string(sessionpkg.WakeCauseExplicit) || got.Metadata["wake_requested_at"] == "" || pokes != 1 {
+			t.Fatalf("precondition: the notice must record its wake and poke once; wake_request=%q wake_requested_at=%q pokes=%d warnings=%q",
+				got.Metadata["wake_request"], got.Metadata["wake_requested_at"], pokes, warnings.String())
+		}
+	}}, nil)
 	assertIdleLatchedHolderWoke(t, res)
 }
 

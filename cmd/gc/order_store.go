@@ -94,21 +94,6 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
 }
 
-func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return beads.OrdersStore{}, 1
-	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return beads.OrdersStore{}, 1
-	}
-	return beads.OrdersStore{Store: store}, 0
-}
-
 func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 	if err != nil {
@@ -613,7 +598,7 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 // wispClosed: 0 on a split city and exits 0 — the silent no-op this pairing
 // exists to make un-writable.
 func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, beads.Store, error) {
-	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+	targets := withoutRelicFreeRigSweepTargets(cliStorageRoutes(cityPath), orderTrackingSweepTargetsForConfig(cityPath, cfg))
 	if len(requiredTargets) > 0 {
 		filtered := targets[:0]
 		for _, target := range targets {
@@ -628,6 +613,22 @@ func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City,
 	})
 	stores = appendOrdersSweepStore(stores, relocatedOrdersClassStore(cityPath, cfg))
 	return stores, orderWispSweepStore(cityPath, cfg), err
+}
+
+// withoutRelicFreeRigSweepTargets drops the rig targets a tracking sweep no
+// longer needs to read: on a split city a rig order's tracking beads are born
+// in the orders binding, and a rig store holds only pre-split history until
+// the rig is imported or proven clean (the S4 relic-free predicate). A city
+// that relocates nothing keeps every target.
+func withoutRelicFreeRigSweepTargets(routes *storageRoutes, targets []orderTrackingSweepTarget) []orderTrackingSweepTarget {
+	out := targets[:0:0]
+	for _, target := range targets {
+		if target.target.ScopeKind == "rig" && splitRigGraphRelicFree(routes, target.target.RigName) {
+			continue
+		}
+		out = append(out, target)
+	}
+	return out
 }
 
 // orderWispSweepStore returns the store that owns this city's order wisp roots
@@ -678,10 +679,8 @@ func relocatedOrdersClassStore(cityPath string, cfg *config.City) beads.Store {
 // store stays the caller's for everything else it does; only the tracking bead
 // routes here. On a city that relocates nothing this returns a front door over
 // the exact store value it was handed.
-func orderTrackingFrontDoor(cityPath string, cfg *config.City, scopeStore beads.OrdersStore) *orders.Store {
-	return orders.NewStore(beads.OrdersStore{
-		Store: resolveOrderStore(cliStorageRoutes(cityPath), scopeStore.Store, cfg, cityPath, nil),
-	})
+func orderTrackingFrontDoor(cityPath string, _ *config.City, scopeStore beads.OrdersStore) *orders.Store {
+	return orders.NewStore(cliStores(cityPath, scopeStore.Store).Orders())
 }
 
 // appendOrdersSweepStore adds the orders-class binding to a tracking sweep's

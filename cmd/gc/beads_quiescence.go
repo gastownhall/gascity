@@ -28,7 +28,9 @@ import (
 //
 // For a suspended rig the skips live where each periodic reader picks its
 // stores (rig caches, demand, order tracking, completions, convergence, the
-// maintenance orders, the convoy check). For a suspended city with no running
+// maintenance orders, the convoy check, and by-id store resolution, whose
+// uniqueness probe serves autoclose, execution-fact emission and the convoy
+// commands). For a suspended city with no running
 // session the tick stops before its first phase, the order lane and the
 // completions sweep stand down, and every cache pauses its reconcile
 // (controllerState.beadsQuiescent).
@@ -85,12 +87,15 @@ func (cr *CityRuntime) setBeadsQuiescent(quiescent bool) {
 // quiescent city stops every suspended scope's pair it has not stopped yet and
 // reports true, and the tick then runs no phase at all. The decision reads the
 // suspension state file and the runtime provider's session list, never a bead
-// store.
+// store; a rig the boot census skipped as suspended and that has since resumed
+// is censused in the background (censusResumedRigs).
 func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 	suspended := suspendedBeadsScopes(cr.cityPath, cr.cfg)
 	cr.retiredScopes.forgetResumed(suspended)
 	cr.repairResumedScopes(suspended)
-	cr.cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath)))
+	suspendedRigs := buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath))
+	cr.cs.setSuspendedRigs(suspendedRigs)
+	cr.censusResumedRigs(ctx, suspended.City(), suspendedRigs)
 	quiescent := false
 	if suspended.City() {
 		running, err := cr.sp.ListRunning("")

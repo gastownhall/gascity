@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -34,7 +35,7 @@ func TestNudgeKeyedDerivesStableT3IDs(t *testing.T) {
 	}
 
 	for _, key := range []string{"batch-1", "batch-1", "batch-2"} {
-		if err := keyed.NudgeKeyed("agent-a", runtime.TextContent("hello"), key); err != nil {
+		if _, err := keyed.NudgeKeyed("agent-a", runtime.TextContent("hello"), key); err != nil {
 			t.Fatalf("NudgeKeyed(%s): %v", key, err)
 		}
 	}
@@ -94,7 +95,7 @@ func TestNudgeKeyedRejectionIsErrNudgeRejected(t *testing.T) {
 	server.rejectCommand("thread.turn.start", "thread is archived")
 	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
 
-	err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
+	_, err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
 	if !errors.Is(err, runtime.ErrNudgeRejected) {
 		t.Fatalf("NudgeKeyed with a rejected turn start = %v, want errors.Is(runtime.ErrNudgeRejected)", err)
 	}
@@ -115,7 +116,7 @@ func TestNudgeKeyedUpstreamWrappedRejectionIsErrNudgeRejected(t *testing.T) {
 	})
 	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
 
-	err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
+	_, err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
 	if !errors.Is(err, runtime.ErrNudgeRejected) {
 		t.Fatalf("NudgeKeyed with an upstream-wrapped rejection = %v, want errors.Is(runtime.ErrNudgeRejected)", err)
 	}
@@ -192,6 +193,8 @@ func TestT3ExitCauseIsRejection(t *testing.T) {
 
 // A turn start whose handler died or was interrupted may still commit, so it
 // is not a rejection: redelivering under a new key could start a second turn.
+// Nor is it unavailable, which runtime.TurnFenceProvider reserves for a send
+// that sent nothing: deliver-now would queue the message a second time.
 func TestNudgeKeyedAmbiguousFailureIsNotErrNudgeRejected(t *testing.T) {
 	for name, cause := range map[string]interface{}{
 		"die":       map[string]interface{}{"_tag": "Die", "defect": "boom"},
@@ -203,13 +206,150 @@ func TestNudgeKeyedAmbiguousFailureIsNotErrNudgeRejected(t *testing.T) {
 			server.failCommand("thread.turn.start", cause)
 			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
 
-			err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
+			_, err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
 			if err == nil {
 				t.Fatal("NudgeKeyed with a failed turn start = nil, want the failure")
 			}
 			if errors.Is(err, runtime.ErrNudgeRejected) {
 				t.Fatalf("NudgeKeyed with a %s cause = %v, want an ambiguous (non-rejection) error", name, err)
 			}
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("NudgeKeyed with a %s cause = %v, want an error that does not claim nothing was sent", name, err)
+			}
 		})
+	}
+}
+
+// sentTurnStart is the one turn start server saw: its message id and the
+// createdAt it carried, parsed.
+func sentTurnStart(t *testing.T, server *t3BridgeTestServer) (string, time.Time, string) {
+	t.Helper()
+	payloads := server.commandPayloads("thread.turn.start")
+	if len(payloads) != 1 {
+		t.Fatalf("turn starts = %+v, want one", payloads)
+	}
+	message, _ := payloads[0]["message"].(map[string]interface{})
+	messageID, _ := message["messageId"].(string)
+	created, _ := payloads[0]["createdAt"].(string)
+	at, err := time.Parse(t3TimeLayout, created)
+	if err != nil {
+		t.Fatalf("createdAt %q: %v", created, err)
+	}
+	return messageID, at, created
+}
+
+// Kills a receipt naming the command id (M9) or a second time.Now() (M10):
+// it is the wire message id and exactly the createdAt the send carried.
+func TestNudgeKeyedReceiptIsTheSentMessage(t *testing.T) {
+	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+	t.Cleanup(server.Close)
+	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+	r, err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "gc:op-1:1")
+	if err != nil {
+		t.Fatalf("NudgeKeyed: %v", err)
+	}
+	messageID, at, _ := sentTurnStart(t, server)
+	if r.MessageID != messageID || r.MessageID != deriveDeliveryIDs("city-a", "thread-agent-a", "gc:op-1:1").messageID {
+		t.Fatalf("receipt message id = %q, want the sent message id %q", r.MessageID, messageID)
+	}
+	if !r.MessageAt.Equal(at) || r.TurnID != "" {
+		t.Fatalf("receipt = %+v, want MessageAt %v exactly and no turn", r, at)
+	}
+	if strings.Contains(r.MessageID, "op-1") {
+		t.Fatalf("receipt message id %q carries the key", r.MessageID)
+	}
+}
+
+// Kills a fenced path that ignores the receipt slot (M11); without a slot
+// the wire is the same and nothing panics.
+func TestNudgeFencedFillsTheReceiptSlot(t *testing.T) {
+	server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(t3Fence)))
+	p := newTurnFenceTestProvider(t, server)
+	var r runtime.DeliveryReceipt
+	if err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence, DeliveryKey: "k1", Receipt: &r}); err != nil {
+		t.Fatalf("NudgeFenced: %v", err)
+	}
+	messageID, at, _ := sentTurnStart(t, server)
+	if r.MessageID != messageID || !r.MessageAt.Equal(at) {
+		t.Fatalf("receipt = %+v, want message %q at %v", r, messageID, at)
+	}
+	if err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence, DeliveryKey: "k1"}); err != nil {
+		t.Fatalf("NudgeFenced without a slot: %v", err)
+	}
+	if ids := keyedNudgeIDs(t, server); len(ids) != 2 || ids[0] != ids[1] {
+		t.Fatalf("turn ids = %v, want the same ids twice", ids)
+	}
+}
+
+// Kills a receipt reported with an error (M12): a rejection, an unconfirmed
+// send and an outage all report none.
+func TestNudgeKeyedErrorsReportNoReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*t3BridgeTestServer)
+		url   bool
+		want  error
+	}{
+		{name: "rejected", setup: func(s *t3BridgeTestServer) { s.rejectCommand("thread.turn.start", "archived") }, want: runtime.ErrNudgeRejected},
+		{name: "ambiguous", setup: func(s *t3BridgeTestServer) {
+			s.failCommand("thread.turn.start", map[string]interface{}{"_tag": "Die", "defect": "boom"})
+		}},
+		{name: "unavailable", url: true, want: runtime.ErrRuntimeUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url := unreachableBridgeURL
+			if !tc.url {
+				server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+				t.Cleanup(server.Close)
+				tc.setup(server)
+				url = server.wsURL()
+			}
+			_, sp := newSeamBackedSnapshotTestProvider(t, url)
+			r, err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "k")
+			if err == nil || (tc.want != nil && !errors.Is(err, tc.want)) || !r.IsZero() {
+				t.Fatalf("NudgeKeyed = %+v, %v; want no receipt and an error (%v)", r, err, tc.want)
+			}
+		})
+	}
+	t.Run("unconfirmed fenced", func(t *testing.T) {
+		next := runtime.InputFence{Generation: 2, Epoch: 3, Token: "tok-next"}
+		server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(t3Fence)))
+		p := newTurnFenceTestProvider(t, server)
+		server.dropNextCommand()
+		server.setCommandHook(func(map[string]interface{}) {
+			server.setSnapshots(fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(next)))
+		})
+		var r runtime.DeliveryReceipt
+		err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence, DeliveryKey: "k1", Receipt: &r})
+		if !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) || !r.IsZero() {
+			t.Fatalf("NudgeFenced = %v with receipt %+v; want unconfirmed and no receipt", err, r)
+		}
+	})
+}
+
+// Pins the basis of DES-O1 §4.8 row 3 on T3: the receipt's MessageAt is the
+// started turn's requestedAt as TurnHistory reads it.
+func TestNudgeKeyedReceiptMatchesTheTurnsRequestedAt(t *testing.T) {
+	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+	t.Cleanup(server.Close)
+	server.setCommandHook(func(payload map[string]interface{}) {
+		created, _ := payload["createdAt"].(string)
+		snapshot := boundThreadSnapshot("running")
+		thread := snapshot["threads"].([]interface{})[0].(map[string]interface{})
+		thread["session"] = map[string]interface{}{"status": "running", "activeTurnId": "t1"}
+		thread["latestTurn"] = latestTurn("t1", "running", created, "")
+		server.setSnapshots(snapshot)
+	})
+	backed, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+	r, err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := backed.raw.TurnHistory(t.Context(), "agent-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.CurrentStart.Equal(r.MessageAt) || r.MessageAt.IsZero() {
+		t.Fatalf("CurrentStart = %v, receipt MessageAt = %v; want equal", h.CurrentStart, r.MessageAt)
 	}
 }

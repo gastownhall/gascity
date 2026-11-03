@@ -1213,7 +1213,7 @@ func migratedThenCollectedCity(t *testing.T) (cityPath string, cfg *config.City,
 	}
 	// Past the TTL for every seeded row, so this sweep is the first post-cutover
 	// GC a real city would run rather than a no-op.
-	purged, err := gc.runGC(beads.GraphStore{Store: binding}, beads.SessionStore{}, beads.MailStore{Store: binding}, time.Now().Add(72*time.Hour))
+	purged, err := gc.runGC(nil, beads.GraphStore{Store: binding}, beads.SessionStore{}, beads.MailStore{Store: binding}, time.Now().Add(72*time.Hour))
 	if err != nil {
 		t.Fatalf("wisp gc: %v", err)
 	}
@@ -1633,8 +1633,11 @@ func (s undeppableInfraSource) DepList(id, direction string) ([]beads.Dep, error
 	if s.seen == nil {
 		return nil, s.err
 	}
-	s.seen[id]++
-	if s.seen[id] > 1 {
+	// Per direction: the source refusal reads each row's edges both ways
+	// once, and the import's second read down is the one that fails.
+	key := id + " " + direction
+	s.seen[key]++
+	if s.seen[key] > 1 {
 		return nil, s.err
 	}
 	return s.Store.DepList(id, direction)

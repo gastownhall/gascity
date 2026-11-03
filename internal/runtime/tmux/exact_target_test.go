@@ -286,19 +286,19 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 		{
 			"sendLiteralText",
 			scriptedTargetExecutor{},
-			func(tm *Tmux) { _ = tm.sendLiteralText("worker-1", "hi") },
+			func(tm *Tmux) { _ = tm.sendLiteralText(context.Background(), "worker-1", "hi") },
 			[]string{"send-keys"},
 		},
 		{
 			"pasteLiteralText",
 			scriptedTargetExecutor{},
-			func(tm *Tmux) { _ = tm.pasteLiteralText("worker-1", "hi") },
+			func(tm *Tmux) { _ = tm.pasteLiteralText(context.Background(), "worker-1", "hi") },
 			[]string{"paste-buffer"},
 		},
 		{
 			"sendNudgeSubmitSequence",
 			scriptedTargetExecutor{},
-			func(tm *Tmux) { _ = tm.sendNudgeSubmitSequence("worker-1", []string{"Enter"}) },
+			func(tm *Tmux) { _ = tm.sendNudgeSubmitSequence(context.Background(), "worker-1", []string{"Enter"}) },
 			[]string{"send-keys"},
 		},
 		{
@@ -316,7 +316,7 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 		{
 			"dismissMidSessionDialogBeforeNudge",
 			scriptedTargetExecutor{captures: []string{resumeDialogPane}},
-			func(tm *Tmux) { tm.dismissMidSessionDialogBeforeNudge("worker-1") },
+			func(tm *Tmux) { tm.dismissMidSessionDialogBeforeNudge(context.Background(), "worker-1") },
 			[]string{"capture-pane", "send-keys"},
 		},
 		{

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -79,10 +80,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
+			freshness := cacheAgeSeconds(cityStore)
 			return &ListOutput[beads.Bead]{
-				Index:     hit.Index,
-				CacheAgeS: cacheAgeSeconds(cityStore),
-				Body:      hit.Body,
+				Index:        hit.Index,
+				CacheAgeS:    freshness.ageS,
+				CacheRefresh: freshness.refresh,
+				Body:         hit.Body,
 			}, nil
 		}
 	}
@@ -176,7 +179,15 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				query.SeekAfter = seek
 			}
 			pa.attempt()
-			list, err := leg.store.List(query)
+			// One leg of the /beads fan-out (work legs, then the class
+			// binding): each lists only its own rows, so a type or label the
+			// other legs own misses here by design.
+			var list []beads.Bead
+			err := beads.FederatedRead(func() error {
+				var listErr error
+				list, listErr = leg.store.List(query)
+				return listErr
+			})
 			if err != nil {
 				if leg.graph {
 					// The graph leg is the execution DAG, not a rig: any degraded
@@ -252,7 +263,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
 	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
@@ -273,9 +284,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[beads.Bead]]{Index: index, Body: body})
 	}
 	return &ListOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAge,
-		Body:      body,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         body,
 	}, nil
 }
 
@@ -512,6 +524,12 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
+//   - Frame: every rig BeadStores holds, suspended ones included. `gc ready`
+//     deliberately does not match this: it federates the serving rigs only,
+//     the frame the controller's demand census reads, so a suspended rig's own
+//     rows are in this answer and absent from the CLI's (ga-h07n0z; see
+//     readyServingRigs in cmd/gc/ready_federation.go). CLI == API holds over a
+//     city with no suspended rig.
 //   - Within a leg: whatever order that leg's own Ready reader emits. For a
 //     work store (CachingStore.Ready) and for the canonical relocated binding
 //     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
@@ -558,9 +576,14 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
-	var all []beads.Bead
 	var pa partialAggregator
-	seen := make(map[string]bool)
+	// Each leg's rows are kept by leg so a split city can pass them through the
+	// cross-store rule before they merge (below).
+	type readyLeg struct {
+		leg  readywork.Leg
+		rows []beads.Bead
+	}
+	var legs []readyLeg
 	federate := func(label string, store beads.Store) {
 		if store == nil {
 			return
@@ -578,16 +601,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		} else {
 			pa.success()
 		}
-		for _, b := range ready {
-			if seen[b.ID] {
-				// An id is one bead: legacy file mode can alias the city and rig
-				// stores, and a migrated split city holds the same infrastructure
-				// row in both the work store and the binding.
-				continue
-			}
-			seen[b.ID] = true
-			all = append(all, b)
-		}
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store}, rows: ready})
 	}
 	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
 	// beads) lives in the city store, so federate it explicitly first or HTTP
@@ -616,18 +630,50 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		for _, b := range ready {
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
+	}
+	if pa.totalOutage() {
+		return nil, pa.outageError()
+	}
+	// On a split city every leg's rows pass through the same cross-store rule
+	// `gc ready` and pool demand apply (readywork.LegGate): a row a blocker
+	// held in another store still holds is not served, and a row a store
+	// strands behind a blocker that has closed elsewhere is. One gate judges
+	// every leg, so a blocker several legs' rows wait on is read once. A city
+	// with no binding keeps every store's own answer.
+	federated := make([]readywork.Leg, len(legs))
+	for i, l := range legs {
+		federated[i] = l.leg
+	}
+	if readywork.IsSplit(federated) {
+		gate := readywork.NewLegGate(federated, readyFederationQuery())
+		for i := range legs {
+			gated, err := gate.Gate(ctx, i, legs[i].rows)
+			if err != nil {
+				// A leg whose blockers could not be judged serves nothing: an
+				// ungated row may be one a blocker still holds. The response
+				// says it is short, as it does for a leg that failed to read.
+				pa.record(legs[i].leg.Label, fmt.Errorf("cross-store blockers: %w", err))
+				legs[i].rows = nil
+				continue
+			}
+			legs[i].rows = gated
+		}
+	}
+	var all []beads.Bead
+	seen := make(map[string]bool)
+	for _, l := range legs {
+		for _, b := range l.rows {
 			if seen[b.ID] {
+				// An id is one bead: legacy file mode can alias the city and rig
+				// stores, and a migrated split city holds the same infrastructure
+				// row in both the work store and the binding.
 				continue
 			}
 			seen[b.ID] = true
 			all = append(all, b)
 		}
 	}
-	if pa.totalOutage() {
-		return nil, pa.outageError()
-	}
-
 	if all == nil {
 		all = []beads.Bead{}
 	}
@@ -699,10 +745,12 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
+	freshness := cacheAgeSeconds(cityStore)
 	return &IndexOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(cityStore),
-		Body:      b,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         b,
 	}, nil
 }
 
@@ -762,6 +810,16 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 			// review).
 			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
 				return beads.Bead{}, err
+			}
+			// Record who made a write-auth-verified request. Cloned so the
+			// request body, which the idempotency digest covers, is never
+			// mutated.
+			if kid, ok := VerifiedPrincipal(ctx); ok {
+				candidate.Metadata = maps.Clone(candidate.Metadata)
+				if candidate.Metadata == nil {
+					candidate.Metadata = make(map[string]string, 1)
+				}
+				candidate.Metadata[beadmeta.InitiatorMetadataKey] = kid
 			}
 			// The store follows from the bead, not from the request: an
 			// infrastructure-class body belongs in this city's class binding
@@ -953,8 +1011,14 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	}
 	// Before the assignee's normalization, which may materialize a named
 	// session: a refused write creates nothing.
-	if err := refuseGenericWrite(id, &current, afterUpdate(current, body), genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
+	after := afterUpdate(current, body)
+	if err := refuseGenericWrite(id, &current, after, genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
 		return nil, err
+	}
+	if beadUpdateMutation(body).TouchesClass() {
+		if err := s.refuseClassFlip(id, store, current, after); err != nil {
+			return nil, err
+		}
 	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
@@ -1107,8 +1171,11 @@ func ownerOf(b beads.Bead) (kind, owner string) {
 func refuseGenericWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
 	var invalid []*huma.ErrorDetail
 	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
-		if !beadmeta.ValidKey(k) {
+		switch {
+		case !beadmeta.ValidKey(k):
 			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
+		case k == beadmeta.InitiatorMetadataKey:
+			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "server-owned metadata key: the server records who made the request", Value: w.meta[k]})
 		}
 	}
 	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {
@@ -1157,22 +1224,63 @@ type genericWrite struct {
 
 // afterUpdate is current with the update's type, label and metadata changes
 // applied: the row the update would leave, as far as whether it is owned.
+//
+// It is the update stated as a coordclass.Mutation, the shape the
+// class-must-not-flip guard (coordclass.CheckFlip) judges for every door.
 func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
-	after := current
-	if body.Type != nil {
-		after.Type = *body.Type
+	return beadUpdateMutation(body).Apply(current)
+}
+
+// beadUpdateMutation is a generic update's type, label and metadata writes.
+func beadUpdateMutation(body beadUpdateBody) coordclass.Mutation {
+	return coordclass.Mutation{
+		Type:         body.Type,
+		AddLabels:    body.Labels,
+		RemoveLabels: body.RemoveLabels,
+		SetMetadata:  body.Metadata,
 	}
-	if len(body.Metadata) > 0 {
-		after.Metadata = maps.Clone(current.Metadata)
-		if after.Metadata == nil {
-			after.Metadata = make(map[string]string, len(body.Metadata))
+}
+
+// refuseClassFlip is the bead API's door onto the one class-must-not-flip
+// guard (coordclass.CheckFlip). On a split city a work store holds only work
+// beads and a class binding only its classes, so a write that changes a bead's
+// class in place — a work bead given gc.root_bead_id, a wisp label or gc:rt; a
+// graph step whose only graph marker is blanked — strands it in a store its
+// class is never read from. One stranded row makes every later routed gc
+// command refuse. It is refused here with 422 and nothing is written.
+//
+// A single-store city holds every class in its one store, so storeClassHolds
+// answers nil there and the guard is silent: no behavior change.
+func (s *Server) refuseClassFlip(id string, store beads.Store, before, after beads.Bead) error {
+	flip := coordclass.CheckFlip(before, after, s.storeClassHolds(store))
+	if flip == nil {
+		return nil
+	}
+	return apierr.ValidationFailed.With(fmt.Sprintf("bead %s: %s. %s", id, flip.Error(), flip.Guidance()),
+		&huma.ErrorDetail{Location: "body", Message: fmt.Sprintf("changes the bead's class from %s to %s", flip.Before, flip.After), Value: id})
+}
+
+// storeClassHolds returns the classes store holds on this city, or nil on a
+// single-store city (where the one store holds every class). A class binding
+// holds the classes it serves; a work store — the city's or a rig's — holds
+// work plus every class no binding serves.
+func (s *Server) storeClassHolds(store beads.Store) []coordclass.Class {
+	topo := s.residencyTopology()
+	if topo.IsSingleStore() {
+		return nil
+	}
+	for _, binding := range topo.Bindings {
+		if binding.Leg.Store == store { // residency:allow — identifies which binding the already-resolved owner store is, to read its classes; resolves no bead
+			return binding.Classes
 		}
-		maps.Copy(after.Metadata, body.Metadata)
 	}
-	labels := slices.Clone(current.Labels)
-	labels = append(labels, body.Labels...)
-	after.Labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(body.RemoveLabels, l) })
-	return after
+	holds := []coordclass.Class{coordclass.ClassWork}
+	for _, class := range coordclass.Classes() {
+		if _, served := topo.BindingFor(class); class.IsInfrastructure() && !served {
+			holds = append(holds, class)
+		}
+	}
+	return holds
 }
 
 // awaitBeadParentProjection waits, for at most

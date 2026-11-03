@@ -14,8 +14,9 @@ import (
 // decideRow's drift arms (CONTRACT v5 §4, A14 and A16; plan C7b1): config
 // drift on an alive row, in legacy's order (session_reconciler.go's drift
 // block), and the execution backstop's drain request (NUDGE-022). A
-// version-mismatched stored hash is A8's to rebaseline, never A14's to
-// repair or drain. A live drift's RunLive (SESS-565) and an asleep named
+// version-artifact stored hash (runtime.IsCoreHashArtifact; a v6 one of
+// changed config is a drift) is A8's to rebaseline, never A14's to repair
+// or drain. A live drift's RunLive (SESS-565) and an asleep named
 // row's repair (SESS-566/568) are C7b2-1's; a named row's restart in place
 // (SESS-557) on the stop verb, with its deferrals (SESS-555), and a
 // launch-only relaunch (SESS-556/560) with its fallback are C7b2-2's.
@@ -62,7 +63,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	if e.Liveness != livenessAlive {
-		return r.driftRepair(stored, core)
+		return r.driftRepair(cfg, stored, core)
 	}
 	if stored == core {
 		if info.ConfigDriftDeferredAt+info.ConfigDriftDeferredKey+info.AttachedConfigDriftDeferredAt+info.AttachedConfigDriftDeferredKey != "" {
@@ -76,7 +77,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	key, now, obs := stored+":"+core, r.w.Now, r.w.Observed[r.k]
 	_, active := activeStop(r.row)
 	launchOnly := r.w.Env.relaunches() && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" && // a conjoined runtime takes the full path
-		info.StartedProvisionHash == runtime.ProvisionFingerprint(cfg) && info.StartedLaunchHash != runtime.LaunchFingerprint(cfg)
+		runtime.ProvisionHashMatches(info.StartedProvisionHash, cfg) && !runtime.LaunchHashMatches(info.StartedLaunchHash, cfg)
 	switch {
 	case obs.Attached || obs.Uncertain:
 		if driftStampFresh(info.AttachedConfigDriftDeferredKey, info.AttachedConfigDriftDeferredAt, key, now, sessionAttachedConfigDriftRefreshInterval) {
@@ -127,10 +128,11 @@ func (r *rowFacts) driftRestart(relaunch bool) (intent, bool) {
 	return r.heal(intentDriftRestart, decideDriftRestart, nil)
 }
 
-// liveApply is SESS-565: a live hash of this binary's version that differs
-// from the template's (A8, decided first, backfills an empty one with no
-// session_live and rebaselines another version's) has session_live run
-// again on the row's own runtime, then the live hashes recorded.
+// liveApply is SESS-565: a live hash of this binary's version, or a v6 one
+// of another session_live, that differs from the template's (A8, decided
+// first, backfills an empty one with no session_live and rebaselines another
+// version's) has session_live run again on the row's own runtime, then the
+// live hashes recorded.
 func (r *rowFacts) liveApply(cfg runtime.Config) (intent, bool) {
 	stored, live := r.row.Info.StartedLiveHash, runtime.LiveFingerprint(cfg)
 	if stored == live || stored == "" && len(cfg.SessionLive) == 0 || !r.freshOwnAlive() {
@@ -155,9 +157,9 @@ func liveHashPatch(live string) session.MetadataPatch {
 // as legacy repairs and then starts it: its key cleared, so the PreWake's
 // set-once fill mints the fresh conversation's, never resuming the old one
 // on the drifted config.
-func (r *rowFacts) driftRepair(stored, core string) (intent, bool) {
+func (r *rowFacts) driftRepair(cfg runtime.Config, stored, core string) (intent, bool) {
 	info, now := r.row.Info, r.w.Now
-	if stored == core || !isNamedSessionInfo(info) || runtime.IsLegacyOrMismatchedVersion(stored) ||
+	if stored == core || !isNamedSessionInfo(info) || runtime.IsCoreHashArtifact(stored, cfg) ||
 		pendingResumePreservingNamedRestartAt(info, now, r.w.startupTimeout()) || !r.freshGone() {
 		return intent{}, false
 	}

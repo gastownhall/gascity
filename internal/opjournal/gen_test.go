@@ -115,6 +115,22 @@ func (g *opGen) op() Op {
 			op.Scope.Interaction = g.text(10)
 		}
 	}
+	if kind == KindRespond {
+		// A respond carries a RespondPayload and, on the lane, answers an
+		// occurrence at most once (validateRespondShape).
+		p := RespondPayload{Action: pick(r, []string{"approve", "deny", "approve_always"})}
+		if r.IntN(2) == 0 {
+			p.Text = g.text(12)
+		}
+		if r.IntN(2) == 0 {
+			p.Metadata = map[string]string{"source": g.text(8)}
+		}
+		op.Payload, _ = EncodeRespondPayload(p)
+		if op.Executor == ExecutorLane {
+			op.Scope.Interaction = fmt.Sprintf("req-%d#%d", r.IntN(1000), 1+r.IntN(5))
+			op.Policy.Guarantee = GuaranteeAtMostOnce
+		}
+	}
 	if spec.AllowsAfter && r.IntN(2) == 0 {
 		op.After = g.opID()
 	}
@@ -161,8 +177,53 @@ func (g *opGen) op() Op {
 		op.Transitions = append(op.Transitions, Transition{Status: pick(r, statuses), At: g.time(), By: g.text(10)})
 	}
 	op.ID, _ = DeriveID(pick(r, []string{"gc", "gcs", "my-city"}), op.Conversation, op.Producer.Principal, op.ClientKey)
+	g.laneFields(&op, spec)
 	op.PayloadDigest = RequestDigest(op)
 	return op
+}
+
+// laneFields gives a conversation-lane lane op random lane bookkeeping and, on
+// a succeeded outcome, a random delivery record and turn link.
+func (g *opGen) laneFields(op *Op, spec Spec) {
+	r := g.r
+	if op.Executor != ExecutorLane || spec.Lane != LaneConversation {
+		return
+	}
+	if r.IntN(2) == 0 {
+		op.RetryAt = g.time()
+	}
+	op.Failures = r.IntN(6)
+	if op.Attempt > 0 {
+		op.MaybeDelivered = r.IntN(op.Attempt + 1)
+	}
+	if r.IntN(2) == 0 {
+		op.DeliveryKey = pick(r, []string{op.ID, g.opID()}) + ":" + fmt.Sprint(1+r.IntN(1000))
+	}
+	if r.IntN(2) == 0 {
+		op.LastError = pick(r, []string{"lease_expired", "transient: pane busy " + g.text(20), "unknown: 日本語 🙂"})
+	}
+	if op.Outcome.Arm != ArmSucceeded || r.IntN(4) == 0 {
+		return
+	}
+	res := &op.Outcome.Result
+	res.Delivery = RecordedDelivery{
+		Seq: 1 + r.Uint64N(1<<40), At: g.time(),
+		Ack: pick(r, []AckKind{AckDelivered, AckDeliveredUnobserved, AckInBand}),
+	}
+	if r.IntN(2) == 0 {
+		res.Delivery.MessageID = g.text(20)
+		res.Delivery.MessageAt = g.time()
+	}
+	res.TurnLink = pick(r, []LinkConfidence{"", LinkExact, LinkCorrelated, LinkAmbiguous, LinkNone})
+	if res.TurnLink == "" {
+		return
+	}
+	res.TurnBasis = pick(r, []LinkBasis{BasisRuntimeTurn, BasisHistoryDiff, BasisNoSource, "a_newer_basis"})
+	if res.TurnLink == LinkNone {
+		res.Turn = ""
+	} else if res.Turn == "" {
+		res.Turn = g.text(10)
+	}
 }
 
 func (g *opGen) outcome(op *Op) Outcome {

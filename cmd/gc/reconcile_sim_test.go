@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -85,9 +86,11 @@ type simRuntime struct {
 }
 
 // simStart and simKill are the spy's records of a Start and of a
-// destructive call, with the runtime it hit.
+// destructive call, with the runtime it hit. A Start records the command it
+// launched and the work dir it launched in.
 type simStart struct {
 	Name, ID, Token              string
+	Command, WorkDir             string
 	FreshOnly, External, Created bool
 }
 
@@ -296,7 +299,7 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], FreshOnly: cfg.FreshOnly, External: p.external}
+	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], Command: cfg.Command, WorkDir: cfg.WorkDir, FreshOnly: cfg.FreshOnly, External: p.external}
 	err := p.nextStart
 	p.nextStart = nil
 	if err == nil && p.rts[name] != nil {
@@ -463,7 +466,9 @@ type sim struct {
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
 // seed one fault into the code under test through a test seam.
 type simOpts struct {
-	rows     func(s *sim) (city, rig []beads.Bead)
+	rows func(s *sim) (city, rig []beads.Bead)
+	// deps seeds the city leg's dependencies before its cache is primed.
+	deps     []beads.Dep
 	inflight func(*inflightMap) plannerInflight
 	specs    func(map[string]effectSpec)
 	// rowLock replaces runTx's session mutation lock, unobserved.
@@ -492,8 +497,12 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
-		m := beads.NewMemStoreFrom(0, rows, nil)
-		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+		var deps []beads.Dep
+		if name == simCityLeg {
+			deps = o.deps
+		}
+		m := beads.NewMemStoreFrom(0, rows, deps)
+		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
@@ -927,7 +936,7 @@ var externalOps = []struct {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if _, err := session.WriteKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
+		if _, err := session.WriteKillFence(beadstest.Sessions(l.backing), b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])
@@ -1285,12 +1294,14 @@ func (s *sim) failf(inv, format string, args ...any) {
 	}
 }
 
-// report fails t with the seed's violations and its schedule.
+// report fails t with the seed's violations, the command that reruns t's
+// top-level test on the seed, and its schedule.
 func (s *sim) report(t *testing.T) {
 	t.Helper()
 	if len(s.failures) > 0 {
-		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: GC_V2_SIM_SEED=%d go test -run TestSimCorpus ./cmd/gc/\nschedule:\n%s",
-			s.seed, s.lag, strings.Join(s.failures, "\n  "), s.seed, strings.Join(s.schedule, "\n"))
+		test, _, _ := strings.Cut(t.Name(), "/")
+		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: bazel test //cmd/gc:gc_test --test_sharding_strategy=disabled --test_filter='^%s$' --test_env=GC_V2_SIM_SEED=%d\nschedule:\n%s",
+			s.seed, s.lag, strings.Join(s.failures, "\n  "), test, s.seed, strings.Join(s.schedule, "\n"))
 	}
 }
 

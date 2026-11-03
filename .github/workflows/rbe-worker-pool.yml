@@ -58,8 +58,9 @@ jobs:
       # worker-env (rbe-worker's worker-env-drift): provision and measure this
       # host against the pin before serving. Drift fails this step, never the
       # worker: a drifted worker still registers (advertising what it
-      # measured) and serves the pool's actions that send no worker-env
-      # (beads). The upload is what await-drift reports from.
+      # measured) and serves only the pool's actions that send no
+      # worker-env. gascity's and beads' both send the pin, so it serves
+      # neither. The upload is what await-drift reports from.
       - name: Measure this host against the worker-env pin
         id: worker-env
         continue-on-error: true

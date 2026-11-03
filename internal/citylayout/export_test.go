@@ -91,6 +91,10 @@ func TestDefaultWorkDirExportExcludesDenyControllerState(t *testing.T) {
 		".gc/dispatch-wake",
 		".gc/storage-served-binding.json",
 		".gc/storage-infra-cleared.json",
+		".gc/storage-attestations.log",
+		".gc/reconciler-v2-fallback.json",
+		".gc/remote-stage.toml",
+		".gc/storage-window.json",
 		".gc/cache/packs/x/child.pid",
 		".beads/dolt/hq/.dolt/noms/x",
 		".beads/embeddeddolt/hq/.dolt/noms/x",
@@ -151,6 +155,27 @@ func TestDefaultWorkDirExportExcludesDenyControllerState(t *testing.T) {
 			t.Errorf("%s should be excluded from the work-dir export", rel)
 		}
 	}
+}
+
+// TestWorkDirExportExcludesControlPlaneDescriptor keeps the worker-site
+// descriptor in the box that `gc connect` wrote it in, and only that file:
+// the rest of .gc/ is classified as before.
+func TestWorkDirExportExcludesControlPlaneDescriptor(t *testing.T) {
+	if ControlPlaneDescriptorPath != ".gc/control-plane.toml" {
+		t.Fatalf("ControlPlaneDescriptorPath = %q, want .gc/control-plane.toml", ControlPlaneDescriptorPath)
+	}
+	if !excludedByDefault(t, ControlPlaneDescriptorPath) {
+		t.Fatalf("%s is exported from a work dir", ControlPlaneDescriptorPath)
+	}
+	for _, rel := range []string{".gc/control-plane.toml.bak", ".gc/control-plane", "control-plane.toml"} {
+		if excludedByDefault(t, rel) {
+			t.Errorf("%s is excluded; only the descriptor itself is", rel)
+		}
+	}
+
+	workDir := t.TempDir()
+	writeExportTree(t, workDir, ControlPlaneDescriptorPath, ".gc/site.toml", "city.toml")
+	assertExportEntries(t, exportEntries(t, workDir), ".gc/site.toml", "city.toml")
 }
 
 func TestDefaultWorkDirExportExcludesKeepDeploymentArtifacts(t *testing.T) {
@@ -253,10 +278,19 @@ var soleMatchProbes = map[string]string{
 	".gc/worktrees/**":                 ".gc/worktrees/rig/agent/main.go",
 	".gc/agents/**":                    ".gc/agents/dog/src/main.go",
 	".gc/scope-ownership.json":         ".gc/scope-ownership.json",
+	".gc/bd-inventory-vouch.json":      ".gc/bd-inventory-vouch.json",
+	".gc/cache/bd-inventory.json":      ".gc/cache/bd-inventory.json",
+	".gc/cache/bd-inventory.json.lock": ".gc/cache/bd-inventory.json.lock",
+	".gc/cache/tmp/**":                 ".gc/cache/tmp/bd-walk-1/x",
 	".gc/mcp-locks/**":                 ".gc/mcp-locks/abc",
 	".gc/dispatch-wake":                ".gc/dispatch-wake",
+	".gc/control-plane.toml":           ".gc/control-plane.toml",
 	".gc/storage-served-binding.json":  ".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json":   ".gc/storage-infra-cleared.json",
+	".gc/storage-attestations.log":     ".gc/storage-attestations.log",
+	".gc/reconciler-v2-fallback.json":  ".gc/reconciler-v2-fallback.json",
+	".gc/remote-stage.toml":            ".gc/remote-stage.toml",
+	".gc/storage-window.json":          ".gc/storage-window.json",
 	".gc/mcp-adopted/**":               ".gc/mcp-adopted/claude/settings.json",
 	".gc/emergency/**":                 ".gc/emergency/spool/1.json",
 	".gc/jsonl-archive/**":             ".gc/jsonl-archive/2026-01.jsonl",

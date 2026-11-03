@@ -126,6 +126,12 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return stopCommandOutcome{code: 1}
 	}
+	// A worker site's controller is the remote one: stopping here would tear
+	// down sessions and the bead store behind it.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return stopCommandOutcome{code: 1, cityPath: cityPath}
+	}
 
 	stopStdout := stdout
 	if jsonOut {
@@ -419,6 +425,10 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 // default wall-clock cap that extendCap grows (nil when the cap is the
 // operator's --timeout, or there is none).
 func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	cityName := loadedCityName(cfg, cityPath)
 
 	// If a controller is running, ask it to shut down (it stops agents).
@@ -524,15 +534,15 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 	var recorded, recordedUnknown []string
 	var recordedUnread error
 	if !runtime.ListRunningAttested(sp) {
-		listed, listErr := sp.ListRunning("")
+		listed, attested, listErr := runtime.ListRunningWithAttestation(sp, "")
 		unreachable = listErr != nil
-		if recordedSweepAllowed(sp, listErr) {
+		if recordedSweepAllowed(sp, attested, listErr) {
 			skip := maps.Clone(desired)
 			for _, name := range listed {
 				skip[strings.TrimSpace(name)] = true
 			}
 			var found []string
-			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
+			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, attested, "gc stop", stderr)
 			recorded = slices.DeleteFunc(found, func(sn string) bool { return slices.Contains(recordedUnknown, sn) })
 			if extendCap != nil && len(recorded) > 0 {
 				extendCap(stopCapExtensionForRecorded(cfg, len(recorded), !stopTargetsAllResolved(recorded, cfg, sessStore)))
@@ -547,11 +557,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		graceTimeout = 0
 	}
 
-	// A start the controller died in leaves its row creating, a state the stop
-	// sweep's suspend refuses (it is the start's own), so its runtime would
-	// outlive the stop. With no controller left, stop those first.
-	// A start in flight is left to that start: keep it out of the sweep (whose
-	// stop would kill it under its starter) and in desired (so the orphan sweep
+	// A start the controller died in leaves its row creating. The sweep's
+	// suspend tears such a row's runtime down too (its sweep-only latitude),
+	// but this pass is what reports a row the stop could not verify, and what
+	// keeps a start still owned by a live starter out of the sweep (whose stop
+	// would kill it under its starter) and in desired (so the orphan sweep
 	// does not stop it either).
 	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, unreachable, stdout, stderr)
 	if len(inFlight) > 0 {
@@ -628,9 +638,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // for the standalone stop, which runs only once no controller serves the city.
 // A starter holds the runtime name's flock from before it records creating
 // until it commits the start, so a free flock means the process that wrote the
-// row died mid-start (a controller crash). The stop sweep's suspend refuses a
-// creating row, so without this its runtime outlives the stop. The row is left
-// as it is, for the reconciler to resolve on the next start.
+// row died mid-start (a controller crash). The row is left as it is, its
+// in-flight marker with it, for the reconciler to relaunch on the next start:
+// the stop sweep's suspend, which tears a listed creating row's runtime down
+// too, writes nothing to it either. This pass also stops one the runtime does
+// not list, and reports a row the stop could not stop or check.
 //
 // A name whose flock is held is a start in flight, whether or not its runtime
 // is up yet: it is reported and returned in inFlight, for the caller to keep

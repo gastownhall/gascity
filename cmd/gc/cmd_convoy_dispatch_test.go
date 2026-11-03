@@ -1361,6 +1361,90 @@ func TestRoutineControlPending_IsNotBudgetedOrEscalated(t *testing.T) {
 	}
 }
 
+// TestStopCanceledFinalizerStaysOpenForRetry pins the stop window: a drain or
+// stop signals the dispatcher's children first, so a bd read in flight exits
+// "context canceled" while the dispatcher is still alive to handle it. That
+// store never answered, so the finalizer must stay open for the next dispatcher
+// instead of being quarantined and settling its root as failed.
+func TestStopCanceledFinalizerStaysOpenForRetry(t *testing.T) {
+	cases := []struct {
+		name  string
+		cause func(finID, rootID string) error
+	}{
+		{
+			name: "bd read cut short",
+			cause: func(finID, _ string) error {
+				return fmt.Errorf("%s: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled", finID)
+			},
+		},
+		{
+			name: "source workflow lock wait canceled",
+			cause: func(_, rootID string) error {
+				return fmt.Errorf("%s: closing source bead chain: %w", rootID, context.Canceled)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			// A Tier B mis-tiering would quarantine on the first refusal.
+			t.Setenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET", "0s")
+
+			store := beads.NewMemStore()
+			root, err := store.Create(beads.Bead{Title: "workflow", Type: "task"})
+			if err != nil {
+				t.Fatalf("create root: %v", err)
+			}
+			fin, err := store.Create(beads.Bead{
+				Title: "Finalize workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+					beadmeta.RootBeadIDMetadataKey: root.ID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create finalizer: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, fin, fin.ID, tc.cause(fin.ID, root.ID), &stderr)
+			if got == nil {
+				t.Fatal("handleControlDispatchError = nil, want the cause returned for retry (nil means quarantined)")
+			}
+			if !dispatch.IsTransientControllerError(got) {
+				t.Fatalf("handleControlDispatchError = %v, want a transient controller error", got)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence for a stop-canceled read", stderr.String())
+			}
+
+			for _, id := range []string{fin.ID, root.ID} {
+				after, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("get %s: %v", id, err)
+				}
+				if after.Status != "open" {
+					t.Fatalf("%s status = %q, want open", id, after.Status)
+				}
+				if slices.Contains(after.Labels, "gc:control-quarantined") {
+					t.Fatalf("%s labels = %#v, want no gc:control-quarantined", id, after.Labels)
+				}
+				for _, key := range []string{
+					beadmeta.OutcomeMetadataKey,
+					beadmeta.FailureClassMetadataKey,
+					beadmeta.ControllerRetryFirstSeenMetadataKey,
+					beadmeta.ControllerRetryCountMetadataKey,
+				} {
+					if v := after.Metadata[key]; v != "" {
+						t.Fatalf("%s %s = %q, want empty (no write on a stop-canceled read)", id, key, v)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestPendingControlRefusal_FirstRefusalIsNotQuiet keeps the quiet marking from
 // swallowing the first report of a new problem: the sweep that discovers a
 // pending refusal must still count as activity so the serve loop reacts to it.
@@ -2749,6 +2833,160 @@ func TestCmdWorkflowReopenSourcePreRoutesToRunTarget(t *testing.T) {
 	const wantRoute = "myrig/voxist.reviewer"
 	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != wantRoute {
 		t.Fatalf("gc.routed_to = %q, want %q (pre-routed to gc.run_target)", got, wantRoute)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+	if updated.Assignee != "" {
+		t.Fatalf("assignee = %q, want empty", updated.Assignee)
+	}
+}
+
+// TestCmdWorkflowReopenSourceDropsGraphExecutionRoute: a graph.v2 wrap leaves
+// the source carrying gc.execution_routed_to, which the detached-orphan sweep
+// reads as a workflow's bead and never re-routes. reopen-source hands the bead
+// back to the pool, so it drops that execution route in the write that routes
+// the bead: a route the bead loses once it is back in the pool is recovered as
+// usual. A route the caller wrote wins over the execution route.
+func TestCmdWorkflowReopenSourceDropsGraphExecutionRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "workflow_id", "wf-gone"); err != nil {
+		t.Fatalf("SetMetadata(workflow_id): %v", err)
+	}
+	if err := store.SetMetadata(source.ID, "gc.execution_routed_to", "myrig/voxist.reviewer"); err != nil {
+		t.Fatalf("SetMetadata(gc.execution_routed_to): %v", err)
+	}
+	// The caller writes the route before it reopens the bead (ga-20zd).
+	if err := store.SetMetadata(source.ID, "gc.routed_to", "myrig/voxist.executor"); err != nil {
+		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.execution_routed_to"]); got != "" {
+		t.Fatalf("gc.execution_routed_to = %q, want cleared (the bead is back in the pool)", got)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "myrig/voxist.executor" {
+		t.Fatalf("gc.routed_to = %q, want the caller's myrig/voxist.executor preserved over the execution route", got)
+	}
+	if updated.Status != "open" {
+		t.Fatalf("status = %q, want open", updated.Status)
+	}
+}
+
+// TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource: a graph.v2 wrap
+// moves the source's pool route to gc.execution_routed_to and clears
+// gc.routed_to and gc.run_target, the keys reopen-source pre-routes from
+// (FR-C0.1). Reopened after its workflow is cleaned up, with no route written
+// in between, the source must still go back to the pool it was routed to:
+// neither route recovery nor the detached-orphan sweep would route it again.
+func TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+
+	deps, slingStdout, slingStderr := testDeps(graphWorkSlingTestCity(t), runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+	// The workflow is graph class: it goes to the graph store gc sling
+	// resolves for this city, the source stays in the work store.
+	deps.GraphStore = resolveGraphStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil)
+	maxPolecats := 5
+	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
+
+	// Route the source to the pool, then wrap it in a graph.v2 workflow.
+	if code := doSling(testOpts(a, source.ID), deps, nil, slingStdout, slingStderr); code != 0 {
+		t.Fatalf("plain doSling returned %d, want 0; stderr: %s", code, slingStderr.String())
+	}
+	wrap := testOpts(a, source.ID)
+	wrap.OnFormula = "graph-work"
+	wrap.ScopeKind = "city"
+	wrap.ScopeRef = "test-city"
+	if code := doSling(wrap, deps, nil, slingStdout, slingStderr); code != 0 {
+		t.Fatalf("--on doSling returned %d, want 0; stderr: %s", code, slingStderr.String())
+	}
+	wrapped, err := store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source) after the wrap: %v", err)
+	}
+	if got, exec := wrapped.Metadata["gc.routed_to"], wrapped.Metadata["gc.execution_routed_to"]; got != "" || exec != "polecat" {
+		t.Fatalf("precondition: after the wrap gc.routed_to = %q, gc.execution_routed_to = %q; want \"\" and polecat", got, exec)
+	}
+
+	// Clean up the workflow.
+	roots, err := deps.GraphStore.List(beads.ListQuery{Metadata: map[string]string{"gc.kind": "workflow"}, AllowScan: true})
+	if err != nil {
+		t.Fatalf("List(workflow roots): %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow roots = %d, want 1: %#v", len(roots), roots)
+	}
+	if _, err := sourceworkflow.CloseWorkflowSubtree(deps.GraphStore, roots[0].ID); err != nil {
+		t.Fatalf("CloseWorkflowSubtree(%s): %v", roots[0].ID, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updated, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "polecat" {
+		t.Fatalf("gc.routed_to = %q, want polecat (pre-routed from the wrap's execution route)", got)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.execution_routed_to"]); got != "" {
+		t.Fatalf("gc.execution_routed_to = %q, want cleared (the bead is back in the pool)", got)
 	}
 	if updated.Status != "open" {
 		t.Fatalf("status = %q, want open", updated.Status)
@@ -5441,7 +5679,9 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 // without a Dolt port and silently drop GC_DOLT_PORT/BEADS_DOLT_SERVER_PORT,
 // causing `bd --sandbox` to fall back to port 0. The dispatcher process's own
 // environment already carries the correct connection coordinates it was
-// spawned with, so the query string must carry them through explicitly.
+// spawned with, so the query string must carry them through — under the
+// private GC_AMBIENT_DOLT_* names, with a guard that promotes them to the
+// public names only when the per-poll env resolved no target.
 func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
 	t.Setenv("GC_DOLT_PORT", "29620")
@@ -5450,10 +5690,10 @@ func TestWorkflowServeControlReadyQueryPassesThroughAmbientDoltPort(t *testing.T
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 
 	for _, want := range []string{
-		"GC_DOLT_HOST='127.0.0.1'",
-		"BEADS_DOLT_SERVER_HOST='127.0.0.1'",
-		"GC_DOLT_PORT='29620'",
-		"BEADS_DOLT_SERVER_PORT='29620'",
+		"GC_AMBIENT_DOLT_HOST='127.0.0.1'",
+		"GC_AMBIENT_DOLT_PORT='29620'",
+		`export GC_DOLT_HOST="$GC_AMBIENT_DOLT_HOST" BEADS_DOLT_SERVER_HOST="$GC_AMBIENT_DOLT_HOST"`,
+		`export GC_DOLT_PORT="$GC_AMBIENT_DOLT_PORT" BEADS_DOLT_SERVER_PORT="$GC_AMBIENT_DOLT_PORT"`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -5469,7 +5709,7 @@ func TestWorkflowServeControlReadyQueryOmitsDoltEnvWhenAmbientUnset(t *testing.T
 
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 
-	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT="} {
+	for _, unwanted := range []string{"GC_DOLT_HOST=", "GC_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=", "GC_AMBIENT_DOLT_HOST=", "GC_AMBIENT_DOLT_PORT="} {
 		if strings.Contains(query, unwanted) {
 			t.Fatalf("workflowServeControlReadyQuery should omit %q when ambient env is unset: %q", unwanted, query)
 		}
@@ -5492,10 +5732,13 @@ func TestWorkflowServeControlReadyQueryDoesNotMixDoltNamespaces(t *testing.T) {
 
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName})
 
-	for _, want := range []string{"GC_DOLT_PORT='29999'", "BEADS_DOLT_SERVER_PORT='29999'"} {
+	for _, want := range []string{"GC_AMBIENT_DOLT_PORT='29999'"} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
 		}
+	}
+	if strings.Contains(query, "GC_AMBIENT_DOLT_HOST=") {
+		t.Fatalf("workflowServeControlReadyQuery must not pair an empty GC host with the port: %q", query)
 	}
 	if strings.Contains(query, "9.9.9.9") {
 		t.Fatalf("workflowServeControlReadyQuery must not mix BEADS_DOLT_SERVER_HOST from a different namespace than the resolved port: %q", query)
@@ -5563,6 +5806,77 @@ printf '[]'
 	}
 	if !strings.Contains(string(logData), "GC_DOLT_PORT=29620") || !strings.Contains(string(logData), "BEADS_DOLT_SERVER_PORT=29620") {
 		t.Fatalf("bd did not see the ambient Dolt port despite a stripped outer env; log:\n%s", string(logData))
+	}
+}
+
+// TestWorkflowServeControlReadyQueryPrefersPerPollDoltPortOverAmbient pins the
+// fill-if-empty contract of gastownhall/gascity#1656: the ambient pair the
+// dispatcher process was spawned with is a fallback, never an override. A
+// per-poll env that resolved a live port must win whole (the ambient prefix
+// may carry a port dolt has since left), and only a per-poll env with no port
+// at all -- absent, or explicit-empty the way mergeRuntimeEnv leaves it -- may
+// fall back to the ambient one (the gc-74rxa protection).
+func TestWorkflowServeControlReadyQueryPrefersPerPollDoltPortOverAmbient(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "29620")
+	unsetTestEnv(t, "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT")
+
+	for _, tc := range []struct {
+		name        string
+		perPollEnv  []string
+		wantPortLog string
+	}{
+		{
+			name:        "per-poll port wins",
+			perPollEnv:  []string{"GC_DOLT_PORT=29621", "BEADS_DOLT_SERVER_PORT=29621"},
+			wantPortLog: "GC_DOLT_PORT=29621 BEADS_DOLT_SERVER_PORT=29621",
+		},
+		{
+			name:        "per-poll explicit-empty falls back",
+			perPollEnv:  []string{"GC_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT="},
+			wantPortLog: "GC_DOLT_PORT=29620 BEADS_DOLT_SERVER_PORT=29620",
+		},
+		{
+			name:        "per-poll absent falls back",
+			perPollEnv:  nil,
+			wantPortLog: "GC_DOLT_PORT=29620 BEADS_DOLT_SERVER_PORT=29620",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := workflowServeControlReadyQuery(
+				config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+				"gascity--control-dispatcher",
+			)
+
+			tmp := t.TempDir()
+			logPath := filepath.Join(tmp, "bd.log")
+			bdPath := filepath.Join(tmp, "bd")
+			if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf 'GC_DOLT_PORT=%s BEADS_DOLT_SERVER_PORT=%s\n' "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_PORT:-}" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+				t.Fatalf("write fake bd: %v", err)
+			}
+
+			env := append([]string{
+				"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"BD_LOG=" + logPath,
+				"GC_SESSION_NAME=gascity--control-dispatcher",
+				"GC_ALIAS=gascity/control-dispatcher",
+			}, tc.perPollEnv...)
+			if _, err := shellWorkQueryWithEnv(query, t.TempDir(), env); err != nil {
+				t.Fatalf("run workflow serve query: %v", err)
+			}
+
+			logData, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatalf("read bd log: %v", readErr)
+			}
+			if !strings.Contains(string(logData), tc.wantPortLog) {
+				t.Fatalf("bd saw the wrong Dolt port; want %q in log:\n%s", tc.wantPortLog, string(logData))
+			}
+		})
 	}
 }
 

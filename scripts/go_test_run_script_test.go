@@ -27,9 +27,9 @@ func TestGoTestRunScript(t *testing.T) {
 	}{
 		{
 			name:   "a late violation with a long report",
-			body:   "printf '%s\\n' '--- FAIL: TestSimCorpus (1.00s)' '    --- FAIL: TestSimCorpus/459 (0.20s)' 'seed 459 (inventory lag true) violated:' '  I15 I-STOP-3/4: v2 rewrote ...' 'replay: GC_V2_SIM_SEED=459 go test -run TestSimCorpus ./cmd/gc/'\ncat <<'NOISE'\n" + noise + "NOISE\necho 'last line'\nexit 1",
+			body:   "printf '%s\\n' '--- FAIL: TestSimCorpus (1.00s)' '    --- FAIL: TestSimCorpus/459 (0.20s)' 'seed 459 (inventory lag true) violated:' '  I15 I-STOP-3/4: v2 rewrote ...' \"replay: bazel test //cmd/gc:gc_test --test_sharding_strategy=disabled --test_filter='^TestSimCorpus\\$' --test_env=GC_V2_SIM_SEED=459\"\ncat <<'NOISE'\n" + noise + "NOISE\necho 'last line'\nexit 1",
 			wantRC: true,
-			want:   []string{"--- FAIL: TestSimCorpus/459", "seed 459 (inventory lag true) violated:", "replay: GC_V2_SIM_SEED=459", "last line", "failed (exit 1)"},
+			want:   []string{"--- FAIL: TestSimCorpus/459", "seed 459 (inventory lag true) violated:", "replay: bazel test //cmd/gc:gc_test --test_sharding_strategy=disabled --test_filter='^TestSimCorpus$' --test_env=GC_V2_SIM_SEED=459", "last line", "failed (exit 1)"},
 		},
 		{
 			name:   "a Go test timeout",

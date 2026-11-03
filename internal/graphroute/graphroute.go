@@ -102,16 +102,10 @@ func IsCompiledGraphWorkflow(recipe *formula.Recipe) bool {
 // GraphWorkflowRouteVars builds the route variable map by merging recipe
 // defaults with user-provided variables.
 func GraphWorkflowRouteVars(recipe *formula.Recipe, provided map[string]string) map[string]string {
-	routeVars := make(map[string]string, len(provided))
-	if recipe != nil {
-		for name, def := range recipe.Vars {
-			if def != nil && def.Default != nil {
-				routeVars[name] = *def.Default
-			}
-		}
+	if recipe == nil {
+		return formula.ApplyVarDefaults(nil, provided)
 	}
-	maps.Copy(routeVars, provided)
-	return routeVars
+	return formula.ApplyVarDefaults(recipe.Vars, provided)
 }
 
 // GraphRouteRigContext extracts the rig context (directory prefix) from
@@ -537,13 +531,15 @@ func formulaRoleTarget(target string) string {
 // canonical implementation shared by the graphroute library path and the CLI
 // projection in cmd/gc.
 func ResolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *config.City, target, rigContext string, deps Deps) (GraphRouteBinding, bool, error) {
+	// store is the caller's graph/scope store, not the sessions class: the relabel keeps its reads (typed-store T5b).
+	sessions := beads.SessionStore{Store: store}
 	target = strings.TrimSpace(target)
 	if store == nil || target == "" {
 		return GraphRouteBinding{}, false, nil
 	}
 	// Exact session bead IDs are unambiguous and must win even when they
 	// collide with a config target name.
-	if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+	if id, err := session.ResolveSessionIDByExactID(sessions, target); err == nil {
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
 			return GraphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 		}
@@ -571,7 +567,7 @@ func ResolveGraphDirectSessionBinding(store beads.Store, cityName string, cfg *c
 			return GraphRouteBinding{}, false, nil
 		}
 	}
-	if id, err := session.ResolveSessionID(store, target); err == nil {
+	if id, err := session.ResolveSessionID(sessions, target); err == nil {
 		if bead, getErr := store.Get(id); getErr == nil && session.IsSessionBeadOrRepairable(bead) && bead.Status != "closed" {
 			return GraphRouteBinding{DirectSessionID: bead.ID, RigContext: graphDirectSessionRigContext(target, rigContext, bead)}, true, nil
 		}

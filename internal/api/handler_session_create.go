@@ -183,7 +183,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets real-world apps
 	// show the session in the sidebar immediately via optimistic UI.
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), configuredProgramStatusMode(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -202,15 +202,15 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		reservationIDs = append(reservationIDs, createCtx.Identity)
 	}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && createCtx.Identity != alias {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), createCtx.Identity, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), createCtx.Identity, ""); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store.Store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), createCtx.ExplicitName, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -317,6 +317,11 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusBadRequest, "invalid", "async session creation is only supported for configured agent templates")
 		return
 	}
+	if err := s.checkInitialMessage(body.Message); err != nil {
+		s.idem.unreserve(idemKey)
+		writeHumaStatusError(w, err)
+		return
+	}
 
 	workDir := s.state.CityPath()
 
@@ -370,7 +375,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), configuredProgramStatusMode(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -384,7 +389,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), alias, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
 		}
 		var createErr error
@@ -411,7 +416,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
+		if sendErr := s.deliverInitialMessage(r.Context(), store.Store, info.ID, msg); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -463,7 +468,7 @@ func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID stri
 	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	if err := s.sessionManager(store.Store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {
+	if err := s.sessionManager(store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
 	if err := store.Delete(sessionID); err != nil {

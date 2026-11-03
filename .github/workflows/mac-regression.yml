@@ -29,6 +29,11 @@ on:
         required: false
         type: boolean
         default: false
+      go_test_count:
+        description: go test -count for the cmd-gc process shards (soak runs; 1 to 10)
+        required: false
+        type: string
+        default: "1"
   workflow_dispatch:
     inputs:
       suite:
@@ -56,6 +61,11 @@ on:
         description: Pull request head ref for label-dispatched runs
         required: false
         type: string
+      go_test_count:
+        description: go test -count for the cmd-gc process shards (soak runs; 1 to 10)
+        required: false
+        type: string
+        default: "1"
   schedule:
     - cron: "17 3 * * *"
   pull_request:
@@ -65,26 +75,37 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+  # Merge queue: a required check must report on every queue entry, or the
+  # entry waits out the queue's response timeout and fails. The gate passes
+  # merge groups through (the pull request's head already ran Mac).
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
+# Keyed by event as well as pull request: the needs-mac label dispatches a
+# separate run for the same pull request, and sharing a group would cancel
+# the pull_request run, whose summary then reports failure on the PR head.
 concurrency:
-  group: mac-regression-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
+  group: mac-regression-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "2.2.0"
-  BD_VERSION: "v1.3.1"
+  DOLT_VERSION: "2.6.0"
+  BD_VERSION: "v1.3.2"
 
 # Tier routing is centralized in the `gate` job below, which always runs
 # and computes run_smoke/run_full/run_review_formulas plus a human-readable
 # `reason` from the trigger (schedule / workflow_dispatch suite input /
-# same-repo non-draft PR carrying the `needs-mac` label). Every tier job
-# reads exactly one of those booleans via `needs.gate.outputs.*` instead of
-# duplicating the trigger expression, and mac-regression-summary always
-# runs (bare `always()`) so an all-skipped workflow run can never report
-# green (fleet rule D5, ga-hd99jq).
+# same-repo non-draft PR: smoke unless the diff is docs-only, full with the
+# `needs-mac` label / merge group: passed through). Every tier job reads
+# exactly one of those booleans via `needs.gate.outputs.*` instead of
+# duplicating the trigger expression, and no tier needs another, so a red
+# smoke tier cannot skip (and hide) the integration tiers.
+# mac-regression-summary always runs (bare `always()`) and fails closed:
+# every tier the gate selected must succeed, so an all-skipped or partly
+# skipped run can never report green (fleet rule D5, ga-hd99jq).
 
 jobs:
   runner-policy:
@@ -130,17 +151,22 @@ jobs:
           persist-credentials: false
       # token: '': diff with git, not the pulls/files API, so the shared
       # installation rate limit cannot fail this gate (see ci.yml changes).
+      # A file is code when it matches every pattern: anything outside the
+      # docs trees and the root's markdown files. A filter failure leaves
+      # the diff unclassified, and the gate then runs the smoke tier.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
+        if: github.event_name == 'pull_request'
         continue-on-error: true
         with:
           token: ''
+          predicate-quantifier: every
           filters: |
-            mac_sensitive:
-              - 'cmd/gc/**'
-              - 'internal/pathutil/**'
-              - 'internal/fsys/**'
-              - '.github/actions/setup-gascity-macos/**'
+            code:
+              - '**'
+              - '!docs/**'
+              - '!engdocs/**'
+              - '!*.md'
       - name: Decide which tiers should run
         id: gate
         env:
@@ -149,7 +175,8 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           NEEDS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}
-          PATH_HIT: ${{ steps.filter.outputs.mac_sensitive }}
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          CODE_CHANGED: ${{ steps.filter.outputs.code }}
         run: |
           run_smoke=false
           run_full=false
@@ -182,12 +209,17 @@ jobs:
             elif [[ "$NEEDS_LABEL" == "true" ]]; then
               run_smoke=true; run_full=true
               reason="pull request carries needs-mac label"
-            elif [[ "$PATH_HIT" == "true" ]]; then
+            elif [[ "$FILTER_OUTCOME" != "success" ]]; then
               run_smoke=true
-              reason="pull request touches mac-sensitive paths without needs-mac label, running smoke tier"
+              reason="pull request diff not classified (filter ${FILTER_OUTCOME:-missing}), running smoke tier"
+            elif [[ "$CODE_CHANGED" == "true" ]]; then
+              run_smoke=true
+              reason="pull request changes code, running smoke tier"
             else
-              reason="pull request without needs-mac label (path hit: ${PATH_HIT})"
+              reason="docs-only pull request, skipping"
             fi
+          elif [[ "$EVENT_NAME" == "merge_group" ]]; then
+            reason="merge_group: Mac verified at PR head"
           fi
 
           {
@@ -290,7 +322,8 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 20
+    # A soak (go_test_count above 1) runs each shard's tests that many times.
+    timeout-minutes: ${{ (inputs.go_test_count || '1') == '1' && 20 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -307,7 +340,17 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
       - name: Run cmd/gc process shard
-        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
+        env:
+          GO_TEST_COUNT_INPUT: ${{ inputs.go_test_count || '1' }}
+        run: |
+          case "$GO_TEST_COUNT_INPUT" in
+            [1-9] | 10) ;;
+            *) echo "go_test_count must be 1 to 10, got '$GO_TEST_COUNT_INPUT'" >&2; exit 1 ;;
+          esac
+          timeout=20m
+          if [ "$GO_TEST_COUNT_INPUT" != 1 ]; then timeout=80m; fi
+          make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 \
+            CMD_GC_PROCESS_COUNT="$GO_TEST_COUNT_INPUT" CMD_GC_PROCESS_TIMEOUT="$timeout"
       - name: Run product metrics testhook profile
         if: ${{ matrix.shard == 6 }}
         run: make test-productmetrics-testhook
@@ -339,15 +382,17 @@ jobs:
           # so the whole binary doesn't panic mid-test.
           ACCEPTANCE_TIMEOUT: 20m
         run: make test-acceptance-go
+      # The bd contract steps run after a Tier A failure too, so one red step
+      # does not hide the others.
       - name: Run external bd CLI contract
+        if: ${{ !cancelled() }}
         run: make test-bd-cli-contract
       - name: Run external bd CLI contract HOME isolation
+        if: ${{ !cancelled() }}
         run: make test-bd-cli-contract-home-isolation
 
   # Unit coverage pass — the Linux `Check` job's equivalent of
-  # `make test-cover`. Kept best-effort while we discover Mac-specific
-  # failures; continue-on-error is on the test step (not the job) so the
-  # job's result still reflects the actual outcome for the summary.
+  # `make test-cover`. Part of the full tier the summary requires.
   mac-cover:
     name: Mac / test-cover
     needs:
@@ -356,8 +401,6 @@ jobs:
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
-    outputs:
-      outcome: ${{ steps.cover.outcome }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -373,7 +416,6 @@ jobs:
         run: make install-tools
       - name: Run test-cover-mac
         id: cover
-        continue-on-error: true
         run: make test-cover-mac
       - name: Upload coverage artifact
         if: ${{ always() }}
@@ -391,9 +433,6 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -455,14 +494,9 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 60
-    outputs:
-      outcome: ${{ steps.shard.outcome }}
     env:
       ANTHROPIC_BASE_URL: https://ollama.com
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
@@ -488,7 +522,6 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        continue-on-error: true
         run: make test-integration-bdstore
 
   mac-integration-rest:
@@ -496,9 +529,6 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -563,14 +593,9 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_review_formulas == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 90
-    outputs:
-      outcome: ${{ steps.shard.outcome }}
     env:
       ANTHROPIC_BASE_URL: https://ollama.com
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
@@ -596,17 +621,16 @@ jobs:
         run: make install-tools
       - name: Run review-formulas shard
         id: shard
-        continue-on-error: true
         run: make test-integration-review-formulas
 
   # Aggregate summary so a single check reports Mac parity status on the
   # PR. This job always runs (bare `always()`) and reads the gate job's
   # own result/outputs: it fails closed if the gate did not succeed, and
   # reports "Not run: <reason>" when the gate decided no tier applies —
-  # so an all-skipped run can never appear green (fleet rule D5). The
-  # best-effort jobs keep their failures visible here via job outputs that
-  # capture the real step outcome — needs.<job>.result masks it as success
-  # because the failing steps are continue-on-error.
+  # so an all-skipped run can never appear green (fleet rule D5). Every
+  # tier the gate selected must succeed: a skipped, cancelled or failed
+  # selected tier fails the summary, which is what lets it be a required
+  # check.
   mac-regression-summary:
     name: Mac regression summary
     if: always()
@@ -628,17 +652,18 @@ jobs:
         env:
           GATE_RESULT: ${{ needs.gate.result }}
           RUN_SMOKE: ${{ needs.gate.outputs.run_smoke }}
+          RUN_FULL: ${{ needs.gate.outputs.run_full }}
+          RUN_REVIEW_FORMULAS: ${{ needs.gate.outputs.run_review_formulas }}
           REASON: ${{ needs.gate.outputs.reason }}
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
-          # Best-effort jobs: use outputs.outcome (not needs.*.result).
-          COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
+          COVER: ${{ needs.mac-cover.result }}
           INT_PACKAGES: ${{ needs.mac-integration-packages.result }}
-          INT_BDSTORE: ${{ needs.mac-integration-bdstore.outputs.outcome || needs.mac-integration-bdstore.result }}
+          INT_BDSTORE: ${{ needs.mac-integration-bdstore.result }}
           INT_REST: ${{ needs.mac-integration-rest.result }}
-          REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.outputs.outcome || needs.mac-integration-review-formulas.result }}
+          REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.result }}
         run: |
           # This job always runs (if: always(), above) so an all-skipped
           # workflow run can never report green. Read the gate job's own
@@ -655,7 +680,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "${RUN_SMOKE}" != "true" ]]; then
+          if [[ "${RUN_SMOKE}" != "true" && "${RUN_FULL}" != "true" && "${RUN_REVIEW_FORMULAS}" != "true" ]]; then
             echo "Mac Regression: not requested (${REASON})"
             cat >>"$GITHUB_STEP_SUMMARY" <<EOF
           ## Mac Regression
@@ -665,28 +690,35 @@ jobs:
             exit 0
           fi
 
-          cat >>"$GITHUB_STEP_SUMMARY" <<EOF
-          ## Mac Regression
+          # Fail closed: every tier the gate selected must report success.
+          # skipped, cancelled, failure, or no result at all fails the run.
+          required=()
+          if [[ "${RUN_SMOKE}" == "true" ]]; then
+            required+=("Mac / quality=${QUALITY}" "Mac / make test-mac=${UNIT}" "Mac / cmd-gc process=${CMD_GC}" "Mac / acceptance (Tier A)=${ACCEPTANCE}")
+          fi
+          if [[ "${RUN_FULL}" == "true" ]]; then
+            required+=("Mac / test-cover-mac=${COVER}" "Mac / integration packages=${INT_PACKAGES}" "Mac / integration bdstore=${INT_BDSTORE}" "Mac / integration rest=${INT_REST}")
+          fi
+          if [[ "${RUN_REVIEW_FORMULAS}" == "true" ]]; then
+            required+=("Mac / integration review-formulas=${REVIEW_FORMULAS}")
+          fi
 
-          | Job | Result |
-          | --- | --- |
-          | Mac / quality | ${QUALITY} |
-          | Mac / make test-mac | ${UNIT} |
-          | Mac / cmd-gc process | ${CMD_GC} |
-          | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
-          | Mac / test-cover-mac (best-effort) | ${COVER} |
-          | Mac / integration packages | ${INT_PACKAGES} |
-          | Mac / integration bdstore (best-effort) | ${INT_BDSTORE} |
-          | Mac / integration rest | ${INT_REST} |
-          | Mac / integration review-formulas (best-effort) | ${REVIEW_FORMULAS} |
-          EOF
-
+          {
+            echo "## Mac Regression"
+            echo
+            echo "Selected by the gate: ${REASON}"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+          } >>"$GITHUB_STEP_SUMMARY"
           fail=0
-          for result in "$QUALITY" "$UNIT" "$CMD_GC" "$ACCEPTANCE" "$INT_PACKAGES" "$INT_REST"; do
-            # Skipped is acceptable (e.g. when run outside the needs-mac trigger set)
-            case "$result" in
-              success|skipped|"") ;;
-              *) fail=1 ;;
-            esac
+          for entry in "${required[@]}"; do
+            job=${entry%=*}
+            result=${entry##*=}
+            echo "| ${job} | ${result:-no result} |" >>"$GITHUB_STEP_SUMMARY"
+            if [[ "${result}" != "success" ]]; then
+              echo "Mac Regression: ${job} is ${result:-missing}, want success" >&2
+              fail=1
+            fi
           done
           exit "$fail"

@@ -41,6 +41,10 @@ const (
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline
 	alertUnknownState   = "unknown-state"          // a state legacy does not know was written (I-legacy broke)
 	alertHealRefused    = "heal-refused"           // an A6 heal refused until its backoff reached the cap
+	// alertWorktreeRefused: the allocation refuses a pool work item whose
+	// worktree evidence it found unusable (C6.5(a)); no create effect ever
+	// sees the request, so this alert is all that reports the starved item.
+	alertWorktreeRefused = "worktree-refused"
 )
 
 // healRefusalsBeforeAlert is how many backed-off refusals in a row an A6 heal
@@ -54,12 +58,16 @@ type passObserver struct {
 	gateAlerted     bool
 	duplicates      map[string]bool   // the last pass's named-duplicate alerts
 	unknown         map[rowKey]string // rows alerted for an unknown state, with it
+	worktreeRefused map[string]string // work items alerted for unusable worktree evidence, with the alert
 	lastKey         string
 	lastEmit        time.Time
 	identity        identityObserver // arm A3's alerts (reconcile_observe_identity.go)
 	// escalated is each outstanding stop's last alert, by (row, incarnation)
 	// (v5 D6): kept while the stop stays outstanding.
 	escalated map[stopEscalationKey]time.Time
+	// claimedCut is the last pass's claimed-demand cut, as template/bead keys
+	// (observeClaimedDemand).
+	claimedCut map[string]struct{}
 }
 
 // stopEscalationKey is one row incarnation's stop request.
@@ -151,7 +159,33 @@ func idleRespawnPhase(s settlement) string {
 }
 
 // soakSeries are passMetrics.series' counters, always in the record.
-var soakSeries = []string{"idle_respawn_begun", "idle_respawn_voided", "idle_respawn_completed", "stop_escalations"}
+var soakSeries = []string{"idle_respawn_begun", "idle_respawn_voided", "idle_respawn_completed", "stop_escalations", claimedDemandSeries}
+
+// claimedDemandSeries counts the default-probe rows gather dropped as work
+// the pass already reads as claimed (demandView.ClaimedDemand): new demand the
+// pass would otherwise have counted for work a seat holds.
+const claimedDemandSeries = "claimed_demand_cut"
+
+// observeClaimedDemand counts each row v cuts on the first pass that cuts it.
+// A row the probe keeps listing until its read catches up with the claim
+// counts once, so the series tracks lagging claims rather than passes, and
+// moves the record's content key only when a new one appears.
+func (p *planner) observeClaimedDemand(v demandView) {
+	var cut map[string]struct{}
+	for template, c := range v.ClaimedDemand {
+		for _, id := range c.WorkBeadIDs {
+			key := template + "/" + id
+			if cut == nil {
+				cut = make(map[string]struct{})
+			}
+			cut[key] = struct{}{}
+			if _, seen := p.obs.claimedCut[key]; !seen {
+				p.metrics.count(&p.metrics.series, claimedDemandSeries)
+			}
+		}
+	}
+	p.obs.claimedCut = cut
+}
 
 // observeWorld fills c's gauges from w, and alerts once on each named
 // duplicate the allocation reports and each row with a state legacy does
@@ -186,6 +220,28 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 		}
 	}
 	p.obs.duplicates = dups
+}
+
+// observeWorktreeRefusals alerts once on each work item the allocation
+// refused for unusable worktree evidence (allocTraceRecord.WorkBeadID), for
+// as long as the refusal lasts: a changed pool or cause alerts again, and an
+// item the pass no longer refuses is forgotten, so a relapse alerts again.
+func (p *planner) observeWorktreeRefusals(trace []allocTraceRecord) {
+	refused := make(map[string]string)
+	for _, r := range trace {
+		if r.WorkBeadID == "" {
+			continue
+		}
+		if _, seen := refused[r.WorkBeadID]; seen {
+			continue
+		}
+		msg := fmt.Sprintf("work bead %s gets no %q session while its worktree evidence is unusable: %s", r.WorkBeadID, r.Template, r.Detail)
+		refused[r.WorkBeadID] = msg
+		if p.obs.worktreeRefused[r.WorkBeadID] != msg {
+			p.alert(alertWorktreeRefused, r.WorkBeadID, msg)
+		}
+	}
+	p.obs.worktreeRefused = refused
 }
 
 // escalateStop is D6's stop-outstanding alert for row, whose signaled stop

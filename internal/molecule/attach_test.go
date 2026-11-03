@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1120,5 +1121,169 @@ func TestAttachGraphApplyPlanReferencesAttachRootOnEveryStep(t *testing.T) {
 		if _, ok := node.Metadata[beadmeta.MoleculeIDMetadataKey]; ok {
 			t.Errorf("node %s carries %s, want unset", node.Key, beadmeta.MoleculeIDMetadataKey)
 		}
+	}
+}
+
+// setupV1MoleculeAttachment reproduces the production shape gc sling leaves
+// behind for a source bead that already has a live v1 attachment: an open
+// molecule M (type molecule, no gc.kind) with one open step child and
+// gc.var.issue naming the source bead S, and S.molecule_id pointing at M. The
+// pointer is a forward pointer from S to its own attachment, never a container
+// of S. withEdge additionally wires the S->M blocks edge (the shape PR #6489
+// assumed), which must not change the answer.
+func setupV1MoleculeAttachment(t *testing.T, store *beads.MemStore, withEdge bool) (source, mol, step beads.Bead) {
+	t.Helper()
+	source, err := store.Create(beads.Bead{Title: "content bead", Type: "bug"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	mol, err = store.Create(beads.Bead{
+		Title:    "mol-tdd-build",
+		Type:     "molecule",
+		Metadata: map[string]string{"gc.var.issue": source.ID},
+	})
+	if err != nil {
+		t.Fatalf("create molecule: %v", err)
+	}
+	step, err = store.Create(beads.Bead{Title: "load-context", Type: "step", ParentID: mol.ID})
+	if err != nil {
+		t.Fatalf("create molecule step: %v", err)
+	}
+	if err := store.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, mol.ID); err != nil {
+		t.Fatalf("set molecule_id: %v", err)
+	}
+	if withEdge {
+		if err := store.DepAdd(source.ID, mol.ID, "blocks"); err != nil {
+			t.Fatalf("dep add source->molecule: %v", err)
+		}
+	}
+	return source, mol, step
+}
+
+// TestAttachDoesNotNestUnderMoleculeIDAttachment is the regression for
+// ga-crz5ege (be-t5hge / be-1wlhp / be-bl675): gc formula cook --attach on a
+// bead whose molecule_id names its own live v1 attachment rooted the new
+// sub-DAG at that other molecule and stamped gc.root_bead_id=<molecule> on
+// every step. molecule_id is a forward pointer, so the new sub-DAG must root at
+// the attach target itself, with or without a blocks edge to the molecule.
+func TestAttachDoesNotNestUnderMoleculeIDAttachment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		withEdge bool
+	}{
+		{name: "no source-to-molecule edge (production shape)", withEdge: false},
+		{name: "blocks edge source-to-molecule", withEdge: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			source, mol, step := setupV1MoleculeAttachment(t, store, tc.withEdge)
+			molBefore, stepBefore := mol, step
+
+			result, err := Attach(context.Background(), store, makeWorkflowRecipe("sub-work", "run", "eval"), source.ID, AttachOptions{})
+			if err != nil {
+				t.Fatalf("Attach: %v", err)
+			}
+
+			if result.WorkflowRootID != source.ID {
+				t.Errorf("WorkflowRootID = %q, want %q (the attach target; %q is its forward-pointer attachment)", result.WorkflowRootID, source.ID, mol.ID)
+			}
+			assertAllBeadsHaveRootID(t, store, result.IDMapping, source.ID)
+			for stepID, beadID := range result.IDMapping {
+				b, err := store.Get(beadID)
+				if err != nil {
+					t.Fatalf("Get(%s) for step %s: %v", beadID, stepID, err)
+				}
+				if got := b.Metadata[beadmeta.RootBeadIDMetadataKey]; got == mol.ID {
+					t.Errorf("step %s (bead %s) was nested under the molecule_id attachment %s", stepID, beadID, mol.ID)
+				}
+			}
+			assertBlockingDep(t, store, source.ID, result.RootID)
+
+			// The pre-existing attachment is not adopted, burned, or rewritten.
+			molAfter, err := store.Get(mol.ID)
+			if err != nil {
+				t.Fatalf("Get molecule: %v", err)
+			}
+			stepAfter, err := store.Get(step.ID)
+			if err != nil {
+				t.Fatalf("Get molecule step: %v", err)
+			}
+			if molAfter.Status != molBefore.Status || !reflect.DeepEqual(molAfter.Metadata, molBefore.Metadata) {
+				t.Errorf("molecule %s changed: before status=%q meta=%v, after status=%q meta=%v", mol.ID, molBefore.Status, molBefore.Metadata, molAfter.Status, molAfter.Metadata)
+			}
+			if stepAfter.Status != stepBefore.Status || !reflect.DeepEqual(stepAfter.Metadata, stepBefore.Metadata) {
+				t.Errorf("molecule step %s changed: before status=%q meta=%v, after status=%q meta=%v", step.ID, stepBefore.Status, stepBefore.Metadata, stepAfter.Status, stepAfter.Metadata)
+			}
+		})
+	}
+}
+
+// TestAttachLiveRunChainBeatsMoleculeID pins the precedence of the keys that
+// still nest: a live workflow_id, and a live gc.root_bead_id, each win over a
+// molecule_id pointing at some other open molecule.
+func TestAttachLiveRunChainBeatsMoleculeID(t *testing.T) {
+	for _, key := range []string{"workflow_id", beadmeta.RootBeadIDMetadataKey} {
+		t.Run(key, func(t *testing.T) {
+			store := beads.NewMemStore()
+			root := setupWorkflow(t, store)
+			other, err := store.Create(beads.Bead{Title: "unrelated open molecule", Type: "molecule"})
+			if err != nil {
+				t.Fatalf("create other molecule: %v", err)
+			}
+			source, err := store.Create(beads.Bead{
+				Title: "bead inside a live run",
+				Type:  "task",
+				Metadata: map[string]string{
+					key:                            root.ID,
+					beadmeta.MoleculeIDMetadataKey: other.ID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create source: %v", err)
+			}
+
+			result, err := Attach(context.Background(), store, makeWorkflowRecipe("sub-work", "run"), source.ID, AttachOptions{})
+			if err != nil {
+				t.Fatalf("Attach: %v", err)
+			}
+			if result.WorkflowRootID != root.ID {
+				t.Errorf("WorkflowRootID = %q, want %q (live %s), not molecule_id target %q", result.WorkflowRootID, root.ID, key, other.ID)
+			}
+			assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
+		})
+	}
+}
+
+// TestAttachClosedNestingRootSelfRoots pins the ga-yov1rr guard on the keys
+// that still nest. The molecule_id variant of this guard
+// (TestAttachFallsBackToSelfWhenRunChainRootIsClosed) now passes without the
+// guard, because molecule_id is no longer consulted; these two fail if the
+// closed-root guard is removed.
+func TestAttachClosedNestingRootSelfRoots(t *testing.T) {
+	for _, key := range []string{"workflow_id", beadmeta.RootBeadIDMetadataKey} {
+		t.Run(key, func(t *testing.T) {
+			store := beads.NewMemStore()
+			staleRoot := setupWorkflow(t, store)
+			if err := store.Close(staleRoot.ID); err != nil {
+				t.Fatalf("close stale root: %v", err)
+			}
+			source, err := store.Create(beads.Bead{
+				Title:    "content bead being re-attached",
+				Type:     "bug",
+				Metadata: map[string]string{key: staleRoot.ID},
+			})
+			if err != nil {
+				t.Fatalf("create source: %v", err)
+			}
+
+			result, err := Attach(context.Background(), store, makeWorkflowRecipe("sub-work", "run"), source.ID, AttachOptions{})
+			if err != nil {
+				t.Fatalf("Attach: %v", err)
+			}
+			if result.WorkflowRootID != source.ID {
+				t.Errorf("WorkflowRootID = %q, want %q (self-root; %s %q is closed)", result.WorkflowRootID, source.ID, key, staleRoot.ID)
+			}
+			assertAllBeadsHaveRootID(t, store, result.IDMapping, source.ID)
+		})
 	}
 }

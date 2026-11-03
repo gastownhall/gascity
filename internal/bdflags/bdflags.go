@@ -24,10 +24,14 @@ import (
 // is exactly that bypass. The two are pinned separately by
 // TestGlobalValueFlagsIsComplete and TestGlobalBoolFlagsIsComplete so a
 // misfiled flag fails the build rather than silently disarming a guard.
+//
+// --profile and --server-url are value flags of the bd 1.3.0 Enterprise build
+// the fleet runs (`--profile string`, `--server-url string`); OSS bd 1.3.x no
+// longer registers them and rejects them, so carrying them is a safe superset.
 var globalValueFlags = map[string]bool{
 	"--actor": true, "--database": true, "--db": true, "-C": true,
 	"--directory": true, "--dolt-auto-commit": true, "--format": true,
-	"--mem-profile": true,
+	"--mem-profile": true, "--profile": true, "--server-url": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
@@ -44,7 +48,8 @@ var globalBoolFlags = map[string]bool{
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29).
+// Sourced from `bd <sub> --help` (bd 1.3.2, 2026-10-24, and bd 1.3.0
+// Enterprise, 2026-10-26: TestBdFlagManifestCurrent passes against both).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -75,15 +80,19 @@ var valueFlagsBySub = map[string]map[string]bool{
 		// or slow leaves the pinned table as the only answer, and these two
 		// are the flags whose absence broke fenced dispatch in every rig.
 		"--if-assignee": true, "--if-status": true,
+		// bd 1.3.0 Enterprise: -l is --add-label's shorthand, --if-revision
+		// the revision compare-and-set.
+		"-l": true, "--if-revision": true,
 	},
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
+		"--if-revision": true,
 	},
 	"reopen": {
-		"-r": true, "--reason": true,
+		"-r": true, "--reason": true, "--if-revision": true,
 	},
 	"delete": {
-		"--from-file": true,
+		"--from-file": true, "--if-revision": true,
 	},
 	"ready": {
 		"-a": true, "--assignee": true, "--exclude-label": true, "--exclude-type": true,
@@ -111,7 +120,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--wisp-type": true,
 	},
 	"show": {
-		"--as-of": true, "--id": true,
+		"--as-of": true, "--id": true, "--comments-tail": true,
 	},
 	"mol current": {
 		"--for": true, "--limit": true, "--range": true,
@@ -141,7 +150,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29). A flag whose
+// Sourced from `bd <sub> --help` (bd 1.3.2, 2026-10-24). A flag whose
 // help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
 // not in valueFlagsBySub: it never consumes the next argv token, so
 // `bd list --deps all` leaves "all" positional.
@@ -154,7 +163,7 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"update": {
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
 		"--force": true, "--history": true, "--no-history": true,
-		"--persistent": true, "--stdin": true,
+		"--persistent": true, "--stdin": true, "--clear-notes": true,
 	},
 	"close": {
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
@@ -166,13 +175,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"ready": {
 		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
-		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
+		"--include-deferred": true, "--include-ephemeral": true, "--plain": true, "--flat": true,
 		"--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
 		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
 		"--empty-description": true, "--flat": true,
-		"--include-ephemeral": true, "--include-gates": true, "--include-infra": true,
+		"--include-ephemeral": true, "--include-gates": true, "--include-infra": true, "--include-comments": true,
 		"--include-templates": true, "--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,
 		"--pretty": true, "--ready": true, "-r": true, "--reverse": true,

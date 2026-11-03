@@ -396,8 +396,8 @@ func TestProcessRalphControlNonExecutableCheckRecoversAfterChmod(t *testing.T) {
 // the hold for a removed gc.work_dir (formula-spec-v2 §3.1): a copy of the
 // script shipped under the store root resolves through the #3008 fallback but
 // cannot start, because the check runs inside the removed directory. That
-// failed start is not held open: it spends the attempt and the step closes
-// failed.
+// failed start is not held open: it spends the attempt, spends none of the
+// infrastructure budget, and the step closes failed.
 func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
 	t.Parallel()
 	cityPath := t.TempDir()
@@ -422,6 +422,9 @@ func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
 	}
 	if log := got.Metadata[beadmeta.AttemptLogMetadataKey]; !strings.Contains(log, "chdir") {
 		t.Fatalf("gc.attempt_log = %q, want the failed start inside the removed work_dir", log)
+	}
+	if r := got.Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+		t.Errorf("gc.check_infra_retry = %q, want empty (a failed start is graded, not an infrastructure re-run)", r)
 	}
 }
 

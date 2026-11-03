@@ -371,6 +371,10 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if jsonOut {
 				out = io.Discard
 			}
+			if err := initRemoteStageRefusal(fromFlag, noStart); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return err
+			}
 			mode := "default"
 			hostedEndpoint := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
 				Host:      doltHostFlag,
@@ -405,6 +409,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
 	cmd.Flags().StringVar(&fromFlag, "from", "", "path to an example city directory to copy")
+	cmd.Flags().BoolVar(&initAdoptStoreFlag, "adopt-store", false, "initialize even though the directory already holds a .gc/store binding (a previous city's infrastructure state); without it gc init refuses")
+	cmd.Flags().StringVar(&initRemoteStageFlag, "remote-stage", "", "with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "workspace name (default: target directory basename)")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "deprecated alias for --default-provider")
 	cmd.Flags().StringVar(&defaultProviderFlag, "default-provider", "", "default readiness-aware provider to select from --providers")
@@ -416,7 +422,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&doltUserFlag, "dolt-user", "", "external/hosted Dolt user (or "+envDoltUser+"); optional")
 	cmd.Flags().StringVar(&doltDatabaseFlag, "dolt-database", "", "hosted beads project database, e.g. bd_prj_… (or "+envDoltDatabase+"); required with --dolt-host")
 	cmd.Flags().StringVar(&doltProjectIDFlag, "dolt-project-id", "", "authoritative beads project_id for the identity handshake (or "+envBeadsProjectID+"); derived from a bd_<id> --dolt-database when omitted")
-	cmd.Flags().StringVar(&beadsTransportFlag, "beads-transport", "", "beads transport selector: direct or proxied (or "+envBeadsTransport+"); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd >= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor")
+	cmd.Flags().StringVar(&beadsTransportFlag, "beads-transport", "", "beads transport selector: direct or proxied (or "+envBeadsTransport+"); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every init requires bd >= 1.3.0, selector or not, including the legacy --dolt-host alias")
 	cmd.Flags().StringVar(&beadsTargetFlag, "beads-target", "", "beads target selector: local or external (or "+envBeadsTarget+"); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or "+envDoltHost+"/"+envDoltPort+"/"+envDoltDatabase+"); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "initialize files and imports without registering or starting the city")
@@ -1180,6 +1186,10 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	// --file creates a new city from a template; default to target dir name.
 	cityName := resolveCityName(nameOverride, "", cityPath)
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if err := initReservedPrefixRefusal(fs, tomlSrc, cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	templatePack, err := decodeInitPackTemplate(data, cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1197,6 +1207,10 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	}
 	if alreadyInitialized {
 		return initAlreadyInitialized(stderr)
+	}
+	if err := initExistingStoreRefusal(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1365,6 +1379,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	if cityHasScaffoldFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
+	if err := initExistingStoreRefusal(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if _, err := fs.Stat(tomlPath); err == nil {
 		if !canBootstrapExistingCity(wiz) {
 			return initAlreadyInitialized(stderr)
@@ -1385,22 +1403,6 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintln(stdout, "Welcome to Gas City!")                              //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Bootstrapped city %q runtime scaffold.\n", cityName) //nolint:errcheck // best-effort stdout
 		return 0
-	}
-
-	// Create directory structure.
-	logInitProgress(stdout, 1, "Creating runtime scaffold")
-	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	// Install Claude Code hooks (settings.json).
-	logInitProgress(stdout, 2, "Installing hooks (Claude Code)")
-	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
-		return code
 	}
 
 	// Build the initial city shape before writing prompt scaffolds so init
@@ -1430,11 +1432,37 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
+	initCityConfigHook(&cfg)
 	if err := wiz.hostedDolt.applySelectorToCityConfig(&cfg); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	// Today no wizard template declares [storage], so this cannot refuse; it
+	// is here for the day `gc init` writes a split (split-by-default), so the
+	// new city is never given a reserved prefix it would then be refused for.
+	// The city shape is built, and this runs, before the scaffold, so a
+	// refusal leaves nothing behind.
+	if err := initReservedPrefixRefusal(fs, "", &cfg, cityName, cityPrefix); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Create directory structure.
+	logInitProgress(stdout, 1, "Creating runtime scaffold")
+	if err := ensureCityScaffoldFS(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Install Claude Code hooks (settings.json).
+	logInitProgress(stdout, 2, "Installing hooks (Claude Code)")
+	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
+		return code
+	}
 
 	// Write prompt files only for the agents declared by the init template.
 	logInitProgress(stdout, 3, "Writing default prompts")
@@ -1837,6 +1865,16 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	if cityAlreadyInitializedFS(fs, cityPath) {
 		return initAlreadyInitialized(stderr)
 	}
+	if err := initExistingStoreRefusal(fs, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Refused before anything is copied, so a refusal leaves no destination
+	// behind and the corrected retry is not "already initialized".
+	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride); err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := fs.MkdirAll(cityPath, 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1850,6 +1888,13 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// A remote stage is recorded before anything else runs in it, so no
+	// later step (nor a one-shot gc racing this init) can reach storage
+	// genesis there.
+	if err := recordInitRemoteStage(srcDir, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: recording the remote stage: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if persistSiteIdentity {
@@ -1969,6 +2014,48 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 
 func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
 	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
+}
+
+// initFromReservedPrefixRefusal refuses `gc init --from` a split source when
+// the city it would create mints under a reserved class prefix (split-default
+// R10): its first boot, and every CLI process, would refuse it. It reads the
+// SOURCE and predicts the identity rewriteCopiedInitFromIdentity gives the
+// copy — the target name, the source's workspace prefix, the source's rigs —
+// for both the pack.toml and the legacy (no pack.toml) layout, so it can run
+// before anything is copied. A [storage] in a source include fragment counts:
+// fragments resolve against the source directory exactly as they will
+// against the copy.
+func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string) error {
+	data, err := fs.ReadFile(srcToml)
+	if err != nil {
+		return nil // the copy and its own parse report this
+	}
+	src, err := config.Parse(data)
+	if err != nil {
+		return nil
+	}
+	return initReservedPrefixRefusal(fs, srcToml, src, resolveCityName(nameOverride, "", cityPath), src.Workspace.Prefix)
+}
+
+// initCityConfigHook lets a test shape the city a plain `gc init` builds (a
+// split template does not exist yet). Production leaves it a no-op.
+var initCityConfigHook = func(*config.City) {}
+
+// initReservedPrefixRefusal is the R10 check every city-creating init path
+// shares (gc init, gc init --file, gc init --from): cfg is the config the new
+// city gets, tomlPath the file its include fragments resolve against ("" when
+// it has none), cityName and cityPrefix the identity init gives it. The
+// remedy it names is renaming the city or changing the source config — never
+// a file of the city being created, which does not exist yet.
+func initReservedPrefixRefusal(fs fsys.FS, tomlPath string, cfg *config.City, cityName, cityPrefix string) error {
+	if cfg == nil {
+		return nil
+	}
+	next := *cfg
+	next.Workspace.Name = cityName
+	next.ResolvedWorkspaceName = cityName
+	next.ResolvedWorkspacePrefix = strings.TrimSpace(cityPrefix)
+	return config.ReservedPrefixSplitRefusalForNewCity(fs, tomlPath, &next)
 }
 
 // rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
@@ -2276,4 +2363,25 @@ func restoreLegacyWorkspaceIdentity(fs fsys.FS, cityTomlPath string, cfg *config
 		return fmt.Errorf("write %q: %w", cityTomlPath, err)
 	}
 	return nil
+}
+
+// initAdoptStoreFlag is gc init's --adopt-store.
+var initAdoptStoreFlag bool
+
+// initExistingStoreRefusal refuses to initialize a city over an existing
+// .gc/store (S5 §7.2, B15). That directory is a binding: some city's
+// sessions, mail, workflows, orders and nudges. A new city initialized over
+// it would boot against that state, so adopting it is an explicit choice.
+func initExistingStoreRefusal(fs fsys.FS, cityPath string) error {
+	if initAdoptStoreFlag {
+		return nil
+	}
+	store := filepath.Join(cityPath, ".gc", "store")
+	if _, err := fs.Stat(store); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("checking for an existing binding at %s: %w", store, err)
+	}
+	return fmt.Errorf("%s already exists: it holds a previous city's infrastructure state (sessions, mail, workflows), and a new city initialized over it would serve that state. Archive or remove it, or pass --adopt-store to initialize over it deliberately", store)
 }

@@ -100,7 +100,7 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 		return err
 	}
 
-	if err := validateCityForEdit(cfg); err != nil {
+	if err := e.validateForEdit(cfg); err != nil {
 		return err
 	}
 
@@ -136,7 +136,7 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 		return err
 	}
 
-	if err := validateCityForEdit(raw); err != nil {
+	if err := e.validateForEdit(raw); err != nil {
 		return err
 	}
 
@@ -174,6 +174,19 @@ func validateCityForEdit(cfg *config.City) error {
 	}
 	if err := validateProviders(cfg.Providers); err != nil {
 		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
+	}
+	return nil
+}
+
+// validateForEdit is validateCityForEdit for this editor's city, plus the
+// checks that need the city on disk: a reserved prefix introduced on a split
+// city is refused before the write (split-default R10).
+func (e *Editor) validateForEdit(cfg *config.City) error {
+	if err := validateCityForEdit(cfg); err != nil {
+		return err
+	}
+	if err := config.ReservedPrefixSplitRefusalForEdit(e.fs, e.tomlPath, cfg); err != nil {
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
 	}
 	return nil
 }
@@ -1106,7 +1119,7 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 		if !stripAgentPatchUpdate(raw, agent.QualifiedName(), patch) {
 			return writeLocalDiscoveredAgentUpdate(e.fs, cityRoot, updated, patch)
 		}
-		if err := validateCityForEdit(raw); err != nil {
+		if err := e.validateForEdit(raw); err != nil {
 			return err
 		}
 		return e.commitLocalDiscoveredAgentUpdate(cityRoot, agent, func() error {
@@ -1118,7 +1131,7 @@ func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
 	for i := range raw.Agents {
 		if config.AgentMatchesIdentity(&raw.Agents[i], name) {
 			applyAgentUpdate(&raw.Agents[i], patch)
-			if err := validateCityForEdit(raw); err != nil {
+			if err := e.validateForEdit(raw); err != nil {
 				return err
 			}
 			return e.write(raw)
@@ -1165,7 +1178,7 @@ func (e *Editor) DeleteAgent(name string) error {
 				return removeLocalDiscoveredAgentConfig(e.fs, cityRoot, agent)
 			}, nil)
 		}
-		if err := validateCityForEdit(raw); err != nil {
+		if err := e.validateForEdit(raw); err != nil {
 			return err
 		}
 		return e.commitLocalDiscoveredAgentUpdate(cityRoot, agent, func() error {
@@ -1177,7 +1190,7 @@ func (e *Editor) DeleteAgent(name string) error {
 	for i := range raw.Agents {
 		if config.AgentMatchesIdentity(&raw.Agents[i], name) {
 			raw.Agents = append(raw.Agents[:i], raw.Agents[i+1:]...)
-			if err := validateCityForEdit(raw); err != nil {
+			if err := e.validateForEdit(raw); err != nil {
 				return err
 			}
 			return e.write(raw)
@@ -1266,7 +1279,7 @@ func (e *Editor) DeleteRig(name string) error {
 	}
 	cfg.Agents = kept
 
-	if err := validateCityForEdit(cfg); err != nil {
+	if err := e.validateForEdit(cfg); err != nil {
 		return err
 	}
 

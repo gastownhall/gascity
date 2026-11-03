@@ -71,12 +71,19 @@ type recorderInstruments struct {
 	// Histograms — Phase 2 (1)
 	poolCheckDurationHist metric.Float64Histogram
 
+	// Nudge queue lock instrumentation
+	nudgeQueueLockWaitHist metric.Float64Histogram
+	nudgeQueueLockHoldHist metric.Float64Histogram
+
 	// HTTP API request instrumentation
 	httpRequestTotal    metric.Int64Counter
 	httpRequestDuration metric.Float64Histogram
 
 	// Operation journal recording (O0 shadow ops)
 	opsRecordTotal metric.Int64Counter
+
+	// Turn-fenced deliver-now (SESSION-RUNTIME-020)
+	turnInterruptTotal metric.Int64Counter
 }
 
 var (
@@ -174,6 +181,16 @@ func initInstruments() {
 			metric.WithUnit("ms"),
 		)
 
+		// Nudge queue lock
+		inst.nudgeQueueLockWaitHist, _ = m.Float64Histogram("gc.nudge_queue.lock.wait_ms",
+			metric.WithDescription("Time a nudge queue verb waited for the queue lock, in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+		inst.nudgeQueueLockHoldHist, _ = m.Float64Histogram("gc.nudge_queue.lock.hold_ms",
+			metric.WithDescription("Time a nudge queue verb held the queue lock, in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+
 		// HTTP API request instrumentation
 		inst.httpRequestTotal, _ = m.Int64Counter("gc.http.requests.total",
 			metric.WithDescription("Total HTTP API requests"),
@@ -186,6 +203,11 @@ func initInstruments() {
 		// Operation journal recording
 		inst.opsRecordTotal, _ = m.Int64Counter("gc.ops.record.total",
 			metric.WithDescription("Total operation-journal recording steps by kind, surface, stage and result"),
+		)
+
+		// Turn-fenced deliver-now
+		inst.turnInterruptTotal, _ = m.Int64Counter("gc.session.turn_interrupts.total",
+			metric.WithDescription("Total turn-fenced deliver-now requests by outcome, degradation and message disposition"),
 		)
 	})
 }
@@ -628,6 +650,19 @@ func RecordPoolCheck(ctx context.Context, agent string, durationMs float64, desi
 	)
 }
 
+// RecordNudgeQueueLock records one acquisition of the nudge queue's lock: the
+// verb that took it, its outcome ("ok", "error", "busy"), and how long it
+// waited for and held the lock.
+func RecordNudgeQueueLock(ctx context.Context, verb, outcome string, waitMs, holdMs float64) {
+	initInstruments()
+	attrs := metric.WithAttributes(
+		attribute.String("verb", verb),
+		attribute.String("outcome", outcome),
+	)
+	inst.nudgeQueueLockWaitHist.Record(ctx, waitMs, attrs)
+	inst.nudgeQueueLockHoldHist.Record(ctx, holdMs, attrs)
+}
+
 // RecordMailOp records a mail operation (metrics + log event).
 // operation is "send", "read", "reply", "delete", "archive", "mark_read", "mark_unread".
 func RecordMailOp(ctx context.Context, operation string, err error) {
@@ -696,15 +731,21 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 }
 
 // RecordOpRecord counts one step of recording an operation-journal op
-// (gc.ops.record.total). kind is the op kind; surface is api, cli or
-// controller; stage is admit, close, adopt or sweep; result is recorded,
-// unrecorded, replayed, adopted, busy, key_reuse, refused, closed, left_open,
-// failed or late. unrecordedReason says why a request ran unrecorded or, in
-// require mode, was refused (store_unavailable, type_unregistered,
-// no_namespace, payload_too_large, invalid_key, invalid_request,
-// unmaterialized_target, no_generation, propose_error); it is empty for every
-// other result. Every value is a closed token, so the label set stays
-// bounded; no op id or key is ever a label.
+// (gc.ops.record.total). kind is the op kind, or empty for a controller op
+// sweeper pass that failed as a whole; surface is api, cli or controller;
+// stage is admit, close, adopt or sweep, or open for a sweeper pass that
+// could not open the op store; result is recorded, unrecorded, replayed,
+// adopted, busy, key_reuse, refused, closed, left_open, failed or late.
+// unrecordedReason says why a request ran unrecorded or, in require mode, was
+// refused (store_unavailable, type_unregistered, no_namespace,
+// payload_too_large, invalid_key, invalid_request, unmaterialized_target,
+// no_generation, unreadable_target, propose_error, or not_recorded_by_default
+// for a gate auto only by its builtin default over a sessions store that is
+// not SQLite-backed), or, for a sweeper pass
+// that failed as a whole, the failure's degrade class (store_error,
+// contention, conditional_writes_unsupported, type_unregistered,
+// no_namespace); it is empty for every other result. Every value is a closed
+// token, so the label set stays bounded; no op id or key is ever a label.
 func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecordedReason string) {
 	initInstruments()
 	inst.opsRecordTotal.Add(ctx, 1,
@@ -715,5 +756,31 @@ func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecorde
 			attribute.String("result", result),
 			attribute.String("unrecorded_reason", unrecordedReason),
 		),
+	)
+}
+
+// RecordTurnInterrupt records one turn-fenced deliver-now
+// (gc.session.turn_interrupts.total and a session.turn_interrupt log event).
+// outcome is settled, no_turn, stale, unsettled or unavailable; degradation is
+// unfenced_interrupt or empty; disposition is delivered, queued, deferred or
+// failed. The metric labels are only these closed tokens, so the label set
+// stays bounded; the session and turn ride the log event alone, and no
+// message text is recorded.
+func RecordTurnInterrupt(ctx context.Context, sessionName, turnID, outcome, degradation, disposition string, err error) {
+	initInstruments()
+	inst.turnInterruptTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("outcome", outcome),
+			attribute.String("degradation", degradation),
+			attribute.String("message_disposition", disposition),
+		),
+	)
+	emit(ctx, "session.turn_interrupt", severity(err),
+		attribute.String("session", sessionName),
+		attribute.String("turn", turnID),
+		attribute.String("outcome", outcome),
+		attribute.String("degradation", degradation),
+		attribute.String("message_disposition", disposition),
+		errKV(err),
 	)
 }

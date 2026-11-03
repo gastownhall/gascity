@@ -2157,3 +2157,13 @@ func TestFileStoreRevisionContinuityAcrossDowngradeRewrite(t *testing.T) {
 		t.Fatalf("re-seed not deterministic: %d then %d", reloaded.Revision, again.Revision)
 	}
 }
+
+func TestFileStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "FileStore", func(st *testing.T) beads.Store {
+		s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(st.TempDir(), "beads.json"))
+		if err != nil {
+			st.Fatal(err)
+		}
+		return s
+	})
+}

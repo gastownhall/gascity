@@ -418,6 +418,21 @@ func (q *beadsNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudgeq
 	return buckets, nudgeQueueQuarantined("Lookup", corrupt)
 }
 
+// ListLive returns the queue's live items as of now, split into pending and
+// in flight, for the queue-mode shim that moves live work out of the beads
+// queue. It is one indexed read of the live records. Dead letters are not
+// live, and neither is an item past its deliver-by deadline, which reads as
+// dead. An undecodable record is skipped and reported as a partial result
+// beside the items that did decode.
+func (q *beadsNudgeQueue) ListLive(now time.Time) (pending, inFlight []nudgequeue.Item, err error) {
+	entries, corrupt, err := q.wholeQueueEntries(now, nudgeQueueStateLive)
+	if err != nil {
+		return nil, nil, err
+	}
+	state := nudgeQueueBucketState(entries, now)
+	return state.Pending, state.InFlight, nudgeQueueQuarantined("ListLive", corrupt)
+}
+
 // DueKeys returns, sorted and unique, the non-empty queue keys with an item
 // that reads as pending and is due at now: a due pending item, or an in-flight
 // item whose lease has run out. It is one indexed read of the live records,
@@ -772,7 +787,7 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Tim
 }
 
 // deleteRetired deletes one retired record the sweep listed, fenced on its
-// revision. A store whose List leaves revisions unstamped (the native store),
+// revision. A store whose List leaves revisions unstamped (BdStore, mc-3c8h5),
 // or a cache that served such a row, hands over no usable token, so a refused
 // delete is presented again at the revision of a fresh read — but only while
 // that read still shows a closed, terminal record last written before cutoff.

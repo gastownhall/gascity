@@ -335,6 +335,7 @@ type dockerSessionEnv struct {
 
 func newDockerSessionEnv(t *testing.T) *dockerSessionEnv {
 	t.Helper()
+	requireProcfs(t)
 	for _, tool := range []string{"bash", "jq", "tmux"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("%s is required (pinned in the rbe-west worker image, tools/rbe/worker-env.txt): %v", tool, err)
@@ -445,4 +446,16 @@ func containerPIDsByName(t *testing.T, h *Host, name string) []int {
 		return nil
 	}
 	return containerPIDs(c.ID)
+}
+
+// requireProcfs skips a test that starts emulated containers on a host
+// without Linux's /proc. The emulated host is a Linux container host: it
+// finds a container's processes by the marker in /proc/<pid>/environ (and
+// its pgrep reads /proc/<pid>/comm), so on macOS no container ever reads as
+// running. bazel.yml's integration-packages lane runs these on Linux.
+func requireProcfs(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skipf("the emulated container host tracks processes through /proc, which this host lacks: %v", err)
+	}
 }

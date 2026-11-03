@@ -32,6 +32,7 @@
         "claimed",
         "existing_assignment",
         "ready_assignment",
+        "started_claim_held",
         "no_work",
         "claims_errored",
         "stale_session",

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -70,11 +71,12 @@ type StatusInput struct {
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
 //
-// Read-path gate: refuses to serve while the city-scope CachingStore is
-// priming (cacheLiveOr503 → typed 503) so the CLI falls back to its local
-// snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
-// age of the latest fresh observation so `gc status` can append a staleness
-// banner when the supervisor is lagging.
+// Read-path gate: cacheLiveOr503 refuses only a store that reports liveness.
+// The controller's city store is the bead-policy layer, which does not, so the
+// gate passes while the city cache primes and the not-live cache answers from
+// its backing store. CacheAgeS and CacheRefresh surface the cache's age,
+// cadence and refresh state so `gc status` can flag a cache that is behind, except on a
+// body built without reading any bead store (statusCacheFreshness).
 //
 // The gate and the age both read the WORK store, which is the class the body's
 // expensive legs come from (work counts, store health). It deliberately does
@@ -112,10 +114,12 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -130,19 +134,25 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// build below, same as before this change.
 		//
 		// CacheAgeS reports the GREATER of the two staleness signals: how
-		// long ago this response entry was built, and cacheAgeSeconds(store)
-		// — the age of the CachingStore snapshot the body was built from.
-		// Reporting only the response-entry age would let a recently built
-		// entry sitting on top of a lagging reconciler under-report true
-		// staleness and suppress the banner `gc status` renders above
-		// cacheAgeBannerThresholdSeconds; reporting only the store age would
-		// hide the SWR delay. The max preserves both.
+		// long ago this response entry was built, and the age of the
+		// CachingStore snapshot the body was built from (0 when it read
+		// none). Reporting only the response-entry age would let a recently
+		// built entry sitting on top of a lagging cache under-report true
+		// staleness; reporting only the store age would hide the SWR delay.
+		// When the saved entry's age is the greater, the refresh state says
+		// so (rebuilding), so a client does not blame the cache's re-scans
+		// for it.
 		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			if built := age.Seconds(); built > f.ageS {
+				f.ageS, f.refresh.State = built, CacheRefreshRebuilding
+			}
 			return &IndexOutput[StatusBody]{
-				Index:     hit.Index,
-				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      hit.Body,
+				Index:        hit.Index,
+				CacheAgeS:    f.ageS,
+				CacheRefresh: f.refresh,
+				Body:         hit.Body,
 			}, nil
 		}
 	}
@@ -152,7 +162,20 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
-	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+	f := statusCacheFreshness(resp, cacheAgeSeconds(store))
+	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
+}
+
+// statusCacheFreshness is the bead-cache freshness /status reports with body:
+// f, the city store's (cacheAgeSeconds), or the zero value for a body built
+// without reading any bead store (StoresNotRead, a suspended city). A
+// suspended city's cache pauses its re-scans, so its age grows without bound
+// and says nothing about a body that never read it.
+func statusCacheFreshness(body StatusBody, f cacheFreshness) cacheFreshness {
+	if body.StoresNotRead {
+		return cacheFreshness{}
+	}
+	return f
 }
 
 // refreshStatusResponseInBackground kicks a detached rebuild of the /status
@@ -200,19 +223,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	// A suspended city's bead stores are not read: a read restarts the
 	// retired bd proxy the controller just stopped, and an open dashboard
 	// polling this would cycle it. The body says so (StoresNotRead) and
 	// carries no work, mail, session-count or store-health figures.
-	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
-	sessionSnapshot := statusSessionSnapshot{
-		bySessionName: make(map[string]statusSessionInfo),
-		byTemplate:    make(map[string][]statusSessionInfo),
-	}
-	if !citySuspended {
-		sessionSnapshot = s.statusSessionSnapshot(ctx)
-	}
+	sessionSnapshot, citySt, citySuspended := s.citySessionSnapshot(ctx, cfg)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
@@ -223,18 +238,13 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	var rawRunning int
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
-	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
-	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
-	// the same set as suspendedRigs, which grows below to include rigs merely
-	// inferred suspended because every one of their agents is — those keep a
-	// refreshing cache and must still be asked for ready work.
-	cacheColdRigs := make(map[string]bool, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		if suspensionstate.EffectiveRigSuspended(citySt, r.Name, r.EffectiveSuspendedOnStart()) {
-			suspendedRigs[r.Name] = true
-			cacheColdRigs[r.Name] = true
-		}
+	// cacheColdRigs is deliberately not the same set as suspendedRigs, which
+	// grows below to include rigs merely inferred suspended because every one
+	// of their agents is — those keep a refreshing cache and must still be
+	// asked for ready work.
+	cacheColdRigs := cacheColdRigNames(cfg, citySt)
+	for name := range cacheColdRigs {
+		suspendedRigs[name] = true
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
@@ -291,6 +301,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
+				SessionID:     info.id,
 				GroupName:     groupName,
 				Expanded:      isPool,
 			}
@@ -556,10 +567,86 @@ type statusSessionSnapshot struct {
 }
 
 type statusSessionInfo struct {
+	id          string
 	sessionName string
 	agentName   string
 	template    string
 	state       session.State
+}
+
+// cacheColdRigNames returns the rigs suspended by effective state. It mirrors
+// the controller's per-rig cache refresh gate (rigStoreBackgroundRefresh): such
+// a rig gets no cache at all, so any read of its store goes to bd and restarts
+// the rig's retired proxy and Dolt. gc leaves a suspended scope untouched, so
+// neither status (statusWorkCounts) nor the active-bead lookup reads these
+// stores. The map is never nil.
+func cacheColdRigNames(cfg *config.City, st suspensionstate.State) map[string]bool {
+	cold := make(map[string]bool)
+	if cfg == nil {
+		return cold
+	}
+	for _, r := range cfg.Rigs {
+		if suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {
+			cold[r.Name] = true
+		}
+	}
+	return cold
+}
+
+// loadCacheColdRigs reads the runtime suspension state and returns
+// cacheColdRigNames for the current config. An unreadable state file is
+// treated as no runtime overrides, so the config's startup defaults still
+// decide, as they do for the controller. It is logged once, naming the file,
+// until it reads again or fails differently (suspensionStateFaultChanged).
+// Without a city path there is no state file to read.
+func (s *Server) loadCacheColdRigs() map[string]bool {
+	cfg := s.state.Config()
+	cityPath := s.state.CityPath()
+	if cityPath == "" {
+		return cacheColdRigNames(cfg, suspensionstate.State{})
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if newFault := s.suspensionStateFaultChanged(err); err != nil {
+		if newFault {
+			log.Printf("api: reading suspension state %s: %v; applying the config's suspension defaults", citylayout.SuspensionStateFile(cityPath), err)
+		}
+		st = suspensionstate.State{}
+	}
+	return cacheColdRigNames(cfg, st)
+}
+
+// suspensionStateFaultChanged records err, nil once the state file reads
+// again, as the current suspension-state read fault and reports whether it
+// differs from the one recorded before. Every active-bead lookup loads the
+// file, once per row of a list, so a persistent fault is logged once rather
+// than on every row of every poll.
+func (s *Server) suspensionStateFaultChanged(err error) bool {
+	fault := ""
+	if err != nil {
+		fault = err.Error()
+	}
+	s.suspensionStateFaultMu.Lock()
+	defer s.suspensionStateFaultMu.Unlock()
+	changed := fault != s.suspensionStateFault
+	s.suspensionStateFault = fault
+	return changed
+}
+
+// citySessionSnapshot reads the session snapshot (statusSessionSnapshot)
+// unless the city is suspended, and returns the city's suspension state with
+// whether it is in effect. A suspended city's snapshot is empty and reads no
+// bead store: a read restarts the retired bd proxy the controller just
+// stopped, and an open dashboard polling a view built on it would cycle it.
+// Every view that reads the session snapshot goes through here.
+func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (statusSessionSnapshot, suspensionstate.State, bool) {
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	if suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()) {
+		return statusSessionSnapshot{
+			bySessionName: make(map[string]statusSessionInfo),
+			byTemplate:    make(map[string][]statusSessionInfo),
+		}, citySt, true
+	}
+	return s.statusSessionSnapshot(ctx), citySt, false
 }
 
 // statusSessionSnapshot reads the session-class beads every session-derived
@@ -655,6 +742,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 			continue
 		}
 		info := statusSessionInfo{
+			id:          strings.TrimSpace(sessInfo.ID),
 			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
 			agentName:   strings.TrimSpace(sessInfo.AgentName),
 			template:    strings.TrimSpace(sessInfo.Template),
@@ -694,13 +782,15 @@ type statusWorkResult struct {
 // when its cache is clean (#1896). Stores are queried concurrently; results
 // aggregate in deterministic city/rig order.
 //
-// NOT identical to GET /beads/ready on a split city: that handler grew a
-// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
-// on a city with [beads.classes.graph] relocated the status ready count omits
-// graph-class ready work while /beads/ready includes it. Left divergent
-// deliberately rather than fixed here: this read is cache-only and error-lenient
-// by design (see cacheColdRigs below), which is the opposite of the graph leg's
-// fail-loud contract, so wiring one in is its own slice, not a rider.
+// On a split city the graph binding is one more READY leg, as it is for GET
+// /beads/ready (huma_handlers_beads.go): without it the status Ready count
+// omitted every graph-class ready step that /beads/ready served (read-audit
+// R12). It is read the way every other leg here is — cache-only through the
+// binding's CachingStore, error-lenient (a failure is a partial error, not a
+// failed status) — and its stored open/in-progress rows are not added, because
+// a city that relocates nothing never counted those either: its counts come
+// from the work stores. A city whose graph class is not relocated has no such
+// leg, so its counts are unchanged.
 //
 // Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
 // runs no cache, so every read would go to bd, and a bd read restarts a
@@ -741,6 +831,10 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 			includeStored: true,
 			includeReady:  rigName != cityName,
 		})
+	}
+
+	if graph := s.state.GraphBeadStore().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
+		queries = append(queries, workQuery{label: "graph", store: graph, includeReady: true})
 	}
 
 	results := make([]statusWorkResult, len(queries))
@@ -1081,7 +1175,6 @@ func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, c
 			rig:           a.Dir,
 			pool:          poolName,
 			suspended:     a.Suspended,
-			provider:      a.Provider,
 			description:   a.Description,
 		})
 		seenSessionNames[info.sessionName] = true

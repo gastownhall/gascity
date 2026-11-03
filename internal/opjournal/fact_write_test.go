@@ -1,6 +1,7 @@
 package opjournal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -260,5 +261,75 @@ func TestRecordFactReportsAFailedCloseAfterTheCreate(t *testing.T) {
 	}
 	if msg := err.Error(); !strings.Contains(msg, "closing fact") || strings.Contains(msg, " op ") {
 		t.Fatalf("error %q does not name the fact", msg)
+	}
+}
+
+func TestFactCreateItemRoundTrips(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	f := turnEndedFact()
+	item, err := FactCreateItem("gc", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{item}}); err != nil {
+		t.Fatalf("ApplyGuarded: %v", err)
+	}
+	id, _ := FactID("gc", f)
+	b, err := mem.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeFact(b)
+	if err != nil || got.Turn != f.Turn || got.Basis != f.Basis || b.Status != "closed" {
+		t.Fatalf("fact %+v, %v (status %s)", got, err, b.Status)
+	}
+	bad := f
+	bad.Turn = ""
+	if _, err := FactCreateItem("gc", bad); err == nil {
+		t.Fatal("FactCreateItem accepted an invalid fact")
+	}
+}
+
+// TestFactCollisionRefusesTheWholeBatch pins what the lane's respond Done
+// relies on: a batch carrying an already-recorded fact writes nothing.
+func TestFactCollisionRefusesTheWholeBatch(t *testing.T) {
+	stores := map[string]func(t *testing.T) (*Store, beads.Store){
+		"memstore": func(t *testing.T) (*Store, beads.Store) {
+			h := newHarness(t)
+			return h.store, h.mem
+		},
+		"sqlite": openSQLiteOpStore,
+	}
+	for name, open := range stores {
+		t.Run(name, func(t *testing.T) {
+			s, backing := open(t)
+			f := turnEndedFact()
+			if _, err := s.RecordFact(f); err != nil {
+				t.Fatal(err)
+			}
+			op, _, err := s.Propose(msgReq("k", "x"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			batcher, ok := beads.GuardedBatcherFor(backing)
+			if !ok {
+				t.Fatal("no guarded batcher")
+			}
+			b, _ := backing.Get(op.ID)
+			rev := b.Revision
+			assignee := "x"
+			fact, _ := FactCreateItem(s.Prefix(), f)
+			_, err = batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+				{Update: &beads.GuardedUpdate{ID: op.ID, Opts: beads.UpdateOpts{Assignee: &assignee}, ExpectedRevision: &rev}},
+				fact,
+			}})
+			var item *beads.BatchItemError
+			if !errors.As(err, &item) || !errors.Is(err, beads.ErrAlreadyExists) {
+				t.Fatalf("ApplyGuarded = %v, want an ErrAlreadyExists item refusal", err)
+			}
+			if after, _ := backing.Get(op.ID); after.Assignee != "" || after.Revision != rev {
+				t.Fatalf("the refused batch wrote the op: %+v", after)
+			}
+		})
 	}
 }

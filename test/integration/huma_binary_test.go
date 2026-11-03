@@ -29,9 +29,11 @@ import (
 // Huma registration, and listener bootstrap all agree.
 //
 // The test is build-tagged `integration` so it doesn't run in the
-// default `go test ./...` pass; run it explicitly via:
+// default `bazel test //...` pass; run it explicitly via:
 //
-//	go test -tags=integration ./test/integration/ -run TestHumaBinary
+//	bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_'
+//
+// `make test-integration-huma` is its Go-native twin.
 func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	bin := buildGCBinary(t)
 
@@ -316,7 +318,7 @@ func waitHTTP(t *testing.T, url string, deadline time.Duration) {
 //
 // Build-tagged `integration`; run with:
 //
-//	go test -tags=integration ./test/integration/ -run TestHumaBinary_CityCreateAsync
+//	bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_CityCreateAsync$'
 func TestHumaBinary_CityCreateAsync(t *testing.T) {
 	bin := buildGCBinary(t)
 
@@ -492,7 +494,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 //
 // Build-tagged `integration`; run with:
 //
-//	go test -tags=integration ./test/integration/ -run TestHumaBinary_CityUnregisterAsync
+//	bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_CityUnregisterAsync$'
 func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 	// Quarantined: this test was the dominant trip on Integration / rest-full-6-of-16
 	// (13 hits in the 2026-05-15 → 2026-05-17 red-CI anchor window). Root cause is the

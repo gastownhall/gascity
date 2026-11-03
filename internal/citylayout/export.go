@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// ControlPlaneDescriptorPath is the worker-site descriptor `gc connect` writes,
+// relative to the city root. Its presence makes the directory a worker site, so
+// it never leaves the box it was written in: a work dir exported from a box
+// must not turn its destination into one.
+const ControlPlaneDescriptorPath = RuntimeRoot + "/control-plane.toml"
+
 // defaultWorkDirExportExcludes lists orchestrator-local state that a runtime
 // must not copy out of a session's work dir. Deployment artifacts sessions
 // read at start (.gc/settings.json, .gc/site.toml, .gc/cache, .gc/system,
@@ -56,9 +62,23 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/emergency/**",
 	".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json",
+	// S5-A: storage attestations, the reconciler's v2 fallback record, and a
+	// remote stage's record (written by the staging gc init, never shipped).
+	".gc/storage-attestations.log",
+	".gc/reconciler-v2-fallback.json",
+	".gc/remote-stage.toml",
+	// S5-B: the maintenance window's record of a provider it started.
+	".gc/storage-window.json",
 	".gc/scope-ownership.json",
+	// gc bd's trust state for this host's bd binaries: the verdict cache,
+	// its lock, the walks' scratch dirs, and the operator's vouches.
+	".gc/bd-inventory-vouch.json",
+	".gc/cache/bd-inventory.json",
+	".gc/cache/bd-inventory.json.lock",
+	".gc/cache/tmp/**",
 	".gc/mcp-locks/**",
 	".gc/dispatch-wake",
+	ControlPlaneDescriptorPath,
 
 	// Ledger copies: the file provider's store in every scope and the
 	// legacy JSONL archive.

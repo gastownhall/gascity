@@ -189,7 +189,7 @@ func assertNoGraphBeads(t *testing.T, store beads.Store, storeName string) {
 func TestOrderRunWispRootLandsInGraphStoreOnSplitCity(t *testing.T) {
 	cityPath, a := oneShotGraphOrderCity(t, "cooldown")
 	scope := splittest.NewWorkStore(t, "mc")
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graph))
 
 	wispID := runOneShotOrder(t, cityPath, a, scope, nil)
@@ -221,7 +221,7 @@ func TestOrderRunWispRootLandsInGraphStoreOnSplitCity(t *testing.T) {
 //	wisp root gc-1 is not resident in the single store: bead not found
 func TestOrderRunWispStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 	cityPath, a := oneShotGraphOrderCity(t, "cooldown")
-	store := splittest.NewWorkStore(t, "gc")
+	store := splittest.NewSingleStore(t, "gc")
 	seedCLIStorageRoutes(t, cityPath, nil)
 
 	wispID := runOneShotOrder(t, cityPath, a, store, nil)
@@ -258,7 +258,7 @@ func TestOrderRunWispStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 func TestOrderRunGraphResidentRunIsVisibleToTheOrderReaders(t *testing.T) {
 	cityPath, a := oneShotGraphOrderCity(t, "event")
 	scope := splittest.NewWorkStore(t, "mc")
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graph))
 
 	ep := events.NewFake()
@@ -378,7 +378,7 @@ func cookFormula(t *testing.T, name string, extraArgs ...string) formulaCookJSON
 // command opened for the formula's scope.
 func TestFormulaCookGraphV2RootLandsInGraphStoreOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "graph-work")
@@ -411,7 +411,7 @@ func TestFormulaCookGraphV2RootLandsInGraphStoreOnSplitCity(t *testing.T) {
 // relocate a class the split does not relocate.
 func TestFormulaCookLegacyMoleculeStaysOnTheWorkStore(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "legacy-work")
@@ -505,7 +505,7 @@ func closeEveryBeadExcept(t *testing.T, store beads.Store, keep string) {
 // TestFormulaCookAttachOnAWorkResidentBeadIsRefusedOnSplitCity).
 func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	work, err := openStoreAtForCity(cityDir, cityDir)
@@ -556,7 +556,7 @@ func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T
 // on it.
 func TestFormulaCookRootOnlyLegacyWispLandsInGraphStoreOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "vapor-work")
@@ -601,7 +601,7 @@ func TestFormulaCookRootOnlyLegacyWispStaysOnTheOneStoreOnSingleStoreCity(t *tes
 // already materialized.
 func TestFormulaCookMetaStampLandsOnTheGraphResidentRoot(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "graph-work", "--meta", "gc.trace=abc123")
@@ -612,6 +612,33 @@ func TestFormulaCookMetaStampLandsOnTheGraphResidentRoot(t *testing.T) {
 	}
 	if got := root.Metadata["gc.trace"]; got != "abc123" {
 		t.Errorf("cooked root %s: gc.trace = %q, want %q — the --meta stamp went to a store that never held the root", res.RootID, got, "abc123")
+	}
+}
+
+// TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot is the
+// --attach twin of TestFormulaCookMetaStampLandsOnTheGraphResidentRoot, on the
+// one graft a split city serves: a v1 formula onto a binding-owned bead.
+// molecule.Attach materializes the sub-DAG through the store that holds the
+// attach bead, so the --meta stamp must go through that same store — addressed
+// at the scope store it fails the cook after the graft already exists (#7309).
+func TestFormulaCookAttachMetaStampLandsOnTheBindingResidentSubDAGRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
+
+	source, err := graph.Create(beads.Bead{Title: "class-resident attach target", Type: "task"})
+	if err != nil {
+		t.Fatalf("create the class-resident attach bead: %v", err)
+	}
+
+	res := cookFormula(t, "legacy-work", "--attach", source.ID, "--meta", "gc.trace=abc123")
+
+	root, err := graph.Get(res.RootID)
+	if err != nil {
+		t.Fatalf("attached sub-DAG root %s is not resident in the graph binding: %v", res.RootID, err)
+	}
+	if got := root.Metadata["gc.trace"]; got != "abc123" {
+		t.Errorf("sub-DAG root %s: gc.trace = %q, want %q — the --meta stamp went to a store that never held the root", res.RootID, got, "abc123")
 	}
 }
 
@@ -653,7 +680,7 @@ func TestFormulaCookAttachIsIdempotent(t *testing.T) {
 
 	t.Run("split refuses repeatedly and accumulates nothing", func(t *testing.T) {
 		cityDir := oneShotCookCity(t)
-		graph := splittest.NewClassStore(t, config.BeadClassGraph)
+		graph := splittest.NewBindingStore(t)
 		seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 		work, err := openStoreAtForCity(cityDir, cityDir)
 		if err != nil {
@@ -710,7 +737,7 @@ func blockingDepCount(t *testing.T, store beads.Store, beadID string) int {
 func TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity(t *testing.T) {
 	cityPath, a := oneShotPouredOrderCity(t)
 	scope := splittest.NewWorkStore(t, "mc")
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graph))
 
 	rootID := runOneShotOrder(t, cityPath, a, scope, nil)
@@ -782,7 +809,7 @@ func TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity(t *testing.T) {
 // the split fixture and both are the ones that have to answer for it.
 func TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg(t *testing.T) {
 	cityPath := t.TempDir()
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	work := splittest.NewWorkStore(t, "mc")
 
 	convoy, err := work.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
@@ -902,5 +929,45 @@ func TestRecipeCoordClassRederivesTheVerdictFromTheClassifier(t *testing.T) {
 				t.Fatalf("moleculeClassStore picked the wrong store for a %v recipe", tc.want)
 			}
 		})
+	}
+}
+
+// TestFormulaCookAttachStampsMetaOnTheRoot asserts the documented --meta
+// contract ("set root bead metadata after cook") holds on the --attach arms as
+// it does on a standalone cook, for both formula compilers (issue #7309).
+func TestFormulaCookAttachStampsMetaOnTheRoot(t *testing.T) {
+	cityDir := oneShotCookCity(t)
+	resetCLIStorageRoutes(t)
+	seedCLIStorageRoutes(t, cityDir, nil)
+	work, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open work store: %v", err)
+	}
+	want := map[string]string{
+		"work_dir":         "/tmp/cook-repro-worktree",
+		"review_work_bead": "fixture-bead",
+		"base_sha":         "base-abc",
+		"head_sha":         "head-def",
+	}
+	var metaArgs []string
+	for k, v := range want {
+		metaArgs = append(metaArgs, "--meta", k+"="+v)
+	}
+
+	for _, formulaName := range []string{"legacy-work", "graph-work"} {
+		source, err := work.Create(beads.Bead{Title: "attach target " + formulaName, Type: "task"})
+		if err != nil {
+			t.Fatalf("create attach bead: %v", err)
+		}
+		res := cookFormula(t, formulaName, append([]string{"--attach", source.ID}, metaArgs...)...)
+		root, err := work.Get(res.RootID)
+		if err != nil {
+			t.Fatalf("%s: get attached root %s: %v", formulaName, res.RootID, err)
+		}
+		for k, v := range want {
+			if got := root.Metadata[k]; got != v {
+				t.Errorf("%s --attach: root %s metadata %s = %q, want %q", formulaName, res.RootID, k, got, v)
+			}
+		}
 	}
 }

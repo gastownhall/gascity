@@ -110,7 +110,12 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 			storesScanned = append(storesScanned, info.ref)
 			seenStoreRefs[info.ref] = true
 		}
-		root, err := info.store.Get(workflowID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): a
+		// miss here is covered by the leg that owns the root.
+		root, err := beads.RelicGet(info.store, workflowID)
 		if err != nil {
 			if firstGetErr == nil && !errors.Is(err, beads.ErrNotFound) {
 				firstGetErr = err
@@ -138,12 +143,21 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 			if info.store == nil {
 				continue
 			}
-			roots, err := info.store.List(beads.ListQuery{
-				Metadata: map[string]string{
-					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
-					beadmeta.WorkflowIDMetadataKey: workflowID,
-				},
-				IncludeClosed: true,
+			var roots []beads.Bead
+			// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+			// rows only as pre-split copies, so beads.RelicRead counts the read as
+			// debt; on the class binding the same read is legitimate.
+			// One leg of the workflowStores federation; see the Get above.
+			err := beads.RelicRead(func() error {
+				var listErr error
+				roots, listErr = info.store.List(beads.ListQuery{
+					Metadata: map[string]string{
+						beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+						beadmeta.WorkflowIDMetadataKey: workflowID,
+					},
+					IncludeClosed: true,
+				})
+				return listErr
 			})
 			if err != nil {
 				listPartial = true
@@ -612,6 +626,17 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 }
 
 func workflowStores(state State) []workflowStoreInfo {
+	return workflowStoresWith(state, false)
+}
+
+// workflowStoresIncludingRetiredRigs is workflowStores with every rig leg,
+// relic-free or not, for a reader that may be looking for rig WORK (an event
+// subject), which a relic-free rig still holds.
+func workflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
+	return workflowStoresWith(state, true)
+}
+
+func workflowStoresWith(state State, includeRetiredRigs bool) []workflowStoreInfo {
 	beadStores := state.BeadStores()
 	stores := make([]workflowStoreInfo, 0, len(beadStores)+2)
 	cityName := workflowCityScopeRef(state.CityName())
@@ -649,6 +674,14 @@ func workflowStores(state State) []workflowStoreInfo {
 		}
 		store := state.BeadStore(rigName)
 		if store == nil {
+			continue
+		}
+		// On a split city a rig's graph rows live in the binding leading
+		// this list; the rig's own store is read only while it may still
+		// hold pre-S4 rows. Once the rig is imported or proven clean (the
+		// S4 relic-free predicate) its store holds only work, and no
+		// workflow reader here reads work.
+		if !includeRetiredRigs && rigGraphLegRetired(state, rigName) {
 			continue
 		}
 		stores = append(stores, workflowStoreInfo{
