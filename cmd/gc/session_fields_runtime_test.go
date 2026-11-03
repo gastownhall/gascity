@@ -323,7 +323,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
 		{"operator kill fence", "currently_processing_bead_id held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			_, err := session.WriteKillFence(rec, id, now)
+			_, err := session.WriteKillFence(beadstest.Sessions(rec), id, now)
 			must(t, err)
 		}},
 		{"operator set state", "state state_reason", []string{"internal/session/store.go:Store.SetState"}, func(t *testing.T, rec *sessionKeyRecorder) {
