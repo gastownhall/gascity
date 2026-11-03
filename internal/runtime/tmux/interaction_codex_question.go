@@ -16,7 +16,13 @@ var codexQueuedQuestionCount = regexp.MustCompile(`^[?？] (\d+) questions?$`)
 // menu or conversational bullet list. Pending itself does not open the editor.
 func codexQuestionPanel(lines []string) *parsedQuestion {
 	end := trimBlankTail(lines, len(lines))
-	if end == 0 || !strings.Contains(lines[end-1], "enter submit") || !strings.Contains(lines[end-1], "^] skip") || !strings.Contains(lines[end-1], "main prompt") {
+	if end == 0 {
+		return nil
+	}
+	footer := lines[end-1]
+	// Codex renders Control-] as a key glyph on macOS. Keep all three
+	// native editor controls required in either rendering.
+	if !strings.Contains(footer, "enter submit") || (!strings.Contains(footer, "^] skip") && !strings.Contains(footer, "⌃] skip")) || !strings.Contains(footer, "main prompt") {
 		return nil
 	}
 	start := -1
