@@ -199,9 +199,11 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 // convoyCreateStoreDir picks the store directory for a new convoy. An
 // explicit --rig name selects that rig's store, resolving the name the way
 // gc bd and gc formula do (case-insensitive exact match, refusing a
-// declared rig with no path binding); without one, placement is unchanged:
-// the first issue's store when issues are given, else the city store, so
-// ambient rig selection (GC_RIG, cwd) never chooses the convoy store.
+// declared rig with no path binding) and refusing an issue whose prefix
+// routes to a different store, since a convoy and its issues must share
+// one; without one, placement is unchanged: the first issue's store when
+// issues are given, else the city store, so ambient rig selection
+// (GC_RIG, cwd) never chooses the convoy store.
 func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
 	if name := strings.TrimSpace(rigName); name != "" {
 		if cfg == nil {
@@ -214,7 +216,13 @@ func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs [
 		if strings.TrimSpace(rig.Path) == "" {
 			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
 		}
-		return resolveStoreScopeRoot(cityPath, rig.Path), nil
+		rigRoot := resolveStoreScopeRoot(cityPath, rig.Path)
+		for _, id := range issueIDs {
+			if routed := convoyCreateStoreRoot(cfg, cityPath, id); !samePath(routed, rigRoot) {
+				return "", fmt.Errorf("--rig %q conflicts with issue %s, which routes to store %q; a convoy and its issues must share one store", name, id, routed)
+			}
+		}
+		return rigRoot, nil
 	}
 	if len(issueIDs) > 0 {
 		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil

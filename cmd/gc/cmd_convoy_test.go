@@ -4304,8 +4304,19 @@ func TestConvoyCreateRigFlag(t *testing.T) {
 // gc formula, and the no-flag default placement.
 func TestConvoyCreateStoreDir(t *testing.T) {
 	cityDir := t.TempDir()
+	frontendDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(frontendDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	frontendLink := filepath.Join(cityDir, "frontend-link")
+	if err := os.Symlink(frontendDir, frontendLink); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.City{Rigs: []config.Rig{
 		{Name: "frontend", Path: "frontend", Prefix: "fe"},
+		{Name: "frontend-abs", Path: frontendDir, Prefix: "fx"},
+		{Name: "frontend-link", Path: "frontend-link", Prefix: "fl"},
+		{Name: "backend", Path: "backend", Prefix: "be"},
 		{Name: "unbound", Prefix: "ub"},
 	}}
 	frontendRoot := resolveStoreScopeRoot(cityDir, "frontend")
@@ -4356,6 +4367,36 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 			name:    "relative path written with ./ is not a name",
 			rigName: "./frontend",
 			wantErr: `rig "./frontend" not found`,
+		},
+		{
+			name:     "rig conflicting with the issue's routed store",
+			rigName:  "backend",
+			issueIDs: []string{"fe-1"},
+			wantErr:  "--rig \"backend\" conflicts with issue fe-1, which routes to store \"" + frontendRoot + "\"; a convoy and its issues must share one store",
+		},
+		{
+			name:     "rig conflicting with a city-prefixed issue",
+			rigName:  "frontend",
+			issueIDs: []string{"demo-1"},
+			wantErr:  "--rig \"frontend\" conflicts with issue demo-1, which routes to store \"" + cityDir + "\"; a convoy and its issues must share one store",
+		},
+		{
+			name:     "rig conflicting with an unknown-prefix issue",
+			rigName:  "frontend",
+			issueIDs: []string{"xx-9"},
+			wantErr:  "--rig \"frontend\" conflicts with issue xx-9, which routes to store \"" + cityDir + "\"; a convoy and its issues must share one store",
+		},
+		{
+			name:     "same-root alias binding agrees with the issue's store",
+			rigName:  "frontend-abs",
+			issueIDs: []string{"fe-1"},
+			wantDir:  frontendRoot,
+		},
+		{
+			name:     "symlink-equivalent binding agrees with the issue's store",
+			rigName:  "frontend-link",
+			issueIDs: []string{"fe-1"},
+			wantDir:  frontendRoot,
 		},
 	}
 	for _, tc := range cases {
@@ -4569,4 +4610,90 @@ func TestConvoyCreateRigFlagRejectsUnusableRig(t *testing.T) {
 			requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
 		})
 	}
+}
+
+// TestConvoyCreateRigFlagConflictsWithIssueStore: an explicit --rig that
+// disagrees with the store an issue's prefix routes to must refuse the
+// create, naming the rig, the issue and the routed store, before any store
+// is opened. The pre-existing mixed-issue refusal keeps precedence, and a
+// rig whose binding resolves to the same root as the issue's store agrees
+// rather than conflicts.
+func TestConvoyCreateRigFlagConflictsWithIssueStore(t *testing.T) {
+	cityDir := convoyRigFlagTestCity(t)
+	frontendDir := filepath.Join(cityDir, "frontend")
+	backendDir := filepath.Join(cityDir, "backend")
+
+	frontendSeed, err := openScopeLocalFileStoreForCity(frontendDir, cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStoreForCity(frontend): %v", err)
+	}
+	frontendIssue, err := frontendSeed.Create(beads.Bead{Title: "frontend issue"})
+	if err != nil {
+		t.Fatalf("create frontend issue: %v", err)
+	}
+	citySeed, err := openScopeLocalFileStoreForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStoreForCity(city): %v", err)
+	}
+	cityIssue, err := citySeed.Create(beads.Bead{Title: "city issue"})
+	if err != nil {
+		t.Fatalf("create city issue: %v", err)
+	}
+
+	t.Run("rig conflicting with the issue's store", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", cityDir, "--rig", "backend", "convoy", "create", "conflicted batch", frontendIssue.ID, "--json"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("run convoy create --rig backend with %s exited 0; want a refusal", frontendIssue.ID)
+		}
+		wantErr := "--rig \"backend\" conflicts with issue " + frontendIssue.ID +
+			", which routes to store \"" + frontendDir + "\"; a convoy and its issues must share one store"
+		if !strings.Contains(stderr.String(), wantErr) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), wantErr)
+		}
+		requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
+	})
+
+	t.Run("rig conflicting with a city-prefixed issue", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "conflicted batch", cityIssue.ID, "--json"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("run convoy create --rig frontend with %s exited 0; want a refusal", cityIssue.ID)
+		}
+		wantErr := "--rig \"frontend\" conflicts with issue " + cityIssue.ID +
+			", which routes to store \"" + cityDir + "\"; a convoy and its issues must share one store"
+		if !strings.Contains(stderr.String(), wantErr) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), wantErr)
+		}
+		requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
+	})
+
+	t.Run("rig conflicting with an unknown-prefix issue", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "conflicted batch", "xx-9", "--json"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatal("run convoy create --rig frontend with xx-9 exited 0; want a refusal")
+		}
+		wantErr := "--rig \"frontend\" conflicts with issue xx-9" +
+			", which routes to store \"" + cityDir + "\"; a convoy and its issues must share one store"
+		if !strings.Contains(stderr.String(), wantErr) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), wantErr)
+		}
+		requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
+	})
+
+	t.Run("mixed-issue refusal keeps precedence over the rig conflict", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", cityDir, "--rig", "backend", "convoy", "create", "conflicted batch", frontendIssue.ID, cityIssue.ID, "--json"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("run convoy create with %s and %s exited 0; want the mixed-store refusal", frontendIssue.ID, cityIssue.ID)
+		}
+		if !strings.Contains(stderr.String(), "issues span multiple stores") {
+			t.Fatalf("stderr = %q, want the mixed-store refusal to win over the rig conflict", stderr.String())
+		}
+		if strings.Contains(stderr.String(), "conflicts with issue") {
+			t.Fatalf("stderr = %q, want only the mixed-store refusal", stderr.String())
+		}
+		requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
+	})
 }
