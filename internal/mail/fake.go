@@ -235,7 +235,8 @@ func (f *Fake) Check(recipient string) ([]Message, error) {
 	return f.Inbox(recipient)
 }
 
-// Reply creates a reply to an existing message.
+// Reply creates a reply to an existing message. It is addressed to the
+// original sender, or to the original recipient when the replier is that sender.
 func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -254,6 +255,16 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 		return Message{}, fmt.Errorf("replying to %q: %w", id, ErrNotFound)
 	}
 
+	// Reply to the original sender; when the replier is that sender, the other
+	// party is the original's recipient.
+	to := original.msg.From
+	if from != "" && from == original.msg.From {
+		to = original.msg.To
+	}
+	if to == "" || to == from {
+		return Message{}, fmt.Errorf("replying to %q: reply would address its own sender %q", id, from)
+	}
+
 	threadID := original.msg.ThreadID
 	if threadID == "" {
 		threadID = f.nextThreadID()
@@ -263,7 +274,7 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 	m := Message{
 		ID:        fmt.Sprintf("fake-%d", f.seq),
 		From:      from,
-		To:        original.msg.From, // reply to sender
+		To:        to,
 		Subject:   subject,
 		Body:      body,
 		CreatedAt: f.now(),

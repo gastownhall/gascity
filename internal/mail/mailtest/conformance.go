@@ -385,26 +385,6 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
-	t.Run("Reply_BySenderGoesToOriginalRecipient", func(t *testing.T) {
-		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "Hello", "first")
-		if err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		// alice is the parent's sender replying on her own thread: the other
-		// party is bob, never alice herself.
-		reply, err := p.Reply(sent.ID, "alice", "RE: Hello", "follow-up")
-		if err != nil {
-			t.Fatalf("Reply: %v", err)
-		}
-		if reply.To != "bob" {
-			t.Errorf("Reply To = %q, want %q (original recipient, not the replier)", reply.To, "bob")
-		}
-		if reply.From != "alice" {
-			t.Errorf("Reply From = %q, want %q", reply.From, "alice")
-		}
-	})
-
 	// --- Group 8: Thread ---
 
 	t.Run("Thread_ReturnsAllInThread", func(t *testing.T) {
@@ -919,4 +899,34 @@ func messageIDs(messages []mail.Message) []string {
 		ids[i] = msg.ID
 	}
 	return ids
+}
+
+// RunReplyToOwnMessageTests runs the self-reply contract: when the replier is
+// the sender of the message being replied to, the reply goes to that message's
+// recipient, never back to the replier. It is separate from RunProviderTests
+// because exec-backed providers delegate the reply target to an external
+// script that has not adopted this rule; in-process providers (the bead store,
+// the Fake) must run it. newProvider returns a fresh, empty provider per test.
+func RunReplyToOwnMessageTests(t *testing.T, newProvider func(t *testing.T) mail.Provider) {
+	t.Helper()
+
+	t.Run("Reply_BySenderGoesToOriginalRecipient", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		// alice is the parent's sender replying on the thread it started: the other
+		// party is bob, never alice herself.
+		reply, err := p.Reply(sent.ID, "alice", "RE: Hello", "follow-up")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if reply.To != "bob" {
+			t.Errorf("Reply To = %q, want %q (original recipient, not the replier)", reply.To, "bob")
+		}
+		if reply.From != "alice" {
+			t.Errorf("Reply From = %q, want %q", reply.From, "alice")
+		}
+	})
 }

@@ -847,7 +847,9 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 
 // Reply creates a reply to an existing message. Inherits ThreadID from the
 // original, sets ReplyTo to the original's ID. Reply is addressed to the
-// original sender.
+// original sender, except when the replier IS that sender: then the other
+// party on the thread is the original's recipient, and the reply goes there.
+// A reply is never addressed to its own sender.
 func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	original, err := p.store.Get(id)
 	if err != nil {
@@ -856,24 +858,49 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if isRemovedMessageBead(original) {
 		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
 	}
-	toSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
-	to := toSessionID
-	if to == "" {
-		to = strings.TrimSpace(original.From)
-	}
-	if to == "" {
-		return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
-	}
-	toDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
-	if toDisplay == "" {
-		toDisplay = strings.TrimSpace(original.From)
-	}
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
 	if metadata == nil {
 		metadata = make(map[string]string)
+	}
+	replierSessionID := metadata[fromSessionIDMetadataKey]
+
+	parentSessionID := strings.TrimSpace(original.Metadata[fromSessionIDMetadataKey])
+	parentFrom := strings.TrimSpace(original.From)
+	parentDisplay := strings.TrimSpace(original.Metadata[fromDisplayMetadataKey])
+	if parentDisplay == "" {
+		parentDisplay = parentFrom
+	}
+
+	// Send stamps only the sender's identity, so the original's recipient is
+	// known only as its Assignee. The replier owns the parent when both carry
+	// the same session ID, or, with no session identity on either side, the
+	// same address.
+	replyingToOwnMessage := (replierSessionID != "" && replierSessionID == parentSessionID) ||
+		(replierSessionID == "" && parentSessionID == "" && from != "" && from == parentDisplay)
+
+	var to, toSessionID, toDisplay string
+	if replyingToOwnMessage {
+		to = strings.TrimSpace(original.Assignee)
+		toDisplay = to
+		if to == "" {
+			return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no other party to reply to", id)
+		}
+	} else {
+		toSessionID = parentSessionID
+		to = toSessionID
+		if to == "" {
+			to = parentFrom
+		}
+		toDisplay = parentDisplay
+		if to == "" {
+			return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
+		}
+	}
+	if (replierSessionID != "" && toSessionID == replierSessionID) || (from != "" && to == from) {
+		return mail.Message{}, fmt.Errorf("beadmail reply: reply to %s would address its own sender %q", id, from)
 	}
 	if toSessionID != "" {
 		metadata[toSessionIDMetadataKey] = toSessionID
@@ -893,7 +920,7 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 		Title:       deriveReplyTitle(subject, original.Title, body),
 		Description: body,
 		Type:        messageBeadType,
-		Assignee:    to, // reply goes back to sender
+		Assignee:    to, // the other party on the thread
 		From:        from,
 		Labels:      labels,
 		Metadata:    metadata,

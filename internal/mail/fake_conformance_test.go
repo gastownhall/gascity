@@ -16,6 +16,12 @@ func TestFakeConformance(t *testing.T) {
 	})
 }
 
+func TestFakeReplyToOwnMessage(t *testing.T) {
+	mailtest.RunReplyToOwnMessageTests(t, func(_ *testing.T) mail.Provider {
+		return mail.NewFake()
+	})
+}
+
 func TestFakeUsesSuppliedClockAndThreadIDs(t *testing.T) {
 	times := []time.Time{
 		time.Date(2026, time.July, 16, 10, 0, 0, 0, time.UTC),

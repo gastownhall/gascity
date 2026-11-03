@@ -139,13 +139,15 @@ func RunMailProviderTests(t *testing.T, suite MessagingSuite) {
 	if suite.NewFrontDoors == nil {
 		t.Fatalf("storebindingtest: MessagingSuite.NewFrontDoors is required")
 	}
-	mailtest.RunProviderTests(t, func(t *testing.T) mail.Provider {
+	newMail := func(t *testing.T) mail.Provider {
 		fronts := suite.NewFrontDoors(t)
 		if fronts.Mail == nil {
 			t.Fatalf("the Messaging front-door set carries no mail provider")
 		}
 		return fronts.Mail
-	})
+	}
+	mailtest.RunProviderTests(t, newMail)
+	mailtest.RunReplyToOwnMessageTests(t, newMail)
 }
 
 func mustMail(r Runner, suite MessagingSuite) mail.Provider {
