@@ -643,12 +643,12 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 	return patch
 }
 
-// ConfigDriftAsleepResetPatch is ConfigDriftResetPatch(StateAsleep, ...),
-// which reads no clock: the v2 asleep named repair's (SESS-568). It reads
-// the wall clock itself for ResetCommittedAtKey, same as RestartRequestPatch's
-// IsZero fallback, since every continuation-reset re-arm site stamps it.
-func ConfigDriftAsleepResetPatch(sessionKey string) MetadataPatch {
-	return configDriftReset(StateAsleep, sessionKey, time.Now().UTC())
+// ConfigDriftAsleepResetPatch is ConfigDriftResetPatch(StateAsleep, ...)
+// at now, which it reads from its caller: the v2 asleep named repair's
+// (SESS-568). Every continuation-reset re-arm site stamps ResetCommittedAtKey,
+// same as its siblings.
+func ConfigDriftAsleepResetPatch(sessionKey string, now time.Time) MetadataPatch {
+	return configDriftReset(StateAsleep, sessionKey, now)
 }
 
 // ConfigDriftRestartPatch is ConfigDriftResetPatch(StateStartPending, ...)
