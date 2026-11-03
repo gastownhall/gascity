@@ -857,13 +857,38 @@ func mergeConvoyViewRows[T any](views []convoyStoreView, rows [][]T, idOf func(T
 	return merged, nil
 }
 
-func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
+func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error), strict ...bool) ([]convoyStoreView, error) {
+	strictRead := len(strict) > 0 && strict[0]
+	if strictRead && cfg != nil {
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				return nil, fmt.Errorf("rig %q has no work-scope path", rig.Name)
+			}
+			if err := requireStrictBeadsScopeDirectory(resolveStoreScopeRoot(cityPath, rig.Path)); err != nil {
+				return nil, fmt.Errorf("rig %q: %w", rig.Name, err)
+			}
+		}
+	}
 	var firstErr error
-	stores := openConvoyStoreDirs(convoyStoreCandidates(cfg, cityPath, beadID), openStore, func(_ string, err error) {
+	var failures []error
+	stores := openConvoyStoreDirs(convoyStoreCandidates(cfg, cityPath, beadID), openStore, func(dir string, err error) {
 		if firstErr == nil {
 			firstErr = err
 		}
+		if strictRead {
+			failures = append(failures, fmt.Errorf("opening work scope %q: %w", dir, err))
+		}
 	})
+	if strictRead {
+		if err := errors.Join(failures...); err != nil {
+			return nil, err
+		}
+		for _, view := range stores {
+			if view.store == nil {
+				return nil, fmt.Errorf("work scope %q opened without a store", view.path)
+			}
+		}
+	}
 	if len(stores) > 0 {
 		return stores, nil
 	}
@@ -1056,20 +1081,34 @@ func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string,
 
 // openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
-// to the fallback path. A store it cannot open is skipped, so gc beads show's
-// lookup by id and gc convoy stranded still read the healthy stores.
-func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
+// to the fallback path. Ordinary reads skip a store they cannot open;
+// strict reads refuse an incomplete scope inventory.
+func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string, strict ...bool) ([]convoyStoreView, int) {
+	strictRead := len(strict) > 0 && strict[0]
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
-	// Each open reuses this invocation's cfg rather than reloading city.toml
-	// and every pack include once per store.
+	if strictRead {
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err == nil {
+			err = validateStrictBeadsScopeBindings(cfg, binding)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return nil, 1
+		}
+	}
 	stores, err := openConvoyStores(cfg, cityPath, "", func(storeDir string) (beads.Store, error) {
+		if strictRead {
+			if err := validateStrictBeadsWorkScope(storeDir, cityPath); err != nil {
+				return nil, err
+			}
+		}
 		return openOneShotStoreAtForCityWithConfig(storeDir, cityPath, cfg)
-	})
+	}, strictRead)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr

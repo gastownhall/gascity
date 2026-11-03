@@ -512,7 +512,7 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --assignee, --all, and --format.
+Supports --label, --status, --assignee, --all, --format, --fresh, and --strict.
 --format=json prints a JSON array of beads, the same on every route
 for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
@@ -529,6 +529,10 @@ A city or rig bead store that cannot be opened or read fails the command
 (exit 1, naming the store) rather than being left out of the list. For
 a local city whose relocated class binding cannot be read, the command
 warns on stderr, lists the remaining stores and exits 0.
+
+--fresh reads local stores directly instead of cached API projections.
+--strict implies --fresh and refuses incomplete work/class-store reads without
+printing a successful result. Fresh/strict reads require a local city.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.
@@ -561,8 +565,10 @@ gc beads list --assignee city.agent-a --status in_progress
 | `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--assignee` | string |  | filter to beads whose stored assignee matches this string exactly (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
+| `--fresh` | bool |  | read local stores directly, bypassing API caches |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+| `--strict` | bool |  | require a complete local store read (implies --fresh) |
 
 ## gc beads metadata-cas
 

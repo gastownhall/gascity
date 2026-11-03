@@ -687,3 +687,21 @@ the group's mutation lock. An explicit empty default_handle clears that route.
 Full service upserts retain their existing replacement semantics; metadata-only
 HTTP calls must not become full settings replacements or handler-side read/write
 races.
+
+
+## Authoritative local bead lists
+
+`gc beads list --fresh` reads the resolved local city's stores directly instead
+of API/cache projections. `--strict` implies that local fresh path and refuses
+any configured work-scope open failure, relocated class-binding refusal, partial
+store list or ownership-merge failure before emitting a successful result.
+Remote selectors must fail rather than fall back to a different local city.
+Ordinary list and convoy commands retain their existing best-effort contracts.
+Preserve store identity when merging: unrelated stores may hold the same bead
+ID; only proven migration copies are superseded.
+
+The strict command is a complete live census for its supplied filters, not an
+atomic transaction across all stores. Mutation admission still owns race
+resolution. See `engdocs/design/beads-list-read-contract.md`.
+
+Strict local bead-list reads must establish an existing physical work-scope directory before invoking a potentially lazy store factory. BD-contract scopes require existing valid backend metadata. Preserve the file provider's legitimate empty-before-first-write contract for an already declared, existing scope; a read must never create a missing rig directory. Database availability is still proved by the provider's ordinary open/List result, without initialization or migration.

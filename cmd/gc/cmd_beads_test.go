@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,11 +10,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestDoBeadsHealth_FileProvider(t *testing.T) {
@@ -1066,5 +1069,342 @@ func TestBeadsListFallbackWarnsEveryRunOnARefusedBinding(t *testing.T) {
 		if !strings.Contains(stderr.String(), "bad day") {
 			t.Errorf("run %d: the refusal was not announced with its own cause: %q", run, stderr.String())
 		}
+	}
+}
+
+// TestBeadsListFreshAndStrictBypassAPI proves these flags cannot consume the
+// cached or partial API projection that an authoritative absence check replaces.
+func TestBeadsListFreshAndStrictBypassAPI(t *testing.T) {
+	for _, flags := range [][]string{{"--fresh"}, {"--strict"}, {"--fresh", "--strict"}} {
+		t.Run(strings.Join(flags, "-"), func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := writeBeadsTestCity(t)
+			work := workStoreFor(t, cityPath)
+			if _, err := work.Create(beads.Bead{Title: "native current row", Type: "task"}); err != nil {
+				t.Fatal(err)
+			}
+			original := beadsListAPIClient
+			beadsListAPIClient = func(string) (*api.Client, string) {
+				t.Fatal("fresh/strict read touched API discovery or cached data")
+				return nil, ""
+			}
+			t.Cleanup(func() { beadsListAPIClient = original })
+			args := append([]string{"--city", cityPath, "beads", "list", "--all", "--format=json"}, flags...)
+			var out, errb bytes.Buffer
+			if code := run(args, &out, &errb); code != 0 {
+				t.Fatalf("fresh native list exited %d: %s", code, errb.String())
+			}
+			var rows []beads.Bead
+			if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+				t.Fatalf("native JSON must be a complete plain array: %v; %s", err, out.String())
+			}
+			if len(rows) != 1 || rows[0].Title != "native current row" {
+				t.Fatalf("rows = %+v", rows)
+			}
+		})
+	}
+}
+
+// TestOpenConvoyStoresStrictRejectsAnyMissingScope reproduces the surviving-
+// store case: the legacy best-effort opener succeeds while a configured rig
+// failed, but the strict caller cannot turn that failure into absence.
+func TestOpenConvoyStoresStrictRejectsAnyMissingScope(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	city := t.TempDir()
+	rig := filepath.Join(city, "practice")
+	if err := os.Mkdir(rig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "practice", Path: rig}}}
+	cause := errors.New("configured practice store unavailable")
+	opener := func(dir string) (beads.Store, error) {
+		if dir == rig {
+			return nil, cause
+		}
+		return beads.NewMemStore(), nil
+	}
+	legacy, err := openConvoyStores(cfg, city, "", opener)
+	if err != nil || len(legacy) != 1 {
+		t.Fatalf("legacy compatibility changed: rows=%d err=%v", len(legacy), err)
+	}
+	strict, err := openConvoyStores(cfg, city, "", opener, true)
+	if !errors.Is(err, cause) || strict != nil || !strings.Contains(err.Error(), rig) {
+		t.Fatalf("strict opener hid an omitted work scope: rows=%v err=%v", strict, err)
+	}
+}
+
+func TestBeadsListStrictRefusesUnavailableClassBindingWithoutJSON(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	if _, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "still-readable work", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	failClassBindingReads(t, cityPath, errors.New("native class plane unavailable"))
+	var out, errb bytes.Buffer
+	if code := doBeadsListStrict(cityPath, "json", beadFilters{all: true}, &out, &errb); code == 0 {
+		t.Fatalf("strict read accepted a missing class plane: %s", out.String())
+	}
+	if out.Len() != 0 || !strings.Contains(errb.String(), "native class plane unavailable") {
+		t.Fatalf("strict read must fail before any JSON: out=%q err=%q", out.String(), errb.String())
+	}
+}
+
+func TestBeadsListStrictReadsClassRowsAndKeepsIndependentScopeIDCollision(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	retained, err := work.Create(beads.Bead{Title: "frozen migration row", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, binding := classResidentWorkShapedBead(t, cityPath, retained.ID, "current graph row")
+	mustCreateClassBead(t, binding, beads.Bead{
+		Title: "native graph-only workflow", Type: "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.root_store_ref": "rig:practice", "gc.input_convoy_id": "pr-input"},
+	})
+	rigHoldingID(t, cityPath, retained.ID, "independent rig row", "task")
+	var out, errb bytes.Buffer
+	if code := doBeadsListStrict(cityPath, "json", beadFilters{all: true}, &out, &errb); code != 0 {
+		t.Fatalf("strict read failed: %s", errb.String())
+	}
+	var rows []beads.Bead
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]int{}
+	for _, row := range rows {
+		titles[row.Title]++
+	}
+	for _, title := range []string{"current graph row", "native graph-only workflow", "independent rig row"} {
+		if titles[title] != 1 {
+			t.Fatalf("scope or class row missing/duplicated: %q count=%d; %s", title, titles[title], out.String())
+		}
+	}
+	if titles["frozen migration row"] != 0 {
+		t.Fatal("strict federation revived a superseded migration copy")
+	}
+}
+
+type strictBeadsListStore struct {
+	beads.Store
+	rows  []beads.Bead
+	err   error
+	query beads.ListQuery
+}
+
+func (s *strictBeadsListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.query = q
+	return s.rows, s.err
+}
+
+func TestBeadsListStrictCollectionIsUnboundedAndRejectsPartialRows(t *testing.T) {
+	rows := make([]beads.Bead, 701)
+	for i := range rows {
+		rows[i].ID = "native-" + strings.Repeat("x", i+1)
+	}
+	store := &strictBeadsListStore{rows: rows}
+	views := []convoyStoreView{{path: t.TempDir(), store: store, role: convoyViewOrdinary}}
+	got, err := collectBeadsAcrossStores(views, beadFilters{all: true})
+	if err != nil || len(got) != len(rows) || store.query.Limit != 0 || !store.query.IncludeClosed {
+		t.Fatalf("strict native read was bounded/incomplete: count=%d query=%+v err=%v", len(got), store.query, err)
+	}
+	cause := errors.New("native rows truncated")
+	store.err = &beads.PartialResultError{Op: "strict native list", Err: cause}
+	if got, err := collectBeadsAcrossStores(views, beadFilters{all: true}); !errors.Is(err, cause) || got != nil {
+		t.Fatalf("partial rows became a successful observation: rows=%d err=%v", len(got), err)
+	}
+}
+
+// Native pack commands pin a supervisor URL without selecting a remote city.
+// The local environment/cwd must still admit the fresh native read.
+func TestBeadsListStrictAcceptsNativePackContext(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := writeBeadsTestCity(t)
+	t.Chdir(cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CITY_NAME", "test-city")
+	t.Setenv("GC_SUPERVISOR_URL", "http://127.0.0.1:8372")
+	if _, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "native pack row", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	original := beadsListAPIClient
+	beadsListAPIClient = func(string) (*api.Client, string) {
+		t.Fatal("native pack fresh/strict command touched API discovery")
+		return nil, ""
+	}
+	t.Cleanup(func() { beadsListAPIClient = original })
+	var out, errb bytes.Buffer
+	if code := run([]string{"beads", "list", "--fresh", "--strict", "--all", "--format=json"}, &out, &errb); code != 0 {
+		t.Fatalf("native pack context rejected: %s", errb.String())
+	}
+	var rows []beads.Bead
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0].Title != "native pack row" {
+		t.Fatalf("native pack rows = %s; decode = %v", out.String(), err)
+	}
+}
+
+func TestBeadsListFreshAndStrictRefuseRemoteSelectors(t *testing.T) {
+	for _, flag := range []string{"--fresh", "--strict"} {
+		t.Run(flag, func(t *testing.T) {
+			clearGCEnv(t)
+			cityPath := writeBeadsTestCity(t)
+			t.Chdir(cityPath)
+			if _, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "must not substitute local row", Type: "task"}); err != nil {
+				t.Fatal(err)
+			}
+			var out, errb bytes.Buffer
+			args := []string{"--city-url", "https://remote.invalid:9443", "--city-name", "remote-city", "beads", "list", flag, "--all", "--format=json"}
+			if code := run(args, &out, &errb); code == 0 || out.Len() != 0 || !strings.Contains(errb.String(), "requires a local city") {
+				t.Fatalf("remote selector was not refused: out=%q err=%q", out.String(), errb.String())
+			}
+		})
+	}
+}
+
+func TestBeadsListStrictRefusesIndeterminateConfigScopesWithoutJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name, citySuffix, site, want string
+	}{
+		{name: "missing include", citySuffix: "\ninclude = [\"missing-scope.toml\"]\n", want: "missing-scope.toml"},
+		{name: "undefined storage binding", citySuffix: "\n[storage.classes]\nwork=\"work\"\ngraph=\"missing\"\nsessions=\"missing\"\nmessaging=\"missing\"\norders=\"missing\"\nnudges=\"missing\"\n", want: "undefined binding"},
+		{name: "undeclared site scope", site: "[[rig]]\nname=\"unbound-project\"\npath=\"/existing/project\"\n", want: "undeclared rig scope"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			city := writeBeadsTestCity(t)
+			if tc.citySuffix != "" {
+				// Include is a root key; prepend it before the workspace table.
+				body := "[workspace]\nname=\"test-city\"\n"
+				if tc.name == "missing include" {
+					body = tc.citySuffix + body
+				} else {
+					body += tc.citySuffix
+				}
+				if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.site != "" {
+				if err := os.WriteFile(config.SiteBindingPath(city), []byte(tc.site), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out, errb bytes.Buffer
+			if code := doBeadsListStrict(city, "json", beadFilters{all: true}, &out, &errb); code == 0 || out.Len() != 0 || !strings.Contains(errb.String(), tc.want) {
+				t.Fatalf("indeterminate config accepted: out=%q err=%q", out.String(), errb.String())
+			}
+		})
+	}
+}
+
+func TestStrictBeadsScopeBindingsRefuseConflictingPaths(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "practice", Path: "/project"}}}
+	binding := &config.SiteBinding{Rigs: []config.RigSiteBinding{{Name: "practice", Path: "/project"}, {Name: "practice", Path: "/different"}}}
+	if err := validateStrictBeadsScopeBindings(cfg, binding); err == nil || !strings.Contains(err.Error(), "conflicting paths") {
+		t.Fatalf("ambiguous scope accepted: %v", err)
+	}
+}
+
+func TestStrictBeadsWorkScopeRefusesMissingDirectoryWithoutCreation(t *testing.T) {
+	clearGCEnv(t)
+	city := writeBeadsTestCity(t)
+	missing := filepath.Join(city, "never-created-project")
+	if err := validateStrictBeadsWorkScope(missing, city); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing scope was not refused: %v", err)
+	}
+	// Even legacy file federation (one shared city ledger) must not treat a
+	// declared rig whose directory disappeared as a complete observation.
+	body := "[workspace]\nname=\"test-city\"\n\n[[rigs]]\nname=\"missing-project\"\npath=" + strconv.Quote(missing) + "\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := doBeadsListStrict(city, "json", beadFilters{all: true}, &out, &errb); code == 0 || out.Len() != 0 || !strings.Contains(errb.String(), missing) {
+		t.Fatalf("missing declared file rig accepted: out=%q err=%q", out.String(), errb.String())
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("strict read created or changed missing scope: %v", err)
+	}
+}
+
+func TestBeadsListStrictAcceptsExistingEmptyFileScope(t *testing.T) {
+	clearGCEnv(t)
+	city := writeBeadsTestCity(t)
+	ledger := filepath.Join(city, ".gc", "beads.json")
+	if _, err := os.Stat(ledger); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture must precede first file-ledger write: %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := doBeadsListStrict(city, "json", beadFilters{all: true}, &out, &errb); code != 0 {
+		t.Fatalf("valid existing empty file scope refused: %s", errb.String())
+	}
+	var rows []beads.Bead
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil || len(rows) != 0 {
+		t.Fatalf("empty file result = %s; decode = %v", out.String(), err)
+	}
+	if _, err := os.Stat(ledger); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty read must not initialize a ledger: %v", err)
+	}
+}
+
+func TestBeadsListStrictRefusesUninitializedBDMetadataWithoutOpening(t *testing.T) {
+	for _, tc := range []struct{ name, metadata, want string }{
+		{name: "missing", want: "no initialized beads metadata identity"},
+		{name: "malformed", metadata: "{", want: "invalid metadata.json"},
+		{name: "empty identity", metadata: "{}", want: "no initialized beads metadata identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			city := writeBeadsTestCity(t)
+			t.Setenv("GC_BEADS", "bd")
+			if tc.metadata != "" {
+				if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(tc.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			original := openStoreFactoryForCity
+			openStoreFactoryForCity = func(context.Context, beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+				t.Fatal("strict read attempted store open/init without BD identity")
+				return beads.StoreOpenResult{}, nil
+			}
+			t.Cleanup(func() { openStoreFactoryForCity = original })
+			var out, errb bytes.Buffer
+			if code := doBeadsListStrict(city, "json", beadFilters{all: true}, &out, &errb); code == 0 || out.Len() != 0 || !strings.Contains(errb.String(), tc.want) {
+				t.Fatalf("uninitialized BD scope accepted: out=%q err=%q", out.String(), errb.String())
+			}
+			if _, err := os.Stat(filepath.Join(city, ".beads", "dolt")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("strict read initialized a database: %v", err)
+			}
+		})
+	}
+}
+
+func TestStrictBeadsWorkScopeOpensExistingBDIdentity(t *testing.T) {
+	clearGCEnv(t)
+	city := writeBeadsTestCity(t)
+	t.Setenv("GC_BEADS", "bd")
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := "{\"database\":\"dolt\",\"backend\":\"dolt\",\"dolt_mode\":\"server\",\"dolt_database\":\"existing_scope\"}"
+	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := beads.NewMemStore()
+	calls := 0
+	original := openStoreFactoryForCity
+	openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		calls++
+		if opts.ScopeRoot != city {
+			t.Fatalf("scope identity changed: %q", opts.ScopeRoot)
+		}
+		return beads.StoreOpenResult{Store: want}, nil
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = original })
+	var errb bytes.Buffer
+	got, code := openAllConvoyStoresAt(city, &errb, "strict identity fixture", true)
+	if code != 0 || len(got) != 1 || calls != 1 {
+		t.Fatalf("valid BD identity did not reach ordinary factory: views=%d calls=%d err=%s", len(got), calls, errb.String())
 	}
 }

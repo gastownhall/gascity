@@ -4,11 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -44,7 +49,7 @@ API with transparent fallback to direct bd reads.`,
 func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		label, status, assignee, format string
-		all                             bool
+		all, fresh, strict              bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -53,7 +58,7 @@ func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --assignee, --all, and --format.
+Supports --label, --status, --assignee, --all, --format, --fresh, and --strict.
 --format=json prints a JSON array of beads, the same on every route
 for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
@@ -70,6 +75,10 @@ A city or rig bead store that cannot be opened or read fails the command
 (exit 1, naming the store) rather than being left out of the list. For
 a local city whose relocated class binding cannot be read, the command
 warns on stderr, lists the remaining stores and exits 0.
+
+--fresh reads local stores directly instead of cached API projections.
+--strict implies --fresh and refuses incomplete work/class-store reads without
+printing a successful result. Fresh/strict reads require a local city.
 
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.
@@ -89,7 +98,12 @@ actually assigned under.`,
   gc beads list --assignee city.agent-a --status in_progress`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdBeadsList(format, beadFilters{label: label, status: status, assignee: assignee, all: all}, stdout, stderr) != 0 {
+			filters := beadFilters{label: label, status: status, assignee: assignee, all: all}
+			if fresh || strict {
+				if cmdBeadsListFresh(format, filters, strict, stdout, stderr) != 0 {
+					return errExit
+				}
+			} else if cmdBeadsList(format, filters, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -99,6 +113,8 @@ actually assigned under.`,
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
 	cmd.Flags().StringVar(&assignee, "assignee", "", "filter to beads whose stored assignee matches this string exactly (across every rig and the city)")
 	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: all nonclosed statuses)")
+	cmd.Flags().BoolVar(&fresh, "fresh", false, "read local stores directly, bypassing API caches")
+	cmd.Flags().BoolVar(&strict, "strict", false, "require a complete local store read (implies --fresh)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
@@ -158,6 +174,107 @@ func cmdBeadsList(format string, filters beadFilters, stdout, stderr io.Writer) 
 	return routeReadCmd("beads list", stderr, beadsListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
 		return routeBeadsList(cityPath, c, nilReason, format, filters, stdout, stderr)
 	})
+}
+
+// cmdBeadsListFresh resolves only a local city, then reads its native stores.
+// A remote selector is refused rather than reinterpreted as a local fallback.
+func cmdBeadsListFresh(format string, filters beadFilters, strict bool, stdout, stderr io.Writer) int {
+	_, remote, cityPath, err := resolveReadTarget()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if remote {
+		fmt.Fprintln(stderr, "gc beads list: --fresh/--strict requires a local city; no cached or local substitute was read") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !strict {
+		return doBeadsListFallback(cityPath, format, filters, stdout, stderr)
+	}
+	return doBeadsListStrict(cityPath, format, filters, stdout, stderr)
+}
+
+// doBeadsListStrict emits rows only after every configured work scope, the
+// relocated class binding and the unbounded store merge have succeeded.
+func doBeadsListStrict(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
+	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads list: incomplete strict read", true)
+	if stores == nil {
+		return code
+	}
+	stores, err := convoyStoreViewsWithBinding(cityPath, stores)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads list: incomplete strict read: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	all, err := collectBeadsAcrossStores(stores, filters)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads list: incomplete strict read: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	sortBeadsForList(all)
+	if format == "json" {
+		writeBeadsJSON(all, stdout)
+	} else {
+		writeBeadTable(all, stdout, true)
+	}
+	return 0
+}
+
+// validateStrictBeadsWorkScope establishes the selected work scope before the
+// ordinary factory can apply fallback or lazy-empty file-store semantics.
+func validateStrictBeadsWorkScope(scopeRoot, cityPath string) error {
+	if err := requireStrictBeadsScopeDirectory(scopeRoot); err != nil {
+		return err
+	}
+	if providerUsesBdStoreContract(rawBeadsProviderForScope(scopeRoot, cityPath)) {
+		path := filepath.Join(scopeRoot, ".beads", "metadata.json")
+		state, present, err := contract.LoadMetadataState(fsys.OSFS{}, path)
+		if err != nil {
+			return fmt.Errorf("reading work-scope identity %q: %w", path, err)
+		}
+		if !present || strings.TrimSpace(state.Backend) == "" {
+			return fmt.Errorf("work scope %q has no initialized beads metadata identity", scopeRoot)
+		}
+	}
+	// A declared existing file scope may legitimately have no ledger until
+	// its first write. Custom exec providers retain their open/List contract.
+	return nil
+}
+
+func requireStrictBeadsScopeDirectory(scopeRoot string) error {
+	info, err := os.Stat(scopeRoot)
+	if err != nil {
+		return fmt.Errorf("reading work-scope directory %q: %w", scopeRoot, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("work scope %q is not a directory", scopeRoot)
+	}
+	return nil
+}
+
+// validateStrictBeadsScopeBindings refuses site scopes composition only warns
+// about. An undeclared or ambiguous binding must not become a successful absence
+// observation; ordinary config loads retain their migration-friendly behavior.
+func validateStrictBeadsScopeBindings(cfg *config.City, binding *config.SiteBinding) error {
+	declared := make(map[string]bool, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		declared[rig.Name] = true
+	}
+	seen := make(map[string]string, len(binding.Rigs))
+	for _, rig := range binding.Rigs {
+		name, path := strings.TrimSpace(rig.Name), strings.TrimSpace(rig.Path)
+		if name == "" || path == "" {
+			return fmt.Errorf("site rig binding requires a name and work-scope path")
+		}
+		if !declared[name] {
+			return fmt.Errorf("site binding names undeclared rig scope %q", name)
+		}
+		if previous, ok := seen[name]; ok && previous != path {
+			return fmt.Errorf("site rig scope %q has conflicting paths %q and %q", name, previous, path)
+		}
+		seen[name] = path
+	}
+	return nil
 }
 
 // beadsListAPIClient returns (client, "") when the API path is available,
