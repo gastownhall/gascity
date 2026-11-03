@@ -153,3 +153,88 @@ func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestKillExistingOrphansPacesOnlyTheScanLog (ga-zpcphq): a start whose scan
+// line is suppressed still terminates the orphans the scan surfaced and still
+// refuses on a root its provider claims; a failure of the whole scan is logged
+// on every start.
+func TestKillExistingOrphansPacesOnlyTheScanLog(t *testing.T) {
+	const sessionID = "sid-paced"
+	perm := entryScanError("reading environ for pid %d: permission denied", 21, 22)
+	t0 := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	start := func(t *testing.T, city string, sp *scanErrorFake, at time.Duration) error {
+		t.Helper()
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city), WithClock(&clock.Fake{Time: t0.Add(at)}))
+		return mgr.killExistingOrphans(context.Background(), sessionID)
+	}
+
+	t.Run("orphans are terminated", func(t *testing.T) {
+		logged := captureLog(t)
+		city := t.TempDir()
+		sp := &scanErrorFake{Fake: runtime.NewFake(), err: perm, roots: []runtime.LiveRuntime{{SessionID: sessionID, City: city, PID: 100}}}
+		for i := range 2 {
+			if err := start(t, city, sp, time.Duration(i)*time.Minute); err != nil {
+				t.Fatalf("start %d: killExistingOrphans: %v", i, err)
+			}
+		}
+		if n := strings.Count(logged.String(), scanErrorLine); n != 1 {
+			t.Fatalf("scan line logged %d times, want once; log=%q", n, logged.String())
+		}
+		var terminated []string
+		for _, c := range sp.Calls {
+			if c.Method == "TerminateRuntime" {
+				terminated = append(terminated, c.Value)
+			}
+		}
+		if !slices.Equal(terminated, []string{"100", "100"}) {
+			t.Fatalf("terminated pids = %v, want orphan 100 on both starts", terminated)
+		}
+	})
+
+	t.Run("a claimed root refuses", func(t *testing.T) {
+		logged := captureLog(t)
+		city := t.TempDir()
+		sp := &scanErrorFake{Fake: runtime.NewFake(), err: perm, roots: []runtime.LiveRuntime{
+			{SessionID: sessionID, City: city, PID: 100},
+			{SessionID: sessionID, City: city, PID: 300, PPID: 4200, LiveUnlisted: true},
+		}}
+		for i := range 2 {
+			if err := start(t, city, sp, time.Duration(i)*time.Minute); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("start %d: killExistingOrphans = %v, want a refusal wrapping ErrRuntimeUnavailable", i, err)
+			}
+		}
+		if n := strings.Count(logged.String(), scanErrorLine); n != 1 {
+			t.Fatalf("scan line logged %d times, want once; log=%q", n, logged.String())
+		}
+		if n := strings.Count(logged.String(), "session: refusing to start "+sessionID); n != 2 {
+			t.Fatalf("refusal logged %d times, want on both starts; log=%q", n, logged.String())
+		}
+		for _, c := range sp.Calls {
+			if c.Method == "TerminateRuntime" {
+				t.Fatalf("terminated pid %s, want nothing terminated while a root is claimed", c.Value)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"a whole-scan failure", errors.New("enumerating /proc: permission denied")},
+		{"a whole-scan failure joined with entries", errors.Join(errors.New("listing sessions: server gone"), perm)},
+	} {
+		t.Run(tc.name+" is logged every time", func(t *testing.T) {
+			logged := captureLog(t)
+			city := t.TempDir()
+			sp := &scanErrorFake{Fake: runtime.NewFake(), err: tc.err}
+			for i := range 3 {
+				if err := start(t, city, sp, time.Duration(i)*time.Second); err != nil {
+					t.Fatalf("start %d: killExistingOrphans: %v", i, err)
+				}
+			}
+			if n := strings.Count(logged.String(), scanErrorLine); n != 3 {
+				t.Fatalf("scan line logged %d times, want on every start; log=%q", n, logged.String())
+			}
+		})
+	}
+}
