@@ -8839,3 +8839,64 @@ func TestNudgeSessionStartOwnedByReconciler(t *testing.T) {
 		})
 	}
 }
+
+// ga-bdb0ad: a live sling nudge whose submit drained the composer but never
+// showed busy is a delivered nudge. deliverSlingNudge must not fall through to
+// the queue, or the poller later delivers "Work slung. Check your hook." a
+// second time.
+func TestDeliverSlingNudgeDeliveredUnobservedDoesNotQueueDuplicate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = nil
+	fake.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitDeliveredUnobserved, info.SessionName)}
+
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, store, store, dir, "", &stdout, &stderr)
+
+	var nudgeCalls int
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			nudgeCalls++
+		}
+	}
+	if nudgeCalls != 1 {
+		t.Fatalf("nudge calls = %d, want exactly 1", nudgeCalls)
+	}
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want 0/0/0: a drained-but-unobserved sling nudge was delivered and must not be queued again; stdout=%q", len(pending), len(inFlight), len(dead), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Nudged ") {
+		t.Fatalf("stdout = %q, want the delivered confirmation", stdout.String())
+	}
+	assertSessionLastNudgeDeliveredAtStamped(t, store, info.ID)
+}
