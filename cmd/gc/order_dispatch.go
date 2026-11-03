@@ -2849,7 +2849,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 
 	moleculeStore := moleculeClassStore(recipe, store, graphStore)
 	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
-	cookResult, err := molecule.Instantiate(ctx, moleculeTargetOf(recipe, moleculeStore), recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(ctx, moleculeClassTarget(recipe, store, graphStore), recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

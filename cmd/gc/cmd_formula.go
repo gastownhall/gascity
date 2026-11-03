@@ -955,7 +955,7 @@ city's work store, copy them into the binding with
 							}
 							return err
 						}
-						emitFormulaCookExecutionFacts(beads.WorkStore{Store: store}, beads.WorkStore{Store: store}, cityPath, result, stderr)
+						emitFormulaCookExecutionFacts(store, beads.WorkStore{Store: store}, cityPath, result, stderr)
 						wired, err = wireFormulaCookGraphV2AttachRoot(store, attach, result.RootID, rootMeta)
 						return err
 					})
@@ -1000,7 +1000,7 @@ city's work store, copy them into the binding with
 				// the store it is handed only has to be able to LOAD the
 				// formula. That is exactly why this arm can serve a class-owned
 				// attach bead when the graph.v2 arm above cannot.
-				inv, err := graphv2.PrepareInvocation(cmd.Context(), beads.WorkStore{Store: attachStore}, args[0], scope.searchPaths, attach, cookVars)
+				inv, err := graphv2.PrepareInvocation(cmd.Context(), beads.WorkStore{Store: store}, args[0], scope.searchPaths, attach, cookVars)
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("prepare formulas v2 invocation: %w", err))
 				}
@@ -1027,7 +1027,7 @@ city's work store, copy them into the binding with
 				// its own graph leg through resolveGraphStore, which already
 				// names the binding, and its work leg is only read for an input
 				// convoy this arm never mints.
-				result, err := molecule.Attach(cmd.Context(), beads.GraphMolecule(beads.GraphStore{Store: attachStore}), recipe, attach, molecule.AttachOptions{
+				result, err := molecule.Attach(cmd.Context(), moleculeClassTarget(recipe, attachStore, attachStore), recipe, attach, molecule.AttachOptions{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1131,7 +1131,7 @@ city's work store, copy them into the binding with
 					unlock := graphv2.LockKey(graphRootKey)
 					defer unlock()
 				}
-				result, err = molecule.Instantiate(cmd.Context(), moleculeTargetOf(recipe, rootStore), recipe, molecule.Options{
+				result, err = molecule.Instantiate(cmd.Context(), moleculeClassTarget(recipe, store, graphStore), recipe, molecule.Options{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1139,7 +1139,7 @@ city's work store, copy them into the binding with
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}
-				emitFormulaCookExecutionFacts(beads.WorkStore{Store: rootStore}, beads.WorkStore{Store: store}, cityPath, result, stderr)
+				emitFormulaCookExecutionFacts(rootStore, beads.WorkStore{Store: store}, cityPath, result, stderr)
 			} else {
 				// The legacy compiler still emits a graph-class root for a
 				// root-only formula: `phase = "vapor"` (or no [[steps]]) compiles
@@ -1163,7 +1163,7 @@ city's work store, copy them into the binding with
 						refused = cookMetaFlipError(args[0], flip)
 						return beads.MoleculeTarget{}
 					}
-					return moleculeTargetOf(recipe, chosen)
+					return moleculeClassTarget(recipe, store, graphStore)
 				})
 				rootStore = target
 				if refused != nil {

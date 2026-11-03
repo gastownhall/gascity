@@ -2613,6 +2613,9 @@ func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec ev
 		}
 	}
 
+	// store is the closed bead's store, which the autoclose callers hand over
+	// as the graph store: convoys are work class, so this read can miss them
+	// (typed-store design misroute #3; T9(d)).
 	trackingConvoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, beadID)
 	if err != nil {
 		run.note(err)

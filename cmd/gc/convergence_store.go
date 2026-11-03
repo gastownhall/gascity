@@ -397,7 +397,7 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formulaName, idempotencyKey
 			}
 		}
 	}
-	result, err := molecule.Instantiate(context.Background(), moleculeTargetOf(recipe, target), recipe, opts)
+	result, err := molecule.Instantiate(context.Background(), moleculeClassTarget(recipe, target, target), recipe, opts)
 	if err != nil {
 		return "", err
 	}

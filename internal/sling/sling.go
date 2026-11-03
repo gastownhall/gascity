@@ -217,6 +217,16 @@ func (deps SlingDeps) moleculeStoreFor(recipe *formula.Recipe) beads.Store {
 	return deps.Store
 }
 
+// moleculeTargetFor is moleculeStoreFor's store as the molecule target of the
+// recipe's class: the graph store as a graph target, the work store as a work
+// target. T6 gives SlingDeps the handles themselves.
+func (deps SlingDeps) moleculeTargetFor(recipe *formula.Recipe) beads.MoleculeTarget {
+	if molecule.RecipeClass(recipe) == coordclass.ClassGraph {
+		return beads.GraphMolecule(beads.GraphStore{Store: deps.graphStore()})
+	}
+	return beads.WorkMolecule(beads.WorkStore{Store: deps.Store})
+}
+
 // graphrouteDeps projects the graph-routing subset of SlingDeps into
 // graphroute.Deps. Store, city name, and config travel as explicit
 // parameters on every graphroute entry point, so only these fields cross
@@ -1503,10 +1513,7 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 			return nil, err
 		}
 	}
-	// moleculeStoreFor picks the graph or the scope store by the recipe's class
-	// (molecule.RecipeClass); the graph label here is a relabel of whichever it
-	// picked, and T6 types moleculeStoreFor to return the target itself.
-	result, err := molecule.Instantiate(ctx, beads.GraphMolecule(beads.GraphStore{Store: deps.moleculeStoreFor(recipe)}), recipe, opts)
+	result, err := molecule.Instantiate(ctx, deps.moleculeTargetFor(recipe), recipe, opts)
 	if err != nil {
 		SlingTracef("instantiate molecule-error formula=%s dur=%s err=%v", formulaName, time.Since(instantiateStart), err)
 		if len(replacedSnapshots) > 0 {
