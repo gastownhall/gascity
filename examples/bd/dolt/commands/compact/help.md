@@ -102,37 +102,6 @@ author: every commit after the watermark is squashed, whichever city wrote it.
     only if no other city, clone, or client outside this city has ever written
     to this database, including before this city started using it.
 
-## Live-database gate
-
-Every pass that rewrites a database's storage (a flatten, a full or bare GC, or
-a pending-GC retry) ends by checking that the database is still live. Its
-`<data_dir>/<db>/.dolt` directory must still be there, and the server must still
-serve the name with a resolvable HEAD. A failed check is retried
-`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default 3),
-`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` apart (default 2), so a brief reconnect
-after a GC is not mistaken for a lost database.
-
-When every attempt fails, compact:
-
-- writes an integrity-quarantine marker with reason `live database unavailable
-  after compaction`, recording the step, the probe failure, the data-dir entry,
-  and the pre-compaction HEAD, and alerts like any other quarantine;
-- stops the run at once, leaving every later database untouched and naming them
-  in the log;
-- exits non-zero.
-
-Compact does not restore the database itself. Before clients write to that name
-again:
-
-1. Confirm what is missing: `gc dolt status`, and whether `<data_dir>/<db>/.dolt`
-   exists.
-2. Restore it from the newest good backup (for example
-   `dolt backup restore <backup-url> <db>` in the data directory), then run
-   `gc dolt restart` so the server loads it. Reconcile against the newest JSONL
-   export if there is one.
-3. Verify bead reads and writes against the database, then clear the marker as
-   `docs/troubleshooting/dolt-bloat-recovery.md` describes.
-
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via
@@ -212,6 +181,50 @@ outruns that fails with `rc=124` and no server error. A reclaim that needs
 longer belongs offline: follow the Recovery Procedure in
 `docs/troubleshooting/dolt-bloat-recovery.md` with
 `dolt gc --full --archive-level=0` as step 3.
+
+## Live-database gate
+
+A flatten or GC can leave the server answering SQL while the database it
+rewrote is gone from disk. Compact checks every database it rewrites. Before
+the first rewrite it records whether `<data_dir>/<db>/.dolt` exists. After the
+flatten and after each GC, whether that rewrite succeeded or failed, it checks
+the entry again and asks the server
+`SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` on that database. The answer
+must name the database (in any case) and a resolvable HEAD; the HEAD may
+differ from the one before the rewrite. The probe is tried up to
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default `3`), waiting
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` seconds (default `2`) between tries,
+and each try gets at most 30 seconds. An empty setting means its default. Any
+other value must be a whole number of at most nine digits, read as decimal
+(`08` is 8), and the attempts must be at least 1; otherwise compact exits 2
+before it takes its lock or queries Dolt. A server that answers within those
+tries is live, and the rewrite's own result decides whether the database
+succeeded.
+When the entry existed before and is gone after, or every try fails, compact:
+
+- writes a quarantine marker with reason
+  `live database unavailable after compaction`, the steps that ran, the step
+  that failed, the probe's failure, the data-dir entry before and after, and
+  the pre-compaction HEAD;
+- emits the `dolt.compact.quarantine` event and mails the compactor alert
+  recipient, as for any quarantine;
+- writes no pending-GC marker for that database; and
+- stops the run with exit 1. It touches no other database, and its last line
+  names the step that failed and the selected databases it never reached
+  (`none` when that database was the last one).
+
+The gate covers every rewrite: the flatten and its full GC, `--gc-only`, bare
+GC, and pending-GC retries, on databases with a remote too, and it runs before
+a pending marker is cleared or a push starts. A pass whose first rewrite is a
+GC first probes the database for its HEAD. If that probe fails, the GC does not
+start and the database fails without a quarantine.
+
+Any other failure on a database that is still live is counted as before, and
+the run goes on to the next database.
+
+Compact never clears this marker on its own. Restore the database first; see
+"Compact Quarantine Reasons" in
+`docs/troubleshooting/dolt-bloat-recovery.md`.
 
 See `docs/troubleshooting/dolt-bloat-recovery.md` for the full bloat-recovery
 runbook, including quarantine marker evidence, the safe marker-clear procedure,

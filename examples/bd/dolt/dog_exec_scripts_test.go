@@ -120,6 +120,9 @@ type compactScriptFixture struct {
 	// owns), so pre-#5958 flatten scenarios keep their full-flatten shape;
 	// watermark tests truncate or rewrite it.
 	tagStateFile string
+	// liveFaultDir holds the fake dolt's live-database fault controls; see
+	// writeCompactFakeDolt and compact_live_database_test.go.
+	liveFaultDir string
 	port         int
 }
 
@@ -204,6 +207,10 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	if err := os.WriteFile(tagStateFile, []byte("rootcommit\n"), 0o644); err != nil {
 		t.Fatalf("write fake dolt tag state: %v", err)
 	}
+	liveFaultDir := filepath.Join(binDir, "live-faults")
+	if err := os.MkdirAll(liveFaultDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake dolt live fault dir: %v", err)
+	}
 	return compactScriptFixture{
 		root:          root,
 		cityPath:      cityPath,
@@ -215,6 +222,7 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 		stateFile:     stateFile,
 		hashStateFile: hashStateFile,
 		tagStateFile:  tagStateFile,
+		liveFaultDir:  liveFaultDir,
 		port:          port,
 	}
 }
@@ -241,6 +249,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
+		"GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS",
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS",
 		"GC_DOLT_COMPACT_DRY_RUN",
 		"GC_DOLT_COMPACT_ONLY_DBS",
 		"GC_DOLT_COMPACT_REMOTE",
@@ -256,6 +266,7 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_FAKE_DOLT_STATE_FILE",
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
 		"GC_FAKE_DOLT_TAG_STATE_FILE",
+		"GC_FAKE_DOLT_LIVE_FAULT_DIR",
 		"GC_FAKE_PENDING_GC_MARKER",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
@@ -273,11 +284,14 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_MANAGED_LOCAL=1",
 		fmt.Sprintf("GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=%d", compactScriptCallTimeoutSecs),
 		fmt.Sprintf("GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=%d", compactScriptPushTimeoutSecs),
+		// The fake dolt answers instantly, so live-probe retries need no delay.
+		"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
 		"GC_FAKE_DOLT_COMPACT_MODE="+mode,
 		"GC_FAKE_DOLT_COUNT_FILE="+filepath.Join(f.binDir, "row-count-calls"),
 		"GC_FAKE_DOLT_STATE_FILE="+f.stateFile,
 		"GC_FAKE_DOLT_HASH_STATE_FILE="+f.hashStateFile,
 		"GC_FAKE_DOLT_TAG_STATE_FILE="+f.tagStateFile,
+		"GC_FAKE_DOLT_LIVE_FAULT_DIR="+f.liveFaultDir,
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
@@ -559,6 +573,40 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 printf 'db=%%s query=%%s\n' "$db" "$query" >> "$log"
+# Live-database faults. A file <live_fault_dir>/after-<gc|flatten>-<db> holding
+# vanish, unserved, or transient:<n> fires once, after the next DOLT_GC or
+# flatten DOLT_RESET on <db> finishes, whatever its exit status: vanish removes
+# the database's data-dir entry, unserved makes every later live probe fail,
+# and transient:<n> fails the next n live probes. A file
+# <live_fault_dir>/unserved-<db> holding always or a count drives the live
+# probe directly, and <live_fault_dir>/response-<db> replaces its answer.
+live_fault_dir="${GC_FAKE_DOLT_LIVE_FAULT_DIR:-}"
+fire_live_fault() {
+  [ -n "$live_fault_dir" ] || return 0
+  fault_file="$live_fault_dir/after-$1-$db"
+  [ -f "$fault_file" ] || return 0
+  fault="$(sed -n '1p' "$fault_file")"
+  rm -f "$fault_file"
+  case "$fault" in
+    vanish)
+      rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db"
+      ;;
+    unserved)
+      printf 'always\n' > "$live_fault_dir/unserved-$db"
+      ;;
+    transient:*)
+      printf '%%s\n' "${fault#transient:}" > "$live_fault_dir/unserved-$db"
+      ;;
+  esac
+}
+case "$query" in
+  *"CALL DOLT_GC("*)
+    trap 'fire_live_fault gc' EXIT
+    ;;
+  *"CALL DOLT_RESET('--soft'"*)
+    trap 'fire_live_fault flatten' EXIT
+    ;;
+esac
 print_cell() {
   printf '+-------+\n'
   printf '| value |\n'
@@ -635,24 +683,36 @@ set_hash() {
   printf '%%s\n' "$1" > "$hash_state_file"
 }
 case "$query" in
-  *"CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
-    # Live-database probe the compactor runs after any flatten or GC. The
-    # db_dir_vanishes_* mode answers like a server whose database directory
-    # left the data dir; the db_unserved_* modes answer like a server that
-    # kept the directory but can no longer resolve the default branch head.
-    if [ "$mode" = "db_dir_vanishes_after_gc" ] && [ ! -d "${GC_DOLT_DATA_DIR:-}/$db/.dolt" ]; then
-      printf 'Error 1049 (HY000): database not found: %%s\n' "$db" >&2
-      exit 1
+  *"SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"*)
+    # Live-database probe. Reads the HEAD state directly so it never advances
+    # the HEAD-probe counters the other modes key on.
+    unserved_file="$live_fault_dir/unserved-$db"
+    if [ -n "$live_fault_dir" ] && [ -f "$unserved_file" ]; then
+      unserved="$(sed -n '1p' "$unserved_file")"
+      case "$unserved" in
+        always)
+          printf 'database not found: %%s\n' "$db" >&2
+          exit 1
+          ;;
+        ''|0)
+          rm -f "$unserved_file"
+          ;;
+        *)
+          printf '%%s\n' "$((unserved - 1))" > "$unserved_file"
+          printf 'cannot resolve default branch head for database %%s\n' "$db" >&2
+          exit 1
+          ;;
+      esac
     fi
-    unserved_file="${state_file}.unserved-$db"
-    if [ -f "$unserved_file" ]; then
-      if [ "$mode" = "db_unserved_once_after_gc" ]; then
-        rm -f -- "$unserved_file"
-      fi
-      printf "Error 1105 (HY000): cannot resolve default branch head for database '%%s': 'main'\n" "$db" >&2
-      exit 1
+    if [ -n "$live_fault_dir" ] && [ -f "$live_fault_dir/response-$db" ]; then
+      print_cell "$(sed -n '1p' "$live_fault_dir/response-$db")"
+      exit 0
     fi
-    print_cell "$db:$(current_head)"
+    live_head=headcommit
+    if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+      live_head="$(sed -n '1p' "$state_file")"
+    fi
+    print_cell "$db:$live_head"
     exit 0
     ;;
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
@@ -1521,13 +1581,6 @@ case "$query" in
     if [ "$mode" = "gc_row_read_wait" ]; then
       printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): row read wait bigger than connection timeout\n" >&2
       exit 1
-    fi
-    if [ "$mode" = "db_dir_vanishes_after_gc" ]; then
-      rm -rf -- "${GC_DOLT_DATA_DIR:?}/$db"
-      exit 0
-    fi
-    if [ "$mode" = "db_unserved_after_gc" ] || [ "$mode" = "db_unserved_once_after_gc" ]; then
-      : > "${state_file}.unserved-$db"
     fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0

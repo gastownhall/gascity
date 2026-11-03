@@ -54,14 +54,8 @@ exit "$rc"
 	if err == nil {
 		t.Fatalf("compact succeeded although beads left the data dir after its full GC")
 	}
-	for _, want := range []string{
-		"db=beads is no longer served after full GC",
-		"data_dir_entry_missing",
-		"aborting this run so no other database is compacted (untouched: zed)",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output missing %q", want)
-		}
+	if want := "compact: db=beads live database gate failed after post-flatten full GC — aborting the run; selected databases not reached: zed"; !strings.Contains(out, want) {
+		t.Fatalf("output missing %q", want)
 	}
 	if strings.Contains(out, "db=zed") {
 		t.Fatalf("compact must not touch zed after losing beads")
@@ -74,8 +68,12 @@ exit "$rc"
 	if got := compactMarkerValue(t, marker, "reason"); got != "live database unavailable after compaction" {
 		t.Fatalf("quarantine reason = %q", got)
 	}
-	assertCompactMarkerHasEvidence(t, marker, "compaction_step=full GC", "data_dir_entry_before=present")
-	if head := compactMarkerValue(t, marker, "pre_compaction_head"); head == "" {
+	assertCompactMarkerHasEvidence(t, marker,
+		"live_gate_failed_step=post-flatten full GC",
+		"live_gate_data_dir_entry_before=present",
+		"live_gate_data_dir_entry_after=absent",
+	)
+	if head := compactMarkerValue(t, marker, "live_gate_pre_compaction_head"); head == "" {
 		t.Fatalf("marker must record the pre-compaction HEAD for the restore")
 	}
 	gcCalls, readErr := os.ReadFile(gcLog)
