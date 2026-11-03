@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -63,7 +64,7 @@ func TestResolveSessionIDWithConfig_RejectsOrphanedNamedSessionBead(t *testing.T
 
 	fs.cfg.NamedSessions = nil
 
-	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id != b.ID {
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err != nil || id != b.ID {
 		t.Fatalf("session.ResolveSessionID = %q, %v, want %q and nil", id, err, b.ID)
 	}
 	_, err = srv.resolveSessionIDWithConfig(fs.cityBeadStore, "myrig/worker")

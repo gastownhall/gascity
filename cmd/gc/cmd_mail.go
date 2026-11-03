@@ -1308,7 +1308,7 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, sessS
 		return "human", nil
 	}
 	if sessStore != nil {
-		sessionID, err := session.ResolveSessionIDByExactID(sessStore, identifier)
+		sessionID, err := session.ResolveSessionIDByExactID(beads.SessionStore{Store: sessStore}, identifier)
 		if err == nil {
 			return sessionID, nil
 		}
@@ -1540,7 +1540,7 @@ func resolveMailTargetsCached(sessStore beads.Store, identifier string, cache *m
 // from its session inbox like a target resolved by id, rather than expanding
 // each of its addresses through whichever session holds that address now.
 func mailTargetFromSessionID(sessStore beads.Store, sessionID, identifier string) (resolvedMailTarget, error) {
-	info, _, err := session.ResolveSessionRecordByExactID(sessStore, sessionID)
+	info, _, err := session.ResolveSessionRecordByExactID(beads.SessionStore{Store: sessStore}, sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}

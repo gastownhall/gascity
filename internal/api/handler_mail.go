@@ -140,14 +140,15 @@ func (s *Server) refuseUnconfiguredMailSender(ctx context.Context, from string) 
 	if _, err := mail.ResolveRecipient(from, agentEntries(cfg)); err == nil {
 		return nil
 	}
-	if store := s.state.SessionsBeadStore().Store; store != nil {
+	if sessions := s.state.SessionsBeadStore(); sessions != (beads.SessionStore{}) {
+		store := sessions.Store
 		if _, ok, err := s.configuredMailRecipientAddress(store, from); err != nil {
 			return apierr.Internal.Msg(err.Error())
 		} else if ok {
 			return nil
 		}
 		if id, err := s.resolveSessionTargetIDWithContext(ctx, store, from, apiSessionResolveOptions{}); err == nil {
-			if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+			if info, getErr := session.NewStore(sessions).Get(id); getErr == nil {
 				if _, ok := findAgentByQualifiedTemplate(cfg, info.Template); ok {
 					return nil
 				}
@@ -187,7 +188,8 @@ func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient stri
 	if recipient == "human" {
 		return apiMailQuery{recipients: []string{"human"}}
 	}
-	store := s.state.SessionsBeadStore().Store
+	sessions := s.state.SessionsBeadStore()
+	store := sessions.Store
 	if store == nil {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
 			if resolved == recipient {
@@ -209,7 +211,7 @@ func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient stri
 	if err != nil {
 		return apiMailQuery{recipients: []string{recipient}}
 	}
-	if info, _, getErr := session.ResolveSessionRecordByExactID(store, resolved); getErr == nil {
+	if info, _, getErr := session.ResolveSessionRecordByExactID(sessions, resolved); getErr == nil {
 		if recipients := session.MailboxAddressesIncludingRuntimeNameFromInfo(info); len(recipients) > 0 {
 			return apiMailQuery{recipients: recipients, session: &info}
 		}
@@ -239,7 +241,7 @@ func (s *Server) mailQueryForNamedSession(store beads.Store, spec apiNamedSessio
 		addresses := session.MailboxAddressesIncludingRuntimeName(b)
 		q.recipients = append(q.recipients, addresses...)
 		if q.session == nil && b.Status != "closed" {
-			info, _, getErr := session.ResolveSessionRecordByExactID(store, b.ID)
+			info, _, getErr := session.ResolveSessionRecordByExactID(beads.SessionStore{Store: store}, b.ID)
 			if getErr != nil {
 				return apiMailQuery{}, getErr
 			}

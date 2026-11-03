@@ -110,7 +110,7 @@ func (legacyDemandReads) ReadyLimit(cfg *config.City) int {
 }
 
 func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
-	return session.BuildClosedNamedSessionBeadIndex(store)
+	return session.BuildClosedNamedSessionBeadIndex(beads.SessionStore{Store: store})
 }
 
 // demandLegCache classifies a demand leg: its CachingStore, behind the

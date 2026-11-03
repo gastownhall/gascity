@@ -1746,9 +1746,9 @@ func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, city
 	if cs == nil {
 		return 0, nil
 	}
-	store := cs.SessionsBeadStore().Store
-	if store == nil {
+	sessions := cs.SessionsBeadStore()
+	if sessions == (beads.SessionStore{}) {
 		return 0, nil
 	}
-	return sessionpkg.ReleaseStaleConfiguredNameClaims(store, cfg, cityName)
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(sessions, cfg, cityName)
 }

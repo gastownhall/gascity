@@ -4249,7 +4249,7 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store(), true,
 		map[string]string{"session_name": legacy})
 	if err != nil {
 		return

@@ -163,7 +163,7 @@ func TestSplitNamedSessionWakeHandsOffPastAFailingWorkStore(t *testing.T) {
 	if !strings.Contains(logs.String(), "rig store unavailable") {
 		t.Fatalf("the first wake logged %q, want the rig store's error: the hand-off it could not finish must be reported", logs.String())
 	}
-	successor, ok, err := session.FindCanonicalConfiguredNamedSessionBead(f.binding, f.spec)
+	successor, ok, err := session.FindCanonicalConfiguredNamedSessionBead(beadstest.Sessions(f.binding), f.spec)
 	if err != nil || !ok || successor.ID != freshID || freshID == f.historicalID {
 		t.Fatalf("successor after the first wake = %q, %v, %v; want the new canonical bead the wake answered (%s)", successor.ID, ok, err, freshID)
 	}

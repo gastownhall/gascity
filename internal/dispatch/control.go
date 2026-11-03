@@ -1688,6 +1688,8 @@ type attemptRouteBinding struct {
 }
 
 func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
+	// store is the graph/scope store, not the sessions class: the relabel keeps its reads (typed-store T5b).
+	sessions := beads.SessionStore{Store: store}
 	if strings.TrimSpace(target) == "" {
 		return attemptRouteBinding{}, false
 	}
@@ -1695,7 +1697,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 		if named := config.FindNamedSession(cfg, target); named != nil {
 			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
 				if store != nil {
-					if candidates, err := session.NamedSessionResolutionCandidates(store, spec); err == nil {
+					if candidates, err := session.NamedSessionResolutionCandidates(sessions, spec); err == nil {
 						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
@@ -1726,7 +1728,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 		}
 	}
 	if store != nil {
-		if id, err := session.ResolveSessionID(store, target); err == nil {
+		if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return attemptRouteBinding{directSessionID: id}, true
 		}
 	}

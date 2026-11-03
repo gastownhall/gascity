@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -50,7 +51,7 @@ func TestChatWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 			t.Run(path+"/"+tc.name, func(t *testing.T) {
 				fake := runtime.NewFake()
 				sp := &idleSnapshotFake{Fake: fake, idle: tc.idle, err: tc.err}
-				mgr := NewManagerWithOptions(beads.NewMemStore(), sp, WithCityPath(t.TempDir()))
+				mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, WithCityPath(t.TempDir()))
 				info, err := mgr.CreateSession(context.Background(), CreateOptions{
 					Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude",
 					ExtraMeta: map[string]string{"session_origin": "manual"},

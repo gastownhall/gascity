@@ -76,14 +76,14 @@ func (s *Store) LookupConfiguredNamed(spec NamedSessionSpec) (ConfiguredNamedSes
 	}, nil
 }
 
-// beadStore returns the bead store behind this door, or nil for a door that has
-// none — the same `s == nil || s.store.Store == nil` shape the read surface
-// already carries (listAllBeads, validatedBead). Every package function it feeds
-// declares its own nil-store behavior, so absence is answered there rather than
-// re-decided per method.
-func (s *Store) beadStore() beads.Store {
+// beadStore returns the sessions store behind this door, or the zero handle
+// for a door that has none — the same `s == nil || s.store` absent shape the
+// read surface already carries (listAllBeads, validatedBead). Every package
+// function it feeds declares its own absent-store behavior, so absence is
+// answered there rather than re-decided per method.
+func (s *Store) beadStore() beads.SessionStore {
 	if s == nil {
-		return nil
+		return beads.SessionStore{}
 	}
-	return s.store.Store
+	return s.store
 }
