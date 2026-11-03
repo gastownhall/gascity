@@ -4303,3 +4303,14 @@ func TestConvoyCreateRigFlagEmptyConvoyAcceptsRigIssues(t *testing.T) {
 	}
 	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, "frontend"), convoyID, issueID)
 }
+
+// TestConvoyCreateRigFlagTracksMatchingIssue: --rig agreeing with the store
+// an issue's prefix routes to creates the convoy there, tracking the issue.
+func TestConvoyCreateRigFlagTracksMatchingIssue(t *testing.T) {
+	cityDir := convoyRigFlagCity(t)
+	issueID := convoyRigFlagIssue(t, cityDir, "frontend")
+	convoyID := convoyRigFlagCreate(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", issueID)
+
+	requireConvoyOnlyIn(t, cityDir, convoyID, "frontend")
+	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, "frontend"), convoyID, issueID)
+}
