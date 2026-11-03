@@ -4473,3 +4473,61 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 		})
 	}
 }
+
+// TestConvoyCreateWithoutRigFlagKeepsDefaultPlacement: without a non-empty
+// --rig the convoy shares the first issue's store, else lands in the city
+// store; an ambient GC_RIG or a working directory inside a rig does not move
+// it.
+func TestConvoyCreateWithoutRigFlagKeepsDefaultPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      func(cityDir string) []string
+		setup     func(t *testing.T, cityDir string)
+		withIssue bool
+		wantScope string
+	}{
+		{name: "no rig, no issues", args: func(cityDir string) []string { return []string{"--city", cityDir} }, wantScope: ""},
+		{name: "no rig, frontend issue", args: func(cityDir string) []string { return []string{"--city", cityDir} }, withIssue: true, wantScope: "frontend"},
+		{name: "empty rig, no issues", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig", ""} }, wantScope: ""},
+		{name: "empty rig, frontend issue", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig="} }, withIssue: true, wantScope: "frontend"},
+		{name: "whitespace rig, no issues", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig", "  "} }, wantScope: ""},
+		{name: "whitespace rig, frontend issue", args: func(cityDir string) []string { return []string{"--city", cityDir, "--rig", "  "} }, withIssue: true, wantScope: "frontend"},
+		{
+			name:      "ambient GC_RIG, city from env",
+			args:      func(string) []string { return nil },
+			setup:     func(t *testing.T, _ string) { t.Setenv("GC_RIG", "backend") },
+			wantScope: "",
+		},
+		{
+			name:      "ambient GC_RIG, frontend issue",
+			args:      func(cityDir string) []string { return []string{"--city", cityDir} },
+			setup:     func(t *testing.T, _ string) { t.Setenv("GC_RIG", "backend") },
+			withIssue: true,
+			wantScope: "frontend",
+		},
+		{
+			name:      "cwd inside a rig",
+			args:      func(cityDir string) []string { return []string{"--city", cityDir} },
+			setup:     func(t *testing.T, cityDir string) { t.Chdir(filepath.Join(cityDir, "backend")) },
+			wantScope: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := convoyRigFlagCity(t)
+			args := append(tc.args(cityDir), "convoy", "create", "batch")
+			issueID := ""
+			if tc.withIssue {
+				issueID = convoyRigFlagIssue(t, cityDir, "frontend")
+				args = append(args, issueID)
+			}
+			if tc.setup != nil {
+				tc.setup(t, cityDir)
+			}
+			convoyID := convoyRigFlagCreate(t, args...)
+			requireConvoyOnlyIn(t, cityDir, convoyID, tc.wantScope)
+			if issueID != "" {
+				requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, tc.wantScope), convoyID, issueID)
+			}
+		})
+	}
+}
