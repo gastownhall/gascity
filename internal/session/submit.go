@@ -952,7 +952,10 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if isGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
-		cmd := newSessionSubmitPollerCommand(exe, execenv.Environ(), cityPath, sessionName, agentName)
+		cmd, err := newSessionSubmitPollerCommand(exe, execenv.Environ(), cityPath, sessionName, agentName)
+		if err != nil {
+			return err
+		}
 		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName, agentName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
@@ -975,11 +978,17 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 
 // newSessionSubmitPollerCommand builds the detached poller child over
 // environ, without the spawning session's identity (nudgepoller.ChildEnv),
-// so the poller never reads as that session's leaked process.
-func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+// so the poller never reads as that session's leaked process, and without the
+// descriptors the caller holds open without close-on-exec
+// (nudgepoller.ScrubInheritedFDs), so the poller never pins a caller's flock
+// after the caller exits.
+func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) (*exec.Cmd, error) {
 	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 	cmd.Env = execenv.WithUsageMetricsDisabled(nudgepoller.ChildEnv(environ))
-	return cmd
+	if err := nudgepoller.ScrubInheritedFDs(cmd); err != nil {
+		return nil, fmt.Errorf("building session submit poller command: %w", err)
+	}
+	return cmd, nil
 }
 
 func isGoTestExecutable(path string) bool {

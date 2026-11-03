@@ -170,3 +170,10 @@ clear, `session.conversation_reset{reason:stale-key}`). While it is kept, the
 resume backstop (a refusal, or the third resume-shaped failure in a row) is
 its only automatic reset, whatever the provider; `gc session reset` is the
 explicit one.
+
+## Detached pollers
+
+Build detached submit-poller commands through `nudgepoller.ScrubInheritedFDs`
+before starting them. On Unix, a caller-owned descriptor without close-on-exec
+must not reach a poller and retain the caller's locks. Surface scrub failures
+instead of launching a child with unverified descriptors.

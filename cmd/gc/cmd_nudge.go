@@ -3316,7 +3316,10 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		cmd := newNudgePollerCommand(exe, processEnvSnapshotExcludingNativeDoltOpen(), cityPath, sessionName, agentName)
+		cmd, err := newNudgePollerCommand(exe, processEnvSnapshotExcludingNativeDoltOpen(), cityPath, sessionName, agentName)
+		if err != nil {
+			return err
+		}
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -3331,15 +3334,20 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 
 // newNudgePollerCommand builds the detached poller child over environ, without
 // the spawning session's identity (nudgepoller.ChildEnv), so the poller
-// never reads as that session's leaked process.
-func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+// never reads as that session's leaked process, and without the descriptors
+// the caller holds open without close-on-exec (nudgepoller.ScrubInheritedFDs),
+// so the poller never pins a caller's flock after the caller exits.
+func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) (*exec.Cmd, error) {
 	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 	cmd.Env = nudgepoller.ChildEnv(environ)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	disableProductMetricsForChild(cmd)
-	return cmd
+	if err := nudgepoller.ScrubInheritedFDs(cmd); err != nil {
+		return nil, fmt.Errorf("building nudge poller command: %w", err)
+	}
+	return cmd, nil
 }
 
 // isQueuedUserSubmit reports whether item is a user's submit the session
