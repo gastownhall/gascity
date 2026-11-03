@@ -309,3 +309,201 @@ func TestWorkspaceTrustConfirmKeysUpwardMovement(t *testing.T) {
 		t.Errorf("workspaceTrustConfirmKeys() = %v, want %v", keys, want)
 	}
 }
+
+// copilotTrustDialog is Copilot CLI 1.0.105's folder-trust dialog as captured
+// in a tmux pane by the reporter of gastownhall/gascity#8738. It asks
+// Gemini's question but draws a "❯" cursor and numbered rows inside a box.
+const copilotTrustDialog = `│ Do you trust the files in this folder?                     │
+│                                                            │
+│ ❯ 1. Yes                                                   │
+│   2. Yes, and remember this folder for future sessions     │
+│   3. No (Esc)                                              │
+│                                                            │
+│ ↑/↓ to navigate · enter to select · esc to cancel          │`
+
+const (
+	copilotTrustRowOnce     = "1. Yes                                                   │"
+	copilotTrustRowRemember = "2. Yes, and remember this folder for future sessions     │"
+	copilotTrustRowNo       = "3. No (Esc)                                              │"
+)
+
+// copilotTrustDialogSelecting returns copilotTrustDialog with the cursor on
+// row (1, 2 or 3) instead of "1. Yes".
+func copilotTrustDialogSelecting(row int) string {
+	rows := []string{copilotTrustRowOnce, copilotTrustRowRemember, copilotTrustRowNo}
+	var b strings.Builder
+	b.WriteString("│ Do you trust the files in this folder?                     │\n")
+	b.WriteString("│                                                            │\n")
+	for i, r := range rows {
+		marker := "  "
+		if i+1 == row {
+			marker = "❯ "
+		}
+		b.WriteString("│ " + marker + r + "\n")
+	}
+	b.WriteString("│                                                            │\n")
+	b.WriteString("│ ↑/↓ to navigate · enter to select · esc to cancel          │")
+	return b.String()
+}
+
+// geminiTrustDialog is Gemini's option list for the question Copilot CLI
+// also asks, as the existing Gemini tests render it.
+const geminiTrustDialog = "Do you trust the files in this folder?\n" +
+	"● 1. Trust folder (city)\n  2. Trust parent folder\n  3. Don't trust"
+
+func TestWorkspaceTrustConfirmKeysCopilotTrustDialog(t *testing.T) {
+	if got := copilotTrustDialogSelecting(1); got != copilotTrustDialog {
+		t.Fatalf("precondition: copilotTrustDialogSelecting(1) differs from the captured dialog:\n%s", got)
+	}
+	if !containsWorkspaceTrustDialog(copilotTrustDialog) {
+		t.Fatal("Copilot trust dialog was not recognized as a workspace-trust dialog")
+	}
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{name: "captured dialog, Yes selected", content: copilotTrustDialog, want: []string{"Enter"}},
+		{name: "remember row selected", content: copilotTrustDialogSelecting(2), want: []string{"Up", "Enter"}},
+		{name: "No selected", content: copilotTrustDialogSelecting(3), want: []string{"Up", "Up", "Enter"}},
+		{
+			name:    "scrollback above the dialog",
+			content: trustDialogScrollback + "$ copilot --yolo\n" + copilotTrustDialogSelecting(3),
+			want:    []string{"Up", "Up", "Enter"},
+		},
+		{
+			name:    "Yes label in another case",
+			content: strings.Replace(copilotTrustDialogSelecting(2), "1. Yes ", "1. YES ", 1),
+			want:    []string{"Up", "Enter"},
+		},
+		{
+			name:    "borderless rows",
+			content: "Do you trust the files in this folder?\n\n  1. Yes\n  2. Yes, and remember this folder for future sessions\n❯ 3. No (Esc)",
+			want:    []string{"Up", "Up", "Enter"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys, ok := workspaceTrustConfirmKeys(tt.content)
+			if !ok {
+				t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
+			}
+			if !reflect.DeepEqual(keys, tt.want) {
+				t.Fatalf("workspaceTrustConfirmKeys() = %v, want %v", keys, tt.want)
+			}
+		})
+	}
+}
+
+// TestWorkspaceTrustConfirmKeysCopilotFailsClosed covers Copilot frames that
+// must get no keys: the session-only "1. Yes" row is missing, so the only
+// trusting row left would persist trust; the cursor is not drawn yet; or the
+// labels are not ones the layout knows.
+func TestWorkspaceTrustConfirmKeysCopilotFailsClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "only the remember row trusts",
+			content: "│ Do you trust the files in this folder?            │\n" +
+				"│ ❯ 1. Yes, and remember this folder for future sessions │\n" +
+				"│   2. No (Esc)                                      │",
+		},
+		{
+			name:    "no cursor drawn yet",
+			content: strings.Replace(copilotTrustDialog, "│ ❯ 1. Yes", "│   1. Yes", 1),
+		},
+		{
+			name:    "unknown labels",
+			content: strings.Replace(copilotTrustDialog, "1. Yes ", "1. Allow", 1),
+		},
+		{
+			name:    "Yes with extra words",
+			content: strings.Replace(copilotTrustDialog, "1. Yes      ", "1. Yes, once", 1),
+		},
+		{
+			name:    "question only",
+			content: "│ Do you trust the files in this folder?                     │",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if keys, ok := workspaceTrustConfirmKeys(tt.content); ok || len(keys) != 0 {
+				t.Fatalf("workspaceTrustConfirmKeys() = %v, %v; want no keys", keys, ok)
+			}
+		})
+	}
+}
+
+// TestWorkspaceTrustConfirmKeysSharedFilesTrustQuestion pins that Gemini and
+// Copilot CLI, which ask the same question, are each answered with their own
+// layout, and that a frame both layouts match gets no keys.
+func TestWorkspaceTrustConfirmKeysSharedFilesTrustQuestion(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string // nil: no keys
+	}{
+		{name: "Gemini, trust folder selected", content: geminiTrustDialog, want: []string{"Enter"}},
+		{
+			name:    "Gemini, Don't trust selected",
+			content: "Do you trust the files in this folder?\n  1. Trust folder (city)\n  2. Trust parent folder\n● 3. Don't trust",
+			want:    []string{"Up", "Up", "Enter"},
+		},
+		{
+			name:    "Copilot dialog in scrollback above live Gemini dialog",
+			content: copilotTrustDialogSelecting(3) + "\n$ gemini\n" + geminiTrustDialog,
+			want:    []string{"Enter"},
+		},
+		{
+			name:    "Gemini dialog in scrollback above live Copilot dialog",
+			content: geminiTrustDialog + "\n$ copilot\n" + copilotTrustDialogSelecting(2),
+			want:    []string{"Up", "Enter"},
+		},
+		{
+			name: "both layouts under one question",
+			content: "Do you trust the files in this folder?\n" +
+				"● 1. Trust folder (city)\n  2. Don't trust\n" +
+				"❯ 1. Yes\n  2. No (Esc)",
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys, ok := workspaceTrustConfirmKeys(tt.content)
+			if tt.want == nil {
+				if ok || len(keys) != 0 {
+					t.Fatalf("workspaceTrustConfirmKeys() = %v, %v; want no keys", keys, ok)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
+			}
+			if !reflect.DeepEqual(keys, tt.want) {
+				t.Fatalf("workspaceTrustConfirmKeys() = %v, want %v", keys, tt.want)
+			}
+		})
+	}
+}
+
+func TestAcceptWorkspaceTrustDialogCopilotUnsafeRowsSendNothing(t *testing.T) {
+	withZeroDialogTimings(t)
+	content := "│ Do you trust the files in this folder?            │\n" +
+		"│ ❯ 1. Yes, and remember this folder for future sessions │\n" +
+		"│   2. No (Esc)                                      │"
+	var sent []string
+	err := acceptWorkspaceTrustDialog(
+		context.Background(),
+		newStartupDialogBudget(100*time.Millisecond),
+		func(int) (string, error) { return content, nil },
+		func(keys ...string) error { sent = append(sent, keys...); return nil },
+	)
+	if err != nil {
+		t.Fatalf("acceptWorkspaceTrustDialog() error = %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("acceptWorkspaceTrustDialog() sent = %v, want no keys without a session-only trust row", sent)
+	}
+}

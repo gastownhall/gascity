@@ -696,3 +696,152 @@ func TestAcceptStartupDialogsFromStreamCodexTrustDialogFallsBackToPeeks(t *testi
 		t.Fatalf("sent = %v confirmed = %q, want [Up Enter] trust", pane.sent, pane.confirmed)
 	}
 }
+
+// copilotComposer is Copilot CLI's empty input box once the trust dialog is
+// gone, as the #8738 reporter observed it.
+const copilotComposer = "❯"
+
+// fakeCopilotTrustPane models Copilot CLI's folder-trust dialog
+// (copilotTrustDialog). The "❯" cursor starts on row (1 "Yes", 2 "Yes, and
+// remember", 3 "No"); Up and Down move it and stop at the ends; Enter
+// confirms the row it is on. After Enter the pane shows the composer, or a
+// shell prompt for "No".
+type fakeCopilotTrustPane struct {
+	row       int
+	sent      []string
+	confirmed string // "" until Enter; then "once", "remember" or "no"
+}
+
+func (p *fakeCopilotTrustPane) peek(int) (string, error) {
+	switch p.confirmed {
+	case "":
+		return copilotTrustDialogSelecting(p.row), nil
+	case "no":
+		return "user@host $", nil
+	default:
+		return copilotComposer, nil
+	}
+}
+
+func (p *fakeCopilotTrustPane) sendKeys(keys ...string) error {
+	p.sent = append(p.sent, keys...)
+	for _, k := range keys {
+		if p.confirmed != "" {
+			break // the dialog is gone
+		}
+		switch k {
+		case "Up":
+			if p.row > 1 {
+				p.row--
+			}
+		case "Down":
+			if p.row < 3 {
+				p.row++
+			}
+		case "Enter":
+			p.confirmed = []string{"once", "remember", "no"}[p.row-1]
+		}
+	}
+	return nil
+}
+
+// TestAcceptStartupDialogsAnswersCopilotTrustDialog drives the polling
+// sequence the tmux provider runs before its readiness wait (#8738). Whichever
+// row the cursor starts on, the dialog is confirmed with the session-only
+// "1. Yes", Enter is sent only from a frame showing it selected, and the pane
+// is left on Copilot's composer for the startup prompt. The dialog frame
+// itself never reads as a ready prompt.
+func TestAcceptStartupDialogsAnswersCopilotTrustDialog(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		row      int
+		wantSent []string
+	}{
+		{name: "Yes selected", row: 1, wantSent: []string{"Enter"}},
+		{name: "remember selected", row: 2, wantSent: []string{"Up", "Enter"}},
+		{name: "No selected", row: 3, wantSent: []string{"Up", "Up", "Enter"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withZeroDialogTimings(t)
+			pane := &fakeCopilotTrustPane{row: tt.row}
+			if containsPromptIndicator(copilotTrustDialogSelecting(tt.row)) {
+				t.Fatal("the Copilot trust dialog reads as a ready prompt")
+			}
+
+			if err := AcceptStartupDialogsWithTimeout(context.Background(), time.Second, pane.peek, pane.sendKeys); err != nil {
+				t.Fatalf("AcceptStartupDialogsWithTimeout() error = %v", err)
+			}
+			if pane.confirmed != "once" || !reflect.DeepEqual(pane.sent, tt.wantSent) {
+				t.Fatalf("sent = %v confirmed = %q, want %v once", pane.sent, pane.confirmed, tt.wantSent)
+			}
+			after, _ := pane.peek(startupDialogPeekLines)
+			if !containsPromptIndicator(after) {
+				t.Fatalf("pane after the dialog = %q, want Copilot's composer", after)
+			}
+		})
+	}
+}
+
+// TestAcceptStartupDialogsFromStreamCopilotTrustDialog drives the exec
+// provider's stream-then-peeks sequence through Copilot's trust dialog. With
+// "1. Yes" already selected the stream confirms it and then reports ready only
+// once a later frame shows the composer; with the cursor elsewhere the stream
+// sends nothing and the polling fallback moves and confirms.
+func TestAcceptStartupDialogsFromStreamCopilotTrustDialog(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		row          int
+		wantObserved bool
+		wantSent     []string
+	}{
+		{name: "Yes selected", row: 1, wantObserved: true, wantSent: []string{"Enter"}},
+		{name: "No selected", row: 3, wantObserved: false, wantSent: []string{"Up", "Up", "Enter"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withZeroDialogTimings(t)
+			pane := &fakeCopilotTrustPane{row: tt.row}
+			snapshots := make(chan string, 2)
+			snapshots <- copilotTrustDialogSelecting(tt.row)
+			streamOpen := true
+			closeStream := func() {
+				if streamOpen {
+					streamOpen = false
+					close(snapshots)
+				}
+			}
+			t.Cleanup(closeStream)
+			streamSendKeys := func(keys ...string) error {
+				err := pane.sendKeys(keys...)
+				if pane.confirmed != "" && streamOpen {
+					// The dialog is gone: the stream's next and last frame
+					// is the pane after it.
+					after, _ := pane.peek(startupDialogPeekLines)
+					snapshots <- after
+					closeStream()
+				}
+				return err
+			}
+
+			observed, err := AcceptStartupDialogsFromStreamWithStatus(context.Background(), 2*time.Second, snapshots, streamSendKeys)
+			if err != nil {
+				t.Fatalf("stream error = %v", err)
+			}
+			if observed != tt.wantObserved {
+				t.Fatalf("stream observed = %v, want %v (sent %v)", observed, tt.wantObserved, pane.sent)
+			}
+			if !observed {
+				if len(pane.sent) != 0 {
+					t.Fatalf("inconclusive stream sent %v, want no keys", pane.sent)
+				}
+				// Like exec.go: close the watch, then fall back to peeks.
+				closeStream()
+				if err := AcceptStartupDialogsWithTimeout(context.Background(), 2*time.Second, pane.peek, pane.sendKeys); err != nil {
+					t.Fatalf("polling fallback error = %v", err)
+				}
+			}
+			if pane.confirmed != "once" || !reflect.DeepEqual(pane.sent, tt.wantSent) {
+				t.Fatalf("sent = %v confirmed = %q, want %v once", pane.sent, pane.confirmed, tt.wantSent)
+			}
+		})
+	}
+}
