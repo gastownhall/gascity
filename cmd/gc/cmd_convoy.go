@@ -202,6 +202,9 @@ func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs [
 		if !ok {
 			return "", fmt.Errorf("rig %q not found", name)
 		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
+		}
 		return resolveStoreScopeRoot(cityPath, rig.Path), nil
 	}
 	if len(issueIDs) > 0 {

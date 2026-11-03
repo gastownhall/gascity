@@ -4314,3 +4314,51 @@ func TestConvoyCreateRigFlagTracksMatchingIssue(t *testing.T) {
 	requireConvoyOnlyIn(t, cityDir, convoyID, "frontend")
 	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, "frontend"), convoyID, issueID)
 }
+
+// requireNoConvoys fails if any fixture store of convoyRigFlagCity holds a
+// convoy.
+func requireNoConvoys(t *testing.T, cityDir string) {
+	t.Helper()
+	for _, scope := range convoyRigFlagScopes {
+		convoys, err := convoyRigFlagStore(t, cityDir, scope).List(beads.ListQuery{Type: "convoy", IncludeClosed: true})
+		if err != nil {
+			t.Fatalf("listing convoys in the %q store: %v", scope, err)
+		}
+		if len(convoys) > 0 {
+			t.Errorf("the %q store holds convoys %v after a refused create", scope, convoys)
+		}
+	}
+}
+
+// TestConvoyCreateRigFlagRejectsUnresolvableRig: a non-empty --rig that names
+// no rig, or a rig without a path binding, fails before any store is written.
+// Values are rig names only: the city name and path-looking values that are
+// not rig names are unknown rigs.
+func TestConvoyCreateRigFlagRejectsUnresolvableRig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rig     func(cityDir string) string
+		wantErr string
+	}{
+		{"unknown name", func(string) string { return "nope" }, `rig "nope" not found`},
+		{"unbound rig", func(string) string { return "ghost" }, "rig \"ghost\" is declared but has no path binding — run `gc rig add <dir> --name ghost` to bind it"},
+		{"city name", func(string) string { return "demo" }, `rig "demo" not found`},
+		{"relative path", func(string) string { return "./frontend" }, `rig "./frontend" not found`},
+		{"trailing slash", func(string) string { return "frontend/" }, `rig "frontend/" not found`},
+		{"bare directory", func(string) string { return "docs" }, `rig "docs" not found`},
+		{"absolute path", func(cityDir string) string { return filepath.Join(cityDir, "frontend") }, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := convoyRigFlagCity(t)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--city", cityDir, "--rig", tc.rig(cityDir), "convoy", "create", "batch"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc convoy create --rig %q exited 0; stdout=%s", tc.rig(cityDir), stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "gc convoy create: ") || !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Errorf("stderr = %q, want a gc convoy create error containing %q", stderr.String(), tc.wantErr)
+			}
+			requireNoConvoys(t, cityDir)
+		})
+	}
+}
