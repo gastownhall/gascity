@@ -22,6 +22,14 @@
 // agent's root session, every subagent child session the task tool opens and
 // any other session in the directory share this module's closure, so all
 // per-turn state below is keyed by session id.
+//
+// OpenCode loads this file for every OpenCode launch in the work dir,
+// including a developer's personal session started by hand. The plugin
+// therefore registers hooks only when gc's session identity is present in
+// the environment. Outside a gc session the injection commands have nothing
+// to return and gc handoff exits 1, so the hooks would only spawn gc every
+// turn and log a failed handoff on every compaction, in a session Gas City
+// does not own.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -29,7 +37,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -125,6 +133,24 @@ function sessionIDFromEvent(event) {
   );
 }
 
+// managedSessionIdentityPresent reports whether this process carries the
+// session identity gc puts in the environment of every session it starts:
+// GC_SESSION_ID and GC_SESSION_NAME always, with GC_ALIAS, GC_AGENT and
+// GC_TEMPLATE where the session has them. A process started from inside a gc
+// session inherits that identity and counts as managed. These are the session
+// keys of gc's hookHasManagedIdentity (cmd/gc/cmd_prime.go). Its other key,
+// GC_MANAGED_SESSION_HOOK, marks gc's own hook commands rather than a session,
+// so it says nothing about the process this plugin runs in.
+function managedSessionIdentityPresent() {
+  return [
+    "GC_SESSION_ID",
+    "GC_SESSION_NAME",
+    "GC_ALIAS",
+    "GC_AGENT",
+    "GC_TEMPLATE",
+  ].some((key) => String(process.env[key] || "").trim() !== "");
+}
+
 function providerSessionEnv(sessionID) {
   sessionID = String(sessionID || "");
   const env = { GC_PROVIDER_SESSION_ID_REQUIRED: "opencode" };
@@ -163,6 +189,9 @@ async function mirrorTranscript(directory, client, sessionID) {
 }
 
 export default async function gascityPlugin({ directory, client }) {
+  if (!managedSessionIdentityPresent()) {
+    return {};
+  }
   let cachedPrime = null;
 
   // experimental.chat.system.transform fires once per model generation, not

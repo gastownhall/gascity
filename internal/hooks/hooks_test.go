@@ -1903,7 +1903,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"const GC_OPENCODE_HOOK_VERSION = 9",
+		"if (!managedSessionIdentityPresent())",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -1936,7 +1937,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	mimocodeHooks := string(fs.Files["/work/.mimocode/plugin/gascity.js"])
 	for _, want := range []string{
 		"Gas City hooks for MiMo Code.",
-		"const GC_MIMOCODE_HOOK_VERSION = 4",
+		"const GC_MIMOCODE_HOOK_VERSION = 5",
+		"if (!managedSessionIdentityPresent())",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2348,7 +2350,8 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"const GC_OPENCODE_HOOK_VERSION = 9",
+		"if (!managedSessionIdentityPresent())",
 		"pending.child.stdin?.end();",
 		"appendVolatileSystem",
 		"const turns = new Map()",
@@ -2372,9 +2375,60 @@ export default async function gascityPlugin() {
 	}
 }
 
+// The unmanaged-session guard shipped as OpenCode plugin 9 and MiMo Code
+// plugin 5. An installed copy without it is replaced by the bundled plugin,
+// and the replaced file is kept as .bak, both when the copy is at the version
+// before the guard and when it is at the current version with the guard call
+// removed. The versions are literal: a plugin installed at the old number
+// must not stay current even when its body already matches, as in builds that
+// carried the guard at the old number.
+func TestInstallUpgradesPluginsFromBeforeTheManagedSessionGuard(t *testing.T) {
+	const guard = "  if (!managedSessionIdentityPresent()) {\n    return {};\n  }\n"
+	for _, tc := range []struct {
+		provider string
+		dst      string
+		current  string
+		previous string
+	}{
+		{"opencode", "/work/.opencode/plugins/gascity.js", "const GC_OPENCODE_HOOK_VERSION = 9;", "const GC_OPENCODE_HOOK_VERSION = 8;"},
+		{"mimocode", "/work/.mimocode/plugin/gascity.js", "const GC_MIMOCODE_HOOK_VERSION = 5;", "const GC_MIMOCODE_HOOK_VERSION = 4;"},
+	} {
+		for _, installed := range []struct {
+			name     string
+			old, new string
+		}{
+			{"previous version", tc.current, tc.previous},
+			{"current version without the guard call", guard, ""},
+		} {
+			t.Run(tc.provider+"/"+installed.name, func(t *testing.T) {
+				fs := fsys.NewFake()
+				if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
+					t.Fatalf("Install: %v", err)
+				}
+				bundled := fs.Files[tc.dst]
+				if !bytes.Contains(bundled, []byte(tc.current)) || bytes.Count(bundled, []byte(guard)) != 1 {
+					t.Fatalf("bundled %s plugin does not declare %q with one guard", tc.provider, tc.current)
+				}
+				stale := bytes.Replace(bundled, []byte(installed.old), []byte(installed.new), 1)
+				fs.Files[tc.dst] = stale
+
+				if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
+					t.Fatalf("reinstall: %v", err)
+				}
+				if !bytes.Equal(fs.Files[tc.dst], bundled) {
+					t.Errorf("installed plugin (%s) was not replaced by the bundled one", installed.name)
+				}
+				if !bytes.Equal(fs.Files[tc.dst+".bak"], stale) {
+					t.Errorf("replaced plugin (%s) was not kept as .bak", installed.name)
+				}
+			})
+		}
+	}
+}
+
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2382,6 +2436,7 @@ function logRunFailure(args, directory, err) {}
 function logRunStderr(stderr) {}
 async function runWithWarning(directory, ...args) {}
 function providerSessionEnv(sessionID) {}
+function managedSessionIdentityPresent() {}
 "experimental.session.compacting";
 logRunStderr(stderr);
 runWithWarning(directory, "handoff", "--auto", "context cycle");
@@ -2392,14 +2447,16 @@ pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+if (!managedSessionIdentityPresent()) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 8"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 10"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
+	unguarded := bytes.Replace(current, []byte("if (!managedSessionIdentityPresent()) {}\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2425,6 +2482,9 @@ if (state.userMessageIDs.has(messageID)) {}
 	if !opencodeHookNeedsUpgrade(idOrderTurnGate) {
 		t.Fatal("OpenCode hook that opens turns by message-id order did not request upgrade")
 	}
+	if !opencodeHookNeedsUpgrade(unguarded) {
+		t.Fatal("OpenCode hook without the unmanaged-session guard did not request upgrade")
+	}
 }
 
 func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
@@ -2447,26 +2507,31 @@ func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 
 func TestMimoCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for MiMo Code.
-const GC_MIMOCODE_HOOK_VERSION = 4;
+const GC_MIMOCODE_HOOK_VERSION = 5;
 const GC_BIN = process.env.GC_BIN || "gc";
+function managedSessionIdentityPresent() {}
 pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+if (!managedSessionIdentityPresent()) {}
 `)
 	versionless := []byte(`// Gas City hooks for MiMo Code.
 const GC_BIN = process.env.GC_BIN || "gc";
+function managedSessionIdentityPresent() {}
 pending.child.stdin?.end();
 function appendVolatileSystem(system, volatile) {}
 const turns = new Map();
 if (state.userMessageIDs.has(messageID)) {}
+if (!managedSessionIdentityPresent()) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 3"), 1)
-	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 4"), []byte("GC_MIMOCODE_HOOK_VERSION = 5"), 1)
+	stale := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 4"), 1)
+	future := bytes.Replace(current, []byte("GC_MIMOCODE_HOOK_VERSION = 5"), []byte("GC_MIMOCODE_HOOK_VERSION = 6"), 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
 	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
 	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
 	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
+	unguarded := bytes.Replace(current, []byte("if (!managedSessionIdentityPresent()) {}\n"), nil, 1)
 
 	if !mimocodeHookNeedsUpgrade(versionless) {
 		t.Fatal("versionless managed MiMo Code hook did not request upgrade")
@@ -2492,6 +2557,9 @@ if (state.userMessageIDs.has(messageID)) {}
 	if !mimocodeHookNeedsUpgrade(idOrderTurnGate) {
 		t.Fatal("MiMo Code hook that opens turns by message-id order did not request upgrade")
 	}
+	if !mimocodeHookNeedsUpgrade(unguarded) {
+		t.Fatal("MiMo Code hook without the unmanaged-session guard did not request upgrade")
+	}
 }
 
 func TestInstallMimoCodeHookUpgradesStaleManagedPlugin(t *testing.T) {
@@ -2511,7 +2579,7 @@ export default async function gascityPlugin() {
 	if data == string(legacy) {
 		t.Fatal("stale MiMo Code managed plugin was preserved; expected managed upgrade")
 	}
-	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 4") {
+	if !strings.Contains(data, "const GC_MIMOCODE_HOOK_VERSION = 5") {
 		t.Errorf("upgraded MiMo Code plugin missing version marker:\n%s", data)
 	}
 	backup := string(fs.Files["/work/.mimocode/plugin/gascity.js.bak"])

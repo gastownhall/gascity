@@ -126,10 +126,12 @@ await hooks.event({ event: { type: "session.idle", properties: { sessionID } } }
 	const sessionID = "ses_default_mirror"
 	cmd := exec.Command(nodeBin, driverPath, filepath.Join(stage, "gascity.js"), workDir, sessionID)
 	// Hermetic env: HOME drives the plugin's default mirror directory, and
-	// GC_MIMOCODE_TRANSCRIPT_DIR is deliberately absent.
+	// GC_MIMOCODE_TRANSCRIPT_DIR is deliberately absent. GC_SESSION_ID makes
+	// this a session gc started, the only kind the plugin registers hooks for.
 	cmd.Env = []string{
 		"HOME=" + home,
 		"PATH=" + os.Getenv("PATH"),
+		"GC_SESSION_ID=gc-mirror-test",
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

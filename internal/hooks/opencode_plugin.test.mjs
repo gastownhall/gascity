@@ -11,7 +11,7 @@
 // reads its hook input to EOF and then emits `Current time: ...` even when
 // the queue is empty.
 
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -61,12 +61,17 @@ const plugins = [
 // `prime --hook` call appends the GC_PROVIDER_SESSION_ID it was given to the
 // prime log, and GC_FAKE_PRIME_STAMP marks the output the way the real
 // command bakes the current time into its beacon, so a test can tell a
-// refreshed prime from the cached one.
+// refreshed prime from the cached one. Every call of any kind appends its
+// arguments to the call log. `handoff --auto` fails when GC_ALIAS,
+// GC_SESSION_ID and GC_AGENT are all blank, the first check the real command
+// makes (cmd/gc/session_target.go).
 function writeFakeGc(dir) {
   const counter = path.join(dir, "drain-count");
   const drainLog = path.join(dir, "drain-log");
   const primeLog = path.join(dir, "prime-log");
+  const callLog = path.join(dir, "call-log");
   const script = `#!/bin/sh
+printf '%s\\n' "$*" >> "${callLog}"
 case "$1 $2" in
   "prime --hook")
     printf '%s\\n' "\${GC_PROVIDER_SESSION_ID:-<unset>}" >> "${primeLog}"
@@ -88,13 +93,20 @@ case "$1 $2" in
   "mail check")
     if [ -n "\${GC_FAKE_MAIL:-}" ]; then printf '%s' "\${GC_FAKE_MAIL}"; fi
     ;;
+  "handoff --auto")
+    if [ -z "$(printf '%s' "\${GC_ALIAS:-}\${GC_SESSION_ID:-}\${GC_AGENT:-}" | tr -d '[:space:]')" ]; then
+      printf '%s\\n' 'gc handoff: not in session context (GC_ALIAS/GC_SESSION_ID not set)' >&2
+      exit 1
+    fi
+    printf '%s' 'Handoff: sent auto mail (restart skipped).'
+    ;;
   *)
     ;;
 esac
 `;
   const bin = path.join(dir, "gc");
   fs.writeFileSync(bin, script, { mode: 0o755 });
-  return { bin, counter, drainLog, primeLog };
+  return { bin, counter, drainLog, primeLog, callLog };
 }
 
 function readLines(file) {
@@ -157,6 +169,9 @@ function countOccurrences(haystack, needle) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gc-plugin-test-"));
 const fake = writeFakeGc(tmp);
 process.env.GC_BIN = fake.bin;
+// The plugins register hooks only in a session gc started, so the suite runs
+// as one.
+process.env.GC_SESSION_ID = "managed-test-session";
 // Both plugins mirror session transcripts through the client, and MiMo Code
 // mirrors by default into the user's Gas City data directory, so keep every
 // mirror under the suite's temp dir.
@@ -686,5 +701,81 @@ for (const plugin of plugins) {
       await hooks.event(sessionEvent("session.compacted", "ses_unknown"));
       assert.deepEqual(readPrimeLog(fake), ["ses_unknown"]);
     });
+  });
+
+  describe(`${plugin.name} plugin outside a gc-managed session`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    // gc puts GC_SESSION_ID and GC_SESSION_NAME in every session it starts,
+    // with GC_ALIAS, GC_AGENT and GC_TEMPLATE where the session has them. A
+    // session started by hand in the same work dir has none of them, and the
+    // provider loads this plugin for it all the same.
+    const identityKeys = ["GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "GC_AGENT", "GC_TEMPLATE"];
+    let gascityPlugin;
+    let savedIdentity;
+
+    function setIdentity(values) {
+      for (const key of identityKeys) {
+        if (values[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = values[key];
+        }
+      }
+    }
+
+    before(async () => {
+      const staged = stagePlugin(tmp, plugin);
+      ({ default: gascityPlugin } = await import(pathToFileURL(staged).href));
+    });
+
+    beforeEach(() => {
+      savedIdentity = Object.fromEntries(identityKeys.map((key) => [key, process.env[key]]));
+      fs.rmSync(fake.callLog, { force: true });
+    });
+
+    afterEach(() => {
+      setIdentity(savedIdentity);
+    });
+
+    it("registers no hooks, runs no gc and logs nothing in a session started by hand", async () => {
+      const registered = [];
+      const warnings = [];
+      const savedWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+      try {
+        // Unset, empty and whitespace-only all mean no identity, as in gc.
+        for (const value of [undefined, "", " \t\n"]) {
+          setIdentity(Object.fromEntries(identityKeys.map((key) => [key, value])));
+          const hooks = await gascityPlugin({ directory: tmp, client: {} });
+          registered.push(...Object.keys(hooks));
+          // Drive whatever was registered the way the provider drives a
+          // session: creation, a user turn and its generation, a compaction.
+          await hooks.event?.(sessionEvent("session.created", "ses_human", { directory: tmp }));
+          await hooks.event?.(userMessageEvent("ses_human", "msg_h1"));
+          await hooks["experimental.chat.system.transform"]?.(
+            { sessionID: "ses_human", model: {} },
+            { system: [HEADER] },
+          );
+          await hooks["experimental.session.compacting"]?.({ sessionID: "ses_human" }, { context: [] });
+        }
+      } finally {
+        console.warn = savedWarn;
+      }
+      assert.deepEqual(
+        { registered, gcCalls: readLines(fake.callLog), warnings },
+        { registered: [], gcCalls: [], warnings: [] },
+      );
+    });
+
+    for (const key of identityKeys) {
+      it(`registers its hooks when only ${key} is set`, async () => {
+        setIdentity({ [key]: "managed-test-session" });
+        const hooks = await gascityPlugin({ directory: tmp, client: {} });
+        assert.deepEqual(Object.keys(hooks).sort(), [
+          "event",
+          "experimental.chat.system.transform",
+          "experimental.session.compacting",
+        ]);
+      });
+    }
   });
 }
