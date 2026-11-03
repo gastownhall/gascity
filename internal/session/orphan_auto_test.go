@@ -197,3 +197,103 @@ func TestKillExistingOrphansPacesScanErrors(t *testing.T) {
 		t.Fatalf("logged %d times for another city, want 4", logged())
 	}
 }
+
+// TestKillExistingOrphansPacingKeepsFailClosedBehavior (ga-zpcphq): pacing
+// only conditions the scan-error line. Failures of the whole scan are logged
+// every time, a start whose entry-error line is suppressed still terminates
+// the orphans the scan surfaced, and a LiveUnlisted root still refuses the
+// start — even when its scan line was the one suppressed.
+func TestKillExistingOrphansPacingKeepsFailClosedBehavior(t *testing.T) {
+	// Each subtest gets its own city: the pacer is package-scoped, so a
+	// shared city would let one subtest's observations suppress another's.
+	kill := func(t *testing.T, city string, sp runtime.Provider) error {
+		t.Helper()
+		clk := &clock.Fake{Time: time.Date(2026, 11, 3, 5, 0, 0, 0, time.UTC)}
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithClock(clk), WithCityPath(city))
+		return mgr.killExistingOrphans(context.Background(), "sid-pace")
+	}
+	terminations := func(sp *orphanScanFake) int {
+		n := 0
+		for _, c := range sp.SnapshotCalls() {
+			if c.Method == "TerminateRuntime" {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("whole-scan failures are logged every time", func(t *testing.T) {
+		city := t.TempDir()
+		sp := &orphanScanFake{Fake: runtime.NewFake(), err: fmt.Errorf("finding runtimes for session %q: session unavailable", "sid-pace")}
+		var buf strings.Builder
+		prevOut, prevFlags := log.Writer(), log.Flags()
+		log.SetOutput(&buf)
+		log.SetFlags(0)
+		t.Cleanup(func() {
+			log.SetOutput(prevOut)
+			log.SetFlags(prevFlags)
+		})
+		for range 2 {
+			if err := kill(t, city, sp); err != nil {
+				t.Fatalf("killExistingOrphans: %v", err)
+			}
+		}
+		if n := strings.Count(buf.String(), "scanning for orphaned runtimes"); n != 2 {
+			t.Fatalf("logged %d times, want the whole-scan failure logged every time", n)
+		}
+	})
+
+	t.Run("suppressed starts still terminate orphans", func(t *testing.T) {
+		city := t.TempDir()
+		roots := []runtime.LiveRuntime{{SessionID: "sid-pace", City: city, PID: 100}}
+		sp := &orphanScanFake{Fake: runtime.NewFake(), err: unreadableEntryError(4000), roots: roots}
+		var buf strings.Builder
+		prevOut, prevFlags := log.Writer(), log.Flags()
+		log.SetOutput(&buf)
+		log.SetFlags(0)
+		t.Cleanup(func() {
+			log.SetOutput(prevOut)
+			log.SetFlags(prevFlags)
+		})
+		for range 2 {
+			if err := kill(t, city, sp); err != nil {
+				t.Fatalf("killExistingOrphans: %v", err)
+			}
+		}
+		if n := strings.Count(buf.String(), "scanning for orphaned runtimes"); n != 1 {
+			t.Fatalf("logged %d times, want the repeat suppressed", n)
+		}
+		if n := terminations(sp); n != 2 {
+			t.Fatalf("terminated %d orphans across two starts, want one per start", n)
+		}
+	})
+
+	t.Run("LiveUnlisted refusal stands while its scan line is suppressed", func(t *testing.T) {
+		city := t.TempDir()
+		roots := []runtime.LiveRuntime{{SessionID: "sid-pace", City: city, PID: 100, LiveUnlisted: true}}
+		sp := &orphanScanFake{Fake: runtime.NewFake(), err: unreadableEntryError(4001), roots: roots}
+		var buf strings.Builder
+		prevOut, prevFlags := log.Writer(), log.Flags()
+		log.SetOutput(&buf)
+		log.SetFlags(0)
+		t.Cleanup(func() {
+			log.SetOutput(prevOut)
+			log.SetFlags(prevFlags)
+		})
+		for range 2 {
+			err := kill(t, city, sp)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("killExistingOrphans error = %v; want the LiveUnlisted start refusal", err)
+			}
+		}
+		if n := strings.Count(buf.String(), "scanning for orphaned runtimes"); n != 1 {
+			t.Fatalf("logged %d times, want the repeat suppressed", n)
+		}
+		if n := strings.Count(buf.String(), "refusing to start"); n != 2 {
+			t.Fatalf("refusal logged %d times, want the refusal reported on every start", n)
+		}
+		if n := terminations(sp); n != 0 {
+			t.Fatalf("terminated %d runtimes, want a LiveUnlisted refusal to terminate nothing", n)
+		}
+	})
+}
