@@ -433,3 +433,71 @@ func TestCompactScriptLiveGateBaselineFailureIsAnOrdinaryFailure(t *testing.T) {
 		t.Fatalf("compact ran GC on a database it could not probe: %q", gcCalls)
 	}
 }
+
+func TestCompactScriptLiveGateNeverProbesWithoutARewrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode string
+		args []string
+		env  []string
+	}{
+		{name: "scheduled dry run", mode: "success", env: []string{"GC_DOLT_COMPACT_DRY_RUN=1"}},
+		{name: "gc-only dry run", mode: "success", args: []string{"--gc-only", "--dry-run"}},
+		{name: "bare GC dry run", mode: "success", env: []string{"GC_DOLT_COMPACT_BARE_GC=1", "GC_DOLT_COMPACT_DRY_RUN=1"}},
+		{name: "shared-history dry run", mode: "remote_success", env: []string{"GC_DOLT_COMPACT_DRY_RUN=1"}},
+		{name: "below threshold", mode: "below_threshold"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.env...)
+			out, err := fixture.runWithArgs(t, tc.mode, tc.args, env...)
+			if err != nil {
+				t.Fatalf("compact failed on a pass with no rewrite: %v\n%s", err, out)
+			}
+			if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", compactLiveProbeQuery); len(probes) != 0 {
+				t.Fatalf("compact probed a database it did not rewrite: %q\n%s", probes, out)
+			}
+			if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
+				t.Fatalf("compact wrote a quarantine marker without a rewrite (stat err=%v):\n%s", err, out)
+			}
+			if strings.Contains(out, "live database") || strings.Contains(out, "live probe") {
+				t.Fatalf("compact reported on the live-database gate without a rewrite:\n%s", out)
+			}
+		})
+	}
+
+	t.Run("existing quarantine refusal", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		marker := compactBeadsQuarantineMarkerPath(fixture)
+		if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+			t.Fatalf("mkdir quarantine dir: %v", err)
+		}
+		if err := os.WriteFile(marker, []byte("db=beads\nreason=post-flatten row count decreased\n"), 0o600); err != nil {
+			t.Fatalf("write quarantine marker: %v", err)
+		}
+
+		out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"})
+		if err == nil {
+			t.Fatalf("compact reclaimed a quarantined database:\n%s", out)
+		}
+		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", compactLiveProbeQuery); len(probes) != 0 {
+			t.Fatalf("compact probed a database it refused: %q\n%s", probes, out)
+		}
+		if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten row count decreased" {
+			t.Fatalf("refusal rewrote the quarantine reason to %q", reason)
+		}
+	})
+
+	// Control: the same fixture probes once a pass does rewrite.
+	t.Run("a rewrite probes", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err != nil {
+			t.Fatalf("compact failed: %v\n%s", err, out)
+		}
+		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", compactLiveProbeQuery); len(probes) == 0 {
+			t.Fatalf("compact rewrote beads without probing it:\n%s", out)
+		}
+	})
+}
