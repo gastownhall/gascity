@@ -1980,6 +1980,7 @@ go_test(
         "remote_stage_test.go",
         "remote_target_test.go",
         "repro_ga_rble9w_test.go",
+        "repro_named_work_ready_blocked_in_progress_test.go",
         "requalify_stability_test.go",
         "requalify_v2_test.go",
         "residency_leg_agreement_test.go",
