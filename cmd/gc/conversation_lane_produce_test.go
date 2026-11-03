@@ -141,7 +141,7 @@ func TestMailReadCancelsItsNotice(t *testing.T) {
 	}
 	// Without message listed the provider is not wrapped.
 	c := newCLILaneCity(t)
-	c.cfg.Ops.Authoritative = nil
+	c.cfg.Ops.Authoritative = config.OpsKinds()
 	inner := mail.NewFake()
 	if p := withMailNoticeWithdrawal(inner, c.store, c.cfg, nil); p != mail.Provider(inner) {
 		t.Fatalf("provider wrapped with message unlisted: %T", p)
@@ -167,7 +167,7 @@ func TestBeadMailReadCancelsItsNotice(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCLILaneCity(t)
-			inner := beadmail.New(c.store)
+			inner := newTestBeadMail(c.store)
 			msg, err := inner.Send("alice", c.target.agentKey(), "hi", "body")
 			if err != nil {
 				t.Fatal(err)
@@ -202,9 +202,9 @@ func TestMailNoticeWithdrawalKeepsTheHandoffArchive(t *testing.T) {
 		store := beads.NewMemStore()
 		cfg := &config.City{}
 		if listed {
-			cfg.Ops.Authoritative = []string{"message"}
+			cfg.Ops.Authoritative = config.OpsKinds("message")
 		}
-		mp := withMailNoticeWithdrawal(beadmail.New(store), store, cfg, io.Discard)
+		mp := withMailNoticeWithdrawal(newTestBeadMail(store), store, cfg, io.Discard)
 		auto, err := store.Create(beads.Bead{
 			Title: "context cycle", Type: "message", Assignee: "mayor", From: "mayor",
 			Labels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
@@ -470,7 +470,7 @@ func TestHookClaimContinuationUnderLaneProposesANotice(t *testing.T) {
 // refused.
 func TestCLIProducersWithoutLaneKeepLegacy(t *testing.T) {
 	c := newCLILaneCity(t)
-	c.cfg.Ops.Authoritative = nil
+	c.cfg.Ops.Authoritative = config.OpsKinds()
 	c.target.cfg = c.cfg
 	if prod, err := routeCLILaneNotice(cliLaneNoticeRoute{
 		target: c.target, sp: c.sp,
@@ -755,7 +755,7 @@ func TestDoSlingNudgeUnderLaneResolvesARigBeadsSessionInTheCityStore(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCLILaneCity(t)
 			if !tc.listed {
-				c.cfg.Ops.Authoritative = nil
+				c.cfg.Ops.Authoritative = config.OpsKinds()
 			}
 			c.cfg.Workspace.Name = "test-city"
 			writeSlingTestCity(t, c.dir, "[workspace]\nname = \"test-city\"\n")
@@ -845,7 +845,7 @@ func TestMailArchiveRetriesAFailedWithdrawal(t *testing.T) {
 		inner func(store beads.Store) mail.Provider
 	}{
 		{"wrapped provider", func(beads.Store) mail.Provider { return mail.NewFake() }},
-		{"bead mail", func(store beads.Store) mail.Provider { return beadmail.New(store) }},
+		{"bead mail", func(store beads.Store) mail.Provider { return newTestBeadMail(store) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &laneCausationFailStore{laneTestStore: newLaneTestStore()}
@@ -922,7 +922,7 @@ func TestRouteCLILaneNotice(t *testing.T) {
 				t.Fatalf("closing the row: %v", err)
 			}
 		}},
-		{name: "a protocol-mode session no lane serves keeps the legacy path", modify: func(_ *testing.T, c *cliLaneCity) {
+		{name: "a protocol-mode runtime with unrecorded turn starts keeps the legacy path", modify: func(_ *testing.T, c *cliLaneCity) {
 			c.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 		}},
 		{name: "no city store is refused", city: func(*cliLaneCity) beads.Store { return nil }, handled: true, refusal: "the city store did not open"},

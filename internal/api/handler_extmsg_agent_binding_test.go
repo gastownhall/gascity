@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -18,7 +19,7 @@ func newExtMsgAgentBindingFixture(t *testing.T) (*fakeState, *Server, *extmsg.Se
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 	registry := extmsg.NewAdapterRegistry()
 	registry.Register(extmsg.AdapterKey{Provider: "discord", AccountID: "acct-1"}, &testExtMsgAdapter{})

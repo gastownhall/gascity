@@ -325,7 +325,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// the purge and prune help and the types.retained setting, as the
 		// core reaper does before it purges.
 		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr, storeGate.Skipped))
-		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
+		lanesCheck := newConversationLanesDoctorCheck(cityPath, cfg)
+		registerCityStoreCheck(lanesCheck)
+		// legacy-delivery reports the queue and pollers even when the city
+		// store is skipped, so it probes the sessions store through the gate
+		// rather than being replaced by the gate's stand-in.
+		register(newLegacyDeliveryDoctorCheck(cfg, func() (laneStoreFit, string, error) {
+			if err := storeGate.skipErr(cityPath); err != nil {
+				return laneStoreFitNone, "", err
+			}
+			return lanesCheck.sessionsFit()
+		}))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))
@@ -535,6 +545,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// managed bd scope. The version check follows the same gate so file-backed
 	// and external Dolt workspaces do not get irrelevant local-binary warnings.
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	// Read-only recovery readiness: the backup and JSONL-export orders
+	// maintain only bound scopes, so an unbound database in the shared data
+	// dir has no restore source — the database a recovery would silently
+	// drop (#1979).
+	register(doctor.NewDoltUnboundDatabasesCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	// Preserved corrupt stores from start-time journal-corruption recovery
+	// are postmortem evidence; keep reporting them until the operator has
+	// confirmed the live database and removed the copy (#1979).
+	register(doctor.NewDoltCorruptAsideCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltCompactStateCheck(cityPath, opts.SkipManagedDoltCheck))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at

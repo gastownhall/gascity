@@ -21,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -462,7 +461,7 @@ func TestMailNotifyOpRequireRefusalIsAnError(t *testing.T) {
 // dedup-suppressed send proposes nothing.
 func TestMailSendNotifyOpsPerRecipient(t *testing.T) {
 	c := newContentOpCity(t, "auto")
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	nf := func(_, messageID string) (string, error) {
 		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
 	}
@@ -1234,7 +1233,7 @@ func TestCLIMessageOpResult(t *testing.T) {
 // gc mail reply --json names the notice's op.
 func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
 	c := newContentOpCity(t, "auto")
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	if _, err := mp.Send("alice", "bob", "Hello", "first"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1490,7 +1489,7 @@ func TestMailBroadcastNotifyDefaultAutoIsQuietOnAnIncapableStore(t *testing.T) {
 	c.h.opStore = cliOpIncapableStore{c.h.opStore}
 	var warn bytes.Buffer
 	nudgeWarningWriter = &warn
-	mp := beadmail.New(beads.NewMemStore())
+	mp := newTestBeadMail(beads.NewMemStore())
 	nf := func(_, messageID string) (string, error) {
 		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
 	}

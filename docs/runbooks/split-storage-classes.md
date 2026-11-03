@@ -293,10 +293,10 @@ A rig whose store holds no infrastructure bead never needs this step: `gc rig
 add` (a new rig, `--adopt`, or a re-add) and the rig census the city runs at
 each boot record it `infra.rig.<rig>.clean` once the city binding has
 converged, so a rig added before a born-split city's first start, or an adopted
-store holding only work, does not wait for an import. A suspended rig is not
-censused at boot. Neither records a store the import refuses as shared (see
-below): that rig stays awaiting import, and `gc rig add` and the boot census's
-`storage.rig_residue` event say why.
+store holding only work, does not wait for an import. A rig suspended at boot
+is not opened then: the controller censuses it when it resumes. Neither records
+a store the import refuses as shared (see below): that rig stays awaiting
+import, and `gc rig add` and the census's `storage.rig_residue` event say why.
 
 The import refuses, before writing anything, a rig store another registered
 city also uses or that it cannot rule out as one (a shared or company store
@@ -468,16 +468,23 @@ gc serves its own `release-if-current` itself.
   a string value, but a JSON null reads as empty to the bd CLI and as the text
   `null` to a native Dolt store, and `gc.root_bead_id` set to `null` is a
   graph marker. A write is refused when either reading moves the bead out of
-  the classes its store holds, and an import row the two readings place in
-  different classes is refused even with `--skip-infra`. Write such a key as a
-  string, leave it out, or clear it with `update --unset-metadata`.
+  the classes its store holds. An import row is kept when its store holds the
+  row's class under both readings, and is handled like any row of a class the
+  store does not hold (refused, or left out with `--skip-infra`) when it holds
+  neither; a row its store holds under one reading only is refused, even with
+  `--skip-infra`. Write such a key as a string, leave it out, or clear it with
+  `update --unset-metadata`.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
   with `--skip-infra`. gc reads the file the way bd's import does: a line
   with a `_schema` key is the export header, a line whose `_type` key is
   exactly `"memory"` is a memory record, and a row whose status is
   `tombstone` is skipped. bd imports every other line as an issue, whatever
-  else its `_type` says, so gc classifies every other line.
+  else its `_type` says, so gc classifies every other line. A row the store
+  keeps is refused when a class binding holds a bead with its id, as
+  `create --id` is: `gc storage migrate` keeps a moved bead's id, so every
+  by-id gc command would answer from the binding's bead. A dry run writes
+  nothing and is not checked.
 - `mol burn` (the gastown patrols): every id must name exactly one bead of
   the work store, as for `delete`. The burn is refused when a class-binding
   bead depends on, or an open cross-store drain gate waits on, the molecule
@@ -518,13 +525,20 @@ gc serves its own `release-if-current` itself.
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
 - A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
-  a `create --graph` plan, the `import` source) is copied to a private
-  temporary file once judged, and bd is pointed at the copy, which is removed
-  when `gc bd` returns. bd writes exactly what gc judged: a file rewritten
-  after gc read it changes nothing. A pipe (`<(...)`, `/dev/stdin`) given to
-  `batch --file`, `delete --from-file`, `create --graph` or `import` is
-  drained by gc's read, and bd gets the drained bytes. bd names the copy, not
-  your file, in what it prints.
+  a `create --graph` plan, the `import` source) is copied, under its own file
+  name, into a private directory under `TMPDIR` (or `/tmp`) once judged, and bd
+  is pointed at the copy, which is removed when `gc bd` returns. bd writes
+  exactly what gc judged: a file rewritten after gc read it changes nothing.
+  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`,
+  `delete --from-file`, `create --graph` or `import` is drained by gc's read,
+  and bd gets the drained bytes. bd prints the copy's path; where it records
+  only a file name (an `import`'s history entry), that is your file's name. A
+  write gc cannot copy (`TMPDIR` missing, unwritable or full) is refused.
+  Every spelling of the `import` source bd accepts (a short-flag run such as
+  `-qia.jsonl`, a name after `--`) is pointed at the copy. On every city,
+  single-store or split, a `--metadata @file` of `create`, `new` or `update`
+  is read once, before any check, so every check and bd read the same bytes
+  and a pipe works there too.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
 - `config set` and `config unset`: only `types.custom`, `types.infra`,

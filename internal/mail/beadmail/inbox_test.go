@@ -41,7 +41,7 @@ func (s *readCountingStore) reset() { s.gets, s.sessionLists, s.messageLists = 0
 func newInboxFixture(t *testing.T) (*readCountingStore, *Provider, session.Info) {
 	t.Helper()
 	store := &readCountingStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
@@ -251,7 +251,7 @@ func (s *writeCountingStore) Close(id string) error {
 // alone.
 func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
-	p := New(store)
+	p := newTestProvider(store)
 	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
@@ -315,7 +315,7 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 // the failed label write is reported rather than swallowed.
 func TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
-	p := New(store)
+	p := newTestProvider(store)
 	handoff, _, err := p.SendHandoff(mail.HandoffIntent{
 		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
@@ -369,7 +369,7 @@ func TestArchiveFromInboxClosesEveryHandoffBeforeAnyLabel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
-			p := New(store)
+			p := newTestProvider(store)
 			var ids []string
 			for _, thread := range []string{"t1", "t2"} {
 				handoff, _, err := p.SendHandoff(mail.HandoffIntent{
@@ -446,7 +446,7 @@ func TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs(t *testing.T) {
 func newSuccessionFixture(t *testing.T) (*readCountingStore, *Provider, func() session.Info) {
 	t.Helper()
 	store := &readCountingStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 	s, err := store.Create(beads.Bead{
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
@@ -602,7 +602,7 @@ func TestInboxForSessionReadBudget(t *testing.T) {
 	}
 
 	recording := &keyedListStore{readCountingStore: store}
-	p = New(recording)
+	p = newTestProvider(recording)
 	recording.reset()
 	if _, err := p.InboxForSession(current()); err != nil {
 		t.Fatalf("InboxForSession: %v", err)
@@ -727,7 +727,7 @@ func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
 		t.Fatalf("SetMetadata(alias_history): %v", err)
 	}
 	recording := &planRecordingStore{readCountingStore: store}
-	p := New(recording)
+	p := newTestProvider(recording)
 	var preds []string
 	for _, alias := range []string{"old-sky", "older-sky"} {
 		preds = append(preds, createSessionBead(t, store, map[string]string{

@@ -30,6 +30,17 @@ export type AdapterEventPayload = {
     provider: string;
 };
 
+export type AgentClaimsPayload = {
+    action?: string;
+    cause?: string;
+    episode: string;
+    provider: string;
+    seats?: number;
+    since: string;
+    template: string;
+    until?: string;
+};
+
 export type AgentCreateInputBody = {
     /**
      * Working directory (rig name).
@@ -1209,6 +1220,10 @@ export type ConvoyAddInputBody = {
 
 export type ConvoyCheckResponse = {
     /**
+     * IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+     */
+    child_ids?: Array<string> | null;
+    /**
      * Closed child bead count.
      */
     closed: number;
@@ -1220,6 +1235,10 @@ export type ConvoyCheckResponse = {
      * Convoy ID.
      */
     convoy_id: string;
+    /**
+     * Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+     */
+    dangling_tracks?: number;
     /**
      * Total child bead count.
      */
@@ -1371,7 +1390,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -4262,6 +4281,10 @@ export type SessionResponse = {
      */
     activity_source?: 'program' | 'transcript';
     agent_kind?: string;
+    /**
+     * The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
+     */
+    agent_name?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -4299,10 +4322,22 @@ export type SessionResponse = {
     template: string;
     title: string;
     /**
+     * How gc drives the session runtime, for example tmux or acp. Empty when unknown.
+     */
+    transport?: string;
+    /**
      * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row.
      */
     turn?: SessionTurn;
+    /**
+     * Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.
+     */
+    wake_reasons?: Array<string> | null;
     work_dir?: string;
+    /**
+     * The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.
+     */
+    worker_dir?: string;
 };
 
 export type SessionStopBody = {
@@ -5966,6 +6001,10 @@ export type StatusAgentDetail = {
      */
     scope: string;
     /**
+     * Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+     */
+    session_id?: string;
+    /**
      * tmux session name CLI drain-ops key on.
      */
     session_name?: string;
@@ -6538,6 +6577,10 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
+    type: 'agent.claims_resumed';
+} & TypedEventStreamEnvelopeAgentClaimsResumed) | ({
+    type: 'agent.claims_stalled';
+} & TypedEventStreamEnvelopeAgentClaimsStalled) | ({
     type: 'backend.credential_resolved';
 } & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_failed';
@@ -6788,6 +6831,42 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
 } & TypedEventStreamEnvelopeCustom);
+
+/**
+ * TypedEventStreamEnvelope agent.claims_resumed
+ */
+export type TypedEventStreamEnvelopeAgentClaimsResumed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.claims_resumed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope agent.claims_stalled
+ */
+export type TypedEventStreamEnvelopeAgentClaimsStalled = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.claims_stalled';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedEventStreamEnvelope backend.credential_resolved
@@ -9045,6 +9124,10 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
+    type: 'agent.claims_resumed';
+} & TypedTaggedEventStreamEnvelopeAgentClaimsResumed) | ({
+    type: 'agent.claims_stalled';
+} & TypedTaggedEventStreamEnvelopeAgentClaimsStalled) | ({
     type: 'backend.credential_resolved';
 } & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_failed';
@@ -9295,6 +9378,44 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
 } & TypedTaggedEventStreamEnvelopeCustom);
+
+/**
+ * TypedTaggedEventStreamEnvelope agent.claims_resumed
+ */
+export type TypedTaggedEventStreamEnvelopeAgentClaimsResumed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.claims_resumed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope agent.claims_stalled
+ */
+export type TypedTaggedEventStreamEnvelopeAgentClaimsStalled = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: AgentClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'agent.claims_stalled';
+    workflow?: WorkflowEventProjection;
+};
 
 /**
  * TypedTaggedEventStreamEnvelope backend.credential_resolved
@@ -11865,6 +11986,10 @@ export type WaitView = {
      * Session continuation epoch at registration.
      */
     registered_epoch?: string;
+    /**
+     * True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.
+     */
+    registered_reset_pending?: boolean;
     /**
      * Session bead ID the wait is registered against.
      */
@@ -19685,13 +19810,17 @@ export type GetV0CityByCityNameSessionByIdData = {
     };
     query?: {
         /**
-         * Include last output preview.
+         * Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.
          */
         peek?: boolean;
         /**
-         * Number of lines to include in the last output preview when peek=true. Defaults to 5.
+         * Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.
          */
         peek_lines?: number;
+        /**
+         * Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.
+         */
+        peek_strict?: boolean;
         /**
          * Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
          */
@@ -21431,6 +21560,10 @@ export type GetV0CityByCityNameSessionsData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.
+         */
+        wake_reasons?: boolean;
     };
     url: '/v0/city/{cityName}/sessions';
 };

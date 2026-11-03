@@ -392,6 +392,20 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 	return findAgentByLegacyTemplate(cfg, template)
 }
 
+// findSessionAgentByTemplate resolves a session's template the way the
+// session itself was built: findAgentByTemplate's exact and migration
+// matches first, then config.FindAgent's rig-stamped copy of a generic
+// scope="rig" agent, which is how session.FindNamedSessionSpec backs each
+// rig's named session. That copy is not an element of cfg.Agents, so
+// callers only read it. The config-drift checks and the v2 template memo's
+// row filter use this helper; other callers keep findAgentByTemplate.
+func findSessionAgentByTemplate(cfg *config.City, template string) *config.Agent {
+	if a := findAgentByTemplate(cfg, template); a != nil {
+		return a
+	}
+	return config.FindAgent(cfg, strings.TrimSpace(template))
+}
+
 // findAgentByLegacyTemplate is findAgentByTemplate's migration fallbacks, for
 // a trimmed template no agent matches exactly: a legacy bound form resolves to
 // the unbound agent, then a legacy unbound form to the one bound agent it
@@ -1563,8 +1577,9 @@ func topoOrderRows(rows []sessionpkg.ReconcileSession, deps map[string][]string)
 // knownSessionStates is the set of bead metadata "state" values that the
 // current reconciler understands. Beads with unrecognized states are skipped
 // during reconciliation to allow forward-compatible rollback from newer
-// versions that add states, and to leave this binary's own archived and
-// draining rows alone. This binary's own close codes are not listed: a row
+// versions that add states, and to leave this binary's own parked rows alone
+// (archived, closing, and a draining without its drain-ack reason). This
+// binary's own close codes are not listed: a row
 // that still carries one is an interrupted close, which the reconciler
 // finishes, or rolls back, before the skip (interruptedCloseGate,
 // finishInterruptedClose).
@@ -1584,12 +1599,42 @@ var knownSessionStates = map[string]bool{
 	"":                                   true, // empty state is valid (legacy beads)
 }
 
-// isKnownStateInfo returns true if the session's metadata state is recognized by
-// the current reconciler. Unknown states (from a newer version) are skipped to
-// prevent panics during rollback. It keys off the RAW metadata state
+// isKnownStateInfo returns true if the session's metadata state is one this
+// gc version's controller manages. States outside the set are skipped during
+// reconciliation: both the ones another gc version wrote (forward-compatible
+// rollback in a mixed-version fleet) and this version's own parked rows (see
+// knownSessionStates). It keys off the RAW metadata state
 // (Info.MetadataState, untrimmed).
 func isKnownStateInfo(i sessionpkg.Info) bool {
 	return knownSessionStates[i.MetadataState]
+}
+
+// isUnknownStateInfo returns true if the session's raw metadata state is one
+// this gc version's controller does not manage: the rows the census counts as
+// unknown, which v2 skips (A5) and its migration gate refuses to boot over. A
+// drain-ack stop-pending row is excluded: the drain-ack stop-pending handler
+// owns it outright and continues before the skip. The legacy reconciler skips
+// these rows too, except an interrupted close of this binary's own, which it
+// finishes, or rolls back, first (interruptedCloseGate). It keys off the RAW
+// metadata state (Info.MetadataState, untrimmed), like isKnownStateInfo.
+func isUnknownStateInfo(i sessionpkg.Info) bool {
+	return !isKnownStateInfo(i) && !isDrainAckStopPendingInfo(i)
+}
+
+// unknownStateRefusal is the operator-facing reason the controller will not
+// act on a wake, reset or kill of info's row because it skips the row's state,
+// or "" when it does not skip it. A closed row is not refused, whatever close
+// code its state carries: the verb answers it as closed, and a close of it
+// does nothing. Nor is an interrupted close: the reconciler finishes it, or
+// rolls it back to asleep, rather than skip it, and v2 never runs over one.
+func unknownStateRefusal(i sessionpkg.Info) string {
+	if i.Closed || !isUnknownStateInfo(i) {
+		return ""
+	}
+	if _, interrupted := interruptedCloseGate(i); interrupted {
+		return ""
+	}
+	return fmt.Sprintf("its state %q is not one this gc version's controller manages, so the controller skips it; `gc session close %s` releases it", i.MetadataState, i.ID)
 }
 
 // reverseBeads returns a reversed copy of the bead slice.

@@ -966,11 +966,12 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 		// (its session bead ID since #6324; "<target>-<suffix>" session_name
 		// on older claims), not under the bare pool target, so bare equality
 		// reads already-claimed pool work as un-slung and mints a second
-		// attempt for it. The original keeps gc.routed_to once wrapped, so
-		// both it and its do-work step satisfy the pool work_query: one unit
-		// of work, two dispatchable rows, two sessions. Treat a claim by any of
-		// this pool's own sessions as idempotent (assigneeIsOwnPoolSession); a
-		// claim by a different pool still falls through to the warning below.
+		// attempt for it. The wrap clears the original's gc.routed_to
+		// (restampWorkBeadRouting), but the attempt's do-work step is still a
+		// dispatchable row while a session holds the original: one unit of
+		// work, two sessions. Treat a claim by any of this pool's own sessions
+		// as idempotent (assigneeIsOwnPoolSession); a claim by a different
+		// pool still falls through to the warning below.
 		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, q, deps.Store)
 		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)

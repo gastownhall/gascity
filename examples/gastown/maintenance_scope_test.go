@@ -810,8 +810,97 @@ func TestReaperTypeSafeSessionPruneDeletesThroughBd(t *testing.T) {
 	if strings.Contains(f.read(t, f.doltLog), "DELETE FROM") {
 		t.Fatalf("type-safe session prune sent SQL DML:\n%s", f.read(t, f.doltLog))
 	}
-	if !strings.Contains(f.read(t, f.gcLog), "sessions-pruned:2") {
-		t.Fatalf("summary did not count the deleted sessions:\n%s", f.read(t, f.gcLog))
+	gcLog := f.read(t, f.gcLog)
+	if !strings.Contains(gcLog, "sessions-pruned:2") {
+		t.Fatalf("summary did not count the deleted sessions:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a counted two-id batch was escalated as a reaper anomaly:\n%s", gcLog)
+	}
+}
+
+// A one-id --from-file batch takes bd's single-id delete path, whose --json
+// reply is {"deleted":"<id>",...} with no deleted_count. The reaper must
+// count that batch as one deletion, not escalate it as a failed prune.
+func TestReaperTypeSafeSessionPruneCountsSingleIDBatch(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "batches")
+	f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    if [ "$n" = "0" ]; then
+      printf '1' > "`+stateFile+`"
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+	f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+	f.runReaper(t)
+
+	if !strings.Contains(f.read(t, f.bdLog), "args=delete --force --json --from-file ") {
+		t.Fatalf("type-safe session prune did not delete through bd:\n%s", f.read(t, f.bdLog))
+	}
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "type-safe session prune failed") {
+		t.Fatalf("a successful one-id delete was escalated as a failed prune:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a successful one-id delete raised a reaper escalation:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "sessions-pruned:1") {
+		t.Fatalf("summary did not count the one deleted session:\n%s", gcLog)
+	}
+}
+
+// A zero-exit delete reply with neither deleted_count nor a non-empty string
+// deleted is not a counted deletion: the reaper records an anomaly and stops
+// after that one call. A batch reply counting zero stops without an anomaly.
+func TestReaperTypeSafeSessionPruneRejectsUncountedDeleteReply(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reply     string
+		wantAnoms bool
+	}{
+		{name: "empty object", reply: `{}`, wantAnoms: true},
+		{name: "empty deleted string", reply: `{"deleted":""}`, wantAnoms: true},
+		{name: "not json", reply: `not json`, wantAnoms: true},
+		{name: "zero count batch", reply: `{"deleted":["gc-session-1"],"deleted_count":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The selection returns a row twice so a reply wrongly counted as a
+			// deletion would loop into a second delete call.
+			stateFile := filepath.Join(t.TempDir(), "batches")
+			f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    printf '%s' $((n + 1)) > "`+stateFile+`"
+    if [ "$n" -lt 2 ]; then
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+			f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+			f.env["BD_DELETE_JSON"] = tc.reply
+			f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			if got := strings.Count(bdLog, "args=delete --force --json --from-file "); got != 1 {
+				t.Fatalf("delete calls = %d, want 1:\n%s", got, bdLog)
+			}
+			gcLog := f.read(t, f.gcLog)
+			if failed := strings.Contains(gcLog, "type-safe session prune failed after 0 deletions"); failed != tc.wantAnoms {
+				t.Fatalf("prune failure recorded = %v, want %v:\n%s", failed, tc.wantAnoms, gcLog)
+			}
+			if escalated := strings.Contains(gcLog, "ESCALATION: Reaper anomalies detected"); escalated != tc.wantAnoms {
+				t.Fatalf("escalated = %v, want %v:\n%s", escalated, tc.wantAnoms, gcLog)
+			}
+			if !strings.Contains(gcLog, "sessions-pruned:0") {
+				t.Fatalf("summary counted an uncounted delete reply:\n%s", gcLog)
+			}
+		})
 	}
 }
 

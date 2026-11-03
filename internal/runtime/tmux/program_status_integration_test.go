@@ -67,7 +67,14 @@ type programSession struct {
 func startProgramSession(t *testing.T, companion, emitter string, mode runtime.ProgramStatusMode, arm runtime.ProgramStatusArm, script []string) *programSession {
 	t.Helper()
 	p := captureProvider(t, newScratchServer(t, programScratchKind(t)), companion)
-	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = mode, mode
+	// A start arms only under a live switch, so a session armed under off
+	// is armed under on and then switched off, as a pane armed before the
+	// switch went off is.
+	startMode := mode
+	if arm.Capture && startMode != runtime.ProgramStatusShadow && startMode != runtime.ProgramStatusOn {
+		startMode = runtime.ProgramStatusOn
+	}
+	p.tm.cfg.ProgramStatus, p.cfg.ProgramStatus = startMode, startMode
 	s := &programSession{p: p, name: "gc-ps-contract", emitter: emitter, relay: arm.Relay}
 	s.cfg = runtime.Config{Command: s.command(script), WorkDir: t.TempDir(), ProgramStatus: arm}
 	if err := p.Start(context.Background(), s.name, s.cfg); err != nil {
@@ -78,6 +85,9 @@ func startProgramSession(t *testing.T, companion, emitter string, mode runtime.P
 		s.nonce = armedNonce(t, p, s.name)
 	}
 	s.settle(t, script)
+	if startMode != mode {
+		s.setMode(t, mode)
+	}
 	return s
 }
 
