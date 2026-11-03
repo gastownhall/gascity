@@ -2806,12 +2806,12 @@ calls = 1
 medium = 1
 
 [[count]]
-path = "internal/session/submit_test.go"
+path = "internal/session/submit_poller_identity_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
 
 [[count]]
-path = "internal/session/submit_test.go"
+path = "internal/session/submit_poller_identity_unix_test.go"
 resource = "subprocess"
 calls = 1
 
