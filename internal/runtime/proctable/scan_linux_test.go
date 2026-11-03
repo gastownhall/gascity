@@ -1150,3 +1150,19 @@ func TestUnreadableEnvironUserManagerScope(t *testing.T) {
 		})
 	}
 }
+
+// TestUnreadableEnvironUserManagerScopeUnderIncarnationBound (ga-zpcphq): the
+// user-manager proof does not need the process to predate the incarnation, so
+// a manager helper started after it adds no entry error to a bounded scan.
+func TestUnreadableEnvironUserManagerScopeUnderIncarnationBound(t *testing.T) {
+	requireUnprivileged(t)
+	root := t.TempDir()
+	boot := time.Unix(1_700_000_000, 0).UTC()
+	writeFakeBootTime(t, root, boot)
+	buildUnreadableProc(t, root, 2642, "(sd-pam)", 1100, unifiedCgroupFile(ownUserManagerScope()))
+
+	got, err := scanWithRootSince(root, "ga-target", boot.Add(10*time.Second))
+	if err != nil || len(got) != 0 {
+		t.Fatalf("scanWithRootSince = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
+	}
+}
