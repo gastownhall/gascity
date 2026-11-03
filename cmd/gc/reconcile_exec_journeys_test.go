@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -577,7 +578,14 @@ func TestExecJourneyOnScreen(t *testing.T) {
 	})
 	// On a loaded host a real `observe` can run past v2's 4s bound, which
 	// reads unknown: v2 retries such a read on a later pass, and so do these
-	// reads and runs, a few times, never past an unknown.
+	// reads and runs, a few times, a second apart. Only a timeout is retried:
+	// an observe error must be its deadline, and a run refused
+	// liveness-unknown must have taken the probe bound.
+	pause := func() {
+		tm := time.NewTimer(time.Second)
+		defer tm.Stop()
+		<-tm.C
+	}
 	observe := func() runtime.Liveness {
 		var err error
 		for range 5 {
@@ -585,6 +593,10 @@ func TestExecJourneyOnScreen(t *testing.T) {
 			if l, err = sp.(runtime.LivenessObserverWithError).ObserveLivenessWithError("s-gc-1", []string{"sleep"}); err == nil {
 				return l
 			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("observe: %v, not a timeout", err)
+			}
+			pause()
 		}
 		t.Fatalf("observe: %v", err)
 		return runtime.Liveness{}
@@ -592,9 +604,14 @@ func TestExecJourneyOnScreen(t *testing.T) {
 	run := func(k *txKit) settlement {
 		var s settlement
 		for range 5 {
+			began := time.Now()
 			if s = k.runKind(); s.Outcome != settledRefused || s.Cause != causeLivenessUnknown {
 				break
 			}
+			if took := time.Since(began); took < 4*time.Second {
+				t.Fatalf("settlement %+v after %s: an unknown read within the probe bound is no timeout", s, took)
+			}
+			pause()
 		}
 		return s
 	}

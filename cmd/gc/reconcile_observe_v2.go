@@ -41,6 +41,10 @@ const (
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline
 	alertUnknownState   = "unknown-state"          // a state legacy does not know was written (I-legacy broke)
 	alertHealRefused    = "heal-refused"           // an A6 heal refused until its backoff reached the cap
+	// alertPeekHeld: a start's recycle or A12's classification held on a
+	// dead box's screen it cannot read (peek-error) until its backoff
+	// reached the cap. The hold has no deadline: this is what reports it.
+	alertPeekHeld = "peek-held"
 	// alertWorktreeRefused: the allocation refuses a pool work item whose
 	// worktree evidence it found unusable (C6.5(a)); no create effect ever
 	// sees the request, so this alert is all that reports the starved item.
@@ -114,6 +118,12 @@ func (p *planner) observeSettlement(s settlement) {
 	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh || s.Kind == intentDriftRepair) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
 		p.backoff.Record(rowBackoffKey(s.Key)).Consecutive == healRefusalsBeforeAlert {
 		p.alert(alertHealRefused, s.Key.ID, fmt.Sprintf("%s effect for %s refused %d times in a row, last with cause %q", s.Kind, s.Key.ID, healRefusalsBeforeAlert, s.Cause))
+	}
+	if (s.Kind == intentStart || s.Kind == intentZombie) && s.Outcome == settledRefused && s.Cause == causePeekError &&
+		p.backoff.Record(rowBackoffKey(s.Key)).Consecutive == healRefusalsBeforeAlert {
+		p.alert(alertPeekHeld, s.Key.ID, fmt.Sprintf("%s effect for session %s held %d times in a row: the screen of its dead runtime cannot be read (%v); "+
+			"it is not recycled until the screen reads; suspending the session (gc session suspend %s) stops it, and the stop removes the dead runtime by its object without reading its screen",
+			s.Kind, s.Key.ID, healRefusalsBeforeAlert, s.Err, s.Key.ID))
 	}
 	if (s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && strings.TrimPrefix(s.Cause, causeFinalizePrefix) == causeDeadline {
 		p.alert(alertEffectDeadline, s.Key.ID+s.Token, fmt.Sprintf("%s effect for %s settled at its deadline", s.Kind, s.Key.ID+s.Token))

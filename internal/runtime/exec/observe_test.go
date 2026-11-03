@@ -836,28 +836,29 @@ func TestFreshCollision(t *testing.T) {
 	}
 }
 
-// Kills (F-1, PR-3b) a v2-ready Peek that reads only a running box, or
-// reads a failure as an empty screen: through the production seam-backed
-// provider, a dead box's screen is the `peek` op's even though `is-running`
-// is false; exit 66 is runtime.ErrNoScreen, never an empty screen; any
+// Kills (F-1, PR-3b) a v2-ready Peek that reads only a running box, reads a
+// failure as an empty screen, or leaks "no screen" as an error: through the
+// production seam-backed provider, a dead box's screen is the `peek` op's
+// even though `is-running` is false; exit 66 (no screen) is an empty screen
+// with no error, as every Peek caller (the recycle, gc session peek, the
+// API, the startup death message, the legacy crash datapoint) reads it; any
 // other failure (exit 1, exit 2, a failed observe) is an error; a running
-// box's screen is read as before, and no box reads nothing, as the seams
-// answer it. A script that is not v2-ready keeps the
-// seams' Peek: nothing for a box that is not running, and exit 66 is no
-// answer.
+// box's screen is read as before, and no box reads nothing. A script that
+// is not v2-ready keeps the seams' Peek: nothing for a box that is not
+// running, and no peek op.
 func TestPeekReadsAnyBoxWhenReady(t *testing.T) {
 	for _, c := range []struct {
 		name, state, peek string
 		want              string
-		wantErr, noScreen bool
+		wantErr           bool
 	}{
-		{"dead box's screen", `{"state":"dead",` + testObject + `}`, `echo "Usage limit reached"`, "Usage limit reached", false, false},
-		{"dead box, no screen", `{"state":"dead",` + testObject + `}`, `exit 66`, "", true, true},
-		{"no box", `{"state":"absent"}`, `exit 66`, "", false, false},
-		{"peek fails", `{"state":"dead",` + testObject + `}`, `echo boom >&2; exit 1`, "", true, false},
-		{"peek not implemented", `{"state":"dead",` + testObject + `}`, `exit 2`, "", true, false},
-		{"observe fails", `x`, `echo screen`, "", true, false},
-		{"running box", `{"state":"running",` + testObject + `}`, `echo live`, "live", false, false},
+		{"dead box's screen", `{"state":"dead",` + testObject + `}`, `echo "Usage limit reached"`, "Usage limit reached", false},
+		{"dead box, no screen", `{"state":"dead",` + testObject + `}`, `exit 66`, "", false},
+		{"no box", `{"state":"absent"}`, `exit 66`, "", false},
+		{"peek fails", `{"state":"dead",` + testObject + `}`, `echo boom >&2; exit 1`, "", true},
+		{"peek not implemented", `{"state":"dead",` + testObject + `}`, `exit 2`, "", true},
+		{"observe fails", `x`, `echo screen`, "", true},
+		{"running box", `{"state":"running",` + testObject + `}`, `echo live`, "live", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			script, dir := observePack(t, readyHandshake, map[string]string{
@@ -867,8 +868,8 @@ func TestPeekReadsAnyBoxWhenReady(t *testing.T) {
 			})
 			out, err := NewSeamBacked(script).Peek("s", 10)
 			switch {
-			case c.wantErr != (err != nil), errors.Is(err, runtime.ErrNoScreen) != c.noScreen, out != c.want:
-				t.Fatalf("Peek = %q, %v; want %q (error %v, no screen %v)", out, err, c.want, c.wantErr, c.noScreen)
+			case c.wantErr != (err != nil), out != c.want:
+				t.Fatalf("Peek = %q, %v; want %q (error %v)", out, err, c.want, c.wantErr)
 			case slices.Contains(opsRan(t, dir), "peek") != (c.name != "observe fails" && c.name != "no box"):
 				t.Fatalf("ops %v: want the peek op exactly for a box", opsRan(t, dir))
 			}

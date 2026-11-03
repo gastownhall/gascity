@@ -699,7 +699,8 @@ is read as before (over `exec` when the runtime implements it); for a dead
 box gc runs `peek` itself. The script must:
 
 - print the box's last `<lines>` lines of screen and exit 0, dead box
-  included, when it can read them;
+  included, when it can read them (a blank screen prints its empty lines;
+  a capture that wrote nothing is a failure, not a blank screen);
 - exit **66** (no screen) when nothing holds a screen for the name: no box,
   or a dead box whose screen is gone. gc reads it as a known-empty screen
   and recycles the box;
@@ -708,7 +709,9 @@ box gc runs `peek` itself. The script must:
   the recycle (`peek-error`) and retries it on the row's backoff (10s,
   doubling, at most every 5 minutes) until `peek` answers, the box goes
   away, or the session is stopped, which removes a dead box by its object
-  without reading its screen. The hold has no deadline of its own.
+  without reading its screen. The hold has no deadline of its own; once
+  its backoff reaches the cap, gc raises a `peek-held` alert naming the
+  session, the error and that remedy.
 
 Its exit 2 is a failure, not the unknown-op no-op.
 

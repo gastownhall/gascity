@@ -110,6 +110,10 @@ export SCREENDIR=$STATE_ROOT/$CITY_KEY
 # counts from boot, so a record from another boot names no process that runs
 # now.
 PROC=/proc
+# PROCFS is set where procfs is mounted: there a pid with no $PROC/<pid> is
+# no process, read with no fork; ps answers only where there is none.
+PROCFS=""
+if [ -d "$PROC/self" ]; then PROCFS=y; fi
 BOOT=-
 if [ -r "$PROC/sys/kernel/random/boot_id" ]; then
   IFS= read -r BOOT < "$PROC/sys/kernel/random/boot_id" || BOOT=-
@@ -224,7 +228,7 @@ start_of() {
     read -r -a fields <<< "$rest"
     case "${fields[0]:-}" in Z | X) return 0 ;; esac
     START=${fields[19]:-}
-  else
+  elif [ -z "$PROCFS" ]; then
     START=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//') || START=""
   fi
 }
@@ -417,6 +421,24 @@ procs_of() {
 # forget removes a box's metadata (not its lock).
 forget() {
   rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window" "$META/$1".meta.*
+}
+
+# forget_stale forgets name $1's metadata, not its lock, once the window
+# process its last start recorded is gone and no box holds the name: the
+# record $2 (as inventory read it) is unchanged under the name's lock, taken
+# without waiting, so no start has run since (a start rewrites it), and a
+# busy name is left for a later call. Records otherwise pile up, one per
+# pool session name, each costing every inventory a read, and each wrapper
+# keeping a session's env.
+forget_stale() {
+  (
+    exec 9>"$META/$1.lock"
+    flock -n 9 || exit 0
+    read_into "$META/$1.window"
+    [ "$REPLY" = "$2" ] || exit 0
+    if window_alive "$1"; then exit 0; fi
+    forget "$1"
+  ) || true
 }
 
 # gone_after waits (up to 2s) for name $1 to hold no row.
@@ -702,7 +724,9 @@ case "$op" in
     done <<< "$ROWS"
     # A name no box lists is still held while the window process its last
     # start recorded runs (its agent outlived the box): it is listed
-    # unknown, never left out of a complete answer.
+    # unknown, never left out of a complete answer. Once that process is
+    # gone, the name's metadata is forgotten (forget_stale), so no later
+    # inventory reads it again.
     declare -A listed=()
     while IFS=$'\t' read -r pid sname _; do
       [ -n "$pid" ] || continue
@@ -713,7 +737,11 @@ case "$op" in
       sname=${rec##*/}
       sname=${sname%.window}
       [ -z "${listed[$sname]:-}" ] || continue
-      window_alive "$sname" || continue
+      if ! window_alive "$sname"; then
+        read_into "$rec"
+        forget_stale "$sname" "$REPLY"
+        continue
+      fi
       out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
     done
     printf '%s]}\n' "$out"
@@ -848,9 +876,17 @@ case "$op" in
       dead) exit 66 ;;
       unknown) die "peek: cannot read $name" ;;
     esac
-    # Use hardcopy to capture the exact session's content.
+    # Use hardcopy to capture the exact session's content. screen -X exits
+    # 0 once the command is sent, whether or not SCREEN writes the file (it
+    # cannot write the path, or it is stopped), and a blank screen still
+    # writes its empty lines: a capture that stays empty is a failure.
     tmp=$(mktemp)
     screen -S "$PID.$name" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; die "peek: cannot read the screen of $name"; }
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      [ -s "$tmp" ] && break
+      sleep 0.1
+    done
+    [ -s "$tmp" ] || { rm -f "$tmp"; die "peek: screen wrote no capture of $name"; }
     if [ "$lines" -gt 0 ] 2>/dev/null; then
       tail -n "$lines" "$tmp"
     else

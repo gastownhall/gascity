@@ -176,8 +176,9 @@ func (s *seamBackedProvider) IsAttachedWithError(name string) (bool, error) {
 
 // Peek reads a v2-ready script's screen of any box the name holds, live or
 // dead (peekBox): the seams' Peek reads only a box `is-running` opens, and
-// answers anything else as an empty screen, so v2 would recycle a dead box
-// without reading why it died. Other scripts keep the seams' Peek.
+// answers anything else, and every failure, as an empty screen, so v2 would
+// recycle a dead box without reading why it died. Other scripts keep the
+// seams' Peek.
 func (s *seamBackedProvider) Peek(name string, lines int) (string, error) {
 	if s.raw.v2Ready() {
 		return s.raw.peekBox(name, lines)

@@ -71,7 +71,10 @@ printf '%s\n' "$*" >> "$F/calls"
 case "$1" in
   -dmS) [ -f "$F/nobox" ] || printf '\t4194999.%s\t(11/02/2026 01:00:00 PM)\t(Detached)\n' "$2" >> "$L" ;;
   -wipe | -S)
-    [ "$4" = hardcopy ] && [ -f "$F/hardcopy.fail" ] && exit 1
+    # hardcopy, as real screen: -X exits 0 once the command is sent, and
+    # SCREEN writes the capture (a blank screen's empty lines included)
+    # unless it cannot (hardcopy.fail: nothing written, still exit 0).
+    if [ "$4" = hardcopy ]; then [ -f "$F/hardcopy.fail" ] || printf 'screen of %s\n\n' "$2" > "$6"; exit 0; fi
     if [ "$1" = -wipe ] || [ "$4" = quit ]; then
       if [ ! -f "$F/sticky" ]; then
         for f in "$F/ls" "$L"; do
@@ -86,7 +89,8 @@ esac
 `)
 	// The snapshot is ps.procs, one "<pid> <ppid> <comm> <args...>" per
 	// line, printed in the fixed columns the script asks for.
-	write("ps", `for last; do :; done
+	write("ps", `printf 'ps %s\n' "$*" >> "$F/ps.calls"
+for last; do :; done
 case "$*" in
   *lstart*)
     grep -qx "$last" "$F/gone" 2>/dev/null && exit 1
@@ -961,15 +965,61 @@ func TestScreenScriptPeekAnswersNoScreen(t *testing.T) {
 			t.Errorf("peek %s: exit %d, want %d", name, code, want)
 		}
 	}
-	if calls := f.calls(); strings.Count(calls, "hardcopy") != 1 || !strings.Contains(calls, "-S 4194001.mc-a -X hardcopy") {
+	if calls := f.calls(); strings.Count(calls, "hardcopy") != 1 || !strings.Contains(calls, "-S 4194001.mc-a -X hardcopy -h ") {
 		t.Errorf("screen calls %q, want one hardcopy of 4194001.mc-a", calls)
 	}
+	if out, code := f.run("", "peek", "mc-a", "10"); code != 0 || !strings.Contains(out, "screen of 4194001.mc-a") {
+		t.Errorf("peek of a running box = %q (%d), want its capture", out, code)
+	}
+	// screen exits 0 for a hardcopy SCREEN never writes: the empty capture
+	// is a failure, never an empty screen.
 	f.file("hardcopy.fail", "")
-	if _, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
-		t.Errorf("a failed hardcopy: exit %d, want a failure", code)
+	if out, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
+		t.Errorf("a hardcopy that wrote nothing: %q, exit %d; want a failure", out, code)
 	}
 	f.file("ls.fail", "")
 	if _, code := f.run("", "peek", "mc-a", "10"); code == 0 || code == 66 {
 		t.Errorf("an unreadable listing: exit %d, want a failure", code)
+	}
+}
+
+// Kills (PR-3a audit MUST) an inventory that slows without bound: each
+// name's last window record is read on every call, and a pool session name
+// is never reused, so records pile up. With procfs mounted, a recorded pid
+// with no /proc entry is gone with no fork (no ps per record), and a gone
+// record whose name no box lists is forgotten, its lock kept: with 60 stale
+// records the first inventory asks ps nothing and forgets them all, so the
+// next reads none. A record whose window still runs stays listed unknown.
+func TestScreenScriptInventoryForgetsStaleRecords(t *testing.T) {
+	f := newFakeBackend(t)
+	f.procFile("self/stat", "1 (self) S 0\n") // procfs is mounted
+	f.procFile("sys/kernel/random/boot_id", "boot-a\n")
+	f.run("", "inventory") // the state directories
+	meta := f.metaDir()
+	for i := range 60 {
+		name := fmt.Sprintf("worker-gcg-session-%032d", i)
+		f.file(filepath.Join(meta, name+".window"), fmt.Sprintf("boot-a %d 12345", 4100000+i))
+		f.file(filepath.Join(meta, name+".wrapper.sh"), "export GC_INSTANCE_TOKEN=tok\n")
+		f.file(filepath.Join(meta, name+".lock"), "")
+	}
+	f.procFile("4194990/stat", "4194990 (claude) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0\n")
+	f.file(filepath.Join(meta, "mc-live.window"), "boot-a 4194990 777")
+	if out, code := f.run("", "inventory"); code != 0 || out != `{"complete":true,"sessions":[{"name":"mc-live","state":"unknown"}]}` {
+		t.Fatalf("inventory = %q (%d), want only the live window's name, unknown", out, code)
+	}
+	if data, _ := os.ReadFile(filepath.Join(f.dir, "ps.calls")); strings.Contains(string(data), "lstart") {
+		t.Fatalf("inventory asked ps for a start time with procfs mounted: %q", data)
+	}
+	left, _ := filepath.Glob(filepath.Join(meta, "worker-gcg-session-*"))
+	for _, p := range left {
+		if !strings.HasSuffix(p, ".lock") {
+			t.Fatalf("a stale record's metadata %s was kept", p)
+		}
+	}
+	if len(left) != 60 {
+		t.Fatalf("%d lock files left, want the 60 locks kept", len(left))
+	}
+	if _, err := os.Stat(filepath.Join(meta, "mc-live.window")); err != nil {
+		t.Fatalf("the live window's record was forgotten: %v", err)
 	}
 }

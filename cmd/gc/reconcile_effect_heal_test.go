@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -220,6 +222,53 @@ func TestHealRefusalsAlertAtTheCap(t *testing.T) {
 				}
 				if got := len(f.alerts(t)); got != want {
 					t.Fatalf("after %d refusals: %d alerts, want %d", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Kills (PR-3b review SHOULD 2) a peek hold kept silent: a start's recycle
+// or A12's classification refused peek-error until its backoff reaches the
+// cap alerts once, naming the session, the peek error and the remedy; not
+// before, not again, and not for another refusal cause or kind.
+func TestPeekHoldAlertsAtTheCap(t *testing.T) {
+	peekErr := errors.New("exec provider pack peek s-gc-1: backend unavailable")
+	for _, c := range []struct {
+		kind, cause string
+		alerts      bool
+	}{
+		{intentStart, causePeekError, true},
+		{intentZombie, causePeekError, true},
+		{intentStart, causeLivenessUnknown, false},
+		{intentStop, causePeekError, false},
+	} {
+		t.Run(c.kind+"/"+c.cause, func(t *testing.T) {
+			f := newObserveFixture(t)
+			for i := 1; i <= healRefusalsBeforeAlert+2; i++ {
+				f.clk.Advance(10 * time.Minute) // past the last backoff
+				f.p.settlements.post(settlement{Key: rowKeyOf("gc-1"), Kind: c.kind, Outcome: settledRefused, Cause: c.cause, Err: peekErr})
+				f.p.drainSettlements(f.clk.Now())
+				want := 0
+				if c.alerts && i >= healRefusalsBeforeAlert {
+					want = 1
+				}
+				alerts := f.alerts(t)
+				if len(alerts) != want || want == 1 && alerts[0] != alertPeekHeld {
+					t.Fatalf("after %d refusals: alerts %v, want %d %s", i, alerts, want, alertPeekHeld)
+				}
+				if want == 1 {
+					msg := ""
+					for _, e := range f.ev.Events {
+						if e.Type == events.ReconcilerAlert {
+							msg = e.Message
+						}
+					}
+					for _, part := range []string{"gc-1", peekErr.Error(), "gc session suspend gc-1", "without reading its screen"} {
+						if !strings.Contains(msg, part) {
+							t.Fatalf("alert %q does not name %q", msg, part)
+						}
+					}
 				}
 			}
 		})
