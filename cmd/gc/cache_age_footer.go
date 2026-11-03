@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/gastownhall/gascity/internal/api"
 )
@@ -46,7 +47,8 @@ func cacheAgeFooter(ageS float64, r api.CacheRefresh) string {
 	default:
 		cause = fmt.Sprintf("this read is over %.0fs old, and the server does not report why", limit)
 	}
-	return fmt.Sprintf("(cache age: %.0fs — %s)", ageS, cause)
+	// Round the shown age up so it always reads as past the limit it crossed.
+	return fmt.Sprintf("(cache age: %.0fs — %s)", math.Ceil(ageS), cause)
 }
 
 // writeCacheAgeFooter writes cacheAgeFooter's line to stderr, or nothing when

@@ -466,8 +466,9 @@ func TestRouteRigStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
-// TestRouteRigStatus_APIStaleBanner verifies the human-output staleness
-// banner appears when the supervisor reports a cache age > 30 s.
+// TestRouteRigStatus_CacheAgeFooterOnStderr verifies the API route prints
+// the cache-age footer on stderr, not stdout, when the supervisor reports a
+// cache age more than twice its re-scan interval.
 func TestRouteRigStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	cityPath := writeRigStatusTestCity(t)
 	staleHandler := func(_ *testing.T) http.Handler {

@@ -4282,8 +4282,9 @@ func TestRouteWaitList_PassesWaitBeadLabelConstant(t *testing.T) {
 	}
 }
 
-// TestRouteWaitList_StaleBannerOver30s confirms the >30 s cache-age banner on
-// the typed rung.
+// TestRouteWaitInspect_CacheAgeFooterOnStderr confirms that on the typed rung
+// `gc wait inspect` prints the cache-age footer on stderr, not stdout, once the
+// served age is more than twice the reported re-scan interval.
 func TestRouteWaitInspect_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeWaitTestCity(t)
@@ -4323,6 +4324,9 @@ func (w *behindCacheResponseWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// TestRouteWaitList_CacheAgeFooterOnStderr confirms that on the typed rung
+// `gc wait list` prints the cache-age footer on stderr, not stdout, once the
+// served age is more than twice the reported re-scan interval.
 func TestRouteWaitList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeWaitTestCity(t)

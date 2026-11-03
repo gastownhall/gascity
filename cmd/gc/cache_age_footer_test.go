@@ -33,6 +33,10 @@ func TestCacheAgeFooter(t *testing.T) {
 		{"healthy idle 45s at 30s cadence", 45, refresh(30, api.CacheRefreshScheduled), ""},
 		{"exactly twice the interval", 60, refresh(30, api.CacheRefreshScheduled), ""},
 		{"behind its 30s cadence", 75, refresh(30, api.CacheRefreshScheduled), late},
+		{
+			"just past twice the interval rounds the age up", 60.4, refresh(30, api.CacheRefreshScheduled),
+			"(cache age: 61s — more than twice the bead cache's 30s re-scan interval: its re-scans of the store are not landing on schedule)",
+		},
 		{"within its 60s cadence", 75, refresh(60, api.CacheRefreshScheduled), ""},
 		{"paused under the bound", 50, refresh(30, api.CacheRefreshPaused), ""},
 		{"paused past the bound", 75, refresh(30, api.CacheRefreshPaused), paused},

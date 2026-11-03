@@ -1329,8 +1329,9 @@ func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
 	}
 }
 
-// TestRouteCityStatus_APIStaleBanner verifies the human-output staleness
-// banner appears when the supervisor reports a cache age > 30 s.
+// TestRouteCityStatus_CacheAgeFooterOnStderr verifies the API route prints
+// the cache-age footer on stderr, not stdout, when the supervisor reports a
+// cache age more than twice its re-scan interval.
 func TestRouteCityStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	cityPath := writeCityStatusTestCity(t)
 	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))

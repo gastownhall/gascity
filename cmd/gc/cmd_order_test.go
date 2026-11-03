@@ -4219,8 +4219,9 @@ func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
 	}
 }
 
-// TestRouteOrderHistory_StaleBannerOver30s verifies the > 30 s stale banner
-// on the API render path; matches the rig-list staleness test contract.
+// TestRouteOrderHistory_CacheAgeFooterOnStderr verifies the API render path
+// prints the cache-age footer on stderr, not stdout, when the supervisor
+// reports a cache age more than twice its re-scan interval.
 func TestRouteOrderHistory_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 
