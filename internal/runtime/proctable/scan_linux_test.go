@@ -1158,3 +1158,60 @@ func TestUnreadableEnvironUserManagerDirectPermissionError(t *testing.T) {
 		t.Fatalf("unreadableEnvironScanError = %v (%s); want the user-manager helper excused", err, SummarizeScanError(err))
 	}
 }
+
+// TestUnreadableEnvironUserManagerScopeUnderIncarnationBound covers the
+// bounded id-scoped scan (ScanBySessionIDSince): a user-manager helper that
+// started after the incarnation cannot be excused as predating it and sits
+// in no tmux-spawn scope, yet its own-manager init.scope identity still
+// proves it no runtime, so the exact-incarnation scan stays complete
+// (ga-zpcphq). The direct-error variant runs the same classification with a
+// wrapped permission error, whatever the file modes.
+func TestUnreadableEnvironUserManagerScopeUnderIncarnationBound(t *testing.T) {
+	euid := os.Geteuid()
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+	// The helper started six seconds after boot, three seconds after the
+	// incarnation: newer than the incarnation, definitely older than any read.
+	boot := time.Unix(1_700_000_000, 0).UTC()
+	incarnation := boot.Add(3 * time.Second)
+	const (
+		helperPID   = 2642
+		helperTicks = 600
+	)
+	newFixture := func(t *testing.T, unreadable bool) string {
+		t.Helper()
+		root := t.TempDir()
+		writeFakeBootTime(t, root, boot)
+		dir := filepath.Join(root, strconv.Itoa(helperPID))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeFakeProcessUID(t, dir, euid)
+		writeFakeProcessStat(t, dir, helperPID, 1, helperTicks)
+		writeFakeProcessCgroup(t, dir, scope)
+		if err := os.WriteFile(filepath.Join(dir, "environ"), nil, 0o644); err != nil {
+			t.Fatalf("write environ: %v", err)
+		}
+		if unreadable {
+			if err := os.Chmod(filepath.Join(dir, "environ"), 0o000); err != nil {
+				t.Fatalf("chmod environ: %v", err)
+			}
+		}
+		return root
+	}
+	t.Run("scan", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses file modes, so the 0o000 environ would stay readable")
+		}
+		if _, err := scanWithRootSince(newFixture(t, true), "ga-target", incarnation); err != nil {
+			t.Fatalf("bounded scan error = %v (%s); want the user-manager helper excused without predating the incarnation", err, SummarizeScanError(err))
+		}
+	})
+	t.Run("direct permission error", func(t *testing.T) {
+		root := newFixture(t, false)
+		readErr := &fs.PathError{Op: "open", Path: filepath.Join(root, strconv.Itoa(helperPID), "environ"), Err: syscall.EACCES}
+		err := unreadableEnvironScanError(root, helperPID, "ga-target", incarnation, time.Now(), euid, readErr)
+		if err != nil {
+			t.Fatalf("unreadableEnvironScanError = %v (%s); want the user-manager helper excused without predating the incarnation", err, SummarizeScanError(err))
+		}
+	})
+}
