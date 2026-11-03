@@ -3,7 +3,10 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
-import "io"
+import (
+	"io"
+	"time"
+)
 
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
@@ -66,6 +69,14 @@ type CheckContext struct {
 	// that issues many store or subprocess calls should stop issuing new ones
 	// once it closes (see Canceled). Nil for unbounded runs.
 	Done <-chan struct{}
+	// Deadline, when nonzero, is the moment the runner abandons this Run at
+	// the per-check timeout (Doctor.CheckTimeout). Checks that stage their
+	// own internal bounds — directory measurement's du-then-walk, for
+	// example — derive them from this so a bounded run's internals finish
+	// inside the budget instead of overrunning it and being abandoned.
+	// Zero for unbounded runs (CheckTimeout 0) and for directly constructed
+	// contexts; internal bounds then fall back to their historical hard caps.
+	Deadline time.Time
 }
 
 // Canceled reports whether the runner has abandoned the check execution this

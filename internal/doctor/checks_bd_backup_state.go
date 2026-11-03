@@ -53,12 +53,12 @@ func (c *BdBackupStateCheck) Name() string { return "bd-backup-state" }
 
 // Run scans each scope's .beads directory for corrupt-store quarantines and
 // stale backup registrations.
-func (c *BdBackupStateCheck) Run(_ *CheckContext) *CheckResult {
+func (c *BdBackupStateCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
 	var findings []string
 	for _, target := range c.stateScanTargets() {
-		findings = append(findings, scanBdBackupState(target.Label, target.BeadsDir)...)
+		findings = append(findings, scanBdBackupState(ctx, target.Label, target.BeadsDir)...)
 	}
 
 	if len(findings) == 0 {
@@ -116,7 +116,9 @@ func (c *BdBackupStateCheck) stateScanTargets() []bdBackupStateTarget {
 
 // scanBdBackupState inspects one scope's .beads directory and returns
 // human-readable findings. A missing .beads directory is not a finding.
-func scanBdBackupState(label, beadsDir string) []string {
+// The context carries the check's runner budget down to directory
+// measurement (see duDirBytes).
+func scanBdBackupState(ctx *CheckContext, label, beadsDir string) []string {
 	var findings []string
 
 	entries, err := os.ReadDir(beadsDir)
@@ -132,7 +134,7 @@ func scanBdBackupState(label, beadsDir string) []string {
 			continue
 		}
 		path := filepath.Join(beadsDir, entry.Name())
-		size, _, err := duDirBytes(path)
+		size, _, err := duDirBytes(ctx, path)
 		if err != nil {
 			findings = append(findings, fmt.Sprintf("%s: corrupt-store quarantine %s (size unknown: %v)", label, entry.Name(), err))
 			continue

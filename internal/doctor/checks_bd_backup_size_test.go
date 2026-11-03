@@ -9,7 +9,7 @@ import (
 
 func newTestBdBackupSizeCheck(cityPath string) *BdBackupSizeCheck {
 	c := NewBdBackupSizeCheck(cityPath)
-	c.measureDir = sumDirBytes
+	c.measureDir = func(_ *CheckContext, root string) (int64, bool, error) { return sumDirBytes(root) }
 	return c
 }
 
@@ -84,7 +84,7 @@ func TestBdBackupSizeCheck_RigScopedBackupWarns(t *testing.T) {
 	}
 	c := NewBdBackupSizeCheck(dir)
 	c.scopeRoots = []string{dir, rigDir}
-	c.measureDir = func(root string) (int64, bool, error) {
+	c.measureDir = func(_ *CheckContext, root string) (int64, bool, error) {
 		if root == backupDir {
 			return bdBackupWarnBytes, true, nil
 		}
@@ -111,7 +111,7 @@ func TestBdBackupSizeCheck_AggregateAcrossScopesWarns(t *testing.T) {
 	}
 	c := NewBdBackupSizeCheck(dir)
 	c.scopeRoots = []string{dir, rigDir}
-	c.measureDir = func(string) (int64, bool, error) {
+	c.measureDir = func(*CheckContext, string) (int64, bool, error) {
 		return bdBackupWarnBytes / 2, true, nil
 	}
 	r := c.Run(&CheckContext{})
@@ -130,7 +130,7 @@ func TestBdBackupSizeCheck_WarnAtThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewBdBackupSizeCheck(dir)
-	c.measureDir = func(string) (int64, bool, error) {
+	c.measureDir = func(*CheckContext, string) (int64, bool, error) {
 		return bdBackupWarnBytes, true, nil
 	}
 	r := c.Run(&CheckContext{})
@@ -149,7 +149,7 @@ func TestBdBackupSizeCheck_ErrorAtThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewBdBackupSizeCheck(dir)
-	c.measureDir = func(string) (int64, bool, error) {
+	c.measureDir = func(*CheckContext, string) (int64, bool, error) {
 		return bdBackupErrorBytes, true, nil
 	}
 	r := c.Run(&CheckContext{})
@@ -168,7 +168,7 @@ func TestBdBackupSizeCheck_MeasureErrorWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewBdBackupSizeCheck(dir)
-	c.measureDir = func(string) (int64, bool, error) {
+	c.measureDir = func(*CheckContext, string) (int64, bool, error) {
 		return 0, true, os.ErrPermission
 	}
 	r := c.Run(&CheckContext{})
@@ -184,7 +184,7 @@ func TestBdBackupSizeCheck_MeasureMissingReportsNoBackupDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewBdBackupSizeCheck(dir)
-	c.measureDir = func(string) (int64, bool, error) {
+	c.measureDir = func(*CheckContext, string) (int64, bool, error) {
 		return 0, false, nil
 	}
 	r := c.Run(&CheckContext{})

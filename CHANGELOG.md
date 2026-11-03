@@ -1137,6 +1137,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Doctor's directory measurement no longer ignores the check budget
+  (#8752).** `worktree-disk-size`, `dolt-noms-size`,
+  `rig:<rig>:worktrees`, `bd-backup-size` and `bd-backup-state` bounded
+  their `du -sk` subprocess and their Go-walk fallback with a fresh
+  60-second context each, so on artifact-heavy trees a cold du timed
+  out, the fallback walk burned another 60s in a goroutine the runner
+  had already abandoned, and the check degraded to "could not measure"
+  regardless of `--check-timeout`. The runner now stamps the
+  abandonment moment on the check context (`CheckContext.Deadline`) and
+  measurement sizes its stages from it: du gets
+  `min(60s, remaining − 30s reserve)` and the walk gets whatever budget
+  du leaves (a budget too small to cover the reserve goes entirely to
+  du, and a check scanning several directories shares the one budget
+  across them — a first target that consumes it can leave later targets
+  unmeasured, reported as a measure warning rather than a stale
+  number). Both stages stop the moment the check is abandoned.
+  Unbounded runs (`--check-timeout 0`) keep the historical hard caps;
+  fast trees still return through the du fast path unchanged.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped
