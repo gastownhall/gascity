@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1192,4 +1194,219 @@ func TestParseApprovalPrompt_WrappedQuestionStopsAtTheMenu(t *testing.T) {
 	if strings.Contains(a.Question, "Yes") || strings.Contains(a.Question, "╌") {
 		t.Errorf("Question = %q, want only the question rows", a.Question)
 	}
+}
+
+// Captured from Claude2.1.308 / Opus5.5 on bb0bfa319. The native command has
+// no space in /native-approval, while the 80-column UI splits it after /n.
+const nativeClaudeApprovalCommand = "printf %s RFC8191_GRANTED_a0187eff1ad64755803cfd41f1035a93 > /Users/admin/rfc8191/cities/rfc-questions-6b8b9019ce654e55aea596720d18f852/native-approval-b54bcd3e246d4142b08ab98830185f84/granted.txt"
+
+const nativeClaudeApprovalScreen = `────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Write approval marker to granted.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ printf %s RFC8191_GRANTED_a0187eff1ad64755803cfd41f1035a93 >
+ │ /Users/admin/rfc8191/cities/rfc-questions-6b8b9019ce654e55aea596720d18f852/n
+ │ ative-approval-b54bcd3e246d4142b08ab98830185f84/granted.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Permission rule Bash(printf *) requires confirmation for this command.
+ /permissions to update rules
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend`
+
+type nativeClaudeApprovalExecutor struct {
+	paneExecutor
+	providerID string
+	managed    bool
+}
+
+func (e *nativeClaudeApprovalExecutor) execute(args []string) (string, error) {
+	for _, arg := range args {
+		if arg == "show-environment" {
+			e.calls = append(e.calls, append([]string(nil), args...))
+			env := "GC_PROVIDER_SESSION_ID=" + e.providerID + "\nGC_DIR=/owned/qualification\n"
+			if e.managed {
+				env += "GC_SESSION_ID=gcg-owned\n"
+			}
+			return env, nil
+		}
+	}
+	return e.paneExecutor.execute(args)
+}
+
+func (e *nativeClaudeApprovalExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func nativeClaudeApprovalRecords(t *testing.T, callID, command string) string {
+	t.Helper()
+	rows := []any{
+		map[string]any{"type": "user", "sessionId": "native-approval-session", "promptId": "native-approval-prompt", "message": map[string]any{"content": "Request one harmless approval"}},
+		map[string]any{"type": "assistant", "sessionId": "native-approval-session", "message": map[string]any{"content": []any{map[string]any{"type": "tool_use", "id": callID, "name": "Bash", "input": map[string]any{"command": command, "description": "Write approval marker to granted.txt"}}}}},
+	}
+	var text strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text.Write(data)
+		text.WriteByte('\n')
+	}
+	return text.String()
+}
+
+func nativeClaudeApprovalTmux(t *testing.T, tail *string) (*Tmux, *nativeClaudeApprovalExecutor) {
+	t.Helper()
+	ex := &nativeClaudeApprovalExecutor{paneExecutor: paneExecutor{pane: nativeClaudeApprovalScreen, inMode: "0"}, providerID: "native-approval-session"}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, claudeQuestionTranscript: func(string) (string, error) { return *tail, nil }}
+	return tm, ex
+}
+
+func TestNativeClaudeApprovalRetainsExactWrappedCommandAndStableOccurrence(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_first", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	first, err := tm.Pending("q")
+	if err != nil || first == nil || first.Metadata["command"] != nativeClaudeApprovalCommand || first.Metadata["request_identity"] != "native_invocation" {
+		t.Fatalf("native command changed at its visible wrap: pending=%+v err=%v", first, err)
+	}
+	again, err := tm.Pending("q")
+	if err != nil || again == nil || again.RequestID != first.RequestID {
+		t.Fatalf("same native approval changed identity: %+v,%v", again, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("ordinary input did not stay held: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeApprovalIdenticalLaterInvocationRejectsStaleAnswer(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_first", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	first, err := tm.Pending("q")
+	if err != nil || first == nil {
+		t.Fatalf("first=%+v,%v", first, err)
+	}
+	tail = nativeClaudeApprovalRecords(t, "toolu_second", nativeClaudeApprovalCommand)
+	second, err := tm.Pending("q")
+	if err != nil || second == nil || second.RequestID == first.RequestID {
+		t.Fatalf("identical later invocation reused identity: first=%+v next=%+v,%v", first, second, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "approve"}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("old approval reached replacement occurrence: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeApprovalUnknownCompletedAmbiguousAndForeignRefuseEveryAction(t *testing.T) {
+	first := nativeClaudeApprovalRecords(t, "toolu_first", nativeClaudeApprovalCommand)
+	second := nativeClaudeApprovalRecords(t, "toolu_second", nativeClaudeApprovalCommand)
+	_, secondCall, _ := strings.Cut(second, "\n")
+	completed := first + `{"type":"user","sessionId":"native-approval-session","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first","content":"completed"}]}}` + "\n"
+	for name, records := range map[string]string{
+		"different command":  nativeClaudeApprovalRecords(t, "toolu_first", "printf other"),
+		"completed":          completed,
+		"unbound completion": first + `{"type":"user","sessionId":"native-approval-session","message":{"content":[{"type":"tool_result","content":"done"}]}}` + "\n",
+		"ambiguous":          first + secondCall,
+		"foreign session":    strings.ReplaceAll(first, "native-approval-session", "another-provider-session"),
+		"malformed":          first + "{incomplete\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tail := records
+			tm, ex := nativeClaudeApprovalTmux(t, &tail)
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["command"] != "" || pending.Metadata["response_unavailable"] == "" {
+				t.Fatalf("unproven native command exposed as answerable: %+v,%v", pending, err)
+			}
+			for _, action := range []string{"approve", "deny"} {
+				if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+					t.Fatalf("%s reached unproven native request: %v", action, err)
+				}
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeClaudeApprovalPreservesRealNewlineAndQuotedSpaces(t *testing.T) {
+	command := "printf '%s  %s' one two\nprintf done"
+	pane := strings.Repeat("─", 80) + "\n Bash command\n Write approval marker to granted.txt\n" + strings.Repeat("╌", 80) + "\n │ printf '%s  %s' one two\n │ printf done\n" + strings.Repeat("╌", 80) + "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel · Tab to amend"
+	tail := nativeClaudeApprovalRecords(t, "toolu_lines", command)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	ex.pane = pane
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["command"] != command {
+		t.Fatalf("native hard newline or quoted spaces changed: %+v,%v", pending, err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+type nativeClaudeApprovalAnswerExecutor struct{ nativeClaudeApprovalExecutor }
+
+func (e *nativeClaudeApprovalAnswerExecutor) execute(args []string) (string, error) {
+	out, err := e.nativeClaudeApprovalExecutor.execute(args)
+	if sendsKeys(args) {
+		e.pane = "assistant ready"
+	}
+	return out, err
+}
+
+func (e *nativeClaudeApprovalAnswerExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func TestNativeClaudeApprovalBoundGrantAndDenySendExactlyOneSelectedAction(t *testing.T) {
+	for action, key := range map[string]string{"approve": "1", "deny": "2"} {
+		t.Run(action, func(t *testing.T) {
+			tail := nativeClaudeApprovalRecords(t, "toolu_bound", nativeClaudeApprovalCommand)
+			tm, original := nativeClaudeApprovalTmux(t, &tail)
+			ex := &nativeClaudeApprovalAnswerExecutor{nativeClaudeApprovalExecutor: *original}
+			tm.exec = ex
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" {
+				t.Fatalf("native pending=%+v,%v", pending, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); err != nil {
+				t.Fatal(err)
+			}
+			if keys := sentKeys(ex.calls); len(keys) != 1 || keys[0] != key {
+				t.Fatalf("bound action sent %q, want one %s key", keys, key)
+			}
+		})
+	}
+}
+
+func TestNativeClaudeApprovalKnownUUIDCannotFallBackToUnboxedContent(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_current", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	ex.pane = "● Bash(printf harmless)\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["response_unavailable"] == "" || pending.Metadata["request_identity"] != "unavailable" {
+		t.Fatalf("managed UUID downgraded to unbound content: %+v,%v", pending, err)
+	}
+	for _, action := range []string{"approve", "deny"} {
+		if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+			t.Fatalf("%s reached unbound managed frame: %v", action, err)
+		}
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeClaudeApprovalManagedWithoutProviderUUIDIsUnavailable(t *testing.T) {
+	tail := nativeClaudeApprovalRecords(t, "toolu_current", nativeClaudeApprovalCommand)
+	tm, ex := nativeClaudeApprovalTmux(t, &tail)
+	ex.providerID, ex.managed = "", true
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["response_unavailable"] == "" || pending.Metadata["request_identity"] != "unavailable" {
+		t.Fatalf("managed missing UUID downgraded: %+v,%v", pending, err)
+	}
+	for _, action := range []string{"approve", "deny"} {
+		if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+			t.Fatalf("%s reached managed missing UUID: %v", action, err)
+		}
+	}
+	requireNoKeys(t, ex.calls, false)
 }

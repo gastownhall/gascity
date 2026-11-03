@@ -153,6 +153,13 @@ type parsedApproval struct {
 	// keeps the rows Codex drew it on (codexRequestText).
 	Command     string
 	Description string
+	// CommandRows/Width retain rendered boundaries for native command binding.
+	CommandRows  []string
+	CommandWidth int
+	// NativeID names one unresolved provider invocation, independent of wrapping.
+	NativeID string
+	// BindingError holds a managed native request whose authority is unavailable.
+	BindingError string
 	// Fingerprint, when set, stands in for Input in the request ID: a Codex
 	// overlay's text above its menu, from its title when gc reads one, with
 	// its line breaks kept and the rows Codex wrapped to the pane width
@@ -389,6 +396,7 @@ func describeApprovalTool(approval *parsedApproval, before []string) {
 			if approval.ToolName == "Bash" {
 				if command, description, ok := boxedBashSubject(body[i+1:]); ok {
 					approval.Command, approval.Description = command, description
+					approval.CommandRows, approval.CommandWidth = boxedApprovalRows(body[i+1:])
 					approval.Input = truncateApprovalInput(strings.TrimSuffix(command+"\n"+description, "\n"))
 					return
 				}
@@ -625,6 +633,9 @@ func isApproveAlwaysLabel(label string) bool {
 // with an error wrapping runtime.ErrInteractionActionUnavailable that says
 // why; it returns nil when the action may proceed.
 func approvalDenyOnly(approval *parsedApproval, action string) error {
+	if approval.BindingError != "" {
+		return fmt.Errorf("%w: %s", runtime.ErrInteractionActionUnavailable, approval.BindingError)
+	}
 	if approval.Unreadable == "" || action == "deny" {
 		return nil
 	}
@@ -690,7 +701,9 @@ type approvalDedup struct {
 
 func approvalHash(a *parsedApproval) string {
 	subject := a.Input
-	if a.Fingerprint != "" {
+	if a.NativeID != "" {
+		subject = a.NativeID + "\x00" + a.Command
+	} else if a.Fingerprint != "" {
 		subject = a.Fingerprint
 	}
 	h := sha256.Sum256([]byte(a.ToolName + "\x00" + subject))
@@ -772,7 +785,14 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	}
 
 	requestID := "tmux-" + approvalHash(approval)
-	metadata := map[string]string{"source": "tmux"}
+	metadata := map[string]string{"source": "tmux", "request_identity": "visible_content"}
+	if approval.NativeID != "" {
+		metadata["request_identity"] = "native_invocation"
+	}
+	if approval.BindingError != "" {
+		metadata["request_identity"] = "unavailable"
+		metadata["response_unavailable"] = approval.BindingError
+	}
 	if approval.ToolName != "" {
 		metadata["tool_name"] = approval.ToolName
 	}
@@ -803,7 +823,9 @@ func approvalPromptText(approval *parsedApproval) string {
 	default:
 		text = approval.ToolName + ": " + approval.Input
 	}
-	if approval.Unreadable != "" {
+	if approval.BindingError != "" {
+		text += " (response unavailable: " + approval.BindingError + ")"
+	} else if approval.Unreadable != "" {
 		text += " (deny only: " + approval.Unreadable + ")"
 	}
 	return text
@@ -943,13 +965,22 @@ func (t *Tmux) dialogInPane(target string) (paneDialog, error) {
 	}
 	approval := parseApprovalPrompt(paneText)
 	if approval == nil || !approval.Codex {
+		if approval != nil {
+			if err := t.bindClaudeApproval(resolved, approval); err != nil {
+				approval.BindingError, approval.Command = err.Error(), ""
+			}
+		}
 		return paneDialog{approval: approval}, nil
 	}
 	pane, err := t.capturePaneWithGeometry(resolved)
 	if err != nil {
 		return paneDialog{}, err
 	}
-	return paneDialog{approval: parseApprovalCapture(pane)}, nil
+	approval = parseApprovalCapture(pane)
+	if err := t.bindCodexApproval(resolved, approval); err != nil {
+		approval.BindingError, approval.Command = err.Error(), ""
+	}
+	return paneDialog{approval: approval}, nil
 }
 
 // approvalInPane returns the approval prompt target's agent pane shows, or

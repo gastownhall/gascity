@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -714,5 +715,50 @@ func waitForNonEmptyFileScopedTest(t *testing.T, path string, timeout time.Durat
 			t.Fatalf("timed out waiting for %s to be written", path)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestStatusWorkCountsEmptyBdWorkCacheWithRelocatedGraph(t *testing.T) {
+	var calls atomic.Int32
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		calls.Add(1)
+		if len(args) > 0 {
+			switch args[0] {
+			case "list", "query":
+				return []byte("[]"), nil
+			case "version":
+				return []byte("bd version 1.3.2\n"), nil
+			}
+		}
+		return nil, errors.New("unexpected live bd read: " + strings.Join(args, " "))
+	}
+	backing := beads.NewBdStore(t.TempDir(), runner)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	before := calls.Load()
+	state := newFakeState(t)
+	state.cityBeadStore = cache
+	state.graphBeadStore = beads.NewMemStore()
+	state.stores = nil
+	var scopedCalls atomic.Int32
+	state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		scopedCalls.Add(1)
+		return nil, errors.New("unexpected scoped/live fallback")
+	}
+	server := &Server{state: state}
+	counts, partialErrors := server.statusWorkCounts(context.Background(), nil)
+	if len(partialErrors) != 0 {
+		t.Fatalf("partial errors = %v, want complete empty work/graph counts", partialErrors)
+	}
+	if counts.Open != 0 || counts.InProgress != 0 || counts.Ready != 0 {
+		t.Fatalf("work counts = %+v, want all zero", counts)
+	}
+	if got := calls.Load() - before; got != 0 {
+		t.Fatalf("status bd calls = %d, want cache-only reads", got)
+	}
+	if got := scopedCalls.Load(); got != 0 {
+		t.Fatalf("scoped/live fallbacks = %d, want none", got)
 	}
 }

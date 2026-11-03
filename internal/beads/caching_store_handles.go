@@ -314,7 +314,10 @@ func (c *CachingStore) cachedReadyJudgment(ctx context.Context, query ReadyQuery
 	if !c.mu.TryRLock() {
 		return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from busy cache: %w", ErrCacheUnavailable)
 	}
-	if c.state != cacheLive || !c.depsComplete || c.primePartialErr != nil || (len(c.dirty) > 0 && !partial) ||
+	// A complete empty active snapshot proves there is no ready candidate even
+	// when no dependency edge has witnessed the backing projection. This does
+	// not claim dependency completeness for this store or for a nonempty cache.
+	if c.state != cacheLive || (!c.depsComplete && len(c.beads) != 0) || c.primePartialErr != nil || (len(c.dirty) > 0 && !partial) ||
 		c.readyReadsMustGoLive() {
 		c.mu.RUnlock()
 		return ReadyJudgment{}, fmt.Errorf("reading complete ready projection from cache: %w", ErrCacheUnavailable)

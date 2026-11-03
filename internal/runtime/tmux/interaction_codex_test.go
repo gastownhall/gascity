@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1312,5 +1313,216 @@ func TestRespond_CodexUnreadableGeometryAfterTheAnswerIsAnError(t *testing.T) {
 	}
 	if sent := sentKeys(e.calls); len(sent) != 1 || sent[0] != "1" {
 		t.Fatalf("send-keys payloads = %q, want exactly [\"1\"]", sent)
+	}
+}
+
+// Retained Codex0.162.1 / Sol6.1 approval from bb0: the pane wraps a native
+// single-line command after > and inside /native-approval. The raw rollout
+// holds the intact literal argument in one outer exec invocation.
+const nativeCodexApprovalCommand = "printf %s RFC8191_GRANTED_7b32036cf6d34336b2e2d631f0f8bbb2 > /Users/admin/rfc8191/cities/rfc-questions-c7233a410ebd48428f0865914c23db0d/native-approval-127e064603f04f67aa6330601b90dd6b/granted.txt"
+
+const nativeCodexApprovalScreen = `
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: May I execute this exact marker write?
+
+  $ printf %s RFC8191_GRANTED_7b32036cf6d34336b2e2d631f0f8bbb2 >
+  /Users/admin/rfc8191/cities/rfc-questions-c7233a410ebd48428f0865914c23db0d/n
+  ative-approval-127e064603f04f67aa6330601b90dd6b/granted.txt
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with printf (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel`
+
+const nativeCodexApprovalUUID = "01a1a105-9ee9-7cd3-a25b-45840b88eb51"
+
+type nativeCodexApprovalExecutor struct {
+	codexPaneExecutor
+	managed bool
+}
+
+func (e *nativeCodexApprovalExecutor) execute(args []string) (string, error) {
+	if e.managed && slices.Contains(args, "show-environment") {
+		e.calls = append(e.calls, slices.Clone(args))
+		return "GC_SESSION_ID=gcg-owned\nGC_PROVIDER=codex\nGC_PROVIDER_SESSION_ID=" + nativeCodexApprovalUUID + "\n", nil
+	}
+	if slices.Contains(args, "#{pane_pid}") {
+		e.calls = append(e.calls, slices.Clone(args))
+		return "4242", nil
+	}
+	return e.codexPaneExecutor.execute(args)
+}
+
+func (e *nativeCodexApprovalExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+func nativeCodexApprovalWrapper(command string) string {
+	return fmt.Sprintf("const result = await tools.exec_command({cmd:%q,sandbox_permissions:\"require_escalated\",justification:\"May I execute this exact marker write?\"});text(result);\n", command)
+}
+
+func nativeCodexApprovalRecords(t *testing.T, callID, code string, completed bool) string {
+	t.Helper()
+	rows := []any{
+		map[string]any{"type": "session_meta", "payload": map[string]any{"id": nativeCodexApprovalUUID, "session_id": nativeCodexApprovalUUID}},
+		map[string]any{"type": "event_msg", "payload": map[string]any{"type": "task_started", "turn_id": "native-approval-turn"}},
+		map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call", "call_id": callID, "name": "exec", "status": "completed", "input": code}},
+	}
+	if completed {
+		rows = append(rows, map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call_output", "call_id": callID, "output": "done"}})
+	}
+	var text strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text.Write(data)
+		text.WriteByte('\n')
+	}
+	return text.String()
+}
+
+func nativeCodexApprovalTmux(t *testing.T, records string) (*Tmux, *nativeCodexApprovalExecutor, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rollout-2026-11-03T10-47-42-"+nativeCodexApprovalUUID+".jsonl")
+	if err := os.WriteFile(path, []byte(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ex := &nativeCodexApprovalExecutor{codexPaneExecutor: codexPaneExecutor{panes: []string{nativeCodexApprovalScreen}, width: 80}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, codexRolloutHeld: func(int) string { return path }}
+	return tm, ex, path
+}
+
+func TestNativeCodexApprovalRetainsExactWrappedCommandAndStableOccurrence(t *testing.T) {
+	records := nativeCodexApprovalRecords(t, "call_first", nativeCodexApprovalWrapper(nativeCodexApprovalCommand), false)
+	tm, ex, _ := nativeCodexApprovalTmux(t, records)
+	first, err := tm.Pending("q")
+	if err != nil || first == nil || first.Metadata["command"] != nativeCodexApprovalCommand || first.Metadata["request_identity"] != "native_invocation" {
+		t.Fatalf("native command changed at visible wraps: %+v,%v", first, err)
+	}
+	again, err := tm.Pending("q")
+	if err != nil || again == nil || again.RequestID != first.RequestID {
+		t.Fatalf("same native approval changed identity: %+v,%v", again, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("ordinary input did not stay held: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeCodexApprovalIdenticalLaterInvocationRejectsStaleAnswer(t *testing.T) {
+	code := nativeCodexApprovalWrapper(nativeCodexApprovalCommand)
+	tm, ex, path := nativeCodexApprovalTmux(t, nativeCodexApprovalRecords(t, "call_first", code, false))
+	first, err := tm.Pending("q")
+	if err != nil || first == nil {
+		t.Fatalf("first=%+v,%v", first, err)
+	}
+	if err := os.WriteFile(path, []byte(nativeCodexApprovalRecords(t, "call_second", code, false)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := tm.Pending("q")
+	if err != nil || second == nil || first.RequestID == second.RequestID {
+		t.Fatalf("later identical invocation reused identity: first=%+v second=%+v,%v", first, second, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: first.RequestID, Action: "approve"}); !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("stale native answer reached later occurrence: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeCodexApprovalUnsupportedCompletedAndAmbiguousRefuseEveryAction(t *testing.T) {
+	code := nativeCodexApprovalWrapper(nativeCodexApprovalCommand)
+	first := nativeCodexApprovalRecords(t, "call_first", code, false)
+	second := nativeCodexApprovalRecords(t, "call_second", code, false)
+	last := strings.Split(strings.TrimSpace(second), "\n")[2] + "\n"
+	for name, records := range map[string]string{
+		"computed value":     nativeCodexApprovalRecords(t, "call_first", strings.Replace(code, fmt.Sprintf("cmd:%q", nativeCodexApprovalCommand), "cmd:dynamicCommand", 1), false),
+		"extra code":         nativeCodexApprovalRecords(t, "call_first", code+"evil();", false),
+		"comment":            nativeCodexApprovalRecords(t, "call_first", "/* comment */"+code, false),
+		"inner comment":      nativeCodexApprovalRecords(t, "call_first", strings.Replace(code, "cmd:", "cmd:/* comment */", 1), false),
+		"multiple calls":     nativeCodexApprovalRecords(t, "call_first", code+code, false),
+		"mismatch":           nativeCodexApprovalRecords(t, "call_first", nativeCodexApprovalWrapper("printf other"), false),
+		"completed":          nativeCodexApprovalRecords(t, "call_first", code, true),
+		"unbound completion": first + `{"type":"response_item","payload":{"type":"custom_tool_call_output","output":"done"}}` + "\n",
+		"unbound new call":   first + strings.Split(strings.TrimSpace(nativeCodexApprovalRecords(t, "", code, false)), "\n")[2] + "\n",
+		"ambiguous":          first + last,
+		"foreign uuid":       strings.ReplaceAll(first, nativeCodexApprovalUUID, "01a1a105-9ee9-7cd3-a25b-45840b88eb52"),
+		"aborted turn":       first + `{"type":"event_msg","payload":{"type":"turn_aborted"}}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm, ex, _ := nativeCodexApprovalTmux(t, records)
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["command"] != "" || pending.Metadata["response_unavailable"] == "" {
+				t.Fatalf("unproven request exposed as answerable: %+v,%v", pending, err)
+			}
+			for _, action := range []string{"approve", "deny"} {
+				if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+					t.Fatalf("%s reached unproven native request: %v", action, err)
+				}
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeCodexApprovalLiteralStringsAreDataAndHardNewlinesStayExact(t *testing.T) {
+	command := "printf '%s  %s' one two\nprintf ',cmd:still-data'"
+	code := nativeCodexApprovalWrapper(command)
+	tm, ex, _ := nativeCodexApprovalTmux(t, nativeCodexApprovalRecords(t, "call_lines", code, false))
+	ex.panes = []string{codexTestOverlay("Would you like to run the following command?", "  $ printf '%s  %s' one two\n  printf ',cmd:still-data'")}
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["command"] != command {
+		t.Fatalf("literal command contents were interpreted or whitespace changed: %+v,%v", pending, err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeCodexApprovalBoundGrantAndDenySendExactlyOneSelectedAction(t *testing.T) {
+	for action, key := range map[string]string{"approve": "1", "deny": "3"} {
+		t.Run(action, func(t *testing.T) {
+			records := nativeCodexApprovalRecords(t, "call_bound", nativeCodexApprovalWrapper(nativeCodexApprovalCommand), false)
+			tm, ex, _ := nativeCodexApprovalTmux(t, records)
+			ex.panes = append(ex.panes, "assistant ready")
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" {
+				t.Fatalf("native pending=%+v,%v", pending, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); err != nil {
+				t.Fatal(err)
+			}
+			if keys := sentKeys(ex.calls); !slices.Equal(keys, []string{key}) {
+				t.Fatalf("bound action sent %q, want one %s key", keys, key)
+			}
+		})
+	}
+}
+
+func TestNativeCodexApprovalManagedIdentityCannotDowngradeToContent(t *testing.T) {
+	for _, scenario := range []string{"missing rollout", "unreadable managed overlay"} {
+		t.Run(scenario, func(t *testing.T) {
+			tm, ex, _ := nativeCodexApprovalTmux(t, nativeCodexApprovalRecords(t, "call_managed", nativeCodexApprovalWrapper(nativeCodexApprovalCommand), false))
+			ex.managed = true
+			if scenario == "missing rollout" {
+				tm.codexRolloutHeld = func(int) string { return "" }
+			} else {
+				ex.panes = []string{codexCollapsedOverlay}
+			}
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["response_unavailable"] == "" || pending.Metadata["request_identity"] != "unavailable" {
+				t.Fatalf("managed approval downgraded: %+v,%v", pending, err)
+			}
+			for _, action := range []string{"approve", "deny"} {
+				if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+					t.Fatalf("%s reached unbound managed frame: %v", action, err)
+				}
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
 	}
 }

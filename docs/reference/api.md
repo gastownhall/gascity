@@ -526,6 +526,43 @@ the supervisor API rather than reading provider logs or sending terminal keys.
 When `metadata.answer_action` is absent, the current native frame cannot be
 answered through the API; use `gc session attach` to answer in the terminal.
 
+A native approval (`kind: "approval"`) reports its response authority in
+`metadata.request_identity`:
+
+| Value | Client behavior |
+| --- | --- |
+| `native_invocation` | The exact `metadata.command` is bound to one unresolved native invocation and provider conversation. Display those command bytes unchanged; pane wrapping does not add shell spaces or newlines. A later identical command has another request ID. |
+| `unavailable` | `metadata.response_unavailable` explains why the current request cannot be bound. Disable both approval actions and refresh pending state. The dialog still holds ordinary input. |
+| `visible_content` | Compatibility for older or unmanaged runtimes. The ID describes visible content and cannot distinguish later identical commands; it does not provide native occurrence safety. |
+
+Enable occurrence-bound approval controls only for `native_invocation` with no
+`response_unavailable`. Send the exact pending request ID with `approve` for
+one-time permission, or `deny` to reject it:
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "approve"
+}
+```
+
+Keep that request ID, action and `Idempotency-Key` unchanged when retrying.
+A recorded terminal retry returns its historical outcome; it never authorizes
+an answer to a later occurrence. Missing or stale native authority refuses
+input. A managed runtime whose native identity or command cannot be read stays
+unavailable; it does not downgrade to a visible-content ID.
+
+The current native binding supports Claude Bash and Codex exec approvals.
+Codex supports direct native JSON `exec_command` calls and the observed single
+literal wrapper `const result = await tools.exec_command({...});text(result);`.
+Computed arguments, comments, extra statements, multiple calls and other wrapper
+forms are unavailable. Command rendering that cannot be verified also remains
+unavailable.
+
+Use the supervisor response route for these controls. An unavailable one-time
+response must never become a broad or prefix grant, ordinary chat, automated
+nudge or terminal-key fallback.
+
 The city event stream (and the supervisor stream, tagged with the city)
 also carries each change as an event, so a client does not have to poll:
 

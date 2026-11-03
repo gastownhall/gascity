@@ -335,6 +335,8 @@ func describeCodexApproval(approval *parsedApproval, body []string, width int) {
 	approval.Input = header.request
 	if layout.request == "$" {
 		approval.Command = header.request
+		approval.CommandRows = strings.Split(header.request, "\n")
+		approval.CommandWidth = width - 2*codexOverlayInset
 	}
 	if m := codexNetworkHostRe.FindStringSubmatch(approval.Question); m != nil {
 		approval.Input = m[1]
