@@ -95,6 +95,7 @@ go_test(
         "tool_home_test.go",
         "tutorial_path_test.go",
         "workflow_event_wait_test.go",
+        "workflow_mol_do_work_drain_test.go",
     ],
     data = glob(
         ["**"],
@@ -130,6 +131,7 @@ go_test(
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
+        "//internal/bootstrap/packs/core",
         "//internal/builtinpacks",
         "//internal/citylayout",
         "//internal/config",
@@ -147,6 +149,7 @@ go_test(
         "//test/dolttest",
         "//test/tmuxtest",
         "//test/toolhome",
+        "@com_github_burntsushi_toml//:toml",
         "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_stretchr_testify//assert",

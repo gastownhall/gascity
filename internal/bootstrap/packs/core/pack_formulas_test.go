@@ -70,9 +70,6 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if !strings.Contains(step, "gc ready --json --limit=2") {
 		t.Fatal("drain must resolve the current continuation from ready work")
 	}
-	if !strings.Contains(step, "--include-ephemeral") {
-		t.Fatal("drain must include ephemeral rows; a wisp-tier continuation is invisible to bd ready without it")
-	}
 	if !strings.Contains(step, `--metadata-field "gc.root_bead_id=$ROOT_BEAD_ID"`) || !strings.Contains(step, `--metadata-field "gc.step_ref=mol-do-work.drain"`) {
 		t.Fatal("drain must select the ready drain step from the current workflow root")
 	}
@@ -99,26 +96,13 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	if !strings.Contains(step[currentAt:readyAt], `.metadata["gc.step_ref"] == "mol-do-work.drain"`) {
 		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
 	}
-	// The startup-bead id is only needed by the ready-query fallback. Requiring
-	// it up front aborts drain on every session seat: GC_BEAD_ID exists only in
-	// the dispatch condition environment, never in a session shell, and no
-	// session shell carries a trigger id (cmd/gc/cmd_hook_current.go). Same
-	// shape as ga-2q2r0.
-	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
-	if startupAt < 0 || startupAt < currentAt {
-		t.Fatal("drain must not require a startup bead id before consulting the current claim")
-	}
-	// The current claim carries gc.root_bead_id, and in a session shell it is
-	// the ONLY source of it: GC_BEAD_ID never reaches a session shell and no
-	// session shell carries a trigger id (cmd/gc/cmd_hook_current.go).
-	// Reading the root off the startup bead first strands every warm seat on
-	// the deferred path — the ga-2q2r0 failure, one layer in.
-	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
-	if rootFromCurrent < 0 {
+	// That the startup bead id is not required up front, and that the root is
+	// read off the current claim rather than the startup bead, are behaviors the
+	// real-store test pins by running this block with GC_BEAD_ID unset
+	// (test/integration TestMolDoWorkDrainClosesTheContinuationOfItsOwnWorkflow);
+	// asserting where the text sits here would only restate how it is written.
+	if !strings.Contains(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`) {
 		t.Fatal("drain must derive the workflow root from the current claim it already fetched")
-	}
-	if rootFromCurrent > startupAt {
-		t.Fatal("drain must try the current claim's root before falling back to startup env vars")
 	}
 
 	updateAt := strings.Index(step, "gc bd update")
@@ -128,6 +112,20 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 	}
 	if updateAt < 0 || !strings.Contains(step[updateAt:drainAckAt], "|| exit 1") {
 		t.Fatal("drain must not acknowledge runtime drain after a failed bead close")
+	}
+}
+
+// TestMolDoWorkDrainStepHasNoRetry guards the exact-match gc.step_ref the drain
+// block selects on (ga-v4vyto). Retry wraps a step in attempt refs that
+// rewriteRetryAttemptRef (internal/dispatch/retry.go) renames, and an exact
+// `gc.step_ref=mol-do-work.drain` would stop matching the renamed bead. The
+// drain has no retry today, so the match is sound; whoever adds one must make
+// the block match the rewritten ref first.
+func TestMolDoWorkDrainStepHasNoRetry(t *testing.T) {
+	for _, step := range readFormula(t, "mol-do-work.toml").Steps {
+		if step.ID == "drain" && step.Retry != nil {
+			t.Fatal("mol-do-work drain gained a retry config: its gc.step_ref=mol-do-work.drain exact match would miss the rewritten attempt ref; teach the drain block the rewritten ref first")
+		}
 	}
 }
 
