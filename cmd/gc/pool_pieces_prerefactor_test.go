@@ -534,7 +534,8 @@ func buildDemandTargetsPreRefactor(
 			}
 			continue
 		}
-		if store != nil && !storeScopedControlDispatcher {
+		claimsGeneratedQuery := cfg.Agents[i].WorkQuery == ""
+		if store != nil && !storeScopedControlDispatcher && (isCold || claimsGeneratedQuery) {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
 			}
