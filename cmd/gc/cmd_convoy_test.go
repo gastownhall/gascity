@@ -4414,13 +4414,15 @@ func TestConvoyCreateRigFlagRejectsConflictingIssue(t *testing.T) {
 		rig       string
 		issue     func(cityDir string) string
 		wantScope string
+		city      func(t *testing.T) string
 	}{
-		{"other rig's issue", "backend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "frontend") }, "frontend"},
-		{"city issue", "frontend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "") }, ""},
-		{"unknown prefix", "frontend", func(string) string { return "zz-1" }, ""},
+		{"other rig's issue", "backend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "frontend") }, "frontend", convoyRigFlagCity},
+		{"city issue", "frontend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "") }, "", convoyRigFlagCity},
+		{"unknown prefix", "frontend", func(string) string { return "zz-1" }, "", convoyRigFlagCity},
+		{"legacy layout, rig with its own store, city issue", "backend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "") }, "", convoyRigFlagLegacyCity},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cityDir := convoyRigFlagCity(t)
+			cityDir := tc.city(t)
 			issueID := tc.issue(cityDir)
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"--city", cityDir, "--rig", tc.rig, "convoy", "create", "batch", issueID}, &stdout, &stderr)
@@ -4452,10 +4454,39 @@ func TestConvoyCreateRigFlagRejectsConflictingIssue(t *testing.T) {
 	})
 }
 
+// convoyRigFlagLegacyCity is convoyRigFlagCity on the legacy shared file
+// layout: the city has no scoped-roots marker and frontend no store of its
+// own, so an open of the frontend rig reaches the city store, while backend
+// keeps its own store.
+func convoyRigFlagLegacyCity(t *testing.T) string {
+	t.Helper()
+	cityDir := convoyRigFlagCity(t)
+	for _, path := range []string{fileStoreLayoutMarkerPath(cityDir), filepath.Join(cityDir, "frontend", ".gc", "beads.json")} {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("moving the fixture to the legacy shared layout: %v", err)
+		}
+	}
+	return cityDir
+}
+
+// TestConvoyCreateRigFlagLegacySharedFileStore: on the legacy shared file
+// layout a rig without a store of its own opens the city store, so --rig
+// naming it agrees with the city's issues and the convoy tracks them there,
+// as the same create without --rig does.
+func TestConvoyCreateRigFlagLegacySharedFileStore(t *testing.T) {
+	cityDir := convoyRigFlagLegacyCity(t)
+	issueID := convoyRigFlagIssue(t, cityDir, "")
+	convoyID := convoyRigFlagCreate(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "batch", issueID)
+	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, ""), convoyID, issueID)
+}
+
 // TestConvoyCreateStoreDir: the store is compared by root, not by rig name, so
 // rigs bound to the same directory through a relative, an absolute or a
-// symlinked path agree, and an issue routed elsewhere conflicts.
+// symlinked path agree, and an issue routed elsewhere conflicts. Every scope
+// here is a bd store of its own.
 func TestConvoyCreateStoreDir(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	cityPath := t.TempDir()
 	for _, dir := range []string{"frontend", "backend"} {
 		if err := os.MkdirAll(filepath.Join(cityPath, dir), 0o755); err != nil {
@@ -4508,6 +4539,83 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 			}
 			if !samePath(got, tc.want) {
 				t.Errorf("convoyCreateStoreDir(%q, %v) = %q, want %q", tc.rig, tc.issueIDs, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConvoyCreateStoreDirComparesOpenedStores: --rig and the issues are
+// compared by the store an open of each scope reaches. On the legacy shared
+// file layout a rig without a store of its own opens the city store, so it
+// agrees with the city's issues. A rig with its own file store, a bd rig, a rig
+// of a city on the scoped-roots layout, and a rig session's file store at the
+// root of a bd city each stay apart from them.
+func TestConvoyCreateStoreDirComparesOpenedStores(t *testing.T) {
+	routedStore := regexp.MustCompile(`which routes to store "([^"]*)"`)
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "shared", Prefix: "sh", Path: "shared"},
+		{Name: "own", Prefix: "ow", Path: "own"},
+		{Name: "bdrig", Prefix: "br", Path: "bdrig"},
+	}}
+	for _, tc := range []struct {
+		name     string
+		provider string // the city's [beads] provider
+		scoped   bool   // the city carries the scoped-roots layout marker
+		session  bool   // GC_BEADS=file scoped to the shared rig, as in that rig's sessions
+		rig      string
+		issueID  string
+		conflict bool
+		routedTo string // the store a conflicting issue routes to, relative to the city
+	}{
+		{name: "legacy layout, shared rig, city issue", provider: "file", rig: "shared", issueID: "gc-1"},
+		{name: "legacy layout, shared rig, own-store rig's issue", provider: "file", rig: "shared", issueID: "ow-1", conflict: true, routedTo: "own"},
+		{name: "legacy layout, own-store rig, city issue", provider: "file", rig: "own", issueID: "gc-1", conflict: true},
+		{name: "legacy layout, bd rig, city issue", provider: "file", rig: "bdrig", issueID: "gc-1", conflict: true},
+		{name: "scoped layout, rig without a store, city issue", provider: "file", scoped: true, rig: "shared", issueID: "gc-1", conflict: true},
+		{name: "rig session over a bd city, city issue", provider: "bd", session: true, rig: "shared", issueID: "gc-1", conflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+			cityPath := t.TempDir()
+			writeProviderAwareTestCity(t, cityPath, fmt.Sprintf("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = %q\n", tc.provider))
+			if tc.scoped {
+				if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, dir := range []string{"shared", filepath.Join("bdrig", ".beads")} {
+				if err := os.MkdirAll(filepath.Join(cityPath, dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ensurePersistedScopeLocalFileStore(filepath.Join(cityPath, "own")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cityPath, "bdrig", ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"br"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.session {
+				t.Setenv("GC_BEADS", "file")
+				t.Setenv("GC_BEADS_SCOPE_ROOT", filepath.Join(cityPath, "shared"))
+			}
+
+			got, err := convoyCreateStoreDir(cfg, cityPath, tc.rig, []string{tc.issueID})
+			if !tc.conflict {
+				if err != nil {
+					t.Fatalf("convoyCreateStoreDir(%q, %s): %v", tc.rig, tc.issueID, err)
+				}
+				if want := filepath.Join(cityPath, tc.rig); !samePath(got, want) {
+					t.Errorf("convoyCreateStoreDir(%q, %s) = %q, want %q", tc.rig, tc.issueID, got, want)
+				}
+				return
+			}
+			want := fmt.Sprintf("--rig %q conflicts with issue %s, which routes to store ", tc.rig, tc.issueID)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("convoyCreateStoreDir(%q, %s) = %q, %v; want an error containing %q", tc.rig, tc.issueID, got, err, want)
+			}
+			if m := routedStore.FindStringSubmatch(err.Error()); m == nil || !samePath(m[1], filepath.Join(cityPath, tc.routedTo)) {
+				t.Errorf("error %q, want it to name the routed store %s", err, filepath.Join(cityPath, tc.routedTo))
 			}
 		})
 	}
