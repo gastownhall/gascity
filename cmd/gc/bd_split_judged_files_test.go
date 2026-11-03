@@ -67,9 +67,10 @@ func bdReadsFile(t *testing.T, inv *bdflags.Inventory, scope string, argv []stri
 
 // TestGcBdSplitHandsBdTheBytesItJudged: a split judge that reads a file the
 // caller names hands bd a private copy of exactly the bytes it judged, in
-// every spelling of the operand, under both pinned bd builds. Rewriting the
-// caller's file afterwards changes nothing bd reads, and the copy is gone once
-// gc bd returns.
+// every spelling of the operand, under both pinned bd builds. The copy keeps
+// the caller's base name in a private directory of its own. Rewriting the
+// caller's file afterwards changes nothing bd reads, and the copy and its
+// directory are gone once gc bd returns.
 func TestGcBdSplitHandsBdTheBytesItJudged(t *testing.T) {
 	const (
 		script  = "create task 2 hello there\n"
@@ -134,6 +135,15 @@ func TestGcBdSplitHandsBdTheBytesItJudged(t *testing.T) {
 				if read == caller {
 					t.Fatalf("forwarded %q: bd re-reads the caller's %s", g.args, c.file)
 				}
+				if filepath.Base(read) != c.file {
+					t.Errorf("forwarded %q: the copy %s does not keep the caller's name %s", g.args, read, c.file)
+				}
+				if fi, err := os.Stat(filepath.Dir(read)); err != nil || fi.Mode().Perm() != 0o700 {
+					t.Errorf("the copy's directory %s is not private (%v, err %v)", filepath.Dir(read), fi.Mode(), err)
+				}
+				if fi, err := os.Stat(read); err != nil || fi.Mode().Perm() != 0o600 {
+					t.Errorf("the copy %s is not private (%v, err %v)", read, fi.Mode(), err)
+				}
 				if err := os.WriteFile(caller, []byte(c.swapped), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -141,8 +151,8 @@ func TestGcBdSplitHandsBdTheBytesItJudged(t *testing.T) {
 					t.Fatalf("bd reads %q (err %v), gc judged %q", got, err, c.judged)
 				}
 				g.cleanup()
-				if _, err := os.Stat(read); !os.IsNotExist(err) {
-					t.Errorf("the copy %s outlived gc bd (stat err %v)", read, err)
+				if _, err := os.Stat(filepath.Dir(read)); !os.IsNotExist(err) {
+					t.Errorf("the copy's directory %s outlived gc bd (stat err %v)", filepath.Dir(read), err)
 				}
 			})
 		}
@@ -185,6 +195,9 @@ func TestGcBdSplitPipeOperandReachesBd(t *testing.T) {
 			if g.refusal != "" {
 				t.Fatalf("refused: %q", g.refusal)
 			}
+			if g.cleanup == nil {
+				t.Fatalf("forwarded %q with no copy to remove", g.args)
+			}
 			defer g.cleanup()
 			read := bdReadsFile(t, bdflags.InventoryByName("bd-1.3.2"), scope, g.args, c.flag, "")
 			if got, err := os.ReadFile(read); err != nil || string(got) != c.body {
@@ -222,6 +235,131 @@ func TestGcBdSplitRefusedFileWriteLeavesNoCopy(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(tmp); len(left) != 0 {
 		t.Errorf("a refused write left copies behind: %v", left)
+	}
+}
+
+// judgedFileOperands writes one admissible caller file per kind of judged
+// operand into scope and returns the argv that names each.
+func judgedFileOperands(t *testing.T, scope string) [][]string {
+	t.Helper()
+	for name, body := range map[string]string{
+		"ops.txt":   "create task 2 hello there\n",
+		"ids.txt":   "demo-1\n",
+		"m.json":    `{"note":"x"}`,
+		"plan.json": `{"nodes":[{"key":"a","title":"a","type":"task"}]}`,
+		"a.jsonl":   `{"id":"demo-1","title":"w","issue_type":"task"}` + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(scope, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return [][]string{
+		{"batch", "--file", "ops.txt"},
+		{"delete", "--from-file", "ids.txt"},
+		{"create", "--title", "t", "--metadata", "@m.json"},
+		{"create", "--graph", "plan.json"},
+		{"import", "a.jsonl"},
+	}
+}
+
+// TestGcBdSplitUnwritableTempDirIsRefused: a write gc admits but cannot hand
+// bd a copy of (TMPDIR names a directory that does not exist) is refused,
+// naming TMPDIR, before bd runs, and nothing is left behind.
+func TestGcBdSplitUnwritableTempDirIsRefused(t *testing.T) {
+	scope := t.TempDir()
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "missing")
+	t.Setenv("TMPDIR", missing)
+	for _, argv := range judgedFileOperands(t, scope) {
+		g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, judgedFilesDeps("bd-1.3.2"))
+		if !strings.Contains(g.refusal, missing+" (TMPDIR)") || !strings.HasSuffix(g.refusal, "Nothing was written.") {
+			t.Errorf("gc bd %q: refusal %q, want one naming TMPDIR %s and that nothing was written", argv, g.refusal, missing)
+		}
+		if g.args != nil || g.cleanup != nil {
+			t.Errorf("gc bd %q forwarded %q (cleanup set %v) despite the refusal", argv, g.args, g.cleanup != nil)
+		}
+	}
+	if left, _ := os.ReadDir(parent); len(left) != 0 {
+		t.Errorf("a refused write left something behind: %v", left)
+	}
+}
+
+// TestBdJudgedFilesPinRemovesEveryCopyWhenOneFails: when one of a write's
+// judged files cannot be handed over, the copies already written are removed
+// with the refusal.
+func TestBdJudgedFilesPinRemovesEveryCopyWhenOneFails(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	j := &bdJudgedFiles{files: []bdJudgedFile{
+		{flag: "--metadata", prefix: "@", name: "m.json", data: []byte(`{"note":"x"}`)},
+		// create has no --from-file, so no argv placement re-resolves.
+		{flag: "--from-file", name: "ids.txt", data: []byte("demo-1\n")},
+	}}
+	g := j.pin(bdflags.InventoryByName("bd-1.3.2"), "create", bdClassGuard{args: []string{"create", "--title", "t", "--metadata", "@m.json"}})
+	if !strings.Contains(g.refusal, "--from-file") || !strings.HasSuffix(g.refusal, "Nothing was written.") || g.args != nil {
+		t.Fatalf("pin = %q (args %q), want the --from-file refusal", g.refusal, g.args)
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("the refused write left copies behind: %v", left)
+	}
+}
+
+// TestGcBdSplitJudgedCopyPathIsAbsolute: bd runs in the scope root, so a
+// relative TMPDIR still hands bd an absolute copy path it can open.
+func TestGcBdSplitJudgedCopyPathIsAbsolute(t *testing.T) {
+	scope, cwd := t.TempDir(), t.TempDir()
+	judgedFileOperands(t, scope)
+	if err := os.Mkdir(filepath.Join(cwd, "rel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	t.Setenv("TMPDIR", "rel")
+	inv := bdflags.InventoryByName("bd-1.3.2")
+	for _, c := range []struct {
+		flag, prefix, judged string
+		argv                 []string
+	}{
+		{"--file", "", "create task 2 hello there\n", []string{"batch", "--file", "ops.txt"}},
+		{"--metadata", "@", `{"note":"x"}`, []string{"create", "--title", "t", "--metadata", "@m.json"}},
+		{"", "", `{"id":"demo-1","title":"w","issue_type":"task"}` + "\n", []string{"import", "a.jsonl"}},
+	} {
+		g := bdClassFlipGuard(splitGuardTestCity(), scope, c.argv, judgedFilesDeps("bd-1.3.2"))
+		if g.refusal != "" {
+			t.Fatalf("gc bd %q refused: %q", c.argv, g.refusal)
+		}
+		read := bdReadsFile(t, inv, scope, g.args, c.flag, c.prefix)
+		if got, err := os.ReadFile(read); err != nil || string(got) != c.judged {
+			t.Errorf("gc bd %q forwarded %q: bd, in the scope root, reads %q (err %v), want the judged bytes", c.argv, g.args, got, err)
+		}
+		if g.cleanup != nil {
+			g.cleanup()
+		}
+	}
+}
+
+// TestGcBdSplitMetadataFileIsReadAsBdReadsIt: bd reads `--metadata @<path>`
+// from the path after the "@" exactly as written, trailing spaces included,
+// so gc judges, and hands bd a copy of, that file and no other.
+func TestGcBdSplitMetadataFileIsReadAsBdReadsIt(t *testing.T) {
+	scope := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scope, "m.json"), []byte(`{"gc.root_bead_id":"gcg-1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argv := []string{"update", "demo-abc", "--metadata", "@m.json "}
+	if g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, judgedFilesDeps("bd-1.3.2")); !strings.Contains(g.refusal, "m.json ") || !strings.Contains(g.refusal, "cannot be read") {
+		t.Fatalf("gc bd %q judged a file bd does not read: %q", argv, g.refusal)
+	}
+	if err := os.WriteFile(filepath.Join(scope, "m.json "), []byte(`{"note":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := bdClassFlipGuard(splitGuardTestCity(), scope, argv, judgedFilesDeps("bd-1.3.2"))
+	if g.refusal != "" {
+		t.Fatalf("gc bd %q refused: %q", argv, g.refusal)
+	}
+	defer g.cleanup()
+	read := bdReadsFile(t, bdflags.InventoryByName("bd-1.3.2"), scope, g.args, "--metadata", "@")
+	if got, err := os.ReadFile(read); err != nil || string(got) != `{"note":"x"}` || filepath.Base(read) != "m.json " {
+		t.Errorf("bd is handed %s holding %q (err %v), want a copy of %q", read, got, err, "m.json ")
 	}
 }
 

@@ -110,6 +110,40 @@ func TestGcBdMetadataPipeSurvivesTheRigCheck(t *testing.T) {
 	}
 }
 
+// TestGcBdMetadataFileIsReadAsBdReadsItOnEveryCity runs `gc bd update
+// --metadata "@m.json "` through doBd on a single-store and a split city. bd
+// reads the path after the "@" exactly as written, trailing space included,
+// and so does every check before it (the pin and the rig check on every city,
+// the class judge on a split one): the write reaches bd once, pointed at a
+// copy that keeps the name. m.json, the file the trimmed path names, holds a
+// route the rig check refuses.
+func TestGcBdMetadataFileIsReadAsBdReadsItOnEveryCity(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		opts bdParityOpts
+	}{{"single-store", bdParityOpts{}}, {"split", bdParityOpts{storage: bdSQLRefusalSplitStorage}}} {
+		t.Run(c.name, func(t *testing.T) {
+			res := runBdParityArm(t, false, c.opts, func(t *testing.T, city bdParityCity) []string {
+				for _, f := range []struct{ name, body string }{
+					{"m.json ", `{"note":"x"}`},
+					{"m.json", `{"gc.routed_to":"ghostrig/polecat-01"}`},
+				} {
+					if err := os.WriteFile(filepath.Join(city.city, f.name), []byte(f.body), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return []string{"update", "demo-abc", "--metadata", "@m.json "}
+			})
+			if res.code != 0 {
+				t.Fatalf("exit %d, want 0; stderr=%q", res.code, res.stderr)
+			}
+			if w := bdParityWrites(res.bd); len(w) != 1 || !strings.Contains(w[0], "/gc-bd-judged-") || !strings.HasSuffix(w[0], "/m.json ") {
+				t.Fatalf("bd ran %q, want one update pointed at a copy of %q; stderr=%q", w, "m.json ", res.stderr)
+			}
+		})
+	}
+}
+
 // TestBdPinMetadataFilesIsExact: the pin rewrites exactly the tokens pflag
 // reads as a --metadata @file value of create, new or update, each read once
 // into an absolute private copy that cleanup removes, and leaves every other
@@ -159,8 +193,12 @@ func TestBdPinMetadataFilesIsExact(t *testing.T) {
 						v = rest
 					}
 					p, ok := strings.CutPrefix(v, "@")
-					if !ok || !filepath.IsAbs(p) || !strings.HasPrefix(filepath.Base(p), "gc-bd-metadata-") {
-						t.Fatalf("token %d = %q, want @ and an absolute private copy", i, got[i])
+					orig := c.argv[i]
+					if _, rest, inline := strings.Cut(orig, "="); inline {
+						orig = rest
+					}
+					if !ok || !filepath.IsAbs(p) || !strings.HasPrefix(filepath.Base(filepath.Dir(p)), "gc-bd-judged-") || filepath.Base(p) != filepath.Base(strings.TrimPrefix(orig, "@")) {
+						t.Fatalf("token %d = %q, want @ and an absolute private copy under the caller's file name", i, got[i])
 					}
 					copies = append(copies, p)
 					continue
@@ -197,11 +235,11 @@ func TestBdWriteJudgedCopyPathIsAbsolute(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", "rel")
-	p, err := bdWriteJudgedCopy([]byte("x"), "gc-bd-judged-*")
+	p, remove, err := bdWriteJudgedCopy([]byte("x"), "m.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(p) //nolint:errcheck // test copy
+	defer remove()
 	if !filepath.IsAbs(p) {
 		t.Fatalf("copy path %q is relative", p)
 	}

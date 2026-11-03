@@ -726,12 +726,14 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 }
 
 // rigListHQRunning reports whether the city's controller is running, for the
-// HQ row of the API-render rig list. Indirected through a var so tests pin both
-// outcomes without a live controller. controllerStatusForCity (not bare
-// controllerAlive) is supervisor-aware: on the supervisor sub-lane
-// controllerAlive==0 by construction while the city IS running.
+// HQ row of the rig list on both routes, so the two print the same value.
+// It pings the city's controller socket, which a standalone controller and
+// the supervisor (for each city it runs) both serve. It never calls the
+// supervisor HTTP API: the local route is the GC_NO_API=1 escape hatch.
+// Indirected through a var so tests pin both outcomes without a live
+// controller.
 var rigListHQRunning = func(cityPath string) bool {
-	return controllerStatusForCity(cityPath).Running
+	return controllerAlive(cityPath) != 0
 }
 
 // routeRigList dispatches the `rig list` read to the supervisor API when
@@ -759,8 +761,9 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 // effective suspension); a rig the controller has not loaded yet has no
 // running agent and the on-disk suspension doRigList reads. HQ info and
 // per-rig beads status are derived locally (neither lives on the API
-// response); the output carries an _cache_age_s envelope field (JSON) or
-// staleness banner (human).
+// response); the JSON output carries an _cache_age_s envelope field, which
+// the server reports as 0 because the rig list is not read from the bead
+// cache, and human output prints no cache-age footer.
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
@@ -785,11 +788,11 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	suspState, _ := loadSuspensionState(fs, cityPath)
 	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 
-	// HQ running is derived from controllerStatusForCity (supervisor-aware),
-	// not a hardcoded true — it flips to false only if the controller actually
-	// died between the ListRigs fetch and this render. Computed for --json only:
-	// renderRigListText ignores Running and the probe costs a socket/supervisor
-	// dial (mirrors doRigList's guard). No wire field — rig list is not
+	// HQ running comes from rigListHQRunning, the same controller-socket ping
+	// the local route uses, not a hardcoded true — it flips to false only if
+	// the controller actually died between the ListRigs fetch and this render.
+	// Computed for --json only: renderRigListText ignores Running and the probe
+	// costs a socket dial (mirrors doRigList's guard). No wire field — rig list is not
 	// remote-wired, and "the server handling the request IS the controller".
 	hqRunning := true
 	if jsonOutput {
@@ -833,10 +836,6 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		return renderRigListJSON(result, stdout, stderr)
 	}
 	renderRigListText(loadedCityName(cfg, cityPath), result, stdout)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, "")                                                               //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
 	return 0
 }
 
@@ -864,8 +863,8 @@ func renderRigListJSON(result RigListJSON, stdout, stderr io.Writer) int {
 
 // renderRigListText renders the human rig-list table from result. displayName is
 // the HQ header name (loadedCityName), which intentionally differs from the HQ
-// item's JSON Name (EffectiveCityName). Shared by both rig-list paths; the
-// API-render path appends its own cache-age banner after calling this.
+// item's JSON Name (EffectiveCityName). Shared by both rig-list paths, so
+// their human output is identical.
 func renderRigListText(displayName string, result RigListJSON, stdout io.Writer) {
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w("")
@@ -893,11 +892,6 @@ func renderRigListText(displayName string, result RigListJSON, stdout io.Writer)
 		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}
 }
-
-// cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
-// output appends the "reconciler may be lagging" banner. Matches the
-// enabler contract D5 documented in the ga-h6w plan.
-const cacheAgeBannerThresholdSeconds = 30.0
 
 // RigListJSON is the JSON output format for "gc rig list --json".
 type RigListJSON struct {
@@ -966,14 +960,14 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		CityPath:      cityPath,
 		CityName:      cityName,
 	}
-	// Running-status detection (controllerAlive + the per-rig session provider)
+	// Running-status detection (rigListHQRunning + the per-rig session provider)
 	// is computed for --json ONLY: the session provider forks tmux probes and
 	// scales O(rigs), and the human table does not display running status
 	// (renderRigListText ignores the Running field). Guarding it here preserves
 	// the historical text-path fast path (~7x faster than --json for many rigs).
 	hqRunning := false
 	if jsonOutput {
-		hqRunning = controllerAlive(cityPath) != 0
+		hqRunning = rigListHQRunning(cityPath)
 	}
 	result.Rigs = append(result.Rigs, RigListItem{
 		Name:    cityName,

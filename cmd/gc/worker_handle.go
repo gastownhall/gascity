@@ -488,6 +488,7 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
+	sessions := beads.SessionStore{Store: store}
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, session.ErrSessionNotFound
@@ -497,10 +498,10 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+		if info, pr, err := session.ResolveSessionRecordByExactID(sessions, target); err == nil {
 			return factory.SessionByRecord(info, pr)
 		}
-		if id, err := session.ResolveSessionID(store, target); err == nil {
+		if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return factory.SessionByID(id)
 		}
 		if sp != nil {

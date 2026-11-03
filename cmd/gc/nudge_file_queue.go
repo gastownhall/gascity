@@ -1324,7 +1324,7 @@ func (q *fileNudgeQueue) Rollback(item nudgequeue.Item, reason string) error {
 
 // WithdrawQueuedWaitNudges withdraws the queued wait nudges ids.
 func (q *fileNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
-	return nudgequeue.StateFileQueue{CityPath: q.cityPath, Shadows: q.store.Store}.WithdrawQueuedWaitNudges(ids)
+	return nudgequeue.StateFileQueue{CityPath: q.cityPath, Shadows: q.store}.WithdrawQueuedWaitNudges(ids)
 }
 
 // Maintain runs the debounced whole-queue sweep at now. The sweep's own time

@@ -4219,9 +4219,10 @@ func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
 	}
 }
 
-// TestRouteOrderHistory_StaleBannerOver30s verifies the > 30 s stale banner
-// on the API render path; matches the rig-list staleness test contract.
-func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
+// TestRouteOrderHistory_CacheAgeFooterOnStderr verifies the API render path
+// prints the cache-age footer on stderr, not stdout, when the supervisor
+// reports a cache age more than twice its re-scan interval.
+func TestRouteOrderHistory_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 
 	cityPath := writeOrderHistoryTestCity(t)
@@ -4232,7 +4233,7 @@ func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
 	aa, _ := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"entries": []map[string]any{
@@ -4256,9 +4257,7 @@ func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
 	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 // TestOrderScopedName verifies city-level vs rig-level scoping matches the

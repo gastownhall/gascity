@@ -34,10 +34,10 @@ func bdPinMetadataFiles(scopeRoot string, bdArgs []string) ([]string, func(), er
 		return bdArgs, noop, nil
 	}
 	out := slices.Clone(bdArgs)
-	var copies []string
+	var removes []func()
 	cleanup := func() {
-		for _, c := range copies {
-			_ = os.Remove(c)
+		for _, remove := range removes {
+			remove()
 		}
 	}
 	for _, i := range at {
@@ -53,15 +53,15 @@ func bdPinMetadataFiles(scopeRoot string, bdArgs []string) ([]string, func(), er
 		if err != nil {
 			continue
 		}
-		copyPath, err := bdWriteJudgedCopy(data, "gc-bd-metadata-*.json")
+		copyPath, remove, err := bdWriteJudgedCopy(data, path)
 		if err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("refusing --metadata %s: gc reads a --metadata file once and hands every check and bd a private copy of it, and could not write that copy (check $TMPDIR): %w", value, err)
 		}
-		copies = append(copies, copyPath)
+		removes = append(removes, remove)
 		out[i] = prefix + "@" + copyPath
 	}
-	if len(copies) == 0 {
+	if len(removes) == 0 {
 		return bdArgs, noop, nil
 	}
 	return out, cleanup, nil

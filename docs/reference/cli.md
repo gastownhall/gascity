@@ -11,7 +11,7 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
 | `--city-name` | string |  | remote city name for --city-url (does not overload --city) |
-| `--city-url` | string |  | operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two (see gc session list --help) |
+| `--city-url` | string |  | operate a REMOTE city at this base URL (https, or http on a loopback host; requires --city-name). A remote target is served by the API, so --json prints the API rendering where a command has two |
 | `--context` | string |  | operate the REMOTE city named by this context (~/.gc/contexts.toml) |
 | `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
@@ -3062,6 +3062,12 @@ rather than disappearing silently. Find IDs with "gc nudge status".
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.
 
+A conversation-lane message's op ID cancels the message as the operator:
+one the lane has not taken is dropped, and one being delivered reports
+cancel_requested, the lane's outcome saying whether the cancel won. A lane
+ID that cannot be canceled fails on its own: the other IDs are still
+dropped.
+
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.
 
@@ -3076,6 +3082,19 @@ gc nudge drop <id>... [flags]
 ## gc nudge status
 
 Show queued and dead-letter nudges for a session.
+
+Lists the legacy nudge queue's items and the session's conversation-lane
+operations (messages and notices the controller's lane host delivers) in one
+view: a lane operation's ID is its op ID, pending until the lane takes it, in
+flight while it is delivered, and dead for an hour after it closes failed or
+skipped. Dead operations are looked up among the session's 50 most recently
+created closed lane messages: an older message is not listed as dead even
+when it closed last.
+
+When the session's lane operations cannot all be read (the op store does not
+open or answer, or an op row does not decode), it names what it could not
+read on stderr and exits 1: the text view still lists the rest, and --json
+prints the failure record instead of a partial result.
 
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
 
@@ -4618,22 +4637,41 @@ gc session kill <session-id-or-alias> [flags]
 
 ## gc session list
 
-List all chat sessions. By default shows active and suspended sessions.
+List all chat sessions. By default lists every open session; --state
+closed or --state all also lists closed ones.
 
 With --json the output is one JSON document that validates against
-"gc session list --json-schema=result". It has one of two renderings, and
-the route a command takes decides which one it gets:
+"gc session list --json-schema=result" and has the same shape on every
+route: schema_version "1", ok true, filters, sessions ([] when empty) and
+summary. Each row carries id, template, state, created_at, last_active,
+attached and closed. A closed session has state "closed" and closed true.
+last_active is "" for a session that has not been active. Timestamps are
+RFC 3339 in UTC.
 
-  - Local rendering (a supervisor-hosted city, a city with no reachable
-    API, or GC_NO_API set for a local target; a remote target rejects
-    GC_NO_API): filters, sessions and summary. Each row carries closed, and
-    agent_name when the session has one, and no liveness.
-  - API rendering (a remote target such as --city-url, a standalone
-    controller's [api] port, or a supervisor serving a city that has no
-    controller): _cache_age_s and sessions. Each row carries running, and no
-    agent_name or closed.
+When the city's API serves the read (a supervisor-hosted city, a standalone
+controller's [api] port, or a remote target such as --city-url), the
+document also carries _cache_age_s, and each row carries running (the
+server's own observation) plus reason and program_status when the server
+reports them. A local read omits those fields; the CLI never computes
+running itself. The API does not report command, session_key or the
+resume_* fields, so only a local read carries them.
 
-Both carry schema_version "1" and ok true, and an empty list renders as [].
+For a local target the read is local when GC_NO_API is set, when no API is
+reachable, when the supervisor requires grants, when the API gives an
+answer the CLI falls back from (its cache is not live, a server error), or
+when the supervisor still runs a gc that predates agent_name on session
+rows (restart it after upgrading). A local target also reads locally when
+the state filter lists closed sessions (--state closed, --state all): the
+API reads the city's whole session history again for every page it
+serves, where the local read reads it once. A remote target never reads
+locally: an older server's rows print without agent_name, transport,
+worker_dir and wake reasons, with a note on stderr. A partial API answer
+fails as a failed local read does: exit 1 and, with --json, the
+session_list_failed error document.
+
+The REASON column shows a session's lifecycle reason (a hold, sleep,
+quarantine or open circuit), else the reasons it is kept awake (session,
+config, create, attached, pin, ...), else "-", on every route.
 
 ```
 gc session list [flags]

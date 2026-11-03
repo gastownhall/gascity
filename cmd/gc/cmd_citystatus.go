@@ -291,22 +291,23 @@ func routeCityStatus(
 			cr, err = c.GetStatus()
 			return err
 		},
-		func() int { return renderCityStatusFromAPI(cityPath, cfg, cr, dops, jsonOutput, stdout) },
+		func() int { return renderCityStatusFromAPI(cityPath, cfg, cr, dops, jsonOutput, stdout, stderr) },
 		fallback,
 	)
 }
 
 // renderCityStatusFromAPI renders the server's StatusView using the same
 // text and JSON formatters as the fallback path. The API path adds
-// _cache_age_s on --json output and a staleness banner on human output
-// when cache age > 30 s. The wire rig rows lack the config-derived fields,
+// _cache_age_s on --json output; human output is followed by the cache-age
+// footer on stderr when the server's cache is behind (writeCacheAgeFooter).
+// The wire rig rows lack the config-derived fields,
 // so they are filled from cfg (fillStatusRigConfigFields) to match the
 // local route's rows.
 //
 // Controller authority is not surfaced through the API response (the
 // server is the controller, so the CLI resolves that locally via
 // controllerStatusForCity — same call the fallback path makes).
-func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout io.Writer) int {
+func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
 	snapshot := snapshotFromStatusView(cityPath, cr.Body)
 	fillStatusRigConfigFields(snapshot.Rigs, cfg)
 	if jsonOutput {
@@ -318,9 +319,7 @@ func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRea
 		fmt.Fprintln(stdout)                                                                                                      //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", cr.Body.SessionCounts.Active, cr.Body.SessionCounts.Suspended) //nolint:errcheck // best-effort stdout
 	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 

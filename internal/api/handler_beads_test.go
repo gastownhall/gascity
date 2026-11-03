@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
@@ -2099,7 +2100,7 @@ func TestPhase2BeadAssignMaterializesExactConfiguredNamedIdentity(t *testing.T) 
 	if got.Assignee == "" {
 		t.Fatalf("assignee = %q, want materialized session identity", got.Assignee)
 	}
-	sessionID, err := session.ResolveSessionID(state.cityBeadStore, got.Assignee)
+	sessionID, err := session.ResolveSessionID(beadstest.Sessions(state.cityBeadStore), got.Assignee)
 	if err != nil {
 		t.Fatalf("ResolveSessionID(materialized assignee %q): %v", got.Assignee, err)
 	}

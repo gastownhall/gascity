@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -303,7 +304,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 	opCity := t.TempDir()
 	steps = append(steps, []step{
 		{"operator create (bead only)", "command continuation_epoch generation instance_token pending_create_claim pending_create_started_at provider resume_command resume_flag resume_style session_id_flag session_name session_origin state template work_dir", []string{"internal/session/manager.go:Manager.createBeadOnly"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			m = session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(opCity))
+			m = session.NewManagerWithOptions(beadstest.Sessions(rec), runtime.NewFake(), session.WithCityPath(opCity))
 			_, err := m.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "test-cmd", WorkDir: t.TempDir(), Provider: "fake", BeadOnly: true})
 			must(t, err)
 			id = fieldRow(t, rec.MemStore, "state", "asleep", "sleep_reason", "idle") // the dormant row the later verbs act on
@@ -322,7 +323,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
 		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			_, err := session.WriteKillFence(rec, id, now)
+			_, err := session.WriteKillFence(beadstest.Sessions(rec), id, now)
 			must(t, err)
 		}},
 		{"operator set state", "state state_reason", []string{"internal/session/store.go:Store.SetState"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -545,7 +546,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				city := t.TempDir()
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(m), runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -557,7 +558,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				city := t.TempDir()
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(m), runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -568,7 +569,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if _, err := session.WriteKillFence(m, id, now); err != nil {
+				if _, err := session.WriteKillFence(beadstest.Sessions(m), id, now); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -591,7 +592,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				city := t.TempDir()
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Suspend(context.Background(), testActorIn(t, session.ActorOperator, city), id, false); err != nil {
+				if err := session.NewManagerWithOptions(beadstest.Sessions(m), runtime.NewFake(), session.WithCityPath(city)).Suspend(context.Background(), testActorIn(t, session.ActorOperator, city), id, false); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -848,7 +849,7 @@ func TestRestartClearWritesOnlyHeldStopKeys(t *testing.T) {
 		id := fieldRow(t, rec, "state", "asleep", "provider", "claude")
 		rec.reset()
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(rec), runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
 		for _, k := range stopKeys {
@@ -865,7 +866,7 @@ func TestRestartClearWritesOnlyHeldStopKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(m, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(m), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
 		got := fieldBead(t, m, id).Metadata

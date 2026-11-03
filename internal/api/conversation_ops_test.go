@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
@@ -82,7 +83,7 @@ func (l *lanePokeState) poked() []string {
 func newLaneOpsEnv(t *testing.T, kinds ...string) (*opsEnv, *lanePokeState) {
 	t.Helper()
 	e := newControlOpsEnv(t, "off", "off")
-	e.fs.cfg.Ops.Authoritative = kinds
+	e.fs.cfg.Ops.Authoritative = config.OpsKinds(kinds...)
 	st := &lanePokeState{fakeState: e.fs, kinds: kinds, ops: e.opStore(t)}
 	e.resolver.state = st
 	return e, st
@@ -497,7 +498,7 @@ func TestProposeGatesOnTheRunningLaneHost(t *testing.T) {
 	t.Run("reload lists a kind", func(t *testing.T) {
 		e, _ := newLaneOpsEnv(t)
 		info := e.session(t, "Reload")
-		e.fs.cfg.Ops.Authoritative = []string{"message"}
+		e.fs.cfg.Ops.Authoritative = config.OpsKinds("message")
 		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`)
 		wantStatus(t, "after reload", rec, http.StatusConflict)
 		if code := problemCode(t, rec); code != "kind-not-enabled" {
