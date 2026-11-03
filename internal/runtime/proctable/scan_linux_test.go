@@ -1709,3 +1709,91 @@ func TestReadUnifiedCgroup(t *testing.T) {
 		}
 	})
 }
+
+// TestUnreadableEnvironUserManagerMixedScan runs both unbounded scans over a
+// host with an exempt manager helper, an unproven unreadable process and a
+// readable orphan root (ga-zpcphq): the scan error names only the unproven
+// process, the readable root is still returned, and a readable credential
+// agent carrying GC_SESSION_ID is reported like any other root — names never
+// exclude a root the scan can read.
+func TestUnreadableEnvironUserManagerMixedScan(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 environ would stay readable")
+	}
+	euid := os.Geteuid()
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+	boot := time.Unix(1_700_000_000, 0).UTC()
+	const (
+		helperPID    = 2642
+		unprovenPID  = 5120
+		readablePID  = 6030
+		agentRootPID = 6040
+	)
+	root := t.TempDir()
+	writeFakeBootTime(t, root, boot)
+	unreadableEnviron := func(t *testing.T, pid int, cgroupPath string, comm string) {
+		t.Helper()
+		dir := filepath.Join(root, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeFakeProcessUID(t, dir, euid)
+		writeFakeProcessStat(t, dir, pid, 1, 600)
+		writeFakeProcessCgroup(t, dir, cgroupPath)
+		if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+			t.Fatalf("write comm: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "environ"), nil, 0o644); err != nil {
+			t.Fatalf("write environ: %v", err)
+		}
+		if err := os.Chmod(filepath.Join(dir, "environ"), 0o000); err != nil {
+			t.Fatalf("chmod environ: %v", err)
+		}
+	}
+	unreadableEnviron(t, helperPID, scope, "(sd-pam)")
+	unreadableEnviron(t, unprovenPID, "/user.slice/user-"+strconv.Itoa(euid)+".slice/session-1.scope", "codex")
+	buildFakeProcUnder(t, root, readablePID, 1, "claude", map[string]string{"GC_SESSION_ID": "ga-target"})
+	buildFakeProcUnder(t, root, agentRootPID, 1, "ssh-agent", map[string]string{"GC_SESSION_ID": "ga-target"})
+
+	scans := map[string]func(root string) ([]int, error){
+		"id-scoped scan": func(root string) ([]int, error) {
+			got, err := scanWithRoot(root, "ga-target")
+			var pids []int
+			for _, live := range got {
+				pids = append(pids, live.PID)
+			}
+			return pids, err
+		},
+		"orphan-candidate scan": func(root string) ([]int, error) {
+			got, err := scanOrphanCandidatesWithRoot(root, 0)
+			var pids []int
+			for _, live := range got {
+				pids = append(pids, live.PID)
+			}
+			return pids, err
+		},
+	}
+	for scanName, scan := range scans {
+		t.Run(scanName, func(t *testing.T) {
+			pids, err := scan(root)
+			if err == nil {
+				t.Fatalf("scan error = nil; want the unproven process reported")
+			}
+			if !slices.Equal(pids, []int{readablePID, agentRootPID}) {
+				t.Fatalf("scan returned pids %v, want the readable root %d and the readable credential-agent root %d", pids, readablePID, agentRootPID)
+			}
+			var entries []*EntryError
+			var other []string
+			collectScanErrors(err, &entries, &other)
+			if len(other) != 0 {
+				t.Fatalf("scan error = %v; want no whole-scan failure", err)
+			}
+			if len(entries) != 1 || entries[0].PID != unprovenPID {
+				t.Fatalf("scan error entries = %v; want exactly the unproven pid %d", entries, unprovenPID)
+			}
+			if summary := SummarizeScanError(err); !strings.Contains(summary, "pid "+strconv.Itoa(unprovenPID)) || strings.Contains(summary, strconv.Itoa(helperPID)) {
+				t.Fatalf("summary = %q; want it to identify the unproven process, not the excused helper", summary)
+			}
+		})
+	}
+}
