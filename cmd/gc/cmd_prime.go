@@ -786,6 +786,9 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		// survives suppression — managed SessionStart hooks still carry it. Folded
 		// into the single write below to keep exactly one provider hook context.
 		prompt += hookContextSuffix
+		if prompt != "" {
+			prompt += primeHookPlatformNote
+		}
 	}
 	if hookMode && hookFormat != "" {
 		if err := writeProviderHookContextForEvent(stdout, hookFormat, "SessionStart", prompt); err == nil && afterDelivery != nil {

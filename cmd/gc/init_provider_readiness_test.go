@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,85 @@ func disableBootstrapForTests(t *testing.T) {
 	old := bootstrap.BootstrapPacks
 	bootstrap.BootstrapPacks = nil
 	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
+}
+
+// assertPlatformFindings verifies the platform-unavailable findings separately
+// from binary and version findings, then returns the latter for exact-list
+// assertions.
+func assertPlatformFindings(t *testing.T, deps []missingDep, expectedNames ...string) []missingDep {
+	t.Helper()
+
+	expected := map[string]string{}
+	for _, name := range expectedNames {
+		if !platformBackendUnavailableForTest(name) {
+			continue
+		}
+		reason, unavailable := backendUnavailableOnThisPlatform(name)
+		if !unavailable {
+			t.Fatalf("%q should be reported as unavailable on %s", name, runtime.GOOS)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Fatalf("%q platform-unavailable reason is empty", name)
+		}
+		expected[name] = reason
+	}
+
+	actual := map[string]missingDep{}
+	kept := make([]missingDep, 0, len(deps))
+	for _, dep := range deps {
+		reason, unavailable := backendUnavailableOnThisPlatform(dep.name)
+		if !unavailable {
+			kept = append(kept, dep)
+			continue
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Fatalf("%q platform-unavailable reason is empty", dep.name)
+		}
+		if strings.TrimSpace(dep.installHint) == "" {
+			t.Fatalf("%q platform-unavailable hint is empty", dep.name)
+		}
+		if dep.installHint != reason {
+			t.Fatalf("%q platform-unavailable hint = %q, want platform reason %q", dep.name, dep.installHint, reason)
+		}
+		if _, ok := actual[dep.name]; ok {
+			t.Fatalf("duplicate platform-unavailable finding %q in %v", dep.name, missingDepNames(deps))
+		}
+		actual[dep.name] = dep
+	}
+	if got, want := sortedPlatformFindingNames(actual), sortedExpectedPlatformFindingNames(expected); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("platform-unavailable findings = %v, want %v; all findings = %v", got, want, missingDepNames(deps))
+	}
+	return kept
+}
+
+func platformBackendUnavailableForTest(name string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	switch name {
+	case "tmux", managedDoltLifecycleDep:
+		return true
+	default:
+		return false
+	}
+}
+
+func sortedExpectedPlatformFindingNames(expected map[string]string) []string {
+	names := make([]string, 0, len(expected))
+	for name := range expected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedPlatformFindingNames(actual map[string]missingDep) []string {
+	names := make([]string, 0, len(actual))
+	for name := range actual {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // configureInitRemoteImportsForTests makes finalizeInit's remote-import
@@ -651,7 +732,7 @@ func TestFinalizeInitRecordsProviderOwnershipBeforeReadinessPreflight(t *testing
 		opts initFinalizeOptions
 		want providerScopeIntent
 	}{
-		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, want: providerScopeIntent{Transport: "proxied", Target: "local"}},
+		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, want: providerScopeIntent{Transport: freshScopeTransportDefault, Target: "local"}},
 		{name: "direct external", opts: initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Host: "127.0.0.1", Port: "3306", Database: "new_city", ProjectID: "new-city", Transport: "direct", Target: "external"}}, want: providerScopeIntent{Transport: "direct", Target: "external"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -715,7 +796,7 @@ func TestFinalizeInitRecordsProviderOwnershipBeforeDependencyFailure(t *testing.
 		t.Fatalf("finalizeInit = %d, want dependency failure: %s", code, stderr.String())
 	}
 	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: freshScopeTransportDefault, Target: "local"}) {
 		t.Fatalf("pending ownership after dependency failure = (%+v, %t, %v)", entry, owned, err)
 	}
 }
@@ -740,7 +821,7 @@ func TestCheckHardDependenciesRequiresBd13ForPendingProviderScope(t *testing.T) 
 		return binary + " version", nil
 	}
 	t.Cleanup(func() { initRunVersion = oldVersion })
-	missing := checkHardDependencies(city)
+	missing := assertPlatformFindings(t, checkHardDependencies(city))
 	if len(missing) != 1 || !strings.Contains(missing[0].name, bdFreshProviderMinVersion) {
 		t.Fatalf("pending provider dependencies = %#v, want bd %s floor", missing, bdFreshProviderMinVersion)
 	}
@@ -794,7 +875,7 @@ func TestCheckHardDependenciesRequiresBd13ForPendingProviderRig(t *testing.T) {
 				return binary + " version", nil
 			}
 			t.Cleanup(func() { initRunVersion = oldVersion })
-			missing := checkHardDependencies(city)
+			missing := assertPlatformFindings(t, checkHardDependencies(city))
 			gotFreshFloor := false
 			for _, dep := range missing {
 				gotFreshFloor = gotFreshFloor || strings.Contains(dep.name, bdFreshProviderMinVersion)
@@ -1407,7 +1488,7 @@ func TestCheckHardDependenciesTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 	}
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-	missing := checkHardDependencies(t.TempDir())
+	missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep)
 	if len(missing) != 1 {
 		t.Fatalf("missing deps = %#v, want only dolt", missing)
 	}
@@ -1443,7 +1524,16 @@ func TestCheckHardDependenciesRequiresBoundedRunnerForBdContract(t *testing.T) {
 	}
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-	missing := checkHardDependencies(t.TempDir())
+	missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep)
+	if !posixShellAutomationEnabled() {
+		// The bounded runner exists for the POSIX shell automation. Where that
+		// automation does not run, requiring it would block a city on a tool
+		// nothing will invoke.
+		if len(missing) != 0 {
+			t.Fatalf("missing deps = %#v, want none where the POSIX shell automation is disabled", missing)
+		}
+		return
+	}
 	if len(missing) != 1 {
 		t.Fatalf("missing deps = %#v, want only bounded runner", missing)
 	}
@@ -1479,7 +1569,7 @@ func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
 	}
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-	if missing := checkHardDependencies(t.TempDir()); len(missing) != 0 {
+	if missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep); len(missing) != 0 {
 		t.Fatalf("missing deps = %#v, want python3 fallback to satisfy bounded runner", missing)
 	}
 }
@@ -1529,7 +1619,7 @@ func TestCheckHardDependenciesEnforcesTheBd130Floor(t *testing.T) {
 			}
 			t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-			missing := checkHardDependencies(t.TempDir())
+			missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep)
 			if !tc.refuse {
 				if len(missing) != 0 {
 					t.Fatalf("missing deps = %#v, want bd %s accepted", missing, tc.bd)
@@ -1570,7 +1660,7 @@ func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
 	}
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-	missing := checkHardDependencies(t.TempDir())
+	missing := assertPlatformFindings(t, checkHardDependencies(t.TempDir()), managedDoltLifecycleDep)
 	if len(missing) != 1 {
 		t.Fatalf("missing deps = %#v, want only dolt prerelease rejection", missing)
 	}
@@ -1624,7 +1714,7 @@ prefix = "fe"
 	}
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-	missing := checkHardDependencies(cityDir)
+	missing := assertPlatformFindings(t, checkHardDependencies(cityDir), managedDoltLifecycleDep)
 	if len(missing) != 1 || missing[0].name != "dolt" {
 		t.Fatalf("missing deps = %#v, want only dolt for bd-backed rig", missing)
 	}
@@ -1683,7 +1773,7 @@ path = "frontend"
 	}
 	t.Cleanup(func() { initRunVersion = oldRunVersion })
 
-	missing := checkHardDependencies(cityDir)
+	missing := assertPlatformFindings(t, checkHardDependencies(cityDir), managedDoltLifecycleDep)
 	if len(missing) != 1 || missing[0].name != "dolt" {
 		t.Fatalf("missing deps = %#v, want only dolt for site-bound bd-backed rig", missing)
 	}

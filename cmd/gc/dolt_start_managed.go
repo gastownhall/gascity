@@ -732,7 +732,7 @@ func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
 	if managedDoltTestModeEnabled() {
 		return nil
 	}
-	return &syscall.SysProcAttr{Setpgid: true}
+	return platformManagedDoltSQLServerSysProcAttr()
 }
 
 func managedDoltTestWatchdogEnabled() bool {
@@ -827,11 +827,11 @@ func terminateManagedDoltTestPID(pid int) error {
 	if pid <= 0 {
 		return nil
 	}
-	pgid, err := syscall.Getpgid(pid)
+	pgid, err := platformGetpgid(pid)
 	if err != nil || pgid != pid || pgid <= 1 {
 		return terminateManagedDoltPID("", pid)
 	}
-	if killErr := syscall.Kill(-pgid, syscall.SIGTERM); killErr != nil {
+	if killErr := platformKill(-pgid, syscall.SIGTERM); killErr != nil {
 		return terminateManagedDoltPID("", pid)
 	}
 	deadline := time.Now().Add(managedDoltTestProcessGroupKillWait)
@@ -841,7 +841,7 @@ func terminateManagedDoltTestPID(pid int) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	_ = platformKill(-pgid, syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
 }
@@ -1227,7 +1227,7 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 	// (kill(-pgid, ...)). Without this, dolt children (e.g. auto_gc helpers,
 	// archive workers) outlive their parent and leak across test runs
 	// (gastownhall/gascity#2313 follow-up M3).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = platformManagedDoltSQLServerSysProcAttr()
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
@@ -1288,7 +1288,7 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 	if parentPipe == nil {
 		return nil, nil, fmt.Errorf("open parent pipe fd %d", fd)
 	}
-	syscall.CloseOnExec(fd)
+	platformCloseOnExec(fd)
 	done := make(chan struct{})
 	go func() {
 		var buf [1]byte

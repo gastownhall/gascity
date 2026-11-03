@@ -243,6 +243,8 @@ func exitTestProcess(code int) {
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunControllerTokenChildSpy()
+	maybeRunNativeFakeBd()
 	maybeRunFakeDoltSQLServer()
 	maybeRunControlDispatchSigtermChild()
 	// Infrastructure spawns never probe the host's systemd user manager from

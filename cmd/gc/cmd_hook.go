@@ -21,7 +21,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1328,16 +1330,33 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // the real cure remains ga-4qdfn (fewer round-trips, faster reader).
 var hookWorkQueryTimeout = 150 * time.Second
 
-// shellWorkQueryWithEnv runs a work query command via sh -c and returns
-// stdout. If env is non-nil it is used as the subprocess environment
-// (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
-// the child inherits the parent process environment. Times out after a
-// short bounded interval so startup hooks cannot strand sessions behind a
+// shellWorkQueryWithEnv runs a work query command through the platform's
+// command interpreter (runtime.ShellCommandContext: `sh -c` on Unix,
+// PowerShell on Windows) and returns stdout. A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing, but on Windows a program
+// this process generated runs in gc's embedded interpreter instead
+// (generatedProgram). If env is non-nil it is used as the subprocess
+// environment (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides);
+// otherwise the child inherits the parent process environment. Times out after
+// a short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	if generated := generatedProgram(command); generated != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+		defer cancel()
+		var stderr bytes.Buffer
+		out, err := generated(ctx, dir, execenv.WithUsageMetricsDisabled(workQueryEnvForDir(env, dir)), &stderr)
+		return workQueryResult(ctx, command, out, &stderr, err)
+	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("work query refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return "", fmt.Errorf("running work query %q: %w", command, err)
+	}
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
@@ -1347,7 +1366,14 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	disableProductMetricsForChild(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	out, err := runWorkQueryCommand(cmd)
+	return workQueryResult(ctx, command, out, &stderr, err)
+}
+
+// workQueryResult turns a finished work query's output and error into
+// shellWorkQueryWithEnv's result. ctx is the query's own, bounded by
+// hookWorkQueryTimeout.
+func workQueryResult(ctx context.Context, command string, out []byte, stderr *bytes.Buffer, err error) (string, error) {
 	if ctx.Err() == context.DeadlineExceeded {
 		// Wrap context.DeadlineExceeded so callers can classify the timeout as
 		// transient (dispatch.IsTransientControllerError / errors.Is). Without

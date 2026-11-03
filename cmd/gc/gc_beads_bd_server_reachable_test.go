@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -20,10 +22,6 @@ import (
 // a healthy store.
 func TestServerReachableReflectsDoltExit(t *testing.T) {
 	t.Parallel()
-
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available; skipping shell-function test")
-	}
 
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")

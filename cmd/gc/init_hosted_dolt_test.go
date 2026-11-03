@@ -906,8 +906,8 @@ version = "^1.4"
 		t.Fatalf("persistFreshProviderOwnership: %v", err)
 	}
 	entry, owned, err := providerScopeOwnership(city, city)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
-		t.Fatalf("ownership = (%+v, %t, %v), want pending proxied/local", entry, owned, err)
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: freshScopeTransportDefault, Target: "local"}) {
+		t.Fatalf("ownership = (%+v, %t, %v), want pending %s/local", entry, owned, err, freshScopeTransportDefault)
 	}
 	for _, name := range []string{"metadata.json", "config.yaml"} {
 		if _, err := os.Stat(filepath.Join(city, ".beads", name)); !os.IsNotExist(err) {

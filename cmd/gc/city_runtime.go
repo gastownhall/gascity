@@ -157,6 +157,8 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
+	processScanState
+
 	dops                    drainOps
 	ct                      crashTracker
 	it                      idleTracker
@@ -714,6 +716,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	lastProviderName := cr.cfg.Session.Provider
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		lastProviderName = v
+	}
+	if lastProviderName == "" {
+		lastProviderName = sessionProviderRuntimeDefault
 	}
 
 	cityRoot := cr.cityPath
@@ -2881,6 +2886,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
+	if newProviderName == "" {
+		newProviderName = sessionProviderRuntimeDefault
+	}
 	compositionChanged := sessionTransportCompositionChanged(cr.cfg, nextCfg, newProviderName)
 	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) || compositionChanged {
 		// Build through the transport resolver, not the bare registry, so a city
@@ -3042,6 +3050,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// accepts, so the tick loop never runs a config the API rejected. On
 	// rejection nothing below runs: the order dispatcher is neither staged
 	// nor installed, so the lane keeps the controller's generation.
+	// Scope the provider's process-table scan before the provider is
+	// published; the refresh reads the outgoing config, so it runs first.
+	cr.refreshProcessTableScan(nextSp, cr.cfg, nextCfg)
 	if !cr.publishRuntimeConfig(nextCfg, nextSp, nextDops, result.Revision) {
 		return rejectSuperseded("during runtime publication")
 	}

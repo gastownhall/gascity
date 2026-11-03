@@ -26,7 +26,9 @@ import (
 // shellWorkQueryWithEnv (cmd_hook.go) -- the same subprocess path production
 // hook dispatch already runs work queries through -- instead of a new
 // exec.Command literal, so this composition doesn't add a second
-// independently-spawned subprocess call site next to the existing one.
+// independently-spawned subprocess call site next to the existing one. On
+// Windows the fake, a POSIX script, runs in gc's embedded interpreter with the
+// hook (shellLifecycleHookForTest).
 func runLifecycleHookShellForTest(t *testing.T, command string, bdScript string) string {
 	t.Helper()
 
@@ -38,10 +40,10 @@ func runLifecycleHookShellForTest(t *testing.T, command string, bdScript string)
 	logPath := filepath.Join(tmp, "bd.log")
 
 	env := []string{
-		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"BD_LOG=" + logPath,
 	}
-	if _, err := shellWorkQueryWithEnv(command, tmp, env); err != nil {
+	if _, err := shellLifecycleHookForTest(command, tmp, env); err != nil {
 		t.Fatalf("run lifecycle hook: %v", err)
 	}
 	data, err := os.ReadFile(logPath)

@@ -1,12 +1,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -339,13 +337,9 @@ func removeEmptyDirsInclusive(root string) error {
 
 	// Process deepest first.
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) && !isDirectoryNotEmpty(err) {
+		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) && !fsys.IsDirNotEmpty(err) {
 			return fmt.Errorf("removing empty dir %q: %w", dirs[i], err)
 		}
 	}
 	return nil
-}
-
-func isDirectoryNotEmpty(err error) bool {
-	return errors.Is(err, syscall.ENOTEMPTY)
 }

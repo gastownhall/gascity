@@ -77,12 +77,7 @@ func rigFederationFixture(t *testing.T, bdPayload string) (cityPath, rigPath str
 
 	// The payload is baked in, so the fake bd answers every invocation with the
 	// rig leg's ready set whatever flags the caller passed.
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s' '"+bdPayload+"'\n"), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installFakeBdOnPath(t, "#!/bin/sh\nprintf '%s' '"+bdPayload+"'\n", map[string]nativeFakeBdReply{"": {Stdout: bdPayload}})
 	t.Setenv("GC_BEADS", "bd")
 
 	return cityPath, rigPath, beads.NewMemStore()

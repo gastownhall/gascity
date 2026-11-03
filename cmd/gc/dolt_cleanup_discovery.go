@@ -810,5 +810,5 @@ func readWithTimeout(path string) ([]byte, error) {
 // inject a no-op for tests. Errors are returned verbatim; ESRCH (no such
 // process) is the caller's responsibility to interpret as "already gone".
 func killProcess(pid int, sig syscall.Signal) error {
-	return syscall.Kill(pid, sig)
+	return platformKill(pid, sig)
 }

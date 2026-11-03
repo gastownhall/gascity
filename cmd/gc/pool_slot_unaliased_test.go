@@ -44,7 +44,7 @@ func transientSlotPoolConfig() *config.City {
 			Dir:               "rig",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(3),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 }
@@ -260,7 +260,7 @@ func TestCanonicalSingletonPoolKeepsStableAlias(t *testing.T) {
 			Dir:               "cashmaster",
 			StartCommand:      "true",
 			MaxActiveSessions: intPtr(1),
-			ScaleCheck:        "printf 1",
+			ScaleCheck:        printCountCommand(1),
 		}},
 	}
 
