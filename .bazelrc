@@ -117,8 +117,9 @@ build:fork-cache --nobuild_event_binary_file_path_conversion
 build:fork-cache --remote_max_connections=4
 # zstd transfers (REAPI compressed-blobs) with rbe-cache, which advertises
 # zstd (infra anon.json: capabilities remote_cache_compression). Without it
-# contributors read identity: on 2026-11-03 every rbe-cache read was identity,
-# about 0.5 TB that day, mostly Go archives, which zstd-3 shrinks to 0.16.
+# contributors read identity: on 2026-11-03 all contributors' reads were
+# identity, about 0.5 TB that day, mostly Go archives, which zstd-3 shrinks
+# to 0.16.
 # Transport only: action keys are unchanged (bazel_key_parity_test.go). If
 # rbe-cache stops advertising zstd, Bazel refuses the remote and the two
 # fallback flags above make the build local, as when the endpoint is closed

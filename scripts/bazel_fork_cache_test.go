@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,11 +65,17 @@ func runWorkflowStepScript(t *testing.T, dir, script string, env map[string]stri
 }
 
 // bazelCacheZstdProbeStub stands in for cache-zstd-probe.sh: it counts its
-// runs (no lane step may run it) and passes only for BAZEL_TEST_PROBE=zstd
-// (rbe-cache advertising zstd). TestCacheProbes runs the real probe.
+// runs, says why on stderr as the real probe does, and passes only for
+// BAZEL_TEST_PROBE=zstd (rbe-cache advertising zstd). TestCacheProbes runs
+// the real probe.
 const bazelCacheZstdProbeStub = `#!/usr/bin/env bash
 echo probe >>probe.log
-[ "${BAZEL_TEST_PROBE:-}" = zstd ]
+if [ "${BAZEL_TEST_PROBE:-}" = zstd ]; then
+	echo "rbe-cache zstd probe: stub advertises zstd; fork-cache can use it" >&2
+	exit 0
+fi
+echo "rbe-cache zstd probe: stub not advertised; fork-cache builds run locally" >&2
+exit 1
 `
 
 // bazelCacheRRCProbeStub stands in for cache-rrc-probe.sh: it counts its
@@ -370,13 +377,27 @@ func TestBazelForkCacheConfig(t *testing.T) {
 
 // TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
 // appears in one place, .bazelrc's fork-cache line. No other .bazelrc config
-// and no workflow or action may set it, since every other remote (rbe-west's
-// trusted schedulers on :443, rbe-fork on :8444) advertises no compressor
-// and Bazel then refuses the remote.
+// and no workflow, action, git hook (the pre-push suite is
+// .githooks/lib/push-suite.sh), rbe tool or make target may set it, since
+// every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
+// :8444) advertises no compressor and Bazel then refuses the remote.
 func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
 	root := repoRoot(t)
-	files := []string{".bazelrc"}
-	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/action.yml", ".github/actions/*/action.yaml"} {
+	files := []string{".bazelrc", "Makefile"}
+	for _, dir := range []string{".githooks", "tools/rbe"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, err := filepath.Rel(root, path)
+			files = append(files, rel)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/*"} {
 		m, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil {
 			t.Fatal(err)

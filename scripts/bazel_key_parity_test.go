@@ -312,7 +312,7 @@ func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
 	}
 	fork := bazelRCLocalLaneStep(t, bazelForkRRCReadStep)
 	for _, probe := range []string{"", "ok"} {
-		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_RRC_PROBE": probe})
+		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_PROBE": "zstd", "BAZEL_TEST_RRC_PROBE": probe})
 		for _, err := range checkBazelRCLocalLines(run.lines) {
 			t.Errorf("%q, rrc probe %q: %v", fork.Name, probe, err)
 		}
