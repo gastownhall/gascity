@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
@@ -2481,7 +2482,7 @@ func TestConvoyFieldsRoundTrip(t *testing.T) {
 		Target:   "integration/gc-1",
 	}
 
-	if err := setConvoyFields(store, "gc-1", fields); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", fields); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2501,7 +2502,7 @@ func TestConvoyFieldsPartial(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
 
 	fields := ConvoyFields{Owner: "mayor"}
-	if err := setConvoyFields(store, "gc-1", fields); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", fields); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2520,7 +2521,7 @@ func TestConvoyFieldsEmpty(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
 
 	// Set empty fields — should be a no-op.
-	if err := setConvoyFields(store, "gc-1", ConvoyFields{}); err != nil {
+	if err := setConvoyFields(beadstest.Work(store), "gc-1", ConvoyFields{}); err != nil {
 		t.Fatalf("setConvoyFields: %v", err)
 	}
 
@@ -2533,7 +2534,7 @@ func TestConvoyFieldsEmpty(t *testing.T) {
 
 func TestConvoyFieldsNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	err := setConvoyFields(store, "gc-999", ConvoyFields{Owner: "mayor"})
+	err := setConvoyFields(beadstest.Work(store), "gc-999", ConvoyFields{Owner: "mayor"})
 	if err == nil {
 		t.Error("setConvoyFields on nonexistent bead should return error")
 	}

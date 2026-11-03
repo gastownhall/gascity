@@ -31,6 +31,12 @@ func Orders(s beads.Store) beads.OrdersStore { return beads.OrdersStore{Store: s
 // Nudges is a nudges-class handle over s, for a test.
 func Nudges(s beads.Store) beads.NudgesStore { return beads.NudgesStore{Store: s} }
 
+// GraphMolecule is a graph-class molecule target over s, for a test.
+func GraphMolecule(s beads.Store) beads.MoleculeTarget { return beads.GraphMolecule(Graph(s)) }
+
+// WorkMolecule is a work-class molecule target over s, for a test.
+func WorkMolecule(s beads.Store) beads.MoleculeTarget { return beads.WorkMolecule(Work(s)) }
+
 // ClassStores is every class's handle, for a test that hands a fixture city
 // to code taking several classes.
 type ClassStores struct {

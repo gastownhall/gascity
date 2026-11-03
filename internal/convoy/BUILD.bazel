@@ -16,7 +16,6 @@ go_library(
         "//internal/config",
         "//internal/coordclass",
         "//internal/events",
-        "//internal/storeref",
     ],
 )
 
@@ -32,6 +31,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/events",
         "//internal/testenv",

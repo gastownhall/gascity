@@ -938,7 +938,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		epoch, _ = strconv.Atoi(raw)
 	}
 
-	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	result, err := molecule.Attach(ctx, beads.GraphMolecule(beads.GraphStore{Store: store}), recipe, control.ID, molecule.AttachOptions{
 		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 		ExpectedEpoch:  epoch,
 	})

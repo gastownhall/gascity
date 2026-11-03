@@ -312,6 +312,16 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 	return workStore
 }
 
+// moleculeTargetOf is chosen, the store moleculeClassStore picked for recipe,
+// as the molecule target of recipe's class: graph for a graph-class recipe,
+// work otherwise (molecule.RecipeClass). A nil choice is an absent target.
+func moleculeTargetOf(recipe *formula.Recipe, chosen beads.Store) beads.MoleculeTarget {
+	if recipeCoordClass(recipe) == coordclass.ClassGraph {
+		return beads.GraphMolecule(beads.GraphStore{Store: chosen})
+	}
+	return beads.WorkMolecule(beads.WorkStore{Store: chosen})
+}
+
 // cookOnClassRouted compiles a formula and instantiates it in the store the
 // compiled recipe's class demands; molecule.Cook picks its store before compiling.
 //
@@ -324,8 +334,8 @@ func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, f
 	if opts.ParentID == "" {
 		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
 	}
-	result, _, err := molecule.CookChoosingStore(ctx, formulaName, searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
-		return moleculeClassStore(recipe, workStore, graphStore)
+	result, _, err := molecule.CookChoosingStore(ctx, formulaName, searchPaths, opts, func(recipe *formula.Recipe) beads.MoleculeTarget {
+		return moleculeTargetOf(recipe, moleculeClassStore(recipe, workStore, graphStore))
 	})
 	return result, err
 }

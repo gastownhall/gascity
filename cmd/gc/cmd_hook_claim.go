@@ -1332,7 +1332,8 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return false
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
-	stop, err := molecule.WorkflowStopReason(store, candidate)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
 		return false
@@ -2195,7 +2196,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	// same root. Siblings share the bead's root, so one ancestry read, made only
 	// once there is a sibling to pin, answers for all of them; a failed read
 	// fails open like the gate itself.
-	var workflowStore beads.Store
+	var workflowStore beads.MoleculeTarget
 	var ancestorStop molecule.WorkflowStop
 	ancestorRead := false
 	stoppedSibling := func(sibling beads.Bead) bool {
@@ -2204,7 +2205,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		}
 		if !ancestorRead {
 			ancestorRead = true
-			workflowStore = ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")
+			// ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")})
 			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
 				ancestorStop = stop
 			}
@@ -2308,7 +2310,7 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 // wait on). A member that is still unassigned, or still assigned to one of
 // identityCandidates, blocks. A root with no input convoy, or a convoy with
 // no resolvable members, is never "done".
-func workflowInputDone(store beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+func workflowInputDone(store beads.WorkStore, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
 }
 
@@ -2332,7 +2334,7 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // convoy and its members from work. On a single-store city both are the same
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
-func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 	root := candidate
 	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
 		rootID := workflowRootIDForInputCheck(candidate)
@@ -2349,7 +2351,7 @@ func workflowInputDoneAcross(graph, work beads.Store, candidate beads.Bead, iden
 	if convoyID == "" {
 		return root.ID, false, nil
 	}
-	members, err := convoy.Members(work, convoyID, true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: work}, convoyID, true)
 	if err != nil {
 		return root.ID, false, fmt.Errorf("listing input convoy %s members: %w", convoyID, err)
 	}
@@ -2439,7 +2441,7 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
 func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDone(hookClaimBdStoreContext(ctx, dir, env, ""), candidate, identityCandidates)
+	return workflowInputDone(beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates)
 }
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {

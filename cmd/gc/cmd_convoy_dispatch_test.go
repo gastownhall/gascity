@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -2965,7 +2966,7 @@ func TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource(t *testing.T) {
 	if len(roots) != 1 {
 		t.Fatalf("workflow roots = %d, want 1: %#v", len(roots), roots)
 	}
-	if _, err := sourceworkflow.CloseWorkflowSubtree(deps.GraphStore, roots[0].ID); err != nil {
+	if _, err := sourceworkflow.CloseWorkflowSubtree(beadstest.GraphMolecule(deps.GraphStore), roots[0].ID); err != nil {
 		t.Fatalf("CloseWorkflowSubtree(%s): %v", roots[0].ID, err)
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -401,7 +402,7 @@ func TestOnFormulaGraphV2SourceSlungPlainAgainIsRecoveredWhenDetached(t *testing
 	if len(roots) != 1 {
 		t.Fatalf("workflow roots = %d, want 1: %#v", len(roots), roots)
 	}
-	if _, err := sourceworkflow.CloseWorkflowSubtree(store, roots[0].ID); err != nil {
+	if _, err := sourceworkflow.CloseWorkflowSubtree(beadstest.GraphMolecule(store), roots[0].ID); err != nil {
 		t.Fatalf("close workflow %s: %v", roots[0].ID, err)
 	}
 

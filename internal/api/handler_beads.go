@@ -365,7 +365,7 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 
 	if root.Type == "convoy" {
 		membership = beads.MembershipRootIDParentClosureAndConvoy
-		members, err := convoycore.Members(store, root.ID, true)
+		members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, root.ID, true)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
 		}

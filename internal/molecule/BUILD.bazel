@@ -53,6 +53,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/formula",
         "//internal/formulatest",
         "//internal/fsys",
