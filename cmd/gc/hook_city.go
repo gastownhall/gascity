@@ -77,7 +77,8 @@ func (h *hookCity) recorder() events.Recorder {
 // session work-dir lookup, the current-claim stamp and its clear, and the
 // work_started write, removal and read) answer through the invocation's one
 // session front door, whose claim store refs are read off its loaded config, whose
-// workflow input absence proof reads every store of its city, and whose events
+// workflow input absence proof reads the stores of its city that could hold the
+// input (proveInputAbsentAcrossCity), and whose events
 // and continuation nudge reach the invocation's city without resolving it again. Every other
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
