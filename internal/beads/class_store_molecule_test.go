@@ -43,3 +43,27 @@ func TestMoleculeTarget(t *testing.T) {
 		t.Error("a graph target over a zero handle forgot its class")
 	}
 }
+
+// TestMoleculeTargetForwardsGuardedBatchDiscovery: GuardedBatcherFor finds a
+// store's guarded batcher through a molecule target, as it does through a
+// class handle.
+func TestMoleculeTargetForwardsGuardedBatchDiscovery(t *testing.T) {
+	mem := NewMemStore()
+	want, ok := GuardedBatcherFor(mem)
+	if !ok {
+		t.Fatal("fixture: MemStore has no guarded batcher")
+	}
+	for name, target := range map[string]MoleculeTarget{
+		"a graph target": GraphMolecule(GraphStore{mem}),
+		"a work target":  WorkMolecule(WorkStore{mem}),
+	} {
+		got, ok := GuardedBatcherFor(target)
+		if !ok {
+			t.Errorf("%s: GuardedBatcherFor found no guarded batcher", name)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s: GuardedBatcherFor = %#v, want the store's %#v", name, got, want)
+		}
+	}
+}

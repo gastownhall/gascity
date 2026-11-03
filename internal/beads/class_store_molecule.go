@@ -39,3 +39,11 @@ func (t MoleculeTarget) ConditionalWritesResolveTarget() Store { return t.Store 
 func (t MoleculeTarget) unwrapClassLayer() Store { return t.Store }
 
 var _ ConditionalWritesResolveTargeter = MoleculeTarget{}
+
+var _ GuardedBatcherHandleProvider = MoleculeTarget{}
+
+// GuardedBatcherHandle forwards guarded-batch discovery to the wrapped store,
+// as the class handles do (class_store_guarded_batch.go).
+func (t MoleculeTarget) GuardedBatcherHandle() (GuardedBatcher, bool) {
+	return GuardedBatcherFor(t.Store)
+}
