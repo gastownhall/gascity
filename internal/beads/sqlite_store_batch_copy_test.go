@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -122,5 +123,72 @@ func TestSQLiteDepBatchesAgreeWithTheirSingleEdgeForms(t *testing.T) {
 	}
 	if again, _ := s.DepMetadataBatch([]string{"a"}); len(again) != 0 {
 		t.Errorf("re-adding an edge with no payload left %v: it must clear the sidecar as DepAddWithMetadata does", again)
+	}
+}
+
+// TestSQLiteDepBatchesAgreeAcrossChunkBoundaries (review R): with more anchors
+// than one IN list binds (sqliteBatchQueryChunk), DepListBatch and
+// DepMetadataBatch still answer every anchor, edge and payload DepList and
+// DepMetadata answer one at a time.
+func TestSQLiteDepBatchesAgreeAcrossChunkBoundaries(t *testing.T) {
+	const anchors = 2*sqliteBatchQueryChunk + 201
+	s := openBatchTestSQLite(t)
+	var rows []Bead
+	var ids []string
+	for i := 0; i < anchors; i++ {
+		id := fmt.Sprintf("mc-%04d", i)
+		ids = append(ids, id)
+		rows = append(rows, Bead{ID: id, Title: id})
+	}
+	if err := s.CreateWithForeignIDBatch(rows); err != nil {
+		t.Fatal(err)
+	}
+	var edges []DepWithPayload
+	for i := 1; i < anchors; i++ {
+		e := DepWithPayload{Dep: Dep{IssueID: ids[i], DependsOnID: ids[i-1], Type: "blocks"}}
+		if i%3 == 0 {
+			e.Type, e.Payload = "waits-for", fmt.Sprintf(`{"n":%d}`, i)
+		}
+		edges = append(edges, e)
+	}
+	if err := s.DepAddBatch(edges); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := s.DepListBatch(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads, err := s.DepMetadataBatch(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != anchors {
+		t.Fatalf("DepListBatch answered %d anchors, want all %d", len(listed), anchors)
+	}
+	carrying := 0
+	for _, id := range ids {
+		want, err := s.DepList(id, "down")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(listed[id]) != len(want) {
+			t.Fatalf("DepListBatch[%s] = %v, want DepList's %v", id, listed[id], want)
+		}
+		for _, d := range want {
+			payload, carried, err := s.DepMetadata(id, d.DependsOnID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := payloads[DepPair{IssueID: id, DependsOnID: d.DependsOnID}]
+			if ok != carried || got != payload {
+				t.Fatalf("DepMetadataBatch %s -> %s = (%q, %v), want (%q, %v)", id, d.DependsOnID, got, ok, payload, carried)
+			}
+			if carried {
+				carrying++
+			}
+		}
+	}
+	if carrying != len(payloads) || carrying != (anchors-1)/3 {
+		t.Fatalf("DepMetadataBatch answered %d payloads, the per-edge reads %d, want %d", len(payloads), carrying, (anchors-1)/3)
 	}
 }

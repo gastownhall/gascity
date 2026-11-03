@@ -3,6 +3,7 @@
 package beads
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -62,5 +63,65 @@ func TestNativeDoltStoreDepMetadataBatchAgreesWithDepMetadata(t *testing.T) {
 	}
 	if carrying != 1 || len(got) != 1 {
 		t.Fatalf("DepMetadataBatch = %v, want exactly the one carrying edge", got)
+	}
+}
+
+// TestNativeDoltStoreDepBatchesAgreeAcrossChunkBoundaries (review S): with
+// more anchors than one EdgeReader read carries (nativeDepListBatchChunk),
+// DepListBatch and DepMetadataBatch still answer every anchor, edge and
+// payload DepList and DepMetadata answer one at a time.
+func TestNativeDoltStoreDepBatchesAgreeAcrossChunkBoundaries(t *testing.T) {
+	const anchors = 2*nativeDepListBatchChunk + 5
+	store, db := openServerNativeStoreForTest(t)
+	ids := make([]string, 0, anchors)
+	for i := 0; i < anchors; i++ {
+		b, err := store.Create(Bead{Title: fmt.Sprintf("anchor %d", i), Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, b.ID)
+	}
+	want := 0
+	for i := 1; i < anchors; i++ {
+		if err := store.DepAdd(ids[i], ids[i-1], "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if i%3 != 0 {
+			continue
+		}
+		if _, err := db.Exec("UPDATE dependencies SET metadata = ? WHERE issue_id = ?", fmt.Sprintf(`{"n":%d}`, i), ids[i]); err != nil {
+			t.Fatal(err)
+		}
+		want++
+	}
+	listed, err := store.DepListBatch(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads, err := store.DepMetadataBatch(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != anchors || len(payloads) != want {
+		t.Fatalf("DepListBatch answered %d anchors (want %d), DepMetadataBatch %d payloads (want %d)", len(listed), anchors, len(payloads), want)
+	}
+	for _, id := range ids {
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(listed[id]) != len(deps) {
+			t.Fatalf("DepListBatch[%s] = %v, want DepList's %v", id, listed[id], deps)
+		}
+		for _, d := range deps {
+			payload, carried, err := store.DepMetadata(id, d.DependsOnID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := payloads[DepPair{IssueID: id, DependsOnID: d.DependsOnID}]
+			if ok != carried || got != payload {
+				t.Fatalf("DepMetadataBatch %s -> %s = (%q, %v), want (%q, %v)", id, d.DependsOnID, got, ok, payload, carried)
+			}
+		}
 	}
 }

@@ -1677,6 +1677,7 @@ go_test(
         "infra_class_recover_topology_test.go",
         "infra_class_relower_test.go",
         "infra_copy_engine_test.go",
+        "infra_copy_engine_review_test.go",
         "infra_copy_manifest_test.go",
         "infra_engine_bench_test.go",
         "infra_engine_fixture_test.go",
