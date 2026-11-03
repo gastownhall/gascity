@@ -66,6 +66,9 @@ func stopNeeds(w *World, it intent) needs {
 		n.Content = w.idleView().fired[it.Key]
 		n.Activity = !n.Content
 	}
+	if it.Reason == decideFreshCycle {
+		n.Content = true
+	}
 	return n
 }
 

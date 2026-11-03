@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -252,5 +253,60 @@ func TestPinnedRuntimeMarkerHoldsNoCycle(t *testing.T) {
 	r = &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
 	if it, ok := armRestartRequested(r); !ok || it.Reason != decideFreshCycle {
 		t.Fatalf("armRestartRequested = (%q, %q) %v, want the fresh cycle once the marker is gone", it.Kind, it.Reason, ok)
+	}
+}
+
+// freshCycleIdleLeaf scripts the runtime's point-in-time turn boundary.
+type freshCycleIdleLeaf struct {
+	runtime.FullFake
+	idle bool
+	err  error
+}
+
+func (l *freshCycleIdleLeaf) SnapshotIdle(string) (bool, error) { return l.idle, l.err }
+
+// The effect must recheck activity after allocation: a nudge may have started
+// another turn while the fresh cycle was pending.
+func TestFreshCycleEffectWaitsForIdle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		idle bool
+		err  error
+	}{
+		{name: "busy"},
+		{name: "indeterminate", err: runtime.ErrIdleIndeterminate},
+		{name: "unavailable", err: runtime.ErrRuntimeUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, it, store, leaf := admittedBeginOn(t, []string{
+				"wake_mode", "fresh", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true",
+				session.CurrentBeadIDKey, "gw-old", "session_key", "conversation-A",
+			}, func(e *selectionEntry) {
+				e.Desired = desireWake
+				e.AssignedWork = &assignedWorkView{BeadID: "gw-new", RequiresFreshCycle: true}
+			})
+			if it.Reason != decideFreshCycle {
+				t.Fatalf("decided %+v, want a fresh cycle", it)
+			}
+			boundary := &freshCycleIdleLeaf{FullFake: runtime.FullFake{Fake: leaf.Fake}, idle: tc.idle, err: tc.err}
+			p.Runtime = runtime.NewFakeProfile(runtime.ProfileTmux, boundary)
+			s := runBegin(p, it)
+			got, err := store.Get(it.Key.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Outcome != settledRefused || stops(leaf) != 0 || got.Metadata[session.CurrentBeadIDKey] != "gw-old" || got.Metadata["session_key"] != "conversation-A" || got.Metadata["continuation_reset_pending"] == "true" {
+				t.Fatalf("unsafe cycle: settlement=%+v stops=%d metadata=%v", s, stops(leaf), got.Metadata)
+			}
+			boundary.idle, boundary.err = true, nil
+			s = runBegin(p, it)
+			got, err = store.Get(it.Key.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.CurrentBeadIDKey] != "gw-new" || got.Metadata["continuation_reset_pending"] != "true" {
+				t.Fatalf("idle cycle failed: settlement=%+v stops=%d metadata=%v", s, stops(leaf), got.Metadata)
+			}
+		})
 	}
 }

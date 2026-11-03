@@ -5014,6 +5014,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
 						continue
 					}
+					// The old anchor closing does not end this runtime's turn:
+					// a nudge may have started more work before this tick. Keep
+					// the divergence pending until a fresh idle observation.
+					leaf, _, known := runtime.ResolveBackend(sp, name)
+					if !known || leaf == nil {
+						continue
+					}
+					if snap, ok := leaf.(runtime.IdleSnapshotProvider); ok {
+						if content := boundedContent(ctx, snap, name); content != contentIdle {
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerBeadReassignCycle, TraceReasonFreshCycle, TraceOutcomeDeferredBusy, target.tp.TemplateName, name, traceRecordPayload{
+									"idle_observation": content,
+								})
+							}
+							continue
+						}
+					}
 					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
 						if fold != nil {
 							tick.apply(target.info.ID, fold)
