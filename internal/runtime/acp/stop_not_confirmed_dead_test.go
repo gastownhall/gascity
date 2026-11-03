@@ -46,7 +46,7 @@ func TestHandleControlConnStopRepliesNotConfirmedDead(t *testing.T) {
 	t.Cleanup(func() { close(done) })
 	client, owner := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
-	go handleControlConn(owner, &exec.Cmd{}, done, 10*time.Millisecond, controlCommands{})
+	go handleControlConn(owner, &exec.Cmd{}, 0, done, 10*time.Millisecond, controlCommands{})
 
 	if _, err := client.Write([]byte("stop\n")); err != nil {
 		t.Fatalf("write stop: %v", err)
