@@ -594,8 +594,9 @@ have left the server without the database. It records `live_gate_steps` (the
 rewrites that ran), `live_gate_failed_step`, `live_gate_failure`,
 `live_gate_probe_failure` (the server's answer to the served-HEAD probe),
 `live_gate_data_dir_entry` with its `_before` and `_after` states, and
-`live_gate_pre_compaction_head`. Compact stops processing that database and
-leaves no pending-GC marker for it. To recover:
+`live_gate_pre_compaction_head`. Compact leaves no pending-GC marker for that
+database and ends the run with exit 1 without touching another database; its
+last line lists the selected databases it did not reach. To recover:
 
 1. Restore the database, from the safety backup or by restarting the server
    if the entry is still on disk, until `<data_dir>/<database>/.dolt` exists.

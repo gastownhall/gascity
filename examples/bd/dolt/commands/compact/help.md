@@ -201,7 +201,12 @@ gone after, or the probe fails, compact:
 - emits the `dolt.compact.quarantine` event and mails the compactor alert
   recipient, as for any quarantine;
 - writes no pending-GC marker for that database; and
-- exits nonzero.
+- stops the run with exit 1. It touches no other database, and its last line
+  names the step that failed and the selected databases it never reached
+  (`none` when that database was the last one).
+
+Any other failure on a database that is still live is counted as before, and
+the run goes on to the next database.
 
 Compact never clears this marker on its own. Restore the database first; see
 "Compact Quarantine Reasons" in

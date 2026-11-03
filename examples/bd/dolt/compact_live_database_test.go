@@ -1,7 +1,9 @@
 package dolt_test
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,11 +21,11 @@ func compactBeadsPendingGCMarkerPath(fixture compactScriptFixture) string {
 	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 }
 
-// setCompactLiveFault arms a one-shot fake-dolt fault that fires after the
-// next rewrite of kind ("gc" or "flatten") on db finishes.
-func setCompactLiveFault(t *testing.T, fixture compactScriptFixture, kind, db, action string) {
+// setCompactBeadsLiveFault arms a one-shot fake-dolt fault that fires after
+// the next rewrite of kind ("gc" or "flatten") on beads finishes.
+func setCompactBeadsLiveFault(t *testing.T, fixture compactScriptFixture, kind, action string) {
 	t.Helper()
-	path := filepath.Join(fixture.liveFaultDir, "after-"+kind+"-"+db)
+	path := filepath.Join(fixture.liveFaultDir, "after-"+kind+"-beads")
 	if err := os.WriteFile(path, []byte(action+"\n"), 0o644); err != nil {
 		t.Fatalf("write live fault %s: %v", path, err)
 	}
@@ -57,7 +59,7 @@ func assertCompactBeadsLiveGateMarker(t *testing.T, fixture compactScriptFixture
 
 func TestCompactScriptAbortsWhenDatabaseLeavesDataDirAfterGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	setCompactLiveFault(t, fixture, "gc", "beads", "vanish")
+	setCompactBeadsLiveFault(t, fixture, "gc", "vanish")
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
@@ -119,7 +121,7 @@ func TestCompactScriptLiveGateQuarantineRefusalShowsEvidenceAndRestoreGuidance(t
 
 func TestCompactScriptLiveGateQuarantinesWhenFlattenRemovesDataDir(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	setCompactLiveFault(t, fixture, "flatten", "beads", "vanish")
+	setCompactBeadsLiveFault(t, fixture, "flatten", "vanish")
 
 	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
@@ -138,11 +140,11 @@ func TestCompactScriptLiveGateQuarantinesWhenFlattenRemovesDataDir(t *testing.T)
 	}
 }
 
-// setCompactLiveProbeResponse makes the fake dolt answer every live probe on db
-// with response instead of "<db>:<head>".
-func setCompactLiveProbeResponse(t *testing.T, fixture compactScriptFixture, db, response string) {
+// setCompactBeadsLiveProbeResponse makes the fake dolt answer every live probe
+// on beads with response instead of "beads:<head>".
+func setCompactBeadsLiveProbeResponse(t *testing.T, fixture compactScriptFixture, response string) {
 	t.Helper()
-	path := filepath.Join(fixture.liveFaultDir, "response-"+db)
+	path := filepath.Join(fixture.liveFaultDir, "response-beads")
 	if err := os.WriteFile(path, []byte(response+"\n"), 0o644); err != nil {
 		t.Fatalf("write live probe response %s: %v", path, err)
 	}
@@ -162,7 +164,7 @@ func TestCompactScriptLiveGateQuarantinesWhenRewrittenDatabaseIsNotServed(t *tes
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
-			setCompactLiveFault(t, fixture, tc.faultKind, "beads", "unserved")
+			setCompactBeadsLiveFault(t, fixture, tc.faultKind, "unserved")
 
 			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 			if err == nil {
@@ -201,7 +203,7 @@ func TestCompactScriptLiveGateValidatesServedDatabaseAndHead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
-			setCompactLiveProbeResponse(t, fixture, "beads", tc.response)
+			setCompactBeadsLiveProbeResponse(t, fixture, tc.response)
 
 			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 			if err == nil {
@@ -216,7 +218,7 @@ func TestCompactScriptLiveGateValidatesServedDatabaseAndHead(t *testing.T) {
 
 	t.Run("database name case and a new HEAD are accepted", func(t *testing.T) {
 		fixture := newCompactScriptFixture(t)
-		setCompactLiveProbeResponse(t, fixture, "beads", "BEADS:Compact0Commit9")
+		setCompactBeadsLiveProbeResponse(t, fixture, "BEADS:Compact0Commit9")
 
 		out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 		if err != nil {
@@ -229,4 +231,51 @@ func TestCompactScriptLiveGateValidatesServedDatabaseAndHead(t *testing.T) {
 			t.Fatalf("live probes after flatten and full GC = %d, want 2: %q", len(probes), probes)
 		}
 	})
+}
+
+func TestCompactScriptLiveGateFailureAbortsTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		env       []string
+		unreached string
+	}{
+		{name: "every database selected", unreached: "yak,zed"},
+		{name: "only-dbs filter", env: []string{"GC_DOLT_COMPACT_ONLY_DBS=beads,zed"}, unreached: "zed"},
+		{name: "no selected database left", env: []string{"GC_DOLT_COMPACT_ONLY_DBS=beads"}, unreached: "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			for _, db := range []string{"yak", "zed"} {
+				if err := os.MkdirAll(filepath.Join(fixture.dataDir, db, ".dolt"), 0o755); err != nil {
+					t.Fatalf("mkdir %s data dir: %v", db, err)
+				}
+			}
+			setCompactBeadsLiveFault(t, fixture, "gc", "vanish")
+
+			out, err := fixture.run(t, "success", append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.env...)...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("compact exit = %v, want exit status 1:\n%s", err, out)
+			}
+			want := "compact: db=beads live database gate failed after post-flatten full GC — aborting the run; selected databases not reached: " + tc.unreached
+			if !strings.Contains(out, want) {
+				t.Fatalf("compact output missing %q:\n%s", want, out)
+			}
+			if strings.Contains(out, "database(s) failed") {
+				t.Fatalf("aborted run still reported the ordinary failure tally:\n%s", out)
+			}
+
+			// The failed gate's own probe is the last statement the run issues.
+			lines := strings.Split(strings.TrimSpace(readCompactDoltLog(t, fixture)), "\n")
+			last := lines[len(lines)-1]
+			if last != "db=beads query=SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))" {
+				t.Fatalf("compact issued statements after the failed gate; last statement %q\nlog:\n%s", last, strings.Join(lines, "\n"))
+			}
+			for _, db := range []string{"yak", "zed"} {
+				if queries := compactDoltLogQueries(strings.Join(lines, "\n"), db, ""); len(queries) != 0 {
+					t.Fatalf("compact queried %s after the failed gate: %q", db, queries)
+				}
+			}
+		})
+	}
 }
