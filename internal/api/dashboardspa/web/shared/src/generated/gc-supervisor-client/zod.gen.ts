@@ -11640,7 +11640,8 @@ export const zGetV0CityByCityNameStatusPath = z.object({
 export const zGetV0CityByCityNameStatusQuery = z.object({
     index: z.string().optional(),
     wait: z.string().optional(),
-    lite: z.boolean().optional()
+    lite: z.boolean().optional(),
+    fresh: z.boolean().optional()
 });
 
 /**

@@ -21751,6 +21751,10 @@ export type GetV0CityByCityNameStatusData = {
          * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
          */
         lite?: boolean;
+        /**
+         * When true, build the body for this request instead of answering from the response cache: no time-bucket or TTL-floor reuse, and never a saved body served while it rebuilds, so X-GC-Cache-Refresh is never rebuilding. The body is not saved for other readers. Default false keeps stale-while-revalidate for pollers.
+         */
+        fresh?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };

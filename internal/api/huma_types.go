@@ -182,7 +182,8 @@ type ListOutput[T any] struct {
 // ListOutput.
 //
 // One handler widens that meaning: /status may serve a stale-while-revalidate
-// body (ra-4u2eqc, handler_status.go), in which case CacheAgeS reports the
+// body (ra-4u2eqc, handler_status.go), never on a ?fresh=true read, in which
+// case CacheAgeS reports the
 // GREATER of the bead cache's age and the age of the cached response entry
 // itself, and the refresh state is rebuilding when the entry's age is the
 // greater. Reporting only the cache's age there would let a recently lagging

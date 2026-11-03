@@ -67,6 +67,12 @@ type StatusInput struct {
 	// session-count detail, and the per-rig work-count fan-out. The
 	// default/full body that `gc status` renders is unchanged (gascity#3186).
 	Lite bool `query:"lite" required:"false" doc:"When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls."`
+	// Fresh asks for a body built for this request (ga-v1vyh8.17). The
+	// response cache serves pollers; a one-shot read such as `gc status`
+	// sets Fresh so it shows the city as it is now, not as the previous
+	// read left the saved body. Same name and contract as orders/check's
+	// ?fresh=true.
+	Fresh bool `query:"fresh" required:"false" doc:"When true, build the body for this request instead of answering from the response cache: no time-bucket or TTL-floor reuse, and never a saved body served while it rebuilds, so X-GC-Cache-Refresh is never rebuilding. The body is not saved for other readers. Default false keeps stale-while-revalidate for pollers."`
 }
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
@@ -104,15 +110,17 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// built body. The ?lite variant caches under its own key (the shared
 	// cache map keys on the string key, so the suffix is enough).
 	//
-	// Strict-freshness callers (blocking ?index=&wait=) bypass this cache so
-	// the body they receive reflects the event they waited for, never a body
-	// built before it.
+	// Strict-freshness callers neither read nor write an entry: a blocking
+	// read (?index=&wait=) so the body reflects the event it waited for, a
+	// ?fresh=true read so it reflects the city now. Neither is ever served a
+	// body built before the request, and neither saves one for pollers.
+	useCache := !blocking && !input.Fresh
 	cacheKey := "status"
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
 	bucket := responseCacheTimeBucket(time.Now())
-	if !blocking {
+	if useCache {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
 			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
@@ -129,7 +137,9 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// that used to 503 the legacy runs/census endpoint at its internal
 		// budget. Rather than let a request pay that cost inline, serve the
 		// stale body immediately and refresh in the background so the next
-		// poll gets a fresh body. A genuine cold cache (nothing ever built)
+		// poll gets a fresh body. SWR exists for pollers, whose next poll
+		// benefits from that refresh; one-shot readers such as `gc status`
+		// send ?fresh=true instead. A genuine cold cache (nothing ever built)
 		// has nothing to serve here and falls through to the synchronous
 		// build below, same as before this change.
 		//
@@ -158,7 +168,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
-	if !blocking {
+	if useCache {
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 

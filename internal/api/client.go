@@ -1358,11 +1358,19 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 // the supervisor CachingStore age from the X-GC-Cache-Age-S response header
 // so callers can surface _cache_age_s on --json output and a cache-age
 // footer on human output.
+//
+// The CLI's reads are one-shot, so GetStatus asks the server to build the
+// body for the read (?fresh=true) rather than answer with the one a previous
+// read left saved (ga-v1vyh8.17). A server older than the parameter ignores
+// it and serves its saved body, reporting that body's age (and rebuilding
+// where it sends the refresh header). CachedRead.AgeSeconds and Refresh stay
+// exactly what the server reports; the CLI never claims freshness itself.
 func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[StatusView]{}, err
 	}
-	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{})
+	fresh := true
+	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{Fresh: &fresh})
 	if err != nil {
 		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
