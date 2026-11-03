@@ -531,7 +531,17 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 			return
 		}
 		patch := computePoolTriggerBindingPatch(info, request, workDir)
-		if kept := parkedWorkDirKept(info, request, workDir); len(patch) > 0 || kept != "" {
+		kept := parkedWorkDirKept(info, request, workDir)
+		// The plan-only work dir is "" for work with worktree evidence, so a
+		// same-trigger row recording another dir compares against the spec's
+		// path, which the PreWake's verify reports. Stale, it is bound even
+		// with an empty patch: the PreWake verifies the worktree and stamps
+		// its path as the row's work dir.
+		stale := request.WorktreeSpec != nil && sameTriggerWorkDirStale(p.in.CityPath, info, request, strings.TrimSpace(request.WorktreeSpec.Path))
+		if stale {
+			kept = ""
+		}
+		if len(patch) > 0 || kept != "" || stale {
 			sel.binding = bindingOf(request, workDir)
 			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
 		}

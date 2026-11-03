@@ -4397,7 +4397,16 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return info, err
 	}
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
-	if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
+	cityPath := ""
+	if bp != nil {
+		cityPath = bp.cityPath
+	}
+	if sameTriggerWorkDirStale(cityPath, info, request, workDir) && !poolSeatAlive(bp, cfgAgent, info) {
+		if bp != nil && bp.stderr != nil {
+			fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: trigger bead %s runs in its managed worktree %s, not the recorded work dir %s; binding the worktree\n", qualifiedName, info.ID, request.WorkBeadID, workDir, preparedStartSessionWorkDir(info)) //nolint:errcheck // best-effort stderr
+		}
+		patch = withRederivedWorkDir(patch, info, workDir)
+	} else if kept := parkedWorkDirKept(info, request, workDir); kept != "" && bp != nil && !bp.planOnly {
 		if err := parkedWorkDirUsable(bp.city, bp.cityPath, cfgAgent, kept, workDir); err != nil {
 			if bp.stderr != nil {
 				fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s: not resuming in its recorded work dir: %v; binding %s, where it starts fresh\n", qualifiedName, info.ID, err, workDir) //nolint:errcheck // best-effort stderr
