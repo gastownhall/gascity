@@ -2807,6 +2807,12 @@ Display a message and mark it as read.
 Shows the full message details (ID, sender, recipient, subject, date, body).
 The message stays in the store — use "gc mail archive" to remove it.
 
+Only the message's recipient marks it as read. When anyone else reads it, such
+as the sender checking that it arrived, or when your own mailbox cannot be
+resolved, the message is shown without changing its read status, exactly like
+"gc mail peek", and a note on stderr says so. Use "gc mail mark-read" to mark a
+message as read explicitly.
+
 ```
 gc mail read <id> [flags]
 ```

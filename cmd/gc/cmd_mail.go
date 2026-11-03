@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1937,7 +1938,13 @@ func newMailReadCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Display a message and mark it as read.
 
 Shows the full message details (ID, sender, recipient, subject, date, body).
-The message stays in the store — use "gc mail archive" to remove it.`,
+The message stays in the store — use "gc mail archive" to remove it.
+
+Only the message's recipient marks it as read. When anyone else reads it, such
+as the sender checking that it arrived, or when your own mailbox cannot be
+resolved, the message is shown without changing its read status, exactly like
+"gc mail peek", and a note on stderr says so. Use "gc mail mark-read" to mark a
+message as read explicitly.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailReadWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -2519,7 +2526,7 @@ func cmdMailReadWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 		return code
 	}
 	rec := openCityRecorder(stderr)
-	return doMailReadWithJSON(mp, rec, mailReader{}, args, jsonOut, stdout, stderr)
+	return doMailReadWithJSON(mp, rec, lookupMailReader(), args, jsonOut, stdout, stderr)
 }
 
 // mailReader is who is running gc mail read: the routes of the caller's own
@@ -2529,32 +2536,64 @@ type mailReader struct {
 	err    error
 }
 
+// lookupMailReader resolves the caller's own mailbox: the addresses it was
+// resolved from, plus every durable route of the session behind it, which is
+// the set an inbox read matches a message's recipient against.
+func lookupMailReader() mailReader {
+	target, err := lookupDefaultMailTarget()
+	if err != nil {
+		return mailReader{err: err}
+	}
+	routes := slices.Clone(target.recipients)
+	if target.session != nil {
+		routes = append(routes, session.RecipientRoutesFromInfo(*target.session)...)
+	}
+	return mailReader{routes: routes}
+}
+
 // doMailRead displays a message and marks it as read. Accepts an injected
 // provider and recorder for testability.
 func doMailRead(mp mail.Provider, rec events.Recorder, reader mailReader, args []string, stdout, stderr io.Writer) int {
 	return doMailReadWithJSON(mp, rec, reader, args, false, stdout, stderr)
 }
 
-func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, _ mailReader, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, reader mailReader, args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail read: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	id := args[0]
 
-	m, err := mp.Read(id)
-	telemetry.RecordMailOp(context.Background(), "read", err)
+	// Only the recipient's read consumes the message: a sender re-reading its
+	// own mail to verify delivery would otherwise hide it from the recipient's
+	// inbox for good. Anyone else, or a caller whose mailbox could not be
+	// resolved, gets "gc mail peek" instead.
+	m, err := mp.Get(id)
+	marksRead := err == nil && slices.Contains(reader.routes, m.To)
+	if marksRead {
+		m, err = mp.Read(id)
+	}
+	if marksRead || err != nil {
+		telemetry.RecordMailOp(context.Background(), "read", err)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	rec.Record(events.Event{
-		Type:    events.MailRead,
-		Actor:   eventActor(),
-		Subject: id,
-		Payload: mailEventPayload(nil),
-	})
+	switch {
+	case marksRead:
+		rec.Record(events.Event{
+			Type:    events.MailRead,
+			Actor:   eventActor(),
+			Subject: id,
+			Payload: mailEventPayload(nil),
+		})
+	case reader.err != nil:
+		fmt.Fprintf(stderr, "gc mail read: cannot tell whether %s is addressed to you (%v); showing it without marking it read, like \"gc mail peek\"\n", id, reader.err) //nolint:errcheck // best-effort stderr
+	default:
+		fmt.Fprintf(stderr, "gc mail read: %s is addressed to %s, not to you; showing it without marking it read, like \"gc mail peek\"\n", id, m.To) //nolint:errcheck // best-effort stderr
+	}
 
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, mailMessageJSONResult{
