@@ -1534,19 +1534,18 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 }
 
 func buildOnDeath(a *Agent, topo QueryTopology) string {
-	route := a.QualifiedName()
+	reopenUnrouted := `bd update "$id" --status open`
 	if a.PoolName != "" {
-		route = a.PoolName
+		reopenUnrouted = `bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+a.PoolName)
 	}
 	_ = topo
 	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
-	// Reset both assignee and status: clearing assignee alone leaves the bead
-	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
-	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
-	// If routed metadata is missing entirely, backfill the canonical
-	// gc.run_target route so reopened direct-assigned work does not stay
-	// invisible.
+	// Routed work returns to its route with both assignee and status reset.
+	// Unrouted pool work gets the canonical pool run_target before release.
+	// Unrouted singleton work keeps its stable assignee so the respawned
+	// singleton can reclaim it through the assigned-ready tier; its own name
+	// is not a pool route.
 	return `{ ` +
 		`bd list --assignee=` + a.QualifiedName() +
 		` --status=in_progress --json 2>/dev/null | ` +
@@ -1557,7 +1556,7 @@ func buildOnDeath(a *Agent, topo QueryTopology) string {
 		`[ -z "$id" ] && continue; ` +
 		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
 		`if ! err=$(bd update "$id" --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
-		`else if ! err=$(bd update "$id" --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(` + reopenUnrouted + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
 		`fi; ` +
 		`done`
 }

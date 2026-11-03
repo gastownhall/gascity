@@ -51,3 +51,14 @@ round-trips. When adding a field to `SiteBinding` or `RigSiteBinding`, register
 its TOML key in `siteBindingKeyOwners` / `rigSiteBindingKeyOwners` and patch it
 only in that owning writer. `TestSiteBindingFieldsHaveWriterOwner` fails on an
 unregistered field.
+
+## Default lifecycle recovery
+
+`on_death` reopens assigned in-progress work. Existing `gc.run_target` and
+`gc.routed_to` values survive unchanged, and routed work is unassigned for
+reclaim. When both route fields are absent, only an expanded pool member
+(`Agent.PoolName != ""`) may backfill `gc.run_target` with its pool name and
+release ownership. A singleton keeps its assignee on reopened work so its
+stable identity can reclaim it through the assigned-ready query. Never
+invent a pool route from a singleton's qualified name. This applies to both
+durable and ephemeral work.
