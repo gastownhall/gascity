@@ -21,7 +21,7 @@ func FormatBeacon(cityName, agentName string, includePrimeInstruction bool) stri
 func FormatBeaconAt(cityName, agentName string, includePrimeInstruction bool, t time.Time) string {
 	beacon := "[" + cityName + "] " + agentName + " \u2022 " + t.Format("2006-01-02T15:04:05")
 	if includePrimeInstruction {
-		beacon += "\n\nRun `gc prime` to initialize your context."
+		beacon += "\n\nRun `" + GCCommandName + " prime` to initialize your context."
 	}
 	return beacon
 }
