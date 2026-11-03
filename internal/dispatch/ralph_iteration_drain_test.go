@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -170,7 +171,7 @@ func buildRalphDrainFixture(t *testing.T, tc drainStoreCase, formulaText string,
 func cookRalphDrainFixture(t *testing.T, tc drainStoreCase, city compiledRalphCity) ralphDrainFixture {
 	t.Helper()
 	base, mem := tc.open(t)
-	cooked, err := molecule.Cook(context.Background(), base, city.name, []string{city.formulaDir}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(base), city.name, []string{city.formulaDir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}

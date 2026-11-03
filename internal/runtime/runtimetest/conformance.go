@@ -162,6 +162,47 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
+	// v2's start (CONTRACT v5 S1): a provider v2 starts on, one that reads
+	// fresh, refuses a FreshOnly start over a name it holds with
+	// ErrSessionExists, and leaves the session it holds running.
+	t.Run("Start_FreshOnlyRefusesAHeldName", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		if !runtime.FreshReadable(sp) {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		fresh := cfg
+		fresh.FreshOnly = true
+		if err := sp.Start(context.Background(), name, fresh); !errors.Is(err, runtime.ErrSessionExists) {
+			t.Errorf("FreshOnly Start over a held name = %v, want ErrSessionExists", err)
+		}
+		if !sp.IsRunning(name) {
+			t.Error("the refused FreshOnly Start stopped the session it found")
+		}
+	})
+
+	// An attested listing (runtime.ListRunningWithAttestation) is proof of
+	// absence: it lists a started session, and does not list it once
+	// stopped.
+	t.Run("ListRunning_AttestedAfterStartAndStop", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		if !runtime.ListRunningAttested(sp) {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		names, attested, err := runtime.ListRunningWithAttestation(sp, name)
+		if err != nil || !attested || !contains(names, name) {
+			t.Fatalf("attested listing after Start = %v (attested %v), %v; want %q listed", names, attested, err, name)
+		}
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		names, attested, err = runtime.ListRunningWithAttestation(sp, name)
+		if err != nil || !attested || contains(names, name) {
+			t.Errorf("attested listing after Stop = %v (attested %v), %v; want %q absent", names, attested, err, name)
+		}
+	})
+
 	// Stop answers a missing session with nil only while the provider can see
 	// its inventory. The running sentinel holds the provider's backend up, so
 	// the never-started name is a missing session on a responsive provider.

@@ -194,7 +194,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			return nil, apierr.ConvoyNotFound.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		children, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, id, true)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
@@ -239,6 +239,7 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 			if store == nil {
 				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
+			storeWork := beads.WorkStore{Store: store}
 
 			// Pre-validate all items exist, and none is controller-owned,
 			// before creating the convoy.
@@ -264,8 +265,8 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 			// back previously-created tracks deps and THEN delete the new convoy.
 			applied := make([]string, 0, len(input.Body.Items))
 			for _, itemID := range input.Body.Items {
-				if err := convoycore.TrackItem(store, created.ID, itemID); err != nil {
-					rollbackConvoyTracks(store, created.ID, applied, "convoy.create")
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: storeWork}, created.ID, itemID); err != nil {
+					rollbackConvoyTracks(storeWork, created.ID, applied, "convoy.create")
 					if delErr := store.Delete(created.ID); delErr != nil {
 						log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", created.ID, delErr)
 					}
@@ -293,6 +294,7 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
+		storeWork := beads.WorkStore{Store: store}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -316,8 +318,8 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		}
 		applied := make([]string, 0, len(input.Body.Items))
 		for _, itemID := range input.Body.Items {
-			if err := convoycore.TrackItem(store, id, itemID); err != nil {
-				rollbackConvoyTracks(store, id, applied, "convoy.add")
+			if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: storeWork}, id, itemID); err != nil {
+				rollbackConvoyTracks(storeWork, id, applied, "convoy.add")
 				return nil, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
 			}
 			applied = append(applied, itemID)
@@ -335,6 +337,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
+		storeWork := beads.WorkStore{Store: store}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -359,7 +362,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 			if err := refuseOwned(itemID, "untracks from a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
 				return nil, err
 			}
-			hadTrack, terr := convoycore.HasTrack(store, id, itemID)
+			hadTrack, terr := convoycore.HasTrack(storeWork, id, itemID)
 			if terr != nil {
 				return nil, apierr.Internal.Msg(terr.Error())
 			}
@@ -377,7 +380,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 		for _, itemID := range input.Body.Items {
 			snapshot := snapshots[itemID]
 			if snapshot.HadTrack {
-				if err := convoycore.UntrackItem(store, id, itemID); err != nil {
+				if err := convoycore.UntrackItem(storeWork, id, itemID); err != nil {
 					rollbackConvoyMembershipRemoval(store, id, applied, snapshots, "convoy.remove")
 					return nil, apierr.Internal.Msg("failed to unlink item " + itemID + ": " + err.Error())
 				}
@@ -385,7 +388,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 			if snapshot.ParentID == id {
 				if err := store.Update(itemID, beads.UpdateOpts{ParentID: &empty}); err != nil {
 					if snapshot.HadTrack {
-						if trackErr := convoycore.TrackItem(store, id, itemID); trackErr != nil {
+						if trackErr := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: storeWork}, id, itemID); trackErr != nil {
 							log.Printf("gc api: convoy.remove rollback failed for current item %s tracks dep: %v", itemID, trackErr)
 						}
 					}
@@ -402,7 +405,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
-func rollbackConvoyTracks(store beads.Store, convoyID string, applied []string, op string) {
+func rollbackConvoyTracks(store beads.WorkStore, convoyID string, applied []string, op string) {
 	for i := len(applied) - 1; i >= 0; i-- {
 		itemID := applied[i]
 		if err := convoycore.UntrackItem(store, convoyID, itemID); err != nil {
@@ -427,7 +430,7 @@ func rollbackConvoyMembershipRemoval(store beads.Store, convoyID string, applied
 			}
 		}
 		if snapshot.HadTrack {
-			if err := convoycore.TrackItem(store, convoyID, itemID); err != nil {
+			if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, itemID); err != nil {
 				log.Printf("gc api: %s rollback failed for item %s tracks dep: %v", op, itemID, err)
 			}
 		}
@@ -470,7 +473,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		children, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, id, true)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}

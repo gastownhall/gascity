@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -938,7 +939,14 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		epoch, _ = strconv.Atoi(raw)
 	}
 
-	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
+	// The attempt molecule lives in store, labeled with the recipe's class
+	// (molecule.RecipeClass); T5b gives the dispatcher its graph and work
+	// handles.
+	target := beads.WorkMolecule(beads.WorkStore{Store: store})
+	if molecule.RecipeClass(recipe) == coordclass.ClassGraph {
+		target = beads.GraphMolecule(beads.GraphStore{Store: store})
+	}
+	result, err := molecule.Attach(ctx, target, recipe, control.ID, molecule.AttachOptions{
 		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 		ExpectedEpoch:  epoch,
 	})

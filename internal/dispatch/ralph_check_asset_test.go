@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
@@ -219,7 +220,7 @@ needs = ["gate"]
 	}
 
 	store := beads.NewMemStore()
-	cooked, err := molecule.Cook(context.Background(), store, "pin-child", []string{historicalFormulas}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "pin-child", []string{historicalFormulas}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook(pin-child): %v", err)
 	}

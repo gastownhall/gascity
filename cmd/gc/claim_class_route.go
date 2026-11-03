@@ -843,7 +843,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputDoneAcross(route.class, work, candidate, identityCandidates)
+		return workflowInputDoneAcross(route.class, beads.WorkStore{Store: work}, candidate, identityCandidates)
 	}
 
 	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
