@@ -99,9 +99,18 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".`,
+also be added later with "gc convoy add".
+
+An explicit --rig <name> creates the convoy in that rig's store: the
+name must match a declared rig (case-insensitively) that has a path
+binding, and every issue ID must route to the same store, because a
+convoy and its issues must share one. Without --rig, the convoy is
+created in the first issue's store, or in the city store for an empty
+convoy; ambient rig selection (GC_RIG, the working directory) never
+chooses the store.`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
+  gc convoy create --rig frontend frontend batch
   gc convoy create deploy --owner mayor --notify mayor --merge mr
   gc convoy create auth-rewrite --owned --target integration/auth-rewrite`,
 		Args: cobra.ArbitraryArgs,

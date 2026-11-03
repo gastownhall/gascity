@@ -1137,6 +1137,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc convoy create` now honors an explicit `--rig` (#8696).** The
+  flag was silently ignored: an empty convoy created with `--rig` landed
+  in the city store, so a later `gc convoy add` of that rig's beads
+  failed with `bead not found`, and a `--rig` disagreeing with the
+  given issues was dropped. A non-empty `--rig` now selects that rig's
+  store, refusing unknown names, declared rigs with no path binding,
+  and issues whose prefix routes to a different store, before anything
+  is written. Inputs that used to exit 0 and now fail: a `--rig` that
+  names no bound rig (including path-shaped values like `./dir` or
+  `dir/`, and the city's own name), and a `--rig` conflicting with an
+  issue's store. An explicitly empty `--rig` and the no-flag placement
+  (first issue's store, else the city store) are unchanged, and
+  ambient `GC_RIG` or the working directory still never choose the
+  store.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped
