@@ -634,11 +634,12 @@ func TestExecJourneyOnScreen(t *testing.T) {
 }
 
 // screenAgentPID is the pid of the sleep the box's window shell runs: the
-// window pid comes from the script's own record (meta/s-gc-1.window), and
+// window pid comes from the script's own record (<city key>.meta/
+// s-gc-1.window), and
 // its child is found in /proc.
 func screenAgentPID(t *testing.T, state string) int {
 	t.Helper()
-	recs, _ := filepath.Glob(filepath.Join(state, "city-*", "meta", "s-gc-1.window"))
+	recs, _ := filepath.Glob(filepath.Join(state, "*.meta", "s-gc-1.window"))
 	if len(recs) != 1 {
 		t.Fatalf("window records %v, want one", recs)
 	}
