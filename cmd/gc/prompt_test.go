@@ -1887,4 +1887,75 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-5: startup fragment and Dolt copy distinguish drain shapes", func(t *testing.T) {
+		// The rendered startup protocol (sourced from the claim-protocol
+		// fragment) separates the drain-aware claim's exit semantics from a
+		// plain poll's.
+		startup := poolWorkerFlat(poolWorkerPromptSection(t, got, "Startup Protocol"))
+		for _, want := range []string{
+			// the drain-aware claim's command appears in its fenced block
+			"gc hook --claim --drain-ack --json",
+			"`gc hook --claim --json`",
+			"`drain_acknowledged=true`",
+			"exits 0",
+			"`gc runtime drain-ack`",
+			"acknowledges nothing",
+		} {
+			if !strings.Contains(startup, want) {
+				t.Errorf("Startup Protocol missing %q:\n%s", want, startup)
+			}
+		}
+
+		// The fragment is the canonical copy; the Dolt dog prompt carries its
+		// body verbatim, so both distinguish the same call shapes.
+		body := poolWorkerClaimProtocolFragmentBody(t)
+		bodyFlat := poolWorkerFlat(body)
+		for _, want := range []string{
+			"`drain_acknowledged=true`",
+			"exits 0",
+			"acknowledges nothing",
+		} {
+			if !strings.Contains(bodyFlat, want) {
+				t.Errorf("claim-protocol fragment body missing %q:\n%s", want, body)
+			}
+		}
+		dogPath := filepath.Join(mustRepoRoot(t), "examples", "bd", "dolt", "agents", "dog", "prompt.template.md")
+		dogData, err := os.ReadFile(dogPath)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", dogPath, err)
+		}
+		if !strings.Contains(string(dogData), body) {
+			t.Errorf("Dolt dog prompt drifted from the core claim-protocol fragment; update both together\n--- fragment body ---\n%s", body)
+		}
+	})
+}
+
+// mustRepoRoot returns the repository root, with the test chdir'd to the
+// real package source directory.
+func mustRepoRoot(t *testing.T) string {
+	t.Helper()
+	chdirToRealPackageDir(t)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	return repoRoot
+}
+
+// poolWorkerClaimProtocolFragmentBody returns the claim-protocol
+// fragment's text between its define/end wrapper lines — the canonical
+// body the Dolt dog prompt carries verbatim.
+func poolWorkerClaimProtocolFragmentBody(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(mustRepoRoot(t), "internal", "bootstrap", "packs", "core", "template-fragments", "claim-protocol.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 3 || !strings.Contains(lines[0], `{{ define "claim-protocol"`) || !strings.Contains(lines[len(lines)-1], "end }}") {
+		t.Fatalf("claim-protocol.template.md no longer has the define/end wrapper shape:\n%s", data)
+	}
+	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 }
