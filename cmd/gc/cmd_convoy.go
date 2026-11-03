@@ -99,9 +99,16 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".`,
+also be added later with "gc convoy add", which finds them in the
+convoy's own store.
+
+The convoy lands in the store of the rig named by --rig (a rig name).
+Every issue's ID prefix must route to that same store. Without --rig it
+lands in the first issue's store, or in the city store when no issues
+are given; GC_RIG and the working directory do not choose the store.`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
+  gc --rig frontend convoy create frontend-batch
   gc convoy create deploy --owner mayor --notify mayor --merge mr
   gc convoy create auth-rewrite --owned --target integration/auth-rewrite`,
 		Args: cobra.ArbitraryArgs,
@@ -162,12 +169,10 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		}
 	}
 
-	// Determine which store to use: if children are provided, use the
-	// first child's rig store so convoy and children share a database.
-	// This avoids cross-store parent references that bd can't resolve.
-	storeDir := cityPath
-	if len(issueIDs) > 0 {
-		storeDir = convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+	storeDir, err := convoyCreateStoreDir(cfg, cityPath, rigFlag, issueIDs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
@@ -192,6 +197,49 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 		}
 	}
 	return cityPath
+}
+
+// convoyCreateStoreDir picks the store a new convoy lands in. A non-empty
+// rigName selects that rig's store, matched by name as gc bd and gc formula
+// match --rig, and every issue must route to the store an open of that rig
+// reaches. Without one the convoy shares the first issue's store, so convoy
+// and issues share a database, else it lands in the city store.
+func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
+	if name := strings.TrimSpace(rigName); name != "" {
+		rig, ok := rigByName(cfg, name)
+		if !ok {
+			return "", fmt.Errorf("rig %q not found", name)
+		}
+		if strings.TrimSpace(rig.Path) == "" {
+			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
+		}
+		root := resolveStoreScopeRoot(cityPath, rig.Path)
+		provider, store := openedStoreForScope(cityPath, root)
+		for _, id := range issueIDs {
+			routedProvider, routed := openedStoreForScope(cityPath, convoyCreateStoreRoot(cfg, cityPath, id))
+			if routedProvider != provider || !samePath(routed, store) {
+				return "", fmt.Errorf("--rig %q conflicts with issue %s, which routes to store %q; a convoy and its issues must share one store", name, id, routed)
+			}
+		}
+		return root, nil
+	}
+	if len(issueIDs) > 0 {
+		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
+	}
+	return cityPath, nil
+}
+
+// openedStoreForScope names the store an open of scopeRoot reaches: the
+// provider that opens it and the root of the store it opens. A file scope
+// opens the city store on the legacy shared layout unless it has a store of
+// its own (compatibleFileStoreRoot); every other scope opens its own root.
+func openedStoreForScope(cityPath, scopeRoot string) (provider, root string) {
+	provider = rawBeadsProviderForScope(scopeRoot, cityPath)
+	if provider != "file" {
+		return provider, scopeRoot
+	}
+	root, _ = compatibleFileStoreRoot(scopeRoot, cityPath)
+	return provider, root
 }
 
 func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs []string) error {
