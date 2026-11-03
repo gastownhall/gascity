@@ -645,8 +645,7 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 
 // ConfigDriftAsleepResetPatch is ConfigDriftResetPatch(StateAsleep, ...)
 // at now, which it reads from its caller: the v2 asleep named repair's
-// (SESS-568). Every continuation-reset re-arm site stamps ResetCommittedAtKey,
-// same as its siblings.
+// (SESS-568).
 func ConfigDriftAsleepResetPatch(sessionKey string, now time.Time) MetadataPatch {
 	return configDriftReset(StateAsleep, sessionKey, now)
 }

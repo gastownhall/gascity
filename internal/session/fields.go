@@ -420,7 +420,6 @@ var registry = slices.Concat([]Field{
 		v2(srcTransition, "ConfigDriftRestartPatch"),
 		op("internal/session/lifecycle_exits.go", "ConversationResetPatch"),
 		op(srcManager, "Manager.RequestFreshRestart"),
-		op("internal/session/chat.go", "Manager.clearStaleResumeMetadata"),
 		legacy("cmd/gc/session_reconcile.go", "healStatePatchWithRollbackInfo"),
 		opUnmint,
 	), Clears: sites(opMint)},
