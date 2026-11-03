@@ -66,9 +66,13 @@ func stubMigrationWindowStartStop(t *testing.T, p *migrationWindowProvider) {
 		p.lockHeldAtStop = controllerLockHeld(cityPath)
 		return p.stopErr
 	}
-	migrationWindowSessions = func(context.Context, string) ([]beads.DoltConnection, bool, error) {
+	migrationWindowSessions = func(context.Context, string) (func(context.Context) ([]beads.DoltConnection, error), func(), bool, error) {
 		p.lists++
-		return p.sessions, !p.unlistable, p.listErr
+		if p.unlistable {
+			return nil, nil, false, nil
+		}
+		list := func(context.Context) ([]beads.DoltConnection, error) { return p.sessions, p.listErr }
+		return list, func() {}, true, nil
 	}
 }
 
@@ -655,6 +659,7 @@ func TestStorageMigrateRunsInsideTheMaintenanceWindow(t *testing.T) {
 // starts Dolt with no record.
 func TestStorageMigrateOpensTheWindowBeforeTheSharedStoreRowCheck(t *testing.T) {
 	request, source := exclusionCity(t)
+	request.FleetStopped = true
 	sharedStoreCities(t, request)
 	request.Force = storageForce{SharedStores: []string{sharedToken}}
 	provider := &migrationWindowProvider{down: true}
@@ -770,4 +775,120 @@ func TestEmittingClassStoreForwardsThePayloadBlindDeclaration(t *testing.T) {
 	if _, absent := beads.DepMetadataAbsent(plain); absent {
 		t.Fatal("the emitter over a store that declares nothing reads as payload-blind")
 	}
+}
+
+// TestStorageVerbsTouchNoProviderBeforeTheirChecksPass (R2-M1): a run refused
+// by a check that reads no store (here the missing --fleet-stopped
+// attestation, and a controller that still answers) never starts or stops the
+// provider, in each of the three verbs.
+func TestStorageVerbsTouchNoProviderBeforeTheirChecksPass(t *testing.T) {
+	type verb struct {
+		name string
+		run  func(t *testing.T, fleetStopped bool, livePID int) (int, string)
+	}
+	verbs := []verb{
+		{name: "migrate", run: func(t *testing.T, fleetStopped bool, livePID int) (int, string) {
+			request, _ := exclusionCity(t)
+			request.FleetStopped = fleetStopped
+			stubInfraControllerPing(t, livePID)
+			return migrateFor(t, request)
+		}},
+		{name: "recover-stranded", run: func(t *testing.T, fleetStopped bool, livePID int) (int, string) {
+			cityPath := recoveryCityPath(t)
+			cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+			source := stubInfraMigrationSource(t)
+			mustCreateInfraBead(t, source, beads.Bead{Title: "carried", Type: "session"})
+			stubInfraControllerPing(t, 0)
+			stubSessionInventory(t, nil, true, nil)
+			stubOtherCities(t)
+			if report := migrateInfraClasses(t, cityPath, cfg, &bytes.Buffer{}); report.Outcome != infraMigrationConverged {
+				t.Fatalf("cutover = %v", report.Outcome)
+			}
+			stubInfraControllerPing(t, livePID)
+			var stdout, stderr bytes.Buffer
+			code := doStorageRecoverStranded(context.Background(), storageOperatorRequest{CityPath: cityPath, Cfg: cfg, FleetStopped: fleetStopped}, strandedRecoveryOptions{}, &stdout, &stderr)
+			return code, stderr.String()
+		}},
+		{name: "from-rigs", run: func(t *testing.T, fleetStopped bool, livePID int) (int, string) {
+			f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
+			f.request.FleetStopped = fleetStopped
+			stubInfraControllerPing(t, livePID)
+			code, stdout, stderr := f.importRigs()
+			return code, stdout + stderr
+		}},
+	}
+	for _, v := range verbs {
+		for _, tc := range []struct {
+			name         string
+			fleetStopped bool
+			livePID      int
+			want         string
+		}{
+			{name: "no attestation", want: "--" + storageFleetStoppedFlag},
+			{name: "live controller", fleetStopped: true, livePID: 4242, want: "controller PID 4242"},
+		} {
+			t.Run(v.name+"/"+tc.name, func(t *testing.T) {
+				provider := &migrationWindowProvider{down: true}
+				stubMigrationWindowProvider(t, provider)
+				code, said := v.run(t, tc.fleetStopped, tc.livePID)
+				if code == 0 || !strings.Contains(said, tc.want) {
+					t.Fatalf("exit %d, output %q; want a refusal naming %q", code, said, tc.want)
+				}
+				if provider.starts != 0 || provider.stops != 0 {
+					t.Fatalf("starts = %d, stops = %d on a refused run; want the provider untouched", provider.starts, provider.stops)
+				}
+			})
+		}
+	}
+}
+
+// TestMigrationWindowRefusalStopsOnlyWhatThisRunStarted: a refused session
+// check stops a provider this run started, and leaves one a killed run
+// started running and recorded. The note names the provider and who started
+// it.
+func TestMigrationWindowRefusalStopsOnlyWhatThisRunStarted(t *testing.T) {
+	foreign := []beads.DoltConnection{{ID: 9, User: "root", Host: "localhost", DB: "hq", Command: "Sleep"}}
+	t.Run("inherited", func(t *testing.T) {
+		cityPath, lock := windowCity(t)
+		if err := writeMigrationWindowRecord(cityPath); err != nil {
+			t.Fatal(err)
+		}
+		provider := &migrationWindowProvider{sessions: foreign}
+		stubMigrationWindowProvider(t, provider)
+		if _, err := openTestWindow(t, lock, cityPath, nil); err == nil || !strings.Contains(err.Error(), "session 9") {
+			t.Fatalf("openMigrationSource = %v, want the foreign session refused", err)
+		}
+		if provider.stops != 0 || !fileExists(migrationWindowRecordPath(cityPath)) {
+			t.Fatalf("stops = %d, record kept = %v: a refusal stopped a provider this run did not start", provider.stops, fileExists(migrationWindowRecordPath(cityPath)))
+		}
+	})
+	t.Run("started here", func(t *testing.T) {
+		cityPath, lock := windowCity(t)
+		provider := &migrationWindowProvider{down: true, sessions: foreign}
+		stubMigrationWindowProvider(t, provider)
+		if _, err := openTestWindow(t, lock, cityPath, nil); err == nil {
+			t.Fatal("the foreign session was not refused")
+		}
+		if provider.stops != 1 || fileExists(migrationWindowRecordPath(cityPath)) {
+			t.Fatalf("stops = %d, record kept = %v: the provider this run started was left running", provider.stops, fileExists(migrationWindowRecordPath(cityPath)))
+		}
+	})
+	t.Run("note", func(t *testing.T) {
+		cityPath, lock := windowCity(t)
+		if err := writeMigrationWindowRecord(cityPath); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_BEADS", "exec:/opt/providers/gc-beads-file")
+		stubMigrationWindowProvider(t, &migrationWindowProvider{unlistable: true})
+		var stderr bytes.Buffer
+		window, err := openTestWindow(t, lock, cityPath, &stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer window.Close() //nolint:errcheck // test cleanup
+		said := stderr.String()
+		if !strings.Contains(said, "an earlier run started (exec:/opt/providers/gc-beads-file)") || strings.Contains(said, "this run started (") {
+			t.Fatalf("the note does not name the provider and who started it: %s", said)
+		}
+	})
 }

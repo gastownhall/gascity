@@ -818,6 +818,15 @@ func reportInfraEdgePlan(stdout io.Writer, plan infraEdgePlan) {
 	}
 }
 
+// strandedRecoveryControllerRefusal is the refusal for a controller still
+// answering the city's socket, or "".
+func strandedRecoveryControllerRefusal(cityPath, logPrefix string) string {
+	if pid := infraMigrationForeignControllerPID(cityPath); pid != 0 {
+		return fmt.Sprintf("%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid)
+	}
+	return ""
+}
+
 // doStorageRecoverStranded performs the repair, in the order the hazards demand.
 //
 // Structural validation first, because a plan boot would refuse must not be
@@ -879,15 +888,10 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			return 1
 		}
 		defer controllerLock.Close() //nolint:errcheck // released last, after the guard
-		// A run that writes opens the maintenance window right under its
-		// lock (storage_maintenance.go); a dry run reads the store as it
-		// finds it.
-		window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		if refusal := strandedRecoveryControllerRefusal(request.CityPath, logPrefix); refusal != "" {
+			fmt.Fprint(stderr, refusal) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		defer window.closeReporting(logPrefix, stderr)
 		shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -895,15 +899,23 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 		defer shared.Release()
 		sharedAttested = shared.Attested
+		if !request.FleetStopped {
+			fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands after this run stays stranded and the next check names it\n", //nolint:errcheck // best-effort stderr
+				logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
+			return 1
+		}
 		recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
-	}
-	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !request.FleetStopped && !opts.DryRun {
-		fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands after this run stays stranded and the next check names it\n", //nolint:errcheck // best-effort stderr
-			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
+		// The maintenance window (storage_maintenance.go), once every check
+		// that reads no store has passed, and before anything opens the work
+		// store; a dry run reads the store as it finds it.
+		window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer window.closeReporting(logPrefix, stderr)
+	} else if refusal := strandedRecoveryControllerRefusal(request.CityPath, logPrefix); refusal != "" {
+		fmt.Fprint(stderr, refusal) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

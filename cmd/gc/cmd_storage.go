@@ -476,16 +476,6 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
-	// The maintenance window (storage_maintenance.go), right under the lock:
-	// the provider up, the payload-reading lanes forced, before anything
-	// below opens the work store (the shared-store row check does). Closed
-	// before the lock is released.
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defer window.closeReporting(logPrefix, stderr)
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
@@ -496,16 +486,27 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	defer shared.Release() // the co-tenants stay stopped until the copy and the clear are done
+	if !request.FleetStopped {
+		fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands in the source after the copy is proven stays stranded there, and every later boot names it rather than losing it\n", //nolint:errcheck // best-effort stderr
+			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
+		return 1
+	}
+	// The maintenance window (storage_maintenance.go), once every check that
+	// reads no store has passed (the controller, the shared-store identity and
+	// its co-tenants' locks, the attestation), and before the first that opens
+	// the work store (the shared-store row check). Closed before the
+	// co-tenants and the lock are released.
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr)
 	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	}
-	if !request.FleetStopped {
-		fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands in the source after the copy is proven stays stranded there, and every later boot names it rather than losing it\n", //nolint:errcheck // best-effort stderr
-			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
-		return 1
 	}
 
 	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)

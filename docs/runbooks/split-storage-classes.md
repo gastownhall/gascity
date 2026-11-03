@@ -190,38 +190,46 @@ What the command does, in order:
    refused here first rather than migrated toward.
 2. Takes the city's `.gc/controller.lock` and holds it until it exits. It
    refuses while something else holds the lock, while the city is registered
-   with the supervisor, while any of its sessions runs, and on a remote stage.
-   Then, still under the lock and before anything reads the work store, it
-   opens the maintenance window:
+   with the supervisor, while any of its sessions runs, on a remote stage,
+   and, without the matching `--force`, on a remote runtime or a shared work
+   store (under `--force=shared-store`, it takes every co-tenant's lock). It
+   refuses if a controller answers the city's socket, and without
+   `--fleet-stopped`. None of these reads the work store, and a run they
+   refuse never touches the bead-store provider.
+3. Opens the maintenance window, once those checks have passed:
    - `gc stop` stopped the city's bead-store provider, and a managed bd/Dolt,
      proxied or bd-contract exec city has no server to read without it. The
      window starts the provider the way `gc start` does (no agents, no nudge
      pollers), recording that it did in `.gc/storage-window.json` first, and
      stops it again before the lock is released. A provider that was already
-     up is left as it was. A provider a killed run started is stopped by the
-     next run, whoever has started it since: the city is stopped and locked.
+     up is left as it was, except a bd-owned proxy: bd restarts it on any
+     read, so the window always starts the city's proxied scope and stops
+     every provider-owned scope at the end, as `gc stop` does. A provider a
+     killed run started is stopped by the next run, whoever has started it
+     since: the city is stopped and locked.
    - Inside the window the migration's own opens of the work store take the
      native lane: the proxied-native lane is forced on and
      `beads.native_transport = "off"` is overridden, for those opens only, with
      the configuration the command loaded.
    - On a gc-managed Dolt the window started, it lists the server's client
      sessions over its published port and refuses while any other client holds
-     one, naming each, or when they cannot be listed. A bd-owned proxy or an
-     exec provider the window started cannot be judged that way: the run says
-     so, and `--fleet-stopped` covers it.
+     one, naming each, or when they cannot be listed. Such a refusal stops the
+     provider only if this run started it; one a killed run started stays
+     running and recorded. A bd-owned proxy or an exec provider cannot be
+     judged that way: the run names it, and `--fleet-stopped` covers it.
 
-   It then refuses, without the matching `--force`, a remote runtime or a
-   shared work store, and refuses if a controller answers the city's socket.
-3. Takes a migration guard over the city, so a second migrator cannot run.
-4. Does not census rig scopes. A rig's graph rows stay readable through its
+   Under `--force=shared-store`, it then refuses rows that name another city's
+   scope, the one check here that reads the work store.
+4. Takes a migration guard over the city, so a second migrator cannot run.
+5. Does not census rig scopes. A rig's graph rows stay readable through its
    relic legs and move with `gc storage migrate --from-rigs` once the binding
    has converged; the success message names every rig still awaiting that.
-5. Copies every infrastructure bead with its id and within-class dependency
+6. Copies every infrastructure bead with its id and within-class dependency
    topology preserved.
-6. Closes the destination, reopens it, and proves field-level equality against
+7. Closes the destination, reopens it, and proves field-level equality against
    the bytes on disk — not against the connection that wrote them.
-7. Records a proven-copy manifest, and only then the convergence marker.
-8. Clears the work store's copies of the beads it moved. Each row, with every
+8. Records a proven-copy manifest, and only then the convergence marker.
+9. Clears the work store's copies of the beads it moved. Each row, with every
    dependency edge touching it and that edge's payload, is first written to
    `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
    and proven equal to the rows it records; only then is a row removed.
@@ -238,15 +246,15 @@ into the binding either. On a native-Dolt work store each removal is a Dolt
 commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
 before the clear) is the full-fidelity backstop for them.
 
-Nothing in the work store changes before the marker: until step 7 the source is
+Nothing in the work store changes before the marker: until step 8 the source is
 exactly as you left it, and the cutover can still be abandoned by a config
 edit. Past the marker the binding is the only authoritative copy, which is why
-step 8 exists — a copy left behind in the work store is served to every reader
+step 9 exists — a copy left behind in the work store is served to every reader
 that reaches the work store first (`bd`, `gc hook`, the demand and claim
 surfaces), and a workflow step closed in the binding stays open there and is
 dispatched again and again.
 
-Step 8 changes only what it has to. A work bead whose blocking dependency
+Step 9 changes only what it has to. A work bead whose blocking dependency
 points at a moved bead keeps that dependency, unless the binding has already
 closed the bead it waits on, in which case the dependency is released. Every
 other dependency from a work bead into a moved bead is kept by re-adding it
@@ -329,8 +337,11 @@ a row it moves is such a rig, and so is a generic exec rig with one: the city
 migration copies a generic exec store's edges carrying no payload, as its
 protocol declares, but the rig import does not take that declaration yet. The
 import runs in the same maintenance window as the city migration (Step 4), so
-a managed rig is read natively, and a proxied-server rig on the proxied-native
-lane, which the window forces on. While an
+a managed rig is read natively. A proxied-server rig is read on the
+proxied-native lane, which the window forces on, but the window starts only
+the city's own proxied scope: a rig whose bd proxy is down refuses with the
+lane's `proxy_gone` verdict. Bring that rig's proxy up (any `bd` read in the
+rig does) and run the import again. While an
 import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
 every gc command refuse; re-run the import to finish it. If a rig store is
 gone for good after its import wrote its marker, `gc storage migrate
@@ -642,7 +653,7 @@ gc start
 gc storage status
 ```
 
-The command re-proves convergence, then runs step 8 above. Copies the binding's
+The command re-proves convergence, then runs step 9 above. Copies the binding's
 own garbage collection has since removed from the binding are cleared too:
 they are the frozen rows the demand surface would otherwise serve forever.
 

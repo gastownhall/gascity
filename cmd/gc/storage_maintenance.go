@@ -28,6 +28,11 @@ package main
 // before anything is written (migrationWindowPayloadRefusal). A source with no
 // edge needs none and migrates as it did before the window existed.
 //
+// Every check that reads no store runs before the window opens: the
+// controller, the shared-store identity and its co-tenants' locks, the
+// --fleet-stopped attestation and, for a rig import, the convergence and the
+// rig names. A run those refuse never touches the provider.
+//
 // A gc-managed Dolt server the window started has, a moment later, no client
 // but this process: any other session is a writer nothing proved stopped, and
 // the window refuses it. The sessions are listed over a direct connection to
@@ -35,7 +40,9 @@ package main
 // opened on, and a list that fails refuses. A provider the window started that
 // is not a gc-managed Dolt (a bd-owned proxy, whose own sessions to its Dolt
 // child no list can tell from another client's; an exec provider) is named,
-// and is left to the --fleet-stopped attestation.
+// and is left to the --fleet-stopped attestation. A refusal stops only a
+// provider this run started; one a killed run started stays running and
+// recorded.
 //
 // The window records that it started the provider in .gc/storage-window.json
 // before the start, and removes the record once the provider is stopped. A run
@@ -50,15 +57,19 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -89,7 +100,7 @@ var (
 	migrationWindowProviderDown  = migrationProviderDown
 	migrationWindowStartProvider = ensureBeadsProvider
 	migrationWindowStopProvider  = shutdownBeadsProvider
-	migrationWindowSessions      = managedDoltForeignSessions
+	migrationWindowSessions      = managedDoltSessionLister
 )
 
 // migrationSourceWindow is one open maintenance window.
@@ -100,6 +111,8 @@ type migrationSourceWindow struct {
 	// started reports that this window, or a killed one before it, started
 	// the provider, so closing the window stops it.
 	started bool
+	// startedHere reports that this run started it, not a killed one before.
+	startedHere bool
 	// lane is the city work store's lane, as its last open in the window
 	// reported it (laneKnown false until one has).
 	lane      beads.BeadsDiagnostic
@@ -157,7 +170,7 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 		if err := writeMigrationWindowRecord(cityPath); err != nil {
 			return nil, err
 		}
-		w.started = true
+		w.started, w.startedHere = true, true
 		if err := migrationWindowStartProvider(cityPath); err != nil {
 			stopErr := w.stopProvider()
 			return nil, errors.Join(fmt.Errorf("starting the bead-store provider for the maintenance window: %w", err), stopErr)
@@ -169,10 +182,21 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 	migrationWindows.Unlock()
 	if w.started {
 		if err := w.refuseForeignSessions(logPrefix, stderr); err != nil {
-			return nil, errors.Join(err, w.Close())
+			return nil, errors.Join(err, w.abandon())
 		}
 	}
 	return w, nil
+}
+
+// abandon ends a window that refused before its verb ran. It stops the
+// provider only when this run started it. A provider a killed run started is
+// left running and recorded: the refusal may name a session of whoever has
+// started it since, and the next window owns it again.
+func (w *migrationSourceWindow) abandon() error {
+	if !w.startedHere {
+		w.started = false
+	}
+	return w.Close()
 }
 
 // refuseForeignSessions refuses any client session but this process's on the
@@ -181,15 +205,25 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 func (w *migrationSourceWindow) refuseForeignSessions(logPrefix string, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), migrationWindowSessionSettle+migrationWindowSessionTimeout)
 	defer cancel()
+	who := "this run started"
+	if !w.startedHere {
+		who = "an earlier run started"
+	}
+	list, closeList, listable, err := migrationWindowSessions(ctx, w.cityPath)
+	if err != nil {
+		return fmt.Errorf("listing the client sessions on the Dolt server %s: %w. A server whose sessions cannot be listed is not one with none; nothing was written", who, err)
+	}
+	if !listable {
+		fmt.Fprintf(stderr, "%s: the bead-store provider %s (%s) is not a gc-managed Dolt, so its client sessions cannot be told from the provider's own; --%s attests that nothing else reaches it\n", //nolint:errcheck // best-effort stderr
+			logPrefix, who, migrationWindowProviderName(w.cityPath), storageFleetStoppedFlag)
+		return nil
+	}
+	defer closeList()
 	deadline := time.Now().Add(migrationWindowSessionSettle)
 	for {
-		sessions, listable, err := migrationWindowSessions(ctx, w.cityPath)
+		sessions, err := list(ctx)
 		if err != nil {
-			return fmt.Errorf("listing the client sessions on the Dolt server this run started: %w. A server whose sessions cannot be listed is not one with none; nothing was written", err)
-		}
-		if !listable {
-			fmt.Fprintf(stderr, "%s: the bead-store provider this run started is not a gc-managed Dolt, so its client sessions cannot be told from the provider's own; --%s attests that nothing else reaches it\n", logPrefix, storageFleetStoppedFlag) //nolint:errcheck // best-effort stderr
-			return nil
+			return fmt.Errorf("listing the client sessions on the Dolt server %s: %w. A server whose sessions cannot be listed is not one with none; nothing was written", who, err)
 		}
 		// The server reaps a session this process just closed a moment later,
 		// so one still there once the settle has passed is another client's.
@@ -200,31 +234,49 @@ func (w *migrationSourceWindow) refuseForeignSessions(logPrefix string, stderr i
 	}
 }
 
-// managedDoltForeignSessions lists the client sessions on the city's
-// gc-managed Dolt, over a direct connection to its published port, other than
-// the one asking. listable is false for a provider that is not a gc-managed
-// Dolt. This process's own pooled sessions (internal/doltpool: the project-id
-// and health reads keep them idle for up to 20s) are closed first; a one-shot
-// verb holds none of those handles past its call.
-func managedDoltForeignSessions(ctx context.Context, cityPath string) ([]beads.DoltConnection, bool, error) {
+// migrationWindowProviderName names the city's bead-store provider for an
+// operator: the provider, and that bd owns its proxied scopes when it does.
+func migrationWindowProviderName(cityPath string) string {
+	name := beadsProvider(cityPath)
+	if owned, err := cityScopeProviderOwned(cityPath); err == nil && owned {
+		name += ", whose proxied scopes bd owns"
+	}
+	return name
+}
+
+// managedDoltSessionLister opens the session list of the city's gc-managed
+// Dolt: a private single-connection client of its published port, which the
+// caller closes. listable is false for a provider that is not a gc-managed
+// Dolt. This process's own pooled sessions (internal/doltpool: the health and
+// project-id reads keep them idle for up to 20s) are closed first, once; a
+// one-shot verb holds none of those handles past its call.
+func managedDoltSessionLister(_ context.Context, cityPath string) (func(context.Context) ([]beads.DoltConnection, error), func(), bool, error) {
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
-		return nil, true, err
+		return nil, nil, true, err
 	}
 	if !owned {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	port := currentManagedDoltPort(cityPath)
 	if port == "" {
-		return nil, true, errors.New("the managed Dolt publishes no live port")
+		return nil, nil, true, errors.New("the managed Dolt publishes no live port")
 	}
 	doltpool.Shutdown()
-	db, err := managedDoltOpenDB("", port, "")
+	dsn := mysql.NewConfig()
+	dsn.User = "root"
+	dsn.Passwd = managedDoltPassword()
+	dsn.Net = "tcp"
+	dsn.Addr = net.JoinHostPort(managedDoltConnectHost(""), port)
+	dsn.Timeout = migrationWindowSessionTimeout
+	dsn.ReadTimeout = migrationWindowSessionTimeout
+	db, err := sql.Open("mysql", dsn.FormatDSN())
 	if err != nil {
-		return nil, true, err
+		return nil, nil, true, err
 	}
-	sessions, err := beads.ForeignDoltSessions(ctx, db)
-	return sessions, true, err
+	db.SetMaxOpenConns(1)
+	list := func(ctx context.Context) ([]beads.DoltConnection, error) { return beads.ForeignDoltSessions(ctx, db) }
+	return list, func() { _ = db.Close() }, true, nil
 }
 
 // migrationForeignSessionRefusal is the refusal for the sessions another

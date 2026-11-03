@@ -1511,14 +1511,6 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
-	// The maintenance window (storage_maintenance.go), right under the lock:
-	// the city's provider serves its rigs' stores too.
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defer window.closeReporting(logPrefix, stderr)
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1536,6 +1528,15 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The maintenance window (storage_maintenance.go), once every check that
+	// reads no store has passed, and before anything opens one: the city's
+	// provider serves its rigs' stores too.
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr)
 	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
