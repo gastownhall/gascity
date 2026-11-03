@@ -16,20 +16,23 @@
 #
 # Usage: GC_SESSION=exec:/path/to/gc-session-screen gc start <city>
 #
-# State: <home>/.gc-session-screen, where <home> is the user's home directory
-# from the password database, never from the caller's environment: the
-# supervisor, a cron job and a sudo shell resolve one directory, so none of
-# them can read a box as absent and start a twin. GC_EXEC_STATE_DIR overrides
-# it, and then must be the same for every gc process of the city. It is a
-# 0700 directory owned by the user (the script refuses a symlink or another
-# owner's directory; to keep state elsewhere, set GC_EXEC_STATE_DIR rather
-# than link it). Per city and host it holds the screen sockets (SCREENDIR) and
-# each box's metadata, written 0600 by rename, so no write follows a link. The
-# host is in the key so two hosts sharing a home never list each other's
-# sockets, which screen would read as dead and wipe. To reach a box with
-# screen directly, point SCREENDIR at
-# <state>/city-<cksum of `uname -n` and GC_EXEC_CITY_PATH>/s; `gc session
-# attach` does it for you.
+# State: <home>/.gcss, where <home> is the user's home directory from the
+# password database, never from the caller's environment: the supervisor, a
+# cron job and a sudo shell resolve one directory, so none of them can read a
+# box as absent and start a twin. GC_EXEC_STATE_DIR overrides it, and then
+# must be the same for every gc process of the city. It is a 0700 directory
+# owned by the user (the script refuses a symlink or another owner's
+# directory; to keep state elsewhere, set GC_EXEC_STATE_DIR rather than link
+# it). Per city and host it holds <key>, the city's screen sockets
+# (SCREENDIR) and nothing else, and <key>.meta, each box's metadata, written
+# 0600 by rename, so no write follows a link. <key> is the 8 hex digits of
+# the cksum of `uname -n` and GC_EXEC_CITY_PATH. The host is in the key so two
+# hosts sharing a home never list each other's sockets, which screen would
+# read as dead and wipe. A socket path is "<state>/<key>/<pid>.<name>" and
+# must fit 107 bytes, so with the default state a name fits in 83 bytes less
+# the length of <home>: 71 under /home/ubuntu. To reach a box with screen
+# directly, point SCREENDIR at <state>/<key>; `gc session attach` does it for
+# you.
 #
 # Upgrading from the previous version: stop the city with the OLD script in
 # place (`gc stop <city>`: the controller and every session), then replace
@@ -88,17 +91,19 @@ if [ -n "${GC_EXEC_STATE_DIR:-}" ]; then
   STATE_ROOT=$GC_EXEC_STATE_DIR
 else
   home=$(user_home) || die "cannot find the home directory of $(id -un)"
-  STATE_ROOT=$home/.gc-session-screen
+  STATE_ROOT=$home/.gcss
 fi
 private_dir "$STATE_ROOT"
 host=$(uname -n) || die "cannot read the host name"
-CITY_KEY=$(printf '%s\n%s' "$host" "${GC_EXEC_CITY_PATH:-}" | cksum | cut -d' ' -f1)
-CITY_DIR=$STATE_ROOT/city-$CITY_KEY
-META=$CITY_DIR/meta
-private_dir "$CITY_DIR"
+crc=$(printf '%s\n%s' "$host" "${GC_EXEC_CITY_PATH:-}" | cksum | cut -d' ' -f1)
+case "$crc" in "" | *[!0-9]*) die "cannot key the city's state" ;; esac
+CITY_KEY=$(printf %08x "$crc")
+# The socket directory is kept short, apart from the metadata: every byte of
+# its path is a byte less for a session name.
+META=$STATE_ROOT/$CITY_KEY.meta
 private_dir "$META"
-private_dir "$CITY_DIR/s"
-export SCREENDIR=$CITY_DIR/s
+private_dir "$STATE_ROOT/$CITY_KEY"
+export SCREENDIR=$STATE_ROOT/$CITY_KEY
 
 # PROC is the process filesystem (the script's tests run a copy pointing it
 # at a fixture). BOOT is this boot's id: a process start time read from /proc
@@ -205,15 +210,19 @@ classify() {
 }
 
 # start_of sets START to process $1's start time (from /proc, or ps where
-# there is none); empty when no such process runs.
+# there is none); empty when no such process runs. A zombie (state Z or X in
+# /proc) has exited: only its reaping is pending, which on a host without a
+# reaper never comes.
 start_of() {
   local stat rest
+  local -a fields
   START=""
   if [ -r "$PROC/$1/stat" ]; then
     # A process that exits mid-read is simply gone.
     { IFS= read -r stat < "$PROC/$1/stat"; } 2>/dev/null || return 0
     rest=${stat##*) }
     read -r -a fields <<< "$rest"
+    case "${fields[0]:-}" in Z | X) return 0 ;; esac
     START=${fields[19]:-}
   else
     START=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//') || START=""
@@ -379,6 +388,10 @@ identity_of() {
   elif [ -f "$META/$boxname.wrapper.sh" ]; then
     IDENT=$(
       set +u
+      # The script runs with its caller's environment (a gc CLI inside an
+      # agent session carries that session's identity): only the wrapper's
+      # exports may name the box.
+      for k in $IDENTITY_KEYS; do unset "$k"; done
       eval "$(grep -E '^export (GC_SESSION_ID|GC_RUNTIME_EPOCH|GC_INSTANCE_TOKEN|GT_PROCESS_NAMES)=' "$META/$boxname.wrapper.sh" || true)"
       for k in $IDENTITY_KEYS; do
         if [ -n "${!k:-}" ]; then json+="$sep\"$k\":$(json_str "${!k}")"; sep=","; fi
@@ -447,24 +460,28 @@ case "$op" in
 
     lock "$name"
     # A held name refuses the start; a listing that cannot be read refuses
-    # it too, rather than read as vacant. Under fresh_only the refusal is exit
-    # 73, and nothing is touched: v2 removes a dead box itself, by its object.
-    # A legacy start wipes a name only dead boxes hold (as a reboot leaves
-    # them) and starts once they are gone.
+    # it too, rather than read as vacant. A name is held while a box lists
+    # it, and while the window process its last start recorded runs: an
+    # agent that ignores the hangup outlives its box, listed dead or not
+    # listed at all. Under fresh_only the refusal is exit 73, and nothing is
+    # touched: v2 removes a dead box itself, by its object. A legacy start
+    # wipes a name only dead boxes hold (as a reboot leaves them) and starts
+    # once they are gone.
     load_rows || exit 1
     held=$(rows_of "$name")
-    if [ -n "$held" ]; then
+    if [ -n "$held" ] || window_alive "$name"; then
       if [ "$fresh_only" = true ]; then
         echo "session \"$name\" already exists" >&2
         exit 73
       fi
-      if printf '%s\n' "$held" | awk -F'\t' '$3 != "Dead ???" { live = 1 } END { exit !live }'; then
+      if [ -n "$held" ] && printf '%s\n' "$held" | awk -F'\t' '$3 != "Dead ???" { live = 1 } END { exit !live }'; then
         die "session \"$name\" already exists"
       fi
       if window_alive "$name"; then
-        die "session \"$name\" is dead, but its agent still runs"
+        die "session \"$name\" has no live box, but its agent still runs"
       fi
       while IFS=$'\t' read -r pid _ _; do
+        [ -n "$pid" ] || continue
         screen -wipe "$pid.$name" >/dev/null 2>&1 || true
       done <<< "$held"
       gone_after "$name" || die "start: the dead session $name could not be wiped"
@@ -618,7 +635,15 @@ case "$op" in
     names=$(cat | tr -d ' \r' | tr '\n' ',' | sed 's/^,*//;s/,*$//')
     load_rows || exit 1
     rc=0; one_row "$name" || rc=$?
-    if [ "$rc" -eq 1 ]; then echo '{"state":"absent"}'; exit 0; fi
+    if [ "$rc" -eq 1 ]; then
+      # No box, but the agent of the last one may outlive it.
+      if window_alive "$name"; then
+        echo '{"state":"unknown","reason":"agent outlived its box"}'
+      else
+        echo '{"state":"absent"}'
+      fi
+      exit 0
+    fi
     if [ "$rc" -ne 0 ]; then echo '{"state":"unknown","reason":"repeated name"}'; exit 0; fi
     classify "$STATUS"
     created_of "$PID" "$name" "$STATE"
@@ -675,6 +700,22 @@ case "$op" in
       identity_of "$sname"
       out+="$sep$entry,\"identity\":$IDENT}"; sep=","
     done <<< "$ROWS"
+    # A name no box lists is still held while the window process its last
+    # start recorded runs (its agent outlived the box): it is listed
+    # unknown, never left out of a complete answer.
+    declare -A listed=()
+    while IFS=$'\t' read -r pid sname _; do
+      [ -n "$pid" ] || continue
+      listed[$sname]=y
+    done <<< "$ROWS"
+    for rec in "$META"/*.window; do
+      [ -f "$rec" ] || continue
+      sname=${rec##*/}
+      sname=${sname%.window}
+      [ -z "${listed[$sname]:-}" ] || continue
+      window_alive "$sname" || continue
+      out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
+    done
     printf '%s]}\n' "$out"
     ;;
 
@@ -714,6 +755,12 @@ case "$op" in
         [ "${agent#* }" = dead ] || { echo changed; exit 0; }
         screen -S "$PID.$name" -X quit >/dev/null 2>&1 || true
         gone_after "$name" || die "kill-object: $PID.$name survived its kill"
+        # A window that ignored the hangup is ended too, as stop ends it:
+        # its record is dropped only once it is gone.
+        window_of "$name"
+        if [ -n "$WPID" ]; then
+          kill_wait "$WPID" "$WSTART" || die "kill-object: the window of $PID.$name survived its kill"
+        fi
         forget "$name"
         echo killed
         ;;

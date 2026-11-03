@@ -120,7 +120,8 @@ any required requirement fails.`,
 
 // v2ReadyLine says whether the executable is fit for reconciler v2, and
 // why not: the capabilities its handshake lacks, and the requirements it
-// failed.
+// failed. A handshake that lacks nothing already has gc read the
+// executable through observe.v1, whatever it failed, and the line says so.
 func v2ReadyLine(report runtimecontract.Report) string {
 	if report.V2Ready {
 		return "v2-ready: yes"
@@ -128,6 +129,8 @@ func v2ReadyLine(report runtimecontract.Report) string {
 	var why []string
 	if len(report.V2Missing) > 0 {
 		why = append(why, "missing "+strings.Join(report.V2Missing, ", "))
+	} else {
+		why = append(why, "gc already reads it through observe.v1")
 	}
 	if len(report.V2Failed) > 0 {
 		failed := make([]string, len(report.V2Failed))

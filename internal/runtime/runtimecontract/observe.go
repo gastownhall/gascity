@@ -68,10 +68,16 @@ func (r *runner) identityFor(name, processNames string) map[string]string {
 
 // startBox starts name with identity env and processNames under env.
 func (r *runner) startBox(ctx context.Context, env []string, name string, processNames []string, freshOnly bool) outcome {
+	return r.startWithIdentity(ctx, env, name, r.identityFor(name, strings.Join(processNames, ",")), processNames, freshOnly)
+}
+
+// startWithIdentity starts name with the identity env given and
+// processNames under env.
+func (r *runner) startWithIdentity(ctx context.Context, env []string, name string, identity map[string]string, processNames []string, freshOnly bool) outcome {
 	cfg, _ := json.Marshal(boxConfig{
 		WorkDir:      r.opts.WorkDir,
 		Command:      r.opts.Command,
-		Env:          r.identityFor(name, strings.Join(processNames, ",")),
+		Env:          identity,
 		ProcessNames: processNames,
 		FreshOnly:    freshOnly,
 	})
@@ -425,7 +431,12 @@ func probeObserveFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolIn
 	if s != StatusPass {
 		return s, d
 	}
-	again := r.startBox(ctx, nil, name, nil, true)
+	// The refused start carries its own attempt's token, as every fresh
+	// start gc makes does: a script that seeds it before its held-name
+	// check would give the live box to that attempt.
+	attempt := r.identityFor(name, "")
+	attempt["GC_INSTANCE_TOKEN"] = name + "-tok-refused"
+	again := r.startWithIdentity(ctx, nil, name, attempt, nil, true)
 	switch {
 	case again.ok():
 		return StatusFail, "a fresh_only start over a held name succeeded"
@@ -441,7 +452,10 @@ func probeObserveFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolIn
 	if objectOf(after) != objectOf(before) {
 		return StatusFail, fmt.Sprintf("the refused fresh_only start replaced the box: object %+v then %+v", objectOf(before), objectOf(after))
 	}
-	return StatusPass, "refused, the box untouched"
+	if !sameIdentity(after.Identity, before.Identity) {
+		return StatusFail, "the refused fresh_only start changed the box's identity"
+	}
+	return StatusPass, "refused, the box and its identity untouched"
 }
 
 func collisionPhrase(msg string) bool {

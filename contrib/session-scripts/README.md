@@ -19,17 +19,26 @@ session, captures output via `hardcopy`, and stores each box's identity and
 metadata in 0600 sidecar files. Each city gets its own private screen
 socket directory, so its listing holds only the boxes gc started for it.
 
-State lives in `<home>/.gc-session-screen`, where `<home>` is the user's
-home directory from the password database, never from `XDG_RUNTIME_DIR`,
-`TMPDIR` or `HOME`: the supervisor, cron jobs and sudo shells all resolve
-the same directory, so none of them can read a running box as absent and
-start a twin. `GC_EXEC_STATE_DIR` overrides it, and then must be identical
-for every gc process of the city. It is a 0700 directory the script refuses
-to use if it is a symlink or someone else's: to keep state elsewhere, set
-`GC_EXEC_STATE_DIR` instead of linking `~/.gc-session-screen`. Keep it
-short: a screen socket path must fit 107 bytes. Each city's directory is
-keyed by the host name and the city path, so two hosts sharing a home never
-list (and wipe) each other's boxes.
+State lives in `<home>/.gcss`, where `<home>` is the user's home directory
+from the password database, never from `XDG_RUNTIME_DIR`, `TMPDIR` or
+`HOME`: the supervisor, cron jobs and sudo shells all resolve the same
+directory, so none of them can read a running box as absent and start a
+twin. `GC_EXEC_STATE_DIR` overrides it, and then must be identical for every
+gc process of the city. It is a 0700 directory the script refuses to use if
+it is a symlink or someone else's: to keep state elsewhere, set
+`GC_EXEC_STATE_DIR` instead of linking `~/.gcss`. Each city has two
+directories there, keyed by the host name and the city path (`<key>`, 8 hex
+digits), so two hosts sharing a home never list (and wipe) each other's
+boxes: `<key>` holds the city's screen sockets and nothing else, and
+`<key>.meta` each box's metadata.
+
+A screen socket path, `<state>/<key>/<pid>.<name>`, must fit 107 bytes, so
+the state directory's length limits session names: counting the pid as 7
+digits, a name fits in 89 bytes less the length of the state directory,
+which by default is 83 less the length of `<home>`. Under `/home/ubuntu`
+that is 71 bytes, enough for gc's pool session names
+(`<template>-gcg-session-<32 hex>`) of templates up to 26 characters. A
+start whose socket path would not fit fails before screen runs.
 
 **Upgrading from an earlier version:** with the old script still in place,
 stop the city (`gc stop <city>`: the controller and every session), then
@@ -44,11 +53,15 @@ key, and its running boxes would no longer be listed.
 After a reboot the old sockets list as dead. A legacy start wipes a name
 only dead sessions hold and starts it; a v2 (`fresh_only`) start refuses it
 with exit 73 and leaves the removal to gc, by the dead box's object.
-A box screen lists dead whose agent survived (one that ignores the hangup)
-is not free: each start records its window process (boot id, pid and
-start time), and while that process runs the box observes `unknown`, a
-corpse kill answers `live`, and a legacy start refuses it. `stop` ends that
-agent. A record from before a reboot names no process and is never killed.
+A name whose box is gone, or listed dead, is not free while the box's agent
+survives (one that ignores the hangup outlives a SCREEN that quit or was
+killed): each start records its window process (boot id, pid and start
+time), and while that process runs the name observes `unknown`, `inventory`
+lists it `unknown`, a start refuses it (exit 73 under `fresh_only`), and a
+corpse kill of a box listed dead answers `live`. `stop` ends that agent, and
+so does a zombie kill after it quits the box. A record from before a reboot
+names no process and is never killed, and a zombie (`/proc` state `Z`)
+counts as gone.
 A start whose session does not appear within 2s ends its own SCREEN (found
 by its exact argv in `/proc`) before it fails, so no box appears after the
 failure.

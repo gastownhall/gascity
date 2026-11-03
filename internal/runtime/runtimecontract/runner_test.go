@@ -146,6 +146,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqObserveMetaIsIdentity, set("set-meta", `v=$(cat); if [ -d "$box" ]; then printf %s "$v" > "$box/xmeta.$3"; fi`), "set-meta writes a store observe does not read"},
 		{ReqObserveFreshOnlyRefuses, edit("start", `if [ -n "$fresh" ]; then exit 73; fi; exit 1;`, `if [ -n "$fresh" ]; then rm -rf "$box"; else exit 1; fi;`), "fresh_only recreates the box"},
 		{ReqObserveFreshOnlyRefuses, edit("start", `if [ -n "$fresh" ]; then exit 73; fi;`, `if [ -n "$fresh" ]; then printf 'obj-x' > "$box/id"; exit 73; fi;`), "a refused fresh_only start changes the box"},
+		{ReqObserveFreshOnlyRefuses, edit("start", `if [ -n "$fresh" ]; then exit 73; fi;`, `if [ -n "$fresh" ]; then printf %s "$cfg" | sed -n 's/.*"GC_INSTANCE_TOKEN":"\([^"]*\)".*/\1/p' > "$box/meta.GC_INSTANCE_TOKEN"; exit 73; fi;`), "a refused fresh_only start writes its token to the box"},
 		{ReqObserveKillObjectExact, set("kill-object", `cat >/dev/null; rm -rf "$box"; echo killed`), "kill-object kills by name"},
 		{ReqObserveKillObjectExact, edit("kill-object", ` || [ "$(cat "$box/created")" != "$cr" ]`, ``), "kill-object ignores the object's creation time"},
 		{ReqObserveKillObjectExact, edit("kill-object", `corpse) echo live ;;`, `corpse) rm -rf "$box"; echo killed ;;`), "corpse mode kills a running box"},

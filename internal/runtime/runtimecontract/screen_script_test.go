@@ -2,11 +2,13 @@ package runtimecontract
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -152,10 +154,17 @@ func (f *fakeBackend) cmdline(pid string, argv ...string) {
 	f.procFile(pid+"/cmdline", strings.Join(argv, "\x00")+"\x00")
 }
 
+// procStat sets pid's stat in the fake /proc: its command name, its state
+// (S, Z) and its start time, the 22nd field. With it the script reads pid
+// from /proc, not ps.
+func (f *fakeBackend) procStat(pid, comm, state, start string) {
+	f.procFile(pid+"/stat", fmt.Sprintf("%s (%s) %s 1 %s %s 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n", pid, comm, state, pid, pid, start))
+}
+
 // rows sets screen -ls to exactly the given "<pid>.<name>\t<status>" rows,
 // replacing the sessions the script started.
 func (f *fakeBackend) rows(rows ...string) {
-	started, _ := filepath.Glob(filepath.Join(f.state, "city-*", "s", "fake-ls"))
+	started, _ := filepath.Glob(filepath.Join(f.state, "*", "fake-ls"))
 	for _, p := range started {
 		f.file(p, "")
 	}
@@ -416,8 +425,11 @@ func TestScreenScriptStartNeedsTheBox(t *testing.T) {
 	if strings.Contains(f.calls(), "-dmS") {
 		t.Fatalf("start ran screen for a socket path that cannot fit: %q", f.calls())
 	}
-	// Two bytes per character: 30 characters fit, 60 bytes do not.
-	if _, code := f.run(`{"command":"sleep 300"}`, "start", strings.Repeat("é", 30)+strings.Repeat("n", 10)); code == 0 {
+	// A socket path is "<state>/<8 hex key>/<pid>.<name>", the pid counted
+	// as 7 digits. Two bytes per character: a name of half the budget and
+	// one more character fits in characters, not in bytes.
+	budget := 107 - len(f.state) - len("/01234567/1234567.")
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", strings.Repeat("é", budget/2+1)); code == 0 {
 		t.Fatal("start with a socket path over 107 bytes (but not characters) succeeded")
 	}
 	if strings.Contains(f.calls(), "-dmS") {
@@ -490,7 +502,7 @@ func TestScreenScriptStartNeedsTheBox(t *testing.T) {
 // metaDir is the fake city's metadata directory.
 func (f *fakeBackend) metaDir() string {
 	f.t.Helper()
-	dirs, err := filepath.Glob(filepath.Join(f.state, "city-*", "meta"))
+	dirs, err := filepath.Glob(filepath.Join(f.state, "*.meta"))
 	if err != nil || len(dirs) != 1 {
 		f.t.Fatalf("metadata directory: %v, %v", dirs, err)
 	}
@@ -529,7 +541,10 @@ func TestScreenScriptPrivateState(t *testing.T) {
 
 // Kills (SHOULD 8) a box whose identity sidecar is gone reading null for
 // good: its wrapper's exports, written before the box, are its identity;
-// and GC_CITY_PATH is kept with the identity for get-meta.
+// and GC_CITY_PATH is kept with the identity for get-meta. Kills (adoption
+// review SHOULD) a recovered identity taken from the caller's environment:
+// a gc CLI run inside an agent session carries that session's identity, and
+// none of it may name the box.
 func TestScreenScriptIdentityFromTheWrapper(t *testing.T) {
 	f := newFakeBackend(t)
 	if _, code := f.run(`{"command":"sleep 300","env":{"GC_SESSION_ID":"sid-w","GC_INSTANCE_TOKEN":"tok w'q","GC_CITY_PATH":"/cities/w"}}`, "start", "mc-w"); code != 0 {
@@ -538,25 +553,23 @@ func TestScreenScriptIdentityFromTheWrapper(t *testing.T) {
 	if out, _ := f.run("", "get-meta", "mc-w", "GC_CITY_PATH"); out != "/cities/w" {
 		t.Errorf("get-meta GC_CITY_PATH = %q, want /cities/w", out)
 	}
-	meta := f.metaDir()
-	sidecars, _ := filepath.Glob(filepath.Join(meta, "mc-w.meta.*"))
-	for _, p := range append(sidecars, filepath.Join(meta, "mc-w.identity")) {
-		if err := os.Remove(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	out, _ := f.run("", "observe", "mc-w")
-	var o struct{ Identity map[string]string }
-	if err := json.Unmarshal([]byte(out), &o); err != nil || o.Identity["GC_SESSION_ID"] != "sid-w" || o.Identity["GC_INSTANCE_TOKEN"] != "tok w'q" {
-		t.Fatalf("observe without the sidecar = %q (%v), want the wrapper's identity", out, err)
-	}
-
 	// A wrapper carrying no identity proves none: identity null, never {}.
 	if _, code := f.run(`{"command":"sleep 300"}`, "start", "mc-v"); code != 0 {
 		t.Fatal("start mc-v failed")
 	}
-	if err := os.Remove(filepath.Join(meta, "mc-v.identity")); err != nil {
-		t.Fatal(err)
+	meta := f.metaDir()
+	sidecars, _ := filepath.Glob(filepath.Join(meta, "mc-w.meta.*"))
+	for _, p := range append(sidecars, filepath.Join(meta, "mc-w.identity"), filepath.Join(meta, "mc-v.identity")) {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.env = append(f.env, "GC_SESSION_ID=caller-sid", "GC_RUNTIME_EPOCH=99", "GC_INSTANCE_TOKEN=caller-tok", "GT_PROCESS_NAMES=caller")
+	out, _ := f.run("", "observe", "mc-w")
+	var o struct{ Identity map[string]string }
+	want := map[string]string{"GC_SESSION_ID": "sid-w", "GC_INSTANCE_TOKEN": "tok w'q"}
+	if err := json.Unmarshal([]byte(out), &o); err != nil || !reflect.DeepEqual(o.Identity, want) {
+		t.Fatalf("observe without the sidecar = %q (%v), want exactly the wrapper's identity %v", out, err, want)
 	}
 	if out, _ := f.run("", "observe", "mc-v"); !strings.Contains(out, `"identity":null`) {
 		t.Fatalf("observe of a box whose wrapper carries no identity = %q, want identity null", out)
@@ -589,7 +602,7 @@ func TestScreenScriptStateIgnoresTheCallersEnvironment(t *testing.T) {
 	if _, code := f.run(`{"command":"sleep 300","fresh_only":true}`, "start", "mc-mayor"); code != 73 {
 		t.Fatalf("a fresh_only start from another environment exited %d, want 73 (no twin)", code)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".gc-session-screen")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, ".gcss")); err != nil {
 		t.Fatalf("state is not under the password database's home: %v", err)
 	}
 }
@@ -652,8 +665,8 @@ func TestScreenScriptKeysStateByHost(t *testing.T) {
 	if out, _ := f.run("", "observe", "mc-a"); !strings.Contains(out, `"absent"`) {
 		t.Errorf("observe on host-b of host-a's box = %q, want absent", out)
 	}
-	if dirs, _ := filepath.Glob(filepath.Join(f.state, "city-*")); len(dirs) != 2 {
-		t.Errorf("city directories for two hosts = %v, want two", dirs)
+	if dirs, _ := filepath.Glob(filepath.Join(f.state, "*.meta")); len(dirs) != 2 {
+		t.Errorf("city metadata directories for two hosts = %v, want two", dirs)
 	}
 }
 
@@ -752,4 +765,185 @@ func TestScreenScriptDeadBoxWithALiveAgent(t *testing.T) {
 	if _, code := f.run("", "stop", "mc-p"); code != 0 || strings.Contains(f.calls(), "kill") || !strings.Contains(f.calls(), "-wipe 4194999.mc-p") {
 		t.Fatalf("stop after a reboot: exit %d, calls %q; want the dead box wiped and no kill", code, f.calls())
 	}
+}
+
+// Kills (adoption review MUST) a name read free while the agent of its last
+// box runs with no box left: an agent that ignores the hangup outlives a
+// SCREEN that quit or was killed, whose socket is gone. The window process
+// recorded at start keeps the name unknown to observe and listed unknown in
+// a complete inventory; a fresh_only start answers 73 and a legacy start
+// refuses, neither touching the record or the identity; and stop ends the
+// agent. Once that process is gone, or its pid is another process's, the
+// name is absent and free.
+func TestScreenScriptAgentOutlivesItsBox(t *testing.T) {
+	f := newFakeBackend(t)
+	f.procFile("sys/kernel/random/boot_id", "boot-a\n")
+	f.file("ps.procs", "4194998 4194999 claude /usr/bin/claude\n")
+	start := `{"command":"claude","env":{"GC_SESSION_ID":"sid-g","GC_INSTANCE_TOKEN":"tok-1"}}`
+	if _, code := f.run(start, "start", "mc-g"); code != 0 {
+		t.Fatal("start failed")
+	}
+	f.rows() // the box is gone; its agent runs on
+	if out, _ := f.run("claude\n", "observe", "mc-g"); !strings.Contains(out, `"state":"unknown"`) {
+		t.Errorf("observe of a name whose agent outlived its box = %q, want unknown", out)
+	}
+	if out, _ := f.run("", "inventory"); out != `{"complete":true,"sessions":[{"name":"mc-g","state":"unknown"}]}` {
+		t.Errorf("inventory with an agent that outlived its box = %q, want the name listed unknown", out)
+	}
+	fresh := `{"command":"claude","fresh_only":true,"env":{"GC_SESSION_ID":"sid-g","GC_INSTANCE_TOKEN":"tok-2"}}`
+	if _, code := f.run(fresh, "start", "mc-g"); code != 73 {
+		t.Errorf("fresh_only start over an agent that outlived its box exited %d, want 73", code)
+	}
+	if _, code := f.run(strings.Replace(start, "tok-1", "tok-3", 1), "start", "mc-g"); code == 0 {
+		t.Error("legacy start over an agent that outlived its box succeeded")
+	}
+	if calls := f.calls(); strings.Count(calls, "-dmS") != 1 || strings.Contains(calls, "kill") {
+		t.Fatalf("a refused start started a box or killed: %q", calls)
+	}
+	if out, _ := f.run("", "get-meta", "mc-g", "GC_INSTANCE_TOKEN"); out != "tok-1" {
+		t.Errorf("token after the refused starts = %q, want the running agent's tok-1", out)
+	}
+	if out, _ := f.run("claude\n", "observe", "mc-g"); !strings.Contains(out, `"state":"unknown"`) {
+		t.Fatalf("observe after the refused starts = %q, want the record kept (unknown)", out)
+	}
+	if _, code := f.run("", "stop", "mc-g"); code != 0 || !strings.Contains(f.calls(), "kill -s TERM -- 4194998") {
+		t.Fatalf("stop of an agent that outlived its box: exit %d, calls %q; want the agent ended", code, f.calls())
+	}
+	if out, _ := f.run("", "observe", "mc-g"); out != `{"state":"absent"}` {
+		t.Errorf("observe after the stop = %q, want absent", out)
+	}
+
+	// The record of a window whose pid now runs another process (another
+	// start time) holds nothing.
+	f.file("ps.procs", "4194997 4194999 claude /usr/bin/claude\n")
+	if _, code := f.run(start, "start", "mc-r"); code != 0 {
+		t.Fatal("start mc-r failed")
+	}
+	f.rows()
+	f.file("lstart.4194997", "Tue Nov  3 00:00:00 2026\n")
+	if out, _ := f.run("", "observe", "mc-r"); out != `{"state":"absent"}` {
+		t.Errorf("observe of a name whose window pid was reused = %q, want absent", out)
+	}
+	if out, _ := f.run("", "inventory"); out != `{"complete":true,"sessions":[]}` {
+		t.Errorf("inventory with a reused window pid = %q, want complete and empty", out)
+	}
+	if _, code := f.run(`{"command":"claude","fresh_only":true}`, "start", "mc-r"); code != 0 {
+		t.Errorf("fresh_only start over a reused window pid exited %d, want 0", code)
+	}
+}
+
+// Kills (adoption review MUST) a zombie kill that drops the record of a
+// window that ignored the hangup, leaving it running: the box quits, the
+// window is ended as stop ends it, and only then is the record dropped. A
+// window that survives fails the kill and keeps the name unknown.
+func TestScreenScriptZombieKillEndsTheWindow(t *testing.T) {
+	f := newFakeBackend(t)
+	f.file("ps.procs", "4194998 4194999 sh /bin/sh -c x\n")
+	zombie := `{"object":{"id":"4194999","created":"Mon Nov 2 00:00:00 2026"},"mode":"zombie"}`
+	if _, code := f.run(`{"command":"sh","env":{"GT_PROCESS_NAMES":"claude"}}`, "start", "mc-z"); code != 0 {
+		t.Fatal("start failed")
+	}
+	if out, code := f.run(zombie, "kill-object", "mc-z"); code != 0 || out != "killed" || !strings.Contains(f.calls(), "kill -s TERM -- 4194998") {
+		t.Fatalf("zombie kill = %q (%d), calls %q; want killed, its window ended", out, code, f.calls())
+	}
+	if out, _ := f.run("", "observe", "mc-z"); out != `{"state":"absent"}` {
+		t.Errorf("observe after the zombie kill = %q, want absent", out)
+	}
+
+	if err := os.Remove(filepath.Join(f.dir, "gone")); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := f.run(`{"command":"sh","env":{"GT_PROCESS_NAMES":"claude"}}`, "start", "mc-y"); code != 0 {
+		t.Fatal("start mc-y failed")
+	}
+	f.file("unkillable", "")
+	if out, code := f.run(zombie, "kill-object", "mc-y"); code == 0 {
+		t.Fatalf("zombie kill whose window survived = %q, exit 0; want a failure", out)
+	}
+	if out, _ := f.run("", "observe", "mc-y"); !strings.Contains(out, `"state":"unknown"`) {
+		t.Errorf("observe after a zombie kill whose window survived = %q, want unknown (its record kept)", out)
+	}
+}
+
+// Kills (adoption review SHOULD) a zombie read alive: a window /proc shows
+// in state Z has exited, only its reaping pending, which on a host without
+// a reaper never comes. A dead box holding it reads dead, and stop ends the
+// box without a kill of the corpse. A command name holding ") " does not
+// shift the parse.
+func TestScreenScriptZombieWindowIsGone(t *testing.T) {
+	f := newFakeBackend(t)
+	f.procFile("sys/kernel/random/boot_id", "boot-a\n")
+	f.file("ps.procs", "4194998 4194999 claude /usr/bin/claude\n")
+	f.procStat("4194998", "a) b", "S", "4242")
+	if _, code := f.run(`{"command":"claude"}`, "start", "mc-q"); code != 0 {
+		t.Fatal("start failed")
+	}
+	f.rows("4194999.mc-q\tDead ???")
+	if out, _ := f.run("", "observe", "mc-q"); !strings.Contains(out, `"state":"unknown"`) {
+		t.Errorf("observe of a dead box whose window runs (/proc) = %q, want unknown", out)
+	}
+	f.procStat("4194998", "a) b", "S", "4343")
+	if out, _ := f.run("", "observe", "mc-q"); !strings.Contains(out, `"state":"dead"`) {
+		t.Errorf("observe of a dead box whose window pid runs another process (/proc) = %q, want dead", out)
+	}
+	f.procStat("4194998", "a) b", "Z", "4242")
+	if out, _ := f.run("", "observe", "mc-q"); !strings.Contains(out, `"state":"dead"`) {
+		t.Errorf("observe of a dead box whose window is a zombie = %q, want dead", out)
+	}
+	if _, code := f.run("", "stop", "mc-q"); code != 0 || strings.Contains(f.calls(), "kill") {
+		t.Fatalf("stop of a dead box whose window is a zombie: exit %d, calls %q; want it stopped, no kill", code, f.calls())
+	}
+	if out, _ := f.run("", "observe", "mc-q"); out != `{"state":"absent"}` {
+		t.Errorf("observe after the stop = %q, want absent", out)
+	}
+}
+
+// Kills (adoption review MUST) a default layout that leaves no room for
+// gc's pool session names, <template>-gcg-session-<32 hex>: with no
+// GC_EXEC_STATE_DIR and a home as long as /home/ubuntu (12 bytes), names up
+// to 71 bytes (83 less the home's 12) start, among them 67-byte
+// adopt-pr-review-claude and 70-byte gc__implementation-worker pool names,
+// and a name one byte longer is refused before screen runs.
+func TestScreenScriptDefaultLayoutFitsPoolSessionNames(t *testing.T) {
+	f := newFakeBackend(t)
+	home := tmpDirOfLength(t, len("/home/ubuntu"))
+	f.file("home", home)
+	f.env = []string{f.env[0], "GC_EXEC_CITY_PATH=/fake-city"} // PATH, no GC_EXEC_STATE_DIR
+	hex := strings.Repeat("0123456789abcdef", 2)
+	for _, name := range []string{
+		"claude-gcg-session-" + hex,
+		"adopt-pr-review-claude-gcg-session-" + hex,
+		"gc__implementation-worker-gcg-session-" + hex,
+		strings.Repeat("n", 71),
+	} {
+		if _, code := f.run(`{"command":"sleep 300"}`, "start", name); code != 0 || !strings.Contains(f.calls(), "-dmS "+name+" ") {
+			t.Errorf("start of a %d-byte name under a 12-byte home: exit %d, calls %q; want it started", len(name), code, f.calls())
+		}
+	}
+	long := strings.Repeat("n", 72)
+	if _, code := f.run(`{"command":"sleep 300"}`, "start", long); code == 0 || strings.Contains(f.calls(), "-dmS "+long+" ") {
+		t.Errorf("start of a 72-byte name under a 12-byte home: exit %d, calls %q; want it refused before screen", code, f.calls())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gcss")); err != nil {
+		t.Fatalf("state is not under the home's .gcss: %v", err)
+	}
+}
+
+// tmpDirOfLength makes a new directory whose path is n bytes, n at least 7:
+// /tmp and a random name.
+func tmpDirOfLength(t *testing.T, n int) string {
+	t.Helper()
+	for range 10 {
+		dir := "/tmp/" + strings.ToLower(rand.Text())[:n-len("/tmp/")]
+		err := os.Mkdir(dir, 0o700)
+		if err == nil {
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			return dir
+		}
+		if !os.IsExist(err) {
+			t.Fatal(err)
+		}
+	}
+	t.Fatalf("no free %d-byte directory under /tmp", n)
+	return ""
 }

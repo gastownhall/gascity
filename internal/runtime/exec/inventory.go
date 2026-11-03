@@ -207,7 +207,7 @@ func (p *Provider) ListInventory(prefix string) ([]string, map[string]runtime.In
 
 // Inventory is one well-formed `inventory` answer as gc reads it: every
 // listed name, and the attributes of each name whose state and object were
-// readable (runtime.InventoryEntry; Incarnation is "<id>@<created>"). It is
+// readable (runtime.InventoryEntry; Incarnation is "<id>:<created>"). It is
 // exported for the conformance kit.
 type Inventory struct {
 	Complete bool
