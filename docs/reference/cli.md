@@ -5312,6 +5312,12 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
 
+--time-budget bounds the copy and the clear. The run checks it between
+batches, never inside one, and when it is spent stops at the next boundary and
+exits 75, naming the phase and how far it got. Running the same command again
+continues: the copy keeps every row an earlier run copied that still equals the
+work store, and the clear resumes from the rows it had not yet removed.
+
 ```
 gc storage migrate [flags]
 ```
@@ -5325,6 +5331,7 @@ gc storage migrate [flags]
 | `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
 | `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
+| `--time-budget` | duration | `30m0s` | stop the copy or the clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget) |
 
 ## gc storage preflight
 

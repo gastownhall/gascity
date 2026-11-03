@@ -90,6 +90,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"ReadEventsJournalPage":       nativeStoreRead,
 	"EventsJournalActive":         nativeStoreLifecycle,
 	"DepMetadata":                 nativeStoreRead,
+	"DepMetadataBatch":            nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,
 	"AtomicTx":                    nativeStoreLifecycle,

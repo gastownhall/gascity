@@ -46,7 +46,7 @@ func infraSplitConfig(path string) *config.City {
 // command's own preflights (source flag, controller probe, attestation, guard,
 // rig census), so the copy machinery below is exercised on its own rather than
 // through the flag parsing that gates it.
-func migrateInfraClasses(t *testing.T, cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
+func migrateInfraClasses(t testing.TB, cityPath string, cfg *config.City, stderr io.Writer) infraMigrationReport {
 	t.Helper()
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {

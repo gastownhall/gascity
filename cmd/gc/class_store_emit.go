@@ -978,6 +978,56 @@ func (s *emittingClassStore) DepAddWithMetadata(issueID, dependsOnID, depType, m
 	return nil
 }
 
+// CreateWithForeignIDBatch forwards the engine's batch create
+// (beads.ForeignIDBatchCreator) and emits bead.created for each row as the
+// engine stored it, as CreateWithForeignID does for one. An engine without
+// it reports beads.ErrBatchCopyUnsupported, and the caller creates per row.
+func (s *emittingClassStore) CreateWithForeignIDBatch(rows []beads.Bead) error {
+	creator, ok := beads.As[beads.ForeignIDBatchCreator](s.Store)
+	if !ok {
+		return beads.ErrBatchCopyUnsupported
+	}
+	if err := creator.CreateWithForeignIDBatch(rows); err != nil {
+		return err
+	}
+	for _, b := range rows {
+		s.emitCreated(s.Get(b.ID))
+	}
+	return nil
+}
+
+// DepAddBatch forwards the engine's batch edge write (beads.DepBatchWriter)
+// and emits bead.updated once per issue side, as DepAddWithMetadata does per
+// edge. An engine without it reports beads.ErrBatchCopyUnsupported.
+func (s *emittingClassStore) DepAddBatch(edges []beads.DepWithPayload) error {
+	writer, ok := beads.As[beads.DepBatchWriter](s.Store)
+	if !ok {
+		return beads.ErrBatchCopyUnsupported
+	}
+	if err := writer.DepAddBatch(edges); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, e := range edges {
+		if !seen[e.IssueID] {
+			seen[e.IssueID] = true
+			s.emitUpdated(e.IssueID)
+		}
+	}
+	return nil
+}
+
+// DepMetadataBatch forwards the engine's batched payload read
+// (beads.DepMetadataBatchReader). An engine without it reports
+// beads.ErrDepMetadataUnsupported, and the caller reads per edge.
+func (s *emittingClassStore) DepMetadataBatch(ids []string) (map[beads.DepPair]string, error) {
+	reader, ok := beads.As[beads.DepMetadataBatchReader](s.Store)
+	if !ok {
+		return nil, beads.ErrDepMetadataUnsupported
+	}
+	return reader.DepMetadataBatch(ids)
+}
+
 func (s *emittingClassStore) SequenceFloor() (int64, error) {
 	floor, ok := s.Store.(interface{ SequenceFloor() (int64, error) })
 	if !ok {

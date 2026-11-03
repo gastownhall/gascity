@@ -597,7 +597,7 @@ func TestVerifyInfraCopyRefusesAnInventedDependencyEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination, reopen := infraEqualityDestination(t)
-	if _, err := importInfraSnapshot(destination, source, rows); err != nil {
+	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
 	if _, err := verifyInfraCopy(reopen, source); err != nil {
@@ -678,7 +678,7 @@ func TestVerifyInfraCopyRefusesAStrippedEdgePayload(t *testing.T) {
 		t.Fatalf("readInfraSnapshot: %v", err)
 	}
 	destination, reopen := infraEqualityDestination(t)
-	if _, err := importInfraSnapshot(destination, source, rows); err != nil {
+	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
 	if _, err := verifyInfraCopy(reopen, source); err != nil {
@@ -813,7 +813,7 @@ func TestVerifyInfraCopyReReadsTheSourceAtVerificationTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination, reopen := infraEqualityDestination(t)
-	if _, err := importInfraSnapshot(destination, source, rows); err != nil {
+	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
 
@@ -1130,4 +1130,25 @@ func TestInfraSnapshotLeavesSyntheticConvoysInTheWorkStore(t *testing.T) {
 	if got := len(rows); got != 4 {
 		t.Fatalf("snapshot carried %d rows, want exactly the 4 infra beads; ids=%v", got, carried)
 	}
+}
+
+// importInfraRows plans rows out of source and imports them into destination,
+// the copy step on its own: no prepare, no budget.
+func importInfraRows(t *testing.T, destination, source beads.Store, rows []beads.Bead) error {
+	t.Helper()
+	plan, err := infraSourceEdgePayloadRefusal(source, rows, nil)
+	if errors.Is(err, beads.ErrDepMetadataUnsupported) {
+		// A double that cannot be asked about payloads still has edges to
+		// copy; the copy reads each payload itself (infraCopyDepEdge).
+		plan = infraCopyPlan{rows: rows, infraIDs: map[string]bool{}}
+		for _, b := range rows {
+			plan.infraIDs[b.ID] = true
+		}
+		plan.down, err = readInfraDownEdges(nil, source, sortedMapKeys(plan.infraIDs))
+	}
+	if err != nil {
+		return err
+	}
+	_, err = importInfraSnapshot(destination, source, plan, infraPrepared{}, infraEngineClock{})
+	return err
 }

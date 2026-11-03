@@ -253,6 +253,30 @@ into the binding either. On a native-Dolt work store each removal is a Dolt
 commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
 before the clear) is the full-fidelity backstop for them.
 
+**Batches, the time budget, and resuming.** The copy and the clear run in
+batches: rows are created 500 to a transaction, edges 2,000 to one, the edges
+and their payloads are read in batches of 1,000 rows, and the clear removes
+1,000 rows per batched delete (one Dolt commit each on a native-Dolt work
+store; a store without batched deletes removes them one at a time). On an
+MC-sized city (40,000 rows, 18,662 edges) the whole run takes about 30
+seconds. `--time-budget` (default `30m`, `0` for none) is checked between
+batches, never inside one. When it is spent, the run stops at the next
+boundary and exits 75 with "paused in <phase> at <n>/<N>":
+
+- before the marker, the city is unconverged and boot refuses it, as for any
+  copy still under way. Running the same command again keeps every row an
+  earlier run copied that still equals the work store, and every edge between
+  kept rows that already carries the right payload. It deletes and copies
+  again any row the work store changed since, or that the binding holds an
+  edge of the work store no longer has.
+- after the marker, the clear is pending and boot refuses it as retained
+  copies. Running the same command again finishes the clear from the rows it
+  had not yet removed.
+
+Either way the proof is unchanged: the copy is proven against a re-read of
+the work store before the marker, and the clear deletes only rows the
+manifest proves the binding holds.
+
 Nothing in the work store changes before the marker: until step 8 the source is
 exactly as you left it, and the cutover can still be abandoned by a config
 edit. Past the marker the binding is the only authoritative copy, which is why

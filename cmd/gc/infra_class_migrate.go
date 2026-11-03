@@ -381,6 +381,11 @@ func (o infraMigrationOutcome) String() string {
 type infraMigrationReport struct {
 	// Outcome is what was observed.
 	Outcome infraMigrationOutcome
+	// Paused is set when the engine stopped at a batch boundary because the
+	// run's time budget was spent (infra_copy_engine.go): before the marker
+	// the outcome is unconverged, after it retained, and the same command
+	// continues.
+	Paused *infraEnginePause
 	// Stranded holds the sorted ids the stranded outcome found, and is empty
 	// for every other outcome. It travels on the report because the refusal
 	// has to NAME them: a supervisor records the refusal string and nothing
@@ -975,7 +980,7 @@ func recordInfraGenesis(cityPath string, target infraBindingTarget) error {
 	if err != nil {
 		return infraGenesisOpenFailure(target, err)
 	}
-	if err := prepareInfraDestination(destination); err != nil {
+	if _, err := prepareInfraDestination(destination, nil); err != nil {
 		_ = closeBeadStoreHandle(destination)
 		return err
 	}
@@ -1346,33 +1351,50 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// equality stage, and clears it so this does not run twice.
 	defer func() { _ = closeBeadStoreHandle(writer) }()
 
-	rows, err := readInfraSnapshot(source)
+	rows, allIDs, err := readInfraSnapshotWithIDs(source, coordclass.CurrentGeneration)
 	if err != nil {
 		return fail(err)
+	}
+	// paused is fail for the engine stopping at a boundary on the time budget:
+	// the same outcome, and the pause the operator command renders.
+	paused := func(err error) infraMigrationReport {
+		report := fail(err)
+		var pause *infraEnginePause
+		if errors.As(err, &pause) {
+			report.Paused = pause
+		}
+		return report
 	}
 	// Both halves run before the destination is touched, so a refused city can
 	// re-run from empty once the payload can be carried. The destination half
 	// has to be here rather than left to infraCopyDepEdge: by the time the
 	// import writes its first edge, prepareInfraDestination has already deleted
 	// the rows an interrupted earlier attempt stamped.
-	carrying, blind, err := infraSourceEdgePayloadRefusal(source, rows)
+	plan, err := infraSourceEdgePayloadRefusal(source, rows, allIDs)
 	if err != nil {
 		return fail(migrationWindowPayloadRefusal(cityPath, err))
 	}
 	var annotations []string
-	if blind != "" {
-		annotations = append(annotations, infraManifestPayloadBlindPrefix+blind)
-		fmt.Fprintf(stderr, "%s: the work store is a %s store, whose protocol carries no dependency payload, so its edges are copied carrying none\n", logPrefix, blind) //nolint:errcheck // best-effort stderr
+	if plan.blind != "" {
+		annotations = append(annotations, infraManifestPayloadBlindPrefix+plan.blind)
+		fmt.Fprintf(stderr, "%s: the work store is a %s store, whose protocol carries no dependency payload, so its edges are copied carrying none\n", logPrefix, plan.blind) //nolint:errcheck // best-effort stderr
 	}
-	if err := infraDestinationEdgePayloadRefusal(writer, carrying); err != nil {
+	if err := infraDestinationEdgePayloadRefusal(writer, plan.carrying); err != nil {
 		return fail(err)
 	}
-	if err := prepareInfraDestination(writer); err != nil {
+	if err := infraEngineCrashPoint("plan"); err != nil {
 		return fail(err)
 	}
-	imported, err := importInfraSnapshot(writer, source, rows)
+	prepared, err := prepareInfraDestination(writer, &plan)
 	if err != nil {
 		return fail(err)
+	}
+	if err := infraEngineCrashPoint("prepare"); err != nil {
+		return fail(err)
+	}
+	imported, err := importInfraSnapshot(writer, source, plan, prepared, infraEngineClockFor(cityPath))
+	if err != nil {
+		return paused(err)
 	}
 	// Equality is proven against the database, not against the connection that
 	// just wrote it. Closing the writer first is what makes the proof about
@@ -1386,6 +1408,9 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err != nil {
 		return fail(fmt.Errorf("equality check: %w", err))
 	}
+	if err := infraEngineCrashPoint("verify"); err != nil {
+		return fail(err)
+	}
 	// Before the marker, so a marker never exists without the manifest that
 	// makes its convergence claim re-checkable.
 	// Each id with its created_at, so a later row that reuses the id is never
@@ -1395,11 +1420,17 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := writeInfraCopyManifestRecord(target, proven, infraManifestRecordCreated(nil, rows, proven), generation, annotations...); err != nil {
 		return fail(err)
 	}
+	if err := infraEngineCrashPoint("manifest"); err != nil {
+		return fail(err)
+	}
 	current, err := currentWorkStoreIdentity(cityPath)
 	if err != nil {
 		return fail(err)
 	}
 	if err := writeInfraMigratedMarker(target, current); err != nil {
+		return fail(err)
+	}
+	if err := infraEngineCrashPoint("marker"); err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
@@ -1426,7 +1457,12 @@ func clearInfraRetainedCopiesReport(cityPath string, target infraBindingTarget, 
 		}
 		fmt.Fprintf(stderr, "%s: clearing the retained work-store copies: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		retained, _ := infraRetainedIDs(cityPath, target)
-		return infraMigrationReport{Outcome: infraMigrationRetained, Retained: retained, Fault: err, Clear: result}
+		report := infraMigrationReport{Outcome: infraMigrationRetained, Retained: retained, Fault: err, Clear: result}
+		var pause *infraEnginePause
+		if errors.As(err, &pause) {
+			report.Paused = pause
+		}
+		return report
 	}
 	fmt.Fprintf(stderr, "%s: %s\n", logPrefix, describeInfraClear(result)) //nolint:errcheck // best-effort stderr
 	for _, edge := range result.Unrestorable {
@@ -1949,9 +1985,12 @@ func readInfraSnapshotWithIDs(source beads.Store, gen coordclass.Generation) ([]
 	return infra, ids, nil
 }
 
-// infraSourceEdgePayloadRefusal walks the source's edges and returns whether
-// any within-infra one CARRIES a payload, plus the refusal for a source whose
-// payloads this copy or the clear after it cannot READ.
+// infraSourceEdgePayloadRefusal reads the source's edges and their payloads in
+// one pass and returns them as the copy's plan (whether any within-infra edge
+// CARRIES a payload included), or the refusal for a source whose payloads this
+// copy or the clear after it cannot READ. allIDs is every row the work store
+// holds, which lets a store that lists edges in batches answer the dependents
+// of the slice from its rows' down edges; nil reads each infra row both ways.
 //
 // It answers both from one walk because the caller needs both and the read is
 // the expensive part: whether any payload exists at all is what decides whether
@@ -2001,49 +2040,90 @@ func readInfraSnapshotWithIDs(source beads.Store, gen coordclass.Generation) ([]
 // beads.DepMetadataAbsentByProtocol) is the one source that cannot be asked
 // and is not refused: nothing can have stored a payload through it. blind names
 // that protocol, for the manifest and the operator.
-func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead) (carrying bool, blind string, err error) {
+func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead, allIDs map[string]bool) (infraCopyPlan, error) {
+	plan := infraCopyPlan{rows: rows, infraIDs: make(map[string]bool, len(rows)), up: map[string][]beads.Dep{}}
+	for _, b := range rows {
+		plan.infraIDs[b.ID] = true
+	}
+	// The edges, in one batched pass over every row the work store holds
+	// when it can list them in batches (the dependents of an infra row are
+	// the down edges of whatever row holds them), otherwise both directions
+	// of each infra row.
+	batch, _ := beads.As[beads.DependencyBatchLister](source)
+	if batch != nil && allIDs != nil {
+		all, err := readInfraDownEdges(batch, source, sortedMapKeys(allIDs))
+		if err != nil {
+			return plan, fmt.Errorf("listing deps to check for edge payloads: %w", err)
+		}
+		plan.down = make(map[string][]beads.Dep, len(rows))
+		for id, deps := range all {
+			if plan.infraIDs[id] {
+				plan.down[id] = deps
+				continue
+			}
+			for _, d := range deps {
+				if plan.infraIDs[d.DependsOnID] {
+					plan.up[d.DependsOnID] = append(plan.up[d.DependsOnID], d)
+				}
+			}
+		}
+	} else {
+		var err error
+		if plan.down, err = readInfraDownEdges(nil, source, sortedMapKeys(plan.infraIDs)); err != nil {
+			return plan, fmt.Errorf("listing deps to check for edge payloads: %w", err)
+		}
+		for _, b := range rows {
+			up, err := source.DepList(b.ID, "up")
+			if err != nil {
+				return plan, fmt.Errorf("listing dependents of %s to check for edge payloads: %w", b.ID, err)
+			}
+			for _, d := range up {
+				if !plan.infraIDs[d.IssueID] {
+					plan.up[b.ID] = append(plan.up[b.ID], beads.Dep{IssueID: d.IssueID, DependsOnID: b.ID, Type: d.Type})
+				}
+			}
+		}
+	}
 	if protocol, absent := beads.DepMetadataAbsent(source); absent {
-		return false, protocol, nil
+		plan.blind, plan.payloads = protocol, map[beads.DepPair]string{}
+		return plan, nil
 	}
 	reader, ok := source.(beads.DepMetadataReader)
 	if !ok {
-		return false, "", fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace (%w)", source, beads.ErrDepMetadataUnsupported)
+		return plan, fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace (%w)", source, beads.ErrDepMetadataUnsupported)
 	}
-	infraIDs := make(map[string]bool, len(rows))
-	for _, b := range rows {
-		infraIDs[b.ID] = true
+	// Every edge the copy or the clear reads a payload of: each infra row's
+	// edges down, and its edges up from a row outside the slice.
+	read := make(map[string][]beads.Dep, len(plan.down))
+	for id, deps := range plan.down {
+		read[id] = deps
 	}
-	for _, b := range rows {
-		down, err := source.DepList(b.ID, "down")
-		if err != nil {
-			return false, "", fmt.Errorf("listing deps of %s to check for edge payloads: %w", b.ID, err)
+	for _, deps := range plan.up {
+		for _, d := range deps {
+			read[d.IssueID] = append(read[d.IssueID], d)
 		}
-		for _, dep := range down {
-			payload, carried, err := reader.DepMetadata(b.ID, dep.DependsOnID)
-			if err != nil {
-				return false, "", fmt.Errorf("reading the payload on dep %s -> %s: %w", b.ID, dep.DependsOnID, err)
+	}
+	under, _, _ := unwrapBeadPolicyStore(source)
+	batchReader, _ := beads.As[beads.DepMetadataBatchReader](under)
+	got, err := readInfraPayloads(batchReader, reader, read, func(beads.Dep) bool { return true })
+	if err != nil {
+		return plan, err
+	}
+	plan.payloads = make(map[beads.DepPair]string, len(got))
+	for _, deps := range read {
+		for _, d := range deps {
+			pair := beads.DepPair{IssueID: d.IssueID, DependsOnID: d.DependsOnID}
+			payload, carried := got[pair]
+			if !carried {
+				continue
 			}
-			// The same normalization infraReadEdgePayload applies, so an
-			// engine's spelling of "no payload" does not make the copy demand a
-			// writer it has nothing to write with.
-			if infraIDs[dep.DependsOnID] && carried && beads.DepMetadataCarries(payload) {
-				carrying = true
-			}
-		}
-		up, err := source.DepList(b.ID, "up")
-		if err != nil {
-			return false, "", fmt.Errorf("listing dependents of %s to check for edge payloads: %w", b.ID, err)
-		}
-		for _, dep := range up {
-			if infraIDs[dep.IssueID] {
-				continue // read above, from its own row
-			}
-			if _, _, err := reader.DepMetadata(dep.IssueID, b.ID); err != nil {
-				return false, "", fmt.Errorf("reading the payload on dep %s -> %s: %w", dep.IssueID, b.ID, err)
+			plan.payloads[pair] = payload
+			if plan.infraIDs[d.IssueID] && plan.infraIDs[d.DependsOnID] {
+				plan.carrying = true
 			}
 		}
 	}
-	return carrying, "", nil
+	return plan, nil
 }
 
 // infraDestinationEdgePayloadRefusal returns the refusal for a destination that
@@ -2162,20 +2242,75 @@ func infraCopyDepEdge(destination, source beads.Store, issueID, dependsOnID, dep
 // changed. Any unstamped row is content this migration did not put there — a
 // genesis city, or a store already in service — and the migration refuses
 // rather than overwriting it.
-func prepareInfraDestination(destination beads.Store) error {
+func prepareInfraDestination(destination beads.Store, plan *infraCopyPlan) (infraPrepared, error) {
+	prepared := infraPrepared{kept: map[string]bool{}, edges: map[beads.DepPair]beads.DepWithPayload{}}
 	existing, err := destination.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
-		return fmt.Errorf("listing binding: %w", err)
+		return prepared, fmt.Errorf("listing binding: %w", err)
 	}
 	if err := infraDestinationPopulatedRefusal(existing); err != nil {
-		return err
+		return prepared, err
 	}
-	for _, b := range existing {
-		if err := destination.Delete(b.ID); err != nil {
-			return fmt.Errorf("clearing partial attempt row %s: %w", b.ID, err)
+	// Resumable copy: a stamped row that still equals the source stays, and
+	// so does an edge between two kept rows that already carries the planned
+	// type and payload. The proof is the verify that follows, against a
+	// re-read source, so keeping them weakens nothing; a row the source
+	// changed since is deleted (with its edges) and copied again.
+	var drop []string
+	if plan != nil && len(existing) > 0 {
+		want := make(map[string]beads.Bead, len(plan.rows))
+		for _, b := range plan.rows {
+			want[b.ID] = b
+		}
+		ids := make([]string, 0, len(existing))
+		for _, b := range existing {
+			ids = append(ids, b.ID)
+		}
+		batch, _ := beads.As[beads.DependencyBatchLister](destination)
+		gotDeps, err := readInfraDownEdges(batch, destination, ids)
+		if err != nil {
+			return prepared, fmt.Errorf("listing binding: %w", err)
+		}
+		for _, b := range existing {
+			if w, ok := want[b.ID]; ok && infraKeepStampedRow(*plan, w, b, gotDeps[b.ID]) {
+				prepared.kept[b.ID] = true
+				continue
+			}
+			drop = append(drop, b.ID)
+		}
+		between := func(d beads.Dep) bool { return prepared.kept[d.IssueID] && prepared.kept[d.DependsOnID] }
+		reader, _ := beads.As[beads.DepMetadataReader](destination)
+		batchReader, _ := beads.As[beads.DepMetadataBatchReader](destination)
+		payloads, err := readInfraPayloads(batchReader, reader, gotDeps, between)
+		if err != nil {
+			return prepared, fmt.Errorf("reading the binding's edge payloads: %w", err)
+		}
+		for id, deps := range gotDeps {
+			for _, d := range deps {
+				if !between(d) {
+					continue
+				}
+				pair := beads.DepPair{IssueID: id, DependsOnID: d.DependsOnID}
+				prepared.edges[pair] = beads.DepWithPayload{Dep: d, Payload: payloads[pair]}
+			}
+		}
+	} else {
+		for _, b := range existing {
+			drop = append(drop, b.ID)
 		}
 	}
-	return nil
+	if deleter, ok := beads.As[beads.BatchDeleter](destination); ok && len(drop) > 0 {
+		if err := deleter.DeleteBatch(drop); err != nil {
+			return prepared, fmt.Errorf("clearing %d partial attempt row(s): %w", len(drop), err)
+		}
+		return prepared, nil
+	}
+	for _, id := range drop {
+		if err := destination.Delete(id); err != nil {
+			return prepared, fmt.Errorf("clearing partial attempt row %s: %w", id, err)
+		}
+	}
+	return prepared, nil
 }
 
 // infraDestinationPopulatedRefusal returns the refusal for a destination
@@ -2238,40 +2373,75 @@ func infraDestinationPreflightRefusal(target infraBindingTarget) error {
 // payload the source holds for it. Cross-boundary edges into work stay metadata
 // linkage, resolved by the owning-store read on each side — re-adding them here
 // would need a work-store row the destination does not own.
-func importInfraSnapshot(destination beads.Store, source beads.Store, rows []beads.Bead) (int, error) {
-	creator, ok := destination.(beads.ForeignIDCreator)
-	if !ok {
-		return 0, fmt.Errorf("binding store cannot preserve bead ids: %T does not implement ForeignIDCreator", destination)
+func importInfraSnapshot(destination beads.Store, source beads.Store, plan infraCopyPlan, prepared infraPrepared, clock infraEngineClock) (int, error) {
+	var create []beads.Bead
+	for _, b := range plan.rows {
+		if !prepared.kept[b.ID] {
+			create = append(create, infraMigrationRow(b))
+		}
 	}
-	infraIDs := make(map[string]bool, len(rows))
-	for _, b := range rows {
-		infraIDs[b.ID] = true
-	}
-	imported := 0
-	for _, b := range rows {
-		if _, err := destination.Get(b.ID); err == nil {
+	var edges []beads.DepWithPayload
+	for _, e := range plan.internalEdges() {
+		if held, ok := prepared.edges[beads.DepPair{IssueID: e.IssueID, DependsOnID: e.DependsOnID}]; ok && held.Type == e.Type && held.Payload == e.Payload {
 			continue
 		}
-		if _, err := creator.CreateWithForeignID(infraMigrationRow(b)); err != nil {
-			return imported, fmt.Errorf("importing bead %s: %w", b.ID, err)
-		}
-		imported++
+		edges = append(edges, e)
 	}
-	for _, b := range rows {
-		deps, err := source.DepList(b.ID, "down")
-		if err != nil {
-			return imported, fmt.Errorf("listing deps of %s: %w", b.ID, err)
+	// A destination without the batch capabilities, or a wrapper whose store
+	// has none: one create and one edge at a time, each payload read from the
+	// source as it is written.
+	perRow := func() (int, error) {
+		one, ok := destination.(beads.ForeignIDCreator)
+		if !ok {
+			return 0, fmt.Errorf("binding store cannot preserve bead ids: %T does not implement ForeignIDCreator", destination)
 		}
-		for _, d := range deps {
-			if !infraIDs[d.DependsOnID] {
-				continue
-			}
-			if err := infraCopyDepEdge(destination, source, b.ID, d.DependsOnID, d.Type); err != nil {
-				return imported, fmt.Errorf("importing dep %s -> %s: %w", b.ID, d.DependsOnID, err)
+		for _, b := range create {
+			if _, err := one.CreateWithForeignID(b); err != nil {
+				return 0, fmt.Errorf("importing bead %s: %w", b.ID, err)
 			}
 		}
+		for _, e := range edges {
+			if err := infraCopyDepEdge(destination, source, e.IssueID, e.DependsOnID, e.Type); err != nil {
+				return len(create), fmt.Errorf("importing dep %s -> %s: %w", e.IssueID, e.DependsOnID, err)
+			}
+		}
+		return len(create), nil
 	}
-	return imported, nil
+	creator, batchRows := beads.As[beads.ForeignIDBatchCreator](destination)
+	writer, batchEdges := beads.As[beads.DepBatchWriter](destination)
+	if !batchRows || !batchEdges {
+		return perRow()
+	}
+	err := runInfraBatches(clock, "copying rows", len(create), infraCopyRowBatch, func(start, end int) error {
+		if err := creator.CreateWithForeignIDBatch(create[start:end]); err != nil {
+			return fmt.Errorf("importing beads %s..%s: %w", create[start].ID, create[end-1].ID, err)
+		}
+		return nil
+	})
+	if errors.Is(err, beads.ErrBatchCopyUnsupported) {
+		return perRow()
+	}
+	if err != nil {
+		return 0, err
+	}
+	err = runInfraBatches(clock, "copying edges", len(edges), infraCopyEdgeBatch, func(start, end int) error {
+		if err := writer.DepAddBatch(edges[start:end]); err != nil {
+			return fmt.Errorf("importing deps %s -> %s .. %s -> %s: %w", edges[start].IssueID, edges[start].DependsOnID, edges[end-1].IssueID, edges[end-1].DependsOnID, err)
+		}
+		return nil
+	})
+	if errors.Is(err, beads.ErrBatchCopyUnsupported) {
+		for _, e := range edges {
+			if err := infraCopyDepEdge(destination, source, e.IssueID, e.DependsOnID, e.Type); err != nil {
+				return len(create), fmt.Errorf("importing dep %s -> %s: %w", e.IssueID, e.DependsOnID, err)
+			}
+		}
+		return len(create), nil
+	}
+	if err != nil {
+		return len(create), err
+	}
+	return len(create), nil
 }
 
 // infraMigrationRow returns the form of b that is safe to create in the
@@ -2347,29 +2517,33 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		infraIDs[b.ID] = true
 		proven = append(proven, b.ID)
 	}
+	sort.Strings(proven)
 	destination, err := openDestination()
 	if err != nil {
 		return nil, fmt.Errorf("reopening the binding for the equality stage: %w", err)
 	}
 	defer func() { _ = closeBeadStoreHandle(destination) }()
 	// Equality is bidirectional: the destination must hold the source's infra
-	// slice and nothing else, so a row the copy invented is caught too.
+	// slice and nothing else, so a row the copy invented is caught too. One
+	// list of each side, compared row by row, not a read per row.
 	copied, err := destination.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 	if err != nil {
 		return nil, fmt.Errorf("listing binding: %w", err)
 	}
+	held := make(map[string]beads.Bead, len(copied))
 	for _, b := range copied {
 		if !infraIDs[b.ID] {
 			return nil, fmt.Errorf("binding holds %s, which the work store's infrastructure slice does not", b.ID)
 		}
+		held[b.ID] = b
 	}
 	if len(copied) != len(rows) {
 		return nil, fmt.Errorf("binding holds %d beads, want %d", len(copied), len(rows))
 	}
 	for _, want := range rows {
-		got, err := destination.Get(want.ID)
-		if err != nil {
-			return nil, fmt.Errorf("bead %s missing from binding: %w", want.ID, err)
+		got, ok := held[want.ID]
+		if !ok {
+			return nil, fmt.Errorf("bead %s missing from binding", want.ID)
 		}
 		if diff := beadCopyDifference(want, got); diff != "" {
 			return nil, fmt.Errorf("bead %s differs after copy: %s", want.ID, diff)
@@ -2377,26 +2551,59 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		if diff := infraCopyClassDifference(want, got); diff != "" {
 			return nil, fmt.Errorf("bead %s %s", want.ID, diff)
 		}
-		wantDeps, err := source.DepList(want.ID, "down")
-		if err != nil {
-			return nil, fmt.Errorf("re-listing deps of %s: %w", want.ID, err)
-		}
-		gotDeps, err := destination.DepList(want.ID, "down")
-		if err != nil {
-			return nil, fmt.Errorf("listing copied deps of %s: %w", want.ID, err)
-		}
-		if diff := infraDepDifference(want.ID, wantDeps, gotDeps, infraIDs); diff != "" {
-			return nil, errors.New(diff)
-		}
-		diff, err := infraEdgePayloadDifference(want.ID, wantDeps, gotDeps, infraIDs, source, destination)
-		if err != nil {
-			return nil, err
-		}
-		if diff != "" {
+	}
+	// The edges of both sides, in batches where the store lists them so.
+	srcLister, _ := beads.As[beads.DependencyBatchLister](source)
+	wantDeps, err := readInfraDownEdges(srcLister, source, proven)
+	if err != nil {
+		return nil, fmt.Errorf("re-listing deps: %w", err)
+	}
+	dstLister, _ := beads.As[beads.DependencyBatchLister](destination)
+	gotDeps, err := readInfraDownEdges(dstLister, destination, proven)
+	if err != nil {
+		return nil, fmt.Errorf("listing copied deps: %w", err)
+	}
+	for _, id := range proven {
+		if diff := infraDepDifference(id, wantDeps[id], gotDeps[id], infraIDs); diff != "" {
 			return nil, errors.New(diff)
 		}
 	}
-	sort.Strings(proven)
+	// And their payloads, both directions. A payload-blind source declares
+	// none; a binding that cannot be asked is read edge by edge, which
+	// refuses it there.
+	dstReader, dstAsks := beads.As[beads.DepMetadataReader](destination)
+	if !dstAsks {
+		for _, id := range proven {
+			diff, err := infraEdgePayloadDifference(id, wantDeps[id], gotDeps[id], infraIDs, source, destination)
+			if err != nil {
+				return nil, err
+			}
+			if diff != "" {
+				return nil, errors.New(diff)
+			}
+		}
+		return proven, nil
+	}
+	internal := func(d beads.Dep) bool { return infraIDs[d.DependsOnID] }
+	want := map[beads.DepPair]string{}
+	if _, blind := beads.DepMetadataAbsent(source); !blind {
+		srcReader, _ := beads.As[beads.DepMetadataReader](source)
+		under, _, _ := unwrapBeadPolicyStore(source)
+		srcBatch, _ := beads.As[beads.DepMetadataBatchReader](under)
+		if want, err = readInfraPayloads(srcBatch, srcReader, wantDeps, internal); err != nil {
+			return nil, fmt.Errorf("re-reading the work store's edge payloads: %w", err)
+		}
+	}
+	dstBatch, _ := beads.As[beads.DepMetadataBatchReader](destination)
+	got, err := readInfraPayloads(dstBatch, dstReader, gotDeps, func(beads.Dep) bool { return true })
+	if err != nil {
+		return nil, fmt.Errorf("reading the binding's edge payloads: %w", err)
+	}
+	for _, id := range proven {
+		if diff := infraPayloadDifference(id, wantDeps[id], gotDeps[id], infraIDs, want, got); diff != "" {
+			return nil, errors.New(diff)
+		}
+	}
 	return proven, nil
 }
 

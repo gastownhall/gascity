@@ -242,7 +242,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
-	rows, err := readInfraSnapshotAt(source, manifest.Generation)
+	rows, allIDs, err := readInfraSnapshotWithIDs(source, manifest.Generation)
 	if err != nil {
 		return result, err
 	}
@@ -328,17 +328,50 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 			}
 		}
 	}
+	// Each row's edges and their payloads: in batches over every row the work
+	// store holds when it lists edges so (a row's dependents are the down
+	// edges of whatever holds them), otherwise both directions row by row.
+	var fresh []beads.Bead
+	for _, b := range retained {
+		if _, ok := sessionBackup[b.ID]; !ok {
+			fresh = append(fresh, b)
+		}
+	}
+	read := make(map[string]infraBackupEntry, len(fresh))
+	if batch, ok := beads.As[beads.DependencyBatchLister](source); ok && len(fresh) > 0 {
+		down, err := readInfraDownEdges(batch, source, sortedMapKeys(allIDs))
+		if err != nil {
+			return result, err
+		}
+		payloads := map[beads.DepPair]string{}
+		if _, blind := beads.DepMetadataAbsent(source); !blind {
+			reader, _ := beads.As[beads.DepMetadataReader](source)
+			under, _, _ := unwrapBeadPolicyStore(source)
+			batchReader, _ := beads.As[beads.DepMetadataBatchReader](under)
+			wanted := infraBackupEdgeFilter(fresh, retainedIDs)
+			if payloads, err = readInfraPayloads(batchReader, reader, down, wanted); err != nil {
+				return result, err
+			}
+		}
+		for _, entry := range infraBackupEntriesFrom(fresh, down, payloads, retainedIDs) {
+			read[entry.Bead.ID] = entry
+		}
+	} else {
+		for _, b := range fresh {
+			entry, err := infraBackupEntryFor(source, b, retainedIDs)
+			if err != nil {
+				return result, err
+			}
+			read[b.ID] = entry
+		}
+	}
 	entries := make([]infraBackupEntry, 0, len(retained))
 	for _, b := range retained {
 		if prior, ok := sessionBackup[b.ID]; ok {
 			entries = append(entries, prior)
 			continue
 		}
-		entry, err := infraBackupEntryFor(source, b, retainedIDs)
-		if err != nil {
-			return result, err
-		}
-		entries = append(entries, entry)
+		entries = append(entries, read[b.ID])
 	}
 	merged := mergeInfraBackupEntries(previous, entries)
 	if len(entries) > 0 {
@@ -383,18 +416,62 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		return result, err
 	}
 
-	for _, entry := range entries {
-		id := entry.Bead.ID
-		if err := infraClearBeforeDelete(id); err != nil {
-			return result, err
+	// The rows go in chunks, and every row is detached before it goes: each
+	// edge touching it is removed and the remainder proven empty
+	// (detachInfraClearedRow), so a native-Dolt or bd delete has no neighbor
+	// whose text it would rewrite (#8786). A store that deletes in batches
+	// then removes the chunk in one call, one commit on Dolt; any other
+	// deletes row by row. The budget is checked between chunks; a paused
+	// clear leaves the note pending, and the same command finishes it from
+	// the session the note names. Whether the store deletes in batches is
+	// asked of the store under the bead-policy wrapper, which forwards
+	// DeleteBatch whatever its store can do; the delete goes through the
+	// wrapper.
+	under, _, _ := unwrapBeadPolicyStore(source)
+	_, canBatch := beads.As[beads.BatchDeleter](under)
+	deleter, _ := beads.As[beads.BatchDeleter](source)
+	canBatch = canBatch && deleter != nil
+	err = runInfraBatches(infraEngineClockFor(cityPath), "clearing", len(entries), infraClearChunk, func(start, end int) error {
+		chunk := entries[start:end]
+		ids := make([]string, 0, len(chunk))
+		for _, entry := range chunk {
+			if err := infraClearBeforeDelete(entry.Bead.ID); err != nil {
+				return err
+			}
+			if err := detachInfraClearedRow(source, entry, session); err != nil {
+				return err
+			}
+			if !canBatch {
+				if err := source.Delete(entry.Bead.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing the retained copy %s from the work store: %w", entry.Bead.ID, err)
+				}
+				result.Cleared++
+				continue
+			}
+			ids = append(ids, entry.Bead.ID)
 		}
-		if err := detachInfraClearedRow(source, entry, session); err != nil {
-			return result, err
+		if len(ids) == 0 {
+			return nil
 		}
-		if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return result, fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
+		err := deleter.DeleteBatch(ids)
+		if errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			canBatch = false
+			for _, id := range ids {
+				if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
+				}
+				result.Cleared++
+			}
+			return nil
 		}
-		result.Cleared++
+		if err != nil {
+			return fmt.Errorf("removing %d retained cop(ies) from the work store: %w", len(ids), err)
+		}
+		result.Cleared += len(ids)
+		return nil
+	})
+	if err != nil {
+		return result, err
 	}
 	for _, edge := range release {
 		if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {

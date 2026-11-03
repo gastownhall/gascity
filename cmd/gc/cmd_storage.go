@@ -26,6 +26,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -74,6 +75,13 @@ const (
 	// the retained-source backup a clear wrote, for re-copying a binding whose
 	// database is gone after the work store's copies were cleared.
 	storageFromBackupFlag = "from-backup"
+	// storageTimeBudgetFlag bounds a migration's copy and clear.
+	storageTimeBudgetFlag = "time-budget"
+	// storageDefaultTimeBudget is --time-budget's default (S5 §3.4, O13).
+	storageDefaultTimeBudget = 30 * time.Minute
+	// storagePausedExitCode is EX_TEMPFAIL: the run stopped on its budget and
+	// the same command continues it.
+	storagePausedExitCode = 75
 
 	// storageFleetStoppedFlag is the operator's attestation that nothing this
 	// process cannot see is still writing to the source.
@@ -254,6 +262,7 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		abandonRig   bool
 		fleetStopped bool
 		forced       []string
+		timeBudget   time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -304,7 +313,13 @@ that did not finish exits non-zero, and running this command again finishes it.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
-half is an explicit operator attestation.`,
+half is an explicit operator attestation.
+
+--time-budget bounds the copy and the clear. The run checks it between
+batches, never inside one, and when it is spent stops at the next boundary and
+exits 75, naming the phase and how far it got. Running the same command again
+continues: the copy keeps every row an earlier run copied that still equals the
+work store, and the clear resumes from the rows it had not yet removed.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sources := 0
 			for _, set := range []bool{fromWork, fromBackup, fromRigs} {
@@ -334,6 +349,7 @@ half is an explicit operator attestation.`,
 			request.FleetStopped = fleetStopped
 			request.FromBackup = fromBackup
 			request.Force = force
+			request.TimeBudget = timeBudget
 			if abandonRig {
 				if !fromRigs || len(rigNames) != 1 {
 					fmt.Fprintf(stderr, "gc %s %s: --%s needs --%s and exactly one --%s\n", surface.Namespace, surface.Verb, storageAbandonRigStoreFlag, storageFromRigsFlag, storageRigFlag) //nolint:errcheck // best-effort stderr
@@ -360,6 +376,8 @@ half is an explicit operator attestation.`,
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	addStorageForceFlag(cmd, &forced)
+	cmd.Flags().DurationVar(&timeBudget, storageTimeBudgetFlag, storageDefaultTimeBudget,
+		"stop the copy or the clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget)")
 	return cmd
 }
 
@@ -408,6 +426,9 @@ type storageOperatorRequest struct {
 	FromBackup bool
 	// Force carries the named hazards the operator attested (--force=).
 	Force storageForce
+	// TimeBudget bounds the migration's copy and clear (--time-budget); zero
+	// is none.
+	TimeBudget time.Duration
 }
 
 // resolveStorageOperatorRequest resolves the city and its configuration.
@@ -515,6 +536,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	defer window.closeReporting(logPrefix, stderr, &code)
+	window.setTimeBudget(request.TimeBudget)
 	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -537,6 +559,14 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	report.Target = target
 	report.BindingProvenEmpty, report.BindingProbe = infraBindingHoldsNothing(target)
 	rec := openCityRecorderAt(request.CityPath, stderr)
+	if report.Paused != nil {
+		// Not a failure: the budget is spent and the work is resumable. Boot
+		// refuses the city until a run finishes it, as for any copy or clear
+		// still under way.
+		fmt.Fprintf(stderr, "%s: %v (exit %d)\n", logPrefix, report.Paused, storagePausedExitCode) //nolint:errcheck // best-effort stderr
+		recordStorageBindingOutcome(rec, report, report.Paused.Error())
+		return storagePausedExitCode
+	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
 		if advice != "" {
