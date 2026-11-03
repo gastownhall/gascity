@@ -76,7 +76,8 @@ def prove_review(*, base, city, city_root, source, root, record, evidence, deadl
     workflow = item('bead', root)
     source_row = item('bead', source)
     metadata = workflow.get('metadata', {})
-    assert metadata.get('gc.formula') == 'quick-start', "Reviewer proof supports the actual quick-start graph only"
+    assert metadata.get('gc.formula_name') == 'quick-start', "Reviewer proof supports the actual quick-start graph only"
+    assert 'gc.formula' not in metadata or metadata['gc.formula'] == metadata['gc.formula_name'], "Conflicting native formula identity"
     assert metadata.get('gc.formula_contract') == 'graph.v2', "Unexpected source-delivery graph contract"
     actual = json.loads(metadata['gc.delivery.record'])
     assert actual == record, "Delivery record changed while proving its review"

@@ -120,7 +120,7 @@ def health():
     with urllib.request.urlopen(base+"/health", timeout=15) as r:
         return json.load(r)
 def bead(label, bid):
-    rows = json.loads(cmd(label,["--rig","practice","bd","show",bid,"--json"]))
+    rows = json.loads(cmd(label,["bd","show",bid,"--json"]))
     assert len(rows) == 1, rows
     return rows[0]
 lessons = []

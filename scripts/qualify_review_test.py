@@ -39,7 +39,7 @@ class ReviewProofTests(unittest.TestCase):
                        'reviewed_sha': self.sha, 'tested_sha': self.sha, 'output_sha': self.sha}
         self.rows = {
             'bead/owned-root': {'id': 'owned-root', 'status': 'closed', 'metadata': {
-                'gc.formula': 'quick-start', 'gc.formula_contract': 'graph.v2',
+                'gc.formula_name': 'quick-start', 'gc.formula_contract': 'graph.v2',
                 'gc.outcome': 'pass', 'gc.delivery.record': json.dumps(self.record)}},
             'bead/owned-input': {'id': 'owned-input', 'status': 'closed', 'metadata': {'gc.delivery.workflow_root': 'owned-root'}},
             'runs/owned-root/steps': {'run_id': 'owned-root', 'steps': []},
@@ -78,6 +78,25 @@ class ReviewProofTests(unittest.TestCase):
         self.assertEqual(result['actual_repository_head'], self.sha)
         self.assertNotEqual(result['identities']['implement']['gc_session_id'], result['identities']['inspect']['gc_session_id'])
         self.assertTrue((self.path/'proof/transcript-review-session.json').is_file())
+
+    def test_legacy_formula_alias_cannot_replace_native_formula_name(self):
+        metadata = self.rows['bead/owned-root']['metadata']
+        metadata.pop('gc.formula_name')
+        metadata['gc.formula'] = 'quick-start'
+        with self.assertRaisesRegex(AssertionError, 'actual quick-start graph'):
+            self.run_proof()
+
+    def test_wrong_native_formula_name_cannot_pass_with_legacy_alias(self):
+        metadata = self.rows['bead/owned-root']['metadata']
+        metadata['gc.formula_name'] = 'another-formula'
+        metadata['gc.formula'] = 'quick-start'
+        with self.assertRaisesRegex(AssertionError, 'actual quick-start graph'):
+            self.run_proof()
+
+    def test_conflicting_formula_identity_is_not_review_proof(self):
+        self.rows['bead/owned-root']['metadata']['gc.formula'] = 'another-formula'
+        with self.assertRaisesRegex(AssertionError, 'Conflicting native formula identity'):
+            self.run_proof()
 
     def test_scope_check_inheriting_inspect_id_is_not_a_reviewer(self):
         self.rows['runs/owned-root/steps']['steps'].append({'id': 'inspect-control', 'status': 'completed'})
@@ -274,6 +293,46 @@ class ReviewProofTests(unittest.TestCase):
             scope['wait_delivery']('greeting', 'owned-input', 'owned-root')
         self.assertEqual(len(calls), 1)
         self.assertEqual(scope['lessons'], [], 'Unproven review entered the accepted lesson list')
+
+
+class BeginnerBeadReadTests(unittest.TestCase):
+    def reader(self, command):
+        qualifier = Path(os.environ.get('RFC_QUALIFIER_UNDER_TEST', str(Path(__file__).with_name('qualify-beginner'))))
+        syntax = ast.parse(qualifier.read_text())
+        function = next(node for node in syntax.body if isinstance(node, ast.FunctionDef) and node.name == 'bead')
+        scope = {'json': json, 'cmd': command}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(qualifier), 'exec'), scope)
+        return scope['bead']
+
+    def test_split_store_source_and_graph_root_use_native_by_id_routing(self):
+        # Native c0dbda2b2 trial: first START == immediate START returned
+        # pr-n7a/gcg-vv6; its maintained reader then hit this exact class guard.
+        calls = []
+        def command(label, args):
+            calls.append((label, args))
+            if args[:2] == ['--rig', 'practice'] and args[-2] == 'gcg-vv6':
+                raise RuntimeError("gc bd: gcg-vv6 is owned by infra, but --rig practice pins that rig's work store, which does not hold it; a relocated class is not partitioned by rig, so drop --rig (auto-detected scope — GC_RIG, -C, cwd — is not affected)")
+            selected = args[2:] if args[:2] == ['--rig', 'practice'] else args
+            self.assertEqual(selected[:2], ['bd', 'show'])
+            self.assertEqual(selected[-1], '--json')
+            return json.dumps([{'id': selected[2]}])
+        read = self.reader(command)
+        for bid in ('pr-n7a', 'gcg-vv6'):
+            with self.subTest(bead=bid):
+                self.assertEqual(read('native-read', bid), {'id': bid})
+        self.assertEqual(calls, [('native-read', ['bd', 'show', 'pr-n7a', '--json']),
+                                 ('native-read', ['bd', 'show', 'gcg-vv6', '--json'])])
+
+    def test_native_by_id_failure_is_not_an_empty_observation(self):
+        def unavailable(label, args):
+            raise RuntimeError('native binding read unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'native binding read unavailable'):
+            self.reader(unavailable)('native-read', 'gcg-vv6')
+
+    def test_native_by_id_cardinality_guard_remains_required(self):
+        for rows in ([], [{'id': 'one'}, {'id': 'two'}]):
+            with self.subTest(rows=rows), self.assertRaises(AssertionError):
+                self.reader(lambda label, args: json.dumps(rows))('native-read', 'gcg-vv6')
 
 
 if __name__ == '__main__': unittest.main()
