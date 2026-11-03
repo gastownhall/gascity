@@ -4211,6 +4211,17 @@ func convoyRigFlagStore(t *testing.T, cityDir, scope string) beads.Store {
 	return store
 }
 
+// convoyRigFlagIssue creates an issue in the fixture store at cityDir/scope,
+// minted under that scope's prefix.
+func convoyRigFlagIssue(t *testing.T, cityDir, scope string) string {
+	t.Helper()
+	issue, err := convoyRigFlagStore(t, cityDir, scope).Create(beads.Bead{Title: scope + " task"})
+	if err != nil {
+		t.Fatalf("creating an issue in the %q store: %v", scope, err)
+	}
+	return issue.ID
+}
+
 // convoyRigFlagCreate runs `gc <args> --json` and returns the created
 // convoy's ID, failing the test unless it exits 0.
 func convoyRigFlagCreate(t *testing.T, args ...string) string {
@@ -4276,4 +4287,19 @@ func TestConvoyCreateRigFlagPlacesEmptyConvoy(t *testing.T) {
 		}
 		requireConvoyOnlyIn(t, cityDir, fields[2], "frontend")
 	})
+}
+
+// TestConvoyCreateRigFlagEmptyConvoyAcceptsRigIssues: gc convoy add looks the
+// issue up in the convoy's own store, so an empty convoy created with --rig
+// can later track that rig's issues.
+func TestConvoyCreateRigFlagEmptyConvoyAcceptsRigIssues(t *testing.T) {
+	cityDir := convoyRigFlagCity(t)
+	issueID := convoyRigFlagIssue(t, cityDir, "frontend")
+	convoyID := convoyRigFlagCreate(t, "--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityDir, "convoy", "add", convoyID, issueID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc convoy add %s %s = %d; stderr=%s stdout=%s", convoyID, issueID, code, stderr.String(), stdout.String())
+	}
+	requireConvoyTrack(t, convoyRigFlagStore(t, cityDir, "frontend"), convoyID, issueID)
 }
