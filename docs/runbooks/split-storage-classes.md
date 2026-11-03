@@ -267,6 +267,14 @@ closed the bead it waits on, in which case the dependency is released. Every
 other dependency from a work bead into a moved bead is kept by re-adding it
 after its target row is removed.
 
+Step 8 never changes a work bead's text. `bd delete --force` (and the native
+Dolt delete) rewrites every mention of a deleted id in the text of each bead
+still linked to it, to `[deleted:<id>]`. The beads step 8 removes were moved,
+not deleted, so every edge touching a moved row is removed from the work store
+(and recorded in the backup) before the row is, and the delete finds no
+neighbor to rewrite. No pre-removal of work-to-infrastructure edges is needed
+before the migration.
+
 **On a `bd` or native-Dolt work store those kept edges are lost.** Removing a
 row there drops every edge touching it, and the store refuses to re-add an edge
 to a bead it no longer holds. So a work bead blocked on a moved bead that is
