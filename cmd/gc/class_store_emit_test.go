@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1407,7 +1408,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		if err != nil {
 			t.Fatalf("creating the session row: %v", err)
 		}
-		if _, err := sessionpkg.WriteKillFence(sessions, row.ID, time.Now().UTC()); err != nil {
+		if _, err := sessionpkg.WriteKillFence(beadstest.Sessions(sessions), row.ID, time.Now().UTC()); err != nil {
 			t.Fatalf("writing the kill fence: %v", err)
 		}
 		if got := beadEventCount(t, cityPath, events.BeadUpdated, row.ID); got != 1 {
@@ -1418,7 +1419,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		// the revision and be re-decided, never overwritten blind.
 		leaf := writer.(*emittingClassStore).Store
 		decisions := 0
-		err = sessionpkg.ApplyKillFencePatch(sessions, row.ID, func(beads.Bead) (map[string]string, bool) {
+		err = sessionpkg.ApplyKillFencePatch(beadstest.Sessions(sessions), row.ID, func(beads.Bead) (map[string]string, bool) {
 			decisions++
 			if decisions == 1 {
 				if err := leaf.SetMetadata(row.ID, "test_racer", "won"); err != nil {

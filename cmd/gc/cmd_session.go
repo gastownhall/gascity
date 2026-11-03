@@ -236,6 +236,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// and the start-wait front door), so route the whole flow through the session
 	// coordination-class store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessions := beads.SessionStore{Store: sessStore}
 
 	sp, err := newSessionProvider()
 	if err != nil {
@@ -357,15 +358,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		}
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, alias, "", configuredOwner); err != nil {
 				return err
 			}
 			if reserveConcreteIdentity && sessionQualifiedName != alias {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 					return err
 				}
 			}
-			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, explicitName, "", configuredOwner); err != nil {
 				return err
 			}
 			var createErr error
@@ -491,15 +492,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, alias, "", configuredOwner); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && sessionQualifiedName != alias {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, explicitName, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error

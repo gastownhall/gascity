@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -468,7 +469,7 @@ func TestProtocolTurnInterruptRestartOnFailure(t *testing.T) {
 func TestInterruptPreSendFailureIsNotSent(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager: manager,
 		Session: SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"},
@@ -480,7 +481,7 @@ func TestInterruptPreSendFailureIsNotSent(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	by := handleActor(t, h, sessionpkg.ActorController)
-	h.manager = sessionpkg.NewManagerWithOptions(failingGetStore{Store: store, err: errors.New("store boom")}, sp, sessionpkg.WithCityPath(t.TempDir()))
+	h.manager = sessionpkg.NewManagerWithOptions(beadstest.Sessions(failingGetStore{Store: store, err: errors.New("store boom")}), sp, sessionpkg.WithCityPath(t.TempDir()))
 	sp.Calls = nil
 	_, err = h.InterruptAs(context.Background(), by, InterruptRequest{OnFailure: InterruptOnFailureRestart})
 	if !errors.Is(err, ErrInterruptNotSent) {

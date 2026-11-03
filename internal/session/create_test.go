@@ -101,7 +101,7 @@ func TestCreateSessionInfoErrorContract(t *testing.T) {
 		t.Errorf("CreateSessionInfo returned non-zero Info on create error: %+v", info)
 	}
 	// No bead was persisted (the failing store never delegated to the memstore).
-	all, err := ListAllSessionBeads(mem, beads.ListQuery{})
+	all, err := ListAllSessionBeads(beadstest.Sessions(mem), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}

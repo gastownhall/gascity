@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -415,7 +417,7 @@ func programStreamSession(t *testing.T, fs *fakeState, searchBase string, transc
 	if !transcript {
 		return createTestSession(t, fs.cityBeadStore, fs.sp, "Peek")
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude",

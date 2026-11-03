@@ -126,6 +126,7 @@ var Default = Config{
 		"internal/mail/beadmail",
 		"internal/nudgequeue",
 		"internal/opjournal",
+		"internal/session",
 		"internal/workladder",
 	},
 	LoadBaseline: LoadBaselineFromEnv,

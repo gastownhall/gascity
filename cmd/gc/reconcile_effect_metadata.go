@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -57,13 +58,14 @@ type aliasCheck struct{ err error }
 // under the lock the around took, for alias work that is not blocked.
 func aliasAvailability(_ context.Context, r effectReads, v txView) (aliasCheck, error) {
 	id, _, lock, ok := v.World.rowIdentityOf(v.It.Key, v.Row, readRefreshKeys(v.Meta))
+	sessions := beads.SessionStore{Store: r.city}
 	if !ok || lock == "" || id.Alias == "" {
 		return aliasCheck{}, nil
 	}
 	if id.Owner != "" {
-		return aliasCheck{err: session.EnsureAliasAvailableWithConfigForOwner(r.city, v.World.Env.Cfg, id.Alias, v.Row.ID, id.Owner)}, nil
+		return aliasCheck{err: session.EnsureAliasAvailableWithConfigForOwner(sessions, v.World.Env.Cfg, id.Alias, v.Row.ID, id.Owner)}, nil
 	}
-	return aliasCheck{err: session.EnsureAliasAvailableWithConfig(r.city, v.World.Env.Cfg, id.Alias, v.Row.ID)}, nil
+	return aliasCheck{err: session.EnsureAliasAvailableWithConfig(sessions, v.World.Env.Cfg, id.Alias, v.Row.ID)}, nil
 }
 
 // rowMetadataStep decides the identity again on the fresh row: a lock the

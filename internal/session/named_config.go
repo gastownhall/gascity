@@ -613,7 +613,7 @@ type ConfiguredNamedSessionLookup struct {
 
 // FindCanonicalConfiguredNamedSessionBead finds the live bead that owns a
 // configured named session using exact metadata-filtered store queries.
-func FindCanonicalConfiguredNamedSessionBead(store beads.Store, spec NamedSessionSpec) (beads.Bead, bool, error) {
+func FindCanonicalConfiguredNamedSessionBead(store beads.SessionStore, spec NamedSessionSpec) (beads.Bead, bool, error) {
 	lookup, err := lookupConfiguredNamedSession(store, spec, false)
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -626,12 +626,12 @@ func FindCanonicalConfiguredNamedSessionBead(store beads.Store, spec NamedSessio
 // The result is stitched from several sequential store reads; downstream
 // uniqueness and claim serialization remain the authority under concurrent
 // bead mutation.
-func LookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec) (ConfiguredNamedSessionLookup, error) {
+func LookupConfiguredNamedSession(store beads.SessionStore, spec NamedSessionSpec) (ConfiguredNamedSessionLookup, error) {
 	return lookupConfiguredNamedSession(store, spec, true)
 }
 
-func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, includeConflict bool) (ConfiguredNamedSessionLookup, error) {
-	if store == nil {
+func lookupConfiguredNamedSession(store beads.SessionStore, spec NamedSessionSpec, includeConflict bool) (ConfiguredNamedSessionLookup, error) {
+	if store == (beads.SessionStore{}) {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
 	spec.Identity = NormalizeNamedSessionTarget(spec.Identity)
@@ -805,7 +805,7 @@ func namedSessionCandidateIsSelf(b beads.Bead, spec NamedSessionSpec) bool {
 	return ok
 }
 
-func listConfiguredNamedSessionBeadsByMetadata(store beads.Store, key, value string) ([]beads.Bead, error) {
+func listConfiguredNamedSessionBeadsByMetadata(store beads.SessionStore, key, value string) ([]beads.Bead, error) {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	if key == "" || value == "" {
@@ -859,8 +859,8 @@ func appendUniqueNamedSessionCandidates(dst []beads.Bead, seen map[string]bool, 
 // session count, which is small. Measured under 20-parallel load on a
 // representative city: 5.2s → 1.3s. Interactive session-targeting paths
 // that must avoid label-wide scans use LookupConfiguredNamedSession instead.
-func NamedSessionResolutionCandidates(store beads.Store, spec NamedSessionSpec) ([]beads.Bead, error) {
-	if store == nil {
+func NamedSessionResolutionCandidates(store beads.SessionStore, spec NamedSessionSpec) ([]beads.Bead, error) {
+	if store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	identity := NormalizeNamedSessionTarget(spec.Identity)
@@ -1055,13 +1055,13 @@ func bareIdentityCanonicalInfo(candidates []Info, spec NamedSessionSpec) (Info, 
 }
 
 // FindClosedNamedSessionBead finds the newest closed bead for a named session identity.
-func FindClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool, error) {
+func FindClosedNamedSessionBead(store beads.SessionStore, identity string) (beads.Bead, bool, error) {
 	return FindClosedNamedSessionBeadForSessionName(store, identity, "")
 }
 
 // FindClosedNamedSessionBeadForSessionName finds a closed bead for a named session identity.
-func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool, error) {
-	if store == nil {
+func FindClosedNamedSessionBeadForSessionName(store beads.SessionStore, identity, sessionName string) (beads.Bead, bool, error) {
+	if store == (beads.SessionStore{}) {
 		return beads.Bead{}, false, nil
 	}
 	candidates, err := NamedSessionIdentityRows(store, identity)
@@ -1076,7 +1076,7 @@ func FindClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 // identity as its configured named session identity, newest first. It reads
 // store as given: a cached store answers from its cache, so a caller that
 // must see another process's writes passes a live view.
-func NamedSessionIdentityRows(store beads.Store, identity string) ([]beads.Bead, error) {
+func NamedSessionIdentityRows(store beads.SessionStore, identity string) ([]beads.Bead, error) {
 	identity = NormalizeNamedSessionTarget(identity)
 	rows, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
@@ -1234,8 +1234,8 @@ type ClosedNamedSessionBeadIndex struct {
 // graceful fallback than the per-identity function's own all-or-nothing
 // error handling, which the batched caller doesn't need to match since it
 // has many identities' worth of rows to salvage from a single partial read.
-func BuildClosedNamedSessionBeadIndex(store beads.Store) (ClosedNamedSessionBeadIndex, error) {
-	if store == nil {
+func BuildClosedNamedSessionBeadIndex(store beads.SessionStore) (ClosedNamedSessionBeadIndex, error) {
+	if store == (beads.SessionStore{}) {
 		return ClosedNamedSessionBeadIndex{}, nil
 	}
 

@@ -33,7 +33,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
@@ -140,7 +140,7 @@ func (s *Server) setSessionListWakeReasons(page []sessionResponse, pageSessions 
 // session is found only by its exact bead id.
 func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
 	if input.ExactID {
-		return session.ResolveSessionIDByExactID(store, input.ID)
+		return session.ResolveSessionIDByExactID(beads.SessionStore{Store: store}, input.ID)
 	}
 	if input.PeekStrict {
 		return s.resolveSessionIDWithConfig(store, input.ID)
@@ -157,7 +157,7 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	if raw == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	mgr := s.sessionManager(raw)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
@@ -212,7 +212,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -443,7 +443,7 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 		}, nil
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	pending, supported, err := mgr.Pending(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -502,7 +502,7 @@ func (s *Server) probeCityPending() (cityPendingSnapshot, error) {
 	if store.Store == nil {
 		return cityPendingSnapshot{}, errNoSessionsStore
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 
 	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
@@ -610,7 +610,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -659,7 +659,7 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
 		return nil, humaSessionManagerError(err)

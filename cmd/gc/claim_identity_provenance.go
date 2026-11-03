@@ -83,7 +83,7 @@ func claimIdentityProvenance(cfg *config.City, cityName, identity string, openSe
 	if err != nil {
 		return claimProvenance{Verdict: claimVerdictUnknown, Reason: claimReasonLookupFailed, Detail: err.Error()}
 	}
-	recordID, err := session.RecordAnsweringTo(store, identity)
+	recordID, err := session.RecordAnsweringTo(beads.SessionStore{Store: store}, identity)
 	if recordID != "" {
 		return claimProvenance{Verdict: claimVerdictLocal, Reason: claimReasonSessionRecord, Detail: recordID}
 	}
