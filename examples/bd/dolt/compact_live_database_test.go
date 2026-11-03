@@ -327,6 +327,110 @@ func TestCompactScriptLiveGateAttemptsKnobBoundsRetries(t *testing.T) {
 	}
 }
 
+// TestCompactScriptLiveGateBaselineProbeFailureSkipsRewrite asserts the
+// gate proves the database is served BEFORE a GC-first pass rewrites it: a
+// database that is already unserved fails the pass as an ordinary counted
+// failure — no rewrite, no quarantine, and the run goes on.
+func TestCompactScriptLiveGateBaselineProbeFailureSkipsRewrite(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"},
+		"GC_FAKE_DOLT_LIVE_PROBE_FAIL_ALL=1", "GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0")
+	if err == nil {
+		t.Fatalf("compact succeeded although beads was unserved before its reclaim:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) failed gc-only reclaim") {
+		t.Fatalf("a failed baseline probe must be an ordinary counted failure:\n%s", out)
+	}
+	if _, statErr := os.Stat(compactQuarantineMarkerPath(fixture)); !os.IsNotExist(statErr) {
+		t.Fatalf("a failed baseline probe must not quarantine — the pass rewrote nothing (stat err=%v):\n%s", statErr, out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("a failed baseline probe must not run the rewrite:\n%s", logData)
+	}
+}
+
+// TestCompactScriptLiveGateQuarantinesEveryGCRewriteEntryPath asserts every
+// storage-rewriting entry path — --gc-only, bare GC, the pending-GC retry,
+// and both shared-history variants — ends quarantined and aborts the run
+// when the rewrite leaves the database unserved, before any push or marker
+// clearing.
+func TestCompactScriptLiveGateQuarantinesEveryGCRewriteEntryPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		args       []string
+		env        []string
+		pendingGC  bool
+		failedStep string
+	}{
+		{
+			name: "gc-only reclaim", mode: "success", args: []string{"--gc-only"},
+			failedStep: "gc-only reclaim",
+		},
+		{
+			name: "bare GC", mode: "success", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"},
+			failedStep: "bare GC",
+		},
+		{
+			name: "pending-GC retry", mode: "success", pendingGC: true,
+			args:       []string{"--only-db", "beads"},
+			failedStep: "pending-GC retry",
+		},
+		{
+			name: "shared-history bare GC", mode: "remote_success",
+			failedStep: "shared-history bare GC",
+		},
+		{
+			name: "shared-history pending-GC retry", mode: "remote_success", pendingGC: true,
+			args:       []string{"--only-db", "beads"},
+			failedStep: "shared-history pending-GC retry",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			var pendingMarker string
+			if tt.pendingGC {
+				pendingMarker = writeCompactPendingGCMarker(t, fixture, "beads")
+			}
+			env := append([]string{
+				"GC_FAKE_DOLT_LIVE_PROBE_FAIL_FROM=2",
+				"GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS=0",
+			}, tt.env...)
+			out, err := fixture.runWithArgs(t, tt.mode, tt.args, env...)
+			if err == nil {
+				t.Fatalf("compact succeeded although beads was unserved after its rewrite:\n%s", out)
+			}
+			assertCompactMarkerHasEvidence(t, compactQuarantineMarkerPath(fixture),
+				"reason=live database unavailable after compaction",
+				"live_gate_failed_step="+tt.failedStep,
+			)
+			if tt.pendingGC {
+				if _, statErr := os.Stat(pendingMarker); statErr != nil {
+					t.Fatalf("failed live gate must not clear the pending-GC marker: %v\n%s", statErr, out)
+				}
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if !strings.Contains(string(logData), "DOLT_GC") {
+				t.Fatalf("expected the rewrite to run before the failed gate:\n%s", logData)
+			}
+			if strings.Contains(string(logData), "DOLT_PUSH") {
+				t.Fatalf("failed live gate must not push:\n%s", logData)
+			}
+			if strings.Contains(out, "— ok") {
+				t.Fatalf("compact must not report success after the database became unserved:\n%s", out)
+			}
+		})
+	}
+}
+
 // installDoltShim wraps the fixture's fake dolt with a shell shim so a test
 // can mutate the data dir after a chosen rewrite command succeeds while the
 // server keeps answering SQL.

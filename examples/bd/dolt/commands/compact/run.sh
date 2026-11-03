@@ -2560,11 +2560,41 @@ live_gate_reset() {
   live_gate_probe_failure=""
 }
 
+# live_gate_probe_until_served DB — run the served-HEAD probe up to
+# live_probe_attempts times, sleeping live_probe_delay_secs between
+# attempts (never after the last) and logging each failed attempt and the
+# recovery. Sets live_gate_probe_detail to the last failure detail.
+# Returns 0 when DB is served, 1 when every attempt failed.
+live_gate_probe_until_served() {
+  lgr_db="$1"
+  lgr_attempt=1
+  while :; do
+    if live_gate_probe_detail=$(live_gate_probe "$lgr_db"); then
+      if [ "$lgr_attempt" -gt 1 ]; then
+        printf 'compact: db=%s live gate served-HEAD probe recovered on attempt %s/%s\n' \
+          "$lgr_db" "$lgr_attempt" "$live_probe_attempts" >&2
+      fi
+      return 0
+    fi
+    printf 'compact: db=%s live gate served-HEAD probe attempt %s/%s failed: %s\n' \
+      "$lgr_db" "$lgr_attempt" "$live_probe_attempts" "$live_gate_probe_detail" >&2
+    [ "$lgr_attempt" -lt "$live_probe_attempts" ] || break
+    lgr_attempt=$((lgr_attempt + 1))
+    sleep "$live_probe_delay_secs"
+  done
+  return 1
+}
+
 # live_gate_arm DB STEP [PRESET_HEAD] — arm the live gate for DB immediately
 # before its first storage-rewriting step. The first arm records the
 # data-dir entry and the pre-compaction HEAD; later arms keep that baseline
 # and only append the step label, so a pass that flattens and then GCs
-# reports both steps but keeps one baseline.
+# reports both steps but keeps one baseline. A pass that arrives with no
+# preset HEAD (every GC-first path: --gc-only, bare GC, the pending-GC
+# retries) first proves the database is served — the baseline probe — so a
+# database already out of service fails the pass before any rewrite, as an
+# ordinary counted failure: no rewrite ran, so there is nothing to
+# quarantine. Runs in the current shell.
 live_gate_arm() {
   lg_db="$1"
   lg_step="$2"
@@ -2584,6 +2614,14 @@ live_gate_arm() {
     live_gate_dir_before="absent"
   fi
   live_gate_pre_head="$lg_head"
+  if [ -z "$lg_head" ]; then
+    if ! live_gate_probe_until_served "$lg_db"; then
+      live_gate_armed=0
+      printf 'compact: db=%s live gate baseline probe failed before %s: %s\n' \
+        "$lg_db" "$lg_step" "$live_gate_probe_detail" >&2
+      return 1
+    fi
+  fi
   live_gate_armed=1
   return 0
 }
@@ -2658,24 +2696,12 @@ live_gate_check() {
     live_gate_write_marker "$lg_db" "$lg_dir_after"
     return 1
   fi
-  lg_attempt=1
-  while :; do
-    if lg_probe_detail=$(live_gate_probe "$lg_db"); then
-      if [ "$lg_attempt" -gt 1 ]; then
-        printf 'compact: db=%s live gate served-HEAD probe recovered on attempt %s/%s\n' \
-          "$lg_db" "$lg_attempt" "$live_probe_attempts" >&2
-      fi
-      return 0
-    fi
-    printf 'compact: db=%s live gate served-HEAD probe attempt %s/%s failed: %s\n' \
-      "$lg_db" "$lg_attempt" "$live_probe_attempts" "$lg_probe_detail" >&2
-    [ "$lg_attempt" -lt "$live_probe_attempts" ] || break
-    lg_attempt=$((lg_attempt + 1))
-    sleep "$live_probe_delay_secs"
-  done
+  if live_gate_probe_until_served "$lg_db"; then
+    return 0
+  fi
   live_gate_failed=1
   live_gate_failed_step="$lg_step"
-  live_gate_probe_failure="$lg_probe_detail"
+  live_gate_probe_failure="$live_gate_probe_detail"
   live_gate_write_marker "$lg_db" "$lg_dir_after"
   return 1
 }
