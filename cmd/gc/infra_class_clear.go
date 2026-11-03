@@ -460,7 +460,7 @@ func detachInfraClearedRow(source beads.Store, entry infraBackupEntry, session m
 		}
 		for _, d := range live {
 			if dir == "down" || !session[d.IssueID] {
-				return fmt.Errorf("removing the retained copy %s from the work store: it still has the edge %s -[%s]-> %s, which its backup entry does not record; deleting it would drop the edge and rewrite the text of %s. Nothing was removed for this row", id, d.IssueID, d.Type, d.DependsOnID, d.IssueID)
+				return fmt.Errorf("removing the retained copy %s from the work store: it still has the edge %s -[%s]-> %s, which its backup entry does not record; deleting it would drop the edge and rewrite the text of %s. The row stays in the work store", id, d.IssueID, d.Type, d.DependsOnID, d.IssueID)
 			}
 			if err := source.DepRemove(d.IssueID, d.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
 				return fmt.Errorf("removing dep %s -[%s]-> %s from the work store: %w", d.IssueID, d.Type, d.DependsOnID, err)

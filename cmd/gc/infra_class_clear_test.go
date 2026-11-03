@@ -746,3 +746,53 @@ func TestTheClearNeverRewritesWorkBeadText(t *testing.T) {
 		})
 	}
 }
+
+// TestTheClearRefusesAnEdgeItsBackupDoesNotRecord pins the guard under
+// ga-w4p3pw's fix. The clear detaches a row by the edges its backup entry
+// records; an edge that reached the row after the backup (here, written between
+// the backup and the delete) is one no backup can restore. Deleting the row
+// would drop that edge and, on a bd or native-Dolt work store, rewrite the
+// linked work bead's text, so the clear refuses by edge and the row stays.
+func TestTheClearRefusesAnEdgeItsBackupDoesNotRecord(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	source := referenceRewritingStore{MemStore: beads.NewMemStore()}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+
+	moved := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	text := "follow-up of " + moved.ID
+	late := mustCreateInfraBead(t, source, beads.Bead{Title: "linked after the backup", Type: "task", Description: text})
+	prevBefore := infraClearBeforeDelete
+	infraClearBeforeDelete = func(id string) error {
+		if id != moved.ID {
+			return nil
+		}
+		return source.MemStore.DepAdd(late.ID, moved.ID, "related")
+	}
+	t.Cleanup(func() { infraClearBeforeDelete = prevBefore })
+
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
+	if report.Outcome != infraMigrationRetained {
+		t.Fatalf("migrate = %s, want the clear refused over the unrecorded edge: %s", report.Outcome, log.String())
+	}
+	advice := infraMigrationOperatorAdvice(report, "gc storage migrate")
+	if !strings.Contains(advice, late.ID+" -[related]-> "+moved.ID) || !strings.Contains(advice, "The row stays in the work store") {
+		t.Fatalf("the refusal does not name the unrecorded edge %s -> %s and what became of the row: %s", late.ID, moved.ID, advice)
+	}
+	if _, err := source.Get(moved.ID); err != nil {
+		t.Fatalf("the clear removed %s over an edge its backup does not record: %v", moved.ID, err)
+	}
+	got, err := source.Get(late.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != text {
+		t.Fatalf("work bead %s text rewritten by the clear:\n got %q\nwant %q", late.ID, got.Description, text)
+	}
+	if deps, err := source.DepList(late.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != moved.ID {
+		t.Fatalf("%s deps = %+v (%v); the unrecorded edge must survive the refusal", late.ID, deps, err)
+	}
+}
