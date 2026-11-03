@@ -644,6 +644,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamAPIKeyEnv:    "COPILOT_PROVIDER_API_KEY",
 		UpstreamAuthTokenEnv: "COPILOT_GITHUB_TOKEN",
 		Args:                 []string{"--yolo"},
+		OptionsSchema: []BuiltinProviderOption{
+			// Copilot's ask_user tool blocks the pane on an interactive
+			// question until someone answers it. Most sessions run
+			// unattended, so the default launches with --no-ask-user; an
+			// agent a human attaches to opts back in with
+			// option_defaults = { ask_user = "on" }.
+			{
+				Key:     "ask_user",
+				Label:   "Ask User Tool",
+				Type:    "select",
+				Default: "off",
+				Choices: []BuiltinOptionChoice{
+					{Value: "off", Label: "Disabled (work autonomously)", FlagArgs: []string{"--no-ask-user"}},
+					{Value: "on", Label: "Enabled (may ask questions)", FlagArgs: []string{}},
+				},
+			},
+		},
 		// PromptMode "none" delivers the prompt via tmux send-keys after the
 		// ready prefix is detected (Step 6 in doStartSession), instead of
 		// appending to argv. Required for copilot CLI 1.0.x which rejects
