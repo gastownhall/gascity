@@ -31,6 +31,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var claim bool
 	var drainAck bool
 	var jsonOut bool
+	var worktree bool
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -97,6 +98,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				Claim:      claim,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
+				Worktree:   worktree,
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
 			// contract is exit 2 (reportWorkQueryFailure), and folding it
@@ -110,6 +112,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
@@ -291,6 +294,7 @@ type hookCommandOptions struct {
 	Claim      bool
 	DrainAck   bool
 	JSON       bool
+	Worktree   bool
 	DrainAckFn hookDrainAckFunc
 }
 
@@ -319,6 +323,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	_ = opts.HookFormat
 	if opts.DrainAck && !opts.Claim {
 		fmt.Fprintln(stderr, "gc hook: --drain-ack requires --claim") //nolint:errcheck
+		return 1
+	}
+	if opts.Worktree && !opts.Claim {
+		fmt.Fprintln(stderr, "gc hook: --worktree requires --claim") //nolint:errcheck
 		return 1
 	}
 
@@ -597,7 +605,20 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			// The fenced row, so the worktree check costs no extra read.
 			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
 		}
-		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		var provisionWorktree hookProvisionWorktreeFunc
+		if opts.Worktree {
+			resolved, err := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook: resolving provider for worktree staging: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			provisionWorktree, err = newHookClaimWorktreeProvisioner(cityPath, cityName, cfg, &a, resolvedAgentName, resolved)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+				return 1
+			}
+		}
+		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -881,6 +902,13 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
 func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+}
+
+// claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
+// provisioned before its receipt is delivered (gc hook --claim --worktree).
+// A nil provisionWorktree is the plain claim.
+func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -891,7 +919,9 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 	// Work-store writes announce themselves to the city's event log so the run
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
 	// wrapped before the class route, whose binding writes announce themselves.
-	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), opened, err, city.recorder, stderr)
+	base := city.claimOps()
+	base.ProvisionWorktree = provisionWorktree
+	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}
@@ -1000,6 +1030,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if len(claimStore.env) > 0 {
 			storeOpts.Env = claimStore.env
 		}
+		storeOpts.StoreRef = claimStore.storeRef
 		storeDir := workDir
 		if dir := strings.TrimSpace(claimStore.dir); dir != "" {
 			storeDir = dir
