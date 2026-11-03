@@ -5,7 +5,7 @@
 Gate PASS for PR opening, with the unchanged base's routed-row guard attributed under criteria 3a/3b. Raw runner status 79 and `criterion3_valid=false` remain intact: `criterion3_valid_if_attributed=true` proves every other requirement completed. No waiver is used.
 
 - Build ga-m6wgyi7; review ga-ix76oxq PASS; reviewed source `3547d76f90dcf89d3a69e93e1cefa3862cd7985a`. Provenance builder/ga-m6wgyi7 is never a push target.
-- deploy_mode: remote; base_ref: origin/main; isolated branch: deploy/ga-6dpyh1q-gate.
+- deploy_mode: remote; push_remote: origin (fresh dry-run and ordinary push succeeded); base_ref: origin/main; isolated branch: deploy/ga-6dpyh1q-gate.
 - gate_base: `2cf1a9d4ed31016ea14d4c436259898b9a5c3baa`; gate_base_kind: current-tip (frozen at the completed criterion-6 evaluation).
 - merge_state: clean (origin/main@2cf1a9d4ed31016ea14d4c436259898b9a5c3baa).
 - merge_validation: canonical preserved merge `a2d06873cdacc20089ac2c68d14ebbafa8e40f47` / tree `5e0a436f015f8c281293f79c4148822788ef7a66` exactly matches git merge-tree and was built/vetted. No self-rebase.
@@ -69,7 +69,7 @@ ci_lane_run:n/a (no CI-config change). waiver_ref:none (gascity has no waiver pa
 
 ## ci-required accounting
 
-ci_required_closure: ci_required_triggers.py /var/tmp/gc-merge-validate.0b93oy 2cf1a9d4ed31016ea14d4c436259898b9a5c3baa 3547d76f90dcf89d3a69e93e1cefa3862cd7985a fork; workflow blob `e5b11c348505dab28dc223e874bc2c61cbbb33c5`;4 LEAF jobs.
+ci_required_closure: ci_required_triggers.py /var/tmp/gc-merge-validate.0b93oy 2cf1a9d4ed31016ea14d4c436259898b9a5c3baa 3547d76f90dcf89d3a69e93e1cefa3862cd7985a origin; workflow blob `e5b11c348505dab28dc223e874bc2c61cbbb33c5`;4 LEAF jobs.
 
 ~~~text
 diff 2cf1a9d4ed31016ea14d4c436259898b9a5c3baa...3547d76f90dcf89d3a69e93e1cefa3862cd7985a: 1 changed files
