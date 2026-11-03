@@ -3849,6 +3849,12 @@ type fencedInfrastructureRootSet struct {
 
 var fencedInfrastructureRoots = &fencedInfrastructureRootSet{}
 
+// fencedDetachedUserServices remembers, per city, which detached user
+// services the orphan sweep has already reported. A systemd-run unit
+// outlives the session that stamped it, so an every-patrol log would
+// repeat for its whole life.
+var fencedDetachedUserServices = &fencedInfrastructureRootSet{}
+
 func (s *fencedInfrastructureRootSet) take(cityPath string) map[string]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3989,6 +3995,36 @@ func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
 	return true
 }
 
+// detachedUserServiceSkip reports whether live is a user-manager service
+// other than the session's own unit. unit is the service live sits in, or
+// "" when it does not, so the caller can name the unit on a reap of the
+// session's own service. ownCache remembers that unit per session. A skip
+// is logged once per process (pid + start identity) into reported.
+func detachedUserServiceSkip(
+	live runtime.LiveRuntime,
+	found []runtime.LiveRuntime,
+	ownCache map[string]string,
+	previously, reported map[string]struct{},
+	stderr io.Writer,
+) (unit string, skip bool) {
+	own, ok := ownCache[live.SessionID]
+	if !ok {
+		own = proctable.SessionOwnUserService(found, live.SessionID)
+		ownCache[live.SessionID] = own
+	}
+	var foreign bool
+	unit, foreign = proctable.ForeignUserService(live.PID, own)
+	if !foreign {
+		return unit, false
+	}
+	key := strconv.Itoa(live.PID) + ":" + live.StartIdentity
+	reported[key] = struct{}{}
+	if _, seen := previously[key]; !seen {
+		fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: user service %s (not the session's unit)\n", live.PID, live.SessionID, unit) //nolint:errcheck
+	}
+	return unit, true
+}
+
 // sweepProcessTableOrphans terminates untracked, reparented process roots of
 // this city whose incarnation is over (processRootIncarnationOver). inv, when
 // set, is the tick's inventory view; without it, or when its pass is
@@ -4043,6 +4079,10 @@ func sweepProcessTableOrphans(
 	previouslyFenced := fencedInfrastructureRoots.take(cityPath)
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
+	previouslyDetached := fencedDetachedUserServices.take(cityPath)
+	detached := make(map[string]struct{})
+	defer fencedDetachedUserServices.put(cityPath, detached)
+	ownUnit := map[string]string{}
 	selfPID := os.Getpid()
 	subreaperPID := pidutil.DetectUserSubreaperPID(selfPID)
 	reaped := 0
@@ -4097,11 +4137,24 @@ func sweepProcessTableOrphans(
 			}
 			continue
 		}
+		// A root whose cgroup is a *.service below the user manager, and
+		// not this session's own unit, is a detached systemd-run --user
+		// service that inherited GC_SESSION_ID. Leave it. An in-session
+		// child (a scope, or the session's own service) is still reaped,
+		// and a reap of the session's own service names that unit.
+		unit, skip := detachedUserServiceSkip(live, found, ownUnit, previouslyDetached, detached, stderr)
+		if skip {
+			continue
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: terminating process-table orphan pid=%d session=%s: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
 			continue
 		}
-		fmt.Fprintf(stderr, "session reconciler: reaped process-table orphan pid=%d session=%s (%s)\n", live.PID, live.SessionID, rule) //nolint:errcheck
+		if unit != "" {
+			fmt.Fprintf(stderr, "session reconciler: reaped process-table orphan pid=%d session=%s unit=%s (%s)\n", live.PID, live.SessionID, unit, rule) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stderr, "session reconciler: reaped process-table orphan pid=%d session=%s (%s)\n", live.PID, live.SessionID, rule) //nolint:errcheck
+		}
 		reaped++
 	}
 	return reaped
