@@ -101,7 +101,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		// (demand_claimed_work.go). The cut runs before the guards, so a row a
 		// guard admits is never a claimed one.
 		if _, recorded := reads.(*v2DemandReads); recorded {
-			c.DefaultCounts, c.DefaultDemand, v.ClaimedDemand = withoutClaimedDemand(c.DefaultCounts, c.DefaultDemand, claimedWorkIDs(v.AssignedWork))
+			c.DefaultCounts, c.DefaultDemand, v.ClaimedDemand = withoutClaimedDemand(c.DefaultCounts, c.DefaultDemand, demandClaimsOf(v.AssignedWork, v.AssignedStoreRefs))
 		}
 		// A bead whose claims keep failing the same way is not spawn demand
 		// (claim_loop_guard.go).

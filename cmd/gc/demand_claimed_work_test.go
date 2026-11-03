@@ -53,7 +53,7 @@ func claimedWorkCity() *config.City {
 
 // claimedMerge is gather's cut of collected by work's claims, then the merge.
 func claimedMerge(work []beads.Bead, collected collectedDemand) mergedDemand {
-	collected.DefaultCounts, collected.DefaultDemand, _ = withoutClaimedDemand(collected.DefaultCounts, collected.DefaultDemand, claimedWorkIDs(work))
+	collected.DefaultCounts, collected.DefaultDemand, _ = withoutClaimedDemand(collected.DefaultCounts, collected.DefaultDemand, demandClaimsOf(work, nil))
 	return mergeCollectedDemand(claimedWorkCity(), collected)
 }
 
@@ -188,9 +188,10 @@ func TestClaimedWork_ReadyRoutedDropsClaimedRows(t *testing.T) {
 }
 
 // The cut trusts the claim read. Where that read lags a release the probe
-// already saw (a class binding's cache re-scans every 30-120 s), the released
-// row waits for the claim read to catch up; the same stale read keeps the
-// stale claimer resumed, so nothing drains meanwhile.
+// already saw (a write that emitted no event reaches a cache at its next
+// re-scan, every 30-120 s), the released row waits for the claim read to
+// catch up; the same stale read keeps the stale claimer resumed, so nothing
+// drains meanwhile.
 func TestClaimedWork_ReleaseTheClaimReadHasNotSeenWaitsForIt(t *testing.T) {
 	staleClaim := []beads.Bead{workBead("w-1", "claude", "sess-a", "in_progress", 2)}
 	states := passPoolDesired(staleClaim, []beads.Bead{seatA("w-1", claimedWorkNow.Add(-90*time.Second))}, claimedProbe("w-1"))
@@ -209,7 +210,7 @@ func TestClaimedWork_CutLeavesItsInputUntouched(t *testing.T) {
 	in := claimedProbe("w-1", "w-2")
 	wantCounts, wantIDs := maps.Clone(in.DefaultCounts), slices.Clone(in.DefaultDemand["claude"].WorkBeadIDs)
 
-	counts, demand, cut := withoutClaimedDemand(in.DefaultCounts, in.DefaultDemand, map[string]struct{}{"w-1": {}})
+	counts, demand, cut := withoutClaimedDemand(in.DefaultCounts, in.DefaultDemand, demandClaims{{StoreRef: "city", ID: "w-1"}: false})
 
 	if !maps.Equal(in.DefaultCounts, wantCounts) || !reflect.DeepEqual(in.DefaultDemand["claude"].WorkBeadIDs, wantIDs) {
 		t.Fatalf("input edited: counts %v ids %v, want %v %v", in.DefaultCounts, in.DefaultDemand["claude"].WorkBeadIDs, wantCounts, wantIDs)
@@ -225,23 +226,90 @@ func TestClaimedWork_CutLeavesItsInputUntouched(t *testing.T) {
 // Only assigned rows count as claimed, mirroring the serving rules, which
 // count only unassigned rows; status plays no part.
 func TestClaimedWork_IDsAreAssignedRowsOnly(t *testing.T) {
-	got := claimedWorkIDs([]beads.Bead{
+	claims := demandClaimsOf([]beads.Bead{
 		workBead("in-progress", "claude", "sess-a", "in_progress", 2),
 		workBead("open-assigned", "claude", "sess-a", "open", 2),
 		workBead("in-progress-unassigned", "claude", "", "in_progress", 2),
 		workBead("open-unassigned", "claude", "", "open", 2),
-	})
-	if want := []string{"in-progress", "open-assigned"}; !slices.Equal(slices.Sorted(maps.Keys(got)), want) {
-		t.Fatalf("claimed = %v, want %v", slices.Sorted(maps.Keys(got)), want)
+	}, nil)
+	var got []string
+	for k := range claims {
+		got = append(got, k.ID)
+	}
+	slices.Sort(got)
+	if want := []string{"in-progress", "open-assigned"}; !slices.Equal(got, want) {
+		t.Fatalf("claimed = %v, want %v", got, want)
 	}
 }
 
 // With nothing claimed the cut hands its maps back as they are.
 func TestClaimedWork_NothingClaimedReturnsTheSameMaps(t *testing.T) {
 	in := claimedProbe("w-1", "w-2")
-	counts, demand, cut := withoutClaimedDemand(in.DefaultCounts, in.DefaultDemand, map[string]struct{}{"w-9": {}})
+	counts, demand, cut := withoutClaimedDemand(in.DefaultCounts, in.DefaultDemand, demandClaims{{StoreRef: "city", ID: "w-9"}: false})
 	if reflect.ValueOf(counts).Pointer() != reflect.ValueOf(in.DefaultCounts).Pointer() ||
 		reflect.ValueOf(demand).Pointer() != reflect.ValueOf(in.DefaultDemand).Pointer() || cut != nil {
 		t.Fatalf("cut with nothing claimed copied or cut: %v %v %v", counts, demand, cut)
+	}
+}
+
+// cutsW1 reports whether the cut drops the probe's row w-1, read under
+// probeRef (from a class binding when inBinding), when the assigned-work read
+// shows w-1 claimed under each of claimRefs.
+func cutsW1(probeRef string, inBinding bool, claimRefs ...string) bool {
+	d := scaleCheckDemand{Count: 1, WorkBeadIDs: []string{"w-1"}, StoreRefs: map[string]string{"w-1": probeRef}}
+	if inBinding {
+		d.BindingResident = map[string]bool{"w-1": true}
+	}
+	work := make([]beads.Bead, 0, len(claimRefs))
+	for range claimRefs {
+		work = append(work, workBead("w-1", "claude", "sess-a", "in_progress", 2))
+	}
+	_, _, cut := withoutClaimedDemand(map[string]int{"claude": 1}, map[string]scaleCheckDemand{"claude": d}, demandClaimsOf(work, claimRefs))
+	return slices.Equal(cut["claude"].WorkBeadIDs, []string{"w-1"})
+}
+
+// A claim holds a row only in the scope it resides in, however each read
+// spells the store: the census names the city work ledger "" and a rig by its
+// bare name, the probe says "city" and "rig:<name>", or a bare rig name on the
+// cold-wake probe. A same-ID bead in another scope is still unassigned work.
+func TestClaimedWork_ClaimHoldsOnlyItsOwnScope(t *testing.T) {
+	for name, tc := range map[string]struct {
+		probeRef, claimRef string
+		cut                bool
+	}{
+		"city-row-ledger-claim":       {"city", "", true},
+		"city-row-binding-claim":      {"city", "class:graph", true},
+		"rig-row-rig-claim":           {"rig:alpha", "alpha", true},
+		"cold-wake-rig-row-rig-claim": {"alpha", "alpha", true},
+		"city-row-rig-claim":          {"city", "alpha", false},
+		"rig-row-ledger-claim":        {"rig:alpha", "", false},
+		"rig-row-binding-claim":       {"rig:alpha", "class:graph", false},
+		"rig-row-other-rig-claim":     {"rig:alpha", "bravo", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := cutsW1(tc.probeRef, false, tc.claimRef); got != tc.cut {
+				t.Fatalf("probe row under %q, claim under %q: cut = %t, want %t", tc.probeRef, tc.claimRef, got, tc.cut)
+			}
+		})
+	}
+}
+
+// A row the probe read from a class binding is held only by a claim a binding
+// holds. The work ledger's frozen copy of a migrated bead keeps its ID and
+// the assignee it had then, which says nothing about the binding's row.
+func TestClaimedWork_BindingRowIsHeldOnlyByABindingClaim(t *testing.T) {
+	for name, tc := range map[string]struct {
+		claimRefs []string
+		cut       bool
+	}{
+		"binding-claim":                  {[]string{"class:graph"}, true},
+		"frozen-ledger-copy":             {[]string{""}, false},
+		"frozen-ledger-copy-and-binding": {[]string{"", "class:graph"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := cutsW1("city", true, tc.claimRefs...); got != tc.cut {
+				t.Fatalf("binding row, claims under %q: cut = %t, want %t", tc.claimRefs, got, tc.cut)
+			}
+		})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The default probe's pairing guard: work a v2 pass reads as claimed is
@@ -30,33 +31,58 @@ import (
 // and a row both reads agree is unassigned is never dropped. Legacy needs no
 // cut: its probe is a live read taken after its claim read.
 //
+// A claim holds a row only in the scope it resides in (claimStoreRef): a
+// rig's store, or the city, whose work ledger and class bindings a split city
+// reads as one scope. A same-ID bead in another scope is still unassigned
+// work. A row the probe read from a class binding is held only by a binding's
+// claim. `gc storage migrate` carries a bead into the binding under its
+// work-ledger ID and can leave the ledger a frozen copy of it
+// (class_store_cache.go): a release, reopen or reassign in the binding leaves
+// the row claimable while that copy still reads assigned.
+//
 // The cut trusts the claim read, so where that read lags the probe instead
-// it holds a just-released row back until the claim read catches up: a class
-// binding's cache, which has no feed, re-scans every 30 to 120 s, and a
-// migrated relic's frozen work-ledger copy that still reads assigned holds its
-// live binding twin back while it stays so. Nothing drains meanwhile: the same
-// stale read keeps the stale claimer on the resume tier (ga-ylpbsy.88 would
-// compare the two copies' update times instead). Rows match by bead ID because
-// a demand row and its claim can come from a split city's ledger and binding,
-// which demand treats as one scope (normalizeDemandStoreRef).
+// it holds a just-released row back until the claim read catches up: a cache
+// sees a write that emitted no event at its next re-scan, every 30 to 120 s.
+// While the stale claimer's session lasts, the same stale read keeps it on the
+// resume tier, so nothing drains meanwhile (ga-ylpbsy.88 would compare the two
+// reads' update times instead).
 
-// claimedWorkIDs returns the IDs of a pass's assigned-work rows that carry an
-// assignee, live or not: rows the serving rules never count as demand. A
-// claim whose claimant died stays out of demand until the dead-assignee sweep
-// releases it; the next read counts it then.
-func claimedWorkIDs(assigned []beads.Bead) map[string]struct{} {
-	var ids map[string]struct{}
-	for _, wb := range assigned {
+// demandClaims is a pass's claims: its assigned-work rows that carry an
+// assignee, live or not, which the serving rules never count as demand, by
+// the scope the claim resides in (claimStoreRef) and bead ID. A claim is true
+// when a class binding holds it. A claim whose claimant died stays out of
+// demand until the dead-assignee sweep releases it; the next read counts it
+// then.
+type demandClaims map[storeScopedBeadKey]bool
+
+// demandClaimsOf returns the claims among a pass's assigned-work rows; refs
+// holds each row's store ref by index (demandView.AssignedStoreRefs).
+func demandClaimsOf(assigned []beads.Bead, refs []string) demandClaims {
+	var claims demandClaims
+	for i, wb := range assigned {
 		id := strings.TrimSpace(wb.ID)
 		if id == "" || strings.TrimSpace(wb.Assignee) == "" {
 			continue
 		}
-		if ids == nil {
-			ids = make(map[string]struct{})
+		ref := ""
+		if i < len(refs) {
+			ref = refs[i]
 		}
-		ids[id] = struct{}{}
+		if claims == nil {
+			claims = make(demandClaims)
+		}
+		key := storeScopedBeadKey{StoreRef: claimStoreRef(ref), ID: id}
+		claims[key] = claims[key] || storeref.IsClassRef(ref)
 	}
-	return ids
+	return claims
+}
+
+// holds reports whether a claim holds entry's probe row id: a claim on the
+// same bead in the scope the probe read the row from, and for a row read from
+// a class binding, one a binding holds.
+func (c demandClaims) holds(entry scaleCheckDemand, id string) bool {
+	inBinding, claimed := c[storeScopedBeadKey{StoreRef: claimStoreRef(entry.StoreRefs[id]), ID: strings.TrimSpace(id)}]
+	return claimed && (inBinding || !entry.BindingResident[id])
 }
 
 // claimedDemandCut is the default-probe demand one template lost to claims
@@ -68,10 +94,10 @@ type claimedDemandCut struct {
 }
 
 // withoutClaimedDemand returns the default probe's counts and demand without
-// the rows claimed names, and what it cut by template. It runs on the probe's
+// the rows claimed holds, and what it cut by template. It runs on the probe's
 // own read, where a template's count is its row count. It never edits its
 // arguments; with nothing to cut it returns them unchanged.
-func withoutClaimedDemand(counts map[string]int, demand map[string]scaleCheckDemand, claimed map[string]struct{}) (map[string]int, map[string]scaleCheckDemand, map[string]claimedDemandCut) {
+func withoutClaimedDemand(counts map[string]int, demand map[string]scaleCheckDemand, claimed demandClaims) (map[string]int, map[string]scaleCheckDemand, map[string]claimedDemandCut) {
 	if len(claimed) == 0 {
 		return counts, demand, nil
 	}
@@ -80,7 +106,7 @@ func withoutClaimedDemand(counts map[string]int, demand map[string]scaleCheckDem
 	for template, entry := range demand {
 		var keep, cut []string
 		for i, id := range entry.WorkBeadIDs {
-			if _, isClaimed := claimed[strings.TrimSpace(id)]; !isClaimed {
+			if !claimed.holds(entry, id) {
 				if cut != nil {
 					keep = append(keep, id)
 				}

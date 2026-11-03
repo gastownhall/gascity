@@ -133,10 +133,13 @@ func (p *decidePass) demand() {
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
 }
 
-// traceClaimedDemand records each template's default-probe rows gather
-// dropped as claims (demandView.ClaimedDemand), so a listed bead that did not
-// scale its pool is visible (C2.2). The rows go in the reason, never in
-// WorkBeadID: a record naming a work item is a worktree refusal.
+// traceClaimedDemand names each template's default-probe rows gather dropped
+// as claims (demandView.ClaimedDemand) in the decide's trace (C2.2). That
+// trace leaves the process only through the worktree-refusal alert, which
+// skips these records: operators see the cut as the planner's
+// claimed_demand_cut series (observeClaimedDemand). The rows go in the
+// reason, never in WorkBeadID: a record naming a work item is a worktree
+// refusal.
 func (p *decidePass) traceClaimedDemand() {
 	for _, template := range slices.Sorted(maps.Keys(p.in.Demand.ClaimedDemand)) {
 		p.trace = append(p.trace, allocTraceRecord{
