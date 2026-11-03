@@ -1166,3 +1166,238 @@ func TestUnreadableEnvironUserManagerScopeUnderIncarnationBound(t *testing.T) {
 		t.Fatalf("scanWithRootSince = %v, %v (%s); want no runtimes and no error", got, err, SummarizeScanError(err))
 	}
 }
+
+// buildUserManagerHelper writes, without changing any file mode, the process
+// at pid that the user manager scope proof excuses: same uid, a child of
+// init, started startTicks after boot, in the scanner's own user manager
+// scope. It returns the process's directory.
+func buildUserManagerHelper(t *testing.T, root string, pid int, startTicks uint64, cgroupFile string) string {
+	t.Helper()
+	buildFakeProcUnder(t, root, pid, 1, "(sd-pam)", nil)
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	writeFakeProcessStat(t, dir, pid, 1, startTicks)
+	if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroupFile), 0o644); err != nil {
+		t.Fatalf("write cgroup: %v", err)
+	}
+	return dir
+}
+
+// environPermissionError is the error reading pid's environ fails with when
+// the process is not ptrace-readable.
+func environPermissionError(root string, pid int) error {
+	return &fs.PathError{Op: "open", Path: filepath.Join(root, strconv.Itoa(pid), "environ"), Err: syscall.EACCES}
+}
+
+// TestUnreadableEnvironUserManagerProofFailsClosed (ga-zpcphq): with both
+// existing exceptions off (no incarnation bound), an unreadable process the
+// user manager scope proof does not establish keeps its environ failure, and
+// a proof read that failed is kept beside it. Names, agreeing or not, prove
+// nothing; only the exact own-user-manager unified path, a definitely older
+// start, and a permission failure do.
+func TestUnreadableEnvironUserManagerProofFailsClosed(t *testing.T) {
+	const pid = 2642
+	boot := time.Unix(1_700_000_000, 0).UTC()
+	euid := os.Geteuid()
+	scope := ownUserManagerScope()
+	writeCgroup := func(content string) func(*testing.T, string, string) {
+		return func(t *testing.T, _, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(content), 0o644); err != nil {
+				t.Fatalf("write cgroup: %v", err)
+			}
+		}
+	}
+	nameAs := func(comm, argv0, cgroupPath string) func(*testing.T, string, string) {
+		return func(t *testing.T, _, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+				t.Fatalf("write comm: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(argv0+"\x00"), 0o644); err != nil {
+				t.Fatalf("write cmdline: %v", err)
+			}
+			writeFakeProcessCgroup(t, dir, cgroupPath)
+		}
+	}
+	userSlice := "/user.slice/user-" + strconv.Itoa(euid) + ".slice"
+	for _, tc := range []struct {
+		name         string
+		setup        func(t *testing.T, root, dir string)
+		readErr      func(root string) error
+		readStarted  time.Time
+		wantProofErr bool
+	}{
+		{name: "hardened CLI in a tmux-spawn scope", setup: nameAs("codex", "/usr/bin/codex", userSlice+"/session-3.scope/tmux-spawn-a1b2.scope")},
+		{name: "credential agent whose comm and argv agree", setup: nameAs("ssh-agent", "/usr/bin/ssh-agent", userSlice+"/session-3.scope")},
+		{name: "credential agent whose comm and argv disagree", setup: nameAs("gpg-agent", "/usr/bin/node", userSlice+"/user@"+strconv.Itoa(euid)+".service/app.slice/gpg-agent.service")},
+		{name: "another user's manager", setup: writeCgroup(unifiedCgroupFile(ownUserManagerInitScope(euid + 1)))},
+		{name: "the system init.scope", setup: writeCgroup(unifiedCgroupFile("/init.scope"))},
+		{name: "a system service", setup: writeCgroup(unifiedCgroupFile("/system.slice/sshd.service"))},
+		{name: "a namespace-relative root", setup: writeCgroup(unifiedCgroupFile("/"))},
+		{name: "nested below the scope", setup: writeCgroup(unifiedCgroupFile(scope + "/child.scope"))},
+		{name: "a suffix lookalike", setup: writeCgroup(unifiedCgroupFile("/machine.slice/c1.scope" + scope))},
+		{name: "an uncleaned path", setup: writeCgroup(unifiedCgroupFile(strings.Replace(scope, "/user@", "//user@", 1)))},
+		{name: "a trailing slash", setup: writeCgroup(unifiedCgroupFile(scope + "/"))},
+		{name: "a dot-dot path", setup: writeCgroup(unifiedCgroupFile(scope + "/../init.scope"))},
+		{name: "no cgroup file", setup: func(t *testing.T, _, dir string) {
+			if err := os.Remove(filepath.Join(dir, "cgroup")); err != nil {
+				t.Fatalf("remove cgroup: %v", err)
+			}
+		}},
+		{name: "v1 entries only", setup: writeCgroup("1:name=systemd:" + scope + "\n")},
+		{name: "a malformed line", setup: writeCgroup("garbage\n" + unifiedCgroupFile(scope)), wantProofErr: true},
+		{name: "a duplicate unified entry", setup: writeCgroup(unifiedCgroupFile(scope) + unifiedCgroupFile(scope)), wantProofErr: true},
+		{name: "an empty unified path", setup: writeCgroup("0::\n"), wantProofErr: true},
+		{name: "a unified entry naming controllers", setup: writeCgroup("0:cpu:" + scope + "\n"), wantProofErr: true},
+		{name: "an unreadable cgroup file", setup: func(t *testing.T, _, dir string) {
+			if err := os.Remove(filepath.Join(dir, "cgroup")); err != nil {
+				t.Fatalf("remove cgroup: %v", err)
+			}
+			if err := os.Mkdir(filepath.Join(dir, "cgroup"), 0o755); err != nil {
+				t.Fatalf("mkdir cgroup: %v", err)
+			}
+		}, wantProofErr: true},
+		{name: "started after the read", readStarted: boot.Add(500 * time.Millisecond)},
+		{name: "started inside the start-time uncertainty", readStarted: boot.Add(2 * time.Second)},
+		{name: "no boot time", setup: func(t *testing.T, root, _ string) {
+			if err := os.Remove(filepath.Join(root, "stat")); err != nil {
+				t.Fatalf("remove proc stat: %v", err)
+			}
+		}, wantProofErr: true},
+		{name: "a vanished stat", setup: func(t *testing.T, _, dir string) {
+			if err := os.Remove(filepath.Join(dir, "stat")); err != nil {
+				t.Fatalf("remove stat: %v", err)
+			}
+		}},
+		{name: "a malformed stat", setup: func(t *testing.T, _, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte("garbage"), 0o644); err != nil {
+				t.Fatalf("write stat: %v", err)
+			}
+		}, wantProofErr: true},
+		{name: "an I/O failure", readErr: func(root string) error {
+			return &fs.PathError{Op: "read", Path: filepath.Join(root, "2642", "environ"), Err: syscall.EIO}
+		}},
+		{name: "an environ that is a directory", readErr: func(root string) error {
+			return &fs.PathError{Op: "read", Path: filepath.Join(root, "2642", "environ"), Err: syscall.EISDIR}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeBootTime(t, root, boot)
+			dir := buildUserManagerHelper(t, root, pid, 100, unifiedCgroupFile(scope))
+			if tc.setup != nil {
+				tc.setup(t, root, dir)
+			}
+			readErr := environPermissionError(root, pid)
+			if tc.readErr != nil {
+				readErr = tc.readErr(root)
+			}
+			readStarted := time.Now()
+			if !tc.readStarted.IsZero() {
+				readStarted = tc.readStarted
+			}
+
+			err := unreadableEnvironScanError(root, pid, "ga-target", time.Time{}, readStarted, euid, readErr)
+			if !errors.Is(err, readErr) {
+				t.Fatalf("unreadableEnvironScanError = %v, want the environ failure %v kept", err, readErr)
+			}
+			if got := strings.Contains(err.Error(), "proving user manager scope for pid 2642"); got != tc.wantProofErr {
+				t.Fatalf("unreadableEnvironScanError = %v; proof error kept = %t, want %t", err, got, tc.wantProofErr)
+			}
+		})
+	}
+}
+
+// TestUnreadableEnvironUserManagerProofKeepsEarlierProofErrors (ga-zpcphq):
+// the user manager scope proof removes only the environ failure. On a hybrid
+// host, a bounded scan's tmux-spawn proof cannot read the cgroup file its
+// strict reader expects, and that failure stays the entry's error.
+func TestUnreadableEnvironUserManagerProofKeepsEarlierProofErrors(t *testing.T) {
+	const pid = 2642
+	boot := time.Unix(1_700_000_000, 0).UTC()
+	incarnation := boot.Add(10 * time.Second)
+	for _, tc := range []struct {
+		name          string
+		cgroup        string
+		wantTmuxProof bool
+	}{
+		{"pure v2", unifiedCgroupFile(ownUserManagerScope()), false},
+		{"hybrid", hybridCgroupFile(ownUserManagerScope()), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeBootTime(t, root, boot)
+			buildUserManagerHelper(t, root, pid, 1100, tc.cgroup)
+			readErr := environPermissionError(root, pid)
+
+			err := unreadableEnvironScanError(root, pid, "ga-target", incarnation, time.Now(), os.Geteuid(), readErr)
+			if errors.Is(err, readErr) {
+				t.Fatalf("unreadableEnvironScanError = %v, want the environ failure excused", err)
+			}
+			gotTmuxProof := err != nil && strings.Contains(err.Error(), "proving tmux parent for pid 2642")
+			if gotTmuxProof != tc.wantTmuxProof || (err != nil) != tc.wantTmuxProof {
+				t.Fatalf("unreadableEnvironScanError = %v; want tmux proof error kept = %t and nothing else", err, tc.wantTmuxProof)
+			}
+		})
+	}
+}
+
+// TestUnreadableEnvironUserManagerProofRevalidation (ga-zpcphq): the second
+// census abandons the proof when the process's pid, parent, start ticks or
+// unified cgroup changed after the first, or when it can no longer be read,
+// so a recycled pid is never excused on its predecessor's evidence.
+func TestUnreadableEnvironUserManagerProofRevalidation(t *testing.T) {
+	const pid = 2642
+	for _, tc := range []struct {
+		name    string
+		mutate  func(t *testing.T, dir string)
+		want    bool
+		wantErr bool
+	}{
+		{name: "unchanged", want: true},
+		{name: "start ticks change", mutate: func(t *testing.T, dir string) { writeFakeProcessStat(t, dir, pid, 1, 101) }},
+		{name: "parent changes", mutate: func(t *testing.T, dir string) { writeFakeProcessStat(t, dir, pid, 7, 100) }},
+		{name: "cgroup changes", mutate: func(t *testing.T, dir string) {
+			writeFakeProcessCgroup(t, dir, filepath.Dir(ownUserManagerScope())+"/app.slice/agent.service")
+		}},
+		{name: "unified entry disappears", mutate: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte("1:name=systemd:"+ownUserManagerScope()+"\n"), 0o644); err != nil {
+				t.Fatalf("write cgroup: %v", err)
+			}
+		}},
+		{name: "process disappears", mutate: func(t *testing.T, dir string) {
+			if err := os.RemoveAll(dir); err != nil {
+				t.Fatalf("remove process: %v", err)
+			}
+		}},
+		{name: "stat becomes malformed", mutate: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte("garbage"), 0o644); err != nil {
+				t.Fatalf("write stat: %v", err)
+			}
+		}, wantErr: true},
+		{name: "cgroup becomes unreadable", mutate: func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, "cgroup")); err != nil {
+				t.Fatalf("remove cgroup: %v", err)
+			}
+			if err := os.Mkdir(filepath.Join(dir, "cgroup"), 0o755); err != nil {
+				t.Fatalf("mkdir cgroup: %v", err)
+			}
+		}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFakeBootTime(t, root, time.Unix(1_700_000_000, 0))
+			dir := buildUserManagerHelper(t, root, pid, 100, hybridCgroupFile(ownUserManagerScope()))
+
+			candidate, ok, err := userManagerScopeCandidate(root, pid, os.Geteuid(), time.Now())
+			if err != nil || !ok {
+				t.Fatalf("userManagerScopeCandidate = %+v, %t, %v; want the helper captured", candidate, ok, err)
+			}
+			if tc.mutate != nil {
+				tc.mutate(t, dir)
+			}
+			got, err := unifiedIdentityStillCurrent(root, candidate)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("unifiedIdentityStillCurrent = %t, %v; want %t, error %t", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
