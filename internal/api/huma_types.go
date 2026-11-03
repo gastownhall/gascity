@@ -186,9 +186,11 @@ type ListOutput[T any] struct {
 // GREATER of the bead cache's age and the age of the cached response entry
 // itself, and the refresh state is rebuilding when the entry's age is the
 // greater. Reporting only the cache's age there would let a recently lagging
-// cache under-report true staleness. A ?fresh=true read is never served such
-// a body: it builds its own, so CacheAgeS carries only the bead cache's age
-// (0 when that body is not read from the cache) and is never rebuilding.
+// cache under-report true staleness. A ?fresh=true read is served such a
+// body only when the build it waits for is not done statusFreshBuildWait
+// after the read arrived; otherwise its body is built for it, so CacheAgeS
+// carries only the bead cache's age (0 when that body is not read from the
+// cache) and is never rebuilding.
 type IndexOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`

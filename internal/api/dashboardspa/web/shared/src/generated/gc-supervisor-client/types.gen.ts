@@ -21752,7 +21752,7 @@ export type GetV0CityByCityNameStatusData = {
          */
         lite?: boolean;
         /**
-         * When true, build the body for this request instead of answering from the response cache: no time-bucket or TTL-floor reuse, and never a saved body served while it rebuilds, so X-GC-Cache-Refresh is never rebuilding. The body is not saved for other readers. Default false keeps stale-while-revalidate for pollers.
+         * When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
          */
         fresh?: boolean;
     };

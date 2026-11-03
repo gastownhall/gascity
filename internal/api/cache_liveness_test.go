@@ -314,18 +314,18 @@ func TestCacheFreshnessHeadersOnEveryCachedReadType(t *testing.T) {
 	}
 }
 
-// backdateCachedResponse moves the build time of srv's response cached under
-// key d into the past.
-func backdateCachedResponse(t *testing.T, srv *Server, key string, d time.Duration) {
+// backdateSavedStatus moves the build time of the /status body srv saved d
+// into the past.
+func backdateSavedStatus(t *testing.T, srv *Server, d time.Duration) {
 	t.Helper()
 	srv.responseCacheMu.Lock()
 	defer srv.responseCacheMu.Unlock()
-	entry, ok := srv.responseCacheEntries[key]
+	entry, ok := srv.responseCacheEntries["status"]
 	if !ok {
-		t.Fatalf("no response cached under %q", key)
+		t.Fatal("no /status response saved")
 	}
 	entry.storedAt = entry.storedAt.Add(-d)
-	srv.responseCacheEntries[key] = entry
+	srv.responseCacheEntries["status"] = entry
 }
 
 // setCitySuspendedForTest writes the city's runtime suspension state as gc
@@ -423,7 +423,7 @@ func TestCachedStatusOfASuspendedCityReportsNoCacheAge(t *testing.T) {
 				h := newTestCityHandlerWith(t, state, srv)
 
 				cacheAgeOf(t, h, state, "/status") // builds and caches the body
-				backdateCachedResponse(t, srv, "status", tc.builtAgo)
+				backdateSavedStatus(t, srv, tc.builtAgo)
 				hdr := cacheHeadersOf(t, h, state, "/status")
 				srv.waitForBackground()
 				age := cacheAgeIn(t, "/status", hdr)
@@ -463,7 +463,7 @@ func TestStaleStatusServeNamesTheRebuild(t *testing.T) {
 	h := newTestCityHandlerWith(t, state, srv)
 
 	cacheAgeOf(t, h, state, "/status") // builds and saves the body
-	backdateCachedResponse(t, srv, "status", 140*time.Second)
+	backdateSavedStatus(t, srv, 140*time.Second)
 	hdr := cacheHeadersOf(t, h, state, "/status")
 	srv.waitForBackground()
 
@@ -480,9 +480,9 @@ func TestStaleStatusServeNamesTheRebuild(t *testing.T) {
 }
 
 // A ?fresh=true /status read is built for the request, so it reports the city
-// cache's age and refresh state, never a saved body's age or rebuilding, and
-// it starts no stale-while-revalidate refresh. A plain read afterwards still
-// gets the saved body named as rebuilding (ga-v1vyh8.17).
+// cache's age and refresh state, never a saved body's age or rebuilding. Its
+// build replaces the saved body, so a plain read afterwards gets that build,
+// not the old body named as rebuilding (ga-v1vyh8.17).
 func TestFreshStatusReadReportsTheCacheNotARebuild(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: now}))
@@ -499,7 +499,7 @@ func TestFreshStatusReadReportsTheCacheNotARebuild(t *testing.T) {
 	h := newTestCityHandlerWith(t, state, srv)
 
 	cacheAgeOf(t, h, state, "/status") // builds and saves the body
-	backdateCachedResponse(t, srv, "status", 140*time.Second)
+	backdateSavedStatus(t, srv, 140*time.Second)
 	hdr := cacheHeadersOf(t, h, state, "/status?fresh=true")
 	srv.waitForBackground()
 
@@ -512,19 +512,19 @@ func TestFreshStatusReadReportsTheCacheNotARebuild(t *testing.T) {
 	if got := hdr.Get("X-GC-Cache-Refresh-Interval-S"); got != "30" {
 		t.Errorf("X-GC-Cache-Refresh-Interval-S = %q, want 30", got)
 	}
-	if len(srv.responseRefreshing) != 0 {
-		t.Errorf("responseRefreshing = %v, want empty: a fresh read starts no background refresh", srv.responseRefreshing)
+	if len(srv.statusBuilds) != 0 {
+		t.Errorf("statusBuilds = %v, want empty: the fresh read's build has ended", srv.statusBuilds)
 	}
-	if _, age, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status"); !ok || age < 140*time.Second {
-		t.Errorf("saved /status entry age = %v (ok=%v), want at least 140s: a fresh read must not refresh it", age, ok)
+	if _, age, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status"); !ok || age >= 140*time.Second {
+		t.Errorf("saved /status entry age = %v (ok=%v), want under 140s: the fresh read's build replaces the saved body", age, ok)
 	}
 
 	plain := cacheHeadersOf(t, h, state, "/status")
 	srv.waitForBackground()
-	if age := cacheAgeIn(t, "/status", plain); math.Floor(age) != 140 {
-		t.Errorf("plain X-GC-Cache-Age-S = %v, want 140, the saved body's age", age)
+	if age := cacheAgeIn(t, "/status", plain); age != 5 {
+		t.Errorf("plain X-GC-Cache-Age-S = %v, want 5, the city cache's age: the saved body is the fresh read's build", age)
 	}
-	if got := plain.Get("X-GC-Cache-Refresh"); got != "rebuilding" {
-		t.Errorf("plain X-GC-Cache-Refresh = %q, want rebuilding", got)
+	if got := plain.Get("X-GC-Cache-Refresh"); got != "scheduled" {
+		t.Errorf("plain X-GC-Cache-Refresh = %q, want scheduled", got)
 	}
 }

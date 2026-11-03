@@ -1361,10 +1361,12 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 //
 // The CLI's reads are one-shot, so GetStatus asks the server to build the
 // body for the read (?fresh=true) rather than answer with the one a previous
-// read left saved (ga-v1vyh8.17). A server older than the parameter ignores
-// it and serves its saved body, reporting that body's age (and rebuilding
-// where it sends the refresh header). CachedRead.AgeSeconds and Refresh stay
-// exactly what the server reports; the CLI never claims freshness itself.
+// read left saved (ga-v1vyh8.17). The server waits about 10s for that build
+// and then answers with its saved body, if it has one; a server older than
+// the parameter ignores it and serves its saved body at once. Either way the
+// saved body comes with its age (and rebuilding where the server sends the
+// refresh header). CachedRead.AgeSeconds and Refresh stay exactly what the
+// server reports; the CLI never claims freshness itself.
 func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[StatusView]{}, err
