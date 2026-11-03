@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -457,7 +458,7 @@ func TestSetupCommandFailureOmitsCredentials(t *testing.T) {
 	env := map[string]string{"SOME_NEW_TOKEN": sentinel, "GC_RIG": "hauler"}
 	p := &Provider{}
 
-	err := p.runSetupCommand(context.Background(), `echo "auth: $SOME_NEW_TOKEN rig=$GC_RIG"; exit 1`, env)
+	err := p.runSetupCommand(context.Background(), fixtureEchoExit("auth: $SOME_NEW_TOKEN rig=$GC_RIG", 1), env)
 	if err == nil {
 		t.Fatal("a pre_start command exiting 1 returned no error")
 	}
@@ -486,7 +487,7 @@ func TestSetupCommandFailureOmitsInheritedCredentials(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	p := &Provider{}
 	err := p.runSetupCommand(context.Background(),
-		`echo "auth: $SOME_INHERITED_TOKEN home=$HOME"; exit 1`,
+		fixtureEchoExit("auth: $SOME_INHERITED_TOKEN home=$HOME", 1),
 		map[string]string{"GC_RIG": "hauler"})
 	if err == nil {
 		t.Fatal("a pre_start command exiting 1 returned no error")
@@ -535,6 +536,9 @@ func assertEchoRedacted(t *testing.T, what string, err error, echoed string) {
 // path.
 func writeFakeHerdr(t *testing.T, script string) string {
 	t.Helper()
+	if goruntime.GOOS == "windows" {
+		return goFakeHerdrFromScript(t, script)
+	}
 	path := filepath.Join(t.TempDir(), "herdr")
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("writing fake herdr: %v", err)
