@@ -4398,6 +4398,23 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 			issueIDs: []string{"fe-1"},
 			wantDir:  frontendRoot,
 		},
+		{
+			name:     "empty flag with issues keeps the first issue's store",
+			rigName:  "",
+			issueIDs: []string{"fe-1"},
+			wantDir:  frontendRoot,
+		},
+		{
+			name:    "whitespace-only flag without issues keeps the city store",
+			rigName: " ",
+			wantDir: cityDir,
+		},
+		{
+			name:     "whitespace-only flag with issues keeps the first issue's store",
+			rigName:  " ",
+			issueIDs: []string{"fe-1"},
+			wantDir:  frontendRoot,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4695,5 +4712,81 @@ func TestConvoyCreateRigFlagConflictsWithIssueStore(t *testing.T) {
 			t.Fatalf("stderr = %q, want only the mixed-store refusal", stderr.String())
 		}
 		requireNoConvoyInStores(t, cityDir, cityDir, frontendDir, backendDir)
+	})
+}
+
+// TestConvoyCreateRigFlagAbsentKeepsPlacement: with no non-empty --rig,
+// convoy placement stays what it was before the flag was honored — the
+// first issue's store when issues are supplied, else the city store —
+// regardless of ambient rig selection (GC_RIG env, cwd inside a rig), and
+// an explicitly empty or whitespace-only flag counts as absent once the
+// city resolves.
+func TestConvoyCreateRigFlagAbsentKeepsPlacement(t *testing.T) {
+	seedFrontendIssue := func(t *testing.T, cityDir string) string {
+		t.Helper()
+		store, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, "frontend"), cityDir)
+		if err != nil {
+			t.Fatalf("openScopeLocalFileStoreForCity(frontend): %v", err)
+		}
+		issue, err := store.Create(beads.Bead{Title: "frontend issue"})
+		if err != nil {
+			t.Fatalf("create frontend issue: %v", err)
+		}
+		return issue.ID
+	}
+
+	t.Run("no flag, no issues: city store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "convoy", "create", "city batch", "--json"})
+		requireConvoyInStore(t, cityDir, cityDir, convoyID)
+	})
+
+	t.Run("no flag, frontend issue: first issue's store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		issueID := seedFrontendIssue(t, cityDir)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "convoy", "create", "issue batch", issueID, "--json"})
+		requireConvoyInStore(t, cityDir, filepath.Join(cityDir, "frontend"), convoyID)
+		requireConvoyNotInStore(t, cityDir, cityDir, convoyID)
+	})
+
+	t.Run("explicitly empty flag, no issues: city store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig=", "convoy", "create", "city batch", "--json"})
+		requireConvoyInStore(t, cityDir, cityDir, convoyID)
+	})
+
+	t.Run("explicitly empty flag, frontend issue: first issue's store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		issueID := seedFrontendIssue(t, cityDir)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig=", "convoy", "create", "issue batch", issueID, "--json"})
+		requireConvoyInStore(t, cityDir, filepath.Join(cityDir, "frontend"), convoyID)
+	})
+
+	t.Run("whitespace-only flag, no issues: city store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", " ", "convoy", "create", "city batch", "--json"})
+		requireConvoyInStore(t, cityDir, cityDir, convoyID)
+	})
+
+	t.Run("whitespace-only flag, frontend issue: first issue's store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		issueID := seedFrontendIssue(t, cityDir)
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", " ", "convoy", "create", "issue batch", issueID, "--json"})
+		requireConvoyInStore(t, cityDir, filepath.Join(cityDir, "frontend"), convoyID)
+	})
+
+	t.Run("ambient GC_RIG does not choose the store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		t.Setenv("GC_RIG", "frontend")
+		convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "convoy", "create", "city batch", "--json"})
+		requireConvoyInStore(t, cityDir, cityDir, convoyID)
+	})
+
+	t.Run("cwd inside the rig does not choose the store", func(t *testing.T) {
+		cityDir := convoyRigFlagTestCity(t)
+		t.Setenv("GC_CITY", cityDir)
+		chdirProviderAwareTest(t, filepath.Join(cityDir, "frontend"))
+		convoyID := convoyCreateRunJSON(t, []string{"convoy", "create", "city batch", "--json"})
+		requireConvoyInStore(t, cityDir, cityDir, convoyID)
 	})
 }
