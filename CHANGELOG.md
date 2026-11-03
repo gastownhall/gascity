@@ -174,15 +174,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc maintenance status`, and `gc status` and `gc rig status` on a
     suspended city; a stale-while-revalidate `/status` serve still reports
     how long ago its response was built. In 1.5.1 (and since 1.3.0) the
-    supervisor always reported 0, so the `(cache age: ...)` footers never
-    printed.
+    supervisor reported the cache's age as 0, so the `(cache age: ...)`
+    footer printed only on `gc status` and `gc rig status`, when a
+    stale-while-revalidate `/status` serve (added in 1.5.0) was more than
+    30 s old.
   - **The `(cache age: ...)` footer moved to stderr and names its cause.**
     It used to print on stdout after human output, over 15 s on
     `gc session list` and over 30 s on other API-served reads, saying
     "reconciler may be lagging". It now prints on stderr, and only once the
     age passes twice the re-scan interval the server reports in
     `X-GC-Cache-Refresh-Interval-S` (over 60, 120 or 240 s), so a healthy
-    idle city prints none. It says what the server reports bounds the age:
+    idle city prints none on reads served from the cache. `gc status` and
+    `gc rig status` still print it, naming a saved response the server is
+    rebuilding, when that saved response is more than twice the interval
+    old. It says what the server reports bounds the age:
     the cache's re-scans are not landing on schedule, they are paused while
     the city is suspended, they are failing, or the answer is a saved
     `gc status` / `gc rig status` response the server is rebuilding. Against
@@ -836,8 +841,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backoff) or `rebuilding` (the body is a response the server saved
   `X-GC-Cache-Age-S` seconds ago, served while it builds a fresh one). Both
   are optional and declared in the OpenAPI spec; the interval is 0 and the
-  state is omitted when the body was not read from a primed cache. The CLI
-  uses them to decide when to print its cache-age footer.
+  state is omitted when the body was not read from a primed cache, except
+  `rebuilding`: a saved `/status` response reports `rebuilding` whatever it
+  was built from, and its interval is then 0. The CLI uses them to decide
+  when to print its cache-age footer.
 
 - **The work ladder only nudges a step, hourly, while its seat waits on a
   person.** With `[daemon] work_ladder` on (the default), a claimed step whose

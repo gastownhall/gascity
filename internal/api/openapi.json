@@ -32818,7 +32818,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -33758,7 +33758,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -34596,7 +34596,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -35085,7 +35085,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -35452,7 +35452,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -35795,7 +35795,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -36368,7 +36368,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -36543,7 +36543,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -36729,7 +36729,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -36865,7 +36865,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -36996,7 +36996,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -37112,7 +37112,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -37228,7 +37228,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -37582,7 +37582,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -37881,7 +37881,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -38378,7 +38378,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -38552,7 +38552,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -38803,7 +38803,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -39529,7 +39529,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -40018,7 +40018,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -41158,7 +41158,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -43307,7 +43307,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -43481,7 +43481,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -43677,7 +43677,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -43820,7 +43820,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -44112,7 +44112,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -44722,7 +44722,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -46232,7 +46232,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -46972,7 +46972,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -47279,7 +47279,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -47395,7 +47395,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -47843,7 +47843,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -47959,7 +47959,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -48407,7 +48407,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -48523,7 +48523,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -48800,7 +48800,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -49234,7 +49234,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -49536,7 +49536,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -50345,7 +50345,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -50825,7 +50825,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -51611,7 +51611,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -51860,7 +51860,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -52029,7 +52029,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -52204,7 +52204,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -52405,7 +52405,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -52571,7 +52571,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -53291,7 +53291,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -53654,7 +53654,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -53994,7 +53994,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -54171,7 +54171,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -54399,7 +54399,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -54621,7 +54621,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -56134,7 +56134,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -56291,7 +56291,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -56459,7 +56459,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -56903,7 +56903,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -57434,7 +57434,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -57743,7 +57743,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -57886,7 +57886,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",
@@ -58580,7 +58580,7 @@
               },
               "X-GC-Cache-Refresh": {
                 "schema": {
-                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache.",
+                  "description": "What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0.",
                   "enum": [
                     "scheduled",
                     "paused",

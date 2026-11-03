@@ -97,7 +97,7 @@ const (
 // out ~600 symbol names in full, ~370 KB of binary.
 type CacheRefresh struct {
 	IntervalS float64           `header:"X-GC-Cache-Refresh-Interval-S" doc:"Seconds between the scheduled re-scans of its store by the bead cache X-GC-Cache-Age-S describes (its current adaptive cadence). 0 when the body was not read from a primed cache."`
-	State     CacheRefreshState `header:"X-GC-Cache-Refresh" enum:"scheduled,paused,failing,rebuilding" doc:"What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache."`
+	State     CacheRefreshState `header:"X-GC-Cache-Refresh" enum:"scheduled,paused,failing,rebuilding" doc:"What bounds X-GC-Cache-Age-S. scheduled: the cache re-scans its store every X-GC-Cache-Refresh-Interval-S seconds. paused: the server has paused those re-scans while the city is suspended with no session running. failing: the cache's last re-scan of its store failed; it retries with backoff. rebuilding: the body is a response the server saved X-GC-Cache-Age-S seconds ago, served while it builds a fresh one. Omitted when the body was not read from a primed cache, except rebuilding: a saved /status response reports rebuilding whatever it was built from, and its X-GC-Cache-Refresh-Interval-S is then 0."`
 }
 
 // cacheFreshness is the bead-cache freshness a read reports: ageS in its
