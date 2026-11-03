@@ -332,7 +332,7 @@ const (
 	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
 	// filters and two outputs removed; no new job, trigger, step command or
 	// permission.
-	expectedCIExecutionHash     = "8d71c559b60d2715b518faf498209843132276ed3e448929e1841f082136e6cf"
+	expectedCIExecutionHash     = "2c0db5f4a5ba7390f63fccfcee565f6936801bee8f51f2f2ebae8c75688ed5f4"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

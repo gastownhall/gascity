@@ -6,7 +6,7 @@ version = 1
 [[count]]
 path = ".github/workflows/ci.yml"
 resource = "test_target"
-calls = 2
+calls = 6
 
 [[count]]
 path = ".github/workflows/fork-verify.yml"
