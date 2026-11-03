@@ -63,6 +63,7 @@ class ReviewProofTests(unittest.TestCase):
             suffix = url.split('/v0/city/owned-city/', 1)[1]
             self.calls.append(suffix)
             row = self.rows[suffix]
+            if callable(row): row = row()
             if isinstance(row, BaseException): raise row
             return Response(copy.deepcopy(row))
         with patch('qualify_review.urllib.request.urlopen', side_effect=get), \
@@ -272,6 +273,93 @@ class ReviewProofTests(unittest.TestCase):
         self.assertEqual(receipt['url'], url)
         self.assertEqual(receipt['status'], 503)
         self.assertEqual(base64.b64decode(receipt['body_base64']), body)
+
+    # Exact HTTP body retained from the native d3a Claude greeting proof,
+    # runs/gcg-mc3/steps: completed real work, but its read projection was warming.
+    warming_body = base64.b64decode("eyJ0eXBlIjoidXJuOmdhc2NpdHk6ZXJyb3I6c2VydmljZS11bmF2YWlsYWJsZSIsInRpdGxlIjoiU2VydmljZSBVbmF2YWlsYWJsZSIsInN0YXR1cyI6NTAzLCJkZXRhaWwiOiJydW4gcHJvamVjdGlvbiBpcyB3YXJtaW5nIiwiY29kZSI6InNlcnZpY2UtdW5hdmFpbGFibGUifQo=")
+
+    def warming_error(self, *, status=503, body=None):
+        url = 'http://127.0.0.1:18599/v0/city/owned-city/runs/owned-root/steps'
+        return urllib.error.HTTPError(url, status, 'native response', {}, io.BytesIO(self.warming_body if body is None else body))
+
+    def test_exact_native_warming_then_fresh_complete_response_keeps_same_url(self):
+        complete = copy.deepcopy(self.rows['runs/owned-root/steps'])
+        attempts = [0]
+        def observe():
+            attempts[0] += 1
+            return self.warming_error() if attempts[0] == 1 else complete
+        self.rows['runs/owned-root/steps'] = observe
+        pauses = []
+        with patch('qualify_review.time.sleep', side_effect=pauses.append):
+            result = self.run_proof()
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['accepted_sha'], self.sha)
+        self.assertEqual(self.calls.count('runs/owned-root/steps'), 2)
+        self.assertEqual(len(pauses), 1)
+        receipt = json.loads((self.path/'proof/steps.http-error.json').read_text())
+        self.assertEqual(receipt['status'], 503)
+        self.assertEqual(base64.b64decode(receipt['body_base64']), self.warming_body)
+        self.assertTrue((self.path/'proof/steps.json').exists())
+
+    def test_persistent_native_warming_keeps_original_deadline_and_all_errors(self):
+        now = [10.0]
+        self.rows['runs/owned-root/steps'] = self.warming_error
+        pauses = []
+        def pause(seconds):
+            self.assertGreater(seconds, 0)
+            self.assertLessEqual(seconds, 11.0-now[0])
+            pauses.append(seconds)
+            now[0] += seconds
+        with patch('qualify_review.time.monotonic', side_effect=lambda: now[0]), patch('qualify_review.time.sleep', side_effect=pause):
+            with self.assertRaises(TimeoutError): self.run_proof(deadline=11.0)
+        self.assertEqual(now[0], 11.0)
+        receipts = list((self.path/'proof').glob('steps.http-error*.json'))
+        self.assertEqual(len(receipts), self.calls.count('runs/owned-root/steps'))
+        self.assertGreater(len(receipts), 1)
+        self.assertTrue((self.path/'proof/steps.http-error.json').exists())
+        self.assertTrue((self.path/'proof/steps.http-error-2.json').exists())
+        for receipt in receipts:
+            row = json.loads(receipt.read_text())
+            self.assertEqual(base64.b64decode(row['body_base64']), self.warming_body)
+        self.assertFalse((self.path/'proof/proof.json').exists())
+        self.assertFalse((self.path/'proof/steps.json').exists())
+
+    def test_nonwarming_503_remains_fatal_without_retry(self):
+        body = json.loads(self.warming_body)
+        body['detail'] = 'loading session snapshot timed out after 1s'
+        self.rows['runs/owned-root/steps'] = lambda: self.warming_error(body=json.dumps(body).encode())
+        with patch('qualify_review.time.sleep', side_effect=AssertionError('must not retry unrelated failure')):
+            with self.assertRaises(urllib.error.HTTPError): self.run_proof()
+        self.assertEqual(self.calls.count('runs/owned-root/steps'), 1)
+
+    def test_untyped_warming_text_remains_fatal_without_retry(self):
+        self.rows['runs/owned-root/steps'] = lambda: self.warming_error(body=b'{"detail":"run projection is warming"}')
+        with patch('qualify_review.time.sleep', side_effect=AssertionError('must not retry untyped text')):
+            with self.assertRaises(urllib.error.HTTPError): self.run_proof()
+        self.assertEqual(self.calls.count('runs/owned-root/steps'), 1)
+
+    def test_non503_warming_shaped_response_remains_fatal(self):
+        self.rows['runs/owned-root/steps'] = lambda: self.warming_error(status=409)
+        with patch('qualify_review.time.sleep', side_effect=AssertionError('must not retry non503')):
+            with self.assertRaises(urllib.error.HTTPError): self.run_proof()
+        self.assertEqual(self.calls.count('runs/owned-root/steps'), 1)
+
+    def test_warming_retry_late_success_is_rejected_before_acceptance(self):
+        now = [10.0]
+        complete = copy.deepcopy(self.rows['runs/owned-root/steps'])
+        attempts = [0]
+        def observe():
+            attempts[0] += 1
+            if attempts[0] == 1: return self.warming_error()
+            now[0] = 12.0
+            return complete
+        self.rows['runs/owned-root/steps'] = observe
+        with patch('qualify_review.time.monotonic', side_effect=lambda: now[0]), patch('qualify_review.time.sleep'):
+            with self.assertRaises(TimeoutError): self.run_proof(deadline=11.0)
+        self.assertEqual(self.calls[-1], 'runs/owned-root/steps')
+        self.assertEqual(self.calls.count('runs/owned-root/steps'), 2)
+        self.assertFalse((self.path/'proof/steps.json').exists())
+        self.assertFalse((self.path/'proof/proof.json').exists())
 
     def test_maintained_qualifier_cannot_accept_one_native_conversation_for_both_roles(self):
         qualifier = Path(os.environ.get('RFC_QUALIFIER_UNDER_TEST', str(Path(__file__).with_name('qualify-beginner'))))

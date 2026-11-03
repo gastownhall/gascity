@@ -53,20 +53,44 @@ def prove_review(*, base, city, city_root, source, root, record, evidence, deadl
 
     def read(label, suffix):
         url = base + '/v0/city/' + urllib.parse.quote(city, safe='') + '/' + suffix
-        try:
-            with urllib.request.urlopen(url, timeout=remaining(deadline)) as response:
-                row = json.load(response)
-        except urllib.error.HTTPError as error:
+        error_count = 0
+        while True:
             try:
-                body = error.read()
-            finally:
-                error.close()
-            receipt = {'url': url, 'status': error.code, 'body_base64': base64.b64encode(body).decode('ascii'),
-                       'body_text': body.decode('utf-8', errors='replace')}
-            (evidence / (urllib.parse.quote(label, safe='') + '.http-error.json')).write_text(json.dumps(receipt, indent=2) + '\n')
-            raise
-        (evidence / (urllib.parse.quote(label, safe='') + '.json')).write_text(json.dumps(row, indent=2) + '\n')
-        return row
+                with urllib.request.urlopen(url, timeout=remaining(deadline)) as response:
+                    row = json.load(response)
+            except urllib.error.HTTPError as error:
+                try:
+                    body = error.read()
+                finally:
+                    error.close()
+                receipt = {'url': url, 'status': error.code, 'body_base64': base64.b64encode(body).decode('ascii'),
+                           'body_text': body.decode('utf-8', errors='replace')}
+                while True:
+                    error_count += 1
+                    numbered = '' if error_count == 1 else '-' + str(error_count)
+                    path = evidence / (urllib.parse.quote(label, safe='') + '.http-error' + numbered + '.json')
+                    if not path.exists():
+                        break
+                path.write_text(json.dumps(receipt, indent=2) + '\n')
+                remaining(deadline)
+                try:
+                    problem = json.loads(body)
+                except (ValueError, TypeError):
+                    problem = None
+                if not (error.code == 503 and isinstance(problem, dict)
+                        and problem.get('status') == 503
+                        and problem.get('type') == 'urn:gascity:error:service-unavailable'
+                        and problem.get('code') == 'service-unavailable'
+                        and problem.get('detail') == 'run projection is warming'):
+                    raise
+                # Only the same read is retried; the lesson's caller owns its
+                # original absolute deadline, including receipt I/O and pauses.
+                time.sleep(min(0.2, remaining(deadline)))
+                continue
+            remaining(deadline)
+            (evidence / (urllib.parse.quote(label, safe='') + '.json')).write_text(json.dumps(row, indent=2) + '\n')
+            remaining(deadline)
+            return row
 
     def item(kind, identity, query=''):
         row = read(kind + '-' + identity, kind + '/' + urllib.parse.quote(identity, safe='') + query)

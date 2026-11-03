@@ -31,7 +31,7 @@ base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:5f4a74aff57487e764ad2509d25c004c837b44d3"
+version = "sha:483f21f3efd83f992c3d1ae0b695370d4bc5a072"
 
 [daemon]
 patrol_interval = "30s"
