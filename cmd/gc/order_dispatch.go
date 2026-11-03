@@ -3780,6 +3780,10 @@ func sweepClosedOrderTrackingRetentionAcrossStoresBounded(ctx context.Context, s
 		if remaining <= 0 {
 			break
 		}
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		// Enforce the global budget by passing the remaining allowance to the
 		// per-store bounded sweep, which stops deleting once it is spent.
 		n, err := sweepClosedOrderTrackingRetentionBounded(ctx, store, now, policy, onlyOrders, remaining)
