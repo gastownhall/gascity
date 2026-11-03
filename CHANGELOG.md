@@ -190,17 +190,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc rig status` now ask the server to build the status for the read
     (`?fresh=true`), so against a supervisor running this build they never
     get a saved response and print the footer only when the bead cache
-    itself is behind. A supervisor that predates the parameter ignores it;
-    against one they still print the rebuilding cause once its saved
-    response is more than twice the interval old. These two reads now wait
-    for the server's build: measured 0.6–2.1 s on cities of 7–92 agents and
-    12–14 s on a 426-agent city, where they used to answer in milliseconds
-    with a saved response. It says what the server reports bounds the age:
-    the cache's re-scans are not landing on schedule, they are paused while
-    the city is suspended, they are failing, or the answer is a saved
-    `gc status` / `gc rig status` response the server is rebuilding. Against
-    a supervisor that reports no interval it prints only past 240 s, without
-    a cause. The 15 s `gc session list` footer ("STATE may lag the runtime")
+    itself is behind. A supervisor that predates the parameter ignores it
+    and serves its saved response. A stale-while-revalidate serve reports
+    that response's age in `_cache_age_s`, and since such a supervisor
+    sends neither `X-GC-Cache-Refresh` nor `X-GC-Cache-Refresh-Interval-S`,
+    the footer prints only past the 240 s fallback, without a cause. These
+    two reads now wait for one server build of the status, where they used
+    to answer in milliseconds with a saved response. #8801 removed the
+    per-pool runtime listing that was most of that build on large cities
+    (about 11 s of a 676-pool city's 11–13 s); its hermetic benchmark of
+    such a city, at 1 ms per listing, builds `/status` in under 2 ms. The
+    build time on a production city since #8801 has not been measured. A
+    fresh read is neither coalesced with other reads nor saved: concurrent
+    `gc status` runs each cost one build, and they do not warm the saved
+    response the dashboard reads. The footer says what the server reports
+    bounds the age: the cache's re-scans are not landing on schedule, they
+    are paused while the city is suspended, they are failing, or the
+    answer is a saved `gc status` / `gc rig status` response the server is
+    rebuilding. Against a supervisor that reports no interval it prints
+    only past 240 s, without a cause. The 15 s `gc session list` footer ("STATE may lag the runtime")
     is gone, and `gc rig list` and `gc maintenance status`, whose output is
     not read from the cache, print no footer. A script that read the footer
     from stdout must read stderr instead; stdout now carries only the
@@ -210,11 +218,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     running an earlier gc serves the old rows: it ignores
     `gc session peek`'s new request option and keeps the old best-effort
     preview, ignores `gc status`'s and `gc rig status`'s fresh request and
-    answers them with its saved status response, leaves out `session_id` on `gc rig status` rows and
-    `agent_name`, `transport`, `worker_dir` and wake reasons on session
-    rows, does not report convoy member IDs, still reads suspended rigs'
-    convoy stores, and reports a cache age of 0. Until it restarts:
-    a supervisor-hosted city's open-session listing reads the city's store
+    answers them with its saved status response, leaves out `session_id` on
+    `gc rig status` rows and `agent_name`, `transport`, `worker_dir` and
+    wake reasons on session rows, does not report convoy member IDs, still
+    reads suspended rigs' convoy stores, and reports a cache age of 0
+    except on a stale-while-revalidate `/status` serve, which reports its
+    saved response's age. Until it restarts: a supervisor-hosted city's open-session listing reads the city's store
     directly (`route=fallback reason=session-list-predates-agent-name`
     under `GC_DEBUG`), without `running` or `_cache_age_s`; `gc convoy list`
     on a local city reads the stores directly
@@ -897,7 +906,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved body served while it rebuilds, so `X-GC-Cache-Refresh` is never
   `rebuilding`. The body is not saved for other readers. Default false
   keeps stale-while-revalidate for pollers; the dashboard does not send it.
-  `gc status` and `gc rig status` send it.
+  `gc status` and `gc rig status` send it. A fresh read waits for one
+  build, which #8801 made much cheaper on cities with many unlimited pools,
+  and is neither coalesced nor saved: concurrent fresh reads each cost one
+  build and do not warm the saved entry other readers get.
 
 - **The work ladder nudges a step only daily while its seat waits on a
   person, and hourly when the seat's turns say its answer's turn may have
