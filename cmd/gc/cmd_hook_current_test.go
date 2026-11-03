@@ -16,6 +16,20 @@ import (
 // the absent-session case deliberately asks for a different one.
 const hookCurrentSessionID = "mc-sess1"
 
+// isolateHookCurrentLegacy pins doHookCurrent's env seams to the stamp-only
+// behavior: no actor identity, no ledger probe. Without it, a developer run
+// inside a live session environment (BEADS_ACTOR set, a city on disk) would
+// have the command resolve real ledgers from a unit test — and the legacy
+// contracts below are about the stamp read alone.
+func isolateHookCurrentLegacy(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("GC_AGENT", "")
+	restore := hookCurrentLedgerProbe
+	t.Cleanup(func() { hookCurrentLedgerProbe = restore })
+	hookCurrentLedgerProbe = func() *hookCurrentLedger { return nil }
+}
+
 // hookCurrentFrontDoor builds a session front door over an in-memory store
 // holding one session bead carrying claim (empty claim ⇒ nothing stamped).
 func hookCurrentFrontDoor(t *testing.T, claim string) *session.Store {
@@ -40,6 +54,7 @@ func hookCurrentFrontDoor(t *testing.T, claim string) *session.Store {
 // whose bead carries the claim stamp prints it, and --id-only prints the bare id
 // so `$(gc hook current --id-only)` substitutes cleanly into a shell derivation.
 func TestDoHookCurrentPrintsTheStampedClaim(t *testing.T) {
+	isolateHookCurrentLegacy(t)
 	sessFront := hookCurrentFrontDoor(t, "gcg-42")
 
 	var stdout, stderr bytes.Buffer
@@ -69,6 +84,7 @@ func TestDoHookCurrentPrintsTheStampedClaim(t *testing.T) {
 // caller substituting the output would silently derive an empty bead id — the
 // exact fail-open the back-channel exists to close.
 func TestDoHookCurrentExitsOneWhenNothingIsStamped(t *testing.T) {
+	isolateHookCurrentLegacy(t)
 	var stdout, stderr bytes.Buffer
 	code := doHookCurrent(hookCurrentFrontDoor(t, ""), "mc-sess1", true, &stdout, &stderr)
 	if code != 1 {
@@ -86,6 +102,7 @@ func TestDoHookCurrentExitsOneWhenNothingIsStamped(t *testing.T) {
 // session store cannot resolve is an error, not "nothing claimed", and must not
 // print a bead id.
 func TestDoHookCurrentExitsOneOnAnUnreadableSession(t *testing.T) {
+	isolateHookCurrentLegacy(t)
 	var stdout, stderr bytes.Buffer
 	code := doHookCurrent(hookCurrentFrontDoor(t, "gcg-42"), "mc-missing", true, &stdout, &stderr)
 	if code != 1 {
@@ -128,6 +145,7 @@ func TestCmdHookCurrentRequiresASessionIdentity(t *testing.T) {
 // CALLING session from GC_SESSION_ID — the same variable the claim path stamped
 // under — rather than any other identity variable.
 func TestCmdHookCurrentReadsTheCallingSessionFromEnv(t *testing.T) {
+	isolateHookCurrentLegacy(t)
 	t.Setenv("GC_SESSION_ID", "mc-sess1")
 	restore := hookCurrentSessionFrontDoor
 	t.Cleanup(func() { hookCurrentSessionFrontDoor = restore })
