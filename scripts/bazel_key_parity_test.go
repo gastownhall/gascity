@@ -46,9 +46,15 @@ var bazelClientEnvAllowed = map[string]bool{"GC_TEST_REPO_ROOT": true}
 // The result-policy flags were checked against Bazel 9.2.0 on
 // //scripts/cipolicy:cipolicy_test: --flaky_test_attempts (any value) and
 // --[no]cache_test_results leave the aquery action keys and the executed
-// TestRunner spawn (arguments, environment, input digests, outputs,
-// platform, timeout: what the remote action cache hashes) unchanged, while a
-// different --test_env=PATH changes both. --profile only writes a local file.
+// TestRunner spawn's arguments, environment, input digests, outputs,
+// platform and timeout unchanged, while a different --test_env=PATH changes
+// both. That comparison missed Action.do_not_cache, which the REAPI action
+// digest also hashes: --nocache_test_results makes Bazel 9 mark each test
+// spawn no-cache (StandaloneTestStrategy), which sets it, so the TestRunner
+// action gets its own digest (as GoTestRun=+no-cache does below). It stays
+// admitted for --config=fresh, whose runs are meant not to share results;
+// it would re-key any other config that set it. --profile only writes a
+// local file.
 func bazelTransportFlag(flag string) bool {
 	name, _, _ := strings.Cut(flag, "=")
 	switch name {

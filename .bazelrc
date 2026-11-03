@@ -152,12 +152,16 @@ test:ci --experimental_use_validation_aspect
 # neither the pin nor any action key, and Bazel's test cache would never re-run a test
 # whose inputs and key are unchanged -- hiding a regression that minor
 # upgrade introduced behind every PR's and push's cached pass. Nightly
-# re-executes everything once a day instead. Like remote-exec, fork-cache and
-# ci, --nocache_test_results is result policy only (bazel_key_parity_test.go
-# classifies it transport-only), so a fresh run still hashes actions like
-# every other phase and still writes the shared cache from the workers that
-# ran it (--noremote_upload_local_results, build:remote-exec above, is
-# unaffected: this flag only stops a read, never a write).
+# re-executes everything once a day instead. It does not hash like the other
+# phases: Bazel 9 marks a test spawn that must not reuse a cached result
+# no-cache (StandaloneTestStrategy), which sets Action.do_not_cache, so a
+# fresh TestRunner action (and GoTestRun, below) has its own REAPI digest.
+# The workers still record each pass, under that digest, which no other
+# phase reads: fresh re-samples tests, it does not refresh the cached passes
+# other phases use. Only --config=fresh sets it, and only the nightly run
+# and bazel.yml's fresh dispatch input pass that config (never a PR, merge
+# group or push lane, nor pre-push). bazel_key_parity_test.go's classifier
+# would admit it in any non-key config: keep it out of the others.
 test:fresh --nocache_test_results
 # The v2 simulator corpus ranges run as GoTestRun build actions
 # (tools/bazel/rules/go_test_run.bzl), which --nocache_test_results does not
