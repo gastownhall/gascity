@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -239,5 +240,69 @@ func TestStatusBodyNamedSessionUsesSessionClassStore(t *testing.T) {
 	}
 	if body.SessionCountsDetail == nil || body.SessionCountsDetail.Active != 1 {
 		t.Errorf("SessionCountsDetail = %+v, want Active=1 from the session-class store", body.SessionCountsDetail)
+	}
+}
+
+// A warm session-class cache is the complete read model. Resolving a scoped
+// bd clone first throws that cache away and spends the HTTP read budget on I/O.
+func TestStatusSessionSnapshotUsesWarmCacheBeforeScopedStore(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(newSessionBead("cached-session")); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := newFakeState(t)
+	st.sessionsBeadStore = cache
+	scopedCalls := 0
+	st.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) {
+		scopedCalls++
+		return nil, fmt.Errorf("scoped backend must not be resolved for a complete cache")
+	}
+	snapshot := (&Server{state: st}).statusSessionSnapshot(context.Background())
+	if len(snapshot.partialErrors) != 0 {
+		t.Fatalf("warm snapshot degraded: %v", snapshot.partialErrors)
+	}
+	if _, ok := snapshot.bySessionName["cached-session"]; !ok {
+		t.Fatal("warm session is missing")
+	}
+	if scopedCalls != 0 {
+		t.Fatalf("scoped reads = %d, want zero", scopedCalls)
+	}
+}
+
+func TestStatusSessionSnapshotPartialCacheStillUsesScopedStore(t *testing.T) {
+	backing := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
+	first, err := backing.Create(newSessionBead("survivor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := backing.Create(newSessionBead("missing-from-partial-cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing.partialRows = []beads.Bead{first}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	scoped := beads.NewMemStore()
+	for _, row := range []beads.Bead{first, second} {
+		if _, err := scoped.Create(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := newFakeState(t)
+	st.sessionsBeadStore = cache
+	scopedCalls := 0
+	st.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) { scopedCalls++; return scoped, nil }
+	snapshot := (&Server{state: st}).statusSessionSnapshot(context.Background())
+	if len(snapshot.partialErrors) != 0 || len(snapshot.bySessionName) != 2 {
+		t.Fatalf("incomplete cache accepted: sessions=%v errors=%v", snapshot.bySessionName, snapshot.partialErrors)
+	}
+	if scopedCalls != 1 {
+		t.Fatalf("scoped reads = %d, want one", scopedCalls)
 	}
 }

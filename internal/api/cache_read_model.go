@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -76,4 +78,17 @@ func sessionReadModelInfos(sessFront *session.Store) ([]session.Info, []string, 
 		return rows, []string{err.Error()}, nil
 	}
 	return nil, nil, err
+}
+
+// sessionReadModelCachedInfos peeks the typed session read model without
+// falling through to its long-lived backing store. On a miss, the caller can
+// resolve a context-bound store under its original read budget.
+func sessionReadModelCachedInfos(store beads.SessionStore) ([]session.Info, bool, error) {
+	infos, err := session.NewStore(store).ListAll(session.ListAllOptions{
+		Sort: beads.SortCreatedDesc, CacheOnly: true,
+	})
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return nil, false, nil
+	}
+	return infos, true, err
 }

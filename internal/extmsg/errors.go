@@ -12,6 +12,7 @@ var (
 	ErrInvalidInput         = errors.New("extmsg invalid input")
 	ErrInvalidConversation  = errors.New("extmsg invalid conversation")
 	ErrInvalidHandle        = errors.New("extmsg invalid handle")
+	ErrMessageConflict      = errors.New("extmsg inbound message payload conflict")
 	ErrBindingConflict      = errors.New("extmsg binding conflict")
 	ErrBindingMismatch      = errors.New("extmsg binding mismatch")
 	ErrInvariantViolation   = errors.New("extmsg invariant violation")

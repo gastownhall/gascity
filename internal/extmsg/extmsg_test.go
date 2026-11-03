@@ -1134,7 +1134,7 @@ func TestTranscriptServiceAppendDedupeAndList(t *testing.T) {
 		Kind:              TranscriptMessageInbound,
 		Provenance:        TranscriptProvenanceLive,
 		ProviderMessageID: "msg-1",
-		Text:              "hello again",
+		Text:              "hello",
 		CreatedAt:         testNow().Add(time.Minute),
 	})
 	if err != nil {
@@ -3319,6 +3319,47 @@ func TestEnsureGroupAvoidsUnchangedStorageWrites(t *testing.T) {
 			}
 			if got.ID != group.ID || got.Metadata["unrelated"] != "retain" || got.LastAddressedHandle != "alpha" || got.DefaultHandle != input.DefaultHandle || got.Metadata["intent"] != input.Metadata["intent"] {
 				t.Errorf("lost identity, metadata or routing: %+v", got)
+			}
+		})
+	}
+}
+
+func TestInboundTranscriptRetryBindsPayloadAcrossServiceRecreation(t *testing.T) {
+	for _, field := range []string{"actor", "text", "target", "reply", "attachment", "kind"} {
+		t.Run(field, func(t *testing.T) {
+			store := beads.NewMemStore()
+			input := AppendTranscriptInput{Caller: testAdapterCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageInbound, Provenance: TranscriptProvenanceLive, ProviderMessageID: "immutable-public-message", Actor: ExternalActor{ID: "github:42", DisplayName: "Keeper"}, Text: "original", ExplicitTarget: "worker", ReplyToMessageID: "parent", Attachments: []ExternalAttachment{{ProviderID: "asset", URL: "https://example.invalid/a.png", MIMEType: "image/png"}}, CreatedAt: testNow()}
+			original, err := NewServices(store).Transcript.Append(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry := input
+			retry.CreatedAt = input.CreatedAt.Add(time.Hour)
+			recreated := NewServices(store).Transcript
+			same, err := recreated.Append(context.Background(), retry)
+			if err != nil || same.ID != original.ID {
+				t.Fatalf("identical retry after recreation: got=%v err=%v", same.ID, err)
+			}
+			switch field {
+			case "actor":
+				retry.Actor.ID = "github:99"
+			case "text":
+				retry.Text = "changed"
+			case "target":
+				retry.ExplicitTarget = "other"
+			case "reply":
+				retry.ReplyToMessageID = "other"
+			case "attachment":
+				retry.Attachments = []ExternalAttachment{{ProviderID: "asset", URL: "https://example.invalid/other.png", MIMEType: "image/png"}}
+			case "kind":
+				retry.Kind = TranscriptMessageOutbound
+			}
+			if _, err := recreated.Append(context.Background(), retry); !errors.Is(err, ErrMessageConflict) {
+				t.Fatalf("changed %s accepted under frozen message identity: %v", field, err)
+			}
+			rows, err := recreated.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Conversation, Limit: 10})
+			if err != nil || len(rows) != 1 || rows[0].Text != "original" {
+				t.Fatalf("conflict changed transcript: rows=%v err=%v", rows, err)
 			}
 		})
 	}

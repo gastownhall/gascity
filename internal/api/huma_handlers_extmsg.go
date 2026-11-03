@@ -73,6 +73,8 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 			// handler's split below: no ErrBindingConflict (409) arm, because the
 			// inbound path resolves existing bindings rather than creating them.
 			switch {
+			case errors.Is(handleErr, extmsg.ErrMessageConflict):
+				return nil, apierr.ConflictConcurrentModify.Msg(handleErr.Error())
 			// Permanent conditions the normalized path can surface: an
 			// unroutable/malformed conversation (ErrInvalidConversation), and an
 			// invariant violation (ErrInvariantViolation) from binding, group-route,

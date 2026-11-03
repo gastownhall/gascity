@@ -140,6 +140,11 @@ type ListAllOptions struct {
 	// order that a no-op sort would not stabilize (the cold path returns store
 	// order — the two would disagree). Every CacheFirst caller sets SortCreatedDesc.
 	CacheFirst bool
+	// CacheOnly requires the complete cached union and never reads the backing
+	// store. It returns beads.ErrCacheUnavailable when either leg misses, the
+	// store has no cache, Sort is unspecified, or Live requests a backing read.
+	// Unlike CacheFirst, callers must explicitly handle a miss.
+	CacheOnly bool
 	// TierMode sets query.TierMode on each leg. The zero value is the
 	// store's default tier; a federated census states
 	// beads.FederatedReadTier so a relocated sessions binding answers its
@@ -330,11 +335,15 @@ func (s *Store) ListAllWithResponses(opts ListAllOptions) ([]ListedSession, erro
 }
 
 // listAllBeads is the shared union body behind ListAll / ListAllWithResponses:
-// the CacheFirst peek tier when eligible, else the direct ListAllSessionBeads
-// union. It returns the raw beads so the two public methods can pick their
-// projection; the beads never escape the package.
+// the cache peek tier when eligible, else the direct ListAllSessionBeads
+// union (or ErrCacheUnavailable when CacheOnly forbids the backing read).
+// It returns the raw beads so the public methods can pick their projection;
+// the beads never escape the package.
 func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 	if s == nil || s.store == (beads.SessionStore{}) {
+		if opts.CacheOnly {
+			return nil, beads.ErrCacheUnavailable
+		}
 		return nil, nil
 	}
 	base := beads.ListQuery{
@@ -360,12 +369,15 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 		// nothing to do with this cache fix.
 		base.Status = "open"
 	}
-	// CacheFirst peek — skipped when Live is set (Live wins; the caller demands
-	// a store read, not a cache peek).
-	if opts.CacheFirst && !opts.Live {
+	// Cache peeks are skipped when Live is set: it demands a backing read.
+	// CacheOnly refuses that read rather than silently weakening either option.
+	if (opts.CacheFirst || opts.CacheOnly) && !opts.Live {
 		if merged, ok := s.cachedListUnion(opts); ok {
 			return merged, nil
 		}
+	}
+	if opts.CacheOnly {
+		return nil, beads.ErrCacheUnavailable
 	}
 	return ListAllSessionBeads(s.store, base)
 }

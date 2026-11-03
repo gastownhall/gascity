@@ -565,6 +565,63 @@ func TestListAll_ReadTierRouting(t *testing.T) {
 	})
 }
 
+// TestListAll_CacheOnlyNeverFallsThrough pins the typed, bounded-read seam:
+// a complete union is projected identically, but a cache miss never escapes
+// to the long-lived backing store. API callers can then choose a scoped store.
+func TestListAll_CacheOnlyNeverFallsThrough(t *testing.T) {
+	corpus := listAllCorpus()
+	for _, tc := range []struct {
+		name            string
+		typeOK, labelOK bool
+		opts            ListAllOptions
+		wantHit         bool
+		wantPeeks       int
+	}{
+		{"warm", true, true, ListAllOptions{Sort: beads.SortCreatedDesc, Limit: 2}, true, 2},
+		{"type-miss", false, true, ListAllOptions{Sort: beads.SortCreatedDesc}, false, 2},
+		{"label-miss", true, false, ListAllOptions{Sort: beads.SortCreatedDesc}, false, 2},
+		{"cold", false, false, ListAllOptions{Sort: beads.SortCreatedDesc}, false, 2},
+		{"unsorted", true, true, ListAllOptions{}, false, 0},
+		{"live", true, true, ListAllOptions{Sort: beads.SortCreatedDesc, Live: true}, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingCacheStore{
+				Store:        beads.NewMemStoreFrom(len(corpus), corpus, nil),
+				cachedTypeOK: tc.typeOK, cachedLabelOK: tc.labelOK,
+			}
+			front := NewStore(beads.SessionStore{Store: rec})
+			opts := tc.opts
+			opts.CacheOnly = true
+			got, err := front.ListAll(opts)
+			if tc.wantHit {
+				reference := NewStore(beads.SessionStore{Store: beads.NewMemStoreFrom(len(corpus), corpus, nil)})
+				want, wantErr := reference.ListAll(tc.opts)
+				if err != nil || wantErr != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("cache-only = (%v, %v), default = (%v, %v)", got, err, want, wantErr)
+				}
+			} else if !errors.Is(err, beads.ErrCacheUnavailable) || got != nil {
+				t.Fatalf("cache-only = (%v, %v), want nil rows and ErrCacheUnavailable", got, err)
+			}
+			if len(rec.listCalls) != 0 {
+				t.Errorf("cache-only issued %d backing List calls", len(rec.listCalls))
+			}
+			if len(rec.cachedCalls) != tc.wantPeeks {
+				t.Errorf("cache-only issued %d cache peeks, want %d", len(rec.cachedCalls), tc.wantPeeks)
+			}
+		})
+	}
+	t.Run("no-cache-capability", func(t *testing.T) {
+		front := NewStore(beads.SessionStore{Store: &legFaultStore{
+			Store:   beads.NewMemStoreFrom(len(corpus), corpus, nil),
+			typeErr: errors.New("backing read must not be used"),
+		}})
+		got, err := front.ListAll(ListAllOptions{CacheOnly: true, Sort: beads.SortCreatedDesc})
+		if !errors.Is(err, beads.ErrCacheUnavailable) || got != nil {
+			t.Fatalf("cache-only = (%v, %v), want nil rows and ErrCacheUnavailable", got, err)
+		}
+	})
+}
+
 // TestStoreGetPersistedResponse pins GetPersistedResponse as the single-fetch
 // (Info, PersistedResponse) twin: both projections equal the from-bead codecs,
 // and a non-session or absent id is ErrSessionNotFound.

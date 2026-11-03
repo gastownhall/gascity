@@ -854,6 +854,13 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	}
 	done := make(chan snapshotResult, 1)
 	go func() {
+		// A complete session cache is already the read model. Resolving a
+		// scoped bd clone first discards that capability and forks readers
+		// even when all session rows are available in memory.
+		if infos, hit, err := sessionReadModelCachedInfos(sessions); hit {
+			done <- snapshotResult{infos: infos, err: err}
+			return
+		}
 		// Resolve the ctx-bound scoped store INSIDE the timed goroutine.
 		// ScopedStoreLike hands back a bd-CLI-backed clone reqCtx can cancel,
 		// or (nil, nil) for non-bd backends (native/file/mem) — those read
