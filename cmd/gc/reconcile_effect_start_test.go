@@ -355,6 +355,7 @@ var stateWriters = map[string]string{
 	"cmd/gc/city_runtime.go:CityRuntime.recordReconcileTraceInputs":           "trace payload, not a row",
 	"cmd/gc/city_runtime.go:CityRuntime.recordReconcileTraceResults":          "trace payload, not a row",
 	"cmd/gc/cmd_registry_auth.go:registryBrowserLogin":                        "OAuth state, not a row",
+	"cmd/gc/cmd_runtime_drain.go:cancelClaimlessPendingStartRow":              "behavior-5 drain cancel: fenced CAS parks a claimless start-pending row asleep",
 	"cmd/gc/cmd_session_wake.go:doSessionWake":                                "operator: gc session wake",
 	"cmd/gc/endpoint_capacity.go:endpointCapacityGuard.recordTick":            "trace payload, not a row",
 	"cmd/gc/session_bead_cycle.go:cycleAliveSessionForFreshReassign":          "legacy reconciler",

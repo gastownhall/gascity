@@ -241,12 +241,25 @@ const (
 	GateTypeMetadataKey                  = "gc.gate_type" // declared [steps.gate] type, stamped verbatim: gc stores have no gate-condition column
 	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
-	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
-	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
-	InstantiatingMetadataKey             = "gc.instantiating"
-	IterationMetadataKey                 = "gc.iteration"
-	ItemRootKeyMetadataKey               = "gc.item_root_key"
-	KindMetadataKey                      = "gc.kind"
+	// HaltReasonMetadataKey records why a bead was halted in place: written
+	// by the mol-polecat-work STOP arms and by witness brakes (defer + route
+	// stamp). ci-9cb: it was an unmodeled key the compiled routing never
+	// read, so a deferred+unassigned root carrying only halt_reason stayed
+	// pool demand and re-poured forever. Honor it: demand, claim, and the
+	// sling attach override all veto a non-blank value. gc.routed_to=human
+	// stays honored alongside it as the other terminal brake.
+	//
+	// Deliberately NOT in KnownMetadataKeys: the stamp predates the engine
+	// reading it and is written bare (no gc. namespace) by the formulas;
+	// registering it would put a non-namespaced key through the namespace
+	// contract test.
+	HaltReasonMetadataKey     = "halt_reason"
+	IdempotencyKeyMetadataKey = "gc.idempotency_key"
+	InputConvoyIDMetadataKey  = "gc.input_convoy_id"
+	InstantiatingMetadataKey  = "gc.instantiating"
+	IterationMetadataKey      = "gc.iteration"
+	ItemRootKeyMetadataKey    = "gc.item_root_key"
+	KindMetadataKey           = "gc.kind"
 	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in

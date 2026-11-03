@@ -178,6 +178,18 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	if check.Idempotent {
 		decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
 		switch {
+		case decision.Parked != "":
+			// ci-9cb: the bead is parked by a brake. Idempotency is preserved
+			// deliberately — no re-attach, no burn — but the requested formula
+			// attach being dropped must be VISIBLE, or the operator reads a
+			// silent no-op. Say which brake holds it and how to proceed.
+			parkedFormula := opts.OnFormula
+			if parkedFormula == "" {
+				parkedFormula = a.EffectiveDefaultSlingFormula()
+			}
+			result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+				"bead %s is parked (%s); --on %s stayed an idempotent no-op — lift the brake (undefer / clear halt_reason) or route explicitly before re-pouring",
+				opts.BeadOrFormula, decision.Parked, parkedFormula))
 		case decision.Conflict != nil && decision.ConflictSourceUnassigned:
 			// An unassigned source keeps the attach path's burn-and-attach
 			// semantics: nobody is working the live attachment, so the new
@@ -356,6 +368,75 @@ type attachmentDecision struct {
 	// attaches the new formula; an assigned one fails with it.
 	Conflict                 *MoleculeAttachedError
 	ConflictSourceUnassigned bool
+	// Parked names the brake the bead carries (deferred status, or a
+	// non-blank halt_reason stamp): the attach override must NOT fire, the
+	// burn-and-attach conflict path must NOT burn, and idempotency is
+	// deliberately preserved so a witness/formula parking survives any later
+	// sling. The caller surfaces the reason as a bead warning. Only
+	// meaningful when NeedsAttach and Conflict are both zero (ci-9cb).
+	Parked string
+}
+
+// parkedBrake reports whether a bead carries an explicit hold the sling must
+// honor: bd's deferred status (parked for a later actor), a non-blank
+// halt_reason stamp written by the mol-polecat-work STOP arms and by witness
+// brakes, a dispatch hold label (hold:mayor / hold:external), or a
+// terminal non-pool route. Returns the reason for the warning line when
+// parked.
+// Packs-convention metadata keys the mol-polecat-work formula stamps on a
+// bead whose deliverable is parked local-only (branch pushed-or-held per
+// auto_push, marked ready, never handed to the refinery). The engine owns no
+// gc.* spelling for them; they exist only as the formula writes them.
+const (
+	branchReadyMetadataKey = "branch_ready"
+	autoPushMetadataKey    = "auto_push"
+)
+
+func parkedBrake(b *beads.Bead) (bool, string) {
+	if strings.TrimSpace(b.Status) == "deferred" {
+		return true, "status=deferred"
+	}
+	if h := strings.TrimSpace(b.Metadata[beadmeta.HaltReasonMetadataKey]); h != "" {
+		return true, "halt_reason=" + h
+	}
+	// ci-soai (gk-f4gr 3x pour loop, 2026-11-02): a dispatch hold names the
+	// required next actor as someone other than the pool worker, so the
+	// sling must never attach a workflow over it — the witness hold pass on
+	// the f4gr family parked exactly this shape and the pourer re-minted
+	// through it. beadmeta.DispatchHoldLabels is the complete set.
+	for _, l := range b.Labels {
+		if beadmeta.HasDispatchHold([]string{l}) {
+			return true, "hold-label=" + l
+		}
+	}
+	// ci-9cb R1 amendment (gk-bx4v incident, 2026-11-02): gc.routed_to=human is
+	// terminal for pool machinery at EVERY status. The idempotency check that
+	// gates this call only proves "already routed where we are routing" — a
+	// human-routed bead read as NOT idempotent, fell through to the plain
+	// attach path, and a blocked human-quarantine bead (no halt stamp, not
+	// deferred) minted a pool-routed workflow around it (gk-pwmk/gk-xkisl,
+	// 00:53:21Z). ci-soai extends the terminal set with the mayor lane:
+	// gastown.mayor-routed parked beads (gk-f4gr/gk-o687j/gk-xt9uc, held
+	// 07:05Z) were re-wrapped by the pourer too. The routed-raw repair above
+	// stays available for pool routes: only these non-pool terminal markers
+	// veto here.
+	if r := strings.ToLower(strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])); r == "human" || r == "gastown.mayor" {
+		return true, "routed_to=" + r
+	}
+	// gk-3n3jk (mayor word-said 08:03Z, intake re-fire instances gk-6wed9→
+	// gk-h8sdl / gk-y6t8r→gk-ojstx): a bead parked branch_ready=true with
+	// auto_push=false holds its deliverable local-only — the work exists on
+	// a branch awaiting the human/GC-BUILD lane. Re-pouring duplicates or
+	// clobbers that deliverable and cross-wires the new molecule's steps
+	// onto draining agents. The pair is the packs-convention stamp from
+	// mol-polecat-work.toml's branch-ready halt; unlike gc.* keys it is
+	// un-prefixed there, so the names are read exactly as the formula
+	// writes them.
+	if strings.EqualFold(strings.TrimSpace(b.Metadata[branchReadyMetadataKey]), "true") &&
+		strings.EqualFold(strings.TrimSpace(b.Metadata[autoPushMetadataKey]), "false") {
+		return true, "branch_ready+auto_push=false"
+	}
+	return false, ""
 }
 
 // conflictingOnFormulaAttachment reports a live attachment that an explicit
@@ -404,6 +485,23 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 	// as well as an explicit --on.
 	if !usesFormulaBackedRoute(opts) {
 		return attachmentDecision{}, nil
+	}
+	// ci-9cb: a bead PARKED by a brake — deferred, carrying a non-blank
+	// halt_reason, or terminal-routed (gc.routed_to=human) — is held on
+	// purpose. Neither the routed-raw override nor the burn-and-attach conflict
+	// path may fire on it: those are exactly the re-pour loop that re-wrapped
+	// halted roots in synthetic convoys and cleared their halt stamps during
+	// the mint window. The veto runs before the attachment probe so a parked
+	// bead with a live molecule is not burned either. Lifting the brake
+	// (undefer / clear halt_reason / clear the human route) restores the prior
+	// override behavior. The routed_to=human marker is vetoed HERE, not left to
+	// the upstream idempotency check alone: that check proves "already routed
+	// where we are routing", so a human-routed bead reads as NOT idempotent and
+	// fell through into the plain attach path (gk-bx4v, 2026-11-02).
+	if bead, ok := BeadFromGetters(opts.BeadOrFormula, querier, deps.Store); ok {
+		if parked, why := parkedBrake(&bead); parked {
+			return attachmentDecision{Parked: why}, nil
+		}
 	}
 	live, err := findBlockingAttachment(querier, opts.BeadOrFormula, deps.attachmentScope())
 	if live != nil {
@@ -1967,7 +2065,11 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
-	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars)
+	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars,
+		// gk-3n3jk: the automated pour surface reuses an open input convoy on
+		// re-fire instead of minting beside it. Explicit `gc formula cook
+		// --attach` keeps minting fresh per invocation.
+		graphv2.WithReusableInputConvoy())
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}

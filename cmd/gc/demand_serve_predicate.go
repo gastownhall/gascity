@@ -109,6 +109,24 @@ func demandRowServable(b beads.Bead) bool {
 	if rules.RequireUnassigned && strings.TrimSpace(b.Assignee) != "" {
 		return false
 	}
+	// HALT: a non-blank halt_reason parks the bead — the brake the formulas'
+	// STOP arms and witness deferrals stamp, and the exclusion mirrored by
+	// executableWorkflowTopologyJQ on the shell side (ci-9cb). A folded
+	// non-Live scan hands a deferred bead back as "open", so the metadata
+	// veto is what keeps a parked root from counting as permanent capacity
+	// demand. Mirrored here: the Go mirror and the generated filter must
+	// agree, or the agreement test's rows diverge by construction.
+	if strings.TrimSpace(b.Metadata[beadmeta.HaltReasonMetadataKey]) != "" {
+		return false
+	}
+	// HOLD (ci-soai, gk-f4gr 3x pour loop): a dispatch hold (hold:mayor /
+	// hold:external — beadmeta.DispatchHoldLabels) names the required next
+	// actor as someone other than the pool worker, so a held row is never
+	// demand. Same lockstep with executableWorkflowTopologyJQ's
+	// dispatchHoldBlankJQ clause as the halt veto above.
+	if beadmeta.HasDispatchHold(b.Labels) {
+		return false
+	}
 	// Each dimension matches whichever filter has the LAST WORD on what the
 	// worker is served. They are not the same comparison, and pretending they
 	// were is how the controller ends up counting a row no worker will take (or

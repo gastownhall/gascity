@@ -1755,6 +1755,20 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		if strings.TrimSpace(assignee) == "" && workflowTopologyIsNonExecutable(kind, expanded) {
 			continue
 		}
+		// ci-9cb: a non-blank halt_reason is the brake stamp the formulas'
+		// STOP arms and witness deferrals write. An UNASSIGNED halted row is
+		// parked on purpose — never offer it as fresh worker work (assigned
+		// halted beads stay visible for the owner's continuation, matching
+		// the demand side, which excludes assigned rows anyway). ci-soai
+		// extends the same unassigned scope to dispatch holds
+		// (beadmeta.DispatchHoldLabels): a held bead handed back as fresh
+		// work cannot be advanced and is re-served forever.
+		if halt, _ := metadata[beadmeta.HaltReasonMetadataKey].(string); strings.TrimSpace(assignee) == "" && strings.TrimSpace(halt) != "" {
+			continue
+		}
+		if labelsAny, _ := obj["labels"].([]any); strings.TrimSpace(assignee) == "" && beadmeta.HasDispatchHold(labelStrings(labelsAny)) {
+			continue
+		}
 		filtered = append(filtered, obj)
 	}
 	reencoded, err := json.Marshal(filtered)
@@ -1933,17 +1947,25 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // assignment's accounting stays hold-transparent: the assigned-work snapshot,
 // orphan release, pool accounting and the in_progress tiers still count it, so
 // a held assignment keeps its owner visible to the pool and to crash recovery.
-func isHeldHookCandidate(item map[string]any) bool {
-	raw, ok := item["labels"].([]any)
-	if !ok {
-		return false
-	}
+// labelStrings flattens the JSON-array form of a bead's labels (as read out
+// of a re-encoded work_query candidate object) into plain strings, skipping
+// non-string entries.
+func labelStrings(raw []any) []string {
 	labels := make([]string, 0, len(raw))
 	for _, entry := range raw {
 		if label, ok := entry.(string); ok {
 			labels = append(labels, label)
 		}
 	}
+	return labels
+}
+
+func isHeldHookCandidate(item map[string]any) bool {
+	raw, ok := item["labels"].([]any)
+	if !ok {
+		return false
+	}
+	labels := labelStrings(raw)
 	// One predicate for "held": the controller's wake-demand and drain-ack
 	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
 	// answer with the same function, so they cannot drift from what the hook

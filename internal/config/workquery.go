@@ -316,7 +316,13 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
+	// The halt veto rides the legacy tier too (ci-9cb): a run_target-stamped
+	// root whose canonical route was cleared can still be parked by a
+	// witness brake, and the tier must not serve it. The dispatch-hold veto
+	// rides with it (ci-soai) for the same reason. Keep the Go mirror in
+	// demand_serve_agreement_test.legacyWorkflowTierServes and the pinned
+	// program string in lockstep with these clauses.
+	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true") and ((` + jqMeta(beadmeta.HaltReasonMetadataKey) + ` | gsub("^\\s+|\\s+$"; "")) == "") and ` + dispatchHoldBlankJQ() + `)]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -572,11 +578,30 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 
 // Match the hook/controller gate even when scale_check runs the shell count
 // form. The topology vocabulary is shared; a never-expanded workflow root is
+// dispatchHoldBlankJQ is the jq clause that passes only rows carrying no
+// dispatch hold label (beadmeta.DispatchHoldLabels: hold:mayor,
+// hold:external — the complete set). A dispatch hold names the required
+// next actor as someone other than the worker, so a held row is never
+// pool demand and never fresh worker work (ci-soai, gk-f4gr 3x pour loop:
+// deferred+unassigned alone did not gate the pourer, and each re-pour
+// burned a polecat session). Mirrors beadmeta.HasDispatchHold on the Go
+// side; the parity and agreement tests pin the pair in lockstep. This is
+// a what-to-DO filter per the beadmeta doctrine — the demand/liveness
+// probes that decide whether a session must EXIST stay hold-transparent.
+func dispatchHoldBlankJQ() string {
+	return `([(.labels // [])[] | select(. == "` + beadmeta.HoldMayorLabel + `" or . == "` + beadmeta.HoldExternalLabel + `")] | length) == 0`
+}
+
 // the compatibility exception because the root itself can be executable work.
 func executableWorkflowTopologyJQ() string {
 	kind := `(` + jqMeta(beadmeta.KindMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
 	expanded := `(` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
-	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds))
+	// ci-9cb: a bead parked by a brake (non-blank halt_reason) is held on
+	// purpose. It must never read as pool demand (controller count form)
+	// nor be served on the worker claim line — the two share this predicate
+	// so spawn and claim stay in agreement.
+	haltBlank := `((` + jqMeta(beadmeta.HaltReasonMetadataKey) + ` | gsub("^\\s+|\\s+$"; "")) == "")`
+	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds)+2)
 	for _, topologyKind := range beadmeta.WorkflowTopologyKinds {
 		clause := fmt.Sprintf(`%s != %q`, kind, topologyKind)
 		if topologyKind == beadmeta.KindWorkflow {
@@ -584,6 +609,7 @@ func executableWorkflowTopologyJQ() string {
 		}
 		clauses = append(clauses, clause)
 	}
+	clauses = append(clauses, haltBlank, dispatchHoldBlankJQ())
 	return `select(` + strings.Join(clauses, ` and `) + `)`
 }
 
