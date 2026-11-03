@@ -102,6 +102,8 @@ var capabilityProbes = []capabilityProbe{
 	probe[beads.ConditionalAssigneeTransferer]("ConditionalAssigneeTransferer"),
 	probe[beads.DepMetadataReader]("DepMetadataReader"),
 	probe[*beads.CachingStore]("*CachingStore"),
+	probe[beads.ChildrenBatchLister]("ChildrenBatchLister"),
+	probe[beads.AtomicTxStore]("AtomicTxStore"),
 }
 
 // RunClassHandleCapabilityConformance checks, for a store from newStore, that
@@ -115,6 +117,8 @@ func RunClassHandleCapabilityConformance(t *testing.T, newStore func(t *testing.
 	raw := newStore(t)
 	handles := SingleStore(raw).All()
 	handles["nested"] = Graph(Work(raw))
+	handles["graph molecule"] = GraphMolecule(raw)
+	handles["work molecule"] = WorkMolecule(raw)
 	checkHandleCapabilities(t, raw, handles)
 }
 
