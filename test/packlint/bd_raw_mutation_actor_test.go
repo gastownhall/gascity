@@ -142,16 +142,22 @@ var rawBdMutationAllowlistFiles = map[string]bool{}
 // pool session — e.g. a deployer-gate formula that self-claims — so forcing ID-first there would turn a close that works
 // today into a guard failure. Extend this list only after confirming a new
 // file's claim path the way this ruling confirmed mol-dog-stale-db.toml's.
+// Today mol-dog-stale-db.toml has no raw `bd … --actor` line (its writes are
+// `gc bd update`/`gc bd close --reason`), so this entry is a tripwire against
+// reintroducing one with the wrong order.
 var bdActorOrderCheckFiles = map[string]bool{
 	"examples/bd/dolt/formulas/mol-dog-stale-db.toml": true,
 }
 
-// actorFallbackTokenRE finds a recognized identity var immediately following
-// a `${` inside a --actor value. Matching left-to-right over the value
-// yields the tokens in nesting order, which for a bash `${VAR:-${VAR2:-...}}`
-// chain is also fallback-precedence order: bash tries the outermost VAR
-// before ever evaluating its own default expression.
-var actorFallbackTokenRE = regexp.MustCompile(`\$\{(GC_ALIAS|GC_SESSION_ID|GC_SESSION_NAME)\b`)
+// actorFallbackTokenRE finds a recognized identity var inside a --actor
+// value, matching both the braced `${VAR` form and a bare `$VAR` (bash's
+// `:-` fallback lets a terminal default be unbraced, as in
+// `${GC_ALIAS:-${GC_SESSION_ID:-$GC_SESSION_NAME}}`). Matching left-to-right
+// over the value yields the tokens in nesting order, which for a bash
+// `${VAR:-${VAR2:-...}}` chain is also fallback-precedence order: bash tries
+// the outermost VAR before ever evaluating its own default expression. The
+// trailing \b keeps e.g. `$GC_SESSION_IDX` from matching.
+var actorFallbackTokenRE = regexp.MustCompile(`\$\{?(GC_ALIAS|GC_SESSION_ID|GC_SESSION_NAME)\b`)
 
 // actorFallbackOrder returns the GC_ALIAS/GC_SESSION_ID/GC_SESSION_NAME
 // tokens referenced in line's --actor value, in first-seen (left-to-right)
@@ -173,8 +179,8 @@ func actorFallbackOrder(line string) []string {
 
 // actorFlagValue returns the argument value of the first --actor flag on
 // line, so that identity vars in later arguments or trailing comments are not
-// mistaken for part of the fallback chain. It skips one `=` or whitespace
-// separator after the flag; a value opening with `"` or `'` runs to the
+// mistaken for part of the fallback chain. It skips an `=` or any run of
+// whitespace after the flag; a value opening with `"` or `'` runs to the
 // matching closing quote (or end of line if unterminated), otherwise to the
 // next whitespace. It returns "" if line has no --actor flag.
 func actorFlagValue(line string) string {
@@ -186,8 +192,10 @@ func actorFlagValue(line string) string {
 	if rest == "" {
 		return ""
 	}
-	if rest[0] == '=' || rest[0] == ' ' || rest[0] == '\t' {
+	if rest[0] == '=' {
 		rest = rest[1:]
+	} else {
+		rest = strings.TrimLeft(rest, " \t")
 	}
 	if rest == "" {
 		return ""
@@ -371,6 +379,30 @@ func TestBdActorGuardExemptOrderCheck(t *testing.T) {
 			rel:  checkedFile,
 			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-}}" --reason "${GC_SESSION_ID}"`,
 			want: true,
+		},
+		{
+			name: "checked file with reversed order and extra spaces after --actor is NOT exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor   "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`,
+			want: false,
+		},
+		{
+			name: "checked file with unbraced terminal ID after name is NOT exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-$GC_SESSION_ID}}"`,
+			want: false,
+		},
+		{
+			name: "checked file with unbraced terminal name after ID is exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_ID:-$GC_SESSION_NAME}}"`,
+			want: true,
+		},
+		{
+			name: "checked file with --actor= form and reversed order is NOT exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor="${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`,
+			want: false,
 		},
 	}
 	for _, tc := range cases {
