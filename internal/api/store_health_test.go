@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -758,4 +759,54 @@ func TestBuildStatusBodyOmitsStoreHealthWhenTheRowCountIsContradicted(t *testing
 	if !strings.Contains(got, "after already returning rows") {
 		t.Errorf("partial error = %q, want it to say what disproved the zero", got)
 	}
+}
+
+// retainedCountStore models a remote ledger: it cannot count, and its
+// closed-inclusive list outlasts the status read budget.
+type retainedCountStore struct {
+	beads.Store
+	delay         time.Duration
+	retainedLists atomic.Int32
+}
+
+func (s *retainedCountStore) Count(context.Context, beads.ListQuery, ...string) (int, error) {
+	return 0, fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported)
+}
+
+func (s *retainedCountStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if reflect.DeepEqual(query, beads.ListQuery{AllowScan: true, IncludeClosed: true}) {
+		s.retainedLists.Add(1)
+		time.Sleep(s.delay)
+	}
+	return s.Store.List(query)
+}
+
+// A store-health measurement that cannot complete is retried once per
+// storeHealthCacheTTL, not on every full build, and every build in between
+// reports the same partial error.
+func TestStatusFullBuildsReuseAFailedStoreHealthMeasurement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := newFakeState(t)
+		store := &retainedCountStore{Store: beads.NewMemStore(), delay: 10 * time.Second}
+		state.cityBeadStore = store
+		s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
+
+		first := s.buildStatusBody(context.Background(), false)
+		time.Sleep(2 * time.Second)
+		second := s.buildStatusBody(context.Background(), false)
+		if got := store.retainedLists.Load(); got != 1 {
+			t.Errorf("retained-row lists across two builds inside the TTL = %d, want 1", got)
+		}
+		if !reflect.DeepEqual(first.PartialErrors, second.PartialErrors) || len(first.PartialErrors) == 0 {
+			t.Errorf("partial errors differ: %q vs %q", first.PartialErrors, second.PartialErrors)
+		}
+		time.Sleep(storeHealthCacheTTL)
+		s.buildStatusBody(context.Background(), false)
+		if got := store.retainedLists.Load(); got != 2 {
+			t.Errorf("retained-row lists after the TTL = %d, want 2 (retried)", got)
+		}
+		// The timed-out lists were abandoned, not canceled: let them finish.
+		time.Sleep(time.Minute)
+		synctest.Wait()
+	})
 }

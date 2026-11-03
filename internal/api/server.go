@@ -131,6 +131,7 @@ type Server struct {
 	// don't re-walk a fresh city between maintenance runs.
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
+	storeHealthErr      error
 	storeHealthExpires  time.Time
 	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
 	storeHealthFlight   singleflight.Group
