@@ -1142,6 +1142,11 @@ func TestCityRuntimeBeadReconcileTick_ReleasesTrimmedSeatClaimAfterClose(t *test
 		stdout:              io.Discard,
 		stderr:              &stderr,
 	}
+	// The sweep is a delta over sessions that were open on the previous tick and
+	// are gone now (ga-8uf72n); a seat that closed before the controller ever saw
+	// it open is the backstop's. Let the lane see the seat open first, as the
+	// previous tick would have.
+	cr.orphanReleaseLaneOf().observeSessions(newSessionBeadSnapshot([]beads.Bead{seat}).OpenInfos(), cfg)
 	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	gotClaim, err := rigStore.Get(claim.ID)
@@ -1161,13 +1166,22 @@ func TestCityRuntimeBeadReconcileTick_ReleasesTrimmedSeatClaimAfterClose(t *test
 	if gotForeign.Status != "in_progress" || gotForeign.Assignee != "repo/dalinar" {
 		t.Fatalf("foreign claim = status %q assignee %q, want in_progress/repo/dalinar untouched", gotForeign.Status, gotForeign.Assignee)
 	}
+	// The tick's delta pass visits only the closed seat's claims. The foreign
+	// claim's protection summary is the convergence backstop's, which sweeps all
+	// assigned work over the inputs that tick published (ga-8uf72n).
+	cr.runOrphanReleaseBackstop(backstopReasonCadence)
 	logged := logBuf.String()
 	if !strings.Contains(logged, "protected 1 foreign/unknown identities this pass (1 claims)") ||
 		!strings.Contains(logged, `"repo/dalinar" (1: `+foreign.ID+")") {
 		t.Fatalf("summary must report exactly the foreign claim:\n%s", logged)
 	}
-	if strings.Contains(logged, `"repo/nux"`) {
-		t.Fatalf("this city's own seat must not be reported as foreign:\n%s", logged)
+	// The backstop re-verifies its stale snapshot live and logs the claim the tick
+	// already released as "moved"; that line names the seat, so scope the check
+	// to the foreign-identity summary.
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, "foreign/unknown identities") && strings.Contains(line, `"repo/nux"`) {
+			t.Fatalf("this city's own seat must not be reported as foreign:\n%s", logged)
+		}
 	}
 }
 
