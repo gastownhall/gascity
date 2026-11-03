@@ -1137,6 +1137,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc bd list` filters no longer silently miss wisps-tier (ephemeral)
+  rows.** bd hides the wisps tier from any `list` that lacks
+  `--include-infra`, and the passthrough only appended that flag when a
+  filter named the tier (`--type=molecule/wisp`, `--mol-type`,
+  `--wisp-type`). A row predicate that does not name the tier was still
+  blind: `gc bd list --assignee=X --status=open` answered `[]` with live
+  ephemeral beads matching the filter in the ledger, so the deacon startup
+  check could not see its own already-poured successor wisp and poured a
+  duplicate (three surplus wisps on 2026-10-30), and the witness liveness
+  map and the refinery's own work query carried the same shape. The
+  passthrough now appends `--include-infra` to any `list` carrying at least
+  one row predicate — assignee, status, label, parent, id, time window,
+  text containment, metadata, priority, pinned/overdue/deferred/ready and
+  the rest — matching the internal store seam, which has always passed the
+  flag on every list. Unfiltered browses, output-shaping-only invocations
+  (`--json`, `--limit`, `--sort`, ...), store selection, and a non-wisp
+  `--type` that cannot match the tier are forwarded exactly as before.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped

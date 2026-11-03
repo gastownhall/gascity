@@ -1045,8 +1045,12 @@ set -eu
 	if !samePath(got["pwd"], cityDir) {
 		t.Fatalf("pwd = %q, want %q", got["pwd"], cityDir)
 	}
-	if got["args"] != "list --label repo-open" {
-		t.Fatalf("args = %q, want %q", got["args"], "list --label repo-open")
+	// The label predicate gains --include-infra (bd hides the wisps tier from
+	// any list without it, and a label can match an ephemeral bead), but the
+	// hyphenated value must still not route the read to the repo store: the
+	// routing assertions below are the point of this test.
+	if got["args"] != "list --label repo-open --include-infra" {
+		t.Fatalf("args = %q, want %q", got["args"], "list --label repo-open --include-infra")
 	}
 	if !samePath(got["GC_STORE_ROOT"], cityDir) {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got["GC_STORE_ROOT"], cityDir)
