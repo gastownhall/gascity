@@ -56,9 +56,18 @@ closed it, leave its recorded outcome alone.
 
 ## Following Your Formula
 
-Your formula defines your work as a sequence of steps. Steps are NOT
-materialized as individual beads — they exist in the formula definition.
-Read the step descriptions and work through them in order.
+This section is for an assignment whose METADATA has neither
+`gc.root_bead_id` nor `molecule_id` (see "Classify Your Assignment").
+
+- **A plain bead:** execute the work from its description directly.
+- **A root-only formula:** the bead is a formula root whose steps were never
+  poured as beads of their own; they exist only in the formula definition.
+  Read the step descriptions and work through them in order. If the bead
+  names no steps, do not invent any: its description is the work.
+- **An expanded root:** `gc bd show <id>` lists step beads under it. Those
+  steps reach workers one at a time through the hook, so the root is not
+  yours to work: do not execute or close it, and escalate (see
+  "Escalation").
 
 **THE RULE**: Execute one step at a time. Verify completion. Move to next.
 Do NOT skip ahead. Do NOT claim steps done without actually doing them.
@@ -119,9 +128,6 @@ instructions say how to close it (see "Closing a Bead").
 
 Do NOT read the parent bead description and do everything at once.
 Do NOT skip steps. Do NOT close steps you didn't execute.
-
-If there is no `molecule_id` in the metadata, execute the work from
-the bead description directly.
 
 ## Your Tools
 
