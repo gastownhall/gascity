@@ -618,3 +618,81 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 		t.Fatalf("ExplicitTarget tag breakout survived stripping:\n%s", got)
 	}
 }
+
+func TestExtMsgGroupMetadataUpsertPreservesPolicyAndExplicitRouteUpdates(t *testing.T) {
+	for _, change := range []string{"omitted", "replace", "clear"} {
+		t.Run(change, func(t *testing.T) {
+			state := newSessionFakeState(t)
+			services := extmsg.NewServices(state.cityBeadStore)
+			state.extmsgSvc = &services
+			server := New(state)
+			ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "zoo", AccountID: "account", ConversationID: "room", Kind: extmsg.ConversationThread}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			policy := extmsg.FanoutPolicy{Enabled: true, AllowUntargetedPublication: true, MaxPeerTriggeredPublishes: 3, MaxTotalPeerDeliveries: 17}
+			original, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+				RootConversation: ref, Mode: extmsg.GroupModeLauncher, DefaultHandle: "alpha",
+				LastAddressedHandle: "beta", FanoutPolicy: policy, Metadata: map[string]string{"foreign": "keep", "intent": "first"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := map[string]any{"root_conversation": ref, "metadata": map[string]string{"intent": "second"}}
+			wantHandle := "alpha"
+			switch change {
+			case "replace":
+				body["default_handle"], wantHandle = "gamma", "gamma"
+			case "clear":
+				body["default_handle"], wantHandle = "", ""
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, newPostRequest(cityURL(state, "/extmsg/groups"), strings.NewReader(string(raw))))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("metadata upsert status=%d: %s", rec.Code, rec.Body.String())
+			}
+			var response extmsg.ConversationGroupRecord
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := services.Groups.FindByConversation(context.Background(), caller, ref)
+			if err != nil || stored == nil {
+				t.Fatalf("stored group=%+v,%v", stored, err)
+			}
+			for _, got := range []extmsg.ConversationGroupRecord{response, *stored} {
+				if got.ID != original.ID || got.FanoutPolicy != policy || got.DefaultHandle != wantHandle ||
+					got.LastAddressedHandle != "beta" || got.Metadata["foreign"] != "keep" || got.Metadata["intent"] != "second" {
+					t.Errorf("metadata upsert changed unrelated policy/routing or lost explicit update: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+// Presence handling must not lose the existing ability to choose a route on
+// the first HTTP upsert, when there is no prior group from which to retain it.
+func TestExtMsgGroupCreateKeepsExplicitDefaultRoute(t *testing.T) {
+	state := newSessionFakeState(t)
+	services := extmsg.NewServices(state.cityBeadStore)
+	state.extmsgSvc = &services
+	server := New(state)
+	ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "zoo", AccountID: "account", ConversationID: "new-room", Kind: extmsg.ConversationThread}
+	raw, err := json.Marshal(map[string]any{"root_conversation": ref, "default_handle": "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, newPostRequest(cityURL(state, "/extmsg/groups"), strings.NewReader(string(raw))))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create group status=%d: %s", rec.Code, rec.Body.String())
+	}
+	var got extmsg.ConversationGroupRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == "" || got.DefaultHandle != "alpha" || got.FanoutPolicy != (extmsg.FanoutPolicy{}) {
+		t.Fatalf("first upsert lost default route/default policy: %+v", got)
+	}
+}

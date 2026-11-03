@@ -1592,7 +1592,7 @@ export type ExtMsgBindInputBody = {
 
 export type ExtMsgGroupEnsureInputBody = {
     /**
-     * Default handle for the group.
+     * Default handle for the group. Omit to preserve an existing route; an empty string clears it.
      */
     default_handle?: string;
     /**

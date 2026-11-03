@@ -123,7 +123,7 @@ type ExtMsgGroupEnsureInput struct {
 	Body struct {
 		RootConversation extmsg.ConversationRef `json:"root_conversation,omitempty" doc:"Root conversation reference."`
 		Mode             extmsg.GroupMode       `json:"mode,omitempty" doc:"Group mode (launcher, etc.)."`
-		DefaultHandle    string                 `json:"default_handle,omitempty" doc:"Default handle for the group."`
+		DefaultHandle    *string                `json:"default_handle,omitempty" doc:"Default handle for the group. Omit to preserve an existing route; an empty string clears it."`
 		Metadata         map[string]string      `json:"metadata,omitempty" doc:"Group metadata."`
 	}
 }

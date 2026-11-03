@@ -3,6 +3,7 @@ package dashboardspa
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -126,5 +127,45 @@ func TestEmbeddedAssetsServeExactBytesHeadAndRanges(t *testing.T) {
 	}
 	if !ranged {
 		t.Fatal("no real asset exercised Range and Seek")
+	}
+}
+
+// The pinned embed.FS treats an unknown whence as an absolute offset. Match
+// the pinned raw implementation, including its overflow/bounds and cursor state,
+// rather than importing bytes.Reader's different invalid-whence semantics.
+func TestEmbeddedSeekWhenceAndOverflowMatchCanonical(t *testing.T) {
+	maximum := int64(^uint64(0) >> 1)
+	for _, whence := range []int{io.SeekStart, io.SeekCurrent, io.SeekEnd, -1, 3} {
+		for _, offset := range []int64{0, 1, -1, maximum, -maximum - 1} {
+			t.Run(fmt.Sprintf("whence=%d/offset=%d", whence, offset), func(t *testing.T) {
+				wantFile, err := canonicalDist.Open("dist/index.html")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer wantFile.Close() //nolint:errcheck // immutable embedded file
+				gotFile, err := distFS.Open("dist/index.html")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer gotFile.Close() //nolint:errcheck // immutable in-memory file
+				want, got := wantFile.(io.Seeker), gotFile.(io.Seeker)
+				if _, err := want.Seek(3, io.SeekStart); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := got.Seek(3, io.SeekStart); err != nil {
+					t.Fatal(err)
+				}
+				wantPosition, wantError := want.Seek(offset, whence)
+				gotPosition, gotError := got.Seek(offset, whence)
+				if gotPosition != wantPosition || (gotError == nil) != (wantError == nil) || errors.Is(gotError, fs.ErrInvalid) != errors.Is(wantError, fs.ErrInvalid) {
+					t.Fatalf("Seek differs: packed=%d,%v raw=%d,%v", gotPosition, gotError, wantPosition, wantError)
+				}
+				wantCursor, wantError := want.Seek(0, io.SeekCurrent)
+				gotCursor, gotError := got.Seek(0, io.SeekCurrent)
+				if gotCursor != wantCursor || gotError != nil || wantError != nil {
+					t.Fatalf("cursor after Seek differs: packed=%d,%v raw=%d,%v", gotCursor, gotError, wantCursor, wantError)
+				}
+			})
+		}
 	}
 }

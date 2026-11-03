@@ -3628,7 +3628,7 @@ type ExtMsgBindInputBody struct {
 
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
 type ExtMsgGroupEnsureInputBody struct {
-	// DefaultHandle Default handle for the group.
+	// DefaultHandle Default handle for the group. Omit to preserve an existing route; an empty string clears it.
 	DefaultHandle *string `json:"default_handle,omitempty"`
 
 	// Metadata Group metadata.

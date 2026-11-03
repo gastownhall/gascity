@@ -4044,7 +4044,7 @@
         "additionalProperties": false,
         "properties": {
           "default_handle": {
-            "description": "Default handle for the group.",
+            "description": "Default handle for the group. Omit to preserve an existing route; an empty string clears it.",
             "type": "string"
           },
           "metadata": {

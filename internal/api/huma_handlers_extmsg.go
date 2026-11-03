@@ -388,8 +388,8 @@ func (s *Server) humaHandleExtMsgGroupEnsure(ctx context.Context, input *ExtMsgG
 	group, err := svc.Groups.EnsureGroup(ctx, caller, extmsg.EnsureGroupInput{
 		RootConversation: input.Body.RootConversation,
 		Mode:             mode,
-		DefaultHandle:    input.Body.DefaultHandle,
 		Metadata:         input.Body.Metadata,
+		SettingsUpdate:   &extmsg.GroupSettingsUpdate{DefaultHandle: input.Body.DefaultHandle},
 	})
 	if err != nil {
 		return nil, apierr.ValidationFailed.Msg(err.Error())

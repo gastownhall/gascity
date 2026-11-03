@@ -3364,3 +3364,25 @@ func TestInboundTranscriptRetryBindsPayloadAcrossServiceRecreation(t *testing.T)
 		})
 	}
 }
+
+// Full service upserts still own all settings: an explicit all-zero policy
+// and empty route clear them, unlike an HTTP metadata update's omissions.
+func TestEnsureGroupFullUpsertCanClearPolicyAndRoute(t *testing.T) {
+	svc := NewGroupService(beads.NewMemStore())
+	ref := testConversationRef()
+	input := EnsureGroupInput{
+		RootConversation: ref, Mode: GroupModeLauncher, DefaultHandle: "alpha",
+		FanoutPolicy: FanoutPolicy{Enabled: true, AllowUntargetedPublication: true, MaxPeerTriggeredPublishes: 3, MaxTotalPeerDeliveries: 17},
+	}
+	if _, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input); err != nil {
+		t.Fatal(err)
+	}
+	input.DefaultHandle, input.FanoutPolicy = "", FanoutPolicy{}
+	got, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultHandle != "" || got.FanoutPolicy != (FanoutPolicy{}) {
+		t.Fatalf("full upsert could not intentionally clear settings: %+v", got)
+	}
+}

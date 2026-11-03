@@ -667,3 +667,11 @@ The rig-create `adopt` field forwards to native `rig.ProvisionRequest.Adopt`.
 Infer and validate the existing namespace before any writes, preserve queue
 history, and refuse `adopt` with `git_url` before clone admission. Append new
 RigCreateBody fields with omitempty so deployed request digests remain stable.
+
+## Public group metadata updates
+
+The HTTP group upsert preserves existing fanout policy and omitted routing under
+the group's mutation lock. An explicit empty default_handle clears that route.
+Full service upserts retain their existing replacement semantics; metadata-only
+HTTP calls must not become full settings replacements or handler-side read/write
+races.
