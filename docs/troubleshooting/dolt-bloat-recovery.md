@@ -544,7 +544,8 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 `gc dolt compact` writes exact reason strings into
 `.gc/runtime/packs/dolt/compact-quarantine/<database>` when it detects
-possible writer interference before full GC. Operator dashboards and runbooks
+possible writer interference before full GC, or when a database it rewrote
+stops being served. Operator dashboards and runbooks
 should treat these strings as the current vocabulary:
 
 | Reason | Meaning |
@@ -562,6 +563,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone. *(never auto-cleared — see below)* |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -586,6 +588,25 @@ compactor stores `seen_count`, `notify_count`, and last-notified fields under
 checks must not rewrite the quarantine marker. The sidecar is operational
 state, not integrity evidence. A changed reason or a replacement marker alerts
 immediately, while an unchanged marker follows the bounded reminder cadence.
+
+A `live database unavailable after compaction` marker means the rewrite may
+have left the server without the database. It records `live_gate_steps` (the
+rewrites that ran), `live_gate_failed_step`, `live_gate_failure`,
+`live_gate_data_dir_entry` with its `_before` and `_after` states, and
+`live_gate_pre_compaction_head`. Compact stops processing that database and
+leaves no pending-GC marker for it. To recover:
+
+1. Restore the database, from the safety backup or by restarting the server
+   if the entry is still on disk, until `<data_dir>/<database>/.dolt` exists.
+2. Verify the HEAD resolves, with
+   `gc dolt sql --db <database> -q "SELECT HASHOF('HEAD')"`, and that bead
+   data is healthy, with `bd list --limit 1` in that rig. Compare the HEAD
+   with `live_gate_pre_compaction_head` to tell whether the flatten landed.
+3. Remove the quarantine marker, and any pending-GC or pending-push marker
+   under `.gc/runtime/packs/dolt/` that predates the restore.
+4. Preview the next run with
+   `gc dolt compact --dry-run --only-db <database>` before letting scheduled
+   compaction touch it again.
 
 Safe marker-clear procedure:
 
