@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -17,6 +18,10 @@ import (
 
 // rotatedKey is the session key a restart handoff mints onto the row.
 const rotatedKey = "rotated-key-k"
+
+// backfilledKey is the session key the session sync mints onto a row a churn
+// reset left keyless.
+const backfilledKey = "backfilled-key-k2"
 
 // rotatedKeyOptions shapes the handle and row newRotatedKeyHandle builds.
 type rotatedKeyOptions struct {
@@ -57,7 +62,7 @@ func newRotatedKeyHandle(t *testing.T, opts rotatedKeyOptions) rotatedKeyFixture
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithStaleKeyDetectionWaiter(
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithStaleKeyDetectionWaiter(
 		func(context.Context, string) error { return nil },
 	), sessionpkg.WithCityPath(t.TempDir()))
 	beadWorkDir := t.TempDir()
@@ -126,6 +131,20 @@ func writeKeyedTranscript(t *testing.T, root, workDir string) {
 	})
 }
 
+// commitStart records a committed start of f's row under its stored key, as
+// the reconciler's start commit writes it: a started_config_hash, and the
+// conversation reset the restart handoff left pending consumed.
+func commitStart(t *testing.T, f rotatedKeyFixture) {
+	t.Helper()
+	patch := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash: "hash-abc",
+		Now:      time.Now().Add(-time.Hour),
+	})
+	if err := f.store.SetMetadataBatch(f.id, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(commit start): %v", err)
+	}
+}
+
 func beadMetadata(t *testing.T, store *beads.MemStore, id string) map[string]string {
 	t.Helper()
 	b, err := store.Get(id)
@@ -189,13 +208,24 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 			want: "claude --resume " + rotatedKey,
 		},
 		{
-			name: "AC-3 committed conversation without a transcript resumes",
+			name:  "AC-3 committed conversation without a transcript resumes",
+			setup: commitStart,
+			want:  "claude --resume " + rotatedKey,
+		},
+		{
+			name: "churn reset beside a committed hash with a backfilled key starts with the session-id flag",
 			setup: func(t *testing.T, f rotatedKeyFixture) {
-				if err := f.store.SetMetadata(f.id, "started_config_hash", "hash-abc"); err != nil {
-					t.Fatalf("SetMetadata(started_config_hash): %v", err)
+				commitStart(t, f)
+				// A churn reset keeps started_config_hash and clears the key,
+				// which the session sync then mints anew.
+				if err := f.store.SetMetadataBatch(f.id, sessionpkg.ConversationResetPatch(false)); err != nil {
+					t.Fatalf("SetMetadataBatch(churn reset): %v", err)
+				}
+				if err := f.store.SetMetadata(f.id, "session_key", backfilledKey); err != nil {
+					t.Fatalf("SetMetadata(session_key): %v", err)
 				}
 			},
-			want: "claude --resume " + rotatedKey,
+			want: "claude --session-id " + backfilledKey,
 		},
 		{
 			name: "AC-4 provider the probe cannot read resumes",
@@ -262,7 +292,7 @@ func TestSessionHandleAttachAfterRestartHandoffStartsWithSessionID(t *testing.T)
 	t.Setenv("HOME", t.TempDir())
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithStaleKeyDetectionWaiter(
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithStaleKeyDetectionWaiter(
 		func(context.Context, string) error { return nil },
 	), sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{

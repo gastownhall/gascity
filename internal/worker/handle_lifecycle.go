@@ -834,22 +834,28 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 // unlaunchedSessionKey reports whether the row's stored session key never
 // launched a conversation a resume could reattach to, so the start should open
 // a fresh conversation under the stored key with the provider's session-id
-// flag instead. The key must have a session-id flag to open one with, the row
-// must never have committed a start under the key (started_config_hash empty —
-// every key rotation clears it in the same patch that writes the key, and only
-// a committed start restores it), and the keyed transcript the resume would
-// reattach to must be probeable and absent under the roots this launch reads —
-// the same probe and root rule the reconciler's own start applies
-// (workertranscript.KeyedProbeRoots): the handle's search paths, plus the
-// projects root of an absolute CLAUDE_CONFIG_DIR the launch's env names. A
-// relative or ~ value adds no root; a provider whose transcript layout cannot
-// be probed, a missing key or work dir, and a transcript that is present all
-// keep the resume.
+// flag instead. The key must have a session-id flag to open one with, no
+// committed start may vouch for it, and the keyed transcript the resume would
+// reattach to must be probeable and absent under the roots this launch reads.
+// A committed start (started_config_hash) with no conversation reset pending
+// (continuation_reset_pending) vouches for the key, which then resumes
+// whatever the probe reads: a conversation under a root the probe cannot see,
+// such as a wrapper's own config dir, is not started over, and one whose
+// transcript is gone fails its resume into the session manager's
+// committed-conversation rule. A pending reset means the hash no longer speaks
+// for the key: a churn reset keeps the hash while it clears the key, which the
+// session sync then mints anew. The probe is the same probe and root rule the
+// reconciler's own start applies (workertranscript.KeyedProbeRoots): the
+// handle's search paths, plus the projects root of an absolute
+// CLAUDE_CONFIG_DIR the launch's env names. A relative or ~ value adds no
+// root; a provider whose transcript layout cannot be probed, a missing key or
+// work dir, and a transcript that is present all keep the resume.
 func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, pr sessionpkg.PersistedResponse) bool {
 	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
 		return false
 	}
-	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" {
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" &&
+		strings.TrimSpace(pr.Metadata["continuation_reset_pending"]) == "" {
 		return false
 	}
 	hints := h.runtimeHints()
