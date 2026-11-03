@@ -4401,3 +4401,58 @@ func TestConvoyCreateRigFlagConvoyAddTracksIssue(t *testing.T) {
 	requireConvoyTrack(t, verifyStore, convoyID, human.ID)
 	requireConvoyTrack(t, verifyStore, convoyID, jsonIssue.ID)
 }
+
+// TestConvoyCreateRigFlagWithMemberTracksIssue: creating a convoy with an
+// explicit --rig and an issue whose prefix routes to that rig's store must
+// land both in that store, with the tracks dependency recorded there. The
+// issue's prefix already selected this store before --rig was honored, so
+// this pins that agreement on both output paths.
+func TestConvoyCreateRigFlagWithMemberTracksIssue(t *testing.T) {
+	cityDir := convoyRigFlagTestCity(t)
+	seedStore, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, "frontend"), cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStoreForCity(frontend): %v", err)
+	}
+	human, err := seedStore.Create(beads.Bead{Title: "frontend issue"})
+	if err != nil {
+		t.Fatalf("create human issue: %v", err)
+	}
+	jsonIssue, err := seedStore.Create(beads.Bead{Title: "frontend json issue"})
+	if err != nil {
+		t.Fatalf("create json issue: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", human.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run convoy create with %s = %d; stdout=%s stderr=%s", human.ID, code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "tracking 1 issue") {
+		t.Fatalf("stdout = %q, want it to report tracking 1 issue", stdout.String())
+	}
+	convoyID := ""
+	convoys, err := seedStore.List(beads.ListQuery{Type: "convoy", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list convoys: %v", err)
+	}
+	for _, convoy := range convoys {
+		if convoy.Title == "frontend batch" {
+			convoyID = convoy.ID
+		}
+	}
+	if convoyID == "" {
+		t.Fatalf("convoy %q not found in the frontend store", "frontend batch")
+	}
+	requireConvoyTrack(t, seedStore, convoyID, human.ID)
+	requireConvoyNotInStore(t, cityDir, cityDir, convoyID)
+
+	stdout.Reset()
+	stderr.Reset()
+	convoyID = convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend json batch", jsonIssue.ID, "--json"})
+	requireConvoyInStore(t, cityDir, filepath.Join(cityDir, "frontend"), convoyID)
+	requireConvoyNotInStore(t, cityDir, cityDir, convoyID)
+	verifyStore, err := openStoreAtForCity(filepath.Join(cityDir, "frontend"), cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(frontend): %v", err)
+	}
+	requireConvoyTrack(t, verifyStore, convoyID, jsonIssue.ID)
+}
