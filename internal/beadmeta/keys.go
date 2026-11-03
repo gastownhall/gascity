@@ -469,6 +469,25 @@ const OwnerNamespaceMetadataKey = "gc.owner_namespace"
 // The set of valid WorkOutcomeMetadataKey values and the "shipped requires a
 // commit on the branch" rule live with the close gate in cmd/gc.
 
+// Public messaging receipt/outbox metadata is distinct from session state.
+const (
+	// ExtMsgCancelRequestedMetadataKey records a monotonic whole-message
+	// cancellation request on its durable public admission receipt.
+	ExtMsgCancelRequestedMetadataKey = "gc.extmsg.cancel_requested"
+	// ExtMsgDeliveryChangePendingMetadataKey marks an outbox row whose latest
+	// delivery-state invalidation still needs acknowledgment by the event log.
+	ExtMsgDeliveryChangePendingMetadataKey = "gc.extmsg.delivery_change_pending"
+)
+
+// InitOwner identifies the bootstrap owner of initialization evidence and
+// project metadata, so an interrupted fresh init adopts only its own work.
+const InitOwner = "gc.init_owner"
+
+// ExtMsgLastDeliveryPrefix maps a canonical recipient's 24-hex hash suffix
+// to its last committed public outbox delivery ID on the sequence row. It is
+// the durable predecessor link used to preserve per-recipient message order.
+const ExtMsgLastDeliveryPrefix = Namespace + "extmsg.last_delivery."
+
 // FormulaVarPrefix is the dynamic key prefix under which formula-supplied
 // variables are written as gc.var.<name>. The suffix is open-world (a
 // user-authored variable name), so it is declared as a prefix, not enumerated.
@@ -672,6 +691,8 @@ var KnownMetadataKeys = []string{
 	ExecutionRigContextMetadataKey,
 	ExecutionRoutedToMetadataKey,
 	ExitCodeMetadataKey,
+	ExtMsgCancelRequestedMetadataKey,
+	ExtMsgDeliveryChangePendingMetadataKey,
 	FailedAttemptMetadataKey,
 	FailureClassMetadataKey,
 	FailureOwnerMetadataKey,
@@ -692,6 +713,7 @@ var KnownMetadataKeys = []string{
 	Graphv2RootKeyMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InitiatorMetadataKey,
+	InitOwner,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
 	IterationMetadataKey,
@@ -797,6 +819,7 @@ var KnownMetadataKeys = []string{
 // begins with one of these is considered declared even though its full key is
 // not enumerable.
 var KnownMetadataPrefixes = []string{
+	ExtMsgLastDeliveryPrefix,
 	FormulaVarPrefix,
 	IdemPrefix,
 }

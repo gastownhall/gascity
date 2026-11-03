@@ -180,7 +180,11 @@ func codexQuestionsIn(tail string) ([]*parsedQuestion, error) {
 			return nil, fmt.Errorf("%w: native Codex rollout contains an incomplete record", runtime.ErrRuntimeUnavailable)
 		}
 		p := row.Payload
-		if row.Type == "event_msg" && (p.Type == "task_complete" || p.Type == "turn_aborted") {
+		// Async user inputs outlive the model turn that queued them. A
+		// task_complete record is not an answer or dismissal: Codex keeps the
+		// question editor live until the user answers. The pane queue and exact
+		// native occurrence below remain required before any answer is sent.
+		if row.Type == "event_msg" && p.Type == "turn_aborted" {
 			pending = nil
 			continue
 		}

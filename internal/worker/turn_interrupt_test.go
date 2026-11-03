@@ -1249,3 +1249,123 @@ func TestTurnInterruptSettleJoinsNoReadFromBeforeTheLock(t *testing.T) {
 		}
 	})
 }
+
+// A visible native-bound Claude approval holds an open turn while the pane
+// has no composer or busy spinner. The turn check must reach the runtime's
+// interrupt (whose tmux Claude implementation cancels the widget with Escape)
+// rather than indefinitely release the lane on ErrIdleIndeterminate.
+func TestTurnInterruptNativeClaudeApprovalReachesRuntimeInterrupt(t *testing.T) {
+	for _, staleFence := range []bool{false, true} {
+		t.Run(map[bool]string{false: "current incarnation", true: "stale incarnation"}[staleFence], func(t *testing.T) {
+			pending := &runtime.PendingInteraction{
+				RequestID: "tmux-native-approval", Kind: "approval",
+				Metadata: map[string]string{"request_identity": "native_invocation", "command": "printf %s owned > /owned/marker"},
+			}
+			s, idle := nativeApprovalTurn(t, pending, nil, runtime.ErrIdleIndeterminate)
+			fence, ok := sessionpkg.InputFenceFor(s.info)
+			if !ok {
+				t.Fatal("session names no incarnation")
+			}
+			if staleFence {
+				fence.Token = "previous-incarnation-token"
+			}
+			idle.Calls = nil
+			err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1, Fence: fence})
+			sent := sentInputs(idle.Fake, s.info.SessionName)
+			if staleFence {
+				var miss *runtime.FenceMismatchError
+				if !errors.As(err, &miss) || len(sent) != 0 {
+					t.Fatalf("stale incarnation = %v, sent %v; want fenced refusal and no input", err, sent)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Interrupt while the exact native approval is waiting = %v", err)
+			}
+			if !slices.Equal(sent, []string{"Interrupt", "ClearInput"}) {
+				t.Fatalf("sent %v, want one runtime interrupt then the settled input clear", sent)
+			}
+			if call := lastCall(idle.SnapshotCalls(), "Interrupt"); call == nil || call.Fence != fence {
+				t.Fatalf("runtime interrupt %+v, want the exact incarnation fence %+v", call, fence)
+			}
+			for _, call := range idle.SnapshotCalls() {
+				if call.Method == "Respond" || call.Method == "Nudge" || call.Method == "NudgeNow" || call.Method == "SendKeys" {
+					t.Fatalf("stopping the approval answered it or sent an extra key: %+v", call)
+				}
+			}
+		})
+	}
+}
+
+// Unknown pane state alone still refuses. An unavailable binding, a capture
+// error or a stale/non-native interaction cannot stand in for current native
+// approval evidence.
+func TestTurnInterruptClaudeApprovalWitnessRefusesUnknownOrChangedTarget(t *testing.T) {
+	bound := func() *runtime.PendingInteraction {
+		return &runtime.PendingInteraction{
+			RequestID: "tmux-native-approval", Kind: "approval",
+			Metadata: map[string]string{"request_identity": "native_invocation"},
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		pending    *runtime.PendingInteraction
+		pendingErr error
+		idleErr    error
+	}{
+		{name: "no pending interaction", idleErr: runtime.ErrIdleIndeterminate},
+		{name: "unsupported interaction", pendingErr: runtime.ErrInteractionUnsupported, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "pending read failed", pendingErr: errors.New("native pending capture failed"), idleErr: runtime.ErrIdleIndeterminate},
+		{name: "idle capture failed despite a pending approval", pending: bound(), idleErr: errors.New("idle pane capture failed")},
+		{name: "binding unavailable", pending: &runtime.PendingInteraction{RequestID: "tmux-unavailable", Kind: "approval", Metadata: map[string]string{"request_identity": "unavailable", "response_unavailable": "native invocation not established"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "visible content only", pending: &runtime.PendingInteraction{RequestID: "tmux-visible", Kind: "approval", Metadata: map[string]string{"request_identity": "visible_content"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "missing occurrence identity", pending: &runtime.PendingInteraction{Kind: "approval", Metadata: map[string]string{"request_identity": "native_invocation"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "contradictory unavailable binding", pending: &runtime.PendingInteraction{RequestID: "tmux-native", Kind: "approval", Metadata: map[string]string{"request_identity": "native_invocation", "response_unavailable": "native invocation unresolved"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "another interaction kind", pending: &runtime.PendingInteraction{RequestID: "tmux-question", Kind: "question", Metadata: map[string]string{"request_identity": "native_invocation"}}, idleErr: runtime.ErrIdleIndeterminate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, idle := nativeApprovalTurn(t, tc.pending, tc.pendingErr, tc.idleErr)
+			idle.Calls = nil
+			err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1})
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Interrupt = %v, want unknown runtime state", err)
+			}
+			if got := sentInputs(idle.Fake, s.info.SessionName); len(got) != 0 {
+				t.Fatalf("unproven native approval sent %v", got)
+			}
+		})
+	}
+	t.Run("another turn is current", func(t *testing.T) {
+		s, idle := nativeApprovalTurn(t, bound(), nil, runtime.ErrIdleIndeterminate)
+		s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"), claudePrompt(claudeTurn2, "2026-10-13T06:00:00Z"))
+		idle.Calls = nil
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1})
+		if !errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("Interrupt(previous turn) = %v, want stale-target refusal", err)
+		}
+		if got := sentInputs(idle.Fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("an approval on another turn sent %v", got)
+		}
+	})
+}
+
+func nativeApprovalTurn(t *testing.T, pending *runtime.PendingInteraction, pendingErr, idleErr error) (turnSession, idleScript) {
+	t.Helper()
+	idle := newIdleScript(idleAnswer{err: idleErr}, idleAnswer{idle: true}, idleAnswer{idle: true})
+	backend := inputHookBackend{idleScript: idle}
+	var name string
+	backend.onInput = func(method string) {
+		if method == "Interrupt" {
+			idle.SetPendingInteraction(name, nil)
+		}
+	}
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, backend), "claude", "")
+	name = s.info.SessionName
+	timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s.handle.turns.timing = timing
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+	ageTranscript(t, path, clock.now().Add(-time.Minute))
+	idle.SetPendingInteraction(name, pending)
+	idle.PendingErrors[name] = pendingErr
+	return s, idle
+}

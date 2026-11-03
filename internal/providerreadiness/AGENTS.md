@@ -28,3 +28,11 @@ agent questions do not authorize this startup action; never choose Update now.
 Move, re-read, and confirm only from the visible Skip row; unknown selection
 never authorizes Enter or composer readiness. A stream needing a selection move
 hands off to synchronous peeks.
+
+## Native interaction lifetime
+
+A Codex async question remains pending until its native reply or cancellation,
+even after the model emits task_complete. Require the process-owned native
+occurrence and matching live queue/editor before answering; a completed model
+turn alone does not dismiss queued user input. Preserve stale-response refusal
+and the ordinary-message guard while a native interaction owns input.

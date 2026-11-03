@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
@@ -435,7 +436,7 @@ func (s *PublicAdmissionStore) planAdmission(input PublicAdmissionInput, id, dig
 		if delivery.RecipientKey == "" {
 			delivery.RecipientKey = target.SessionID + "\x00" + target.AgentIdentity
 		}
-		lastKey := "gc.extmsg.last_delivery." + publicHash(delivery.RecipientKey)[:24]
+		lastKey := beadmeta.ExtMsgLastDeliveryPrefix + publicHash(delivery.RecipientKey)[:24]
 		if stateItem.Update != nil {
 			previous, err := s.store.Get(stateItem.Update.ID)
 			if err != nil {

@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net"
+	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +18,28 @@ type publicLifecycleTestState struct {
 }
 
 func (s *publicLifecycleTestState) ExtMsgPublicContext() context.Context { return s.ctx }
+
+// publicNoHTTPListener exercises Server.Serve/Shutdown without allocating a
+// socket or accepting a connection. Only Close releases the blocked Accept.
+type publicNoHTTPListener struct {
+	closed    chan struct{}
+	accepting chan struct{}
+	closeOnce sync.Once
+	startOnce sync.Once
+}
+
+func (l *publicNoHTTPListener) Accept() (net.Conn, error) {
+	l.startOnce.Do(func() { close(l.accepting) })
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *publicNoHTTPListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *publicNoHTTPListener) Addr() net.Addr { return &net.UnixAddr{Net: "unix"} }
 
 func TestPublicOutboxRestartsWithoutAnyCityHTTPClient(t *testing.T) {
 	e, state, message, targets := newPublicAdmissionEnv(t)
@@ -32,10 +57,7 @@ func TestPublicOutboxRestartsWithoutAnyCityHTTPClient(t *testing.T) {
 	restored := &publicLifecycleTestState{publicAdmissionTestState: state, ctx: cityCtx}
 	resolver := &stateCityResolver{state: restored}
 	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := &publicNoHTTPListener{closed: make(chan struct{}), accepting: make(chan struct{})}
 	served := make(chan error, 1)
 	go func() { served <- sm.Serve(listener) }()
 	t.Cleanup(func() {
@@ -43,12 +65,24 @@ func TestPublicOutboxRestartsWithoutAnyCityHTTPClient(t *testing.T) {
 		if err := sm.Shutdown(context.Background()); err != nil {
 			t.Error(err)
 		}
-		<-served
+		if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve after Shutdown: %v", err)
+		}
+		select {
+		case <-listener.closed:
+		default:
+			t.Error("Shutdown did not close the controlled listener")
+		}
 	})
 	// No HTTP request, getCityServer(), handler lookup, or API helper here.
 	// Only the ledger and event provider are observed.
 	waitFor(t, 5*time.Second, "public lane relay after restart", func() bool {
-		return len(e.opRows(t)) == 1
+		select {
+		case <-listener.accepting:
+			return len(e.opRows(t)) == 1
+		default:
+			return false
+		}
 	})
 	found, err := state.EventProvider().List(events.Filter{Type: events.ExtMsgInbound})
 	if err != nil || len(found) != 1 {

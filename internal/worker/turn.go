@@ -594,12 +594,32 @@ var errNoIdleSnapshot = errors.New("its runtime takes no idle snapshot of it")
 // reading that is neither is not idle either, with plan.idleUnknown's error:
 // one that failed, read indeterminate or unsupported, or went unanswered,
 // ErrObservationOutstanding included, which a locked read gets at once while
-// one an earlier check left wedged is still out.
+// one an earlier check left wedged is still out. A locked Claude check can also
+// establish a waiting turn from a current native-bound approval: its widget
+// covers the composer without a busy spinner, so its idle scan is deliberately
+// indeterminate. That evidence permits the existing interrupt's cancellation,
+// never text or an approval answer.
 func (h *SessionHandle) readsIdle(ctx context.Context, plan turnPlan) (bool, error) {
 	got, err := observeTurnRead(ctx, plan.reads, "idle", h.turnObservationScope(), plan.info.SessionName, func(context.Context) (idleReading, error) {
 		idle, supported, err := h.manager.RuntimeIdleSnapshot(plan.info)
 		return idleReading{idle, supported}, err
 	})
+	if plan.reads == lockedTurnReads && errors.Is(err, runtime.ErrIdleIndeterminate) &&
+		sessionpkg.ProviderFamilyFromInfo(plan.info, "") == "claude" {
+		waiting, pendingErr := observeTurnRead(ctx, plan.reads, "approval", h.turnObservationScope(), plan.info.SessionName, func(context.Context) (bool, error) {
+			pending, supported, err := h.manager.PendingByName(plan.info.SessionName)
+			if err != nil || !supported || pending == nil {
+				return false, err
+			}
+			return pending.Kind == "approval" && pending.RequestID != "" &&
+				pending.Metadata["request_identity"] == "native_invocation" &&
+				pending.Metadata["response_unavailable"] == "", nil
+		})
+		if pendingErr == nil && waiting {
+			return false, nil
+		}
+		err = errors.Join(err, pendingErr)
+	}
 	switch {
 	case err != nil:
 		return false, plan.idleUnknown(err)

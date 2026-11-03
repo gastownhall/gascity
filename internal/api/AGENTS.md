@@ -75,6 +75,11 @@ Build the platform-neutral SPA with the execution worker's native JavaScript
 dependencies even when the Go binary targets another OS. Preserve the
 `dist_in_sync_test` comparison with the committed bundle.
 
+Production embedding stores the dashboard in a compressed manifest while the
+HTTP handler reads ordinary uncompressed, seekable files. Preserve exact asset
+bytes, metadata, HEAD/Range, cache and CSP behavior. Keep the raw bundle check,
+packed-manifest sync and both Bazel and Node-less build paths aligned.
+
 - `make dashboard-check` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
   `internal/api/dashboardspa/`, or generated dashboard types. It runs the

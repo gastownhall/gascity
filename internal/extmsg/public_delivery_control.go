@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 const (
-	publicCancelKey        = "gc.extmsg.cancel_requested"
-	publicChangePendingKey = "gc.extmsg.delivery_change_pending"
+	publicCancelKey        = beadmeta.ExtMsgCancelRequestedMetadataKey
+	publicChangePendingKey = beadmeta.ExtMsgDeliveryChangePendingMetadataKey
 )
 
 // PublicDeliveryState describes handoff to GC's Sessions lane, not model work.

@@ -30,6 +30,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/extmsg",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/events",
         "//internal/opjournal",

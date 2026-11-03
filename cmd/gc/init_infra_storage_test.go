@@ -318,3 +318,53 @@ func TestNativeInfrastructureDryRunDoesNotProvisionPendingCity(t *testing.T) {
 		t.Fatal("dry run changed config")
 	}
 }
+
+func TestNativeInfrastructureWitnessUsesCanonicalBindingPrefix(t *testing.T) {
+	city, _, plan := nativeInfrastructureFixture(t)
+	want, err := infraBindingIDPrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Prefix != want {
+		t.Fatalf("initializer prefix = %q, want canonical binding prefix %q", plan.Prefix, want)
+	}
+	path := initInfrastructurePath(city)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := readInitInfrastructurePlan(fsys.OSFS{}, city)
+	if err != nil || recovered == nil || *recovered != plan {
+		t.Fatalf("read existing witness = %+v, %v; want unchanged %+v", recovered, err, plan)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("read changed persisted owner/database/config identity bytes: %v", err)
+	}
+}
+
+func TestNativeInfrastructureForeignNamespaceRefusalPreservesIntent(t *testing.T) {
+	city, _, plan := nativeInfrastructureFixture(t)
+	for _, prefix := range []string{"gcs", "gcm", "foreign"} {
+		t.Run(prefix, func(t *testing.T) {
+			changed := plan
+			changed.Prefix = prefix
+			if err := saveInitInfrastructurePlan(fsys.OSFS{}, city, changed); err != nil {
+				t.Fatal(err)
+			}
+			path := initInfrastructurePath(city)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := readInitInfrastructurePlan(fsys.OSFS{}, city)
+			if err == nil || recovered != nil || !strings.Contains(err.Error(), "another reserved namespace") {
+				t.Fatalf("foreign namespace read = %+v, %v; want refusal", recovered, err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("refusal rewrote foreign intent: %v", err)
+			}
+		})
+	}
+}

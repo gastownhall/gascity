@@ -13,6 +13,17 @@ py_test(
     imports = ["."],
 )
 
+py_test(
+    name = "qualify_review_test",
+    size = "small",
+    srcs = [
+        "qualify_review.py",
+        "qualify_review_test.py",
+    ],
+    data = ["qualify-beginner"],
+    imports = ["."],
+)
+
 exports_files([
     "check-generated-in-sync.sh",
     "check-go-format.sh",

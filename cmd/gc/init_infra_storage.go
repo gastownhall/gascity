@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -118,8 +119,8 @@ func recordFreshInitInfrastructure(fs fsys.FS, city string, fresh bool) error {
 		return err
 	}
 	owner := hex.EncodeToString(id[:])
-	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
-	if !ok || prefix == "" {
+	prefix, err := infraBindingIDPrefix()
+	if err != nil {
 		return errors.New("graph infrastructure has no reserved prefix")
 	}
 	plan := initInfrastructurePlan{Version: 2, Owner: owner, Database: "gc_infra_" + owner, Prefix: prefix, ConfigSHA256: initInfrastructureHash(raw), PackSHA256: initInfrastructureHash(packRaw), ReadyConfigSHA256: initInfrastructureHash(initInfrastructureConfig(raw))}
@@ -190,8 +191,8 @@ func readInitInfrastructurePlan(fs fsys.FS, city string) (*initInfrastructurePla
 	if plan.Version != 2 || !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(plan.Owner) || plan.Database != "gc_infra_"+plan.Owner || plan.Prefix == "" || len(plan.ConfigSHA256) != 64 || len(plan.PackSHA256) != 64 || len(plan.ReadyConfigSHA256) != 64 {
 		return nil, errors.New("invalid infrastructure initialization intent; preserve it for recovery")
 	}
-	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
-	if !ok || plan.Prefix != prefix {
+	prefix, err := infraBindingIDPrefix()
+	if err != nil || plan.Prefix != prefix {
 		return nil, errors.New("infrastructure intent has another reserved namespace")
 	}
 	return &plan, nil
@@ -479,7 +480,7 @@ func verifyInitInfrastructure(ctx context.Context, workspace string, plan initIn
 		return beads.ErrGuardedBatchUnsupported
 	}
 	id := plan.Prefix + "-init-" + plan.Owner
-	probe := beads.Bead{ID: id, Title: "Gas City infrastructure readiness", Type: "event", Ephemeral: true, Metadata: map[string]string{"gc.init_owner": plan.Owner}}
+	probe := beads.Bead{ID: id, Title: "Gas City infrastructure readiness", Type: "event", Ephemeral: true, Metadata: map[string]string{beadmeta.InitOwner: plan.Owner}}
 	existing, err := store.Get(id)
 	if errors.Is(err, beads.ErrNotFound) {
 		if _, err = batcher.ApplyGuarded(ctx, beads.GuardedBatch{Reason: "native infrastructure readiness", Items: []beads.GuardedItem{{Create: &probe}}}); err != nil {
@@ -495,7 +496,7 @@ func verifyInitInfrastructure(ctx context.Context, workspace string, plan initIn
 	if err != nil {
 		return err
 	}
-	if existing.Metadata["gc.init_owner"] != plan.Owner {
+	if existing.Metadata[beadmeta.InitOwner] != plan.Owner {
 		return errors.New("readiness probe identity collision")
 	}
 	defer func() {
@@ -508,7 +509,7 @@ func verifyInitInfrastructure(ctx context.Context, workspace string, plan initIn
 				verifyErr = errors.Join(verifyErr, err)
 				continue
 			}
-			if row.Metadata["gc.init_owner"] != plan.Owner {
+			if row.Metadata[beadmeta.InitOwner] != plan.Owner {
 				verifyErr = errors.Join(verifyErr, errors.New("refusing to remove a foreign readiness row"))
 				continue
 			}

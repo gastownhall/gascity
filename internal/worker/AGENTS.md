@@ -79,6 +79,10 @@ when the context ends. Take the bound from the caller's own context.
   is `session.TurnEndUnreadError`, which withholds a restart on failure. That
   includes `ErrObservationOutstanding`, which every later check's own
   reading gets at once while one an earlier check left wedged is still out.
+  A locked Claude turn check may establish waiting from a current supported
+  approval with a native invocation identity. Its widget intentionally has an
+  indeterminate idle scan; that separate bounded observation lets the existing
+  interrupt cancel it. An unreadable or unbound interaction remains unknown.
   A read that decides which turn to act on, such as the lane interrupt's
   target, is `TurnHandle.FreshTurn`: `CurrentTurn` with its session load and
   runtime probes its own, under `fresh-` turn keys, so a shared read that

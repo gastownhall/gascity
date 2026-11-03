@@ -287,6 +287,7 @@ var soleMatchProbes = map[string]string{
 	".gc/control-plane.toml":           ".gc/control-plane.toml",
 	".gc/storage-served-binding.json":  ".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json":   ".gc/storage-infra-cleared.json",
+	".gc/init-infrastructure.json":     ".gc/init-infrastructure.json",
 	".gc/storage-attestations.log":     ".gc/storage-attestations.log",
 	".gc/reconciler-v2-fallback.json":  ".gc/reconciler-v2-fallback.json",
 	".gc/remote-stage.toml":            ".gc/remote-stage.toml",
@@ -634,5 +635,32 @@ func TestWorkDirExportEntriesErrors(t *testing.T) {
 	}
 	if _, err := WorkDirExportEntries(file); err == nil {
 		t.Error("file work dir: want error")
+	}
+}
+
+// The initialization witness belongs to the operator's workspace. Exporting it
+// would bind another host to this workspace's database identity and recovery
+// intent. Filtering an export must not remove or rewrite the original witness.
+func TestWorkDirExportExcludesInfrastructureInitializationWitness(t *testing.T) {
+	const witness = ".gc/init-infrastructure.json"
+	if !excludedByDefault(t, witness) {
+		t.Fatalf("%s is exported from a work dir", witness)
+	}
+	for _, rel := range []string{".gc/init-infrastructure.json.bak", ".gc/init-infrastructure", "init-infrastructure.json"} {
+		if excludedByDefault(t, rel) {
+			t.Errorf("%s is excluded; only the workspace witness itself is", rel)
+		}
+	}
+	workDir := t.TempDir()
+	writeExportTree(t, workDir, witness, ".gc/init-infrastructure.json.bak", ".gc/settings.json", "city.toml")
+	original := []byte(`{"owner":"owned-project","database":"owned-workspace","ready":true}`)
+	witnessPath := filepath.Join(workDir, filepath.FromSlash(witness))
+	if err := os.WriteFile(witnessPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertExportEntries(t, exportEntries(t, workDir), ".gc/init-infrastructure.json.bak", ".gc/settings.json", "city.toml")
+	retained, err := os.ReadFile(witnessPath)
+	if err != nil || string(retained) != string(original) {
+		t.Fatalf("export filtering changed the operator's initialization witness: %q, %v", retained, err)
 	}
 }

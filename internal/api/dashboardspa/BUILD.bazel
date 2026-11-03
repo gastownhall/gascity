@@ -3,6 +3,7 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_lib//lib:diff_test.bzl", "diff_test")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 # JavaScript tooling executes on the build worker even when the Go binary
 # targets another OS. Keep native optional dependencies (Rollup, esbuild) in
@@ -13,15 +14,15 @@ platform_transition_filegroup(
     target_platform = "//platforms:rbe_worker",
 )
 
-# dist/, as embed.go's `//go:embed all:dist` names it, from the Bazel build.
+# Raw canonical dist from the Bazel frontend build.
 copy_directory(
     name = "dist",
     src = ":worker_dist",
     out = "dist",
 )
 
-# The committed dist/ (what a Node-less `go build` embeds) must be exactly the
-# bundle the sources build to: byte-for-byte, file-for-file.
+# Raw canonical dist must remain exactly the bundle the sources build to:
+# byte-for-byte, file-for-file.
 copy_to_directory(
     name = "committed_dist",
     srcs = glob(["dist/**"]),
@@ -35,16 +36,70 @@ diff_test(
     file2 = ":dist",
 )
 
+# One deterministic compressed representation of the same canonical assets.
+py_binary(
+    name = "pack_assets",
+    srcs = ["pack_assets.py"],
+)
+
+genrule(
+    name = "asset_bundle",
+    srcs = [":dist"],
+    outs = ["generated/dist.bundle.json.gz"],
+    # Bazel exposes declared tree artifacts via sandbox symlinks. Materialize
+    # only this declared tree before the packer enforces its source-input rule.
+    cmd = "mkdir -p '$(@D)/asset-bundle-input' && cp -RL '$(location :dist)/.' '$(@D)/asset-bundle-input/' && $(location :pack_assets) --input '$(@D)/asset-bundle-input' --output '$@'",
+    tools = [":pack_assets"],
+)
+
+copy_to_directory(
+    name = "embedded",
+    srcs = [":asset_bundle"],
+    out = "embedded",
+    root_paths = ["internal/api/dashboardspa/generated"],
+)
+
+py_test(
+    name = "pack_assets_test",
+    srcs = [
+        "pack_assets.py",
+        "pack_assets_test.py",
+    ],
+    imports = ["."],
+)
+
+copy_to_directory(
+    name = "committed_packed_dist",
+    srcs = glob(["embedded/**"]),
+    root_paths = ["internal/api/dashboardspa/embedded"],
+)
+
+# Compare canonical manifests: gzip headers are fixed, and zlib implementation
+# differences must not obscure exact uncompressed asset equivalence.
+py_test(
+    name = "packed_dist_in_sync_test",
+    srcs = ["packed_dist_sync_test.py"],
+    args = [
+        "--committed=$(rootpath :committed_packed_dist)",
+        "--generated=$(rootpath :embedded)",
+    ],
+    data = [
+        ":committed_packed_dist",
+        ":embedded",
+    ],
+    main = "packed_dist_sync_test.py",
+)
+
 go_library(
     name = "dashboardspa",
     srcs = [
+        "compressed_fs.go",
         "embed.go",
         "handler.go",
     ],
-    # The SPA bundle built by Bazel (vite under rules_js), not the committed
-    # dist/ copy: //cmd/gc embeds what the sources build to. dist_in_sync_test
-    # keeps the committed copy (what a Node-less `go build` embeds) identical.
-    embedsrcs = [":dist"],  # keep
+    # Production embeds only compressed storage. Canonical raw dist remains
+    # covered by dist_in_sync_test and test-only embeds for byte equivalence.
+    embedsrcs = [":embedded"],  # keep
     importpath = "github.com/gastownhall/gascity/internal/api/dashboardspa",
     visibility = ["//:__subpackages__"],
 )
@@ -52,10 +107,13 @@ go_library(
 go_test(
     name = "dashboardspa_test",
     srcs = [
+        "asset_equivalence_test.go",
+        "compressed_fs_test.go",
         "handler_test.go",
         "testenv_import_test.go",
     ],
     embed = [":dashboardspa"],
+    embedsrcs = [":dist"],  # keep
     deps = ["//internal/testenv"],
 )
 

@@ -346,17 +346,17 @@ func TestNativeCodexBoundAnswerOpensAndUsesItsNativePanel(t *testing.T) {
 	}
 }
 
-func TestNativeCodexCompletedTurnDropsUnansweredQuestions(t *testing.T) {
+func TestNativeCodexAbortedTurnDropsUnansweredQuestions(t *testing.T) {
 	path := nativeQuestionRollout(t)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal := `{"type":"event_msg","payload":{"type":"task_complete"}}` + "\n"
+	terminal := `{"type":"event_msg","payload":{"type":"turn_aborted"}}` + "\n"
 	next := strings.ReplaceAll(string(data), "call-own-question", "call-next-turn")
 	questions, err := codexQuestionsIn(string(data) + terminal + next)
 	if err != nil || len(questions) != 1 || !strings.Contains(questions[0].requestID(), "call-next-turn") {
-		t.Fatalf("expired previous-turn question must not poison the next turn: %+v,%v", questions, err)
+		t.Fatalf("aborted previous-turn question must not poison the next turn: %+v,%v", questions, err)
 	}
 }
 

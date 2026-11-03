@@ -133,3 +133,61 @@ func TestCodexQuestionGlyphDoesNotPermitInputWithoutNativeIdentity(t *testing.T)
 		})
 	}
 }
+
+// Async question inputs stay queued after the model emits its current turn's
+// final answer. Observed on Codex0.162.1: task_complete followed the accepted
+// request while the native queue still showed two unanswered questions.
+func TestCodexAsyncQuestionRemainsBoundAfterModelTurnCompletes(t *testing.T) {
+	tm, ex := nativeQuestionTmux(t, codexQuestionGlyphNativeScreen)
+	path := codexGlyphQuestionRollout(t)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tm.codexRolloutHeld = func(int) string { return path }
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.RequestID != "tmux-codex-question-call-own-question-0" {
+		t.Fatalf("native async input was discarded at model turn completion: pending=%+v err=%v", pending, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("ordinary input must remain guarded while async question is queued: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestCodexCompletedAsyncQuestionStillRequiresMatchingLiveQueue(t *testing.T) {
+	for _, mode := range []string{"no queue", "count mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			pane := strings.ReplaceAll(codexQuestionGlyphNativeScreen, "• Queued follow-up inputs", "• Prior assistant output")
+			if mode == "count mismatch" {
+				pane = strings.ReplaceAll(codexQuestionGlyphNativeScreen, "? 1 question", "? 2 questions")
+			}
+			tm, ex := nativeQuestionTmux(t, pane)
+			path := codexGlyphQuestionRollout(t)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = append(data, []byte("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")...)
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tm.codexRolloutHeld = func(int) string { return path }
+			pending, err := tm.Pending("q")
+			if pending != nil {
+				t.Fatalf("unmatched async input exposed as answerable: %+v", pending)
+			}
+			if mode == "count mismatch" && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("queue mismatch was not refused: %v", err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: "tmux-codex-question-call-own-question-0", Action: "answer", Text: "Owl"}); err == nil {
+				t.Fatal("unmatched input was answered")
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}

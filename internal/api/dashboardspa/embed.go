@@ -1,11 +1,14 @@
 package dashboardspa
 
-import "embed"
+import (
+	_ "embed"
+	"io/fs"
+)
 
-// distFS holds the compiled Vite bundle for the dashboard SPA. The bundle is
-// produced by `npm run build` in web/ and copied to dist/ (committed so a
-// Node-less `go build` still yields a working dashboard). The `all:` prefix
-// captures dotfiles and nested asset directories under dist/.
+// Raw canonical dist stays in source control and is test-only embedded. The
+// binary stores one compressed manifest, decoded behind the same read-only FS.
 //
-//go:embed all:dist
-var distFS embed.FS
+//go:embed embedded/dist.bundle.json.gz
+var packedDist []byte
+
+var distFS fs.FS = &compressedDistFS{packed: packedDist}

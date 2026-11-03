@@ -1166,16 +1166,18 @@ docs-dev:
 DASHBOARD_WEB := internal/api/dashboardspa/web
 DASHBOARD_BAZEL_TARGETS := //internal/api/dashboardspa/... //internal/api/dashboardbff/...
 
-## dashboard-build: build the SPA bundle with Bazel and sync it into the committed dist/ (a Node-less `go build` embeds that copy)
+## dashboard-build: sync canonical raw dist and its compressed Node-less Go embedding from Bazel
 dashboard-build:
-	$(BAZEL) build $(BAZEL_FLAGS) --remote_download_outputs=toplevel //internal/api/dashboardspa:dist
-	rm -rf internal/api/dashboardspa/dist
+	$(BAZEL) build $(BAZEL_FLAGS) --remote_download_outputs=toplevel //internal/api/dashboardspa:dist //internal/api/dashboardspa:embedded
+	rm -rf internal/api/dashboardspa/dist internal/api/dashboardspa/embedded
 	cp -rfL bazel-bin/internal/api/dashboardspa/dist internal/api/dashboardspa/dist
-	chmod -R a-x,u+w,a+rX internal/api/dashboardspa/dist
+	cp -rfL bazel-bin/internal/api/dashboardspa/embedded internal/api/dashboardspa/embedded
+	chmod -R a-x,u+w,a+rX internal/api/dashboardspa/dist internal/api/dashboardspa/embedded
 
 ## dashboard-build-npm: the same bundle through a local npm install
 dashboard-build-npm:
 	cd $(DASHBOARD_WEB) && npm ci --silent && npm run build && rm -rf ../dist && cp -rf frontend/dist ../dist
+	python3 internal/api/dashboardspa/pack_assets.py --input internal/api/dashboardspa/dist --output internal/api/dashboardspa/embedded/dist.bundle.json.gz
 
 ## dashboard-generate-client: regenerate the typed API client from internal/api/openapi.json (openapi-ts under Bazel)
 dashboard-generate-client:

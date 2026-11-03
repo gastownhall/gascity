@@ -10,6 +10,7 @@ import argparse, atexit, datetime, hashlib, json, math, os, pathlib, re, socket
 import shlex, signal, subprocess, sys, time, urllib.request, uuid
 
 from qualify_process import run_logged
+from qualify_review import prove_review
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--gc', type=pathlib.Path, required=True, help='Exact candidate gc binary; companion must be beside it')
@@ -169,7 +170,9 @@ def wait_delivery(name, source, root, pause=False):
                 assert record["predecessor_sha"] == lessons[-1]["record"]["integrated_sha"], record
             if pause:
                 assert paused, "delivery finished before pause: interruption case is unqualified"
-            lessons.append({"lesson":name,"source":source,"workflow":root,"record":record,"source_created_at":s.get("created_at"),"source_closed_at":s.get("closed_at")})
+            review_proof = prove_review(base=base, city=city.name, city_root=city, source=source, root=root, record=record,
+                                        evidence=out/(name+"-review-proof"), deadline=began+1200)
+            lessons.append({"lesson":name,"source":source,"workflow":root,"record":record,"source_created_at":s.get("created_at"),"source_closed_at":s.get("closed_at"),"review_proof":review_proof})
             cmd(name+"-verified-status",["gc","tutorial","status","--lesson",name])
             return
         time.sleep(5)
