@@ -1067,3 +1067,127 @@ func TestBdWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testing.T) {
 		t.Fatalf("CachedList returned %d rows, want %d", len(cached), resident)
 	}
 }
+
+// unwitnessedVetoLedger is the smallest ledger on which BdStore.Ready's
+// work-outcome veto has something to do: bd-dependent is OPEN and unblocked in
+// bd's own column (its only blocker closed, which bd counts as satisfied), but
+// that blocker closed with gc.work_outcome=blocked, so the dependent must not be
+// offered. bd-free is the control both bd and the veto call ready.
+//
+//	bd-blocker (closed, outcome=blocked) <-- depType -- bd-dependent
+func unwitnessedVetoLedger(depType string, outcome map[string]string) *fakeBdLedger {
+	return &fakeBdLedger{rows: []bdLedgerRow{
+		{id: "bd-blocker", closed: true, metadata: outcome},
+		{id: "bd-dependent", deps: []Dep{{IssueID: "bd-dependent", DependsOnID: "bd-blocker", Type: depType}}},
+		{id: "bd-free"},
+	}}
+}
+
+var blockedOutcome = map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}
+
+// TestBdReadyVetoesBlockedOutcomeWhenTheProjectionIsNeverWitnessed is ga-t12rsn.
+//
+// filterReadyByWorkOutcome used to return its candidates untouched whenever
+// listIncludesCompleteDependencies() was false, which is indistinguishable from
+// "no blocked prerequisite exists". The witness only latches on a row whose
+// `blocks` edges bd COUNTED, so each shape below is a real way a ledger whose
+// edges are perfectly visible to bd never becomes witnessed (bd 1.3.2 projects
+// dependency_count on both `bd ready` and `bd list`, so the common case
+// self-witnesses; these are the cases that do not):
+//
+//   - waits-for / conditional-blocks: ready-blocking types dependency_count does
+//     not count, so a ledger whose only such edges are these can never witness.
+//   - a bd that omits dependency_count cannot testify, ever.
+//   - a bd whose count contradicts the edges it carried is proven short, and its
+//     inline edges cannot be trusted to be all of them.
+func TestBdReadyVetoesBlockedOutcomeWhenTheProjectionIsNeverWitnessed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func() *fakeBdLedger
+	}{
+		{"waits-for edge only", func() *fakeBdLedger { return unwitnessedVetoLedger("waits-for", blockedOutcome) }},
+		{"conditional-blocks edge only", func() *fakeBdLedger { return unwitnessedVetoLedger("conditional-blocks", blockedOutcome) }},
+		{"bd omits dependency_count", func() *fakeBdLedger {
+			ledger := unwitnessedVetoLedger("blocks", blockedOutcome)
+			ledger.omitDependencyCount = true
+			return ledger
+		}},
+		{"bd contradicts its own projection", func() *fakeBdLedger {
+			ledger := unwitnessedVetoLedger("blocks", blockedOutcome)
+			ledger.truncateDeps = map[string]bool{"bd-dependent": true}
+			return ledger
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := tc.build()
+			store := NewBdStore(t.TempDir(), ledger.run)
+
+			got, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+			if err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if store.listIncludesCompleteDependencies() {
+				t.Fatal("fixture error: the store witnessed the projection, so this case does not exercise the unwitnessed path")
+			}
+			if ids := sortedIDs(got); !equalIDs(ids, wantReadyIDs("bd-free")) {
+				t.Errorf("Ready = %v, want [bd-free]: bd-dependent's blocker closed with gc.work_outcome=blocked and the veto was skipped because the projection was unwitnessed", ids)
+			}
+		})
+	}
+}
+
+// TestBdReadyFailsLoudlyWhenAnUntrustedProjectionCannotBeCrossChecked is the
+// other half of the acceptance criterion: when the inline edges are known short
+// AND bd cannot hand them over any other way (maintainer-city's bd/Postgres
+// refuses `bd dep list`, ga-7i7ts), the bypass must be visible as an error, not
+// a clean-looking pass-through.
+func TestBdReadyFailsLoudlyWhenAnUntrustedProjectionCannotBeCrossChecked(t *testing.T) {
+	ledger := unwitnessedVetoLedger("blocks", blockedOutcome)
+	ledger.truncateDeps = map[string]bool{"bd-dependent": true}
+	ledger.depListRefusal = `exit status 1: Error: operation "IssueRelations" not supported by the postgres backend`
+	store := NewBdStore(t.TempDir(), ledger.run)
+
+	got, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+	if err == nil {
+		t.Fatalf("Ready = %v with no error: a short projection that cannot be cross-checked must not pass candidates through silently", sortedIDs(got))
+	}
+	if !strings.Contains(err.Error(), "blocking dependency outcomes") {
+		t.Errorf("Ready error = %v, want it to name the work-outcome check that could not run", err)
+	}
+}
+
+// TestBdReadyUnwitnessedStaysCheapAndDoesNotOverVeto pins criterion 3 from the cost
+// side: the fix must not turn an unwitnessed store into one that pays for
+// dependency or closed reads it has no reason to make.
+func TestBdReadyUnwitnessedStaysCheapAndDoesNotOverVeto(t *testing.T) {
+	t.Run("edge-free ledger spends only the ready read", func(t *testing.T) {
+		ledger := &fakeBdLedger{rows: []bdLedgerRow{{id: "bd-1"}, {id: "bd-2"}}}
+		store := NewBdStore(t.TempDir(), ledger.run)
+
+		got, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+		if err != nil {
+			t.Fatalf("Ready: %v", err)
+		}
+		if ids := sortedIDs(got); !equalIDs(ids, wantReadyIDs("bd-1", "bd-2")) {
+			t.Fatalf("Ready = %v, want both rows", ids)
+		}
+		if deps := ledger.callsNamed("dep"); len(deps) != 0 {
+			t.Errorf("an edge-free ledger spent dep reads %v", deps)
+		}
+		if closed := closedInclusiveReads(ledger.calls); len(closed) != 0 {
+			t.Errorf("an edge-free ledger spent closed reads %v", closed)
+		}
+	})
+
+	t.Run("a closed blocker without the blocked outcome still satisfies", func(t *testing.T) {
+		store := NewBdStore(t.TempDir(), unwitnessedVetoLedger("waits-for", nil).run)
+
+		got, err := store.Ready(ReadyQuery{TierMode: TierBoth})
+		if err != nil {
+			t.Fatalf("Ready: %v", err)
+		}
+		if ids := sortedIDs(got); !equalIDs(ids, wantReadyIDs("bd-dependent", "bd-free")) {
+			t.Errorf("Ready = %v, want bd-dependent offered: its closed blocker carries no blocked outcome", ids)
+		}
+	})
+}
