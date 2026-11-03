@@ -293,7 +293,16 @@ func releaseOrphanedPoolAssignments(
 	// Assignee. Same "retain rather than reap" principle as protectedWakeWork
 	// above (gc-ft31x): uncertainty about identity-string matching is not
 	// permission to reopen work with a live, self-reporting owner.
-	openCurrentlyProcessing := make(map[string]struct{}, len(openSessionInfos))
+	// Keyed by storeScopedBeadKey (mirroring protectedWakeWork above) rather
+	// than a bare bead ID: the same bead ID string can exist in more than one
+	// store, and an anchor stamped against one store's bead must not shield a
+	// same-ID bead living in another.
+	openCurrentlyProcessing := make(map[storeScopedBeadKey]struct{}, len(openSessionInfos))
+	legacyOpenCurrentlyProcessing := make(map[string]struct{}, len(openSessionInfos))
+	var claimRefs []string
+	if storeRefAware {
+		claimRefs = assignedWorkClaimRefs(cityPath, cfg, store)
+	}
 	for _, info := range openSessionInfos {
 		if info.Closed {
 			continue
@@ -301,8 +310,16 @@ func releaseOrphanedPoolAssignments(
 		for _, id := range sessionBeadAssigneeIdentitiesForConfigInfo(info, cfg) {
 			legacyOpenIdentifiers[id] = struct{}{}
 		}
-		if id := strings.TrimSpace(info.CurrentlyProcessingBeadID); id != "" {
-			openCurrentlyProcessing[id] = struct{}{}
+		id := strings.TrimSpace(info.CurrentlyProcessingBeadID)
+		if id == "" {
+			continue
+		}
+		if !storeRefAware {
+			legacyOpenCurrentlyProcessing[id] = struct{}{}
+			continue
+		}
+		for _, storeRef := range openSessionReachableStoreRefInfo(cityPath, cfg, claimRefs, info) {
+			openCurrentlyProcessing[storeScopedBeadKey{StoreRef: storeRef, ID: id}] = struct{}{}
 		}
 	}
 
@@ -337,7 +354,11 @@ func releaseOrphanedPoolAssignments(
 		// A live, open session that currently reports this exact bead as its
 		// anchor owns it regardless of what Assignee says — see
 		// openCurrentlyProcessing above (gascity#6362).
-		if _, ok := openCurrentlyProcessing[wb.ID]; ok {
+		if storeRefAware {
+			if _, ok := openCurrentlyProcessing[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok {
+				continue
+			}
+		} else if _, ok := legacyOpenCurrentlyProcessing[wb.ID]; ok {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
