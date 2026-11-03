@@ -4198,7 +4198,8 @@ path = "backend"
 prefix = "be"
 `)
 	site := "workspace_name = \"demo\"\nworkspace_prefix = \"demo\"\n\n[[rig]]\nname = \"frontend\"\npath = " +
-		strconv.Quote(filepath.Join(cityDir, "frontend")) + "\n"
+		strconv.Quote(filepath.Join(cityDir, "frontend")) + "\n\n[[rig]]\nname = \"backend\"\npath = " +
+		strconv.Quote(filepath.Join(cityDir, "backend")) + "\n"
 	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(site), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4349,4 +4350,54 @@ func TestConvoyCreateStoreDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConvoyCreateRigFlagConvoyAddTracksIssue: an empty convoy created
+// with an explicit --rig lands in that rig's store, so a later `gc convoy
+// add` of the rig's beads must succeed and record the tracks dependency
+// there — the workflow the misplaced city-store convoy broke.
+func TestConvoyCreateRigFlagConvoyAddTracksIssue(t *testing.T) {
+	cityDir := convoyRigFlagTestCity(t)
+	convoyID := convoyCreateRunJSON(t, []string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "frontend batch", "--json"})
+
+	rigStore, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, "frontend"), cityDir)
+	if err != nil {
+		t.Fatalf("openScopeLocalFileStoreForCity(frontend): %v", err)
+	}
+	human, err := rigStore.Create(beads.Bead{Title: "frontend issue"})
+	if err != nil {
+		t.Fatalf("create human issue: %v", err)
+	}
+	jsonIssue, err := rigStore.Create(beads.Bead{Title: "frontend json issue"})
+	if err != nil {
+		t.Fatalf("create json issue: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityDir, "convoy", "add", convoyID, human.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run convoy add %s = %d; stdout=%s stderr=%s", human.ID, code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Added "+human.ID+" to convoy "+convoyID) {
+		t.Fatalf("stdout = %q, want it to report adding %s to %s", stdout.String(), human.ID, convoyID)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--city", cityDir, "convoy", "add", convoyID, jsonIssue.ID, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run convoy add %s --json = %d; stdout=%s stderr=%s", jsonIssue.ID, code, stdout.String(), stderr.String())
+	}
+	var added struct {
+		ConvoyID string   `json:"convoy_id"`
+		IssueIDs []string `json:"issue_ids"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &added); err != nil || added.ConvoyID != convoyID || len(added.IssueIDs) != 1 || added.IssueIDs[0] != jsonIssue.ID {
+		t.Fatalf("stdout is not a convoy add JSON result for %s: %v\n%s", jsonIssue.ID, err, stdout.String())
+	}
+
+	verifyStore, err := openStoreAtForCity(filepath.Join(cityDir, "frontend"), cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(frontend): %v", err)
+	}
+	requireConvoyTrack(t, verifyStore, convoyID, human.ID)
+	requireConvoyTrack(t, verifyStore, convoyID, jsonIssue.ID)
 }
