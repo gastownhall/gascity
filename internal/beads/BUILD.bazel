@@ -43,6 +43,9 @@ go_library(
         "@rules_go//go/platform:linux": [
             "@org_golang_x_sys//unix",
         ],
+        "@rules_go//go/platform:windows": [
+            "//internal/platform/filelock",
+        ],
         "//conditions:default": [],
     }),
 )
@@ -52,6 +55,7 @@ go_test(
     srcs = [
         "absent_blocked_test.go",
         "atomic_close_memstore_test.go",
+        "batchfile_windows_test.go",
         "bdsql_relocation_internal_test.go",
         "bdstore_assignee_fanout_test.go",
         "bdstore_batch_test.go",
