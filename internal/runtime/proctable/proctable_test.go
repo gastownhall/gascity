@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // entryErrors builds per-entry failures for pids the way a scan does: one
@@ -137,5 +139,95 @@ func TestScanErrorShapeIgnoresCountsAndPIDs(t *testing.T) {
 	}
 	if ScanErrorShape(b) == ScanErrorShape(c) || ScanErrorShape(b) == ScanErrorShape(d) {
 		t.Fatal("a new kind, or a whole-scan failure, left the shape unchanged")
+	}
+}
+
+// entryScanError is a scan error of one unreadable entry per pid, each
+// failing as format (with %d for its pid) describes.
+func entryScanError(format string, pids ...int) error {
+	return entryErrors(pids, func(pid int) error { return fmt.Errorf(format, pid) })
+}
+
+// TestScanErrorLogPacesUnreadableEntries (mc-ygved, ga-zpcphq): a zero-value
+// ScanErrorLog reports a scan of unreadable entries once per shape, again
+// after ScanErrorLogRepeat or when the shape changes, per key; a failure of
+// the whole scan is reported every time.
+func TestScanErrorLogPacesUnreadableEntries(t *testing.T) {
+	var l ScanErrorLog
+	t0 := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	perm := entryScanError("reading environ for pid %d: permission denied", 11, 12)
+	owner := "reading owner for pid %d: no such device"
+	steps := []struct {
+		name string
+		key  string
+		err  error
+		at   time.Time
+		want bool
+	}{
+		{"first", "/c", perm, t0, true},
+		{"same shape, other pids and count", "/c", entryScanError("reading environ for pid %d: permission denied", 13, 14, 15), t0.Add(time.Minute), false},
+		{"another key", "/d", perm, t0.Add(time.Minute), true},
+		{"a new kind", "/c", entryScanError(owner, 16), t0.Add(2 * time.Minute), true},
+		{"the new kind again", "/c", entryScanError(owner, 17), t0.Add(3 * time.Minute), false},
+		{"just inside the repeat window", "/c", entryScanError(owner, 18), t0.Add(2*time.Minute + ScanErrorLogRepeat - time.Nanosecond), false},
+		{"after the repeat window", "/c", entryScanError(owner, 18), t0.Add(2*time.Minute + ScanErrorLogRepeat), true},
+		{"a whole-scan failure", "/c", errors.New("enumerating /proc: permission denied"), t0.Add(13 * time.Minute), true},
+		{"the whole-scan failure again", "/c", errors.New("enumerating /proc: permission denied"), t0.Add(13*time.Minute + time.Second), true},
+		{"a whole-scan failure joined with entries", "/c", errors.Join(errors.New("listing sessions: server gone"), perm), t0.Add(13*time.Minute + 2*time.Second), true},
+	}
+	for _, s := range steps {
+		if got := l.Report(s.key, s.err, s.at); got != s.want {
+			t.Fatalf("%s: Report = %t, want %t", s.name, got, s.want)
+		}
+	}
+	if ScanErrorLogRepeat != 10*time.Minute {
+		t.Fatalf("ScanErrorLogRepeat = %v, want ten minutes", ScanErrorLogRepeat)
+	}
+}
+
+// TestScanErrorLogInstancesAreIndependent (ga-zpcphq): the orphan sweep and
+// the pre-start scan each keep their own ScanErrorLog, so one's report for a
+// city never suppresses the other's.
+func TestScanErrorLogInstancesAreIndependent(t *testing.T) {
+	var sweep, start ScanErrorLog
+	t0 := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	perm := entryScanError("reading environ for pid %d: permission denied", 11)
+	if !sweep.Report("/c", perm, t0) {
+		t.Fatal("sweep: first Report = false, want true")
+	}
+	if !start.Report("/c", perm, t0.Add(time.Second)) {
+		t.Fatal("start: first Report after the sweep's = false, want true")
+	}
+	if sweep.Report("/c", perm, t0.Add(2*time.Second)) || start.Report("/c", perm, t0.Add(2*time.Second)) {
+		t.Fatal("a repeat within the window was reported, want each log to suppress its own repeat")
+	}
+}
+
+// TestScanErrorLogConcurrentReports (ga-zpcphq): concurrent first reports of
+// one shape on a zero-value ScanErrorLog report it exactly once.
+func TestScanErrorLogConcurrentReports(t *testing.T) {
+	var l ScanErrorLog
+	t0 := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	perm := entryScanError("reading environ for pid %d: permission denied", 11)
+	const callers = 16
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		reported int
+	)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if l.Report("/c", perm, t0) {
+				mu.Lock()
+				reported++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if reported != 1 {
+		t.Fatalf("%d concurrent callers reported %d times, want once", callers, reported)
 	}
 }
