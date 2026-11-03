@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -1190,17 +1191,17 @@ func TestEveryControllerSubtreeCloseReadsAsAControllerClose(t *testing.T) {
 		close func(t *testing.T, store beads.Store, rootID string)
 	}{
 		{"sling attachment of a molecule (molecule.CloseSubtree)", func(t *testing.T, store beads.Store, rootID string) {
-			if _, err := molecule.CloseSubtree(store, rootID); err != nil {
+			if _, err := molecule.CloseSubtree(beadstest.GraphMolecule(store), rootID); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{"sling, gc formula, drain teardown, workflow attachment (sourceworkflow.CloseWorkflowSubtree)", func(t *testing.T, store beads.Store, rootID string) {
-			if _, err := sourceworkflow.CloseWorkflowSubtree(store, rootID); err != nil {
+			if _, err := sourceworkflow.CloseWorkflowSubtree(beadstest.GraphMolecule(store), rootID); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{"wisp GC repair of a closed root", func(t *testing.T, store beads.Store, rootID string) {
-			if _, err := molecule.CloseSubtreeWithMetadata(store, rootID, map[string]string{
+			if _, err := molecule.CloseSubtreeWithMetadata(beadstest.GraphMolecule(store), rootID, map[string]string{
 				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 			}); err != nil {
@@ -1212,7 +1213,7 @@ func TestEveryControllerSubtreeCloseReadsAsAControllerClose(t *testing.T) {
 		{"gc hook --claim skip of a done workflow (closes by gc.root_bead_id)", closeByRootWith(sourceworkflow.HookSkipDoneWorkflowCloseReason)},
 		{"order-tracking sweep of a stale order wisp subtree", closeByRootWith(sourceworkflow.StaleOrderWispCloseReason)},
 		{"POST /runs/{id}/cancel", func(t *testing.T, store beads.Store, rootID string) {
-			if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(store, rootID, beadmeta.OutcomeCanceled,
+			if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(beadstest.GraphMolecule(store), rootID, beadmeta.OutcomeCanceled,
 				sourceworkflow.RunCanceledCloseReason, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -1700,7 +1701,7 @@ func TestATeardownClosedGateIsJudgedAfreshWhenItsDrainIsRevived(t *testing.T) {
 		if _, err := ReleaseCrossStoreGates(graph, resolver); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := molecule.CloseMembersWithMetadataExcept(graph, []beads.Bead{mustGetBead(t, graph, gateID)}, map[string]string{
+		if _, err := molecule.CloseMembersWithMetadataExcept(beadstest.GraphMolecule(graph), []beads.Bead{mustGetBead(t, graph, gateID)}, map[string]string{
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
 			"close_reason":              reason,
 		}, nil); err != nil {
@@ -1773,7 +1774,7 @@ func TestARevivedCanceledRunHoldsItsItemBehindAnOpenCrossRigBlocker(t *testing.T
 	rootID := drain.Metadata[beadmeta.RootBeadIDMetadataKey]
 	manifest := mustDrainManifest(t, mustGetBead(t, graph, drain.ID))
 	itemIDs := itemWorkflowBeadIDs(t, graph, manifest.Rows[0].ItemRootID)
-	if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(graph, rootID, beadmeta.OutcomeCanceled, sourceworkflow.RunCanceledCloseReason,
+	if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(beadstest.GraphMolecule(graph), rootID, beadmeta.OutcomeCanceled, sourceworkflow.RunCanceledCloseReason,
 		map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1879,7 +1880,7 @@ func TestAnOperatorReopenedOverriddenGateIsJudgedAfreshAfterATeardown(t *testing
 					if g.Status != "open" || g.Metadata[beadmeta.CrossStoreGateStateMetadataKey] == CrossStoreGateStateOverridden || g.Metadata["close_reason"] != "" {
 						t.Fatalf("reopened gate = %s %v; want the leftover override and its reason cleared", g.Status, g.Metadata)
 					}
-					if _, err := molecule.CloseMembersWithMetadataExcept(graph, []beads.Bead{g}, map[string]string{
+					if _, err := molecule.CloseMembersWithMetadataExcept(beadstest.GraphMolecule(graph), []beads.Bead{g}, map[string]string{
 						beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
 						"close_reason":              sourceworkflow.RunCanceledCloseReason,
 					}, nil); err != nil {

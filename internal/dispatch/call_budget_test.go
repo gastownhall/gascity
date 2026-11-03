@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -294,14 +295,14 @@ func runCallBudgetMolecule(t *testing.T, workOutcome, failFirstAttemptOf string)
 		t.Fatalf("writing formula: %v", err)
 	}
 	inner := newBdClosePolicyStore()
-	cooked, err := molecule.Cook(context.Background(), inner, "call-budget", []string{dir}, molecule.Options{})
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(inner), "call-budget", []string{dir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
 	rootID := cooked.RootID
 	// Production decorates every graph bead with the store ref of its root,
 	// which arms ProcessControl's root gate; the cooked fixture has none.
-	members, err := molecule.ListSubtree(inner, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(inner), rootID)
 	if err != nil {
 		t.Fatalf("listing cooked members: %v", err)
 	}
@@ -334,7 +335,7 @@ max_active_sessions = 1
 	failed := false
 	const maxRounds = 80
 	for round := 0; round < maxRounds; round++ {
-		members, err := molecule.ListSubtree(inner, rootID)
+		members, err := molecule.ListSubtree(beadstest.GraphMolecule(inner), rootID)
 		if err != nil {
 			t.Fatalf("listing molecule members: %v", err)
 		}
@@ -545,12 +546,12 @@ func callBudgetCrashScenario(name, formulaDir, workOutcome string) crashScenario
 		name: name,
 		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
 			store := newBdClosePolicyStore()
-			cooked, err := molecule.Cook(context.Background(), store, "call-budget", []string{formulaDir}, molecule.Options{})
+			cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "call-budget", []string{formulaDir}, molecule.Options{})
 			if err != nil {
 				t.Fatalf("Cook: %v", err)
 			}
 			rootID := cooked.RootID
-			members, err := molecule.ListSubtree(store, rootID)
+			members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 			if err != nil {
 				t.Fatalf("listing cooked members: %v", err)
 			}
@@ -566,7 +567,7 @@ func callBudgetCrashScenario(name, formulaDir, workOutcome string) crashScenario
 				ledger:   []*beads.MemStore{store.MemStore},
 				dispatch: wrap(store),
 				work: func(t *testing.T) bool {
-					members, err := molecule.ListSubtree(store, rootID)
+					members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 					if err != nil {
 						t.Fatalf("listing molecule members: %v", err)
 					}

@@ -420,7 +420,7 @@ func drainMemberDepStore(store beads.Store, memberID string, opts ProcessOptions
 // to the single convoycore.Members call it replaces, byte for byte.
 func drainConvoyMembers(store beads.Store, convoyID string, opts ProcessOptions) ([]beads.Bead, error) {
 	if len(opts.MemberStores) == 0 {
-		return convoycore.Members(store, convoyID, false)
+		return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, false)
 	}
 	topo, err := drainResidency(store, opts)
 	if err != nil {
@@ -434,9 +434,15 @@ func drainConvoyMembers(store beads.Store, convoyID string, opts ProcessOptions)
 	// the second copy of a member id outright, and this merge needs to SEE it —
 	// a placeholder recorded by the leg that answered first must still yield to
 	// the real bead another leg records.
+	// MemberStores is the work-class store tail (its ProcessOptions doc); T5b
+	// types it.
+	memberWork := make([]beads.WorkStore, 0, len(opts.MemberStores))
+	for _, member := range opts.MemberStores {
+		memberWork = append(memberWork, beads.WorkStore{Store: member})
+	}
 	union, err := storeref.Union[beads.Bead](plan, nil,
 		func(leg storeref.Leg) ([]beads.Bead, error) {
-			return convoycore.Members(leg.Store, convoyID, false, opts.MemberStores...)
+			return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: leg.Store}, Work: memberWork}, convoyID, false)
 		})
 	if err != nil {
 		return nil, err
@@ -1464,7 +1470,7 @@ func reloadDrainUnitConvoy(store beads.Store, unitConvoyID string, opts ProcessO
 
 func ensureDrainUnitTrack(store beads.Store, controlID, unitConvoyID string, member beads.Bead) error {
 	memberID := strings.TrimSpace(member.ID)
-	hasTrack, err := convoycore.HasTrack(store, unitConvoyID, memberID)
+	hasTrack, err := convoycore.HasTrack(beads.WorkStore{Store: store}, unitConvoyID, memberID)
 	if err != nil {
 		return fmt.Errorf("%s: checking unit convoy %s track for member %s: %w", controlID, unitConvoyID, memberID, err)
 	}
@@ -1481,16 +1487,18 @@ func trackDrainMember(store beads.Store, unitConvoyID string, member beads.Bead)
 	if convoycore.IsUnresolvedTrackedItem(member) {
 		return store.SetMetadata(unitConvoyID, beadmeta.DrainMemberUnresolvedMetadataKey, "true")
 	}
-	return convoycore.TrackItem(store, unitConvoyID, member.ID)
+	return convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, unitConvoyID, member.ID)
 }
 
 func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, count int, row *drainManifestRow, itemFormula string, parentVars map[string]string, blockerIDs []string, opts ProcessOptions) (string, bool, error) {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	unlock := graphv2.LockKey(row.ItemRootKey)
 	defer unlock()
 	if err := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); err != nil {
 		return "", false, err
 	}
-	existing, err := sourceworkflow.KeyedRoots(store, beadmeta.ItemRootKeyMetadataKey, row.ItemRootKey, beads.IncludeClosed, beads.WithBothTiers)
+	existing, err := sourceworkflow.KeyedRoots(storeMolecule, beadmeta.ItemRootKeyMetadataKey, row.ItemRootKey, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
 	}
@@ -1537,7 +1545,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	if err != nil {
 		return "", false, fmt.Errorf("%s: loading workflow root %q for drain item launch metadata: %w", control.ID, runRootID, err)
 	}
-	result, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{
+	result, err := molecule.Instantiate(context.Background(), storeMolecule, recipe, molecule.Options{
 		Vars:             runtimeVars,
 		ExternalDeps:     drainWorkflowExternalDeps(recipe, blockerIDs),
 		PriorityOverride: member.Priority,
@@ -1605,11 +1613,13 @@ func drainItemRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[st
 }
 
 func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string) error {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	itemRootKey = strings.TrimSpace(itemRootKey)
 	if store == nil || itemRootKey == "" {
 		return nil
 	}
-	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.ItemRootKeyMetadataKey, itemRootKey, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(storeMolecule, beadmeta.ItemRootKeyMetadataKey, itemRootKey, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("%s: looking up failed drain item roots for key %s: %w", controlID, itemRootKey, err)
 	}
@@ -1617,7 +1627,7 @@ func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string)
 		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
-		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
+		if _, err := sourceworkflow.CloseWorkflowSubtree(storeMolecule, root.ID); err != nil {
 			return fmt.Errorf("%s: closing failed drain item root %s: %w", controlID, root.ID, err)
 		}
 	}
@@ -2019,7 +2029,8 @@ func closeOpenDrainItemRoots(store beads.Store, manifest *drainManifest, failure
 		row.OutcomeBead = rootID
 		row.OutcomeKind = beadmeta.OutcomeFail
 		row.Failure = failureReason
-		if _, err := sourceworkflow.CloseWorkflowSubtree(store, rootID); err != nil {
+		// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		if _, err := sourceworkflow.CloseWorkflowSubtree(beads.GraphMolecule(beads.GraphStore{Store: store}), rootID); err != nil {
 			return fmt.Errorf("closing drain item workflow subtree %s: %w", rootID, err)
 		}
 		if err := store.SetMetadataBatch(rootID, map[string]string{
