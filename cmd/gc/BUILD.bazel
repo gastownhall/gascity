@@ -518,6 +518,8 @@ go_library(
         "prime_auto_handoff_inject.go",
         "probe_template.go",
         "process_failpoint.go",
+        "process_signal.go",
+        "process_unix.go",
         "productmetrics_adapter.go",
         "productmetrics_adapter_production.go",
         "productmetrics_child_env.go",
