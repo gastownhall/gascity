@@ -81,6 +81,7 @@ go_test(
     srcs = [
         "activity_poke_integration_test.go",
         "activity_poke_test.go",
+        "adapter_orphan_scan_linux_test.go",
         "adapter_test.go",
         "adapter_unit_test.go",
         "agent_slice_test.go",
