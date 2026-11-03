@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -98,6 +99,95 @@ func TestReconcileSessionBeads_RestartRequestOnDeadSessionEmitsNoStoppedEvent(t 
 
 	if got := stoppedEventsFor(rec, session.ID); len(got) != 0 {
 		t.Fatalf("session.stopped events for a dead session = %d, want 0: %#v", len(got), got)
+	}
+}
+
+// liveNamedSessionBead creates a named-session bead whose runtime is running in sp.
+func liveNamedSessionBead(t *testing.T, store beads.Store, sp *runtime.Fake, sessionName string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  sessionName,
+		Type:   "session",
+		Status: "open",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"template":                   "worker",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "reviewer",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	return b
+}
+
+// Stopping a live runtime before a session-bead mutation (duplicate retire,
+// removed-named retire) records the stop; both the raw and the Info form.
+func TestStopRuntimeBeforeSessionBeadMutationRecordsStoppedEvent(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	rec := events.NewFake()
+	b := liveNamedSessionBead(t, store, sp, "s-live")
+
+	if !stopRuntimeBeforeSessionBeadMutation(t.TempDir(), store, sp, nil, b, "removed named session", rec, nil) {
+		t.Fatal("stop returned false")
+	}
+	got := stoppedEventsFor(rec, b.ID)
+	if len(got) != 1 || got[0].Subject != "s-live" || !strings.Contains(got[0].Message, "removed named session") {
+		t.Fatalf("raw form events = %#v, want one session.stopped naming s-live and the reason", rec.Events)
+	}
+
+	infoRec := events.NewFake()
+	b2 := liveNamedSessionBead(t, store, sp, "s-live-info")
+	if !stopRuntimeBeforeSessionBeadMutationInfo(t.TempDir(), store, sp, nil, sessionInfoFromBead(b2), "duplicate named session", infoRec, nil) {
+		t.Fatal("info stop returned false")
+	}
+	if got := stoppedEventsFor(infoRec, b2.ID); len(got) != 1 || got[0].Subject != "s-live-info" {
+		t.Fatalf("info form events = %#v, want one session.stopped naming s-live-info", infoRec.Events)
+	}
+}
+
+// A runtime that is not running is not killed, so the helper records nothing.
+func TestStopRuntimeBeforeSessionBeadMutationNotRunningRecordsNothing(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	rec := events.NewFake()
+	b := liveNamedSessionBead(t, store, sp, "s-dead")
+	if err := sp.Stop("s-dead"); err != nil {
+		t.Fatalf("stop runtime: %v", err)
+	}
+
+	if !stopRuntimeBeforeSessionBeadMutation(t.TempDir(), store, sp, nil, b, "removed named session", rec, nil) {
+		t.Fatal("stop returned false")
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("events = %#v, want none for a runtime that was not running", rec.Events)
+	}
+}
+
+// The removed-configured-named retire path (the sync path) names the stop.
+func TestRetireRemovedConfiguredNamedSessionBeadRecordsStoppedEvent(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	rec := events.NewFake()
+	city := t.TempDir()
+	b := liveNamedSessionBead(t, store, sp, "s-removed")
+
+	if !retireRemovedConfiguredNamedSessionBead(city, store, testSeatWork(city, nil, store, nil), sp, b, time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), rec, nil) {
+		t.Fatal("retire returned false")
+	}
+	if sp.IsRunning("s-removed") {
+		t.Fatal("runtime still running after retire")
+	}
+	if got := stoppedEventsFor(rec, b.ID); len(got) != 1 {
+		t.Fatalf("session.stopped events = %d, want 1: %#v", len(got), rec.Events)
 	}
 }
 
@@ -227,13 +317,17 @@ func listRecordsAfter(list []ast.Stmt, stmt ast.Stmt) bool {
 	return found
 }
 
-// nodeCallsRecord reports whether n contains a call to a method named Record.
+// nodeCallsRecord reports whether n contains a call to a method named Record or
+// to recordSessionBeadStop, the session-bead stop helpers' recorder.
 func nodeCallsRecord(n ast.Node) bool {
 	found := false
 	ast.Inspect(n, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Record" {
-				found = true
+			switch fun := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				found = found || fun.Sel.Name == "Record"
+			case *ast.Ident:
+				found = found || fun.Name == "recordSessionBeadStop"
 			}
 		}
 		return !found

@@ -625,7 +625,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	}
 	result := buildDesiredStateWithSessionBeadsAt(cfg.Workspace.Name, w.cityPath, now, now, cfg, w.sp, w.store, w.rigs, snap, nil, io.Discard)
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cfg.Workspace.Name, snap)
-	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, sw, result.State, w.sp, cfgNames, cfg, w.clk, io.Discard, true, snap, nil)
+	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, sw, result.State, w.sp, cfgNames, cfg, w.clk, nil, io.Discard, true, snap, nil)
 	if !reconcile {
 		return
 	}

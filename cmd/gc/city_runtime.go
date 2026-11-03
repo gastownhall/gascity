@@ -4385,6 +4385,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		cfgNames,
 		filteredCfg,
 		clock.Real{},
+		cr.rec,
 		cr.stderr,
 		true,
 		sessionBeads,
@@ -4584,7 +4585,7 @@ func (cr *CityRuntime) syncBeadsAndUpdateIndex(sw *SeatWork, desiredState map[st
 	store := cr.sessionsBeadStore()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
-		cr.cityPath, store, sw, desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads, recordPhase,
+		cr.cityPath, store, sw, desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.rec, cr.stderr, cr.sessionDrains != nil, sessionBeads, recordPhase,
 	)
 	return updated
 }

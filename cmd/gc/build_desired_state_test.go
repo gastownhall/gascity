@@ -5142,7 +5142,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	var syncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, beads.SessionStore{Store: store}, nil), dsResult.State,
-		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads, nil,
+		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, nil, &syncStderr, false, sessionBeads, nil,
 	)
 
 	// No duplicate was minted: exactly one open bead carries the created session_name.
@@ -5247,6 +5247,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		configuredSessionNames(cfg, "", store),
 		cfg,
 		clk,
+		nil,
 		&firstSyncStderr,
 		true,
 		nil,

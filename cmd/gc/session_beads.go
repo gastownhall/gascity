@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/hostboot"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -726,6 +727,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 	bySessionName map[string]beads.Bead,
 	indexBySessionName map[string]int,
 	now time.Time,
+	rec events.Recorder,
 	stderr io.Writer,
 ) []beads.Bead {
 	if store == nil || cfg == nil {
@@ -764,7 +766,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", rec, stderr) {
 				continue
 			}
 			batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
@@ -820,6 +822,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 	cityName string,
 	rows []session.ReconcileSession,
 	now time.Time,
+	rec events.Recorder,
 	stderr io.Writer,
 ) []session.ReconcileSession {
 	if store == nil || cfg == nil {
@@ -859,7 +862,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 			info := rows[idx].Info
 			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", rec, stderr) {
 				continue
 			}
 			batch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
@@ -936,12 +939,13 @@ func retireRemovedConfiguredNamedSessionBead(
 	sp runtime.Provider,
 	b beads.Bead,
 	now time.Time,
+	rec events.Recorder,
 	stderr io.Writer,
 ) bool {
 	if store == nil {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, nil, b, "removed named session", stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, nil, b, "removed named session", rec, stderr) {
 		return false
 	}
 	batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b)))
@@ -1784,6 +1788,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 	configuredNames map[string]bool,
 	cfg *config.City,
 	clk clock.Clock,
+	rec events.Recorder,
 	stderr io.Writer,
 	skipClose bool,
 	sessionBeads *sessionBeadSnapshot,
@@ -1974,7 +1979,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			openBeads[i].Status = "closed"
 		}
 		openBeads = retireDuplicateConfiguredNamedSessionBeads(
-			cityPath, store, sw, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, stderr,
+			cityPath, store, sw, sp, cfg, cityName, openBeads, bySessionName, indexBySessionName, now, rec, stderr,
 		)
 	}
 
@@ -2615,7 +2620,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 						fmt.Fprintf(stderr, "session beads: keeping %s: named identity %q matches %d configured named sessions (%s)\n", b.ID, identity, len(candidates), strings.Join(names, ", ")) //nolint:errcheck
 					} else {
-						if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, stderr) {
+						if retireRemovedConfiguredNamedSessionBead(cityPath, store, sw, sp, b, now, rec, stderr) {
 							if idx, ok := indexBySessionName[sn]; ok {
 								openBeads[idx].Status = "open"
 								if openBeads[idx].Metadata == nil {
@@ -4120,6 +4125,23 @@ func closeSeatIfRuntimeStopped(store beads.Store, sw *SeatWork, sp runtime.Provi
 	return closeSeat(store, sw, info, why, now, stderr)
 }
 
+// recordSessionBeadStop records the stop of a live runtime that a session-bead
+// retire or close just killed, so `gc events` shows the session going down. It
+// runs only on the path where the runtime was running and is now confirmed
+// stopped; a nil rec records nothing.
+func recordSessionBeadStop(rec events.Recorder, beadID, sessionName, reason string) {
+	if rec == nil {
+		return
+	}
+	rec.Record(events.Event{
+		Type:      events.SessionStopped,
+		Actor:     "gc",
+		Subject:   sessionName,
+		Message:   fmt.Sprintf("stopped live session before retiring its bead: %s", reason),
+		SessionID: beadID,
+	})
+}
+
 func stopRuntimeBeforeSessionBeadMutation(
 	cityPath string,
 	store beads.Store,
@@ -4127,6 +4149,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 	cfg *config.City,
 	b beads.Bead,
 	reason string,
+	rec events.Recorder,
 	stderr io.Writer,
 ) bool {
 	if stderr == nil {
@@ -4147,6 +4170,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, b.ID) //nolint:errcheck
 		return false
 	}
+	recordSessionBeadStop(rec, b.ID, sessionName, reason)
 	return true
 }
 
@@ -4161,6 +4185,7 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 	cfg *config.City,
 	info session.Info,
 	reason string,
+	rec events.Recorder,
 	stderr io.Writer,
 ) bool {
 	if stderr == nil {
@@ -4181,6 +4206,7 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): still running after stop\n", reason, sessionName, info.ID) //nolint:errcheck
 		return false
 	}
+	recordSessionBeadStop(rec, info.ID, sessionName, reason)
 	return true
 }
 

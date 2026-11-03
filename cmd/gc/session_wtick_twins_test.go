@@ -173,8 +173,8 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := wtickSessionBead("s-stop", tc.meta)
 			var rawErr, infoErr bytes.Buffer
-			raw := stopRuntimeBeforeSessionBeadMutation(testCity, nil, tc.sp, nil, b, "duplicate", &rawErr)
-			info := stopRuntimeBeforeSessionBeadMutationInfo(testCity, nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
+			raw := stopRuntimeBeforeSessionBeadMutation(testCity, nil, tc.sp, nil, b, "duplicate", nil, &rawErr)
+			info := stopRuntimeBeforeSessionBeadMutationInfo(testCity, nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", nil, &infoErr)
 			if raw != info {
 				t.Fatalf("stop-runtime diverged: raw=%v info=%v", raw, info)
 			}
@@ -286,7 +286,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 				indexBySessionName[sn] = i
 			}
 		}
-		retireDuplicateConfiguredNamedSessionBeads(city, store, testSeatWork(city, cfg, store, nil), sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
+		retireDuplicateConfiguredNamedSessionBeads(city, store, testSeatWork(city, cfg, store, nil), sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil, nil)
 	}
 	runRows := func(store beads.Store, sp *runtime.Fake) {
 		rowBeads := loadOpen(t, store)
@@ -294,7 +294,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		for i, b := range rowBeads {
 			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
-		retireDuplicateConfiguredNamedSessionRows(city, store, testSeatWork(city, cfg, store, nil), sp, cfg, cityName, rows, now, nil)
+		retireDuplicateConfiguredNamedSessionRows(city, store, testSeatWork(city, cfg, store, nil), sp, cfg, cityName, rows, now, nil, nil)
 	}
 
 	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {

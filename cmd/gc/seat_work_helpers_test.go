@@ -158,7 +158,7 @@ func syncSessionBeads(
 	skipClose bool,
 ) map[string]string {
 	openIndex, _ := syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, store, nil), desiredState, sp, configuredNames, cfg, clk, stderr, skipClose, nil, nil,
+		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, store, nil), desiredState, sp, configuredNames, cfg, clk, nil, stderr, skipClose, nil, nil,
 	)
 	return openIndex
 }
@@ -174,6 +174,6 @@ func syncSessionBeadsWithSnapshot(
 	sessionBeads *sessionBeadSnapshot,
 ) (map[string]string, *sessionBeadSnapshot) {
 	return syncSessionBeadsWithSnapshotAndRigStores(
-		"", beads.SessionStore{Store: store}, testSeatWork("", cfg, store, nil), desiredState, sp, configuredNames, cfg, clk, stderr, false, sessionBeads, nil,
+		"", beads.SessionStore{Store: store}, testSeatWork("", cfg, store, nil), desiredState, sp, configuredNames, cfg, clk, nil, stderr, false, sessionBeads, nil,
 	)
 }

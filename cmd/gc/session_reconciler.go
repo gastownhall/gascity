@@ -2087,7 +2087,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// rows, returning the folded row set (retired losers carry their retire batch).
 	if cfg != nil {
 		rows = retireDuplicateConfiguredNamedSessionRows(
-			cityPath, store, sw, sp, cfg, cityName, rows, clk.Now().UTC(), stderr,
+			cityPath, store, sw, sp, cfg, cityName, rows, clk.Now().UTC(), rec, stderr,
 		)
 	}
 	recordPhase(TraceSiteSessionReconcileHealRetire, "session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{
@@ -3733,6 +3733,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
+					// The kill is a fact whether or not the handoff below lands:
+					// record it here, before any later step can continue past it.
+					rec.Record(events.Event{
+						Type:      events.SessionStopped,
+						Actor:     "gc",
+						Subject:   tp.DisplayName(),
+						Message:   "restart requested: stopped live session",
+						SessionID: id,
+					})
 				}
 				if identity := namedSessionIdentityInfo(infoByID[id]); identity != "" {
 					if err := resetSessionCircuitBreakerState(store, id, identity, cb); err != nil {

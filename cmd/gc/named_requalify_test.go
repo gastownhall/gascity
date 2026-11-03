@@ -364,7 +364,7 @@ func requalifyDaemonTickWith(t *testing.T, cityPath string, cfg *config.City, st
 	ds := buildDesiredStateWithSessionBeads(cityName, cityPath, clk.Now().UTC(), cfg, sp, store, rigStores, snapshot, nil, stderr)
 	cfgNames := configuredSessionNames(cfg, cityName, store)
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, store, rigStores), ds.State, sp, cfgNames, cfg, clk, stderr, true, nil, nil,
+		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, store, rigStores), ds.State, sp, cfgNames, cfg, clk, nil, stderr, true, nil, nil,
 	)
 	sessions, err := loadSessionBeads(store)
 	if err != nil {

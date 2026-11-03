@@ -2531,7 +2531,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	indexBySessionName := map[string]int{sessionName: 1}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		testCity, store, testSeatWork(testCity, cfg, store, nil), sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		testCity, store, testSeatWork(testCity, cfg, store, nil), sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), nil, io.Discard,
 	)
 
 	if !sp.IsRunning(sessionName) {
@@ -2659,7 +2659,7 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_StopFailureKeepsRuntimeOwner
 	}
 
 	retired := retireDuplicateConfiguredNamedSessionBeads(
-		testCity, store, testSeatWork(testCity, cfg, store, nil), sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+		testCity, store, testSeatWork(testCity, cfg, store, nil), sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), nil, io.Discard,
 	)
 
 	if !sp.IsRunning(loserSessionName) {
@@ -2718,7 +2718,7 @@ func TestRetireRemovedConfiguredNamedSessionBead_StopFailureKeepsRuntimeOwner(t 
 	}
 
 	var stderr bytes.Buffer
-	retired := retireRemovedConfiguredNamedSessionBead(testCity, store, testSeatWork(testCity, nil, store, nil), sp, b, now, &stderr)
+	retired := retireRemovedConfiguredNamedSessionBead(testCity, store, testSeatWork(testCity, nil, store, nil), sp, b, now, nil, &stderr)
 
 	if retired {
 		t.Fatal("retireRemovedConfiguredNamedSessionBead returned true after runtime stop failed")
@@ -9929,6 +9929,7 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresLeavesOrphanedSessionBeadOpenWh
 		map[string]bool{},
 		declaredRigsConfig("frontend"),
 		clk,
+		nil,
 		&stderr,
 		false,
 		nil,
@@ -9983,7 +9984,7 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresRecordsLoadExistingPhase(t *tes
 
 	var stderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
-		"", beads.SessionStore{Store: store}, testSeatWork("", nil, beads.SessionStore{Store: store}, nil), nil, sp, map[string]bool{}, nil, clk, &stderr, false, nil,
+		"", beads.SessionStore{Store: store}, testSeatWork("", nil, beads.SessionStore{Store: store}, nil), nil, sp, map[string]bool{}, nil, clk, nil, &stderr, false, nil,
 		recordPhase,
 	)
 
@@ -10035,7 +10036,7 @@ func TestSyncSessionBeadsWithSnapshotAndRigStoresRecordsLoadVisibleBySessionName
 
 	var stderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
-		"", beads.SessionStore{Store: store}, testSeatWork("", nil, beads.SessionStore{Store: store}, nil), desired, sp, allConfiguredDS(desired), nil, clk, &stderr, false, nil,
+		"", beads.SessionStore{Store: store}, testSeatWork("", nil, beads.SessionStore{Store: store}, nil), desired, sp, allConfiguredDS(desired), nil, clk, nil, &stderr, false, nil,
 		recordPhase,
 	)
 
@@ -10770,7 +10771,7 @@ func TestRetireRemovedConfiguredNamedSessionBeadClearsItsHolds(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	city := t.TempDir()
-	if !retireRemovedConfiguredNamedSessionBead(city, store, testSeatWork(city, nil, store, nil), runtime.NewFake(), b, time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), &stderr) {
+	if !retireRemovedConfiguredNamedSessionBead(city, store, testSeatWork(city, nil, store, nil), runtime.NewFake(), b, time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), nil, &stderr) {
 		t.Fatalf("retire refused: %s", stderr.String())
 	}
 	got, _ := store.Get(b.ID)
