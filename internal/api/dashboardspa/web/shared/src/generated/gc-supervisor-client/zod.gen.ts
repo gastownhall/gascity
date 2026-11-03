@@ -5658,6 +5658,24 @@ export const zTypedEventStreamEnvelopeRigProvisionProgress = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.async_start_discarded
+ */
+export const zTypedEventStreamEnvelopeSessionAsyncStartDiscarded = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zNoPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.async_start_discarded'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.cold_start_timeout
  */
 export const zTypedEventStreamEnvelopeSessionColdStartTimeout = z.object({
@@ -6605,6 +6623,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeRequestResultSessionMessage.extend({ type: z.literal('request.result.session.message') }),
     zTypedEventStreamEnvelopeRequestResultSessionSubmit.extend({ type: z.literal('request.result.session.submit') }),
     zTypedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
+    zTypedEventStreamEnvelopeSessionAsyncStartDiscarded.extend({ type: z.literal('session.async_start_discarded') }),
     zTypedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
     zTypedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),
@@ -8182,6 +8201,25 @@ export const zTypedTaggedEventStreamEnvelopeRigProvisionProgress = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.async_start_discarded
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zNoPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.async_start_discarded'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.cold_start_timeout
  */
 export const zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout = z.object({
@@ -9177,6 +9215,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeRequestResultSessionMessage.extend({ type: z.literal('request.result.session.message') }),
     zTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit.extend({ type: z.literal('request.result.session.submit') }),
     zTypedTaggedEventStreamEnvelopeRigProvisionProgress.extend({ type: z.literal('rig.provision.progress') }),
+    zTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded.extend({ type: z.literal('session.async_start_discarded') }),
     zTypedTaggedEventStreamEnvelopeSessionColdStartTimeout.extend({ type: z.literal('session.cold_start_timeout') }),
     zTypedTaggedEventStreamEnvelopeSessionConversationReset.extend({ type: z.literal('session.conversation_reset') }),
     zTypedTaggedEventStreamEnvelopeSessionCrashed.extend({ type: z.literal('session.crashed') }),

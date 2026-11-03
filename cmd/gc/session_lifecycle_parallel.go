@@ -2395,7 +2395,7 @@ func commitAsyncStartResultWithContext(
 	}()
 
 	refreshBegin := time.Now()
-	refreshed, refresh := refreshAsyncStartResult(result, store, stderr)
+	refreshed, refresh := refreshAsyncStartResult(result, store, rec, stderr)
 	commitRefreshElapsed := time.Since(refreshBegin)
 	// Carry the per-phase timings forward: refresh's elapsed time is
 	// commit-side, distinct from the start phases captured in
@@ -2535,7 +2535,7 @@ func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVe
 // TestRefreshAsyncStartRejectsNonSessionBead. candidate.info is refreshed to the
 // re-read Info; the prepared side (result.prepared.candidate.info) is the enqueue-time
 // twin the gates compare against.
-func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
+func refreshAsyncStartResult(result startResult, store beads.Store, rec events.Recorder, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
 	preparedInfo := result.prepared.candidate.info
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
 		return result, asyncStartRefreshVerdict{commit: true}
@@ -2561,7 +2561,15 @@ func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Wr
 			verdict.rollbackPendingCreate = true
 			return result, verdict
 		}
-		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
+		name := result.prepared.candidate.name()
+		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", name) //nolint:errcheck
+		rec.Record(events.Event{
+			Type:    events.SessionAsyncStartDiscarded,
+			Actor:   "controller",
+			Subject: name,
+			Message: fmt.Sprintf("session %q async start discarded: desired command changed during startup (prepared %q, persisted %q)",
+				name, strings.TrimSpace(result.prepared.candidate.tp.Command), strings.TrimSpace(currentInfo.Command)),
+		})
 		return result, verdict
 	}
 	if !asyncStartSessionStillCurrentInfo(preparedInfo, currentInfo) {

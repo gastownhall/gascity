@@ -8935,6 +8935,22 @@ type TypedEventStreamEnvelopeRigProvisionProgress struct {
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionAsyncStartDiscarded defines model for TypedEventStreamEnvelopeSessionAsyncStartDiscarded.
+type TypedEventStreamEnvelopeSessionAsyncStartDiscarded struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Actor            string                   `json:"actor"`
@@ -11049,6 +11065,23 @@ type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
 	Ts               time.Time                   `json:"ts"`
 	Type             string                      `json:"type"`
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded defines model for TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded.
+type TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
@@ -19508,6 +19541,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProg
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionAsyncStartDiscarded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionAsyncStartDiscarded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionAsyncStartDiscarded() (TypedEventStreamEnvelopeSessionAsyncStartDiscarded, error) {
+	var body TypedEventStreamEnvelopeSessionAsyncStartDiscarded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionAsyncStartDiscarded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionAsyncStartDiscarded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionAsyncStartDiscarded(v TypedEventStreamEnvelopeSessionAsyncStartDiscarded) error {
+	v.Type = "session.async_start_discarded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionAsyncStartDiscarded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionAsyncStartDiscarded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionAsyncStartDiscarded(v TypedEventStreamEnvelopeSessionAsyncStartDiscarded) error {
+	v.Type = "session.async_start_discarded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionColdStartTimeout() (TypedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedEventStreamEnvelopeSessionColdStartTimeout
@@ -21052,6 +21113,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
+	case "session.async_start_discarded":
+		return t.AsTypedEventStreamEnvelopeSessionAsyncStartDiscarded()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.conversation_reset":
@@ -23347,6 +23410,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigP
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded() (TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded(v TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded) error {
+	v.Type = "session.async_start_discarded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded(v TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded) error {
+	v.Type = "session.async_start_discarded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout() (TypedTaggedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
@@ -24891,6 +24982,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
+	case "session.async_start_discarded":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.conversation_reset":

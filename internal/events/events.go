@@ -675,6 +675,7 @@ var KnownEventTypes = []string{
 	SessionDemandClaimDivergence,
 	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
+	SessionAsyncStartDiscarded,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,

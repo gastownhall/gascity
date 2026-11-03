@@ -14861,6 +14861,7 @@
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
+            "session.async_start_discarded": "#/components/schemas/TypedEventStreamEnvelopeSessionAsyncStartDiscarded",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.conversation_reset": "#/components/schemas/TypedEventStreamEnvelopeSessionConversationReset",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
@@ -15146,6 +15147,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionAsyncStartDiscarded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout"
@@ -16900,6 +16904,7 @@
                 "session.demand_claim_divergence",
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
+                "session.async_start_discarded",
                 "session.conversation_reset",
                 "session.pending",
                 "session.pending_cleared",
@@ -19927,6 +19932,63 @@
         "title": "TypedEventStreamEnvelope rig.provision.progress",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionAsyncStartDiscarded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.async_start_discarded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.async_start_discarded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionColdStartTimeout": {
         "additionalProperties": false,
         "properties": {
@@ -22745,6 +22807,7 @@
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
+            "session.async_start_discarded": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.conversation_reset": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionConversationReset",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
@@ -23030,6 +23093,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout"
@@ -24895,6 +24961,7 @@
                 "session.demand_claim_divergence",
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
+                "session.async_start_discarded",
                 "session.conversation_reset",
                 "session.pending",
                 "session.pending_cleared",
@@ -28125,6 +28192,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope rig.provision.progress",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.async_start_discarded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.async_start_discarded",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionColdStartTimeout": {

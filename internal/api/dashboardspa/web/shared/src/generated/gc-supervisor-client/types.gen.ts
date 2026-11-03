@@ -6733,6 +6733,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'session.async_start_discarded';
+} & TypedEventStreamEnvelopeSessionAsyncStartDiscarded) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.conversation_reset';
@@ -8255,6 +8257,24 @@ export type TypedEventStreamEnvelopeRigProvisionProgress = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.async_start_discarded
+ */
+export type TypedEventStreamEnvelopeSessionAsyncStartDiscarded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.async_start_discarded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.cold_start_timeout
  */
 export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
@@ -9280,6 +9300,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'session.async_start_discarded';
+} & TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.conversation_reset';
@@ -10877,6 +10899,25 @@ export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
     subject?: string;
     ts: string;
     type: 'rig.provision.progress';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.async_start_discarded
+ */
+export type TypedTaggedEventStreamEnvelopeSessionAsyncStartDiscarded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.async_start_discarded';
     workflow?: WorkflowEventProjection;
 };
 

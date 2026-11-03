@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
@@ -79,7 +80,7 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 			},
 			outcome: "success",
 		}
-		_, verdict := refreshAsyncStartResult(result, store, ioDiscard{})
+		_, verdict := refreshAsyncStartResult(result, store, events.Discard, ioDiscard{})
 		if verdict.commit {
 			t.Fatal("refreshAsyncStartResult commit=true for a bead that failed the front-door session gate; want refresh-failed")
 		}
@@ -119,7 +120,7 @@ func TestRefreshAsyncStartRejectsNonSessionBead(t *testing.T) {
 			},
 			outcome: "success",
 		}
-		refreshed, verdict := refreshAsyncStartResult(result, store, ioDiscard{})
+		refreshed, verdict := refreshAsyncStartResult(result, store, events.Discard, ioDiscard{})
 		if !verdict.commit {
 			t.Fatal("refreshAsyncStartResult commit=false for a valid session bead; want proceed")
 		}
