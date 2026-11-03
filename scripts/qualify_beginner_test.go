@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -120,6 +121,75 @@ func TestBeginnerQualifierRefusesUnsafeCandidates(t *testing.T) {
 			}
 		})
 	}
+	t.Run("distinct runtime namespace", func(t *testing.T) {
+		base := t.TempDir()
+		baseline := filepath.Join(base, "bright-lights")
+		if err := os.Mkdir(baseline, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(baseline, "user-data")
+		if err := os.WriteFile(marker, []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(base, "candidate")
+		if err := os.Mkdir(candidate, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gc := filepath.Join(candidate, "gc")
+		writeExecutable(t, filepath.Join(candidate, "gc-osc7501"), "#!/bin/sh\nexit 37\n")
+		cities := map[string]bool{}
+		for _, parent := range []string{"first", "second"} {
+			// Matching work-directory basenames must still receive different
+			// tmux namespaces, even when profiles and supervisor ports differ.
+			work := filepath.Join(base, parent, "qualification")
+			capture := filepath.Join(base, parent+"-invocation.json")
+			writeExecutable(t, gc, fmt.Sprintf("#!/usr/bin/env python3\nimport json, os, sys\nwith open(%q, 'w') as f: json.dump({'args': sys.argv[1:], 'profile': os.environ['GC_HOME']}, f)\nsys.exit(37)\n", capture))
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+			if err := listener.Close(); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("python3", filepath.Join(repoRoot(t), "scripts", "qualify-beginner"), "--gc", gc, "--work-dir", work, "--port", port, "--docs-root", filepath.Join(repoRoot(t), "docs"), "--expected-commit", strings.Repeat("a", 40))
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "init exit=37") {
+				t.Fatalf("candidate must stop at initial argument capture: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var invocation struct {
+				Args    []string
+				Profile string
+			}
+			if err := json.Unmarshal(data, &invocation); err != nil {
+				t.Fatal(err)
+			}
+			if len(invocation.Args) == 0 || invocation.Args[0] != "init" {
+				t.Fatalf("unexpected initial candidate command: %#v", invocation)
+			}
+			city := invocation.Args[len(invocation.Args)-1]
+			name := filepath.Base(city)
+			suffix := strings.TrimPrefix(name, "bright-lights-")
+			if filepath.Dir(city) != work || len(suffix) != 32 || strings.Trim(suffix, "0123456789abcdef") != "" {
+				t.Errorf("candidate city must have its own UUID runtime namespace: %q", city)
+			}
+			if cities[name] {
+				t.Errorf("two profiles reused runtime namespace %q", name)
+			}
+			cities[name] = true
+			if invocation.Profile != filepath.Join(work, "gc-home") {
+				t.Errorf("candidate profile escaped own work directory: %q", invocation.Profile)
+			}
+		}
+		data, err := os.ReadFile(marker)
+		if err != nil || string(data) != "preserve" {
+			t.Fatalf("existing bright-lights data changed: %q %v", data, err)
+		}
+	})
 }
 
 func TestBeginnerQualificationIsReleasePrerequisite(t *testing.T) {

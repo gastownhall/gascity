@@ -11,6 +11,8 @@ export PATH="$sandbox/tools:$PATH"
 export BD_TEST_PIN=v1.3.2
 export BD_TEST_LOG="$sandbox/go.log"
 export BD_TEST_INFO="$sandbox/build-info"
+mkdir -p "$sandbox/scratch root"
+export TMPDIR="$sandbox/scratch root"
 cat > "$sandbox/tools/go" <<'GO'
 #!/bin/sh
 set -eu
@@ -18,7 +20,12 @@ printf '%s\n' "$*" >> "$BD_TEST_LOG"
 case "$1 $2" in
  'list -m') printf '%s\n' "$BD_TEST_PIN" ;;
  'version -m') cat "$3" ;;
- 'mod init') : ;;
+ 'mod init')
+   case "$PWD" in
+     "$TMPDIR"/gc-install-bd.*) ;;
+     *) printf 'installer scratch escaped TMPDIR: %s\n' "$PWD" >&2; exit 20 ;;
+   esac
+   printf 'scratch=%s\n' "$PWD" >> "$BD_TEST_LOG" ;;
  'get github.com/steveyegge/beads/cmd/bd@v1.3.2') : ;;
  'build -o')
    if [ "${BD_TEST_FAIL_BUILD:-0}" = 1 ]; then exit 7; fi
@@ -34,6 +41,9 @@ printf '\tdep\tgithub.com/steveyegge/beads\tv1.3.2\th1:fixture\n' > "$BD_TEST_IN
 printf '[1/5] builds the pinned module into an explicit prefix\n'
 env HOME="$test_home" sh "$installer" "$sandbox/install"
 cmp "$BD_TEST_INFO" "$sandbox/install/bd"
+actual_scratch=$(sed -n 's/^scratch=//p' "$BD_TEST_LOG")
+case "$actual_scratch" in "$TMPDIR"/gc-install-bd.*) ;; *) exit 1 ;; esac
+test ! -e "$actual_scratch"
 test "$(cat "$test_home/.local/bin/bd")" = 'unrelated installation'
 grep -F 'get github.com/steveyegge/beads/cmd/bd@v1.3.2' "$BD_TEST_LOG"
 
@@ -63,3 +73,4 @@ printf '\tdep\tgithub.com/steveyegge/beads\tv1.3.2\th1:fixture\n\t=>\t/tmp/repla
 if env HOME="$test_home" sh "$installer" "$sandbox/install"; then exit 1; fi
 test "$(cat "$sandbox/install/bd")" = 'old installation'
 test "$(cat "$test_home/.local/bin/bd")" = 'unrelated installation'
+test -z "$(find "$TMPDIR" -mindepth 1 -print -quit)"

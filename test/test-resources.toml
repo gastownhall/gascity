@@ -454,7 +454,7 @@ owner = "TestBeginnerQualifierRefusesUnsafeCandidates"
 resources = ["net_listen", "subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the RFC8191 qualification safety proof is a checked Medium subprocess and loopback-listener owner"
-resource_owner = "the Python CLI process and two loopback-port fixtures are confined to TestBeginnerQualifierRefusesUnsafeCandidates; they prove invalid destinations, companion binaries, ports and published commands are refused before any candidate runs or existing data changes"
+resource_owner = "the Python CLI processes and loopback-port fixtures are confined to TestBeginnerQualifierRefusesUnsafeCandidates; they prove invalid destinations, companion binaries, ports and published commands are refused before any candidate runs, and separate qualification profiles receive distinct runtime namespaces without changing existing user data"
 migration_target = "RFC8191/P0.4b/P0.4c"
 expires = "2026-12-31"
 

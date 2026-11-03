@@ -31,7 +31,7 @@ if [ -x "$installed" ] && current=$(beads_module_pin "$installed") && [ "$curren
     exit 0
 fi
 
-scratch=$(mktemp -d /var/tmp/gc-install-bd.XXXXXX)
+scratch=$(mktemp -d "${TMPDIR:-/var/tmp}/gc-install-bd.XXXXXX")
 tmp="$install_dir/.bd.tmp.$$"
 trap 'rm -rf "$scratch"; rm -f "$tmp"' EXIT HUP INT TERM
 (

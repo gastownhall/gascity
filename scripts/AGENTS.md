@@ -77,3 +77,11 @@ lines only; a new integration-only test file costs one sorted record line.
 The shard rule is `i % shard_total == shard_index - 1` in
 `scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
 restates it and runs each shard through the real script).
+
+## Native qualification isolates the runtime namespace
+
+A fresh `GC_HOME` and supervisor port do not isolate tmux: its default socket
+uses the city name. `qualify-beginner` must give every run a unique city basename
+and record that runtime socket with its profile. Keep the published command
+checks intact while substituting the owned city destination; never reuse the
+example's `bright-lights` socket on a host with retained cities.

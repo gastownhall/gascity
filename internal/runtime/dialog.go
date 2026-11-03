@@ -184,8 +184,9 @@ func AcceptStartupDialogsFromStream(
 // AcceptStartupDialogsFromStreamWithStatus dismisses known startup dialogs
 // using an event stream of full-screen snapshots instead of repeated peeks
 // and reports whether the stream observed readiness or a known dialog state.
-// It also reports false when a workspace-trust dialog needs its selection
-// moved: the stream cannot re-read the screen to confirm the move, so it
+// It also reports false when a workspace-trust or Codex update dialog needs a
+// selection move (or the update selection is unknown): the stream cannot
+// re-read the screen to confirm the safe row, so it
 // sends nothing and the caller should fall back to AcceptStartupDialogs with
 // synchronous peeks. The stream also ends at the first snapshot of a Codex
 // composer that is still starting: Codex can replace it with a startup dialog
@@ -230,6 +231,9 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return observed, err
 	}
 	phaseObserved, err = acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if errors.Is(err, errStartupDialogStreamInconclusive) {
+		return false, nil
+	}
 	if err != nil {
 		return observed, fmt.Errorf("codex update dialog: %w", err)
 	}
@@ -683,14 +687,21 @@ func containsPostClaudeResumeStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
-// acceptCodexUpdateDialog skips Codex's interactive update prompt. The default
-// selection is "Update now", so automated sessions must move down to "Skip".
+// ErrCodexUpdateUnconfirmed reports an update menu whose Skip selection could
+// not be confirmed. Startup sends no Enter that could choose Update now.
+var ErrCodexUpdateUnconfirmed = errors.New("codex update Skip selection unconfirmed; left the dialog open")
+
+const maxCodexUpdateMoveAttempts = 3
+
+// acceptCodexUpdateDialog skips Codex's interactive update prompt. Select Skip
+// from the observed row and re-read after movement before confirming it.
 func acceptCodexUpdateDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	moves, skipFrames := 0, 0
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -702,13 +713,34 @@ func acceptCodexUpdateDialog(
 		}
 
 		if containsCodexUpdateDialog(content) {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
-				return err
+			keys, ok := codexUpdateSkipKeys(content)
+			if !ok {
+				return ErrCodexUpdateUnconfirmed
 			}
-			sleep(ctx, bypassDialogConfirmDelay)
+			budget.observe()
+			if len(keys) > 1 {
+				skipFrames = 0
+				moves++
+				if moves > maxCodexUpdateMoveAttempts {
+					return ErrCodexUpdateUnconfirmed
+				}
+				if err := sendKeys(keys[:len(keys)-1]...); err != nil {
+					return err
+				}
+				sleep(ctx, bypassDialogConfirmDelay)
+				continue
+			}
+			// As with workspace trust, require the target row to survive a
+			// re-read so a dropped move or first-paint reset cannot confirm
+			// the default Update now option.
+			skipFrames++
+			if skipFrames < 2 {
+				sleep(ctx, bypassDialogConfirmDelay)
+				continue
+			}
 			return sendKeys("Enter")
 		}
+		skipFrames = 0
 
 		if containsPromptIndicator(content) ||
 			containsWorkspaceTrustDialog(content) ||
@@ -728,9 +760,70 @@ func acceptCodexUpdateDialog(
 }
 
 func containsCodexUpdateDialog(content string) bool {
-	return strings.Contains(content, "Update available!") &&
-		strings.Contains(content, "Skip until next version") &&
-		strings.Contains(content, "Press enter to continue")
+	content = trustDialogWindow(content, "Update available")
+	// Match the complete vendor menu, not update wording quoted in an agent
+	// response or question. Codex's compact TUI changed both heading and footer.
+	var heading, update, skip, skipNext, footer bool
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		header := strings.TrimPrefix(line, "✨ ")
+		if strings.HasPrefix(header, "Update available!") || strings.HasPrefix(header, "Update available · ") {
+			heading = true
+		}
+		if line == "Press enter to continue" || line == "enter continue · esc skip" {
+			footer = true
+		}
+		for _, cursor := range []string{"› ", "> ", "❯ "} {
+			line = strings.TrimPrefix(line, cursor)
+		}
+		switch {
+		case strings.HasPrefix(line, "1. Update now (runs "):
+			update = true
+		case line == "2. Skip":
+			skip = true
+		case line == "3. Skip until next version":
+			skipNext = true
+		}
+	}
+	return heading && update && skip && skipNext && footer
+}
+
+// codexUpdateSkipKeys derives movement from the actual numbered option, not
+// physical line distance (the package-manager command can wrap). Unknown or
+// ambiguous cursor placement authorizes no input.
+func codexUpdateSkipKeys(content string) ([]string, bool) {
+	selected := 0
+	for _, raw := range strings.Split(trustDialogWindow(content, "Update available"), "\n") {
+		line, marked := strings.CutPrefix(strings.TrimSpace(raw), "› ")
+		if !marked {
+			continue
+		}
+		choice := 0
+		switch {
+		case strings.HasPrefix(line, "1. Update now (runs "):
+			choice = 1
+		case line == "2. Skip":
+			choice = 2
+		case line == "3. Skip until next version":
+			choice = 3
+		}
+		if choice != 0 {
+			if selected != 0 {
+				return nil, false
+			}
+			selected = choice
+		}
+	}
+	switch selected {
+	case 1:
+		return []string{"Down", "Enter"}, true
+	case 2:
+		return []string{"Enter"}, true
+	case 3:
+		return []string{"Up", "Enter"}, true
+	default:
+		return nil, false
+	}
 }
 
 func acceptCodexUpdateDialogFromStream(
@@ -740,11 +833,13 @@ func acceptCodexUpdateDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsCodexUpdateDialog,
-		matchKeys:   []string{"Down", "Enter"},
-		matchDelay:  bypassDialogConfirmDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostUpdateStartupDialog,
+		match:                        containsCodexUpdateDialog,
+		matchKeysFor:                 codexUpdateSkipKeys,
+		matchDelay:                   bypassDialogConfirmDelay,
+		ready:                        containsPromptIndicator,
+		readyOrNext:                  containsPostUpdateStartupDialog,
+		confirmOnlyFromSelectedFrame: true,
+		inconclusiveOnUnknownKeys:    true,
 	})
 }
 
@@ -772,7 +867,7 @@ const maxTrustDialogMoveAttempts = 3
 var ErrWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust option; left the dialog unconfirmed")
 
 // errStartupDialogStreamInconclusive reports that a stream handler found a
-// dialog whose selection must move before it can be confirmed. A snapshot
+// dialog whose selection is not safely confirmed. A snapshot
 // stream cannot be re-read on demand, so it cannot close the move/re-read/
 // confirm loop safely: frames may lag the screen, Claude's trust cursor wraps,
 // and Claude re-renders the dialog shortly after first paint, resetting the
@@ -1643,6 +1738,10 @@ type streamDialogSpec struct {
 	// cursor and dropping keys, so a streamed frame showing the cursor on
 	// the target row does not prove the cursor is still there.
 	confirmOnlyFromSelectedFrame bool
+
+	// A recognized menu with no visible selection must not fall through to
+	// a composer prompt. The caller must re-read it with synchronous peeks.
+	inconclusiveOnUnknownKeys bool
 }
 
 type replayableSnapshotStream struct {
@@ -1796,6 +1895,9 @@ func acceptDialogFromStream(
 					keys, ok := spec.matchKeys, true
 					if spec.matchKeysFor != nil {
 						keys, ok = spec.matchKeysFor(content)
+					}
+					if !ok && spec.inconclusiveOnUnknownKeys {
+						return true, errStartupDialogStreamInconclusive
 					}
 					if ok && spec.confirmOnlyFromSelectedFrame && len(keys) > 1 {
 						return true, errStartupDialogStreamInconclusive

@@ -19,3 +19,12 @@ Hook copy destinations must match the effective session runtime, including
 per-agent overrides: local consumers resolve them from the session workdir;
 container consumers retain their city-root projection. Keep managed hook
 content fingerprints and unrelated user files intact.
+
+
+Startup update handling recognizes a complete vendor menu before selecting Skip:
+heading, numbered update/skip choices and continue footer. Keep polling and
+streamed detection aligned. Quoted update text, authentication screens and native
+agent questions do not authorize this startup action; never choose Update now.
+Move, re-read, and confirm only from the visible Skip row; unknown selection
+never authorizes Enter or composer readiness. A stream needing a selection move
+hands off to synchronous peeks.

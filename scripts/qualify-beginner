@@ -7,7 +7,7 @@ the isolated profile it started. Provider HOME/credentials are caller-managed.
 """
 from __future__ import annotations
 import argparse, atexit, datetime, hashlib, json, math, os, pathlib, re, socket
-import shlex, signal, subprocess, sys, time, urllib.request
+import shlex, signal, subprocess, sys, time, urllib.request, uuid
 
 from qualify_process import run_logged
 
@@ -58,14 +58,18 @@ if parallel_setup[0].count('cd ~/bright-lights') != 1 or parallel_run[0].count('
 instructions['tutorials/07-orders.md'] = hashlib.sha256(order_doc.encode()).hexdigest()
 
 root.mkdir(parents=True)
-city = root/'bright-lights'; profile = root/'gc-home'; profile.mkdir()
+# The default tmux socket is the city name, independent of GC_HOME. A
+# qualification destination therefore also needs a unique basename, including
+# when an operator already has a city named like the published example.
+city = root/('bright-lights-'+uuid.uuid4().hex)
+profile = root/'gc-home'; profile.mkdir()
 out = root/'evidence'; out.mkdir()
 (profile/'supervisor.toml').write_text('[supervisor]\nport = '+str(a.port)+'\nbind = "127.0.0.1"\nallow_mutations = true\n')
 env = {key:value for key,value in os.environ.items() if not key.startswith('GC_')}
 env.update(GC_HOME=str(profile), GC_ISOLATED='1', GC_BIN=str(binary))
 env['PATH'] = str(binary.parent)+':'+str(pathlib.Path.home()/'.local/bin')+':/opt/homebrew/bin:/usr/local/bin:'+env.get('PATH','')
 base = 'http://127.0.0.1:'+str(a.port)
-start = {'commit':a.expected_commit, 'city':str(city), 'gc_home':str(profile), 'port':a.port}
+start = {'commit':a.expected_commit, 'city':str(city), 'gc_home':str(profile), 'port':a.port, 'runtime_socket':city.name}
 a.pause_lesson = 'api'
 owned_pid = None
 cleanup_ok = None
