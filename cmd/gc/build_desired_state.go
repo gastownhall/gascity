@@ -1094,22 +1094,13 @@ func computeNamedSessionDemandOn(
 	for identity, spec := range namedSpecs {
 		ownsBareClaim := namedBareClaimOwner(cfg, spec, canonical)
 		for i, wb := range assignedWorkBeads {
-			// in_progress work is actionable unless the store's IsBlocked
-			// projection says it is waiting on an open dependency or gate; open
-			// work is direct named demand only when it passed the store's
-			// readiness/deps gate. Without the readiness check, an open assigned
-			// bead that entered the snapshot via the open-routed orphan-release
-			// pass (no deps gate) would keep an on-demand named session awake
-			// forever even while blocked. The in_progress blocked check mirrors
-			// workBeadHasAwakeDemand's `!bead.Blocked` on the wake side
-			// (compute_awake_set.go) — without it, a named session holding a
-			// blocked in_progress bead was never idle-eligible even though it had
-			// nothing actionable to do (gascity#8767).
+			// in_progress work is always actionable; open work is direct named
+			// demand only when it passed the store's readiness/deps gate. Without
+			// the readiness check, an open assigned bead that entered the snapshot
+			// via the open-routed orphan-release pass (no deps gate) would keep an
+			// on-demand named session awake forever even while blocked.
 			switch wb.Status {
 			case "in_progress":
-				if wb.IsBlocked != nil && *wb.IsBlocked {
-					continue
-				}
 			case "open":
 				ref := ""
 				if i < len(assignedWorkStoreRefs) {
