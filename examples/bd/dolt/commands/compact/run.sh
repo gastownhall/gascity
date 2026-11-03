@@ -2611,7 +2611,11 @@ live_gate_probe_served() {
 
 # live_gate_arm DB STEP PRE_HEAD records the pre-rewrite evidence the first
 # time a pass arms the gate; later arms in the same pass keep that baseline and
-# only append STEP to the list of rewrites the pass ran.
+# only append STEP to the list of rewrites the pass ran. A pass whose first
+# rewrite is a GC has no preflight HEAD, so an empty PRE_HEAD makes the gate
+# probe for one. A database the server does not serve before the GC is an
+# ordinary failure: the arm returns 1, the GC never starts, and nothing is
+# quarantined.
 live_gate_arm() {
   _lg_db="$1"
   _lg_step="$2"
@@ -2621,6 +2625,14 @@ live_gate_arm() {
   fi
   live_gate_dir_before=$(live_gate_dir_state "$_lg_db")
   live_gate_pre_head="$3"
+  if [ -z "$live_gate_pre_head" ]; then
+    if ! live_gate_probe_served "$_lg_db"; then
+      printf 'compact: db=%s live database baseline probe failed before %s: %s — not starting the rewrite\n' \
+        "$_lg_db" "$_lg_step" "$live_probe_failure" >&2
+      return 1
+    fi
+    live_gate_pre_head="$live_probe_head"
+  fi
   live_gate_steps="$_lg_step"
   live_gate_armed=1
   return 0
@@ -2691,7 +2703,7 @@ run_full_gc() {
   start="$4"
   gc_step="$5"
 
-  live_gate_arm "$db" "$gc_step" ""
+  live_gate_arm "$db" "$gc_step" "" || return 1
   printf "compact: db=%s — running DOLT_GC('--full', '--archive-level=0')...\n" "$db"
   gc_rc=0
   gc_err_tmp=$(mktemp)
@@ -3137,6 +3149,8 @@ resolve_compact_base() {
 # journal and working-set garbage without touching history.
 run_bare_gc() {
   db="$1"
+  gc_step="$2"
+  live_gate_arm "$db" "$gc_step" "" || return 1
   start=$(date +%s)
   gc_rc=0
   gc_err_tmp=$(mktemp)
@@ -3147,10 +3161,12 @@ run_bare_gc() {
       "$db" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
     rm -f "$gc_err_tmp"
+    live_gate_check "$db" "$gc_step" || return 1
     return 1
   fi
   rm -f "$gc_err_tmp"
   compact_gc_ran=1
+  live_gate_check "$db" "$gc_step" || return 1
 
   printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
   return 0
@@ -3234,7 +3250,7 @@ compact_shared_history_database() {
     printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
     return 0
   fi
-  run_bare_gc "$db"
+  run_bare_gc "$db" "shared-history bare GC"
 }
 
 flatten_database() {
@@ -4176,7 +4192,7 @@ bare_gc_database() {
     return 0
   fi
 
-  run_bare_gc "$db"
+  run_bare_gc "$db" "bare GC"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full

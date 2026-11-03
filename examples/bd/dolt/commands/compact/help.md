@@ -209,6 +209,12 @@ When the entry existed before and is gone after, or every try fails, compact:
   names the step that failed and the selected databases it never reached
   (`none` when that database was the last one).
 
+The gate covers every rewrite: the flatten and its full GC, `--gc-only`, bare
+GC, and pending-GC retries, on databases with a remote too, and it runs before
+a pending marker is cleared or a push starts. A pass whose first rewrite is a
+GC first probes the database for its HEAD. If that probe fails, the GC does not
+start and the database fails without a quarantine.
+
 Any other failure on a database that is still live is counted as before, and
 the run goes on to the next database.
 

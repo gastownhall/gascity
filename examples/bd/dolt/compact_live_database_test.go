@@ -346,3 +346,90 @@ func TestCompactScriptLiveGateRetriesATransientProbeFailure(t *testing.T) {
 		}
 	})
 }
+
+func TestCompactScriptLiveGateCoversEveryGCEntryPath(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		args      []string
+		env       []string
+		pendingGC bool
+		step      string
+	}{
+		{name: "gc-only reclaim", mode: "success", args: []string{"--gc-only"}, step: "gc-only reclaim"},
+		{name: "bare GC", mode: "success", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}, step: "bare GC"},
+		{name: "shared-history bare GC", mode: "remote_success", step: "shared-history bare GC"},
+		{name: "pending-GC retry", mode: "success", pendingGC: true, step: "pending-GC retry"},
+		{name: "shared-history pending-GC retry", mode: "remote_success", pendingGC: true, step: "shared-history pending-GC retry"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			var pendingMarker string
+			if tc.pendingGC {
+				pendingMarker = writeCompactPendingGCMarker(t, fixture, "beads")
+			}
+			setCompactBeadsLiveFault(t, fixture, "gc", "vanish")
+
+			env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}, tc.env...)
+			out, err := fixture.runWithArgs(t, tc.mode, tc.args, env...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("compact exit = %v, want exit status 1:\n%s", err, out)
+			}
+			assertCompactBeadsLiveGateMarker(t, fixture, map[string]string{
+				"live_gate_steps":                 tc.step,
+				"live_gate_failed_step":           tc.step,
+				"live_gate_data_dir_entry_before": "present",
+				"live_gate_data_dir_entry_after":  "absent",
+				"live_gate_pre_compaction_head":   "headcommit",
+			})
+			assertCompactBeadsQuarantineAlert(t, fixture, "mayor", compactBeadsQuarantineMarkerPath(fixture), "compact-quarantine", compactLiveGateReason)
+			want := "compact: db=beads live database gate failed after " + tc.step + " — aborting the run; selected databases not reached: none"
+			if !strings.Contains(out, want) {
+				t.Fatalf("compact output missing %q:\n%s", want, out)
+			}
+			if pendingMarker != "" {
+				if _, err := os.Stat(pendingMarker); err != nil {
+					t.Fatalf("live gate failure cleared the pending-GC marker: %v\n%s", err, out)
+				}
+			}
+			log := readCompactDoltLog(t, fixture)
+			if pushes := compactDoltLogQueries(log, "beads", "DOLT_PUSH"); len(pushes) != 0 {
+				t.Fatalf("compact pushed a database that failed its live gate: %q", pushes)
+			}
+			// The baseline probe precedes the GC; the failed gate's probe is last.
+			lines := strings.Split(strings.TrimSpace(log), "\n")
+			if last := lines[len(lines)-1]; last != "db=beads query="+compactLiveProbeQuery {
+				t.Fatalf("compact issued statements after the failed gate; last statement %q\nlog:\n%s", last, log)
+			}
+			if len(lines) < 3 || lines[len(lines)-3] != "db=beads query="+compactLiveProbeQuery || !strings.Contains(lines[len(lines)-2], "CALL DOLT_GC(") {
+				t.Fatalf("compact did not probe the database before its GC:\n%s", log)
+			}
+		})
+	}
+}
+
+func TestCompactScriptLiveGateBaselineFailureIsAnOrdinaryFailure(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.liveFaultDir, "unserved-beads"), []byte("always\n"), 0o644); err != nil {
+		t.Fatalf("write unserved fault: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only"})
+	if err == nil {
+		t.Fatalf("compact succeeded although the database was not served before its GC:\n%s", out)
+	}
+	want := "compact: db=beads live database baseline probe failed before gc-only reclaim: probe failed rc=1: database not found: beads — not starting the rewrite"
+	if !strings.Contains(out, want) {
+		t.Fatalf("compact output missing %q:\n%s", want, out)
+	}
+	if !strings.Contains(out, "compact: 1 database(s) failed gc-only reclaim") {
+		t.Fatalf("compact output missing the ordinary failure tally:\n%s", out)
+	}
+	if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
+		t.Fatalf("baseline probe failure quarantined the database (stat err=%v):\n%s", err, out)
+	}
+	if gcCalls := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", "CALL DOLT_GC("); len(gcCalls) != 0 {
+		t.Fatalf("compact ran GC on a database it could not probe: %q", gcCalls)
+	}
+}
