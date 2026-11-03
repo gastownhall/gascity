@@ -2679,6 +2679,63 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
 }
 
+// This isolates a transport hypothesis from the native RFC trial: Claude
+// received only a suffix of a roughly 2.3KB notice+prompt. Requiring one
+// bracketed paste below the size cutoff prevents newline-bearing text from
+// becoming separate typed input, but does not itself prove the native cause.
+func TestSendKeysLiteralWithRetryPreservesClaudeMultilineAsOnePaste(t *testing.T) {
+	paragraph := strings.Repeat("Preserve every byte of this qualification request, including its Unicode marker 界 and line break.\n", 11)
+	multiline := "RFC8191_PREFIX_BEGIN\n" + paragraph + "RFC8191_MIDDLE_INTACT\n" + paragraph + "RFC8191_SUFFIX_END\n"
+	if len(multiline) <= 2000 || len(multiline) >= maxSendKeysLiteralLen {
+		t.Fatalf("fixture must exercise ordinary multiline input below the large-text cutoff: bytes=%d cutoff=%d", len(multiline), maxSendKeysLiteralLen)
+	}
+	for _, tc := range []struct {
+		name, text string
+		paste      bool
+	}{
+		{"multiline atomic paste", multiline, true},
+		{"single line remains typed", strings.ReplaceAll(multiline, "\n", " "), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := newFenceModel(nil, map[string]string{"GC_PROVIDER": "claude"})
+			tm := &Tmux{cfg: DefaultConfig(), exec: model}
+			if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", tc.text, time.Second); err != nil {
+				t.Fatalf("sendKeysLiteralWithRetry = %v", err)
+			}
+			// The executor reads the actual temporary load-buffer file before
+			// pasteLiteralText removes it. Compare the whole payload, so its
+			// prefix, middle, suffix and every UTF-8 byte must all survive.
+			if !slices.Equal(model.events, []string{"text:" + tc.text}) {
+				t.Fatalf("input was split, changed or repeated: got %q want one complete %q", model.events, tc.text)
+			}
+			loads, pastes, typed := 0, 0, 0
+			for _, call := range model.calls {
+				switch call[0] {
+				case "load-buffer":
+					loads++
+				case "paste-buffer":
+					pastes++
+					if !slices.Contains(call, "-p") || !slices.Contains(call, "-d") || flagValue(call, "-t") != "%1" {
+						t.Fatalf("paste must be bracketed, consumed and exactly targeted: %q", call)
+					}
+				case "send-keys":
+					if !slices.Contains(call, "-l") {
+						t.Fatalf("literal transport injected a submit or control key: %q", call)
+					}
+					typed++
+				}
+			}
+			if tc.paste {
+				if loads != 1 || pastes != 1 || typed != 0 {
+					t.Fatalf("multiline input must arrive in one paste: loads=%d pastes=%d typed=%d", loads, pastes, typed)
+				}
+			} else if loads != 0 || pastes != 0 || typed != 1 {
+				t.Fatalf("single-line input changed its transport: loads=%d pastes=%d typed=%d", loads, pastes, typed)
+			}
+		})
+	}
+}
+
 func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
 	fe := &fakeExecutor{}
 	tm := NewTmuxWithConfig(DefaultConfig())

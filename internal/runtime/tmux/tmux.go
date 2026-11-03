@@ -2789,11 +2789,16 @@ func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
 // pastesMultilineText reports whether text must reach target as one bracketed
 // paste even under maxSendKeysLiteralLen. Codex (codex-cli 0.162.1) reads
 // typed multi-line text as a paste burst and takes the submit Enter that
-// follows as one more newline, so the message stays drafted in its composer:
-// every Mayor startup prompt did. A bracketed paste arrives as one paste, and
-// the Enter after it submits.
+// follows as one more newline, so the message stays drafted in its composer.
+// Claude Code 2.1.308 can consume only the suffix of a multiline literal send.
+// One bracketed paste preserves the complete message for both providers; the
+// guarded submit that follows still owns the Enter key.
 func (t *Tmux) pastesMultilineText(target, text string) bool {
-	return strings.Contains(text, "\n") && sessionlog.ProviderFamily(t.providerEnv(target)) == "codex"
+	if !strings.Contains(text, "\n") {
+		return false
+	}
+	family := sessionlog.ProviderFamily(t.providerEnv(target))
+	return family == "codex" || family == "claude"
 }
 
 func (t *Tmux) pasteLiteralText(ctx context.Context, target, text string) error {

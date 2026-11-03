@@ -50,3 +50,11 @@ lane's at-most-once outcome. For approval verification, preserve success only
 for a proven missing session; an unavailable observation proves neither success
 nor an unsent answer. See `internal/runtime/REQUIREMENTS.md`,
 RUNTIME-CONTRACT-020 and RUNTIME-CONTRACT-021.
+
+## Complete multiline input
+
+Send multiline Claude and Codex input as one bracketed paste, even below the
+literal-send size threshold. Claude can record only a suffix after multiline
+literal typing; Codex can leave a typed multiline burst drafted. Preserve the
+ordinary-message native-question guard and guarded submit. Journal delivery
+acknowledgment alone does not prove all native user-input bytes arrived.
