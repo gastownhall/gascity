@@ -162,12 +162,10 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		}
 	}
 
-	// Determine which store to use: if children are provided, use the
-	// first child's rig store so convoy and children share a database.
-	// This avoids cross-store parent references that bd can't resolve.
-	storeDir := cityPath
-	if len(issueIDs) > 0 {
-		storeDir = convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+	storeDir, err := convoyCreateStoreDir(cfg, cityPath, rigFlag, issueIDs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
@@ -192,6 +190,24 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 		}
 	}
 	return cityPath
+}
+
+// convoyCreateStoreDir picks the store a new convoy lands in. A non-empty
+// rigName selects that rig's store, matched by name as gc bd and gc formula
+// match --rig. Without one the convoy shares the first issue's store, so
+// convoy and issues share a database, else it lands in the city store.
+func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
+	if name := strings.TrimSpace(rigName); name != "" {
+		rig, ok := rigByName(cfg, name)
+		if !ok {
+			return "", fmt.Errorf("rig %q not found", name)
+		}
+		return resolveStoreScopeRoot(cityPath, rig.Path), nil
+	}
+	if len(issueIDs) > 0 {
+		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
+	}
+	return cityPath, nil
 }
 
 func validateConvoyCreateStoreScope(cfg *config.City, cityPath string, issueIDs []string) error {
