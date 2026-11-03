@@ -71,11 +71,20 @@ filesystem search. If no command exists for what you need, file a bead.
 
 ## Molecules — STOP, check BEFORE you start working
 
-**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
-section. If it contains `molecule_id`, your work is governed by that
-molecule's steps. Do NOT just read the description and start coding.
+**CRITICAL:** When your assignment is a molecule member, its work is
+governed by that molecule's steps. Do NOT just read the bead description
+and start coding.
 
-Run `gc bd mol current <molecule-id>` to see your steps:
+First inspect the molecule root itself with `gc bd show <molecule-id>`.
+If the root's metadata contains `gc.formula_contract=graph.v2` or
+`gc.kind=workflow`, this is a graph-poured workflow, not a legacy
+molecule: do NOT navigate its steps or close the root — that work moves
+through the hook, so escalate (below) if you cannot work what you hold.
+If the root cannot be read at all, that is an error — report it, do not
+fall back to legacy navigation.
+
+A readable root without those markers is a legacy molecule. Run
+`gc bd mol current <molecule-id>` to see your steps:
 
 - `[done]` — step is complete
 - `[current]` — step is in progress (you are here)
@@ -92,10 +101,11 @@ Run `gc bd mol current <molecule-id>` to see your steps:
 4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
-Do NOT skip steps. Do NOT close steps you didn't execute.
-
-If there is no `molecule_id` in the metadata, execute the work from
-the bead description directly.
+Do NOT skip steps. Do NOT close steps you didn't execute. A step you
+reach in this loop that carries `gc.root_bead_id` stays a molecule step
+of this loop — the classification above describes the assignment the
+hook returned, not every bead you visit. Leave steps you could not
+finish open unless their own failure contract says otherwise.
 
 ## Your Tools
 

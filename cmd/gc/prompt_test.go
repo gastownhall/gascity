@@ -1832,4 +1832,34 @@ func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T
 			}
 		}
 	})
+
+	t.Run("AC-3: molecule root inspection guards legacy navigation", func(t *testing.T) {
+		mol := poolWorkerFlat(poolWorkerPromptSection(t, got, "Molecules"))
+		// Root inspection precedes any mol navigation.
+		showIdx := strings.Index(mol, "gc bd show <molecule-id>")
+		navIdx := strings.Index(mol, "gc bd mol current")
+		if showIdx < 0 || navIdx < 0 || showIdx > navIdx {
+			t.Errorf("Molecules must inspect the molecule root with gc bd show before any gc bd mol current navigation:\n%s", mol)
+		}
+		for _, want := range []string{
+			// graph-poured roots are rejected for navigation and escalated
+			"`gc.formula_contract=graph.v2`",
+			"`gc.kind=workflow`",
+			"do NOT navigate",
+			"escalate",
+			// an unreadable root is an error, not a legacy fallback
+			"an error",
+			// verified legacy execution and failure handling remain
+			"`gc bd mol current <molecule-id>`",
+			"`[ready]`",
+			"`gc bd update <step-id> --set-metadata gc.outcome=pass`",
+			"Do NOT skip steps",
+			// a legacy child's gc.root_bead_id does not reclassify the loop
+			"`gc.root_bead_id`",
+		} {
+			if !strings.Contains(mol, want) {
+				t.Errorf("Molecules missing %q:\n%s", want, mol)
+			}
+		}
+	})
 }
