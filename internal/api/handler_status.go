@@ -255,13 +255,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	if !citySuspended {
 		graphWork = s.graphActiveWorkBySession()
 	}
+	pools := newRequestSessionListing(sp)
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
 		if rigName != "" {
 			scope = "rig"
 		}
-		expanded := expandAgent(a, cityName, sessTmpl, sp, cfg.NamedSessions)
+		expanded := expandAgent(a, cityName, sessTmpl, pools, cfg.NamedSessions)
 		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
