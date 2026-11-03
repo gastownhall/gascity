@@ -64,7 +64,7 @@ func ListSubtree(store beads.MoleculeTarget, rootID string) ([]beads.Bead, error
 	// parents' children in one round trip does (beads.ChildrenOfAny).
 	frontier := queue
 	for len(frontier) > 0 {
-		children, err := childrenOfAny(store, frontier)
+		children, err := beads.ChildrenOfAny(store, frontier, beads.WithBothTiers)
 		if err != nil {
 			return nil, err
 		}
@@ -262,17 +262,4 @@ func CloseMembersWithMetadataExcept(store beads.MoleculeTarget, members []beads.
 		return 0, err
 	}
 	return store.CloseAll(ordered, metadata)
-}
-
-// childrenOfAny is beads.ChildrenOfAny over the target: the store's batched
-// read when it has one, reached through the target with beads.As, and one
-// Children read per parent otherwise.
-func childrenOfAny(store beads.MoleculeTarget, parentIDs []string) ([]beads.Bead, error) {
-	if len(parentIDs) == 0 {
-		return nil, nil
-	}
-	if batch, ok := beads.As[beads.ChildrenBatchLister](store); ok {
-		return batch.ChildrenOfAny(parentIDs, beads.WithBothTiers)
-	}
-	return beads.ChildrenOfAnyPerParent(store, parentIDs, beads.WithBothTiers)
 }

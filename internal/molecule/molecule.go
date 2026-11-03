@@ -902,7 +902,7 @@ func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formul
 			}
 			graphApplyTracef("graph-apply transient-error fallback recipe=%s first_err=%v retry_err=%v", recipe.Name, err, retryErr)
 		} else {
-			graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
+			graphApplyTracef("graph-apply unavailable recipe=%s store=%s", recipe.Name, beads.PhysicalStoreKey(store))
 		}
 	}
 
@@ -1210,7 +1210,7 @@ func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe
 			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
 		}
-		graphApplyTracef("graph-apply fragment-unavailable root=%s store=%T", opts.RootID, store)
+		graphApplyTracef("graph-apply fragment-unavailable root=%s store=%s", opts.RootID, beads.PhysicalStoreKey(store))
 	}
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)

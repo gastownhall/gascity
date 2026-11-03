@@ -1659,8 +1659,7 @@ func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
 }
 
 func closeFailedGraphV2RootsByKey(store beads.MoleculeTarget, key string) error {
-	storeMolecule := store
-	matches, err := sourceworkflow.KeyedRoots(storeMolecule, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
@@ -1668,7 +1667,7 @@ func closeFailedGraphV2RootsByKey(store beads.MoleculeTarget, key string) error 
 		if root.Status == "closed" || root.Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
 			continue
 		}
-		if _, err := sourceworkflow.CloseWorkflowSubtree(storeMolecule, root.ID); err != nil {
+		if _, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID); err != nil {
 			return fmt.Errorf("closing failed formulas v2 root %s: %w", root.ID, err)
 		}
 	}

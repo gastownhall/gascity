@@ -557,13 +557,12 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 // root: it is a workflow root in its own right, so its own controls read
 // gc.cancel_requested off it and its own teardown tail still runs.
 func cancelWorkflowRoot(store beads.MoleculeTarget, rootID string) (int, error) {
-	storeMolecule := store
-	exclude, err := molecule.TeardownTailExclusion(storeMolecule, rootID)
+	exclude, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
 		return 0, err
 	}
 	return sourceworkflow.CloseWorkflowSubtreeAsExcept(
-		storeMolecule,
+		store,
 		rootID,
 		beadmeta.OutcomeCanceled,
 		runCanceledCloseReason,
