@@ -24,6 +24,7 @@ go_library(
 go_test(
     name = "hooks_test",
     srcs = [
+        "copilot_hooks_windows_test.go",
         "hooks_family_test.go",
         "hooks_marker_normalize_test.go",
         "hooks_test.go",
@@ -31,6 +32,7 @@ go_test(
         "overlay_provider_hook_path_shape_test.go",
         "plugin_node_test.go",
         "preserve_test.go",
+        "preserve_windows_test.go",
         "testenv_import_test.go",
     ],
     data = [

@@ -2289,6 +2289,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/overlay/platform_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/packregistry/catalog_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2378,6 +2384,12 @@ calls = 1
 path = "internal/productmetrics/transport_test.go"
 resource = "http_test_server"
 calls = 9
+
+[[count]]
+path = "internal/runtime/acl_windows_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/runtime/acp/acp_test.go"
@@ -2547,6 +2559,12 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/privatedir_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/proctable/console_windows_test.go"
 resource = "subprocess"
 calls = 2
@@ -2632,6 +2650,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/runtime/shellcommand_windows_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
 path = "internal/runtime/ssh/process_alive_script_test.go"
 resource = "subprocess"
 calls = 1
@@ -2644,6 +2668,12 @@ tagged = true
 
 [[count]]
 path = "internal/runtime/ssh/ssh_localhost_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/staging_tracked_windows_test.go"
 resource = "subprocess"
 calls = 1
 tagged = true
