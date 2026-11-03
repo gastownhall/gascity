@@ -188,16 +188,18 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if err != nil || pid <= 1 {
 		return runtime.LiveRuntime{}, false, nil
 	}
-	owned, err := processOwnedByUID(root, pid, os.Geteuid())
+	euid := os.Geteuid()
+	owned, err := processOwnedByUID(root, pid, euid)
 	if err != nil {
 		return runtime.LiveRuntime{}, false, unreadableOwnerScanError(root, pid, incarnationStartedAt, err)
 	}
 	if !owned {
 		return runtime.LiveRuntime{}, false, nil
 	}
+	readStartedAt := time.Now()
 	env, err := parseEnvironFile(filepath.Join(root, entryName, "environ"))
 	if err != nil {
-		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, err)
+		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, readStartedAt, euid, err)
 	}
 	if root == "/proc" && pid == os.Getpid() {
 		env = mergeCurrentEnv(env)
@@ -280,9 +282,11 @@ func unreadableOwnerScanError(root string, pid int, incarnationStartedAt time.Ti
 // unreadableEnvironScanError returns the error a process whose environment
 // could not be read adds to the scan, or nil when the process is proven to
 // predate incarnationStartedAt. A process proven outside the incarnation by its
-// tmux-spawn parent is skipped too, but a failed age proof still leaves the
-// scan incomplete.
-func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readErr error) error {
+// tmux-spawn parent is skipped too, as is a process proven a non-runtime by its
+// own-user-manager cgroup scope (unreadableProcessProvenNonRuntime); a failed
+// proof still leaves the scan incomplete, and a proven process's earlier proof
+// errors are kept, as the tmux exception keeps its own.
+func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readStartedAt time.Time, euid int, readErr error) error {
 	irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt)
 	if irrelevant {
 		return nil
@@ -297,6 +301,15 @@ func unreadableEnvironScanError(root string, pid int, id string, incarnationStar
 	}
 	if proofErr != nil {
 		errs = append(errs, fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
+	}
+	if errors.Is(readErr, fs.ErrPermission) {
+		proven, proofErr := unreadableProcessProvenNonRuntime(root, pid, euid, readStartedAt)
+		if proven {
+			return errors.Join(errs...)
+		}
+		if proofErr != nil {
+			errs = append(errs, fmt.Errorf("proving non-runtime for pid %d: %w", pid, proofErr))
+		}
 	}
 	return errors.Join(append(errs, fmt.Errorf("reading environ for pid %d: %w", pid, readErr))...)
 }
@@ -487,6 +500,147 @@ func isUniqueTmuxSpawnScope(cgroup string) bool {
 	return strings.HasPrefix(leaf, prefix) &&
 		strings.HasSuffix(leaf, suffix) &&
 		len(leaf) > len(prefix)+len(suffix)
+}
+
+// userManagerScopePath is the unified-cgroup path of the systemd user
+// manager's own init scope for euid, which holds only systemd --user and its
+// (sd-pam) helper: systemd starts every unit, scope and session elsewhere
+// (https://www.freedesktop.org/software/systemd/man/latest/user%40.service.html),
+// so nothing gc or tmux launches can sit there. The comparison against it is
+// exact, on the raw path — no cleaning, suffix matches or name=systemd
+// fallback — so a nested lookalike fails closed. This rests on ordinary
+// systemd placement: cgroups permit migration, so a custom PAM workload, a
+// manually populated leaf or hostile same-uid mutation can place a runtime
+// there; such a process keeps failing the read and stays an entry error only
+// until the proof's two censuses both observe it in the scope, the same
+// window every other structural proof here has.
+func userManagerScopePath(euid int) string {
+	return "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+}
+
+// readUnifiedCgroup reads the unified (v2, "0::") cgroup path of pid,
+// ignoring v1 controller entries so a hybrid v1/v2 host reads the same shape
+// a pure-v2 host does. exists is false without error when the file or its
+// unified entry is absent — the process is simply unproven — while an
+// unreadable file, a malformed or duplicate unified entry and an empty
+// unified path are errors: an uncertain read must not excuse a process. The
+// path is returned raw, not cleaned.
+func readUnifiedCgroup(root string, pid int) (string, bool, error) {
+	path := filepath.Join(root, strconv.Itoa(pid), "cgroup")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var unified string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 {
+			return "", false, fmt.Errorf("malformed cgroup line %q in %s", line, path)
+		}
+		if fields[0] != "0" {
+			continue // a v1 controller entry: ignored on hybrid hosts
+		}
+		if fields[1] != "" {
+			return "", false, fmt.Errorf("malformed unified cgroup line %q in %s", line, path)
+		}
+		if unified != "" {
+			return "", false, fmt.Errorf("duplicate unified cgroup entry in %s", path)
+		}
+		if fields[2] == "" {
+			return "", false, fmt.Errorf("empty unified cgroup path in %s", path)
+		}
+		unified = fields[2]
+	}
+	if unified == "" {
+		return "", false, nil
+	}
+	return unified, true, nil
+}
+
+// unreadableProcessProvenNonRuntime proves that a process whose environ read
+// failed with a permission error cannot be a runtime: it sits in the
+// scanner's own user manager's init scope (userManagerScopePath) and its
+// identity is stable across the proof and definitely predates the failed
+// read, so a pid recycled before or during the proof abandons it. Any failed
+// or uncertain read leaves the process unproven; only the scope itself is
+// evidence, never a name or non-dumpability (a self-hardened runtime CLI can
+// match those too).
+func unreadableProcessProvenNonRuntime(root string, pid, euid int, readStartedAt time.Time) (bool, error) {
+	snapshot, ok, err := captureUserManagerScopeIdentity(root, pid, euid, readStartedAt)
+	if err != nil || !ok {
+		return false, err
+	}
+	return snapshot.stillCurrent(root)
+}
+
+// userManagerScopeSnapshot is the first census of the user-manager-scope
+// proof: the identity the re-read must confirm.
+type userManagerScopeSnapshot struct {
+	identity processIdentity
+}
+
+// captureUserManagerScopeIdentity takes the first census of the unreadable
+// process at pid. ok is false, without error, unless the process's raw
+// unified cgroup path is exactly the scanner's own user manager's init scope
+// and the process definitely started before the failed environ read began;
+// a vanished process, another scope, an uncertain age and a missing boot
+// time all leave it unproven, while a failed read is an error.
+func captureUserManagerScopeIdentity(root string, pid, euid int, readStartedAt time.Time) (userManagerScopeSnapshot, bool, error) {
+	stat, exists, err := readProcessStat(root, pid)
+	if err != nil || !exists {
+		return userManagerScopeSnapshot{}, false, err
+	}
+	cgroup, exists, err := readUnifiedCgroup(root, pid)
+	if err != nil {
+		return userManagerScopeSnapshot{}, false, err
+	}
+	if !exists || cgroup != userManagerScopePath(euid) {
+		return userManagerScopeSnapshot{}, false, nil
+	}
+	bootedAt, err := readBootTime(root)
+	if err != nil {
+		return userManagerScopeSnapshot{}, false, err
+	}
+	// The proof is bound to the failed read: a process that may have started
+	// after it began could be a runtime that arrived while the scanner looked.
+	if !processStartedAt(bootedAt, stat.StartTicks).Add(linuxProcessStartUncertainty).Before(readStartedAt) {
+		return userManagerScopeSnapshot{}, false, nil
+	}
+	return userManagerScopeSnapshot{identity: processIdentity{
+		PID:        stat.PID,
+		PPID:       stat.PPID,
+		StartTicks: stat.StartTicks,
+		Cgroup:     cgroup,
+	}}, true, nil
+}
+
+// stillCurrent is the second census of the user-manager-scope proof: it
+// re-reads the stat and the unified cgroup path and reports whether both
+// still match the snapshot. A vanished process or a changed PID, parent,
+// start tick or path abandons the proof rather than resolving it either way;
+// a failed read is an error.
+func (snapshot userManagerScopeSnapshot) stillCurrent(root string) (bool, error) {
+	stat, exists, err := readProcessStat(root, snapshot.identity.PID)
+	if err != nil || !exists {
+		return false, err
+	}
+	cgroup, exists, err := readUnifiedCgroup(root, snapshot.identity.PID)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	return stat.PID == snapshot.identity.PID &&
+		stat.PPID == snapshot.identity.PPID &&
+		stat.StartTicks == snapshot.identity.StartTicks &&
+		cgroup == snapshot.identity.Cgroup, nil
 }
 
 func readBootTime(root string) (time.Time, error) {

@@ -1062,3 +1062,99 @@ func TestOrphanCandidate(t *testing.T) {
 		}
 	}
 }
+
+// TestUnreadableEnvironUserManagerScope covers a host helper the scanner's uid
+// owns but cannot ptrace-read, such as the systemd user manager's (sd-pam):
+// its exact own-user-manager unified cgroup scope plus a stable identity that
+// definitely predates the read prove it cannot be a runtime, so it adds no
+// EntryError (ga-zpcphq, PR #8182) — in the unbounded id-scoped scan and the
+// orphan-candidate scan, on a pure-v2 host and a hybrid v1/v2 host alike.
+func TestUnreadableEnvironUserManagerScope(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so the 0o000 environ would stay readable")
+	}
+	euid := os.Geteuid()
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+	boot := time.Now().Add(-time.Hour).UTC()
+	const (
+		helperPID   = 2642
+		helperTicks = 600 // six seconds after boot: definitely older than the read
+	)
+	newFixture := func(t *testing.T, cgroupLines string) string {
+		t.Helper()
+		root := t.TempDir()
+		writeFakeBootTime(t, root, boot)
+		dir := filepath.Join(root, strconv.Itoa(helperPID))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeFakeProcessUID(t, dir, euid)
+		writeFakeProcessStat(t, dir, helperPID, 1, helperTicks)
+		if err := os.WriteFile(filepath.Join(dir, "comm"), []byte("(sd-pam)\n"), 0o644); err != nil {
+			t.Fatalf("write comm: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cgroup"), []byte(cgroupLines), 0o644); err != nil {
+			t.Fatalf("write cgroup: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "environ"), nil, 0o644); err != nil {
+			t.Fatalf("write environ: %v", err)
+		}
+		if err := os.Chmod(filepath.Join(dir, "environ"), 0o000); err != nil {
+			t.Fatalf("chmod environ: %v", err)
+		}
+		return root
+	}
+	scans := map[string]func(root string) error{
+		"id-scoped scan": func(root string) error {
+			_, err := scanWithRoot(root, "ga-target")
+			return err
+		},
+		"orphan-candidate scan": func(root string) error {
+			_, err := scanOrphanCandidatesWithRoot(root, 0)
+			return err
+		},
+	}
+	cgroups := map[string]string{
+		"pure v2": "0::" + scope + "\n",
+		"hybrid":  "1:name=systemd:/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope\n0::" + scope + "\n",
+	}
+	for scanName, scan := range scans {
+		for cgroupName, cgroupLines := range cgroups {
+			t.Run(scanName+", "+cgroupName, func(t *testing.T) {
+				if err := scan(newFixture(t, cgroupLines)); err != nil {
+					t.Fatalf("scan error = %v (%s); want the user-manager helper excused", err, SummarizeScanError(err))
+				}
+			})
+		}
+	}
+}
+
+// TestUnreadableEnvironUserManagerDirectPermissionError proves the
+// user-manager-scope exemption through unreadableEnvironScanError itself,
+// with a wrapped permission error, so the classification holds regardless of
+// file modes and root: a direct error and a 0o000 environ read are the same
+// failure to the scanner.
+func TestUnreadableEnvironUserManagerDirectPermissionError(t *testing.T) {
+	euid := os.Geteuid()
+	scope := "/user.slice/user-" + strconv.Itoa(euid) + ".slice/user@" + strconv.Itoa(euid) + ".service/init.scope"
+	boot := time.Now().Add(-time.Hour).UTC()
+	const (
+		helperPID   = 2642
+		helperTicks = 600
+	)
+	root := t.TempDir()
+	writeFakeBootTime(t, root, boot)
+	dir := filepath.Join(root, strconv.Itoa(helperPID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFakeProcessUID(t, dir, euid)
+	writeFakeProcessStat(t, dir, helperPID, 1, helperTicks)
+	writeFakeProcessCgroup(t, dir, scope)
+
+	readErr := &fs.PathError{Op: "open", Path: filepath.Join(dir, "environ"), Err: syscall.EACCES}
+	err := unreadableEnvironScanError(root, helperPID, "ga-target", time.Time{}, time.Now(), euid, readErr)
+	if err != nil {
+		t.Fatalf("unreadableEnvironScanError = %v (%s); want the user-manager helper excused", err, SummarizeScanError(err))
+	}
+}
