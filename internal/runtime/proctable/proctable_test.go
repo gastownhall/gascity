@@ -207,3 +207,31 @@ func TestScanErrorLogPacesUnreadableEntries(t *testing.T) {
 		}
 	}
 }
+
+// TestScanErrorLogInstancesAreIndependent (ga-zpcphq): the orphan sweep's
+// pacer and the pre-start scan's pacer are separate instances sharing
+// nothing but the type, so one caller's suppression never silences
+// another's first observation of the same city, and each instance's repeat
+// window runs on its own.
+func TestScanErrorLogInstancesAreIndependent(t *testing.T) {
+	now := time.Date(2026, 11, 3, 6, 0, 0, 0, time.UTC)
+	entryErr := pacesEntryScanError("reading environ for pid PID: permission denied", 11)
+	sweep := &ScanErrorLog{}
+	start := &ScanErrorLog{}
+
+	if !sweep.Report("/city", entryErr, now) {
+		t.Fatal("the sweep's first report = false, want true")
+	}
+	if sweep.Report("/city", entryErr, now.Add(time.Minute)) {
+		t.Fatal("the sweep's repeat within the window = true, want false")
+	}
+	if !start.Report("/city", entryErr, now.Add(time.Minute)) {
+		t.Fatal("the start path's first report = false, want true: the sweep's suppression is not its state")
+	}
+	if start.Report("/city", entryErr, now.Add(2*time.Minute)) {
+		t.Fatal("the start path's repeat within the window = true, want false")
+	}
+	if !sweep.Report("/city", entryErr, now.Add(ScanErrorLogRepeat)) {
+		t.Fatal("the sweep's report after its window = false, want true")
+	}
+}
