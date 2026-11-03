@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
@@ -111,8 +113,11 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	for _, a := range located {
 		seen[a.Bead.ID] = true
 	}
-	for _, root := range collectInputConvoyWorkflowRoots(store, graphStore, parent, seen) {
-		located = append(located, sling.AttachedBead{Bead: root, Store: graphStore})
+	inputRoots, _ := collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)
+	inputOf := make(map[string]inputConvoyRoot, len(inputRoots))
+	for _, input := range inputRoots {
+		inputOf[input.root.ID] = input
+		located = append(located, sling.AttachedBead{Bead: input.root, Store: graphStore})
 	}
 	if err == nil || len(located) > 0 {
 		for _, a := range located {
@@ -122,6 +127,17 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			}
 			parked, err := attachedMoleculeIsParked(attachedStore, attached)
 			run.note(err)
+			// A parked root found through its input convoy has nothing left to
+			// run once that whole input is terminal and no step is held or
+			// gated: it retires here rather than waiting for a seat to claim
+			// a step only to find the work done.
+			input, retireIdle := inputOf[attached.ID]
+			retireIdle = retireIdle && parked && err == nil
+			if retireIdle {
+				idle, err := inputConvoyWorkflowIdle(input)
+				run.note(err)
+				parked = !idle
+			}
 			if parked {
 				continue
 			}
@@ -143,6 +159,15 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			run.note(err)
 			if !rootStill {
 				continue
+			}
+			if retireIdle {
+				// The idle decision rests on many rows; read them all again
+				// live so a claim, a gate, or a reopened member since is seen.
+				idle, err := inputConvoyWorkflowIdle(input)
+				run.note(err)
+				if !idle {
+					continue
+				}
 			}
 			closed, err := closeAttachedWispSubtree(attachedStore, attached)
 			if err != nil || closed == 0 {
@@ -205,10 +230,11 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // (the gastownhall/gascity review-pool spawn-churn finalize-gap).
 //
 // This is discovery only: the caller runs each root through the shared
-// attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
+// attachedMoleculeIsParked guard, and a parked root retires only when
+// inputConvoyWorkflowIdle holds, so an orchestrated workflow whose step beads
 // are still in flight stays open and closes later via its workflow-finalize
-// control instead.
-func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+// control instead. A failed read is returned with whatever was found.
+func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) ([]inputConvoyRoot, error) {
 	// The tracks edge is co-resident with the tracking convoy, and the two
 	// owning candidates differ on a split city: every convoy is WORK class
 	// (coordclass), minted co-resident with the issue it tracks, so a
@@ -217,9 +243,13 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 	// side. TrackingConvoysForItem is single-store by contract, so probe both.
 	// On a single-store city graphStore == workStore and this collapses to
 	// the pre-split single read.
-	convoys, err := convoycore.TrackingConvoysForItem(workStore, parent.ID)
+	workConvoys, err := convoycore.TrackingConvoysForItem(workStore, parent.ID)
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	convoys := make([]trackingConvoy, 0, len(workConvoys))
+	for _, c := range workConvoys {
+		convoys = append(convoys, trackingConvoy{bead: c})
 	}
 	if graphStore != workStore {
 		// The graph leg of the two-store probe above: a miss here is
@@ -242,20 +272,36 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 			// The refusal itself was printed once when the verdict was taken;
 			// narrowing to the work leg would be exactly the
 			// looks-like-success answer that file exists to close.
-			return nil
+			return nil, gerr
 		}
-		convoys = dedupeConvoysByID(convoys, graphConvoys)
+		for _, c := range dedupeConvoysByID(workConvoys, graphConvoys)[len(workConvoys):] {
+			convoys = append(convoys, trackingConvoy{bead: c, onGraph: true})
+		}
 	}
-	var roots []beads.Bead
+	var roots []inputConvoyRoot
+	var listErr error
 	for _, convoy := range convoys {
 		// Roots are graph-class, so the root lookup stays on the graph store
 		// regardless of which store owned the tracking convoy.
 		matches, err := graphStore.ListByMetadata(
-			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID},
+			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.bead.ID},
 			0, beads.WithBothTiers,
 		)
 		if err != nil {
+			listErr = err
 			continue
+		}
+		// The members are read with the convoy's own store owning its edges
+		// and the just-closed bead's store as the member class.
+		classes := convoycore.MemberClasses{Convoy: workStore, Work: []beads.Store{workStore}}
+		if convoy.onGraph {
+			classes.Convoy = graphStore
+		}
+		convoyID := convoy.bead.ID
+		reads := inputWorkflowReads{
+			root:    beads.HandlesFor(graphStore).Live.Get,
+			members: func() ([]beads.Bead, error) { return convoycore.MembersIn(classes, convoyID, true) },
+			subtree: func(rootID string) ([]beads.Bead, error) { return molecule.ListSubtree(graphStore, rootID) },
 		}
 		for _, root := range matches {
 			if seen[root.ID] {
@@ -273,10 +319,81 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 				continue
 			}
 			seen[root.ID] = true
-			roots = append(roots, root)
+			roots = append(roots, inputConvoyRoot{root: root, convoyID: convoy.bead.ID, reads: reads})
 		}
 	}
-	return roots
+	return roots, listErr
+}
+
+// trackingConvoy is a convoy tracking the just-closed bead; onGraph reports
+// that it and its membership edges are held by the graph store rather than
+// the work store.
+type trackingConvoy struct {
+	bead    beads.Bead
+	onGraph bool
+}
+
+// inputConvoyRoot is a graph.v2 workflow root found through the input convoy
+// that tracks the just-closed bead, with the live reads its idle check needs.
+type inputConvoyRoot struct {
+	root     beads.Bead
+	convoyID string
+	reads    inputWorkflowReads
+}
+
+// inputWorkflowReads are the live reads behind an input-convoy workflow's idle
+// check: the root by id from the graph store, the convoy's members (a
+// convoy.MembersIn read over the convoy's own store and the member store), and
+// the root's subtree from the graph store.
+type inputWorkflowReads struct {
+	root    func(id string) (beads.Bead, error)
+	members func() ([]beads.Bead, error)
+	subtree func(rootID string) ([]beads.Bead, error)
+}
+
+// inputConvoyWorkflowIdle reports, from live reads, whether a parked graph.v2
+// workflow has nothing left to run: its root still names input.convoyID; that
+// convoy's membership is non-empty, fully resolved and terminal; and no
+// non-terminal root or step (spec sidecars aside, as the parked guard skips
+// them) is held — assigned, or past open — or declares a gate (gc.gate_type;
+// Type=gate alone also marks deferred routing). Anything else keeps the
+// workflow: a claim, finalize, or a later close carries it on.
+func inputConvoyWorkflowIdle(input inputConvoyRoot) (bool, error) {
+	root, err := input.reads.root(input.root.ID)
+	if err != nil {
+		return false, err
+	}
+	if convoycore.IsTerminalStatus(root.Status) || strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) != input.convoyID {
+		return false, nil
+	}
+	members, err := input.reads.members()
+	if err != nil {
+		return false, err
+	}
+	if len(members) == 0 {
+		return false, nil
+	}
+	for _, m := range members {
+		if convoycore.IsUnresolvedTrackedItem(m) || !convoycore.IsTerminalStatus(m.Status) {
+			return false, nil
+		}
+	}
+	subtree, err := input.reads.subtree(root.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range subtree {
+		if b.ID == root.ID {
+			b = root
+		}
+		if sourceworkflow.IsGeneratedSpecSidecar(b) || convoycore.IsTerminalStatus(b.Status) {
+			continue
+		}
+		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" || strings.TrimSpace(b.Metadata[beadmeta.GateTypeMetadataKey]) != "" {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // dedupeConvoysByID merges tracking-convoy lists from the work and graph

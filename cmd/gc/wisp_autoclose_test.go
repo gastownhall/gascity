@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
@@ -918,47 +919,200 @@ func TestWispAutocloseFailsClosedOnPartialGraphView(t *testing.T) {
 	}
 }
 
-func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t *testing.T) {
-	// The input-convoy reap must not steamroll an orchestrated graph.v2 workflow
-	// whose step beads are still in flight: those roots close via their
-	// workflow-finalize control bead, not the on_close hook. The shared parked
-	// guard (subtreeTerminalExcludingRoot) keeps a root with a non-terminal
-	// descendant alive even when an input-convoy member closes early, so only the
-	// genuinely stepless root-only wisp reaps here.
-	store := beads.NewMemStore()
-	issue, _ := store.Create(beads.Bead{Title: "convoy member", Type: "task"})
-	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
-	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
-		t.Fatalf("DepAdd(tracks): %v", err)
-	}
-	root, _ := store.Create(beads.Bead{
-		Title: "orchestrated workflow root",
-		Type:  "task",
-		Metadata: map[string]string{
-			beadmeta.KindMetadataKey:            "workflow",
-			beadmeta.FormulaContractMetadataKey: "graph.v2",
-			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
-		},
-	})
-	// An open step bead keeps the subtree non-terminal -> root stays parked.
-	_, _ = store.Create(beads.Bead{
-		Title:    "in-flight step",
-		Type:     "task",
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
-	})
+// inputWorkflowFixture is a graph.v2 workflow dispatched over an input convoy:
+// the tracked issues in the work store, the convoy and its tracks edges in
+// convoyStore, and the root, an open step and a step that already finished
+// in the graph store.
+type inputWorkflowFixture struct {
+	work, convoyStore, graph beads.Store
+	issues                   []beads.Bead
+	convoyID                 string
+	root, step, finished     beads.Bead
+}
 
-	_ = store.Close(issue.ID)
-
-	var stdout bytes.Buffer
-	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
-
-	rootAfter, err := store.Get(root.ID)
+func newInputWorkflowFixture(t *testing.T, work, convoyStore, graph beads.Store, members int) inputWorkflowFixture {
+	t.Helper()
+	f := inputWorkflowFixture{work: work, convoyStore: convoyStore, graph: graph}
+	conv, err := convoyStore.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
 	if err != nil {
-		t.Fatalf("Get(root): %v", err)
+		t.Fatal(err)
 	}
-	if rootAfter.Status != "open" {
-		t.Fatalf("orchestrated workflow root status = %q, want open (left for workflow-finalize)", rootAfter.Status)
+	f.convoyID = conv.ID
+	for i := 0; i < members; i++ {
+		issue, err := work.Create(beads.Bead{Title: fmt.Sprintf("input %d", i), Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := convoyStore.DepAdd(conv.ID, issue.ID, "tracks"); err != nil {
+			t.Fatalf("DepAdd(tracks): %v", err)
+		}
+		f.issues = append(f.issues, issue)
 	}
+	f.root, err = graph.Create(beads.Bead{Title: "orchestrated workflow root", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.InputConvoyIDMetadataKey:   conv.ID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.step, err = graph.Create(beads.Bead{Title: "idle step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: f.root.ID,
+		beadmeta.RoutedToMetadataKey:   "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.finished, err = graph.Create(beads.Bead{Title: "finished step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: f.root.ID,
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.Close(f.finished.ID); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// closeInput closes issue i and runs the close hook for it.
+func (f inputWorkflowFixture) closeInput(t *testing.T, i int, graph beads.Store) (autocloseRun, string) {
+	t.Helper()
+	if err := f.work.Close(f.issues[i].ID); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	run := doWispAutocloseWith(f.work, f.issues[i].ID, &stdout, beads.GraphStore{Store: graph})
+	return run, stdout.String()
+}
+
+func (f inputWorkflowFixture) assertRetiredAsSkipped(t *testing.T) {
+	t.Helper()
+	for _, id := range []string{f.root.ID, f.step.ID} {
+		got, err := f.graph.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped ||
+			got.Metadata["close_reason"] != sourceworkflow.WorkflowSubtreeClosedReason {
+			t.Fatalf("%s = %s %v; want closed as skipped by the subtree close", id, got.Status, got.Metadata)
+		}
+	}
+	finished, err := f.graph.Get(f.finished.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("finished step %s outcome = %q; a step that closed before keeps its disposition", f.finished.ID, finished.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+}
+
+func (f inputWorkflowFixture) assertPreserved(t *testing.T) {
+	t.Helper()
+	for _, id := range []string{f.root.ID, f.step.ID} {
+		got, err := f.graph.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == "closed" {
+			t.Fatalf("%s = %s %v; the workflow must be preserved", id, got.Status, got.Metadata)
+		}
+	}
+}
+
+// TestWispAutocloseRetiresIdleInputWorkflowWhenItsLastInputCloses: a graph.v2
+// workflow dispatched over an input convoy, with an idle, ungated step left
+// open, has nothing to run once every input is terminal. The close of the
+// last input retires its root and open steps as skipped from the close hook —
+// no seat has to claim a step to discover it — while the close of an earlier
+// input leaves it running. The convoy may sit beside the work (a post-split
+// launch) or on the graph side (a single-store-era migration).
+func TestWispAutocloseRetiresIdleInputWorkflowWhenItsLastInputCloses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stores func() (work, convoyStore, graph beads.Store)
+	}{
+		{name: "single store", stores: func() (beads.Store, beads.Store, beads.Store) {
+			s := beads.NewMemStore()
+			return s, s, s
+		}},
+		{name: "split work and graph stores", stores: func() (beads.Store, beads.Store, beads.Store) {
+			work := beads.NewMemStore()
+			return work, work, &beads.MemStore{IDPrefix: "gcg"}
+		}},
+		{name: "convoy migrated onto the graph store", stores: func() (beads.Store, beads.Store, beads.Store) {
+			graph := &beads.MemStore{IDPrefix: "gcg"}
+			return beads.NewMemStore(), graph, graph
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work, convoyStore, graph := tc.stores()
+			f := newInputWorkflowFixture(t, work, convoyStore, graph, 2)
+
+			run, _ := f.closeInput(t, 0, graph)
+			if !run.finished() {
+				t.Fatalf("run after the first input closed = %+v, want finished", run)
+			}
+			f.assertPreserved(t)
+
+			run, stdout := f.closeInput(t, 1, graph)
+			if !run.finished() {
+				t.Fatalf("run after the last input closed = %+v, want finished", run)
+			}
+			f.assertRetiredAsSkipped(t)
+			if !strings.Contains(stdout, "Auto-closed workflow "+f.root.ID) {
+				t.Fatalf("stdout = %q, want the retirement reported", stdout)
+			}
+		})
+	}
+}
+
+// inputMembershipHookStore runs onMembers before each read of the input
+// convoy's membership (its legacy-children List), so a test can fail that
+// read or change the workflow between the decision and its live recheck.
+type inputMembershipHookStore struct {
+	beads.Store
+	convoyID  string
+	calls     int
+	onMembers func(call int) error
+}
+
+func (s *inputMembershipHookStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.ParentID == s.convoyID && s.onMembers != nil {
+		s.calls++
+		if err := s.onMembers(s.calls); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.List(query)
+}
+
+// TestWispAutocloseRechecksIdleInputWorkflowLiveBeforeRetiring: the idle
+// decision is read again, live, right before the subtree close. A step
+// claimed in between keeps the workflow, and the run still finishes cleanly.
+func TestWispAutocloseRechecksIdleInputWorkflowLiveBeforeRetiring(t *testing.T) {
+	mem := beads.NewMemStore()
+	hooked := &inputMembershipHookStore{Store: mem}
+	f := newInputWorkflowFixture(t, mem, hooked, hooked, 1)
+	f.work, f.graph = hooked, hooked
+	hooked.convoyID = f.convoyID
+	hooked.onMembers = func(call int) error {
+		if call == 2 {
+			return mem.Update(f.step.ID, beads.UpdateOpts{Assignee: strPtr("worker-1")})
+		}
+		return nil
+	}
+
+	run, _ := f.closeInput(t, 0, hooked)
+
+	if hooked.calls != 2 {
+		t.Fatalf("membership read %d times, want the decision and its live recheck", hooked.calls)
+	}
+	if !run.finished() {
+		t.Fatalf("run = %+v, want finished", run)
+	}
+	f.assertPreserved(t)
 }
 
 func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {
