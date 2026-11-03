@@ -2662,6 +2662,12 @@ calls = 4
 tagged = true
 
 [[count]]
+path = "internal/runtime/shellunavailable_parser_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/ssh/process_alive_script_test.go"
 resource = "subprocess"
 calls = 1
