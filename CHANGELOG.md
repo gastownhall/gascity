@@ -1137,6 +1137,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc hook --claim` no longer hands out work another session already owns (#8809).**
+  Two fences from a live double-claim (rig gk, 2026-11-03). A `graph.v2`
+  workflow root sitting open and unassigned while its own member steps run
+  `in_progress` under other seats was served whole to a third polecat: the
+  claim stop gates walk ancestry upward and skip roots, so nothing looked
+  down. The eligible tier now withholds such a root (scoped to
+  `gc.kind=workflow` roots handed out whole; ordinary candidates read no
+  store at all; store faults fail open), leaving it routed for the next
+  poll. Separately, a completed work bead whose submit stamped
+  `handoff_stage` and reassigned it to the refinery was re-claimable: a
+  re-pool or the opt-in stale-lease reclaim (whose predicate ignores
+  holder identity) could flip it back to `in_progress` under a fresh
+  polecat and clear the marker the refinery inbox reads. A non-empty
+  `handoff_stage` now blocks all three pre-CAS surfaces (eligible
+  hand-out, stale-reclaim, ready assignment); a cleared marker restores
+  claimability, and a session resuming its own assignment is untouched.
+
 - **The supervisor built `/status`, `/agents` and `/rigs` slowly on cities
   with many unlimited pools (#8453).** Each unlimited pool listed the
   runtime's sessions on its own, so on tmux every pool forked
