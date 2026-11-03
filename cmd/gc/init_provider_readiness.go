@@ -538,6 +538,12 @@ func shellQuoteWindowsPath(path string) string {
 	return `"` + strings.ReplaceAll(path, `"`, `""`) + `"`
 }
 
+// managedDoltLifecycleDep names the capability of running Gas City's own Dolt
+// server, as opposed to the `dolt` binary being installed. They are separate
+// requirements: a platform can have the binary and still be unable to own a
+// server's lifecycle, and a city pointed at an external endpoint needs neither.
+const managedDoltLifecycleDep = "managed Dolt lifecycle"
+
 // missingDep describes a hard dependency that is missing or too old.
 type missingDep struct {
 	name        string
@@ -678,6 +684,18 @@ const (
 // Returns a list of missing or outdated deps. Without this check, missing
 // binaries cause the supervisor to fail-loop silently and the user never
 // sees the actual error.
+//
+// Every entry carries the condition that makes it a requirement rather than a
+// habit. An unconditional list is only correct for a city that uses every
+// backend at once: it makes a herdr city install tmux, and on a platform where
+// the POSIX automation that consumes jq, pgrep, lsof, flock and GNU timeout is
+// not enabled at all, it demands tools nothing will ever run. Both failures
+// read as "Gas City needs this", which is the opposite of what this check is
+// for.
+//
+// Conditioning is not bypassing. A dependency the selected configuration
+// actually uses is still required and still fails the same way; what changes
+// is that the requirement follows the selection.
 func checkHardDependencies(cityPath string) []missingDep {
 	type dep struct {
 		name        string
@@ -695,15 +713,23 @@ func checkHardDependencies(cityPath string) []missingDep {
 		// journal error before lifecycle work begins.
 		bdRequiredVersion = bdFreshProviderMinVersion
 	}
+	runtimes := citySessionRuntimeNames(cityPath)
 
 	deps := []dep{
 		{
 			name:        "tmux",
 			installHint: "https://github.com/tmux/tmux/wiki/Installing",
+			condition:   func() bool { return selectionResolvesToTmux(runtimes) },
+		},
+		{
+			name:        "herdr",
+			installHint: "https://herdr.dev",
+			condition:   func() bool { return runtimes["herdr"] },
 		},
 		{
 			name:        "jq",
 			installHint: "brew install jq (macOS) or apt install jq (Linux)",
+			condition:   posixShellAutomationEnabled,
 		},
 		{
 			name:        "git",
@@ -722,14 +748,26 @@ func checkHardDependencies(cityPath string) []missingDep {
 			condition:   func() bool { return needsBd },
 		},
 		{
+			// Having the binary is not the same as being able to run a server
+			// with it. Every destructive step of the managed lifecycle is
+			// fenced by an ownership proof, and where the platform cannot
+			// supply one the start path refuses outright — so reporting this
+			// city ready would promise a server that will not come up.
+			name: managedDoltLifecycleDep,
+			condition: func() bool {
+				return needsBd && initNeedsLocalDoltIdentity(cityPath) && managedDoltLifecycleDepApplies(cityPath)
+			},
+			available: func() bool { return managedDoltNativeIdentitySupported() == nil },
+		},
+		{
 			name:        "flock",
 			installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
-			condition:   func() bool { return needsBd },
+			condition:   func() bool { return needsBd && posixShellAutomationEnabled() },
 		},
 		{
 			name:        "timeout/gtimeout/python3",
 			installHint: "install GNU coreutils timeout/gtimeout or python3",
-			condition:   func() bool { return needsBd },
+			condition:   func() bool { return needsBd && posixShellAutomationEnabled() },
 			available: func() bool {
 				return initAnyToolAvailable("timeout", "gtimeout", "python3")
 			},
@@ -737,10 +775,12 @@ func checkHardDependencies(cityPath string) []missingDep {
 		{
 			name:        "pgrep",
 			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
+			condition:   posixShellAutomationEnabled,
 		},
 		{
 			name:        "lsof",
 			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
+			condition:   posixShellAutomationEnabled,
 		},
 	}
 
@@ -753,7 +793,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 			if !d.available() {
 				missing = append(missing, missingDep{
 					name:        d.name,
-					installHint: d.installHint,
+					installHint: unavailableBackendHint(d.name, d.installHint),
 				})
 			}
 			continue
@@ -761,7 +801,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		if _, err := initLookPath(d.name); err != nil {
 			missing = append(missing, missingDep{
 				name:        d.name,
-				installHint: d.installHint,
+				installHint: unavailableBackendHint(d.name, d.installHint),
 			})
 			continue
 		}
@@ -775,6 +815,86 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
+}
+
+// citySessionRuntimeNames returns the runtime selection names this city would
+// resolve: the city-level session provider, the GC_SESSION override that wins
+// over it, and every per-agent session override.
+//
+// The empty selection is reported as the platform runtime default. Unix keeps
+// that default empty, which resolves through the runtime registry's tmux
+// fallback. Windows resolves it to herdr before the registry.
+func citySessionRuntimeNames(cityPath string) map[string]bool {
+	names := map[string]bool{}
+	add := func(raw string) {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			name = "tmux"
+		}
+		names[name] = true
+	}
+
+	cfg, ok := initConfigForBdTooling(cityPath)
+	if !ok {
+		// Without a readable config the selection is unknown. Report the same
+		// platform default that runtime provider construction would use.
+		add(effectiveProviderName(""))
+		return names
+	}
+
+	add(effectiveProviderName(cfg.Session.Provider))
+	for i := range cfg.Agents {
+		// An empty per-agent session means "use the city-level provider",
+		// which is already in the set; only an explicit override adds a name.
+		if override := strings.TrimSpace(cfg.Agents[i].Session); override != "" {
+			add(override)
+		}
+	}
+	return names
+}
+
+// selectionResolvesToTmux reports whether any selected runtime name resolves to
+// a provider that runs sessions on tmux.
+//
+// Naming a provider is not the same as resolving one, so a literal "tmux" is
+// not the only selection that needs tmux installed:
+//
+//   - "hybrid" composes a local tmux provider and routes every session to it
+//     unless a remote match pattern is configured, and even then only the
+//     matching sessions go remote.
+//   - A name the registry does not resolve is not rejected. It falls through
+//     to the tmux fallback, so such a city still runs on tmux.
+//
+// Resolution is asked of the live registry rather than a second copy of the
+// name list, so registering a provider cannot leave this check behind. It has
+// to be Resolves rather than Has: "exec:" and "ssh:" are registered as
+// prefixes, and testing exact membership would misread those real providers as
+// unresolved and demand tmux for them.
+func selectionResolvesToTmux(names map[string]bool) bool {
+	reg := buildRuntimeRegistry()
+	for name := range names {
+		if name == "tmux" || name == "hybrid" {
+			return true
+		}
+		if !reg.Resolves(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// unavailableBackendHint replaces an install hint with the reason a backend
+// cannot be installed at all on this platform.
+//
+// Telling a Windows operator to run `brew install tmux` sends them after
+// something that does not exist for their OS; the actionable answer is that
+// this city selected a backend this platform does not have, so the city has to
+// select a different one.
+func unavailableBackendHint(name, installHint string) string {
+	if reason, unavailable := backendUnavailableOnThisPlatform(name); unavailable {
+		return reason
+	}
+	return installHint
 }
 
 type doltAuthorIdentityProbeError struct {
