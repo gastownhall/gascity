@@ -179,11 +179,12 @@ func registeredCityWorkStore(cityPath string) beads.Store {
 //
 // dropCLIResidencyBindings clears only the DERIVED per-city binding grouping
 // this file memoizes, so a later resolution re-reads the registry instead of a
-// pre-registration answer. It does NOT close or invalidate the one-shot
-// cliStorageRoutes funnel: a handle that funnel already opened in this process
-// stays open, and the 21 non-test sites that call cliStorageRoutes directly
-// keep using it. Neutralizing the funnel is not this slice's scope; keeping the spine off
-// it is.
+// pre-registration answer. The one-shot cliStorageRoutes funnel keeps its
+// answer when it still routes every class where these routes do; one that does
+// not (the city was split, or unsplit, while this process ran) is retired so
+// the next funnel call resolves the city again (retireStaleCLIStorageRoutes,
+// ga-d17a71). A handle the funnel already opened stays open until the process
+// ends either way.
 // work is the runtime's city WORK-store accessor, read lazily (see
 // registeredCityWorkStore); pass nil from a caller that has none.
 func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func() beads.Store) {
@@ -198,6 +199,7 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func()
 	residencyRoutesByCity[key] = residencyRegistration{routes: routes, work: work}
 	residencyRoutesMu.Unlock()
 	dropCLIResidencyBindings(key)
+	retireStaleCLIStorageRoutes(key, routes)
 }
 
 // unregisterResidencyRoutes drops a runtime's registration, and ONLY its own.

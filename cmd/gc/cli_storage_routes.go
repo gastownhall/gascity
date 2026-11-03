@@ -24,6 +24,20 @@ package main
 // where the process ends (main.go), which is the only place that knows the last
 // call site has run.
 //
+// # A controller boot re-decides it
+//
+// A process that lives longer than one routing decision — the machine
+// supervisor, which keeps running while a city is stopped, split with
+// `gc storage migrate`, and started again in the same process — must not keep
+// a funnel answer taken before the split (ga-d17a71). Where a city serves its
+// classes changes only while it is stopped, and takes effect when its
+// controller boots again, so that boot is the trigger: registering the booted
+// routes (registerResidencyRoutes) retires a settled funnel answer whose
+// routing no longer matches them, and the next funnel call resolves the city
+// as it is now. A retired answer's binding stays open until the process ends,
+// because a caller may still hold a store it handed out; an answer that still
+// matches is kept, so a restart does not open a second handle.
+//
 // # It resolves the config itself
 //
 // The call sites disagree about what config they hold: some pass the city config
@@ -71,6 +85,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -94,6 +109,9 @@ var cliStorageStderr io.Writer = os.Stderr
 type cliStorageRoutesEntry struct {
 	once   sync.Once
 	routes *storageRoutes
+	// resolved is set once routes and unsettled hold the answer, so a caller
+	// that must not block on, or complete, a resolution in flight can tell.
+	resolved atomic.Bool
 	// unsettled marks an answer that must not be memoized for the process:
 	// the city's config failed to load, or the gate could not read what it
 	// needed, so the answer is about the moment, not the city. It is reused
@@ -112,6 +130,10 @@ var cliStorageRoutesUnsettledTTL = 2 * time.Second
 var (
 	cliStorageRoutesMu     sync.Mutex
 	cliStorageRoutesByCity map[string]*cliStorageRoutesEntry
+	// cliStorageRoutesRetired are answers a controller boot replaced
+	// (retireStaleCLIStorageRoutes). They are no longer served, and are closed
+	// with the rest at process end.
+	cliStorageRoutesRetired []*cliStorageRoutesEntry
 )
 
 // cliStorageRoutes returns the routes a one-shot CLI command must serve this
@@ -135,6 +157,7 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 			if entry.unsettled {
 				entry.expires = time.Now().Add(cliStorageRoutesUnsettledTTL)
 			}
+			entry.resolved.Store(true)
 		})
 	}
 	entry := cliStorageRoutesEntryFor(clean)
@@ -186,6 +209,47 @@ func forgetCLIStorageRoutesEntry(cityPath string, entry *cliStorageRoutesEntry) 
 	if cliStorageRoutesByCity[cityPath] == entry {
 		delete(cliStorageRoutesByCity, cityPath)
 	}
+}
+
+// retireStaleCLIStorageRoutes drops cityPath's funnel answer when it no longer
+// matches booted, the routes the city's controller just booted with in this
+// process, so the next funnel call resolves the city again (see "A controller
+// boot re-decides it" above). An answer still being resolved is left alone: it
+// is reading the city as it is now. The retired answer is not closed here, since
+// a caller may still hold a store from it; closeCLIStorageRoutes closes it.
+func retireStaleCLIStorageRoutes(cityPath string, booted *storageRoutes) {
+	if cityPath == "" {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	cliStorageRoutesMu.Lock()
+	defer cliStorageRoutesMu.Unlock()
+	entry, ok := cliStorageRoutesByCity[key]
+	if !ok || !entry.resolved.Load() || entry.unsettled || sameCLIStorageRouting(entry.routes, booted) {
+		return
+	}
+	delete(cliStorageRoutesByCity, key)
+	cliStorageRoutesRetired = append(cliStorageRoutesRetired, entry)
+}
+
+// sameCLIStorageRouting reports whether a funnel answer routes every class
+// where booted, a controller's boot routes, does: the same binding, the same
+// relocated classes, and none of them refused. A nil or empty routes value is
+// the identity answer, every class on the work store.
+func sameCLIStorageRouting(funnel, booted *storageRoutes) bool {
+	identity := func(r *storageRoutes) bool { return r == nil || len(r.stores) == 0 }
+	if identity(funnel) || identity(booted) {
+		return identity(funnel) && identity(booted)
+	}
+	if funnel.refused || funnel.binding != booted.binding || len(funnel.stores) != len(booted.stores) {
+		return false
+	}
+	for class := range funnel.stores {
+		if _, ok := booted.stores[class]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // prewarmCLIStorageRoutes resolves cityPath's routes in the background and
@@ -388,8 +452,13 @@ func cliStorageRoutesEntryFor(cityPath string) *cliStorageRoutesEntry {
 // layer up outliving the one it was derived from.
 func closeCLIStorageRoutes() error {
 	cliStorageRoutesMu.Lock()
-	entries := cliStorageRoutesByCity
+	entries := make([]*cliStorageRoutesEntry, 0, len(cliStorageRoutesByCity)+len(cliStorageRoutesRetired))
+	for _, entry := range cliStorageRoutesByCity {
+		entries = append(entries, entry)
+	}
+	entries = append(entries, cliStorageRoutesRetired...)
 	cliStorageRoutesByCity = nil
+	cliStorageRoutesRetired = nil
 	cliStorageRoutesMu.Unlock()
 	resetCLIResidencyBindings()
 	cliStorageRefusalsMu.Lock()
@@ -419,7 +488,7 @@ func closeCLIStorageRoutes() error {
 // the exact failure the refusal exists to prevent.
 func refusingStorageRoutes(binding string, refusal error) *storageRoutes {
 	store := refusedClassStore{err: standingStorageRefusal{err: refusal}}
-	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: binding}
+	routes := &storageRoutes{stores: make(map[coordclass.Class]beads.Store), binding: binding, refused: true}
 	for _, class := range coordclass.Classes() {
 		if class.IsInfrastructure() {
 			routes.stores[class] = store

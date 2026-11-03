@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // resetCLIStorageRoutes gives a test the process-scoped funnel in its start
@@ -304,5 +305,137 @@ func TestCLIStorageRoutesOpenTheBindingOncePerProcess(t *testing.T) {
 	}
 	if *registries != 2 {
 		t.Errorf("the funnel constructed %d provider registr(ies) across a close, want 2", *registries)
+	}
+}
+
+// bootCityRoutesAsController opens the routes a city's controller boots with
+// and registers them as this process's residency answer, as the supervisor
+// does once it holds the city's controller lock.
+func bootCityRoutesAsController(t *testing.T, cityPath string, cfg *config.City) {
+	t.Helper()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the controller's storage boot refused: %v", err)
+	}
+	registerResidencyRoutes(cityPath, routes, nil)
+	t.Cleanup(func() {
+		unregisterResidencyRoutes(cityPath, routes)
+		_ = routes.close()
+	})
+}
+
+// TestSupervisorSeesASplitMadeWhileItRan is ga-d17a71: a city split while the
+// machine supervisor keeps running (gc stop, gc storage migrate --from-work,
+// gc start, which reloads the city in the SAME supervisor process). The
+// supervisor resolved the city through the one-shot funnel while it was
+// unsplit and memoized that answer for its lifetime, so every funnel caller
+// in it (the controller socket's session-circuit reset, the provider session
+// snapshot) kept reading the work store for relocated classes, and
+// `gc session reset` failed with "bead not found" until a supervisor restart.
+//
+// The city's controller booting again is when its routing is decided anew, so
+// the registration of the booted routes retires a funnel answer that no
+// longer matches them; the next funnel call resolves the city as it is now.
+func TestSupervisorSeesASplitMadeWhileItRan(t *testing.T) {
+	cityPath := oneShotCLICity(t, "")
+	captureCLIStorageStderr(t)
+	work := beads.NewMemStore()
+	if got := cliSessionStore(work, nil, cityPath); got != beads.Store(work) {
+		t.Fatalf("fixture: the unsplit city's session route is %p, want the work store %p", got, work)
+	}
+	if routes := cliStorageRoutes(cityPath); routes != nil {
+		t.Fatalf("fixture: the unsplit city resolved routes %+v", routes)
+	}
+
+	// The split, with the city stopped and the supervisor still running.
+	bindingRoot := filepath.Join(t.TempDir(), "store")
+	writeOneShotCityTOML(t, cityPath, bindingRoot)
+	stubInfraControllerPing(t, 0)
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the split city config: %v", err)
+	}
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the split did not converge (%s): %s", report.Outcome, log.String())
+	}
+
+	// gc start: the supervisor boots the city's controller again.
+	bootCityRoutesAsController(t, cityPath, cfg)
+	sessions := cliSessionStore(work, nil, cityPath)
+	if sessions == beads.Store(work) {
+		t.Fatalf("after the split and the controller's reboot, the funnel still routes sessions to the work store")
+	}
+	created, err := sessions.Create(beads.Bead{Title: "named session", Type: "session", Labels: []string{"gc:session"}})
+	if err != nil {
+		t.Fatalf("creating a session bead through the funnel: %v", err)
+	}
+	if _, err := work.Get(created.ID); err == nil {
+		t.Fatalf("the session bead %s landed in the work store", created.ID)
+	}
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the funnel (the retired answer included): %v", err)
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	if _, err := binding.Get(created.ID); err != nil {
+		t.Fatalf("the session bead written through the funnel is not in the binding: %v", err)
+	}
+}
+
+// TestControllerRebootKeepsAFunnelAnswerThatStillMatches: a controller that
+// boots with the routing the funnel already resolved changes nothing, so the
+// funnel keeps its answer (and its open binding) rather than opening a second
+// handle on every restart.
+func TestControllerRebootKeepsAFunnelAnswerThatStillMatches(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	before := cliStorageRoutes(cityPath)
+	if before == nil {
+		t.Fatalf("fixture: the migrated city resolved no routes")
+	}
+	bootCityRoutesAsController(t, cityPath, cfg)
+	if after := cliStorageRoutes(cityPath); after != before {
+		t.Fatalf("a controller reboot with unchanged routing replaced the funnel's answer (%p -> %p)", before, after)
+	}
+}
+
+// TestSameCLIStorageRoutingJudgesWhereEachClassIsServed pins the comparison a
+// controller boot retires a funnel answer by: identity answers match each
+// other only, a refused answer never matches a booted one, and served answers
+// match on binding and relocated classes.
+func TestSameCLIStorageRoutingJudgesWhereEachClassIsServed(t *testing.T) {
+	store := beads.NewMemStore()
+	served := func(binding string, classes ...coordclass.Class) *storageRoutes {
+		r := &storageRoutes{stores: map[coordclass.Class]beads.Store{}, binding: binding}
+		for _, c := range classes {
+			r.stores[c] = store
+		}
+		return r
+	}
+	all := []coordclass.Class{}
+	for _, c := range coordclass.Classes() {
+		if c.IsInfrastructure() {
+			all = append(all, c)
+		}
+	}
+	for _, tc := range []struct {
+		name           string
+		funnel, booted *storageRoutes
+		want           bool
+	}{
+		{"both identity", nil, nil, true},
+		{"empty is identity", &storageRoutes{}, nil, true},
+		{"identity then split", nil, served("infra", all...), false},
+		{"split then unsplit", served("infra", all...), nil, false},
+		{"same split", served("infra", all...), served("infra", all...), true},
+		{"other binding", served("infra", all...), served("graph", all...), false},
+		{"other classes", served("infra", all[0]), served("infra", all...), false},
+		{"refused then served", refusingStorageRoutes("infra", errors.New("unconverged")), served("infra", all...), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameCLIStorageRouting(tc.funnel, tc.booted); got != tc.want {
+				t.Fatalf("sameCLIStorageRouting = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -91,6 +91,10 @@ type storageRoutes struct {
 	// binding names the non-work binding these routes were opened from, for
 	// diagnostics.
 	binding string
+	// refused marks routes whose every relocated class refuses
+	// (refusingStorageRoutes): the one-shot funnel's answer for a city this
+	// build must not serve.
+	refused bool
 	// emitCityPath is the city whose event log these routes' class stores
 	// append bead.* events to, and it is set on exactly one construction:
 	// the one-shot CLI funnel's (cli_storage_routes.go). openStorageRoutes
