@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -7232,7 +7233,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
 		Template: "worker",

@@ -2163,7 +2163,7 @@ func TestSyncSessionBeads_StaleManualPlanDoesNotRecreateClosedSession(t *testing
 		},
 	}
 	city := t.TempDir()
-	manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(city))
+	manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city))
 	if _, err := manager.CloseDetailed(context.Background(), testOperatorIn(t, city), bead.ID); err != nil {
 		t.Fatalf("close manual session: %v", err)
 	}
@@ -7990,7 +7990,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	}
 
 	// The freed alias must now be available for a successor on the same slot.
-	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(store), "gascity-packs/codex-1", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
 	}
 }
@@ -10887,4 +10887,19 @@ func TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow(t *testing.T) {
 			t.Errorf("a keyless row in state %q: session_key %q after sync, want minted %v; stderr=%s", tc.state, key, tc.mint, stderr.String())
 		}
 	}
+}
+
+// findClosedNamedSessionBead is session.FindClosedNamedSessionBead over a
+// single store serving the sessions class, ignoring the error.
+func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBead(beadstest.Sessions(store), identity)
+	return bead, ok
+}
+
+// findClosedNamedSessionBeadForSessionName is
+// session.FindClosedNamedSessionBeadForSessionName over a single store serving
+// the sessions class, ignoring the error.
+func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
+	return bead, ok
 }

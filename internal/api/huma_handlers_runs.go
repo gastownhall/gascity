@@ -539,7 +539,8 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 
 	for _, target := range targets {
 		for _, rootID := range target.workflows {
-			n, err := cancelWorkflowRoot(target.store, rootID)
+			// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			n, err := cancelWorkflowRoot(beads.GraphMolecule(beads.GraphStore{Store: target.store}), rootID)
 			res.closed += n
 			if err != nil {
 				return res, err
@@ -555,7 +556,7 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 // teardown tail. A nested drain item root is canceled exactly like the run
 // root: it is a workflow root in its own right, so its own controls read
 // gc.cancel_requested off it and its own teardown tail still runs.
-func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
+func cancelWorkflowRoot(store beads.MoleculeTarget, rootID string) (int, error) {
 	exclude, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
 		return 0, err
@@ -580,7 +581,8 @@ func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
 // gc.root_bead_id) rather than from a further subtree read, which the close
 // makes for itself, so that no read beyond the walk delays the interrupts.
 func planRunCancel(target *runCancelTarget) ([]string, error) {
-	tree, err := sourceworkflow.WorkflowTree(target.store, target.root.ID)
+	// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	tree, err := sourceworkflow.WorkflowTree(beads.GraphMolecule(beads.GraphStore{Store: target.store}), target.root.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -651,7 +653,8 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 			unique = append(unique, holder)
 		}
 	}
-	store := s.state.SessionsBeadStore().Store
+	sessions := s.state.SessionsBeadStore()
+	store := sessions.Store
 	if store == nil {
 		for _, holder := range unique {
 			fail(holder, errors.New("no session store configured"))
@@ -688,7 +691,7 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mgr := s.sessionManager(store)
+			mgr := s.sessionManager(sessions)
 			info, err := mgr.Get(id)
 			if err != nil {
 				results[i] = err

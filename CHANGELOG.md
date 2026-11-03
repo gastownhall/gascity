@@ -174,10 +174,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc maintenance status`, and `gc status` and `gc rig status` on a
     suspended city; a stale-while-revalidate `/status` serve still reports
     how long ago its response was built. In 1.5.1 (and since 1.3.0) the
-    supervisor always reported 0, so the `(cache age: ...)` footers printed
-    on stdout after human output (over 15 s on `gc session list`, over 30 s
-    on other API-served reads) can now appear on an idle city, and on reads
-    a suspended city serves from its cache.
+    supervisor reported the cache's age as 0, so the `(cache age: ...)`
+    footer printed only on `gc status` and `gc rig status`, when a
+    stale-while-revalidate `/status` serve (added in 1.5.0) was more than
+    30 s old.
+  - **The `(cache age: ...)` footer moved to stderr and names its cause.**
+    It used to print on stdout after human output, over 15 s on
+    `gc session list` and over 30 s on other API-served reads, saying
+    "reconciler may be lagging". It now prints on stderr, and only once the
+    age passes twice the re-scan interval the server reports in
+    `X-GC-Cache-Refresh-Interval-S` (over 60, 120 or 240 s), so a healthy
+    idle city prints none on reads served from the cache. `gc status` and
+    `gc rig status` still print it, naming a saved response the server is
+    rebuilding, when that saved response is more than twice the interval
+    old. It says what the server reports bounds the age:
+    the cache's re-scans are not landing on schedule, they are paused while
+    the city is suspended, they are failing, or the answer is a saved
+    `gc status` / `gc rig status` response the server is rebuilding. Against
+    a supervisor that reports no interval it prints only past 240 s, without
+    a cause. The 15 s `gc session list` footer ("STATE may lag the runtime")
+    is gone, and `gc rig list` and `gc maintenance status`, whose output is
+    not read from the cache, print no footer. A script that read the footer
+    from stdout must read stderr instead; stdout now carries only the
+    result, byte-identical to the local route's.
   - **Restart the supervisor after you install this build**
     (`gc supervisor stop --wait`, then `gc start`). A supervisor still
     running an earlier gc serves the old rows: it ignores
@@ -197,6 +216,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `--state closed` against a supervisor running 1.5.0 or older lists no
     closed sessions, because an empty answer has no rows to tell the
     version by; a local target reads closed history locally.
+
+- **SQLite cities deliver messages, interrupts and responds on the
+  conversation lane by default.** With `[ops] authoritative` unset, a city
+  whose sessions store is SQLite with guarded batches (a SQLite storage
+  split) now runs `message`, `interrupt` and `respond` on the controller's
+  lane host, as if all three were listed. `gc session nudge`, `gc session
+  submit`, mail `--notify`, sling `--nudge`, the hook-claim continuation,
+  planner notices, wait nudges and the API's submit, messages, stop and
+  respond routes then write lane ops instead of nudge-queue items. Lanes
+  need a split store: any other city (bd-served, DoltLite, an exec provider,
+  native Dolt, the file provider) keeps legacy delivery, and `gc doctor`'s
+  `legacy-delivery` check says which one a city runs. A city whose sessions
+  store cannot host lanes (bd-served, DoltLite, exec) gets a warning to split
+  its storage (`docs/runbooks/split-storage-classes.md`, `gc storage
+  migrate`); an unsplit native-Dolt city gets a note that splitting moves
+  lane records to SQLite, which is cheaper. To roll a SQLite city back, set
+  `[ops] authoritative = []` and restart the controller; the rollback is
+  warned, and it goes away when legacy delivery is removed. Queue items
+  written before the upgrade still drain through the legacy deliverers. On
+  such a city with the list unset, this release also changes:
+  - **Messages over 16 KiB are refused.** `gc session nudge` and `gc session
+    submit` refuse them, and the API's submit and messages routes and a
+    provider `POST .../sessions` initial message answer 422
+    `payload_too_large`. Earlier releases delivered them on the legacy path.
+  - **Lane delivery semantics apply now.** An `interrupt_now` submit
+    interrupts the running turn and never restarts the session; a Codex
+    default submit waits for the turn boundary; `--delivery immediate`
+    steers into a running turn only where the runtime can steer, and
+    otherwise delivers at the next boundary.
+  - **Queued notices and prompts wait for the controller.** The lane host
+    runs in the controller, so while it is down they are delivered when it
+    returns; the legacy pollers used to deliver them meanwhile.
+  - **Downgrade floor.** This is the first release that runs lanes on these
+    cities, and v1.5.1 has no lane host, so open lane ops stranded by a
+    downgrade are never delivered. Before downgrading, let them drain or
+    drop them (`gc nudge status`, `gc nudge drop`).
 
 - **Run `gc doctor --fix` in each existing gastown or gascity city after you
   install this build.** gc now pins gastown 0.1.13 and gascity 0.1.7 (see
@@ -812,17 +867,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     new problem type `urn:gascity:error:session-inactive`, and a failed peek
     fails the request. `peek=true` without it keeps the best-effort preview.
 
-- **The work ladder only nudges a step, hourly, while its seat waits on a
-  person.** With `[daemon] work_ladder` on (the default), a claimed step whose
+- **API: `X-GC-Cache-Refresh-Interval-S` and `X-GC-Cache-Refresh` response
+  headers (#8453).** Every read that sends `X-GC-Cache-Age-S` also sends,
+  when its body is read from a primed bead cache, the cache's current
+  re-scan interval in seconds and what bounds the age: `scheduled` (the
+  cache re-scans its store every interval), `paused` (the server has paused
+  those re-scans while the city is suspended with no session running),
+  `failing` (the cache's last re-scan of its store failed; it retries with
+  backoff) or `rebuilding` (the body is a response the server saved
+  `X-GC-Cache-Age-S` seconds ago, served while it builds a fresh one). Both
+  are optional and declared in the OpenAPI spec; the interval is 0 and the
+  state is omitted when the body was not read from a primed cache, except
+  `rebuilding`: a saved `/status` response reports `rebuilding` whatever it
+  was built from, and its interval is then 0. The CLI uses them to decide
+  when to print its cache-age footer.
+
+- **The work ladder nudges a step only daily while its seat waits on a
+  person, and hourly when the seat's turns say its answer's turn may have
+  died.** With `[daemon] work_ladder` on (the default), a claimed step whose
   metadata `gc.awaiting_human` names the session holding it (the seat asked a
   person and waits on their decision, such as an approval asked by mail) is
-  nudged an hour after the ladder sees the wait and hourly after that, however
-  long the person takes: no recycle, no release, and none of the
-  `work.escalated` alerts its pacing would raise (`started_recycled`,
-  `started_unanswered`, `release_unfinished`). Nudges the seat cannot take
-  still count toward `nudge_refused`, and a release already in flight that
-  raced the step's start still raises `release_raced_start`. The hourly nudge
-  takes up an answer whose turn died before the seat could clear the key. The
+  never recycled or released, however long the person takes, and raises none
+  of the `work.escalated` alerts its pacing would (`started_recycled`,
+  `started_unanswered`, `release_unfinished`). While the seat's own turns show
+  its newest turn completed, the step is nudged only a day after the ladder
+  sees the wait or after its last nudge, so a wait costs a turn a day, not one
+  an hour. That daily nudge takes up an answer that started no turn of the
+  seat, which leaves the asking turn the newest: a reply from the dashboard's
+  Mail page or `POST /v0/city/{cityName}/mail/{id}/reply`, which requests no
+  recipient turn, or a `gc mail reply --notify` whose wake failed (the command
+  still exits 0). Any other reading (a turn open, the newest turn failed, was
+  canceled or ended with no status, no turn at all, turns that cannot be read)
+  keeps an hourly nudge: an hour after the ladder sees the wait or after its
+  last nudge, at once when that is already past. That nudge takes up an answer
+  whose turn died before the seat could clear the key, even one whose end was
+  never recorded: the ladder reads only a quiet seat's turns, so a turn open
+  there may have died with its CLI or stopped at a dialog the idle check
+  cannot read.
+  A seat restarted while it waits gets its agent's startup prompt or hint nudge
+  only when the agent has one, and that delivery is best effort. Nudges the
+  seat cannot take still count toward `nudge_refused`, and a release already in
+  flight that raced the step's start still raises `release_raced_start`. The
   ladder checks the key in the planner's snapshot (on the claim's own bead,
   never another store's bead with the same ID) and again in every live
   re-read before it acts (a nudge, a release, pacing carried under an
@@ -840,7 +925,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ending after a nudge the seat took, opens a rate-limit episode, kept on the
   seat's `work_ladder` cell. While it stands the seat is paced as on a
   degraded provider: nudges every 10 minutes that count toward nothing (a
-  step waiting on a person keeps its hourly nudge), and no drain, release or
+  step waiting on a person is nudged hourly while its turns are refused), and
+  no drain, release or
   escalation. Once a nudge the seat took after the episode opened is refused
   too, at least 10 minutes after the first refusal, the seat is restarted in
   place on a fresh conversation (`gc session reset`'s request), keeping its
@@ -921,6 +1007,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `failed to record cause note` and recorded nothing. Every store serves the
   metadata write. The text is unchanged; read it with `gc bd show <id>
   --json`. A later reset overwrites it.
+
+- **`gc nudge status` and `gc nudge drop` cover conversation-lane ops.**
+  `gc nudge status` lists a session's open lane messages beside its queue
+  items, pending until the lane takes them and in flight while it delivers,
+  and lane messages that closed failed or skipped in the last hour as dead,
+  in the same schema-v1 JSON; when it cannot read them all it says so and
+  exits 1. Dead messages are looked up among the session's 50 most recently
+  created closed lane messages, so an older one is not listed even when it
+  closed last. `gc nudge drop <op id>` cancels a lane message as the
+  operator: `dropped` before the lane takes it, `cancel_requested` while it
+  is delivered. `gc doctor` gains a `legacy-delivery` check (queue depth,
+  live `gc nudge poll` sidecars, deprecated keys in use), and its
+  `conversation-lanes` check reports the default kinds and why a city keeps
+  legacy delivery.
+
+- **Protocol-mode sessions take lane notices.** A t3bridge session, whose
+  runtime records its turn starts, is now served by the conversation lane
+  for every notice producer (mail `--notify`, sling `--nudge`, the
+  hook-claim continuation, planner notices, the work ladder and wait
+  nudges) wherever `[ops] authoritative` lists message, not only for the
+  ops route. Producers and the lane host decide with one rule, so a notice
+  never waits for a lane that cannot deliver it. `gc session nudge` to a
+  t3bridge session goes through the lane too: a wait-idle or immediate nudge
+  is delivered inline at the turn boundary, and an immediate nudge into a
+  running turn is not steered; it waits for that boundary and is reported
+  queued (`queued: true`).
 
 - **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
   analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
@@ -1005,7 +1117,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
   same way. Pass `--version` to choose another constraint.
 
+### Deprecated
+
+- **Legacy delivery.** The nudge queue (`.gc/runtime/nudges/state.json`),
+  its `gc nudge poll` sidecars and the supervisor's nudge dispatcher are
+  removed in a future release: one release after `gc init` creates split
+  cities by default. From then on a city whose sessions store cannot host
+  conversation lanes must split its storage (`gc storage migrate`) before
+  it can start; split now with `docs/runbooks/split-storage-classes.md`.
+  Where the lane runs, the controller warns once at start about each of
+  `[daemon] nudge_dispatcher`, `[session] nudge_poll_interval`, `[ops]
+  content` and `[ops] control` still set, and about `[ops] authoritative =
+  []`. Leave those keys set until legacy delivery is removed: they still
+  govern the legacy deliverers that drain queue items written before the
+  upgrade and serve sessions without a row, and removing `nudge_dispatcher
+  = "supervisor"` now would restart the per-session pollers. `gc nudge
+  drain` without `--inject` is deprecated; the prompt hook's `gc nudge drain
+  --inject` stays.
+
 ### Fixed
+
+- **The supervisor built `/status`, `/agents` and `/rigs` slowly on cities
+  with many unlimited pools (#8453).** Each unlimited pool listed the
+  runtime's sessions on its own, so on tmux every pool forked
+  `tmux list-sessions`: a 676-pool city paid 676 forks per `/status` build
+  (about 11 s of an 11-13 s build), 676 per `/agents` and 1,344 per
+  `/rigs`. Each request now lists the runtime once and answers every pool
+  from that listing; a failed or partial listing still falls back to one
+  listing per pool. In a benchmark shaped like that city, at 1 ms per
+  listing, a `/status` build drops from about 717 ms to under 2 ms and
+  `/agents` from 2.99 s to 2.25 s. A StoreHealth measurement whose
+  closed-history list fallback outlasts its 1 s read budget is also kept for
+  the store-health cache TTL (3 minutes) instead of being retried on every
+  full `/status` build, saving about 1 s per build on cities whose remote
+  bead backend cannot count closed history. Every other StoreHealth failure
+  is still retried on the next build, so a transient store error clears as
+  soon as the store recovers. The response bodies are unchanged.
 
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**

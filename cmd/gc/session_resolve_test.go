@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -973,7 +974,7 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 		}},
 	}
 	city := t.TempDir()
-	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(city))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), session.WithCityPath(city))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "mayor", ExplicitName: config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor"), Template: "mayor", Title: "Mayor", Command: "true", WorkDir: t.TempDir(), Provider: "shell", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
 			namedSessionMetadataKey:      "true",
@@ -1233,4 +1234,10 @@ func TestResolveSessionIDMaterializingNamed_NilStderrDoesNotPanic(t *testing.T) 
 	if id != canonical.ID {
 		t.Fatalf("got %q, want canonical %q", id, canonical.ID)
 	}
+}
+
+// resolveSessionIDAllowClosed is session.ResolveSessionIDAllowClosed over a
+// single store serving the sessions class.
+func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
+	return session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), identifier)
 }

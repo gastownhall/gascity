@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -914,7 +915,7 @@ func teardownMoleculeCrashScenario(name, formulaDir, workOutcome string) crashSc
 		name: name,
 		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
 			store := newBdClosePolicyStore()
-			cooked, err := molecule.Cook(context.Background(), store, "teardown-settlement", []string{formulaDir}, molecule.Options{})
+			cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "teardown-settlement", []string{formulaDir}, molecule.Options{})
 			if err != nil {
 				t.Fatalf("Cook: %v", err)
 			}
@@ -923,7 +924,7 @@ func teardownMoleculeCrashScenario(name, formulaDir, workOutcome string) crashSc
 				ledger:   []*beads.MemStore{store.MemStore},
 				dispatch: wrap(store),
 				work: func(t *testing.T) bool {
-					members, err := molecule.ListSubtree(store, rootID)
+					members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 					if err != nil {
 						t.Fatalf("listing molecule members: %v", err)
 					}
@@ -1118,7 +1119,7 @@ func drainScopeCrashScenario(name, formulaDir string, memberCount int, drainMeta
 			parent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "parent", Type: "convoy"})
 			for i := range memberCount {
 				member := mustCreateWorkflowBead(t, store, beads.Bead{Title: fmt.Sprintf("member %d", i+1), Type: "task"})
-				if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, parent.ID, member.ID); err != nil {
 					t.Fatalf("tracking member: %v", err)
 				}
 			}

@@ -310,7 +310,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -407,7 +407,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -640,7 +640,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -900,7 +900,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
 				return err
 			}
 			return updateFn()
@@ -914,7 +914,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

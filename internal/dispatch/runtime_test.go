@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -8108,7 +8109,7 @@ on_exhausted = "hard_fail"
 	if err := routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store); err != nil {
 		t.Fatalf("routeFanoutFragmentSteps: %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}
 	staleRetryControl := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
@@ -8215,7 +8216,7 @@ needs = ["{target}.review"]
 		if err != nil {
 			t.Fatalf("CompileExpansionFragment(%s): %v", reviewer, err)
 		}
-		if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+		if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 			t.Fatalf("InstantiateFragment(%s): %v", reviewer, err)
 		}
 	}
@@ -8322,7 +8323,7 @@ needs = ["{target}.review"]
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	legacyInst, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID})
+	legacyInst, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID})
 	if err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
@@ -8430,7 +8431,7 @@ needs = ["{target}.review"]
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
 
@@ -8539,7 +8540,7 @@ needs = ["{target}.review"]
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
 
@@ -8640,7 +8641,7 @@ title = "Review {reviewer}"
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
 
@@ -11890,7 +11891,7 @@ func cookTeardownMolecule(t *testing.T, store beads.Store) string {
 	if err := os.WriteFile(filepath.Join(dir, "teardown-settlement.toml"), []byte(teardownSettlementFormula), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
-	result, err := molecule.Cook(context.Background(), store, "teardown-settlement", []string{dir}, molecule.Options{})
+	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "teardown-settlement", []string{dir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -11918,7 +11919,7 @@ func runMolecule(t *testing.T, store beads.Store, rootID, workOutcome string) {
 	t.Helper()
 	const maxRounds = 60
 	for round := 0; round < maxRounds; round++ {
-		members, err := molecule.ListSubtree(store, rootID)
+		members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 		if err != nil {
 			t.Fatalf("listing molecule members: %v", err)
 		}
@@ -12039,7 +12040,7 @@ func isTeardownAttempt(bead beads.Bead, teardownSteps map[string]bool) bool {
 
 func memberReport(t *testing.T, store beads.Store, rootID string) string {
 	t.Helper()
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 	if err != nil {
 		t.Fatalf("listing molecule members: %v", err)
 	}
@@ -12063,7 +12064,7 @@ func memberReport(t *testing.T, store beads.Store, rootID string) string {
 // root-outcome guard.
 func teardownTailBeads(t *testing.T, store beads.Store, rootID string) (control, attempt beads.Bead) {
 	t.Helper()
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 	if err != nil {
 		t.Fatalf("listing molecule members: %v", err)
 	}
@@ -12090,7 +12091,7 @@ func teardownTailBeads(t *testing.T, store beads.Store, rootID string) (control,
 
 func assertNoOpenMembers(t *testing.T, store beads.Store, rootID string) {
 	t.Helper()
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 	if err != nil {
 		t.Fatalf("listing molecule members: %v", err)
 	}

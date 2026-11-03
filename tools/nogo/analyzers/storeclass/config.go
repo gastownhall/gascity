@@ -55,6 +55,9 @@ var Default = Config{
 		beads + ".MailStore",
 		beads + ".OrdersStore",
 		beads + ".NudgesStore",
+		// T5a: a molecule's store, graph or work class, built only from those
+		// handles (beads.GraphMolecule, beads.WorkMolecule).
+		beads + ".MoleculeTarget",
 	},
 	UnwrapMethods: []string{"Raw", "ConditionalWritesResolveTarget"},
 	AsFuncs:       []string{beads + ".As"},
@@ -120,12 +123,18 @@ var Default = Config{
 	// Sealed packages have no baseline rows: a phase ends by adding its
 	// package here, and the list only grows (TestSealedOnlyGrows).
 	Sealed: []string{
+		"internal/convoy",
 		"internal/executionevent",
 		"internal/extmsg",
+		"internal/graphroute",
+		"internal/graphv2",
 		"internal/mail",
 		"internal/mail/beadmail",
+		"internal/molecule",
 		"internal/nudgequeue",
 		"internal/opjournal",
+		"internal/session",
+		"internal/sourceworkflow",
 		"internal/workladder",
 	},
 	LoadBaseline: LoadBaselineFromEnv,

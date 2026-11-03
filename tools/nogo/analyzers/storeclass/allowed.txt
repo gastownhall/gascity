@@ -20,6 +20,7 @@ cmd/gc/city_stores.go	routesBindings	raw-field	2
 cmd/gc/city_stores.go	scopeStores	raw-param	1
 cmd/gc/city_stores.go	storesEpoch	raw-field	1
 cmd/gc/city_stores.go	storesEpochCache.get	raw-param	1
+cmd/gc/infra_class_clear.go	detachInfraClearedRow	raw-param	1
 cmd/gc/infra_class_clear.go	infraBackupEdgeFor	raw-param	1
 cmd/gc/infra_class_clear.go	infraBackupEntryFor	raw-param	1
 cmd/gc/infra_class_clear.go	infraBackupSourceStore	raw-field	1

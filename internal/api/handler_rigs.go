@@ -43,8 +43,9 @@ type gitStatus struct {
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
 // Each agent row is observed on the runtime session it runs under, as
-// sessions resolves it.
-func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, sessions *agentSessionResolver, cityName, cityPath string) rigResponse {
+// sessions resolves it. pools answers unlimited-pool expansion for the whole
+// request (newRequestSessionListing).
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, sessions *agentSessionResolver, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -54,7 +55,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp, cfg.NamedSessions)
+		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			var obs worker.LiveObservation
@@ -74,7 +75,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	resp := rigResponse{
 		Name:                rig.Name,
 		Path:                rig.Path,
-		Suspended:           s.rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Suspended:           s.rigSuspended(cfg, rig, sp, pools, cityName, cityPath),
 		Prefix:              rig.EffectivePrefix(),
 		DefaultBranch:       rig.EffectiveDefaultBranch(),
 		DefaultSlingTarget:  rig.DefaultSlingTarget,
@@ -95,7 +96,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // metadata. The deprecated `[[rig]] suspended` field in city.toml is
 // intentionally NOT consulted — `gc doctor` surfaces it as a migration
 // target.
-func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
+func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) bool {
 	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
 		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
@@ -107,7 +108,7 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provi
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp, cfg.NamedSessions)
+		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)

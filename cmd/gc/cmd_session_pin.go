@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
@@ -113,7 +114,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		fmt.Fprintf(stderr, "gc session %s: %s is not a session\n", action, id) //nolint:errcheck
 		return 1
 	}
-	session.RepairEmptyType(sessStore, &b)
+	session.RepairEmptyType(beads.SessionStore{Store: sessStore}, &b)
 	if b.Status == "closed" {
 		fmt.Fprintf(stderr, "gc session %s: session %s is closed\n", action, id) //nolint:errcheck
 		return 1

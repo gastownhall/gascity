@@ -160,9 +160,17 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
 	reader, ok := s.Store.(beads.DepMetadataReader)
 	if !ok {
-		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T: %w", issueID, dependsOnID, s.Store, beads.ErrDepMetadataUnsupported)
 	}
 	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// DepMetadataAbsentByProtocol forwards what the inner store declares about its
+// protocol, for the reason DepMetadata is forwarded: the embedded Store
+// interface strips the declaration, and the migration would read a generic
+// exec store under this wrapper as one it cannot ask.
+func (s *beadPolicyStore) DepMetadataAbsentByProtocol() (string, bool) {
+	return beads.DepMetadataAbsent(s.Store)
 }
 
 // Count implements beads.Counter with the same read-tier expansion as List.

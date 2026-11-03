@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -169,7 +171,7 @@ func TestSessionStopInFlightReturnsConflict(t *testing.T) {
 
 func suspendForWakeTest(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), id, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}

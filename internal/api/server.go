@@ -128,9 +128,11 @@ type Server struct {
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests
-	// don't re-walk a fresh city between maintenance runs.
+	// don't re-walk a fresh city between maintenance runs. storeHealthErr
+	// holds only a memoized retained-row list overrun (cachedStoreHealth).
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
+	storeHealthErr      error
 	storeHealthExpires  time.Time
 	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
 	storeHealthFlight   singleflight.Group

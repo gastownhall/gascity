@@ -80,10 +80,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
 		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
+			freshness := cacheAgeSeconds(cityStore)
 			return &ListOutput[beads.Bead]{
-				Index:     hit.Index,
-				CacheAgeS: cacheAgeSeconds(cityStore),
-				Body:      hit.Body,
+				Index:        hit.Index,
+				CacheAgeS:    freshness.ageS,
+				CacheRefresh: freshness.refresh,
+				Body:         hit.Body,
 			}, nil
 		}
 	}
@@ -261,7 +263,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
 	// limit-bounded read is unfetchable by design (#3208). next_cursor is the
@@ -282,9 +284,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[beads.Bead]]{Index: index, Body: body})
 	}
 	return &ListOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAge,
-		Body:      body,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         body,
 	}, nil
 }
 
@@ -742,10 +745,12 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 	if err != nil {
 		return nil, err
 	}
+	freshness := cacheAgeSeconds(cityStore)
 	return &IndexOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(cityStore),
-		Body:      b,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         b,
 	}, nil
 }
 
