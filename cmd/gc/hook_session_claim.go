@@ -74,6 +74,27 @@ func stampSessionCurrentClaimVia(front sessionFrontGetter, sessionID, beadID str
 	return err
 }
 
+// hookReadSessionCurrentClaim reads the current-claim stamp off the session
+// bead the way hookStampSessionCurrentClaim writes it: through the routed
+// session front door, so a [beads.classes.sessions] relocation reaches both
+// halves of the claim back-channel. It is the production implementation of the
+// hookClaimOps.ReadSessionCurrentClaim seam — the confirmed-missing adoption
+// arm's input, which must know whether the stamp names the purged bead before
+// clearing it.
+//
+// "" when the session carries no stamp. session.Store.CurrentClaimBeadID's
+// error contract is surfaced as is: a present-but-non-session id is
+// ErrSessionNotFound and an absent id is the wrapped store not-found error, so
+// the caller treats an unreadable session bead as leave-the-stamp-alone rather
+// than as an empty stamp.
+func hookReadSessionCurrentClaim(sessionID string) (string, error) {
+	sessFront, err := sessionCurrentClaimFrontDoor()
+	if err != nil {
+		return "", err
+	}
+	return sessFront.CurrentClaimBeadID(sessionID)
+}
+
 // hookSessionDrainPending reports whether the session identified by sessionID is
 // already draining. It is the production implementation of the
 // hookClaimOps.DrainPending seam — the F-D claim fence's only input.

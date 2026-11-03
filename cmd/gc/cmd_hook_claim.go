@@ -297,6 +297,14 @@ type hookClaimOps struct {
 	// which the step's shell can later learn which bead it is running.
 	// Best-effort.
 	StampSessionClaim hookStampSessionClaimFunc
+	// ReadSessionCurrentClaim reads the current-claim stamp back off the session
+	// bead, through the same routed session front door StampSessionClaim writes
+	// through. It tells the confirmed-missing adoption arm whether the session's
+	// pointer names the purged bead before the arm clears it — the pointer may
+	// name other live work, and clearing it on a guess is how a working seat
+	// loses the demand-class drain veto sessionOwnsLiveClaim reads off this
+	// stamp.
+	ReadSessionCurrentClaim hookReadSessionCurrentClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
 	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
@@ -411,8 +419,14 @@ type (
 	hookResolveSessionWorkDirFunc func(sessionID string) string
 	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
 	hookStampSessionClaimFunc     func(sessionID, beadID string) error
-	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
-	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	// hookReadSessionCurrentClaimFunc reads the current-claim stamp off the
+	// session bead the way StampSessionClaim writes it: through the routed
+	// session front door, so a session-class relocation reaches both halves.
+	// "" when the session carries no stamp; an error when the read could not be
+	// made.
+	hookReadSessionCurrentClaimFunc func(sessionID string) (string, error)
+	hookPublishRunMapFunc           func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc            func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
 	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
 	// the lease and, if so, the previous owner.
@@ -614,11 +628,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
 		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
-		// Holding a bead is no reason to resume it once its workflow stopped:
-		// the step a worker took before its root failed is exactly the one a
-		// re-poll would otherwise hand straight back. A stopped bead is closed
-		// and not adopted, and the claim tiers below look for live work.
-		if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
+		if verdict == hookAdoptionMissing {
+			// The canonical store confirms the bead is gone: the work query's
+			// row is a stale cache of a purged bead (city-578k). Serving it
+			// hands the seat a bead no bd mutation can touch — the loop only a
+			// full session drain ever ended. Clear the session's pointer to the
+			// dead claim and fall through to the claim tiers: normal routing is
+			// the recovery, and a drain (the shared end of the tiers) leaves the
+			// session free to be recycled instead of pinned by a bead its
+			// runner cannot address.
+			fmt.Fprintf(stderr, "gc hook --claim: dropping %s: the canonical store confirms it no longer exists; the work query's row is stale\n", bead.ID) //nolint:errcheck
+			clearHookSessionClaimForMissingBead(bead.ID, *opts, *ops, stderr)
+		} else if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
 			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
@@ -627,9 +648,10 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, verdict, time.Time{}, stdout, stderr)}
 			}
 		}
-		// Not adopted — the canonical store named another owner, or the bead is
-		// held under a legacy spelling that could not be moved to this worker's
-		// actor. Fall through to the claim tiers: neither tier can match this
+		// Not adopted — the canonical store named another owner, the bead is
+		// gone (purged, pointer cleared above), or the bead is held under a
+		// legacy spelling that could not be moved to this worker's actor. Fall
+		// through to the claim tiers: neither tier can match this
 		// row anyway (ready requires open, eligible requires an empty
 		// assignee), so this ends in the shared drain unless there is other
 		// work to do. Draining is the point — an unclosable bead in hand is the
@@ -697,6 +719,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.StampSessionClaim == nil {
 		ops.StampSessionClaim = hookStampSessionCurrentClaim
+	}
+	if ops.ReadSessionCurrentClaim == nil {
+		ops.ReadSessionCurrentClaim = hookReadSessionCurrentClaim
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
@@ -1391,6 +1416,11 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
+	// hookAdoptionMissing: the canonical store ANSWERED and confirmed the bead
+	// does not exist. The work query's row is a stale cache of a bead that was
+	// purged, so the receipt is withheld, the session's pointer to the bead is
+	// cleared, and the claim falls through to the routing tiers below.
+	hookAdoptionMissing
 	// hookClaimMinted: not an adoption at all — a claim tier just won this
 	// claim and read it back canonically. It tells restampHookAdoption that a
 	// failed re-stamp must still hand the bead out (with the recovery
@@ -1403,13 +1433,22 @@ const (
 // holds against the canonical store before an existing_assignment receipt
 // promises it.
 //
-// The two failure arms are deliberately different, and the difference is the
+// The three failure arms are deliberately different, and the difference is the
 // whole design. A MISMATCH is positive evidence that someone else owns the bead
 // — the stale-cache shape that re-serves a re-slung step to the seat that lost
-// it — and it is refused. An unreadable readback is evidence of nothing; the
-// stamp path already treats that case as "proceed, but emit no durable
-// lifecycle record", and failing closed here would idle every seat behind one
-// store hiccup, the same trade the F-D probe makes for the same reason.
+// it — and it is refused. A confirmed-missing readback is positive evidence of
+// a different fact: the bead no longer exists at all, so the row the work query
+// served is a stale cache of a purged bead, and re-serving it hands the seat a
+// bead no bd mutation can touch (the city-578k loop that only a full session
+// drain ever ended) — it is refused too, with the session's pointer cleared.
+// An unreadable readback is evidence of nothing; the stamp path already treats
+// that case as "proceed, but emit no durable lifecycle record", and failing
+// closed here would idle every seat behind one store hiccup, the same trade the
+// F-D probe makes for the same reason. Only beads.ErrNotFound counts as
+// confirmed-missing: it is the one error the store maps "no such bead" to
+// (bdstore.go), and the class-routed readback escalates a work-leg miss to the
+// binding before it lets one out, so ErrNotFound here means no residency leg
+// has the bead.
 //
 // On hookAdoptionOwned it also returns the canonical assignee spelling, which
 // may differ from the work query's (cached) row.
@@ -1422,6 +1461,12 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			// Confirmed absent — not a store hiccup. No stderr warning beyond
+			// the caller's drop note: this is the resolver working, not a
+			// degradation.
+			return hookAdoptionMissing, ""
+		}
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
 		return hookAdoptionUnverified, ""
 	}
@@ -3397,6 +3442,34 @@ func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stder
 	if err := ops.StampSessionClaim(sessionID, ""); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim on session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
+}
+
+// clearHookSessionClaimForMissingBead removes the session-side current-claim
+// stamp when it names beadID, for the confirmed-missing adoption arm: the work
+// query served a purged bead, and the session must stop advertising a claim on
+// something the store no longer has. The stamp is read first and cleared only
+// on a match. An unconditional clear is how a working seat loses the
+// demand-class drain veto: a session can hold several claims and the stamp
+// names the latest, so clearing it while it names other live work makes
+// sessionOwnsLiveClaim answer owns=false and the deciders drain the seat
+// mid-turn. An unreadable session bead also leaves the stamp alone — the live
+// readers already fail safe (sessionOwnsLiveClaim treats a missing claim bead
+// as not-owned; `gc hook current` re-resolves a stale stamp from the ledger),
+// and clearing on a guess buys nothing over that floor.
+func clearHookSessionClaimForMissingBead(beadID string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" || beadID == "" || ops.ReadSessionCurrentClaim == nil {
+		return
+	}
+	stamped, err := ops.ReadSessionCurrentClaim(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: leaving the current-claim stamp on session %s unreadable: %v\n", sessionID, err) //nolint:errcheck
+		return
+	}
+	if strings.TrimSpace(stamped) != beadID {
+		return
+	}
+	clearHookSessionCurrentClaim(opts, ops, stderr)
 }
 
 // publishHookClaimRunMap publishes the claimed bead's resolved run ID for the

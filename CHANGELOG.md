@@ -1137,6 +1137,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc hook --claim` no longer re-serves a purged bead as
+  `existing_assignment` (#8798).** The caching work query can outlive
+  the bead it names: after a seat's claimed wisp is deleted from the
+  store, the query keeps serving the dead row and the
+  existing-assignment tier minted its receipt on that row alone, so
+  every claim handed the seat a bead no `bd` mutation can address ("Issue
+  not found") — the loop only a full session drain ever ended. The claim
+  now treats a canonical `ErrNotFound` from the class-routed readback
+  (confirmed absent through every residency leg, not a store hiccup) as
+  a stale row: the receipt is withheld, the session's pointer to the
+  dead claim is cleared — but only when the pointer names the dead bead,
+  so a session holding other live work keeps the drain veto its stamp
+  carries — and the claim falls through to the routing tiers, whose
+  shared end is a drain the seat can actually leave. An unreadable
+  store stays fail-open exactly as before.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped
