@@ -186,14 +186,18 @@ longer belongs offline: follow the Recovery Procedure in
 
 A flatten or GC can leave the server answering SQL while the database it
 rewrote is gone from disk. Compact checks every database it rewrites. Before
-the first rewrite it records whether `<data_dir>/<db>/.dolt` exists, and after
-the flatten and after each GC, whether that rewrite succeeded or failed, it
-checks again. When the entry existed before and is gone after, compact:
+the first rewrite it records whether `<data_dir>/<db>/.dolt` exists. After the
+flatten and after each GC, whether that rewrite succeeded or failed, it checks
+the entry again and asks the server
+`SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))` on that database. The answer
+must name the database (in any case) and a resolvable HEAD; the HEAD may
+differ from the one before the rewrite. When the entry existed before and is
+gone after, or the probe fails, compact:
 
 - writes a quarantine marker with reason
   `live database unavailable after compaction`, the steps that ran, the step
-  that failed, the data-dir entry before and after, and the pre-compaction
-  HEAD;
+  that failed, the probe's failure, the data-dir entry before and after, and
+  the pre-compaction HEAD;
 - emits the `dolt.compact.quarantine` event and mails the compactor alert
   recipient, as for any quarantine;
 - writes no pending-GC marker for that database; and

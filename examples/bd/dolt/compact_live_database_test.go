@@ -11,12 +11,12 @@ import (
 // database it rewrote stops being served.
 const compactLiveGateReason = "live database unavailable after compaction"
 
-func compactQuarantineMarkerPath(fixture compactScriptFixture, db string) string {
-	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", db)
+func compactBeadsQuarantineMarkerPath(fixture compactScriptFixture) string {
+	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 }
 
-func compactPendingGCMarkerPath(fixture compactScriptFixture, db string) string {
-	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", db)
+func compactBeadsPendingGCMarkerPath(fixture compactScriptFixture) string {
+	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 }
 
 // setCompactLiveFault arms a one-shot fake-dolt fault that fires after the
@@ -39,9 +39,9 @@ func compactDoltLogQueries(log, db, fragment string) []string {
 	return matches
 }
 
-func assertCompactLiveGateMarker(t *testing.T, fixture compactScriptFixture, db string, want map[string]string) {
+func assertCompactBeadsLiveGateMarker(t *testing.T, fixture compactScriptFixture, want map[string]string) {
 	t.Helper()
-	marker := compactQuarantineMarkerPath(fixture, db)
+	marker := compactBeadsQuarantineMarkerPath(fixture)
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("live gate quarantine marker %s missing: %v", marker, err)
 	}
@@ -64,7 +64,7 @@ func TestCompactScriptAbortsWhenDatabaseLeavesDataDirAfterGC(t *testing.T) {
 		t.Fatalf("compact succeeded after the database left the data dir:\n%s", out)
 	}
 	entry := filepath.Join(fixture.dataDir, "beads", ".dolt")
-	assertCompactLiveGateMarker(t, fixture, "beads", map[string]string{
+	assertCompactBeadsLiveGateMarker(t, fixture, map[string]string{
 		"live_gate_steps":                 "flatten,post-flatten full GC",
 		"live_gate_failed_step":           "post-flatten full GC",
 		"live_gate_data_dir_entry":        entry,
@@ -80,8 +80,8 @@ func TestCompactScriptAbortsWhenDatabaseLeavesDataDirAfterGC(t *testing.T) {
 			t.Fatalf("compact reported success for a database that left the data dir: %q\n%s", line, out)
 		}
 	}
-	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", compactQuarantineMarkerPath(fixture, "beads"), "compact-quarantine", compactLiveGateReason)
-	if _, err := os.Stat(compactPendingGCMarkerPath(fixture, "beads")); !os.IsNotExist(err) {
+	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", compactBeadsQuarantineMarkerPath(fixture), "compact-quarantine", compactLiveGateReason)
+	if _, err := os.Stat(compactBeadsPendingGCMarkerPath(fixture)); !os.IsNotExist(err) {
 		t.Fatalf("live gate failure left a pending-GC marker (stat err=%v):\n%s", err, out)
 	}
 }
@@ -125,15 +125,108 @@ func TestCompactScriptLiveGateQuarantinesWhenFlattenRemovesDataDir(t *testing.T)
 	if err == nil {
 		t.Fatalf("compact succeeded after the flatten removed the database:\n%s", out)
 	}
-	assertCompactLiveGateMarker(t, fixture, "beads", map[string]string{
+	assertCompactBeadsLiveGateMarker(t, fixture, map[string]string{
 		"live_gate_steps":                 "flatten",
 		"live_gate_failed_step":           "flatten",
 		"live_gate_data_dir_entry_before": "present",
 		"live_gate_data_dir_entry_after":  "absent",
 		"live_gate_pre_compaction_head":   "headcommit",
 	})
-	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", compactQuarantineMarkerPath(fixture, "beads"), "compact-quarantine", compactLiveGateReason)
+	assertCompactBeadsQuarantineAlert(t, fixture, "mayor", compactBeadsQuarantineMarkerPath(fixture), "compact-quarantine", compactLiveGateReason)
 	if gcCalls := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", "CALL DOLT_GC("); len(gcCalls) != 0 {
 		t.Fatalf("compact ran GC on a database the flatten removed: %q", gcCalls)
 	}
+}
+
+// setCompactLiveProbeResponse makes the fake dolt answer every live probe on db
+// with response instead of "<db>:<head>".
+func setCompactLiveProbeResponse(t *testing.T, fixture compactScriptFixture, db, response string) {
+	t.Helper()
+	path := filepath.Join(fixture.liveFaultDir, "response-"+db)
+	if err := os.WriteFile(path, []byte(response+"\n"), 0o644); err != nil {
+		t.Fatalf("write live probe response %s: %v", path, err)
+	}
+}
+
+func TestCompactScriptLiveGateQuarantinesWhenRewrittenDatabaseIsNotServed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mode       string
+		faultKind  string
+		failedStep string
+		steps      string
+	}{
+		{name: "flatten", mode: "success", faultKind: "flatten", failedStep: "flatten", steps: "flatten"},
+		{name: "full GC succeeded", mode: "success", faultKind: "gc", failedStep: "post-flatten full GC", steps: "flatten,post-flatten full GC"},
+		{name: "full GC failed", mode: "gc_failure", faultKind: "gc", failedStep: "post-flatten full GC", steps: "flatten,post-flatten full GC"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			setCompactLiveFault(t, fixture, tc.faultKind, "beads", "unserved")
+
+			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("compact succeeded after the rewritten database stopped being served:\n%s", out)
+			}
+			assertCompactBeadsLiveGateMarker(t, fixture, map[string]string{
+				"live_gate_steps":                 tc.steps,
+				"live_gate_failed_step":           tc.failedStep,
+				"live_gate_failure":               "served-HEAD probe failed",
+				"live_gate_data_dir_entry_before": "present",
+				"live_gate_data_dir_entry_after":  "present",
+				"live_gate_pre_compaction_head":   "headcommit",
+			})
+			marker := compactBeadsQuarantineMarkerPath(fixture)
+			if probe := compactMarkerValue(t, marker, "live_gate_probe_failure"); !strings.Contains(probe, "database not found: beads") {
+				t.Fatalf("live_gate_probe_failure = %q, want the probe's server error", probe)
+			}
+			assertCompactBeadsQuarantineAlert(t, fixture, "mayor", marker, "compact-quarantine", compactLiveGateReason)
+			if _, err := os.Stat(compactBeadsPendingGCMarkerPath(fixture)); !os.IsNotExist(err) {
+				t.Fatalf("live gate failure left a pending-GC marker (stat err=%v):\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestCompactScriptLiveGateValidatesServedDatabaseAndHead(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		response    string
+		wantFailure string
+	}{
+		{name: "other database", response: "zed:headcommit", wantFailure: "probe served database 'zed', not 'beads'"},
+		{name: "empty HEAD", response: "beads:", wantFailure: "probe returned unresolvable HEAD ''"},
+		{name: "non-hash HEAD", response: "beads:NULL!", wantFailure: "probe returned unresolvable HEAD 'NULL!'"},
+		{name: "no separator", response: "beads", wantFailure: "probe returned no database:HEAD answer (got 'beads')"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			setCompactLiveProbeResponse(t, fixture, "beads", tc.response)
+
+			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("compact accepted live probe answer %q:\n%s", tc.response, out)
+			}
+			assertCompactBeadsLiveGateMarker(t, fixture, map[string]string{
+				"live_gate_failed_step":   "flatten",
+				"live_gate_probe_failure": tc.wantFailure,
+			})
+		})
+	}
+
+	t.Run("database name case and a new HEAD are accepted", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		setCompactLiveProbeResponse(t, fixture, "beads", "BEADS:Compact0Commit9")
+
+		out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+		if err != nil {
+			t.Fatalf("compact rejected a served database that differs only in case: %v\n%s", err, out)
+		}
+		if _, err := os.Stat(compactBeadsQuarantineMarkerPath(fixture)); !os.IsNotExist(err) {
+			t.Fatalf("compact quarantined a live database (stat err=%v):\n%s", err, out)
+		}
+		if probes := compactDoltLogQueries(readCompactDoltLog(t, fixture), "beads", "SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"); len(probes) != 2 {
+			t.Fatalf("live probes after flatten and full GC = %d, want 2: %q", len(probes), probes)
+		}
+	})
 }

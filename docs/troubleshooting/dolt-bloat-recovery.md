@@ -563,7 +563,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
-| `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone. *(never auto-cleared — see below)* |
+| `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone or the server no longer served it with a resolvable HEAD. *(never auto-cleared — see below)* |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -592,6 +592,7 @@ immediately, while an unchanged marker follows the bounded reminder cadence.
 A `live database unavailable after compaction` marker means the rewrite may
 have left the server without the database. It records `live_gate_steps` (the
 rewrites that ran), `live_gate_failed_step`, `live_gate_failure`,
+`live_gate_probe_failure` (the server's answer to the served-HEAD probe),
 `live_gate_data_dir_entry` with its `_before` and `_after` states, and
 `live_gate_pre_compaction_head`. Compact stops processing that database and
 leaves no pending-GC marker for it. To recover:

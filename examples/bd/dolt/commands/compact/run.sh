@@ -452,6 +452,17 @@ case "$push_timeout" in
     ;;
 esac
 
+# The live-database probe is a single cheap SELECT, so it gets at most 30s even
+# when the per-call ceiling is the GC-sized default. The comparison runs on the
+# value without leading zeros and only when it has at most two digits, so a long
+# call timeout can never overflow the shell's arithmetic.
+live_probe_timeout=30
+_live_probe_call_timeout=$(printf '%s' "$call_timeout" | sed 's/^0*//')
+if [ -n "$_live_probe_call_timeout" ] && [ "${#_live_probe_call_timeout}" -le 2 ] &&
+  [ "$_live_probe_call_timeout" -lt 30 ]; then
+  live_probe_timeout="$_live_probe_call_timeout"
+fi
+
 case "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" in
   ''|*[!0-9]*|0)
     printf 'compact: invalid GC_DOLT_RIG_LIST_TIMEOUT_SECS=%s (must be a positive integer)\n' \
@@ -913,12 +924,18 @@ discover_database_names() {
 dolt_query() {
   db="$1"
   query="$2"
+  dolt_query_bounded "$call_timeout" "$db" "$query"
+}
+
+# dolt_query_bounded TIMEOUT DB QUERY runs QUERY like dolt_query under its own
+# per-call TIMEOUT, without touching the caller's db/query globals.
+dolt_query_bounded() {
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded "$call_timeout" \
+  run_bounded "$1" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
-    --use-db "$db" \
-    sql -r tabular -q "$query"
+    --use-db "$2" \
+    sql -r tabular -q "$3"
 }
 
 emit_error_file() {
@@ -2476,13 +2493,15 @@ explain_full_gc_cancellation() {
 # per-database pass that reaches a storage rewrite arms the gate immediately
 # before its first rewrite and checks it after each one: a database whose
 # <data_dir>/<db>/.dolt directory was present before the pass must still be
-# present. A failed check quarantines the database, sets live_gate_failed, and
-# makes the pass return 1 before any further statement touches the database.
+# present, and the server must still serve the database with a resolvable HEAD.
+# A failed check quarantines the database, sets live_gate_failed, and makes the
+# pass return 1 before any further statement touches the database.
 #
 # The gate state is shared shell globals (POSIX sh has no locals), so every
 # helper uses an _lg_ prefix and must run in the current shell, never in a
 # pipeline or command substitution.
 live_gate_quarantine_reason="live database unavailable after compaction"
+live_probe_query="SELECT CONCAT(DATABASE(), ':', HASHOF('HEAD'))"
 
 # live_gate_reset clears the gate state at the start of each database pass.
 live_gate_reset() {
@@ -2492,6 +2511,8 @@ live_gate_reset() {
   live_gate_steps=""
   live_gate_dir_before=""
   live_gate_pre_head=""
+  live_probe_head=""
+  live_probe_failure=""
 }
 
 # live_gate_data_dir_entry DB prints the local data-dir entry the gate watches.
@@ -2506,6 +2527,53 @@ live_gate_dir_state() {
   else
     printf 'absent\n'
   fi
+}
+
+# live_gate_probe DB asks the server which database it serves under DB and the
+# HEAD it resolves there. It returns 0 with live_probe_head set when the answer
+# names DB (case-insensitively) and a non-empty alphanumeric HEAD, and 1 with a
+# single-line live_probe_failure otherwise. The HEAD may differ from the
+# pre-rewrite HEAD: a flatten moves it on purpose.
+live_gate_probe() {
+  _lg_db="$1"
+  live_probe_head=""
+  live_probe_failure=""
+  _lg_out=$(mktemp)
+  _lg_err=$(mktemp)
+  _lg_rc=0
+  dolt_query_bounded "$live_probe_timeout" "$_lg_db" "$live_probe_query" >"$_lg_out" 2>"$_lg_err" || _lg_rc=$?
+  _lg_cell=$(awk 'NR==4 {gsub(/[| ]/, ""); print; exit}' "$_lg_out")
+  _lg_detail=$(tr '\n\r\t' '   ' < "$_lg_err" | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-300)
+  rm -f "$_lg_out" "$_lg_err"
+  if [ "$_lg_rc" -eq 124 ]; then
+    live_probe_failure="probe timed out after ${live_probe_timeout}s"
+    return 1
+  fi
+  if [ "$_lg_rc" -ne 0 ]; then
+    live_probe_failure="probe failed rc=$_lg_rc: ${_lg_detail:-no server error}"
+    return 1
+  fi
+  case "$_lg_cell" in
+    *:*) ;;
+    *)
+      live_probe_failure="probe returned no database:HEAD answer (got '$_lg_cell')"
+      return 1
+      ;;
+  esac
+  _lg_served_db="${_lg_cell%%:*}"
+  _lg_served_head="${_lg_cell#*:}"
+  if [ "$(printf '%s' "$_lg_served_db" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$_lg_db" | tr '[:upper:]' '[:lower:]')" ]; then
+    live_probe_failure="probe served database '$_lg_served_db', not '$_lg_db'"
+    return 1
+  fi
+  case "$_lg_served_head" in
+    ''|*[!0-9A-Za-z]*)
+      live_probe_failure="probe returned unresolvable HEAD '$_lg_served_head'"
+      return 1
+      ;;
+  esac
+  live_probe_head="$_lg_served_head"
+  return 0
 }
 
 # live_gate_arm DB STEP PRE_HEAD records the pre-rewrite evidence the first
@@ -2533,10 +2601,16 @@ live_gate_check() {
   _lg_step="$2"
   _lg_entry=$(live_gate_data_dir_entry "$_lg_db")
   _lg_dir_after=$(live_gate_dir_state "$_lg_db")
-  if [ "$live_gate_dir_before" != "present" ] || [ "$_lg_dir_after" = "present" ]; then
+  if [ "$live_gate_dir_before" = "present" ] && [ "$_lg_dir_after" != "present" ]; then
+    # Probe anyway so the marker records what the server says about it.
+    live_gate_probe "$_lg_db" || true
+    live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "data-dir entry $_lg_entry disappeared"
+    return 1
+  fi
+  if live_gate_probe "$_lg_db"; then
     return 0
   fi
-  live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "data-dir entry $_lg_entry disappeared"
+  live_gate_fail "$_lg_db" "$_lg_step" "$_lg_entry" "$_lg_dir_after" "served-HEAD probe failed"
   return 1
 }
 
@@ -2552,12 +2626,14 @@ live_gate_fail() {
   _lg_why="$5"
   live_gate_failed=1
   live_gate_failed_step="$_lg_step"
-  printf 'compact: db=%s live database gate failed after %s: %s (data_dir_entry=%s before=%s after=%s pre_compaction_head=%s) — quarantining\n' \
-    "$_lg_db" "$_lg_step" "$_lg_why" "$_lg_entry" "$live_gate_dir_before" "$_lg_dir_after" "${live_gate_pre_head:-<unknown>}" >&2
+  _lg_probe_failure="${live_probe_failure:-none (served $_lg_db:$live_probe_head)}"
+  printf 'compact: db=%s live database gate failed after %s: %s (probe=%s data_dir_entry=%s before=%s after=%s pre_compaction_head=%s) — quarantining\n' \
+    "$_lg_db" "$_lg_step" "$_lg_why" "$_lg_probe_failure" "$_lg_entry" "$live_gate_dir_before" "$_lg_dir_after" "${live_gate_pre_head:-<unknown>}" >&2
   if ! write_compact_marker "$quarantine_dir" "$_lg_db" "$live_gate_quarantine_reason" \
     "live_gate_steps=$live_gate_steps" \
     "live_gate_failed_step=$_lg_step" \
     "live_gate_failure=$_lg_why" \
+    "live_gate_probe_failure=$_lg_probe_failure" \
     "live_gate_data_dir_entry=$_lg_entry" \
     "live_gate_data_dir_entry_before=$live_gate_dir_before" \
     "live_gate_data_dir_entry_after=$_lg_dir_after" \
