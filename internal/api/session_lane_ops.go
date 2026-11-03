@@ -185,7 +185,7 @@ func (s *Server) stopSessionLane(ctx context.Context, store beads.Store, id, key
 // none. Run cancel's legacy guard, holderHasNoTurn, reads the provider's
 // IsRunning instead, which answers false when the runtime cannot be read.
 func (s *Server) sessionHasNoTurn(ctx context.Context, store beads.Store, id string) (bool, error) {
-	info, err := s.sessionManager(store).Get(id)
+	info, err := s.sessionManager(beads.SessionStore{Store: store}).Get(id)
 	if err != nil {
 		return false, err
 	}

@@ -2822,6 +2822,9 @@ func startOneCity(
 		cityRuntime.run(cityCtx)
 	}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
+	// Recorded after newCityRuntime: its order dispatcher read the event head
+	// its never-run event orders start from, so an order on controller.started
+	// sees this one.
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck

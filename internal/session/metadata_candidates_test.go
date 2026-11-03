@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestExactMetadataSessionCandidatesInfoMatchesRawProjection pins the new
@@ -49,11 +50,11 @@ func TestExactMetadataSessionCandidatesInfoMatchesRawProjection(t *testing.T) {
 
 	for _, includeClosed := range []bool{false, true} {
 		filter := map[string]string{"session_name": "sky"}
-		raw, err := ExactMetadataSessionCandidates(store, includeClosed, filter)
+		raw, err := ExactMetadataSessionCandidates(beadstest.Sessions(store), includeClosed, filter)
 		if err != nil {
 			t.Fatalf("ExactMetadataSessionCandidates(includeClosed=%v): %v", includeClosed, err)
 		}
-		infos, err := ExactMetadataSessionCandidatesInfo(store, includeClosed, filter)
+		infos, err := ExactMetadataSessionCandidatesInfo(beadstest.Sessions(store), includeClosed, filter)
 		if err != nil {
 			t.Fatalf("ExactMetadataSessionCandidatesInfo(includeClosed=%v): %v", includeClosed, err)
 		}
@@ -69,11 +70,11 @@ func TestExactMetadataSessionCandidatesInfoMatchesRawProjection(t *testing.T) {
 
 	// Membership sanity: the open match is always present; the closed match only
 	// appears with includeClosed; the task bead never appears.
-	openOnly, _ := ExactMetadataSessionCandidatesInfo(store, false, map[string]string{"session_name": "sky"})
+	openOnly, _ := ExactMetadataSessionCandidatesInfo(beadstest.Sessions(store), false, map[string]string{"session_name": "sky"})
 	if len(openOnly) != 1 || openOnly[0].ID != openMatch.ID {
 		t.Fatalf("includeClosed=false: got %d infos, want only open %s", len(openOnly), openMatch.ID)
 	}
-	withClosed, _ := ExactMetadataSessionCandidatesInfo(store, true, map[string]string{"session_name": "sky"})
+	withClosed, _ := ExactMetadataSessionCandidatesInfo(beadstest.Sessions(store), true, map[string]string{"session_name": "sky"})
 	if len(withClosed) != 2 {
 		t.Fatalf("includeClosed=true: got %d infos, want open + closed", len(withClosed))
 	}
@@ -101,7 +102,7 @@ func TestExactMetadataSessionCandidatesDeduplicatesAndFiltersSessions(t *testing
 		t.Fatalf("Create(task): %v", err)
 	}
 
-	candidates, err := ExactMetadataSessionCandidates(store, false,
+	candidates, err := ExactMetadataSessionCandidates(beadstest.Sessions(store), false,
 		map[string]string{"session_name": "sky"},
 		map[string]string{"alias": "sky"},
 		map[string]string{"session_name": ""},
@@ -142,7 +143,7 @@ func TestExactMetadataSessionCandidatesWithStatusReturnsOnlyStatus(t *testing.T)
 		t.Fatalf("Close(%s): %v", closed.ID, err)
 	}
 
-	candidates, err := ExactMetadataSessionCandidatesWithStatus(store, "closed",
+	candidates, err := ExactMetadataSessionCandidatesWithStatus(beadstest.Sessions(store), "closed",
 		map[string]string{"session_name": "sky"},
 	)
 	if err != nil {

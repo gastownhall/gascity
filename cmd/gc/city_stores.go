@@ -144,6 +144,14 @@ func placeClass(cityPath string, routes *storageRoutes, work beads.Store, class 
 // from the binding and an unrelocated one from that scope store. It is the
 // frame every per-call class resolver has always taken. It mints per call; a
 // holder with an epoch uses its Stores.
+//
+// With nil routes it hands out handles of every class over scope, whatever
+// scope holds, and the storeclass lint counts none of them: this file is the
+// router's allowlisted mint. That is right for a scope store with no routes
+// (an unsplit city) and for refusedExtMsgServices, whose store refuses every
+// operation. It is not a relabel: a caller holding a store of one class that
+// needs a handle of another takes it from the city's Stores, or relabels it
+// with a counted literal at its own site.
 func scopeStores(cityPath string, routes *storageRoutes, scope beads.Store) storeref.Stores {
 	return mintCityStores(cityPath, routes, scope)
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -700,6 +701,71 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	}
 }
 
+// AC-7: an untracked root carrying this session's identity and city that the
+// provider claims as a live runtime it does not list (LiveUnlisted: a pane of
+// its socket on a server it cannot reach) is not an orphan: the start refuses
+// with ErrRuntimeUnavailable naming the pid, terminating nothing, not even a
+// reparented sibling, and starting nothing.
+func TestStartRefusesLiveUnlistedRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start func(mgr *Manager, info Info) error
+	}{
+		{"Start", func(mgr *Manager, info Info) error {
+			return mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+		{"StartRuntimeOnly", func(mgr *Manager, info Info) error {
+			return startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{
+				{PID: 1235, PPID: 1},
+				{PID: 1234, PPID: 4200, ParentIsProviderInfrastructure: true, LiveUnlisted: true},
+			}
+
+			err := tc.start(mgr, info)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s error = %v, want it to wrap runtime.ErrRuntimeUnavailable", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "pid=1234") {
+				t.Fatalf("%s error = %v, want it to name pid=1234", tc.name, err)
+			}
+			if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want no terminate and no start", sp.events)
+			}
+		})
+	}
+}
+
+// AC-7: a root with no LiveUnlisted claim is an orphan whoever its parent is:
+// one reparented to init, and one whose parent is tmux but which its provider
+// does not claim (a subprocess or ACP provider, or a tmux server an agent
+// started on a socket of its own) are terminated and the start proceeds.
+func TestStartRuntimeOnlyTerminatesRootsTheProviderDoesNotClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		root runtime.LiveRuntime
+	}{
+		{name: "reparented", root: runtime.LiveRuntime{PID: 1234, PPID: 1}},
+		{name: "tmux-parented", root: runtime.LiveRuntime{PID: 1234, PPID: 4200, ParentIsProviderInfrastructure: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{tc.root}
+
+			if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("StartRuntimeOnly: %v", err)
+			}
+			want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+			if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+				t.Fatalf("events = %v, want %v", sp.events, want)
+			}
+		})
+	}
+}
+
 // TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead pins the route-unwinding
 // half of the fix: when the resume path reserved an ACP route before the
 // pre-start orphan gate, a refusal must call unroute() so the reservation is
@@ -1360,7 +1426,7 @@ func TestCreateSessionNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *t
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "first", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err == nil {
 		t.Fatal("expected start failure")
 	}
-	if err := ensureSessionNameAvailable(store, "sky"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "sky"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after failed start = %v, want nil", err)
 	}
 
@@ -1720,7 +1786,7 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 	}
 
 	// The freed runtime name must be available for a fresh session.
-	if err := ensureSessionNameAvailable(store, "test-city--refinery"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "test-city--refinery"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after close = %v, want nil", err)
 	}
 }

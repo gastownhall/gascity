@@ -37,6 +37,10 @@ var dispatchControlSessionProvider = newSessionProvider
 
 const maxControlQuarantineReasonMetadata = 512
 
+// sourceWorkflowCommandContext is the source-workflow lock context of a
+// one-shot command: a Ctrl-C or SIGTERM abandons a lock wait instead of killing
+// the command. A long-lived process must not install it per item, because the
+// handler consumes the signal the process was meant to die of.
 func sourceWorkflowCommandContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
@@ -290,9 +294,13 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		}
 		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
 		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
-			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
-			defer cancelSourceWorkflowCtx()
-			opts.SourceWorkflowLock = makeSourceWorkflowLocker(sourceWorkflowCtx, cityPath, cfg, storePath)
+			// No signal context: the serve loop runs this once per finalizer,
+			// and a handler installed here would catch a stop's SIGTERM, keep
+			// the process serving, and fail the lock wait with
+			// context.Canceled. Left at the default disposition, a stop ends
+			// the dispatcher as it does during every other control kind, and
+			// the open finalizer is the next dispatcher's retry handle.
+			opts.SourceWorkflowLock = makeSourceWorkflowLocker(context.Background(), cityPath, cfg, storePath)
 			opts.SourceWorkflowStores = makeSourceWorkflowStoresLister(cityPath, cfg)
 		}
 		switch bead.Metadata[beadmeta.KindMetadataKey] {

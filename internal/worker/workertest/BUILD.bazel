@@ -68,6 +68,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/events",
         "//internal/nudgequeue",

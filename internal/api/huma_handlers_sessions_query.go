@@ -33,7 +33,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store), input.State)
@@ -86,9 +86,14 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
 	}
+	if input.WakeReasons {
+		s.setSessionListWakeReasons(page, pageSessions, listings)
+	}
+	freshness := cacheAgeSeconds(store.Store)
 	return &ListOutput[sessionResponse]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store.Store),
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[sessionResponse]{
 			Items:         page,
 			Total:         total,
@@ -97,6 +102,30 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 			PartialErrors: partialErrors,
 		},
 	}, nil
+}
+
+// setSessionListWakeReasons fills each page row's wake_reasons from the
+// State's SessionListWakeReasoner, asked once for the whole page. A State
+// without the capability leaves them unset.
+func (s *Server) setSessionListWakeReasons(page []sessionResponse, pageSessions []session.Info, listings []session.ListedSession) {
+	reasoner, ok := s.state.(SessionListWakeReasoner)
+	if !ok || len(pageSessions) == 0 {
+		return
+	}
+	onPage := make(map[string]bool, len(pageSessions))
+	for _, sess := range pageSessions {
+		onPage[sess.ID] = true
+	}
+	persisted := make(map[string]session.Info, len(pageSessions))
+	for _, listing := range listings {
+		if onPage[listing.Info.ID] {
+			persisted[listing.Info.ID] = listing.Info
+		}
+	}
+	reasons := reasoner.SessionListWakeReasons(pageSessions, persisted)
+	for j := range page {
+		page[j].WakeReasons = reasons[page[j].ID]
+	}
 }
 
 // --- Session Get ---
@@ -108,27 +137,33 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 // ladder runs — configured name, live, path alias, closed — whose closed-
 // inclusive steps scan the closed session population by metadata; that is what a
 // caller holding a durable id (the dashboard's run detail, one read per retired
-// seat on every render) must never pay for a miss.
+// seat on every render) must never pay for a miss. With peek_strict the live-
+// session ladder runs instead, as for gc session peek's local path: a closed
+// session is found only by its exact bead id.
 func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
 	if input.ExactID {
-		return session.ResolveSessionIDByExactID(store, input.ID)
+		return session.ResolveSessionIDByExactID(beads.SessionStore{Store: store}, input.ID)
+	}
+	if input.PeekStrict {
+		return s.resolveSessionIDWithConfig(store, input.ID)
 	}
 	return s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
 }
 
 // humaHandleSessionGet is the Huma-typed handler for GET /v0/session/{id}.
 
-func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	raw := store.Store
+	if raw == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionGetID(store.Store, input)
+	id, err := s.resolveSessionGetID(raw, input)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -136,16 +171,32 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	wantPeek := input.Peek
+	var strictOutput string
+	if input.PeekStrict {
+		handle, handleErr := s.workerHandleForSession(raw, id)
+		if handleErr != nil {
+			return nil, humaSessionManagerError(fmt.Errorf("peeking session %s: %w", id, handleErr))
+		}
+		strictOutput, err = strictSessionPeek(ctx, handle, id, input.PeekLines)
+		if err != nil {
+			return nil, err
+		}
+	}
+	wantPeek := input.Peek && !input.PeekStrict
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
+	if input.PeekStrict {
+		resp.LastOutput = strictOutput
+	}
 	if len(s.conversationLaneKinds()) > 0 {
 		resp.Turn = s.observedSessionTurn(id, info.Generation)
 	}
+	freshness := cacheAgeSeconds(raw)
 	return &IndexOutput[sessionResponse]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store.Store),
-		Body:      resp,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
+		Body:         resp,
 	}, nil
 }
 
@@ -165,7 +216,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -396,7 +447,7 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 		}, nil
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	pending, supported, err := mgr.Pending(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -455,7 +506,7 @@ func (s *Server) probeCityPending() (cityPendingSnapshot, error) {
 	if store.Store == nil {
 		return cityPendingSnapshot{}, errNoSessionsStore
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 
 	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
@@ -535,9 +586,11 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 		})
 	}
 
+	freshness := cacheAgeSeconds(store.Store)
 	return &ListOutput[cityPendingEntry]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store.Store),
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[cityPendingEntry]{
 			Items:         entries,
 			Total:         len(entries),
@@ -563,7 +616,7 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -612,7 +665,7 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	logPath, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
 		return nil, humaSessionManagerError(err)

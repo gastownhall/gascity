@@ -3897,10 +3897,10 @@ const (
 	// pendingCreateRuntimeForeign: the runtime is not this create's. It
 	// positively carries another session's ID or another incarnation's token,
 	// carries no attribution at all, or is gone (runtime.ErrSessionNotFound).
-	// No attribution is evidence of another owner only on a runtime that
-	// stamps identity before the name is visible (identityReadable); a close
-	// that frees the name of a row owning it tears such a runtime down first
-	// (releaseRowOwnedRuntime).
+	// No attribution is evidence of another owner only on a runtime whose
+	// GetMeta reads identity stamped before the name is visible
+	// (metaIdentityReadable); a close that frees the name of a row owning it
+	// tears such a runtime down first (releaseRowOwnedRuntime).
 	pendingCreateRuntimeForeign
 	// pendingCreateRuntimeUnknown: an identity read failed, and the keys that
 	// could be read do not decide the answer without it.
@@ -4249,7 +4249,7 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store(), true,
 		map[string]string{"session_name": legacy})
 	if err != nil {
 		return
@@ -4485,12 +4485,16 @@ func (p *rowRuntimeProbes) confirmStopped(name string, sp runtime.Provider) erro
 //
 // It applies to a manual session (session_origin=manual or the legacy manual
 // marker) that is not a configured named session and has a session name,
-// served by a runtime that cannot vouch for identity (identityReadable). Only
-// tmux, acp and subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN before
-// the name is visible, so there a runtime carrying neither is another owner's.
-// Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the row's own start can
-// list a box before its identity reads, or never stamp one, so a box with no
-// identity under a name reserved to this row is most likely the row's own.
+// served by a runtime that cannot vouch for identity through GetMeta, which
+// is how the rollback reads it (metaIdentityReadable). Only tmux, acp and
+// subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN where GetMeta reads
+// them before the name is visible, so there a runtime carrying neither is
+// another owner's. Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the
+// row's own start can list a box before its identity reads, or never stamp
+// one, so a box with no identity under a name reserved to this row is most
+// likely the row's own. That holds for a v2-ready exec pack too: its
+// `observe` reports the identity its box was started with, but its
+// `get-meta` need not.
 // The pending-create rollback reads such a box as foreign
 // (pendingCreateIdentity.attribution) and frees the name without a stop; a
 // configured or pool row re-targets the same name and finds the box again,
@@ -4509,12 +4513,12 @@ func manualRowTearsDownUnattributedRuntime(info sessionpkg.Info, sp runtime.Prov
 	}
 	leaf, _, known := runtime.ResolveBackend(sp, name)
 	if known {
-		return leaf != nil && !identityReadable(leaf), true
+		return leaf != nil && !metaIdentityReadable(leaf), true
 	}
 	// A composite that cannot route the name yet may serve it from any of
 	// its leaves; only a leaf that cannot vouch for identity needs the route.
 	for _, l := range inventoryLeaves(sp, "") {
-		if !identityReadable(l.provider) {
+		if !metaIdentityReadable(l.provider) {
 			return true, false
 		}
 	}

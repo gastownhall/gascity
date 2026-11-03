@@ -635,7 +635,7 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store                   beads.Store
+	store                   beads.SessionStore
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
@@ -766,11 +766,15 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
-// a non-nil error only when an orphan could not be confirmed dead, so callers
-// gating a Start can refuse rather than race a survivor for the same work. A
-// scan error is logged and treated as fail-closed (see FindRuntimesBySessionID):
-// the roots the scan did surface are still killed, and matching the started
-// replacement is impossible because it does not exist yet.
+// a non-nil error when an orphan could not be confirmed dead, or, terminating
+// nothing, when the provider claims one of them as a live runtime it does not
+// list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
+// callers gating a Start can refuse rather than race a survivor for the same
+// work. A scan error is logged and treated as fail-closed (see
+// FindRuntimesBySessionID): the orphans the scan did surface are still
+// terminated unless one of them is LiveUnlisted, which terminates none, and
+// matching the started replacement is impossible because it does not exist
+// yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -782,7 +786,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
-	var termErrs []error
+	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
 			continue
@@ -799,6 +803,20 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
+		// The provider claims this root as a live runtime of its own that it
+		// does not list: a pane of its socket that it cannot reach or that a
+		// failed listing missed. It is not an orphan, and a replacement would
+		// race it for the session's work, so the start refuses and terminates
+		// nothing. The reconciler defers a refused start without recording a
+		// failure, so the refusal is logged here.
+		if live.LiveUnlisted {
+			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
+			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+		}
+		orphans = append(orphans, live)
+	}
+	var termErrs []error
+	for _, live := range orphans {
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
@@ -896,7 +914,7 @@ func WithClock(clk clock.Clock) ManagerOption {
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
-func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
+func NewManagerWithOptions(store beads.SessionStore, sp runtime.Provider, opts ...ManagerOption) *Manager {
 	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
 	for _, opt := range opts {
 		opt(m)
@@ -1797,7 +1815,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
 		}
@@ -1814,7 +1832,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
+		res, err := NewStore(m.store).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
@@ -2208,7 +2226,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(b.ID, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(b.ID, time.Now().UTC())
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
 		}
@@ -2374,7 +2392,7 @@ func (m *Manager) EnrichInfos(infos []Info) []Info {
 // persisted read half of the read model — pair it with EnrichInfo for the live
 // overlay (the worker catalog's Get composes exactly that).
 func (m *Manager) PersistedStore() *Store {
-	return NewStore(beads.SessionStore{Store: m.store})
+	return NewStore(m.store)
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template
