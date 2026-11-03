@@ -110,6 +110,12 @@ var (
 	managedDoltStartSQLServerFn = startManagedDoltSQLServer
 	managedDoltWaitForReadyFn   = waitForManagedDoltReady
 	managedDoltLogSuffixFn      = managedDoltLogSuffix
+
+	// The platform gate is indirected for the same reason, with one
+	// difference worth stating: a test that stubs it is not bypassing a
+	// safety check, because the hazard the gate guards is an unmanageable
+	// live server, and a test that also stubs the spawn never creates one.
+	managedDoltNativeIdentitySupportedFn = managedDoltNativeIdentitySupported
 )
 
 // init is the re-entry point for the dolt-managed-test watchdog. The watchdog
@@ -153,6 +159,16 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 
 //nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+	// Refuse to start what this platform cannot afterwards stop or identify.
+	// The stop and inspect paths are both fenced by the same gate, so where it
+	// fails a successful start leaves a database server holding the data
+	// directory's exclusive lock, a PID file, and a runtime-state record
+	// claiming it is running — none of which any supported operation can act
+	// on again. Refusing here is recoverable; an unmanageable server writing
+	// into a live data directory is not.
+	if err := managedDoltNativeIdentitySupportedFn(); err != nil {
+		return managedDoltStartReport{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err

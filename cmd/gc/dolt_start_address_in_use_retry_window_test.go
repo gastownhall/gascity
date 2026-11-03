@@ -436,6 +436,7 @@ func installStartManagedDoltLoopStubs(t *testing.T, stubs startManagedDoltLoopSt
 	origLog := managedDoltLogSuffixFn
 	origProbe := managedDoltPortAvailableFn
 	origRetryWindow := managedDoltStartAddressInUseRetryWindowFn
+	origIdentitySupported := managedDoltNativeIdentitySupportedFn
 	t.Cleanup(func() {
 		managedDoltPreflightCleanupFn = origPreflight
 		managedDoltStartSQLServerFn = origStart
@@ -443,7 +444,15 @@ func installStartManagedDoltLoopStubs(t *testing.T, stubs startManagedDoltLoopSt
 		managedDoltLogSuffixFn = origLog
 		managedDoltPortAvailableFn = origProbe
 		managedDoltStartAddressInUseRetryWindowFn = origRetryWindow
+		managedDoltNativeIdentitySupportedFn = origIdentitySupported
 	})
+
+	// These cases are about config rendering and the retry loop, which behave
+	// the same on every platform, and the spawn is stubbed below — so no real
+	// server exists for the platform gate to protect. Satisfying it here keeps
+	// that coverage on platforms where managed Dolt itself is refused;
+	// TestStartManagedDoltProcessRefusedWithoutNativeIdentity pins the gate.
+	managedDoltNativeIdentitySupportedFn = func() error { return nil }
 
 	if stubs.preflightCleanup != nil {
 		managedDoltPreflightCleanupFn = stubs.preflightCleanup
