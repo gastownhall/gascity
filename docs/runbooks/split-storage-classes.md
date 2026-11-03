@@ -66,8 +66,9 @@ window, while the city still runs:
   latest 10 closed tracking beads per order, which is where an order's cooldown
   reads its last run; do not delete those by other means.
 - **Read mail and other closed messaging rows** are the next largest. Whatever
-  you delete, keep a backup of it: nothing is recoverable from the binding once
-  the cutover has moved it.
+  you delete, keep a backup of it: rows you prune before the window are not in
+  the migration's own backup (`infra.retained-source.jsonl`), so keep your own
+  copy.
 
 `gc storage preflight` reports `would copy N infrastructure bead(s)` for the
 city and `would import N bead(s)` per rig, so you can watch the number fall.
@@ -81,7 +82,9 @@ promise.
 ### Back up the binding yourself
 
 After the cutover, mail, sessions, order history, nudges and the workflow
-graph exist only in `<city>/.gc/store/graph/beads.sqlite`, and nothing gc ships
+graph exist only in the binding's `beads.sqlite`
+(`<city>/.gc/store/graph/beads.sqlite` with the default `path = ".gc/store"`
+from Step 1; use your binding's `path` if you changed it), and nothing gc ships
 backs that file up yet
 ([#8792](https://github.com/gastownhall/gascity/issues/8792)). A file-level
 copy of `.gc/` (rsync, a nightly copy job) is not a consistent copy of a live
@@ -99,8 +102,9 @@ the cutover*.
 
 On a split city, closed session beads in the binding are purged by wisp GC,
 not by the core reaper. That purge runs whenever the graph-class GC is on
-(`[daemon] wisp_ttl` greater than zero) and keeps a closed session for
-`GC_INFRA_SESSION_PURGE_AGE`, default **72h**. It does not read
+(both `[daemon] wisp_gc_interval` and `wisp_ttl` set, with `wisp_ttl` greater
+than zero) and keeps a closed session for `GC_INFRA_SESSION_PURGE_AGE` after
+its last update, default **72h**. It does not read
 `GC_REAPER_SESSION_PURGE_AGE`. A city that lengthened the reaper's session
 retention on purpose keeps only three days of session history in the binding
 unless it sets `GC_INFRA_SESSION_PURGE_AGE` too. Decide this before you enable
@@ -114,7 +118,7 @@ any read of mail, sessions, orders or nudges straight from the work store,
 prompts and formulas a long-lived city has grown tend to have such reads: a
 "what did I send" check, a wake gate, an audit. Before the window, search your
 packs and scripts for raw `bd` reads of infrastructure classes, and move them
-to `gc mail`, `gc session`, `gc nudge`, `gc order` or `gc bd show <id>`.
+to `gc mail`, `gc session`, `gc nudge status`, `gc order` or `gc bd show <id>`.
 `gc bd ready` refuses on purpose (see "`gc bd ready` stops answering, on
 purpose").
 
