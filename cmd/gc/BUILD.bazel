@@ -1834,6 +1834,7 @@ go_test(
         "pool_slot_workdir_test.go",
         "pool_test.go",
         "pool_trigger_live_seat_test.go",
+        "pool_trigger_same_trigger_rebind_test.go",
         "pool_trigger_workdir_purity_test.go",
         "pool_trigger_worktree_owner_test.go",
         "prepared_start_input_fence_test.go",
