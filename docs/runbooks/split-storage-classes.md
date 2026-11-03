@@ -253,11 +253,16 @@ reports the same refusal under `holds`:
 - **an undated deferral** (`bd` status `deferred` with no future
   `defer_until`): give the bead a dated deferral, `bd defer <id> --until
   <date>`, which the copy carries as `defer_until`, or undefer it;
+- **any other status `bd` parks a bead with** (`blocked`, `pinned`, `hooked`,
+  or a custom status): the binding stores only `open`, `in_progress` and
+  `closed`, and the bead would arrive `open` and ready. Keep it parked with a
+  dated deferral (`bd defer <id> --until <date>`), release it (`bd update <id>
+  --status open`), or close it;
 - **a `waits-for` or `conditional-blocks` edge onto unfinished work**: a
   cross-store gate encodes only `blocks`. Finish the work bead, close the
   infrastructure bead, or replace the edge with a `blocks` edge.
 
-No manual deferral of blocked infrastructure beads is needed before the
+An infrastructure bead blocked on open work needs no manual deferral before the
 migration.
 
 **What the backup holds, and what it does not.** The backup records each bead
