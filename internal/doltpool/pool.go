@@ -118,6 +118,23 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenPrivate returns a fresh single-connection *sql.DB for the given Dolt
+// endpoint, outside the registry, which the caller closes. It is the
+// explicit fresh-dial path for a caller that must not share a pooled session:
+// cmd/gc's storage maintenance window lists a server's sessions and counts
+// every session but its own, so its own must not sit in a pool other reads
+// leave idle connections in.
+func OpenPrivate(host, port, user, password, database string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
+	if err != nil {
+		return nil, fmt.Errorf("opening private dolt connection to %s:%s/%s: %w", host, port, database, err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+	return db, nil
+}
+
 // OpenSocket returns a shared *sql.DB for a Dolt Unix-socket endpoint.
 func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
 	k := key("unix", socket, user, password, database)

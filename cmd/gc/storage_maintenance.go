@@ -57,19 +57,15 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -263,18 +259,10 @@ func managedDoltSessionLister(_ context.Context, cityPath string) (func(context.
 		return nil, nil, true, errors.New("the managed Dolt publishes no live port")
 	}
 	doltpool.Shutdown()
-	dsn := mysql.NewConfig()
-	dsn.User = "root"
-	dsn.Passwd = managedDoltPassword()
-	dsn.Net = "tcp"
-	dsn.Addr = net.JoinHostPort(managedDoltConnectHost(""), port)
-	dsn.Timeout = migrationWindowSessionTimeout
-	dsn.ReadTimeout = migrationWindowSessionTimeout
-	db, err := sql.Open("mysql", dsn.FormatDSN())
+	db, err := doltpool.OpenPrivate(managedDoltConnectHost(""), port, "root", managedDoltPassword(), "")
 	if err != nil {
 		return nil, nil, true, err
 	}
-	db.SetMaxOpenConns(1)
 	list := func(ctx context.Context) ([]beads.DoltConnection, error) { return beads.ForeignDoltSessions(ctx, db) }
 	return list, func() { _ = db.Close() }, true, nil
 }
