@@ -2228,6 +2228,10 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
 			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// A pin runs the sibling in this seat's directory, so a sibling
+			// whose evidence binds it to another managed worktree is left
+			// routed for a seat in that worktree, as a fresh claim leaves it.
+			hookClaimWorktreeHeldElsewhere(sibling, opts.PoolSeat.WorkDir) ||
 			stoppedSibling(sibling) {
 			continue
 		}

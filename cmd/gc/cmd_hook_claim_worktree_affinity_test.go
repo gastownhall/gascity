@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1177,4 +1178,57 @@ func TestHookDoorsNameASeatProbeThatCouldNotTell(t *testing.T) {
 			t.Fatalf("stderr = %q, want it to name the probe that could not tell (%q)", stderr.String(), want)
 		}
 	})
+}
+
+// continuationSiblings stamps the continuation group of root-1 onto each bead.
+func continuationSiblings(siblings ...beads.Bead) []beads.Bead {
+	for i := range siblings {
+		siblings[i].Metadata[beadmeta.RootBeadIDMetadataKey] = "root-1"
+		siblings[i].Metadata[beadmeta.ContinuationGroupMetadataKey] = "group-a"
+	}
+	return siblings
+}
+
+// Continuation pinning claims siblings on the seat's behalf, so it answers to
+// the same worktree check as a fresh claim: a pool seat does not pin a sibling
+// whose complete evidence binds it to another managed worktree, which would
+// run that work in the wrong tree on the wrong branch. The sibling stays
+// routed, and the controller starts a seat in its own worktree. A sibling
+// bound to the seat's own worktree, or to none, is pinned as before, and a
+// claimant that is not a pool seat pins every sibling.
+func TestPreassignHookContinuationGroupSkipsSiblingsBoundToAnotherWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seatDir string
+		want    []string
+	}{
+		{"pool seat in its worktree", "/wt/r1/r1-a", []string{"r1-c", "r1-u"}},
+		{"claimant that is not a pool seat", "", []string{"r1-b", "r1-c", "r1-u"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claimed := continuationSiblings(managedWorktreeCandidate("r1-a", "/wt/r1/r1-a"))[0]
+			siblings := continuationSiblings(
+				managedWorktreeCandidate("r1-b", "/wt/r1/r1-b"),
+				managedWorktreeCandidate("r1-c", "/wt/r1/r1-a"),
+				unboundRoutedCandidate("r1-u"),
+			)
+			var pinned []string
+			ops := hookClaimOps{
+				ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+					return siblings, nil
+				},
+				AssignContinuation: func(_ context.Context, _ string, _ []string, beadID, _ string) error {
+					pinned = append(pinned, beadID)
+					return nil
+				},
+			}
+			assigned, err := preassignHookContinuationGroup(claimed, affinitySeatOpts(tc.seatDir), ops, ".")
+			if err != nil {
+				t.Fatalf("preassignHookContinuationGroup: %v", err)
+			}
+			if !slices.Equal(assigned, tc.want) || !slices.Equal(pinned, tc.want) {
+				t.Fatalf("assigned %v, pinned %v; want %v", assigned, pinned, tc.want)
+			}
+		})
+	}
 }
