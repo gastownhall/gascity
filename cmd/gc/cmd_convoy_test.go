@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -4359,6 +4360,116 @@ func TestConvoyCreateRigFlagRejectsUnresolvableRig(t *testing.T) {
 				t.Errorf("stderr = %q, want a gc convoy create error containing %q", stderr.String(), tc.wantErr)
 			}
 			requireNoConvoys(t, cityDir)
+		})
+	}
+}
+
+// TestConvoyCreateRigFlagRejectsConflictingIssue: an issue whose prefix routes
+// to a store other than --rig's fails before any store is written, naming the
+// rig, the issue and the store the issue routes to. Issues spanning stores
+// still get the mixed-store error first.
+func TestConvoyCreateRigFlagRejectsConflictingIssue(t *testing.T) {
+	routedStore := regexp.MustCompile(`which routes to store "([^"]*)"`)
+	for _, tc := range []struct {
+		name      string
+		rig       string
+		issue     func(cityDir string) string
+		wantScope string
+	}{
+		{"other rig's issue", "backend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "frontend") }, "frontend"},
+		{"city issue", "frontend", func(cityDir string) string { return convoyRigFlagIssue(t, cityDir, "") }, ""},
+		{"unknown prefix", "frontend", func(string) string { return "zz-1" }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := convoyRigFlagCity(t)
+			issueID := tc.issue(cityDir)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--city", cityDir, "--rig", tc.rig, "convoy", "create", "batch", issueID}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc convoy create --rig %s %s exited 0; stdout=%s", tc.rig, issueID, stdout.String())
+			}
+			want := fmt.Sprintf("gc convoy create: --rig %q conflicts with issue %s, which routes to store ", tc.rig, issueID)
+			if !strings.Contains(stderr.String(), want) || !strings.Contains(stderr.String(), "a convoy and its issues must share one store") {
+				t.Errorf("stderr = %q, want it to contain %q and the one-store rule", stderr.String(), want)
+			}
+			if m := routedStore.FindStringSubmatch(stderr.String()); m == nil || !samePath(m[1], filepath.Join(cityDir, tc.wantScope)) {
+				t.Errorf("stderr = %q, want it to name the routed store %s", stderr.String(), filepath.Join(cityDir, tc.wantScope))
+			}
+			requireNoConvoys(t, cityDir)
+		})
+	}
+
+	t.Run("mixed issues", func(t *testing.T) {
+		cityDir := convoyRigFlagCity(t)
+		fe, be := convoyRigFlagIssue(t, cityDir, "frontend"), convoyRigFlagIssue(t, cityDir, "backend")
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"--city", cityDir, "--rig", "frontend", "convoy", "create", "batch", fe, be}, &stdout, &stderr); code == 0 {
+			t.Fatalf("gc convoy create --rig frontend %s %s exited 0; stdout=%s", fe, be, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "issues span multiple stores") {
+			t.Errorf("stderr = %q, want the mixed-store error", stderr.String())
+		}
+		requireNoConvoys(t, cityDir)
+	})
+}
+
+// TestConvoyCreateStoreDir: the store is compared by root, not by rig name, so
+// rigs bound to the same directory through a relative, an absolute or a
+// symlinked path agree, and an issue routed elsewhere conflicts.
+func TestConvoyCreateStoreDir(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, dir := range []string{"frontend", "backend"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linked := filepath.Join(t.TempDir(), "linked-frontend")
+	if err := os.Symlink(filepath.Join(cityPath, "frontend"), linked); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "frontend", Prefix: "fe", Path: "frontend"},
+		{Name: "web", Prefix: "wb", Path: filepath.Join(cityPath, "frontend")},
+		{Name: "linked", Prefix: "ln", Path: linked},
+		{Name: "backend", Prefix: "be", Path: "backend"},
+		{Name: "ghost", Prefix: "gh"},
+	}}
+	frontend, backend := filepath.Join(cityPath, "frontend"), filepath.Join(cityPath, "backend")
+	for _, tc := range []struct {
+		name     string
+		rig      string
+		issueIDs []string
+		want     string
+		wantErr  string
+	}{
+		{name: "no rig, no issues", want: cityPath},
+		{name: "no rig, rig issue", issueIDs: []string{"fe-1"}, want: frontend},
+		{name: "whitespace rig", rig: "  ", issueIDs: []string{"be-1"}, want: backend},
+		{name: "rig, no issues", rig: "frontend", want: frontend},
+		{name: "case variant", rig: "Frontend", want: frontend},
+		{name: "absolute alias", rig: "web", issueIDs: []string{"fe-1"}, want: frontend},
+		{name: "symlinked alias", rig: "linked", issueIDs: []string{"fe-1", "wb-2"}, want: frontend},
+		{name: "relative binding", rig: "frontend", issueIDs: []string{"ln-1"}, want: frontend},
+		{name: "other rig's issue", rig: "backend", issueIDs: []string{"fe-1"}, wantErr: `--rig "backend" conflicts with issue fe-1, which routes to store `},
+		{name: "later issue conflicts", rig: "frontend", issueIDs: []string{"fe-1", "be-2"}, wantErr: `--rig "frontend" conflicts with issue be-2`},
+		{name: "city issue", rig: "frontend", issueIDs: []string{"gc-1"}, wantErr: `--rig "frontend" conflicts with issue gc-1`},
+		{name: "unknown rig", rig: "nope", wantErr: `rig "nope" not found`},
+		{name: "unbound rig", rig: "ghost", wantErr: `rig "ghost" is declared but has no path binding`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convoyCreateStoreDir(cfg, cityPath, tc.rig, tc.issueIDs)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("convoyCreateStoreDir(%q, %v) = %q, %v; want error containing %q", tc.rig, tc.issueIDs, got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("convoyCreateStoreDir(%q, %v): %v", tc.rig, tc.issueIDs, err)
+			}
+			if !samePath(got, tc.want) {
+				t.Errorf("convoyCreateStoreDir(%q, %v) = %q, want %q", tc.rig, tc.issueIDs, got, tc.want)
+			}
 		})
 	}
 }

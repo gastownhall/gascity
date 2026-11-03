@@ -99,9 +99,17 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".`,
+also be added later with "gc convoy add", which finds them in the
+convoy's own store.
+
+The convoy lands in the store of the rig named by --rig (a rig name,
+matched without regard to case). Every issue's ID prefix must route to
+that same store. Without --rig it lands in the first issue's store, or
+in the city store when no issues are given; GC_RIG and the working
+directory do not choose the store.`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
+  gc --rig frontend convoy create frontend-batch
   gc convoy create deploy --owner mayor --notify mayor --merge mr
   gc convoy create auth-rewrite --owned --target integration/auth-rewrite`,
 		Args: cobra.ArbitraryArgs,
@@ -194,8 +202,9 @@ func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
 
 // convoyCreateStoreDir picks the store a new convoy lands in. A non-empty
 // rigName selects that rig's store, matched by name as gc bd and gc formula
-// match --rig. Without one the convoy shares the first issue's store, so
-// convoy and issues share a database, else it lands in the city store.
+// match --rig, and every issue must route to that same store root. Without
+// one the convoy shares the first issue's store, so convoy and issues share
+// a database, else it lands in the city store.
 func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs []string) (string, error) {
 	if name := strings.TrimSpace(rigName); name != "" {
 		rig, ok := rigByName(cfg, name)
@@ -205,7 +214,13 @@ func convoyCreateStoreDir(cfg *config.City, cityPath, rigName string, issueIDs [
 		if strings.TrimSpace(rig.Path) == "" {
 			return "", fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it", rig.Name, rig.Name)
 		}
-		return resolveStoreScopeRoot(cityPath, rig.Path), nil
+		root := resolveStoreScopeRoot(cityPath, rig.Path)
+		for _, id := range issueIDs {
+			if routed := convoyCreateStoreRoot(cfg, cityPath, id); !samePath(routed, root) {
+				return "", fmt.Errorf("--rig %q conflicts with issue %s, which routes to store %q; a convoy and its issues must share one store", name, id, routed)
+			}
+		}
+		return root, nil
 	}
 	if len(issueIDs) > 0 {
 		return convoyCreateStoreRoot(cfg, cityPath, issueIDs[0]), nil
