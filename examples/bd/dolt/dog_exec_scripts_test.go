@@ -7573,3 +7573,273 @@ func TestCompactScriptDiskPreflightInvalidEnvExitsTwo(t *testing.T) {
 		t.Fatalf("invalid minimum free bytes should exit 2: got err=%v\nout=%s", err, out)
 	}
 }
+
+// Compact marker verification contract (ga-wfzwyv). Every pending-push and
+// quarantine marker carries verification_state=verified|failed|unattainable
+// and, unless verified, remediation_command=gc dolt compact --only-db <db>.
+// A blank proof (expected_remote_head, postflight_db_value_hash) is
+// unattainable, never an implicit success or negative.
+
+const compactDefaultRemediation = "gc dolt compact --only-db beads"
+
+func compactPendingPushMarkerPath(fixture compactScriptFixture) string {
+	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+}
+
+func compactQuarantineMarkerPath(fixture compactScriptFixture) string {
+	return filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+}
+
+func assertCompactMarkerVerification(t *testing.T, marker, wantState string) {
+	t.Helper()
+	if got := compactMarkerValue(t, marker, "verification_state"); got != wantState {
+		t.Fatalf("verification_state = %q, want %q", got, wantState)
+	}
+	got := compactMarkerValue(t, marker, "remediation_command")
+	if wantState == "verified" {
+		if got != "" {
+			t.Fatalf("verified marker must not carry remediation_command, got %q", got)
+		}
+		return
+	}
+	if got != compactDefaultRemediation {
+		t.Fatalf("remediation_command = %q, want %q", got, compactDefaultRemediation)
+	}
+}
+
+func TestCompactScriptPendingPushEmptyRemoteHeadIsUnattainable(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_empty_head_push_failure", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact should keep local compaction successful despite remote push failure: %v\n%s", err, out)
+	}
+	marker := compactPendingPushMarkerPath(fixture)
+	// Filed regression: blank expected_remote_head with verified=0 must not be
+	// readable as either success or a negative result.
+	if got := compactMarkerValue(t, marker, "expected_remote_head"); got != "" {
+		t.Fatalf("scenario should leave expected_remote_head blank, got %q", got)
+	}
+	if got := compactMarkerValue(t, marker, "expected_remote_head_verified"); got != "0" {
+		t.Fatalf("legacy expected_remote_head_verified must be kept, got %q", got)
+	}
+	assertCompactMarkerVerification(t, marker, "unattainable")
+}
+
+func TestCompactScriptQuarantineEmptyPostflightHashIsUnattainable(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "db_hash_empty_after_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite empty postflight value hash:\n%s", out)
+	}
+	marker := compactQuarantineMarkerPath(fixture)
+	// Filed regression: blank postflight_db_value_hash is no proof at all.
+	if got := compactMarkerValue(t, marker, "postflight_db_value_hash"); got != "" {
+		t.Fatalf("scenario should leave postflight_db_value_hash blank, got %q", got)
+	}
+	assertCompactMarkerVerification(t, marker, "unattainable")
+}
+
+func TestCompactScriptMarkerVerificationStateTable(t *testing.T) {
+	cases := []struct {
+		name     string
+		scenario string
+		marker   func(compactScriptFixture) string
+		wantRun  bool // true when the run itself must succeed
+		want     string
+	}{
+		{"pending push, verified remote head, push failed", "remote_push_failure", compactPendingPushMarkerPath, true, "verified"},
+		{"pending push, empty remote head", "remote_empty_head_push_failure", compactPendingPushMarkerPath, true, "unattainable"},
+		{"pending push, fetch failed", "remote_fetch_failure", compactPendingPushMarkerPath, true, "unattainable"},
+		{"pending push, remote head changed before push", "remote_advances_before_push", compactPendingPushMarkerPath, true, "failed"},
+		{"pending push, remote has unique commits", "remote_ahead", compactPendingPushMarkerPath, true, "failed"},
+		{"quarantine, empty postflight hash", "db_hash_empty_after_flatten", compactQuarantineMarkerPath, false, "unattainable"},
+		{"quarantine, row-gain value hash drift", "same_table_replacement_with_row_gain", compactQuarantineMarkerPath, false, "failed"},
+		{"quarantine, row count decreased", "row_count_decreases", compactQuarantineMarkerPath, false, "failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.run(t, tc.scenario, "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if tc.wantRun && err != nil {
+				t.Fatalf("run should succeed: %v\n%s", err, out)
+			}
+			if !tc.wantRun && err == nil {
+				t.Fatalf("run should fail:\n%s", out)
+			}
+			assertCompactMarkerVerification(t, tc.marker(fixture), tc.want)
+		})
+	}
+}
+
+func TestCompactScriptLegacyQuarantineMarkerParsesConservatively(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields string
+		want   string
+	}{
+		{"empty postflight hash", "preflight_db_value_hash=hash-before\npostflight_db_value_hash=\n", "unattainable"},
+		{"observed hash mismatch", "preflight_db_value_hash=hash-before\npostflight_db_value_hash=hash-after\n", "failed"},
+		{"integrity table drift", "integrity_table_drift=beads\npreflight_db_value_hash=h\npostflight_db_value_hash=h\n", "failed"},
+		{"matching hashes are still not verified", "preflight_db_value_hash=h\npostflight_db_value_hash=h\n", "unattainable"},
+		{"no proof fields at all", "", "unattainable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := compactQuarantineMarkerPath(fixture)
+			if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+				t.Fatalf("mkdir quarantine dir: %v", err)
+			}
+			legacy := "db=beads\nreason=post-flatten value hash probe returned empty value\ncreated_at=2026-05-15T00:00:00Z\n" + tc.fields
+			if err := os.WriteFile(marker, []byte(legacy), 0o600); err != nil {
+				t.Fatalf("seed legacy quarantine marker: %v", err)
+			}
+			out, err := fixture.run(t, "below_threshold")
+			if err == nil {
+				t.Fatalf("legacy quarantine marker must still block compaction:\n%s", out)
+			}
+			if !strings.Contains(out, " verification_state="+tc.want) {
+				t.Fatalf("legacy marker should surface verification_state=%s:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, "verification_state=verified") {
+				t.Fatalf("legacy marker must never read as verified:\n%s", out)
+			}
+			if !strings.Contains(out, " remediation_command="+compactDefaultRemediation) {
+				t.Fatalf("legacy marker should surface remediation_command:\n%s", out)
+			}
+			after, readErr := os.ReadFile(marker)
+			if readErr != nil || string(after) != legacy {
+				t.Fatalf("reading a legacy marker must not rewrite it: err=%v\n%s", readErr, after)
+			}
+		})
+	}
+}
+
+func TestCompactScriptLegacyPendingPushMarkerParsesConservatively(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields string
+		want   string
+	}{
+		{"empty remote head unverified", "expected_remote_head=\nexpected_remote_head_verified=0\n", "unattainable"},
+		{"remote head present but unverified", "expected_remote_head=remotecommit\nexpected_remote_head_verified=0\n", "unattainable"},
+		{"verified flag without a head", "expected_remote_head=\nexpected_remote_head_verified=1\n", "unattainable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := compactPendingPushMarkerPath(fixture)
+			if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+				t.Fatalf("mkdir pending-push dir: %v", err)
+			}
+			legacy := "db=beads\nreason=flatten and full GC succeeded but remote push failed\ncreated_at=" +
+				time.Now().UTC().Format("2006-01-02T15:04:05Z") + "\nremote=origin\n" + tc.fields +
+				"compacted_from_head=headcommit\nlocal_branch=main\nremote_branch=main\n"
+			if err := os.WriteFile(marker, []byte(legacy), 0o600); err != nil {
+				t.Fatalf("seed legacy pending-push marker: %v", err)
+			}
+			out, _ := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_ALLOW_FEDERATED=1", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if !strings.Contains(out, "pending_push=present verification_state="+tc.want) {
+				t.Fatalf("legacy pending-push retry should surface verification_state=%s:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, "verification_state=verified") {
+				t.Fatalf("legacy pending-push marker must never read as verified:\n%s", out)
+			}
+		})
+	}
+}
+
+// compactRemediationHarness extracts the named shell functions from run.sh and
+// runs a snippet against them under sh, so the command renderer is exercised
+// on hostile database names that the script's earlier checks would otherwise
+// filter out before a marker is written.
+func compactRemediationHarness(t *testing.T, snippet string, args ...string) (string, error) {
+	t.Helper()
+	script := filepath.Join(repoRoot(t), "commands", "compact", "run.sh")
+	src, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("read compact script: %v", err)
+	}
+	var body strings.Builder
+	for _, name := range []string{"valid_database_name", "compact_remediation_command"} {
+		start := strings.Index(string(src), "\n"+name+"() {\n")
+		if start < 0 {
+			t.Fatalf("run.sh does not define %s()", name)
+		}
+		rest := string(src)[start+1:]
+		end := strings.Index(rest, "\n}\n")
+		if end < 0 {
+			t.Fatalf("unterminated %s()", name)
+		}
+		body.WriteString(rest[:end+3])
+	}
+	body.WriteString(snippet)
+	cmd := exec.Command("sh", append([]string{"-c", body.String(), "sh"}, args...)...)
+	out, runErr := cmd.Output()
+	return string(out), runErr
+}
+
+func TestCompactRemediationCommandIsStaticShapeForValidatedDatabase(t *testing.T) {
+	const snippet = `compact_remediation_command "$1"`
+	out, err := compactRemediationHarness(t, snippet, "beads")
+	if err != nil {
+		t.Fatalf("valid db should render a command: %v", err)
+	}
+	if strings.TrimRight(out, "\n") != compactDefaultRemediation {
+		t.Fatalf("rendered command = %q, want %q", out, compactDefaultRemediation)
+	}
+	out, err = compactRemediationHarness(t, snippet, "my_db-2")
+	if err != nil || strings.TrimRight(out, "\n") != "gc dolt compact --only-db my_db-2" {
+		t.Fatalf("valid db with _ and - should render: out=%q err=%v", out, err)
+	}
+}
+
+func TestCompactRemediationCommandFailsClosedOnUnsafeDatabase(t *testing.T) {
+	const snippet = `compact_remediation_command "$1"`
+	for _, db := range []string{
+		"", "bad name", "a;touch x", "$(id)", "`id`", "a|b", "a&b", "a>b", "a<b",
+		"a\nb", "a\tb", "a'b", `a"b`, "a\\b", "a*b", "-rf", "a/../b", "a#b", "a$IFS", "{a,b}",
+	} {
+		out, err := compactRemediationHarness(t, snippet, db)
+		if err == nil {
+			t.Errorf("db %q: renderer must fail closed, got success with %q", db, out)
+		}
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("db %q: renderer must not print a placeholder or partial command, got %q", db, out)
+		}
+	}
+}
+
+func TestCompactMarkerStateNeverEvalsMarkerValues(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := compactQuarantineMarkerPath(fixture)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	canary := filepath.Join(fixture.cityPath, "marker-eval-canary")
+	hostile := "db=beads\nreason=x\ncreated_at=2026-05-15T00:00:00Z\n" +
+		"verification_state=verified$(touch " + canary + ")\n" +
+		"remediation_command=$(touch " + canary + ")\n" +
+		"postflight_db_value_hash=`touch " + canary + "`\n"
+	if err := os.WriteFile(marker, []byte(hostile), 0o600); err != nil {
+		t.Fatalf("seed hostile marker: %v", err)
+	}
+	out, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("quarantine marker must still block:\n%s", out)
+	}
+	if _, statErr := os.Stat(canary); !os.IsNotExist(statErr) {
+		t.Fatalf("marker value was executed as shell: stat=%v", statErr)
+	}
+	// A recorded verification_state or remediation_command is data, not
+	// authority: the surfaced command is the static shape for the validated db.
+	if strings.Contains(out, "touch "+canary) && strings.Contains(out, "remediation_command=$(") {
+		t.Fatalf("hostile marker text must not be echoed as the remediation command:\n%s", out)
+	}
+	if !strings.Contains(out, " remediation_command="+compactDefaultRemediation) {
+		t.Fatalf("surfaced remediation must be the static shape:\n%s", out)
+	}
+	if strings.Contains(out, "verification_state=verified") {
+		t.Fatalf("a hostile verified value must not be accepted:\n%s", out)
+	}
+}
