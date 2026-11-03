@@ -24,8 +24,6 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
-	hasStashes       bool
-	stashesErr       error
 	worktreeRemove   func(path string, force bool) error
 	removedPath      string
 	removedForce     bool
@@ -39,10 +37,6 @@ func (f *fakeGitProbe) CurrentBranch() (string, error) {
 func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
-}
-
-func (f *fakeGitProbe) HasStashesForBranchResult(_ string) (bool, error) {
-	return f.hasStashes, f.stashesErr
 }
 
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
