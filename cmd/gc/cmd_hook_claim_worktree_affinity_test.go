@@ -594,18 +594,29 @@ func ensureAffinityWorktree(t *testing.T) (string, string, string) {
 	return repo, base, managed
 }
 
-// The default probe answers true only for a directory whose git dir holds the
-// provenance a completed Ensure published; anything else leaves unbound work
-// claimable.
+// The default probe answers true only for the root of a directory whose git
+// dir holds the provenance a completed Ensure published; anything else,
+// including a subdirectory of that worktree, leaves unbound work claimable.
+// A symlink to the root names the same checkout and still reads as managed.
 func TestHookClaimSeatInManagedWorktreeReadsEnsureProvenance(t *testing.T) {
 	repo, base, managed := ensureAffinityWorktree(t)
 	plain := filepath.Join(t.TempDir(), "plain-linked")
 	testutil.RunGit(t, repo, "worktree", "add", "-b", "plain", plain, base)
+	nested := filepath.Join(managed, "pkg", "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating a subdirectory of the managed worktree: %v", err)
+	}
+	linked := filepath.Join(t.TempDir(), "managed-link")
+	if err := os.Symlink(managed, linked); err != nil {
+		t.Fatalf("linking to the managed worktree: %v", err)
+	}
 	for _, tc := range []struct {
 		name, dir string
 		want      bool
 	}{
 		{"worktree Ensure created", managed, true},
+		{"symlink to the worktree Ensure created", linked, true},
+		{"subdirectory of the worktree Ensure created", nested, false},
 		{"main checkout", repo, false},
 		{"linked worktree with no provenance", plain, false},
 		{"not a repository", t.TempDir(), false},
@@ -1014,11 +1025,14 @@ func TestHookDoorsAgreeAcrossStoresWhenAStoreHoldsOnlyWorkLeftToAnotherSession(t
 // A pool whose configured work_dir is a managed worktree, or sits inside one,
 // has its sessions for work bound to no managed worktree placed there: that is
 // the directory the controller resolves for the work
-// (verifiedPoolTriggerWorkDir). Such a session must take the work, though the
-// real probe finds a managed worktree around it: leaving it would drain every
-// session of the pool with the work still ready. Work the controller routes to
-// another directory (another pack's) is still left, and named with where its
-// session runs.
+// (verifiedPoolTriggerWorkDir). Such a session must take the work: leaving it
+// would drain every session of the pool with the work still ready. A seat at
+// the managed worktree's root, which the real probe reads as managed, still
+// leaves work the controller routes to another directory (another pack's), and
+// names where that work's session runs. A seat in a directory nested inside the
+// worktree is not one the controller placed for bound work, so the probe reads
+// it as unmanaged and it takes such work as a seat in any plain pool directory
+// does.
 func TestHookClaimSeatInThePoolsOwnManagedDirectoryTakesUnboundWork(t *testing.T) {
 	_, _, managed := ensureAffinityWorktree(t)
 	cityPath := t.TempDir()
@@ -1028,30 +1042,36 @@ func TestHookClaimSeatInThePoolsOwnManagedDirectoryTakesUnboundWork(t *testing.T
 		b.Metadata[beadmeta.PackMetadataKey] = pack
 		return b
 	}
+	nested := filepath.Join(managed, "slots", "{{.AgentBase}}")
 	for _, tc := range []struct {
-		name      string
-		workDir   string
-		placedFor beads.Bead
-		claimable beads.Bead
-		wantClaim bool
-		wantLeft  string
+		name        string
+		workDir     string
+		placedFor   beads.Bead
+		claimable   beads.Bead
+		wantManaged bool
+		wantClaim   bool
+		wantLeft    string
 	}{
 		{
-			name: "configured directory is the managed worktree", workDir: managed,
+			name: "configured directory is the managed worktree", workDir: managed, wantManaged: true,
 			placedFor: unboundRoutedCandidate("r1-u"), claimable: unboundRoutedCandidate("r1-u"), wantClaim: true,
 		},
 		{
-			name: "configured directory inside the managed worktree", workDir: filepath.Join(managed, "slots", "{{.AgentBase}}"),
+			name: "configured directory inside the managed worktree", workDir: nested,
 			placedFor: unboundRoutedCandidate("r1-u"), claimable: unboundRoutedCandidate("r1-u"), wantClaim: true,
 		},
 		{
-			name: "pack-routed work in the pack's directory", workDir: filepath.Join(managed, "slots", "{{.AgentBase}}"),
+			name: "pack-routed work in the pack's directory", workDir: nested,
 			placedFor: packed("r1-p", "review"), claimable: packed("r1-p", "review"), wantClaim: true,
 		},
 		{
-			name: "another pack's work", workDir: filepath.Join(managed, "slots", "{{.AgentBase}}"),
+			name: "another pack's work from the managed worktree", workDir: managed, wantManaged: true,
 			placedFor: unboundRoutedCandidate("r1-u"), claimable: packed("r1-q", "review"),
-			wantLeft: "left r1-q, which names no managed worktree, to a session in the pool's own directory " + filepath.Join(managed, "slots", "review") + ";",
+			wantLeft: "left r1-q, which names no managed worktree, to a session in the pool's own directory " + filepath.Join(filepath.Dir(managed), "review") + ";",
+		},
+		{
+			name: "another pack's work from inside the managed worktree", workDir: nested,
+			placedFor: unboundRoutedCandidate("r1-u"), claimable: packed("r1-q", "review"), wantClaim: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1068,8 +1088,8 @@ func TestHookClaimSeatInThePoolsOwnManagedDirectoryTakesUnboundWork(t *testing.T
 			if err := os.MkdirAll(placed, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if inManaged, err := hookClaimSeatInManagedWorktree(placed); err != nil || !inManaged {
-				t.Fatalf("hookClaimSeatInManagedWorktree(%q) = %v, %v; the seat must run inside a managed worktree", placed, inManaged, err)
+			if inManaged, err := hookClaimSeatInManagedWorktree(placed); err != nil || inManaged != tc.wantManaged {
+				t.Fatalf("hookClaimSeatInManagedWorktree(%q) = %v, %v; want %v, nil", placed, inManaged, err, tc.wantManaged)
 			}
 			row := &session.Info{PoolSlot: strconv.Itoa(slot), AgentName: instance, WorkDirCanonical: placed, WorkDir: placed}
 			opts := affinitySeatOpts("")
