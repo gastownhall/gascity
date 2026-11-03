@@ -3,7 +3,6 @@
 package overlay
 
 import (
-	"bytes"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -11,9 +10,6 @@ import (
 
 // copilotHooksPath is GitHub Copilot CLI's repository hook file.
 var copilotHooksPath = filepath.Join(".github", "hooks", "gascity.json")
-
-// copilotInstructionsPath is GitHub Copilot CLI's repository instruction file.
-var copilotInstructionsPath = filepath.Join(".github", "copilot-instructions.md")
 
 // posixGCHookPrefix starts every command in the bundled Copilot hook file: it
 // appends the usual go-install directories to PATH, then runs the gc that
@@ -35,42 +31,18 @@ const powerShellGCHookPrefix = `$env:PATH = "$env:PATH;$HOME\go\bin;$HOME\.local
 // as it is. Every other file is returned unchanged, as is a document that does
 // not parse.
 func AdaptSettingsForPlatform(relPath string, data []byte) []byte {
-	switch {
-	case isCopilotHooksPath(relPath):
+	if isCopilotHooksPath(relPath) {
 		return adaptCopilotHooks(data)
-	case isInstructionMarkdownPath(relPath):
-		return adaptInstructionMarkdown(data)
-	default:
-		return data
 	}
+	return data
 }
 
 func platformAdaptsPath(relPath string) bool {
-	return isCopilotHooksPath(relPath) || isInstructionMarkdownPath(relPath)
+	return isCopilotHooksPath(relPath)
 }
 
 func platformAdaptsDirectoryCopies() bool {
 	return true
-}
-
-// ManagedFileNeedsPlatformUpgrade returns a predicate that identifies the
-// released Windows-managed bytes this build should silently upgrade. It is nil
-// when relPath has no Windows-only managed-byte adaptation.
-func ManagedFileNeedsPlatformUpgrade(relPath string, legacyData, desiredData []byte) func([]byte) bool {
-	if !isInstructionMarkdownPath(relPath) || bytes.Equal(legacyData, desiredData) {
-		return nil
-	}
-	legacy := append([]byte(nil), legacyData...)
-	return func(existing []byte) bool {
-		return bytes.Equal(existing, legacy)
-	}
-}
-
-func preservePlatformManagedFile(relPath string, existing, legacyData, desiredData []byte) bool {
-	if !isInstructionMarkdownPath(relPath) || bytes.Equal(legacyData, desiredData) {
-		return false
-	}
-	return !bytes.Equal(existing, legacyData)
 }
 
 func platformPreserveExistingPath(relPath string) bool {
@@ -79,12 +51,6 @@ func platformPreserveExistingPath(relPath string) bool {
 
 func isCopilotHooksPath(relPath string) bool {
 	return strings.EqualFold(cleanPlatformRelPath(relPath), filepath.ToSlash(copilotHooksPath))
-}
-
-func isInstructionMarkdownPath(relPath string) bool {
-	clean := cleanPlatformRelPath(relPath)
-	return strings.EqualFold(clean, filepath.ToSlash(copilotInstructionsPath)) ||
-		isRootAgentsMarkdownPath(clean)
 }
 
 func isRootAgentsMarkdownPath(relPath string) bool {
@@ -137,8 +103,6 @@ func adaptCopilotHooks(data []byte) []byte {
 	}
 	return out
 }
-
-func adaptInstructionMarkdown(data []byte) []byte { return data }
 
 func powerShellGCHook(bash string) (string, bool) {
 	args, ok := strings.CutPrefix(bash, posixGCHookPrefix)
