@@ -1039,7 +1039,14 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	// formula path. Without this, a manual `gc order run --rig` is invisible to
 	// the labelOrderTracking history index and the order re-fires every tick
 	// (#3570).
-	run, err := front.CreateRun(scoped, orders.RunOpts{})
+	var maxTimeout time.Duration
+	if cfg != nil {
+		maxTimeout = cfg.Orders.MaxTimeoutDuration()
+	}
+	ctx, cancel := withOrderTimeout(context.Background(), effectiveTimeout(a, maxTimeout))
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	run, err := front.CreateRun(scoped, orders.RunOpts{Deadline: deadline})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1053,7 +1060,7 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 		}
 	}
 
-	result := doOrderRunExecResult(a, cityPath, cfg, vars, stdout, stderr)
+	result := doOrderRunExecResultContext(ctx, a, cityPath, cfg, vars, stdout, stderr)
 	outcome := orders.RunOutcomeExec
 	if result.code != 0 {
 		outcome = orders.RunOutcomeExecFailed
@@ -1087,6 +1094,10 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 	ctx, cancel := withOrderTimeout(context.Background(), timeout)
 	defer cancel()
 
+	return doOrderRunExecResultContext(ctx, a, cityPath, cfg, vars, stdout, stderr)
+}
+
+func doOrderRunExecResultContext(ctx context.Context, a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr

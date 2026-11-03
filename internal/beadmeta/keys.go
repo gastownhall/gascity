@@ -268,33 +268,36 @@ const (
 	NextAttemptMetadataKey              = "gc.next_attempt"
 	OnExhaustedMetadataKey              = "gc.on_exhausted"
 	OnFailMetadataKey                   = "gc.on_fail"
-	OriginalKindMetadataKey             = "gc.original_kind"
-	OutcomeBeadIDMetadataKey            = "gc.outcome_bead_id"
-	OutcomeMetadataKey                  = "gc.outcome"
-	OutputJSONMetadataKey               = "gc.output_json"
-	OutputJSONRequiredMetadataKey       = "gc.output_json_required"
-	ParentBeadIDMetadataKey             = "gc.parent_bead_id"
-	ParentConvoyIDMetadataKey           = "gc.parent_convoy_id"
-	PartialFragmentMetadataKey          = "gc.partial_fragment"
-	PartialRetryMetadataKey             = "gc.partial_retry"
-	PackMetadataKey                     = "gc.pack"
-	PackRootMetadataKey                 = "gc.pack_root"
-	PackWorkspaceMetadataKey            = "gc.pack_workspace"
-	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey              = "gc.ralph_step_id"
-	ReasoningMetadataKey                = "gc.reasoning"
-	RequiredArtifactMetadataKey         = "gc.required_artifact"
-	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
-	ReviewGateMetadataKey               = "gc.review_gate"
-	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
-	RetryCountMetadataKey               = "gc.retry_count"
-	RetryFromMetadataKey                = "gc.retry_from"
-	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
-	RetryStateMetadataKey               = "gc.retry_state"
-	RigRootMetadataKey                  = "gc.rig_root"
-	RootBeadIDMetadataKey               = "gc.root_bead_id"
-	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
-	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
+	// OrderDispatchDeadlineMetadataKey is the RFC3339Nano deadline shared by
+	// an order's execution context and its tracking-bead recovery sweeps.
+	OrderDispatchDeadlineMetadataKey = "gc.order.dispatch_deadline"
+	OriginalKindMetadataKey          = "gc.original_kind"
+	OutcomeBeadIDMetadataKey         = "gc.outcome_bead_id"
+	OutcomeMetadataKey               = "gc.outcome"
+	OutputJSONMetadataKey            = "gc.output_json"
+	OutputJSONRequiredMetadataKey    = "gc.output_json_required"
+	ParentBeadIDMetadataKey          = "gc.parent_bead_id"
+	ParentConvoyIDMetadataKey        = "gc.parent_convoy_id"
+	PartialFragmentMetadataKey       = "gc.partial_fragment"
+	PartialRetryMetadataKey          = "gc.partial_retry"
+	PackMetadataKey                  = "gc.pack"
+	PackRootMetadataKey              = "gc.pack_root"
+	PackWorkspaceMetadataKey         = "gc.pack_workspace"
+	PerDispatchModelMetadataKey      = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey           = "gc.ralph_step_id"
+	ReasoningMetadataKey             = "gc.reasoning"
+	RequiredArtifactMetadataKey      = "gc.required_artifact"
+	RequiredArtifactsMetadataKey     = "gc.required_artifacts"
+	ReviewGateMetadataKey            = "gc.review_gate"
+	RetryAttemptMetadataKey          = "gc.retry_attempt" // see attempt.go
+	RetryCountMetadataKey            = "gc.retry_count"
+	RetryFromMetadataKey             = "gc.retry_from"
+	RetrySessionRecycledMetadataKey  = "gc.retry_session_recycled"
+	RetryStateMetadataKey            = "gc.retry_state"
+	RigRootMetadataKey               = "gc.rig_root"
+	RootBeadIDMetadataKey            = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey    = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey      = "gc.root_settle_failed"
 	// RootStoreRefMetadataKey records the SCOPE a graph tree runs in:
 	// city:<name> or rig:<name>. It is never a location. On a split city every
 	// graph bead lives in the city binding whatever its scope (the S4
@@ -691,6 +694,7 @@ var KnownMetadataKeys = []string{
 	NextAttemptMetadataKey,
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,
+	OrderDispatchDeadlineMetadataKey,
 	OriginalKindMetadataKey,
 	OutcomeBeadIDMetadataKey,
 	OutcomeMetadataKey,
