@@ -1137,6 +1137,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc hook current` no longer prints a stale claim stamp (#8785).**
+  The `current_claim_bead_id` stamp is written best-effort by
+  `gc hook --claim` — a failed write warns on stderr and the claim still
+  exits 0 — so the pointer can keep naming the previous claim, and a
+  formula guard that re-validates the printed id acts on a dead pointer:
+  a closed step's id refused a finished session's drain, and a
+  live-but-not-claiming id points a close step at someone else's work.
+  The command now validates the stamp against the live work ledger
+  before printing it (the row is still `in_progress`, assigned to this
+  session's actor, and not stamped to another session), resolves the
+  session's sole live `in_progress` claim from the ledger when the stamp
+  is stale or missing — the same query `gc bd list
+  --assignee=<actor> --status=in_progress` answers for the same shell —
+  and exits 1 when the ledger answers nothing or answers several:
+  guessing among candidates is how one session closes another's bead. A
+  transient ledger read failure prints the stamp unverified, exactly the
+  pre-existing behavior, and the command never re-stamps: repairing the
+  pointer is the claim path's job, not a read's side effect.
+
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
   `gc session list` printed a different document and dropped
