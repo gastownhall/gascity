@@ -3284,8 +3284,12 @@ func hookSeatManaged(label, seatWorkDir string, probe func(string) (bool, error)
 // hookClaimSeatInManagedWorktree reports whether seatWorkDir is a managed
 // worktree: its private git directory holds the provenance a completed
 // `gc worktree ensure` published, which worktree.Verify checked before the
-// controller started a pool seat there (verifiedPoolTriggerWorkDir). git
-// finding no repository there, and a git directory without a record, establish
+// controller started a pool seat there (verifiedPoolTriggerWorkDir), and the
+// record names seatWorkDir itself as the worktree's root. The controller only
+// starts a seat for bound work at that root, so a directory nested inside a
+// managed worktree (a configured work_dir or pack workspace subdirectory)
+// shares its git directory but is not one. git finding no repository there, a
+// git directory without a record, and a record naming another path establish
 // that it is not. A git that timed out or could not run, and a record that
 // could not be read or decoded, establish nothing and return an error.
 func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
@@ -3306,7 +3310,7 @@ func hookClaimSeatInManagedWorktree(seatWorkDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(provenance.BeadID) != "", nil
+	return strings.TrimSpace(provenance.BeadID) != "" && pathutil.SamePath(provenance.Path, seatWorkDir), nil
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
