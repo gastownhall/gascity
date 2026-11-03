@@ -695,20 +695,24 @@ func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
 	fields("assigned_repairs", map[string]int{"repair_ms": 1, "stamp_ms": 1, "canonicalize_ms": 1})
 	fields("unassigned_repairs", map[string]int{"beads": 2, "repair_ms": 1, "canonicalize_ms": 1, "collapse_ms": 1, "dispatcher_repair_ms": 1})
 
-	// Realization: one reuse and one create. The create's 1000ms and the
-	// create path's own metadata write (100ms) are Phase B; the reused seat's
-	// trigger binding is the one bind write (100ms). Each Phase C segment runs
-	// once per item, a step each.
+	// Realization: one reuse and one create, in one create wave. The create's
+	// 1000ms and the create path's own metadata write (100ms) are Phase B, and
+	// both land in the create's write segment; the create's eight segment
+	// clock reads are a step each inside the wave. The reused seat's trigger
+	// binding is the one bind write (100ms). Each Phase C segment runs once
+	// per item, a step each.
 	realize := fields("realize_pools", map[string]int{
-		"pools": 1, "requests": 2, "creates": 1, "create_errors": 0,
+		"pools": 1, "requests": 2, "creates": 1, "create_errors": 0, "create_waves": 1,
 		"bind_attempts": 2, "bind_writes": 1, "bind_errors": 0, "worktree_verifies": 0, "realized": 2,
-		"plan_ms": 1, "create_ms": 1101, "bind_ms": 102, "resolve_ms": 2, "side_effects_ms": 2,
+		"plan_ms": 1, "create_ms": 1109, "bind_ms": 102, "resolve_ms": 2, "side_effects_ms": 2,
+		"create_pre_lock_ms": 1, "create_lock_wait_ms": 1, "create_census_ms": 1,
+		"create_alias_ms": 1, "create_availability_ms": 1, "create_write_ms": 1101,
 	})
-	// The whole record: 1200ms of writes plus one step for each of the 17
+	// The whole record: 1200ms of writes plus one step for each of the 25
 	// clock reads inside it. A start left at the previous boundary would also
 	// count the compute segment.
-	if realize.DurationMS != 1217 {
-		t.Errorf("realize_pools duration_ms = %d, want 1217: its start must be reset at its own boundary", realize.DurationMS)
+	if realize.DurationMS != 1225 {
+		t.Errorf("realize_pools duration_ms = %d, want 1225: its start must be reset at its own boundary", realize.DurationMS)
 	}
 
 	// Sub-phases with no timed work inside measure one step; a start that

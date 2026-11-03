@@ -340,3 +340,12 @@ which waits for CN-1b2.
 The worker reads work beads and other state it does not own through lookups
 injected as func values (for example `FactoryConfig.ResolveBead`), and never
 enumerates stores itself.
+
+## Legacy pool creation waves
+
+Legacy demand realization may overlap fresh creates across independent pools,
+bounded by `poolRealizeParallelism`. Keep planning and finalization in pool
+order, serialize creates with intersecting identifier lock sets, and preserve
+each create's authoritative availability proof under those locks. A failed
+create refunds its budget for later pools. The v2 allocator does not call this
+realization wave; its shared guarded-create helper retains the same proof.

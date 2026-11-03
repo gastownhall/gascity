@@ -57,6 +57,8 @@ type poolSessionCreateIdentity struct {
 	// the store pre-mints (empty when it mints none); an error refuses the
 	// write, which then never happens.
 	BeforeWrite func(rowID string) error
+	// Segments, when set, times the availability checks and the write.
+	Segments *poolCreateSegments
 }
 
 // poolCreateWriteError marks a create error from the row write itself, or
@@ -337,21 +339,29 @@ func createPoolSessionBeadWithIdentifiers(
 		agentName = template
 	}
 	identity.AgentName = agentName
-	if identifiers.beadScoped {
-		// Snapshot leg first: a holder the tick already sees must fail the
-		// create closed even when the store scan below cannot answer.
-		if err := ensurePoolIdentityNotHeldByOpenRow(nil, cfg, availabilitySnapshot, template, agentName); err != nil {
-			return sessionpkg.Info{}, err
+	seg := identity.Segments
+	segStart := seg.mark()
+	availabilityErr := func() error {
+		if identifiers.beadScoped {
+			// Snapshot leg first: a holder the tick already sees must fail the
+			// create closed even when the store scan below cannot answer.
+			if err := ensurePoolIdentityNotHeldByOpenRow(nil, cfg, availabilitySnapshot, template, agentName); err != nil {
+				return err
+			}
 		}
-	}
-	if err := ensurePoolSessionIdentifiersAvailable(store, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
-		return sessionpkg.Info{}, err
-	}
-	if identifiers.beadScoped {
-		if err := ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, template, agentName); err != nil {
-			return sessionpkg.Info{}, err
+		if err := ensurePoolSessionIdentifiersAvailable(store, cfg, availabilitySnapshot, template, identity, identifiers); err != nil {
+			return err
 		}
+		if identifiers.beadScoped {
+			return ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, template, agentName)
+		}
+		return nil
+	}()
+	segStart = seg.since(poolCreateSegmentAvailability, segStart)
+	if availabilityErr != nil {
+		return sessionpkg.Info{}, availabilityErr
 	}
+	defer seg.since(poolCreateSegmentWrite, segStart)
 	instanceToken := identity.InstanceToken
 	if instanceToken == "" {
 		instanceToken = sessionpkg.NewInstanceToken()
