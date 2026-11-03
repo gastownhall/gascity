@@ -509,9 +509,9 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json prints a
-JSON array of beads, the same on every route for a local city. For a
-remote city (--context, --city-url/--city-name, GC_CITY_URL,
+Supports --label, --status, --assignee, --all, and --format.
+--format=json prints a JSON array of beads, the same on every route
+for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
 &#123;"beads": [...], "_cache_age_s": N&#125;, where _cache_age_s is the age in
 seconds of the remote supervisor's bead cache.
@@ -530,6 +530,16 @@ warns on stderr, lists the remaining stores and exits 0.
 The bare --json flag is reserved by the CLI's JSON-contract layer and is
 not wired for this command; use --format=json.
 
+--assignee is the cross-ledger form of "bd list --assignee". Bare bd
+reads a single ledger, so a bead that lives on a RIG ledger but is
+assigned to a city-scoped agent is invisible to it; this command sweeps
+every rig store plus the city store, so it answers "what is assigned to
+this agent anywhere in town" in one call. Use it when an agent's own
+startup work check comes back empty but work is genuinely assigned to
+it. The match is an exact comparison against the bead's stored assignee
+— no identity resolution happens, so pass the identity form the work is
+actually assigned under.
+
 ```
 gc beads list [flags]
 ```
@@ -540,11 +550,13 @@ gc beads list [flags]
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
+gc beads list --assignee city.agent-a --status in_progress
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
+| `--assignee` | string |  | filter to beads whose stored assignee matches this string exactly (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
