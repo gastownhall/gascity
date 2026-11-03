@@ -1134,7 +1134,7 @@ city's work store, copy them into the binding with
 					unlock := graphv2.LockKey(graphRootKey)
 					defer unlock()
 				}
-				result, err = molecule.Instantiate(cmd.Context(), moleculeClassTarget(recipe, store, graphStore), recipe, molecule.Options{
+				result, err = molecule.Instantiate(cmd.Context(), moleculeClassTarget(recipe, rootStore, rootStore), recipe, molecule.Options{
 					Title:          title,
 					Vars:           cookVars,
 					IdempotencyKey: graphRootKey,
@@ -1166,7 +1166,7 @@ city's work store, copy them into the binding with
 						refused = cookMetaFlipError(args[0], flip)
 						return beads.MoleculeTarget{}
 					}
-					return moleculeClassTarget(recipe, store, graphStore)
+					return moleculeClassTarget(recipe, chosen, chosen)
 				})
 				rootStore = target
 				if refused != nil {

@@ -926,7 +926,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// molecule.Instantiate makes against it.
 	graphStore := resolveGraphStore(cliStorageRoutes(cityPath), genericStore, cfg, cityPath, nil)
 	moleculeStore := moleculeClassStore(recipe, genericStore, graphStore)
-	moleculeStoreMolecule := moleculeClassTarget(recipe, genericStore, graphStore)
+	moleculeStoreMolecule := moleculeClassTarget(recipe, moleculeStore, moleculeStore)
 
 	if err := applyOrderRecipeRouting(recipe, pool, vars, storeTarget, moleculeStore, cityName, cityPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
