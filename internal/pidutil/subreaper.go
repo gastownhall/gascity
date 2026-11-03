@@ -3,7 +3,6 @@ package pidutil
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -32,8 +31,14 @@ import (
 //
 // The comm field is parsed by scanning to the LAST ')' because a process name
 // may itself contain parentheses and spaces.
+//
+// It answers only where procfs does. On Windows it reports ErrUnsupported
+// rather than a fabricated ancestry: the kernel there does not reparent an
+// orphan onto a subreaper at all — a dead parent leaves a dangling parent ID
+// that the PID allocator may later hand to an unrelated process — so the
+// orphan model this function serves has no Windows equivalent to report.
 func ParentPID(pid int) (int, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	data, err := readProcFile(pid, "stat")
 	if err != nil {
 		return 0, err
 	}
@@ -51,7 +56,7 @@ func ParentPID(pid int) (int, error) {
 // Comm returns the executable name from /proc/<pid>/comm, or "" if it cannot
 // be read.
 func Comm(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	data, err := readProcFile(pid, "comm")
 	if err != nil {
 		return ""
 	}
