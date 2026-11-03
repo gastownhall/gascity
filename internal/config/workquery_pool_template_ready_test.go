@@ -284,3 +284,95 @@ func TestPoolMemberCustomWorkQueryRemainsVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// poolAnchoredTemplateFakeBD is a fake bd for a configured pool member whose
+// shared template also has ready work. When anchored, the member owns an
+// in-progress graph workflow root (its remembered anchor); readyStep adds a
+// ready step of that workflow. Ready work assigned to the shared template is
+// always on offer, and --assignee is matched exactly so the member's own
+// identity never stands in for the template.
+func poolAnchoredTemplateFakeBD(anchored, readyStep bool) string {
+	list := `printf '[]'`
+	if anchored {
+		list = `printf '[{"id":"workflow-root","status":"in_progress","assignee":"` + poolMemberReadyAssignee +
+			`","metadata":{"gc.kind":"workflow","gc.formula_contract":"graph.v2","gc.routed_to":"` + poolTemplateReadyAssignee + `"}}]'`
+	}
+	anchorReady := `printf '[]'`
+	if readyStep {
+		anchorReady = `printf '[{"id":"anchored-ready-step","status":"open","assignee":"","metadata":{"gc.kind":"task","gc.root_bead_id":"workflow-root","gc.routed_to":"` +
+			poolTemplateReadyAssignee + `"}}]'`
+	}
+	return `#!/bin/sh
+set -eu
+case "$1" in
+  list)
+    ` + list + `
+    ;;
+  show)
+    printf '[{"id":"workflow-root","dependencies":[]}]'
+    ;;
+  ready)
+    assignee=""
+    for arg in "$@"; do
+      case "$arg" in
+        --assignee=*) assignee=${arg#--assignee=} ;;
+      esac
+    done
+    case "$*" in
+      *"--metadata-field gc.root_bead_id=workflow-root"*)
+        ` + anchorReady + `
+        ;;
+      *)
+        if [ "$assignee" = "` + poolTemplateReadyAssignee + `" ]; then
+          printf '[{"id":"ga-template-ready","status":"open","issue_type":"task","assignee":"` + poolTemplateReadyAssignee + `"}]'
+        else
+          printf '[]'
+        fi
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+}
+
+// TestPoolMemberAnchoredWorkflowPrecedesTemplateAssignedReadyWork pins where
+// the shared-template tier sits among the graph-anchor tiers of the default
+// work_query. A pool member that remembers an in-progress graph workflow root
+// resumes that workflow, and falls back to the root itself when none of its
+// steps is ready, before it looks at work assigned to the shared template: an
+// anchored session must not hop to unrelated work, the rule
+// TestEffectiveWorkQueryPrefersReadyStepOverAssignedGraphWorkflowRoot pins for
+// routed work. The unanchored control shows the same fake does serve the
+// template row, so the two anchored cases cannot pass vacuously.
+func TestPoolMemberAnchoredWorkflowPrecedesTemplateAssignedReadyWork(t *testing.T) {
+	tests := []struct {
+		name      string
+		anchored  bool
+		readyStep bool
+		want      string
+	}{
+		{name: "anchored_ready_step", anchored: true, readyStep: true, want: "anchored-ready-step"},
+		{name: "anchored_root_fallback", anchored: true, readyStep: false, want: "workflow-root"},
+		{name: "unanchored_control", anchored: false, readyStep: false, want: "ga-template-ready"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := runEffectiveWorkQuery(t, *configuredPoolTemplateAgent(), map[string]string{
+				"GC_SESSION_ID":     "gc-session-worker-1",
+				"GC_SESSION_NAME":   poolMemberReadyAssignee,
+				"GC_ALIAS":          poolMemberReadyAssignee,
+				"GC_AGENT":          poolMemberReadyAssignee,
+				"GC_TEMPLATE":       poolTemplateReadyAssignee,
+				"GC_SESSION_ORIGIN": "ephemeral",
+			}, poolAnchoredTemplateFakeBD(tt.anchored, tt.readyStep))
+
+			ids := workQueryOutputIDOrder(t, out)
+			if len(ids) != 1 || ids[0] != tt.want {
+				t.Fatalf("EffectiveWorkQuery() candidates = %v (output %q), want only %q", ids, out, tt.want)
+			}
+		})
+	}
+}
