@@ -111,10 +111,14 @@ type parsedQuestion struct {
 	// Choices are the numbered options' labels in pane order.
 	Choices []string
 	// Focused is the label of the highlighted option.
-	Focused        string
-	Numbers        []int
-	Provider       string
-	NativeID       string
+	Focused  string
+	Numbers  []int
+	Provider string
+	NativeID string
+	// CodexPosition and CodexTotal retain the original async request's batch
+	// position, even after an earlier question in that batch is answered.
+	CodexPosition  int
+	CodexTotal     int
 	BindingError   string
 	FreeNumber     int
 	ChatNumber     int

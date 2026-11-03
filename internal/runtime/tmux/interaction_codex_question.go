@@ -10,7 +10,10 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-var codexQueuedQuestionCount = regexp.MustCompile(`^[?？] (\d+) questions?$`)
+var (
+	codexQueuedQuestionCount = regexp.MustCompile(`^[?？] (\d+) questions?$`)
+	codexQuestionPosition    = regexp.MustCompile(`^([1-9][0-9]*) of ([1-9][0-9]*)$`)
+)
 
 // codexQuestionPanel reads the native async question editor, never an approval
 // menu or conversational bullet list. Pending itself does not open the editor.
@@ -54,6 +57,20 @@ func codexQuestionPanel(lines []string) *parsedQuestion {
 			continuations[last] = append(continuations[last], row)
 		} else if len(q.Choices) == 0 && row != "" {
 			prompt = append(prompt, row)
+		}
+	}
+	// The editor counter is a complete row before the authored question, not
+	// a prefix to strip from arbitrary titles. Keep a lone "1 of 2" title as
+	// data; a wrapped title that resembles this control still has to match the
+	// native batch position, total and exact remaining title below.
+	if len(prompt) > 1 {
+		if position := codexQuestionPosition.FindStringSubmatch(prompt[0]); position != nil {
+			index, indexErr := strconv.Atoi(position[1])
+			total, totalErr := strconv.Atoi(position[2])
+			if indexErr == nil && totalErr == nil && index <= total {
+				q.CodexPosition, q.CodexTotal = index, total
+				prompt = prompt[1:]
+			}
 		}
 	}
 	q.Question = strings.Join(prompt, " ")
@@ -119,9 +136,15 @@ func (t *Tmux) codexNativeQuestions(target string, visible *parsedQuestion, coun
 		return nil, err
 	}
 	if visible != nil {
+		// The observed counter indexes one original async request, not a
+		// guessed ordering across distinct unresolved invocations. Until that
+		// provider layout is qualified, refuse a counter spanning several calls.
+		if visible.CodexTotal > 0 && !codexQuestionsShareBatch(questions) {
+			return nil, codexQuestionMismatch(visible, questions)
+		}
 		var found *parsedQuestion
 		for _, q := range questions {
-			if q.Question == visible.Question && equalQuestionChoices(q.answerChoices(), visible.answerChoices()) {
+			if q.Question == visible.Question && equalQuestionChoices(q.answerChoices(), visible.answerChoices()) && codexQuestionPositionMatches(q, visible) {
 				if found != nil {
 					return nil, fmt.Errorf("%w: native Codex question is ambiguous", runtime.ErrRuntimeUnavailable)
 				}
@@ -138,6 +161,30 @@ func (t *Tmux) codexNativeQuestions(target string, visible *parsedQuestion, coun
 		return nil, fmt.Errorf("%w: Codex queue and native requests disagree", runtime.ErrRuntimeUnavailable)
 	}
 	return questions[0], nil
+}
+
+func codexQuestionPositionMatches(native, visible *parsedQuestion) bool {
+	if visible.CodexTotal == 0 {
+		return native.CodexTotal == 1
+	}
+	return native.CodexPosition == visible.CodexPosition && native.CodexTotal == visible.CodexTotal
+}
+
+func codexQuestionsShareBatch(questions []*parsedQuestion) bool {
+	if len(questions) == 0 {
+		return false
+	}
+	batch := ""
+	for _, question := range questions {
+		// NativeID is authored above from call_id plus the original index.
+		// Remove only that final index, preserving every byte of the call ID.
+		key := strings.TrimSuffix(question.NativeID, fmt.Sprintf("-%d", question.CodexPosition-1))
+		if batch != "" && key != batch {
+			return false
+		}
+		batch = key
+	}
+	return true
 }
 
 // codexQuestionMismatch describes only the parsed question shapes needed to
@@ -160,7 +207,7 @@ func codexQuestionDiagnosticShape(question *parsedQuestion) string {
 	for _, choice := range choices[:min(len(choices), 4)] {
 		labels = append(labels, codexQuestionDiagnosticText(choice, 48))
 	}
-	shape := fmt.Sprintf("{title=%q choices=%q choice_count=%d}", codexQuestionDiagnosticText(question.Question, 96), labels, len(choices))
+	shape := fmt.Sprintf("{title=%q choices=%q choice_count=%d position=%d total=%d}", codexQuestionDiagnosticText(question.Question, 96), labels, len(choices), question.CodexPosition, question.CodexTotal)
 	return codexQuestionDiagnosticText(shape, 512)
 }
 
@@ -234,7 +281,7 @@ func codexQuestionsIn(tail string) ([]*parsedQuestion, error) {
 				if native.Title == "" {
 					return nil, fmt.Errorf("%w: native Codex question has no title", runtime.ErrRuntimeUnavailable)
 				}
-				q := &parsedQuestion{Header: "Codex question", Provider: "codex", Collapsed: true, Question: native.Title, NativeID: fmt.Sprintf("tmux-codex-question-%s-%d", p.CallID, index)}
+				q := &parsedQuestion{Header: "Codex question", Provider: "codex", Collapsed: true, Question: native.Title, NativeID: fmt.Sprintf("tmux-codex-question-%s-%d", p.CallID, index), CodexPosition: index + 1, CodexTotal: len(args.Questions)}
 				for _, option := range native.Options {
 					if len(q.Choices) == 32 {
 						break

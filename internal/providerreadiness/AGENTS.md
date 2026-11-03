@@ -36,3 +36,7 @@ even after the model emits task_complete. Require the process-owned native
 occurrence and matching live queue/editor before answering; a completed model
 turn alone does not dismiss queued user input. Preserve stale-response refusal
 and the ordinary-message guard while a native interaction owns input.
+
+Bind native editor batch counters to the owned question occurrence and preserve
+authored title text. An unsupported counter or ambiguous invocation remains
+unavailable; it never authorizes guessing an answer target.
