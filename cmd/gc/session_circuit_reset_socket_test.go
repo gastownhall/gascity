@@ -172,3 +172,108 @@ func TestSessionCircuitResetSocketRefusesWithoutARegisteredRuntime(t *testing.T)
 		t.Errorf("reset error = %q, want it to say the controller is not serving the city yet", reply.Error)
 	}
 }
+
+// splitRoutesOver returns routes that relocate every infrastructure class to
+// binding, as a split city's runtime registers them.
+func splitRoutesOver(binding beads.Store) *storageRoutes {
+	routes := &storageRoutes{binding: "infra", stores: map[coordclass.Class]beads.Store{}}
+	for _, class := range coordclass.Classes() {
+		if class != coordclass.ClassWork {
+			routes.stores[class] = binding
+		}
+	}
+	return routes
+}
+
+// TestOneShotRoutesAnswerFromTheRegisteredRuntime pins the backstop that covers
+// every in-process caller of a class resolver, not only the reset socket: the
+// nudge poller, the nudge fence census and sling's named-session materialize
+// all reach cliStorageRoutes from inside the controller. Once a runtime
+// registers, the funnel answers with its routes, and the memo taken before the
+// boot is retired so it cannot come back after the runtime stops.
+func TestOneShotRoutesAnswerFromTheRegisteredRuntime(t *testing.T) {
+	cityDir := circuitResetSocketCity(t)
+	if routes := cliStorageRoutes(cityDir); routes != nil {
+		t.Fatalf("precondition: a city with no [storage] resolves nil one-shot routes, got %+v", routes)
+	}
+	if !cliStorageRoutesResolved(cityDir) {
+		t.Fatal("precondition: the funnel memoized its answer")
+	}
+
+	binding := pinnedIDMemStore()
+	const relicID = "pl-wisp-35xhai"
+	seedOpenCircuitSessionBead(t, binding, relicID)
+	routes := splitRoutesOver(binding)
+	registerResidencyRoutes(cityDir, routes, func() beads.Store { return pinnedIDMemStore() })
+	registered := true
+	t.Cleanup(func() {
+		if registered {
+			unregisterResidencyRoutes(cityDir, routes)
+		}
+	})
+
+	if cliStorageRoutesResolved(cityDir) {
+		t.Error("the pre-boot funnel memo survived the registration")
+	}
+	if got := cliStorageRoutes(cityDir); got != routes {
+		t.Fatalf("cliStorageRoutes = %p, want the registered routes %p", got, routes)
+	}
+	if _, err := cliSessionStore(pinnedIDMemStore(), nil, cityDir).Get(relicID); err != nil {
+		t.Fatalf("cliSessionStore Get(%s) inside a registered process: %v, want the binding row", relicID, err)
+	}
+
+	unregisterResidencyRoutes(cityDir, routes)
+	registered = false
+	if got := cliStorageRoutes(cityDir); got != nil {
+		t.Errorf("after the runtime unregistered, cliStorageRoutes = %+v, want the city's own (nil) answer", got)
+	}
+}
+
+// TestRegisteringTheFunnelsOwnRoutesKeepsThem is the one-shot `gc start` pass,
+// which registers the routes the funnel itself resolved. Retiring the memo
+// there would close the routes the pass is about to use.
+func TestRegisteringTheFunnelsOwnRoutesKeepsThem(t *testing.T) {
+	_, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	t.Cleanup(func() { _ = closeCLIStorageRoutes() })
+	routes := cliStorageRoutes(cityDir)
+	if routes == nil {
+		t.Fatal("precondition: the split city resolved no one-shot routes")
+	}
+	registerResidencyRoutes(cityDir, routes, func() beads.Store { return beads.NewMemStore() })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityDir, routes) })
+
+	if !cliStorageRoutesResolved(cityDir) {
+		t.Fatal("registering the funnel's own routes retired them")
+	}
+	sessions, relocated := routes.storeFor(coordclass.ClassSessions)
+	if !relocated {
+		t.Fatal("precondition: the split routes relocate sessions")
+	}
+	if _, err := sessions.Create(beads.Bead{Title: "riley", Type: "session"}); err != nil {
+		t.Fatalf("the registered funnel routes no longer serve a write: %v", err)
+	}
+}
+
+// TestRegisteringARuntimeRetiresAStaleFunnelMemo checks that the retired memo's
+// routes are closed rather than leaked: a supervisor re-boots a city many times
+// over its life, and each stale handle would otherwise stay open until exit.
+func TestRegisteringARuntimeRetiresAStaleFunnelMemo(t *testing.T) {
+	_, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	t.Cleanup(func() { _ = closeCLIStorageRoutes() })
+	stale := cliStorageRoutes(cityDir)
+	staleSessions, relocated := stale.storeFor(coordclass.ClassSessions)
+	if !relocated {
+		t.Fatal("precondition: the split routes relocate sessions")
+	}
+
+	routes := splitRoutesOver(beads.NewMemStore())
+	registerResidencyRoutes(cityDir, routes, func() beads.Store { return beads.NewMemStore() })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityDir, routes) })
+
+	if cliStorageRoutesResolved(cityDir) {
+		t.Fatal("the stale funnel memo survived the registration")
+	}
+	if _, err := staleSessions.Create(beads.Bead{Title: "riley", Type: "session"}); err == nil {
+		t.Error("the retired funnel routes still accept a write: they were detached but never closed")
+	}
+}

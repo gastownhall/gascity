@@ -175,15 +175,18 @@ func registeredCityWorkStore(cityPath string) beads.Store {
 // loser never registers at all, and the live runtime's registration stands
 // untouched. (`runController` already holds the lock before it constructs.)
 //
-// # What the memo drop does and does not do
+// # What the memo drops do
 //
-// dropCLIResidencyBindings clears only the DERIVED per-city binding grouping
-// this file memoizes, so a later resolution re-reads the registry instead of a
-// pre-registration answer. It does NOT close or invalidate the one-shot
-// cliStorageRoutes funnel: a handle that funnel already opened in this process
-// stays open, and the 21 non-test sites that call cliStorageRoutes directly
-// keep using it. Neutralizing the funnel is not this slice's scope; keeping the spine off
-// it is.
+// dropCLIResidencyBindings clears the DERIVED per-city binding grouping this
+// file memoizes, so a later resolution re-reads the registry instead of a
+// pre-registration answer. retireCLIStorageRoutesFor detaches and closes the
+// one-shot funnel's memo for the city, unless it holds the very routes being
+// registered. While the registration stands, cliStorageRoutes answers from it,
+// so no in-process caller reads a memo taken before this boot. That memo was
+// the production `gc session reset` failure: a supervisor that resolved a city
+// as single-store before `gc storage migrate` kept reading the work store for
+// every session bead the migration moved.
+//
 // work is the runtime's city WORK-store accessor, read lazily (see
 // registeredCityWorkStore); pass nil from a caller that has none.
 func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func() beads.Store) {
@@ -198,6 +201,7 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func()
 	residencyRoutesByCity[key] = residencyRegistration{routes: routes, work: work}
 	residencyRoutesMu.Unlock()
 	dropCLIResidencyBindings(key)
+	retireCLIStorageRoutesFor(key, routes)
 }
 
 // unregisterResidencyRoutes drops a runtime's registration, and ONLY its own.
@@ -212,6 +216,10 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func()
 // release sweeps would fall back to the one-shot funnel: a second handle on the
 // binding root, or on a city the funnel cannot resolve, a binding-blind release
 // sweep with ga-j4ob9 back and silent.
+//
+// It retires the funnel's memo for the city as registration does, so a stopped
+// city's first one-shot resolution in this process reads its config as it is
+// now (after a `gc storage migrate`, say), not as it was before the boot.
 func unregisterResidencyRoutes(cityPath string, routes *storageRoutes) {
 	if cityPath == "" {
 		return
@@ -223,6 +231,7 @@ func unregisterResidencyRoutes(cityPath string, routes *storageRoutes) {
 	}
 	residencyRoutesMu.Unlock()
 	dropCLIResidencyBindings(key)
+	retireCLIStorageRoutesFor(key, routes)
 }
 
 // residencyRegistration is what one long-running runtime declares about a city:

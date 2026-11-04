@@ -124,9 +124,21 @@ var (
 //
 // A city this build cannot serve gets routes whose stores refuse. See
 // refusedClassStore.
+//
+// A process that registered a runtime for the city (registerResidencyRoutes)
+// gets that runtime's routes instead. The funnel memoizes for the life of the
+// process, which is right for a one-shot command and wrong for a controller or
+// supervisor that outlives a `gc storage migrate`: its memo would keep
+// answering for the city as it was configured when the process first asked,
+// and every in-process caller of a class resolver would read the wrong store.
+// The registration is replaced on every boot, so it is what this process
+// serves now; residencyRoutesForCity applies the same preference.
 func cliStorageRoutes(cityPath string) *storageRoutes {
 	if cityPath == "" {
 		return nil
+	}
+	if entry, ok := registeredResidencyEntry(cityPath); ok {
+		return entry.routes
 	}
 	clean := filepath.Clean(cityPath)
 	resolve := func(entry *cliStorageRoutesEntry) {
@@ -372,6 +384,43 @@ func cliStorageRoutesEntryFor(cityPath string) *cliStorageRoutesEntry {
 		cliStorageRoutesByCity[cityPath] = entry
 	}
 	return entry
+}
+
+// retireCLIStorageRoutesFor drops cityPath's funnel memo and closes the routes it
+// opened, unless they are keep: the routes a runtime is registering, which the
+// one-shot `gc start` pass registers straight from the funnel. Registration and
+// unregistration call it, so a memo taken before a runtime booted (or while it
+// was stopped, around a `gc storage migrate`) does not outlive the boundary:
+// the next resolution reads the city's config again. A close failure is
+// reported on cliStorageStderr; the memo is detached either way.
+func retireCLIStorageRoutesFor(cityPath string, keep *storageRoutes) {
+	if cityPath == "" {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	cliStorageRoutesMu.Lock()
+	entry, ok := cliStorageRoutesByCity[key]
+	if !ok {
+		cliStorageRoutesMu.Unlock()
+		return
+	}
+	// A resolution in flight finishes before the entry is judged; sync.Once.Do
+	// returns only after the resolving call has.
+	cliStorageRoutesMu.Unlock()
+	entry.once.Do(func() {})
+	if keep != nil && entry.routes == keep {
+		return
+	}
+	cliStorageRoutesMu.Lock()
+	if cliStorageRoutesByCity[key] != entry {
+		cliStorageRoutesMu.Unlock()
+		return
+	}
+	delete(cliStorageRoutesByCity, key)
+	cliStorageRoutesMu.Unlock()
+	if err := entry.routes.close(); err != nil {
+		fmt.Fprintf(cliStorageStderr, "%s: closing the one-shot storage routes of %s: %v\n", cliStorageLogPrefix, key, err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // closeCLIStorageRoutes releases every binding the one-shot funnel opened in this
