@@ -1,0 +1,62 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "osc7501emitter_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest/osc7501emitter",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/runtime/runtimetest/osc7501emitter/emit",
+        "@org_golang_x_term//:term",
+    ],
+)
+
+go_binary(
+    name = "osc7501emitter",
+    embed = [":osc7501emitter_lib"],
+    visibility = ["//:__subpackages__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "osc7501emitter_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":osc7501emitter_lib"],
+    deps = [
+        "//internal/runtime/runtimetest/osc7501emitter/emit",
+        "//internal/testenv",
+    ],
+)

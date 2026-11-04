@@ -57,11 +57,19 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
-// noServerPreflightExecutor makes only the first has-session preflight report
+// isProbeHasSession reports whether args is probeServerAlive's preflight
+// has-session for the bogus probe target, as opposed to a has-session for a
+// real session name.
+func isProbeHasSession(args []string) bool {
+	return firstArgsContainHasSession(args) && slices.Contains(args, "="+probeSessionName)
+}
+
+// noServerPreflightExecutor makes every has-session preflight probe report
 // ErrNoServer, then delegates every other operation to real tmux. It models a
-// stale protocol observation while retaining the real socket boundary.
+// persistently failing protocol answer while retaining the real socket
+// boundary.
 type noServerPreflightExecutor struct {
-	used bool
+	probes int
 }
 
 func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
@@ -69,11 +77,29 @@ func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
 }
 
 func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	if !e.used && firstArgsContainHasSession(args) {
-		e.used = true
+	if isProbeHasSession(args) {
+		e.probes++
 		return "", ErrNoServer
 	}
 	return realExecutor{}.executeCtx(ctx, args)
+}
+
+// probeRecordingExecutor delegates every operation to real tmux and records
+// the result of each has-session preflight probe.
+type probeRecordingExecutor struct {
+	probeErrs []error
+}
+
+func (e *probeRecordingExecutor) execute(args []string) (string, error) {
+	return realExecutor{}.execute(args)
+}
+
+func (e *probeRecordingExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	out, err := realExecutor{}.executeCtx(ctx, args)
+	if isProbeHasSession(args) {
+		e.probeErrs = append(e.probeErrs, err)
+	}
+	return out, err
 }
 
 func TestAttachSessionNoStartServerDoesNotSelfRebindAfterProbe(t *testing.T) {
@@ -352,7 +378,8 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 
 		guarded := NewProviderWithConfig(tm.cfg)
-		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		preflight := &noServerPreflightExecutor{}
+		guarded.Tmux().exec = preflight
 		err = guarded.Start(context.Background(), original, runtimepkg.Config{
 			Command: "sleep 600",
 			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
@@ -368,10 +395,14 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 			"path=" + socketPath,
 			"inode=" + socketInode(beforeSocket),
 			"peer_pid=" + serverPID,
+			"reprobe=" + ErrNoServer.Error(),
 		} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("Provider.Start error = %q, want %q", err, want)
 			}
+		}
+		if preflight.probes != 2 {
+			t.Fatalf("preflight probes = %d, want the probe and its re-probe", preflight.probes)
 		}
 
 		hasOriginal, err := tm.HasSession(original)
@@ -401,6 +432,81 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 		if !os.SameFile(beforeSocket, afterSocket) {
 			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	t.Run("sibling-start-after-no-server-probe-attaches", func(t *testing.T) {
+		// The sibling starts a whole tmux server inside the preflight budget.
+		prev := newSessionProbeTimeout
+		newSessionProbeTimeout = 10 * time.Second
+		t.Cleanup(func() { newSessionProbeTimeout = prev })
+
+		sibling := newTmux(newSocketName("sibling"))
+		socketPath := namedSocketPath(sibling.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = sibling.KillServer()
+			_ = os.Remove(socketPath)
+		})
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("remove prior socket %q: %v", socketPath, err)
+		}
+
+		siblingSession := fmt.Sprintf("gc-sibling-first-%d", time.Now().UnixNano())
+		started := fmt.Sprintf("gc-sibling-second-%d", time.Now().UnixNano())
+		guarded := NewProviderWithConfig(sibling.cfg)
+		probes := &probeRecordingExecutor{}
+		guarded.Tmux().exec = probes
+		var (
+			serverPID     string
+			siblingSocket os.FileInfo
+			observations  int
+		)
+		guarded.Tmux().serverSocketObserver = func(ctx context.Context, path string) error {
+			observations++
+			if len(probes.probeErrs) != 1 || !errors.Is(probes.probeErrs[0], ErrNoServer) {
+				t.Fatalf("preflight before observation = %v, want one genuine ErrNoServer", probes.probeErrs)
+			}
+			if err := sibling.NewSession(siblingSession, ""); err != nil {
+				t.Fatalf("sibling start: %v", err)
+			}
+			var err error
+			if serverPID, err = sibling.run("display-message", "-p", "#{pid}"); err != nil {
+				t.Fatalf("read sibling server #{pid}: %v", err)
+			}
+			if siblingSocket, err = os.Lstat(socketPath); err != nil {
+				t.Fatalf("lstat sibling socket %q: %v", socketPath, err)
+			}
+			return observeNamedSocket(ctx, path)
+		}
+
+		if err := guarded.Start(context.Background(), started, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+			t.Fatalf("Provider.Start after a sibling bound the socket: %v (probes=%v)", err, probes.probeErrs)
+		}
+		if observations != 1 {
+			t.Fatalf("socket observations = %d, want 1", observations)
+		}
+		if len(probes.probeErrs) != 2 || !errors.Is(probes.probeErrs[1], ErrSessionNotFound) {
+			t.Fatalf("preflight probes = %v, want genuine no-server then a server answer", probes.probeErrs)
+		}
+		for _, session := range []string{siblingSession, started} {
+			has, err := sibling.HasSession(session)
+			if err != nil || !has {
+				t.Fatalf("session %q present = %t, err = %v", session, has, err)
+			}
+		}
+		afterPID, err := sibling.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid} after start: %v", err)
+		}
+		if afterPID != serverPID {
+			t.Fatalf("server pid after start = %q, want sibling's %q", afterPID, serverPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after start: %v", err)
+		}
+		if !os.SameFile(siblingSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(siblingSocket), socketInode(afterSocket))
 		}
 	})
 
@@ -722,7 +828,7 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 	}
 	defer tm.CloseHiddenAttachClient(sessionName)
 
-	used, err := tm.sendHiddenAttachedText(sessionName, "HELLO_HIDDEN_ATTACH")
+	used, err := tm.sendHiddenAttachedText(context.Background(), sessionName, "HELLO_HIDDEN_ATTACH")
 	if err != nil {
 		t.Fatalf("sendHiddenAttachedText: %v", err)
 	}
@@ -1256,27 +1362,27 @@ func TestHasDescendantWithNames(t *testing.T) {
 	}
 
 	// Test with a definitely nonexistent PID
-	got := hasDescendantWithNames("999999999", []string{"node", "claude"}, 0)
+	got := snapshotHasDescendant("999999999", "node", "claude")
 	if got {
 		t.Error("hasDescendantWithNames should return false for nonexistent PID")
 	}
 
-	// Test with empty names slice - should always return false
-	got = hasDescendantWithNames("1", []string{}, 0)
+	// Test with no names - should always return false
+	got = snapshotHasDescendant("1")
 	if got {
-		t.Error("hasDescendantWithNames should return false for empty names slice")
+		t.Error("hasDescendantWithNames should return false for no names")
 	}
 
-	// Test with nil names slice - should always return false
-	got = hasDescendantWithNames("1", nil, 0)
+	// Test with only a blank name - should always return false
+	got = snapshotHasDescendant("1", "")
 	if got {
-		t.Error("hasDescendantWithNames should return false for nil names slice")
+		t.Error("hasDescendantWithNames should return false for a blank name")
 	}
 
 	// Exercise a real process-tree edge without recursively scanning every
 	// process on the host. The helper is a direct child of this test binary.
 	helper := startDescendantTestProcess(t)
-	if !hasDescendantWithNames(strconv.Itoa(os.Getpid()), []string{filepath.Base(os.Args[0])}, 0) {
+	if !snapshotHasDescendant(strconv.Itoa(os.Getpid()), filepath.Base(os.Args[0])) {
 		t.Fatalf("hasDescendantWithNames did not find controlled child pid %d", helper.Process.Pid)
 	}
 }
@@ -2479,7 +2585,7 @@ func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Should succeed immediately — no retry needed
-	err := tm.sendKeysLiteralWithRetry(sessionName, "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), sessionName, "hello", 5*time.Second)
 	if err != nil {
 		t.Errorf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2494,7 +2600,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFails(t *testing.T) {
 
 	// Target a session that doesn't exist — should fail immediately, not retry
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-xyz", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-xyz", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2515,7 +2621,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	// Use a nonexistent session — tmux returns "session not found" which is
 	// non-transient, so the function should fail fast (well under the timeout).
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2534,7 +2640,7 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", "large startup prompt", time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2561,7 +2667,7 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2579,7 +2685,7 @@ func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2600,7 +2706,7 @@ func TestSendStartupKeysLiteralWithRetryRecognizesCopilotProviderFamily(t *testi
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "github-copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "github-copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2621,7 +2727,7 @@ func TestSendKeysLiteralWithRetryDoesNotChunkOrdinaryCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendKeysLiteralWithRetry("%1", text, 3*time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", text, 3*time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2642,7 +2748,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T)
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "claude", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "claude", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2665,7 +2771,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *t
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -3380,7 +3486,7 @@ func TestWaitForCodexInterruptBoundary(t *testing.T) {
 		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
 	}()
 
-	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {
+	if err := waitForCodexInterruptBoundary(context.Background(), transcript, since, 2*time.Second); err != nil {
 		t.Fatalf("waitForCodexInterruptBoundary: %v", err)
 	}
 }
@@ -4061,19 +4167,22 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 // zsh dotfiles. How long that lasts depends on host load, $SHELL and $HOME, so
 // an assertion about pane_current_command taken a fixed delay after NewSession
 // races it (ga-kmwwcx). A non-login `sh` with $ENV unset runs no startup
-// files, and once the pane reports "sh" it stays "sh".
+// files, and once the pane reports that shell it stays there.
 func newPlainShellSession(t *testing.T, tm *Tmux, name string) {
 	t.Helper()
 	if err := tm.NewSessionWithCommand(name, "", "exec env -u ENV sh"); err != nil {
 		t.Fatalf("NewSessionWithCommand(%q): %v", name, err)
 	}
-	waitForPaneCommand(t, tm, name, "sh", 10*time.Second)
+	// The pane's sh is whatever POSIX shell the host ships, not always a
+	// process named sh: macOS /bin/sh re-executes bash 3.2 in POSIX mode, so
+	// tmux reports "bash" there, and a host can report its sh as "dash".
+	waitForPaneCommand(t, tm, name, 10*time.Second, "sh", "bash", "dash")
 }
 
-// waitForPaneCommand waits until session's first pane reports want as its
-// pane_current_command, failing the test if that does not happen within
+// waitForPaneCommand waits until session's first pane reports one of want as
+// its pane_current_command, failing the test if that does not happen within
 // timeout.
-func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout time.Duration) {
+func waitForPaneCommand(t *testing.T, tm *Tmux, session string, timeout time.Duration, want ...string) {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -4081,12 +4190,12 @@ func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout ti
 	defer ticker.Stop()
 	for {
 		got, err := tm.GetPaneCommand(session)
-		if err == nil && got == want {
+		if err == nil && slices.Contains(want, got) {
 			return
 		}
 		select {
 		case <-timer.C:
-			t.Fatalf("pane of %q did not report %q within %s (last %q, err %v)", session, want, timeout, got, err)
+			t.Fatalf("pane of %q did not report one of %q within %s (last %q, err %v)", session, want, timeout, got, err)
 		case <-ticker.C:
 		}
 	}

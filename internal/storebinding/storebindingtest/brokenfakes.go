@@ -193,6 +193,11 @@ const (
 	// alongside the dead-lettered ones, so the caller dead-letters work the
 	// queue is about to redeliver — the partial-result defect.
 	NudgesDefectRecordFailureReportsEveryItem
+	// NudgesDefectClaimBatchSplits resumes a pinned batch in part: it hands
+	// back all but one of the batch's members and leaves the last one queued,
+	// so the runtime commits the partial text under the batch key and later
+	// replays that receipt for the member it never saw.
+	NudgesDefectClaimBatchSplits
 )
 
 // NewBrokenNudgeFrontDoors wraps base's queue with exactly one Nudges-class
@@ -234,6 +239,33 @@ func (q *brokenNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 		claimed = append(claimed, item)
 	}
 	return claimed, nil
+}
+
+func (q *brokenNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
+	if q.defect != NudgesDefectClaimBatchSplits {
+		return q.NudgeQueue.ClaimBatch(target, now)
+	}
+	pending, _, _, err := q.ListFor(target, now)
+	if err != nil {
+		return nil, err
+	}
+	pinned := map[string]bool{}
+	for _, item := range pending {
+		if item.DeliveryBatch != "" {
+			pinned[item.DeliveryBatch] = true
+		}
+	}
+	claimed, err := q.NudgeQueue.ClaimBatch(target, now)
+	if err != nil || len(claimed) < 2 || !pinned[claimed[0].DeliveryBatch] {
+		return claimed, err
+	}
+	// A resumed batch: one member goes back to the queue and the rest are
+	// delivered under the batch key.
+	last := claimed[len(claimed)-1]
+	if err := q.ReleaseClaims([]string{last.ID}, time.Time{}); err != nil {
+		return nil, err
+	}
+	return claimed[:len(claimed)-1], nil
 }
 
 func (q *brokenNudgeQueue) RecordFailure(ids []string, cause error, now time.Time) ([]nudgequeue.Item, error) {

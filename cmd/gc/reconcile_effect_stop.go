@@ -3,15 +3,18 @@ package main
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 // The stop verb (CONTRACT v5 D3, D4, F2, F3; C6b2), A4's effect, under the
@@ -49,7 +52,7 @@ const (
 // premise close, which only a finalize that closes reaches: a store that
 // cannot close atomically still stops and finalizes every other row.
 var stopSections = []section{
-	called(callStop, section{Premise: premiseDrainBasis, Decide: stopDecide}, stopCall),
+	called(callStop, drainBasis(probed(freshCycleProbe, stopDecideAfterProbe)), stopCall),
 	called(0, probed(finalizeWorkProbe, stopFinalizeStep), passStopped),
 	asStopClose(probed(finalizeWorkProbe, stopCloseStep)),
 }
@@ -62,6 +65,7 @@ func stopNeeds(w *World, it intent) needs {
 	if isIdleReason(it.Reason) {
 		n.Content = w.idleView().fired[it.Key]
 		n.Activity = !n.Content
+		n.IdleShadow = true
 	}
 	return n
 }
@@ -81,6 +85,12 @@ func stopLegs(it intent) fenceLegs {
 	return legToken | legAttach
 }
 
+// drainBasis is sec with the stop's drain-basis premise.
+func drainBasis(sec section) section {
+	sec.Premise = premiseDrainBasis
+	return sec
+}
+
 // asStopClose is sec as the stop's premise-close section.
 func asStopClose(sec section) section {
 	sec.Premise = premiseClose
@@ -96,6 +106,44 @@ type stopPlan struct {
 	corpse  *corpseObject
 	now     time.Time
 	idle    bool // an idle-timeout stop clears the pane's scrollback after it (SESS-576)
+	restart bool // A13's restart clears the runtime's restart marker after it (C7a-2b)
+	// stalled is the claim an execution-stalled drain was requested for (the
+	// backstop's marker), which a confirmed stop gives back (v5.10x).
+	stalled stalledClaim
+}
+
+// stalledClaim is the claim an execution-stalled stop gives back: its bead
+// and the seat that holds it. started is the seat's record that a turn began
+// it (stalledClaimOf), which keeps it unless it is on a dispatch hold.
+type stalledClaim struct {
+	beadID  string
+	row     session.Info
+	started bool
+}
+
+// stalledClaimOf is the claim an execution-stalled stop of row gives back,
+// and whether the seat records that a turn began it (mc-358yo, PHASE1-2
+// §6.5). It runs with the work ladder off only: with it on, the stop is the
+// ladder's recycle, which gives back nothing (§8 W3), and the ladder releases
+// an unstarted claim itself.
+//
+// The execution backstop requests the stop, and its own record is
+// execution_claim_started at the row's current instance token (startedValue),
+// the stamp that already vetoes its drain, written from a step_started of
+// the claim or from its work_started entry at the row's current generation
+// (workStartedAtGen). Only that keeps the claim: work_started read whole
+// names every claim the hook handed out, at any generation, and a stamp from
+// an earlier incarnation names one the seat was woken on and never ran, so
+// keeping either would leave the seat asleep holding the claim, the
+// assigned-work wake would restart it on it, and the backstop would drain it
+// again: the v5.10x loop.
+func stalledClaimOf(row session.Info, meta map[string]string) stalledClaim {
+	beadID := strings.TrimSpace(meta[executionClaimNudgeWorkKey])
+	if beadID == "" {
+		return stalledClaim{}
+	}
+	started := strings.TrimSpace(meta[executionClaimStartedKey]) == strings.TrimSpace(meta["instance_token"])+"|"+beadID
+	return stalledClaim{beadID: beadID, row: row, started: started}
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -127,7 +175,10 @@ func stopDecide(v txView) txStep {
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
-	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason)}
+	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
+	if stopReason(v.It) == executionStalledDrainReason && x7Releases(v.World, v.Meta) {
+		plan.stalled = stalledClaimOf(v.Row, v.Meta)
+	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -154,11 +205,17 @@ func stopDecide(v txView) txStep {
 	if !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
 	}
-	if plan.idle && !idleReproved(v) {
-		return txStep{Refuse: causeIdleUnproven}
+	if !plan.idle {
+		plan.verdict = fv
+		return txStep{Pass: plan}
+	}
+	// The idle stop's proof decides alone; the step carries it so the
+	// transaction records it beside the record's sleep proof (IdleSleep).
+	if !idleReproved(v) {
+		return txStep{Refuse: causeIdleUnproven, IdleSleep: idleSleepUnproved}
 	}
 	plan.verdict = fv
-	return txStep{Pass: plan}
+	return txStep{Pass: plan, IdleSleep: idleSleepProved}
 }
 
 // dormantGone reports an operator-dormant stop whose fresh read finds
@@ -183,6 +240,10 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		if ok && v.Proceed && p.idle {
 			_ = sp.ClearScrollback(p.name) // legacy's, best effort
 		}
+		if ok {
+			clearRestartMarker(sp, p)
+			releaseStalledClaim(c.release, p.stalled)
+		}
 		return stopped{Confirmed: ok, Performed: v.Proceed, Reason: v.Reason}, nil
 	}
 	if p.name == "" || !confirmStopped(ctx, sp, p.names, p.name, p.now) {
@@ -191,7 +252,80 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 	if k := p.corpse; k != nil {
 		removeCorpse(ctx, *k, now())
 	}
+	clearRestartMarker(sp, p)
+	releaseStalledClaim(c.release, p.stalled)
 	return stopped{Confirmed: true}, nil
+}
+
+// workLadderOn reports whether w's city runs the work ladder ([daemon]
+// work_ladder). With it on, an execution-stalled stop is the ladder's
+// recycle, which keeps a started claim on the seat (PHASE1-2 §6.5): the
+// ladder releases an unstarted claim itself, by a CAS proving it unstarted,
+// and never asks a stop to.
+func workLadderOn(w *World) bool {
+	return w == nil || w.Env == nil || w.Env.Cfg == nil || w.Env.Cfg.Daemon.WorkLadderEnabled()
+}
+
+// x7Releases reports whether an execution-stalled stop of the row whose
+// metadata is meta gives back the execution backstop's claim (X7): only
+// with the ladder rolled back, and only a marker the backstops wrote for the
+// row's own incarnation, and not when the row's work_ladder cell records a
+// recycle at the row's generation (the switch flipped mid-recycle), or is
+// unreadable: each way the stop is, or may be, the ladder's, which keeps the
+// claim.
+func x7Releases(w *World, meta map[string]string) bool {
+	token := strings.TrimSpace(meta["instance_token"])
+	if workLadderOn(w) || token == "" || strings.TrimSpace(meta[executionClaimNudgeTokenKey]) != token {
+		return false
+	}
+	// A recycle the ladder asked for at this generation, with the switch
+	// flipped to off before the stop landed, is still the ladder's; so is
+	// one a cell it cannot read might record (keep the work).
+	cell, err := workladder.DecodeLadder(meta[session.WorkLadderKey])
+	return err == nil && (cell.V == 0 || cell.RecycledGen != rowGeneration(meta))
+}
+
+// releaseStalledClaim gives back, after a confirmed stop, the claim an
+// execution-stalled drain was requested for (v5.10x): read live on the
+// seat's legs, and released only while still in_progress and assigned to
+// this seat (ReleaseWorkBead fences its write on both). The finalize's work
+// read then finds the seat free, so it closes, and a fresh seat takes the
+// claim: the drain's convergence. Without it the finalize kept the seat
+// asleep holding the claim, the assigned-work wake restarted it on the same
+// claim, and the backstop drained it again, in a loop (maintainer-city,
+// build 42dd71f94d). Best effort: a claim it cannot release stays, as before.
+func releaseStalledClaim(r *closeReleases, c stalledClaim) {
+	if r == nil || c.beadID == "" {
+		return
+	}
+	scope := releaseScope(c.row, r.cfg)
+	hits, err := seatWorkFor(r.legs, scope).match(seatWorkQuery{scope: scope, statuses: []string{"in_progress"}}, false)
+	if err != nil {
+		fmt.Fprintf(r.stderr, "execution-stalled stop: reading %s's claim %s: %v\n", c.row.ID, c.beadID, err) //nolint:errcheck // best-effort
+	}
+	for _, hit := range hits {
+		if hit.bead.ID != c.beadID {
+			continue
+		}
+		if c.started && !beadmeta.HasDispatchHold(hit.bead.Labels) {
+			fmt.Fprintf(r.stderr, "execution-stalled stop: %s keeps claim %s: the seat records that a turn began it\n", c.row.ID, c.beadID) //nolint:errcheck // best-effort
+			continue
+		}
+		// The stranded repair's rules without its detached hold: the claim's
+		// route kept, its release fenced on its status and assignee.
+		out := releaseListed([]seatWorkHit{hit}, releaseStalled, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
+		logRelease(r.stderr, "execution-stalled", c.row.ID, out, nil)
+	}
+}
+
+// clearRestartMarker clears the runtime's restart marker after A13's
+// confirmed stop, best effort, as legacy's clearRestartRequested: a tmux
+// session takes its marker with it, but a corpse the stop leaves, or a
+// sidecar that outlives its process, keeps it.
+func clearRestartMarker(sp runtime.Provider, p stopPlan) {
+	if p.restart && p.name != "" {
+		_ = sp.RemoveMeta(p.name, "GC_RESTART_REQUESTED")
+	}
 }
 
 // removeCorpse removes a confirmed corpse under the corpse exception (v5
@@ -251,6 +385,11 @@ func stopChoice(v txView, work finalizeWork, probeErr error) finalizeChoice {
 		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
+	}
+	if v.Alloc != nil && v.Alloc.Snapshot != nil {
+		if e := v.Alloc.Snapshot.Entries[v.It.Key]; e != nil && e.AssignedWork != nil {
+			f.AssignedBead = strings.TrimSpace(e.AssignedWork.BeadID)
+		}
 	}
 	switch {
 	case v.It.Finish != nil:

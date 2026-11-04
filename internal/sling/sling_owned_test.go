@@ -55,17 +55,24 @@ func TestDoSlingBatchRefusesAControllerOwnedChild(t *testing.T) {
 			t.Fatal(err)
 		}
 		owned := map[string]beads.Bead{}
-		for _, typ := range []string{"startup-health-episode", "Convergence", "task"} {
+		for _, typ := range []string{"startup-health-episode", "Convergence", "task", "message", "order-run"} {
 			b, err := store.Create(beads.Bead{Title: typ, Type: "task", Status: "open"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if typ == "task" {
+			switch typ {
+			case "task":
 				if err := store.Update(b.ID, beads.UpdateOpts{Labels: []string{"gc:session"}}); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := store.Update(b.ID, beads.UpdateOpts{Type: &typ}); err != nil {
-				t.Fatal(err)
+			case "order-run": // a coordination row by its run label (the #7766 review)
+				if err := store.Update(b.ID, beads.UpdateOpts{Labels: []string{"order-run:digest"}}); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := store.Update(b.ID, beads.UpdateOpts{Type: &typ}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := store.DepAdd(convoy.ID, b.ID, "tracks"); err != nil {
 				t.Fatal(err)
@@ -82,7 +89,7 @@ func TestDoSlingBatchRefusesAControllerOwnedChild(t *testing.T) {
 		}
 		for _, c := range result.Children {
 			if before, ok := owned[c.BeadID]; ok {
-				if !c.Failed || !strings.Contains(c.FailReason, "controller-owned") {
+				if !c.Failed || !strings.Contains(c.FailReason, "is owned") {
 					t.Fatalf("force %t: owned child %+v, want refused", force, c)
 				}
 				if got, _ := store.Get(c.BeadID); got.Assignee != before.Assignee || got.Status != before.Status || !maps.Equal(got.Metadata, before.Metadata) {

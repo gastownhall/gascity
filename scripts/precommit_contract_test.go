@@ -633,6 +633,7 @@ func installBeadsChainForTempRepo(t *testing.T, repoRoot, tmpRepo string) {
 		t.Fatalf("mkdir .githooks/lib: %v", err)
 	}
 	writeExecutable(t, chainPath, string(chain))
+	installLocalRuntimeProbe(t, repoRoot, tmpRepo, "ok", "")
 }
 
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {

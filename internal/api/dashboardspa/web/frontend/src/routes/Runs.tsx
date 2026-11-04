@@ -1,6 +1,6 @@
 import { type RunLane, type RunSummary, type SourceState } from 'gas-city-dashboard-shared';
 import { useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { useAttentionModel } from '../attention/context';
 import { resourceAttentionSeverity } from '../attention/routeHighlight';
 import { Button } from '../components/Button';

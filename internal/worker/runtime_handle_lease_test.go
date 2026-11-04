@@ -48,7 +48,7 @@ func TestRuntimeHandleSweepStartsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.StartResolved(context.Background(), session.Actor{Kind: session.ActorSweep}, "x", runtime.Config{}); !errors.Is(err, session.ErrSweepStarts) {
+	if err := h.StartResolved(context.Background(), session.Actor{Kind: session.ActorSweep}, session.Incarnation{}, "x", runtime.Config{}); !errors.Is(err, session.ErrSweepStarts) {
 		t.Fatalf("StartResolved by a sweep = %v, want ErrSweepStarts", err)
 	}
 	if sp.IsRunning("legacy-2") {

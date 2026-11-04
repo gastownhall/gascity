@@ -190,8 +190,8 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 	switch {
 	case err != nil:
 		out.Err = err
-	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || prepared.provisionHash != p.row.StartedProvisionHash ||
-		prepared.launchHash == p.row.StartedLaunchHash: // the core partitions into provision and launch: a matching core is the hash form's launch too
+	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || !prepared.provisionMatches(p.row.StartedProvisionHash) ||
+		prepared.launchMatches(p.row.StartedLaunchHash): // the core partitions into provision and launch: a matching core is the hash form's launch too
 		out.Err = errors.New(causeRelaunchSkew)
 	case strings.TrimSpace(p.row.SessionKey) == "" && p.tp.ResolvedProvider != nil && strings.TrimSpace(p.tp.ResolvedProvider.SessionIDFlag) != "":
 		out.Err = errors.New("relaunch would mint a speculative resume key") // legacy's preparation mints one here, then falls back

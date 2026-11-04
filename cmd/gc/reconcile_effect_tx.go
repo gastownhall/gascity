@@ -283,6 +283,11 @@ type needs struct {
 	// only before PreWake: an effect that ends before it, a deferral, writes
 	// nothing.
 	LeaseAt int
+	// IdleShadow brackets the effect's reads with the record's sleep proof
+	// (txFence.IdleShadow): an idle sleep decided without the Idle proof (a
+	// non-interactive idle begin, the idle-timeout stop), recorded under the
+	// program-status shadow switch beside the record (proved_idle).
+	IdleShadow bool
 }
 
 func (s effectSpec) needsOf(w *World, it intent) needs {
@@ -469,6 +474,10 @@ type txFence struct {
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
 	Activity        *activityRead
 	Content         contentState // the pane's fresh snapshot (needs.Content)
+	// IdleShadow is the record's side of the idle sleep the effect decides
+	// (needs.IdleShadow), begun before the legs are read; nil, recording
+	// nothing, unless the routed leaf is shadowing.
+	IdleShadow *runtime.ShadowIdleSample
 }
 
 // workHeld reports L5 holding: work read on the seat, or a read that failed
@@ -512,7 +521,21 @@ type txStep struct {
 	Cause                   string
 	Facts                   effectFacts
 	Pass                    any
+	// IdleSleep is the idle sleep the step judged (an unproved idle begin,
+	// the idle stop's proof), which the transaction records beside the
+	// record's sleep proof (txFence.IdleShadow) before it acts on the step.
+	IdleSleep idleSleepVerdict
 }
+
+// idleSleepVerdict is a step's judgement that its session is idle enough to
+// sleep, or none.
+type idleSleepVerdict uint8
+
+const (
+	idleSleepUnjudged idleSleepVerdict = iota // the step judged no idle sleep
+	idleSleepProved                           // idle: the sleep goes ahead
+	idleSleepUnproved                         // not proved idle: the sleep is refused
+)
 
 // writes reports a step that writes the row: metadata, the disposition's
 // cells, a terminal close, its title, type or labels.
@@ -1040,6 +1063,11 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		}
 	} else {
 		step = sec.Decide(v)
+	}
+	if step.IdleSleep != idleSleepUnjudged {
+		// Under the program-status shadow switch, beside the record's sleep
+		// proof (proved_idle); Decide is pure, so the record is written here.
+		t.view.Fence.IdleShadow.Record(step.IdleSleep == idleSleepProved)
 	}
 	var s settlement
 	switch {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -26,6 +27,13 @@ import (
 func classifyWorkQueryFailure(err error) (reason string, recordable bool) {
 	if err == nil {
 		return "", false
+	}
+	// One secondary store of gc hook's fan-out: its message names the store
+	// and is already bounded, and the kill and timeout reasons below speak for
+	// this session's own read.
+	var store *hookStoreReadError
+	if errors.As(err, &store) {
+		return store.Error(), true
 	}
 	if reason, killed := classifyWorkQueryKill(err); killed {
 		return reason, true

@@ -291,8 +291,8 @@ func TestValue() { set := os.Setenv; _ = set("GC_OTHER", "1") } // E4
 	})
 }
 
-// TestTestRelaxShippedEnv: the shipped list has the rollout fences' env
-// overrides, which turn a write fence off.
+// TestTestRelaxShippedEnv: the shipped list has the rollout gates' env
+// overrides, which turn a write fence or ops recording off.
 func TestTestRelaxShippedEnv(t *testing.T) {
 	const osSrc = `package os
 
@@ -305,6 +305,12 @@ import "os"
 func init() { _ = os.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off") } // S1
 
 func init() { _ = os.Setenv("GC_BEADS_GUARDED_RELEASE", "off") } // S2
+
+func init() { _ = os.Setenv("GC_OPS_CONTENT", "off") } // S3
+
+func init() { _ = os.Setenv("GC_OPS_CONTROL", "off") } // S4
+
+func init() { _ = os.Setenv("GC_OPS_LIFECYCLE", "off") } // S5
 `
 	diags := analyzertest.RunGraph(t, testrelax.Analyzer, []analyzertest.Package{
 		{Path: "os", Files: map[string]string{"os.go": osSrc}},
@@ -318,6 +324,9 @@ func init() { _ = os.Setenv("GC_BEADS_GUARDED_RELEASE", "off") } // S2
 	want(t, got, files, map[string]string{
 		"S1": "init relaxes GC_BEADS_CONDITIONAL_WRITES",
 		"S2": "init relaxes GC_BEADS_GUARDED_RELEASE",
+		"S3": "init relaxes GC_OPS_CONTENT",
+		"S4": "init relaxes GC_OPS_CONTROL",
+		"S5": "init relaxes GC_OPS_LIFECYCLE",
 	})
 }
 

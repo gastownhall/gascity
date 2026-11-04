@@ -99,8 +99,10 @@ func TestHasReadyExcludedLabel(t *testing.T) {
 		{"legacy order tracking", []string{"order-tracking"}, true},
 		{"op journal op row", []string{"gc:op", "gc:op-conv:gc-7"}, true},       // internal/opjournal
 		{"op journal fact row", []string{"gc:fact", "gc:fact-conv:gc-7"}, true}, // internal/opjournal
+		{"op journal runtime row", []string{"gc:rt", "gc:rt-conv:gc-7"}, true},  // internal/opjournal
 		{"op conversation label alone", []string{"gc:op-conv:gc-7"}, false},
 		{"fact conversation label alone", []string{"gc:fact-conv:gc-7"}, false},
+		{"runtime conversation label alone", []string{"gc:rt-conv:gc-7"}, false},
 		{"unrelated label", []string{"priority:high"}, false},
 		{"no labels", nil, false},
 		{"case-sensitive", []string{"GC:OP"}, false},

@@ -253,6 +253,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		ScopeKind: body.ScopeKind,
 		ScopeRef:  body.ScopeRef,
 	}
+	// Who launched this is server fact from the verified write grant, never
+	// a client field or var.
+	opts.Initiator, _ = VerifiedPrincipal(ctx)
 	mode := "direct"
 	switch {
 	case attachedBeadID != "":
@@ -277,9 +280,21 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		err = nil
 	}
 	if err != nil {
+		// A probe that could not read an attachment is a store fault: the
+		// guard cannot tell whether a live molecule is attached. It is checked
+		// before the conflicts, which it may accompany in a batch.
+		var probeErr *sling.AttachmentProbeError
+		if errors.As(err, &probeErr) {
+			fmt.Fprintf(apiSlingStderr(), "gc api sling: %v\n", err) //nolint:errcheck
+			return nil, http.StatusInternalServerError, "attachment_probe_failed", probeErr.Error(), nil
+		}
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
 			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
+		}
+		var attachedErr *sling.MoleculeAttachedError
+		if errors.As(err, &attachedErr) {
+			return nil, http.StatusConflict, "molecule_attached", err.Error(), nil
 		}
 		var lookupErr *sling.BeadLookupError
 		if errors.As(err, &lookupErr) {

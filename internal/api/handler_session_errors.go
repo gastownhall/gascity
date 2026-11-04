@@ -4,7 +4,9 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // turnInterruptUnsupportedCode is the error code for
@@ -47,6 +49,8 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		// Not retryable as is: the kept conversation's resume failed, and the
 		// message names the explicit reset that starts the session fresh.
 		writeError(w, http.StatusConflict, "conversation_retained", err.Error())
+	case errors.As(err, new(*worker.LiveSubagentsError)):
+		writeError(w, http.StatusConflict, "live_subagents", err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrSessionInactive):
@@ -59,6 +63,12 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "session_stopping", err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// Retryable: the runtime could not be observed, so nothing was done.
+		writeError(w, http.StatusServiceUnavailable, "runtime_unavailable", err.Error())
+	case errors.Is(err, runtime.ErrNudgeRejected):
+		// The runtime refused the turn in its current state: nothing was delivered.
+		writeError(w, http.StatusConflict, "nudge_rejected", err.Error())
 	default:
 		writeStoreError(w, err)
 	}

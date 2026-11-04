@@ -223,12 +223,11 @@ var simCoverageAllowlist = map[string]string{
 	// No generator asks a row to restart (generators frozen for the
 	// release; the scripted A13 scenarios cover it).
 	"arm:A13/armRestartRequested": "mc-i7efm: restart requested",
-	// No generator drifts an agent's config.
-	"arm:A14/armConfigDrift":        "mc-i7efm: config drift",
-	"effect:" + intentDriftRepair:   "mc-i7efm: config drift",
-	"effect:" + intentDriftRestart:  "mc-i7efm: config drift",
-	"effect:" + intentDriftRelaunch: "mc-i7efm: config drift",
-	"effect:" + intentLiveApply:     "mc-i7efm: config drift",
+	"effect:" + intentMarkerClear: "mc-i7efm: restart requested",
+	// No generator wakes an awake row (generators frozen for the release;
+	// TestSatisfiedWakeClear and TestSimSatisfiedWakeDoesNotRestartAfterADeath
+	// cover it).
+	"arm:A6/armSatisfiedWake": "mc-i7efm: wake requests",
 	// No agent sleeps after idle (sleep_after_idle, mc-ivrct).
 	"arm:A15/armIdleTimeout": "mc-i7efm: idle timeout",
 	// No execution stalls past the backstop.

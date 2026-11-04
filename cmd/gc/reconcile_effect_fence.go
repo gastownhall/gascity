@@ -17,11 +17,11 @@ import (
 
 // txWork is L5 read live: the row's assigned work over every store its agent
 // can reach, in the form the effect asks for (readWork: open or in-progress;
-// an idle stop's late claim; a signal's awake work and live-claim veto).
-// Only a clean read proves Free; a failed or expired read, and the zero
-// value, count as work.
+// an idle stop's late claim; a rollback's in-progress work; a signal's awake
+// work and live-claim veto). Only a clean read proves Free; a failed or
+// expired read, and the zero value, count as work.
 type txWork struct {
-	Free bool // proven: no open or in-progress assigned work
+	Free bool // proven: no assigned work in the form read
 	Err  error
 }
 
@@ -49,9 +49,13 @@ func (t *tx) readFence(ctx context.Context) string {
 // L3 and L4 fresh on the leaf, L5 through work, each bounded; now stamps the
 // quiet window, passNow the idle proof's pass. L5 comes after L3 and L4:
 // cheapest first, and nearest the CAS, so a claim landing while they are
-// read is seen (v5.10a B).
+// read is seen (v5.10a B). An idle sleep's shadow sample (n.IdleShadow)
+// takes its first reading before every leg.
 func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, now, passNow time.Time, work func() *txWork) txFence {
 	f := txFence{Read: n.Legs & (legAttach | legPending | legWork)}
+	if n.IdleShadow && leaf != nil {
+		f.IdleShadow = runtime.BeginShadowIdleProof(leaf, name)
+	}
 	if n.Legs&legAttach != 0 {
 		f.Attach, f.AttachEscalate = attachLeg(ctx, leaf, name, n.Escalates, now)
 	}
@@ -116,7 +120,8 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	// the sessions store standing in for the work store). A close ends a
 	// dead seat, which the narrow ReleaseScope gates, as legacy's close gate
 	// does; every other effect that reads L5 ends a live runtime (a drain
-	// begin), which the seat's RefuseScope gates (O4).
+	// begin, a Workless rollback's stop), which the seat's RefuseScope gates
+	// (O4).
 	var scope workScope = releaseScope(row, p.World.Env.Cfg)
 	if it.Reason == decideIdleTimeout { // legacy's late claim: in-progress work under the narrow scope (SESS-574)
 		late, err := lateSeatWork(p.reads.legs, scope, []string{"in_progress"}, nil)
@@ -125,7 +130,11 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	if it.Kind != intentClose {
 		scope = refuseScope(row, p.World.Env.Cfg)
 	}
-	has, err := sessionHasOpenAssignedWorkInStores(seatWorkFor(p.reads.legs, scope), scope)
+	statuses := seatWorkStatuses
+	if it.Kind == intentRollback { // a live incarnation's in-flight work (#2081): open work no stale incarnation can claim
+		statuses = []string{"in_progress"}
+	}
+	has, err := sessionHasAssignedWorkInStoresForStatuses(seatWorkFor(p.reads.legs, scope), scope, statuses)
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 
@@ -147,8 +156,15 @@ func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 
 // provedIdle is legacy's idle probe (shouldBeginIdleDrainInfo) on leaf:
 // WaitForIdle succeeds, and the runtime reports no activity after the pass
-// began.
+// began. It is recorded as an idle proof (runtime.ShadowIdleProof).
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
+	return runtime.ShadowIdleProof(ctx, leaf, name, func(ctx context.Context) bool {
+		return legacyProvedIdle(ctx, leaf, name, passNow)
+	})
+}
+
+// legacyProvedIdle is provedIdle's proof.
+func legacyProvedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
 	wp, ok := leaf.(runtime.IdleWaitProvider)
 	if !ok || wp.WaitForIdle(ctx, name, idleSleepProbeTimeoutFor(leaf, name)) != nil {
 		return false

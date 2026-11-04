@@ -4,12 +4,13 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	goruntime "runtime"
 	"slices"
@@ -108,6 +109,43 @@ func nudgeSubmitKeySequenceForFamily(family string) []string {
 	return defaultNudgeSubmitKeySequence
 }
 
+// submitSequenceInterrupts reports whether a submit key sequence carries a key
+// that interrupts a running turn when it reaches a busy pane: Escape (Codex
+// reads it as cancel, which is why its submit leads with it) or Ctrl-C. Enter
+// alone does not; a busy Claude pane queues the message instead.
+func submitSequenceInterrupts(keys []string) bool {
+	for _, key := range keys {
+		switch key {
+		case "Escape", "Esc", "C-c":
+			return true
+		}
+	}
+	return false
+}
+
+// refuseInterruptingSubmitWhileBusy returns an error wrapping
+// runtime.ErrSessionBusy when session's agent pane shows a running turn and its
+// provider's submit sequence would interrupt that turn (see
+// submitSequenceInterrupts). It sends no keys. A pane that cannot be resolved
+// or read returns nil: the delivery that follows takes its own looks and
+// refuses a pane it cannot read.
+func (t *Tmux) refuseInterruptingSubmitWhileBusy(session string) error {
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return nil
+	}
+	family := t.nudgeSubmitFamily(target)
+	keys := nudgeSubmitKeySequenceForFamily(family)
+	if !submitSequenceInterrupts(keys) {
+		return nil
+	}
+	if busy, err := t.turnRunning(target, family); err != nil || !busy {
+		return nil
+	}
+	return fmt.Errorf("%w: session %q is still running a turn and its submit keys (%s) would interrupt it",
+		runtime.ErrSessionBusy, session, strings.Join(keys, " "))
+}
+
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
 type Config struct {
@@ -129,8 +167,11 @@ type Config struct {
 	DebounceMs       int
 	DisplayMs        int
 	// SocketName specifies the tmux socket name for per-city isolation.
-	// When set, all tmux commands use "tmux -L <socket>" to connect to
-	// a dedicated server. Empty means use the default tmux server.
+	// When set, all tmux commands address a dedicated server: "tmux -L
+	// <socket>" normally, or "tmux -S <path>" with the path pinned from
+	// $TMUX when the caller is a pane of that same server, so a pane whose
+	// TMUX_TMPDIR differs from the controller's still reaches the server
+	// hosting it. Empty means use the default tmux server.
 	SocketName string
 	// RuntimeDir is the city runtime root under which per-session
 	// diagnostics are persisted. Production sets it to
@@ -143,6 +184,29 @@ type Config struct {
 	// literal. Empty disables the durable capture, so ad-hoc invocations
 	// and tests run unchanged.
 	RuntimeDir string
+	// ProgramStatusBin is the gc-osc7501 companion that program-status
+	// capture arms with. Empty resolves it at each arm: next to the running
+	// executable, else on PATH. Tests set it to the binary they built.
+	ProgramStatusBin string
+	// ProgramStatus is the city's [session] program_status switch, the mode
+	// every program-status reading is taken under. Off (or empty) reads
+	// nothing: the read formats stay today's and every reading is Unread.
+	ProgramStatus runtime.ProgramStatusMode
+	// ComparisonSink receives the shadow-mode comparisons the leaf's
+	// decision points record. It is used only while the live switch
+	// (ProgramStatus, or the one SetProgramStatusMode published) is shadow;
+	// nil records nothing. It must not block.
+	ComparisonSink runtime.ProgramStatusComparisonSink
+	// ComparisonFollowUps reports whether the process lives long enough to
+	// follow a timed point's comparison past its decision. Nil, or false,
+	// records each decision-time verdict untimed with no follow-up: a
+	// short-lived CLI process may exit before a follow-up ends, and a
+	// comparison it never hands over is lost without a count.
+	ComparisonFollowUps func() bool
+	// ComparisonWork, when set, is called as each piece of background shadow
+	// work starts and returns the call that ends it, so an exiting process
+	// can wait for the comparisons still being judged.
+	ComparisonWork func() (done func())
 }
 
 // DefaultConfig returns a Config with the original hardcoded values.
@@ -224,8 +288,18 @@ var (
 	// ack the item, so it requeues after the normal retry delay and consumes
 	// one of its bounded attempts, exactly like any other delivery failure.
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
-	// exactly what lets a stalled nudge go undetected for many minutes.
-	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// exactly what lets a stalled nudge go undetected for many minutes. It
+	// wraps runtime.ErrNudgeDeliveryUnconfirmed: the message may also have
+	// been delivered, so a caller that must not deliver twice treats it as
+	// possibly delivered.
+	ErrNudgeSubmitUnconfirmed = fmt.Errorf("%w: submit Enter delivered to tmux but not confirmed (busy state never observed)", runtime.ErrNudgeDeliveryUnconfirmed)
+	// errNudgeSubmitHeld means a nudge typed its message but a running turn
+	// held its interrupting submit back for the whole confirm window, and
+	// the typed message could not be cleared: it sits in the composer,
+	// unsubmitted. No submit was sent, so it is not ErrNudgeSubmitUnconfirmed,
+	// and something typed is left, so it is not runtime.ErrSessionBusy.
+	// Callers count the attempt as failed.
+	errNudgeSubmitHeld = errors.New("nudge typed but its submit was held back and the typed message was not cleared")
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -240,6 +314,13 @@ var (
 	// days of production logs). It wraps runtime.ErrNudgeDeliveredUnobserved
 	// so callers that only know the runtime contract treat it as delivered.
 	ErrNudgeSubmitDeliveredUnobserved = fmt.Errorf("%w: submit Enter delivered and composer drained but busy state was never observed", runtime.ErrNudgeDeliveredUnobserved)
+	// ErrNudgeSubmitLost indicates the provider's own record proves the
+	// message did not land: the turn the submit started ended (Codex's
+	// rollout records turn_aborted) before the provider recorded the message
+	// as a user turn. A drained composer is then no proof of delivery. It
+	// wraps ErrNudgeSubmitUnconfirmed, so callers that retry an unconfirmed
+	// submit retry this one too, and none reports it delivered.
+	ErrNudgeSubmitLost = fmt.Errorf("%w: the provider ended the turn before it recorded the message", ErrNudgeSubmitUnconfirmed)
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -366,23 +447,25 @@ func newTmuxCommand(ctx context.Context, args []string, stdout, stderr *bytes.Bu
 }
 
 func (realExecutor) execute(args []string) (string, error) {
-	var stdout, stderr bytes.Buffer
-	cmd := newTmuxCommand(context.Background(), args, &stdout, &stderr)
-	err := cmd.Run()
-	if err != nil {
-		return "", wrapError(err, stderr.String(), args)
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	return realExecutor{}.executeCtx(context.Background(), args)
 }
 
+// executeCtx runs one tmux invocation. On failure it returns no output; output
+// printed before the failure (a command list's earlier commands) travels in
+// the error as a *tmuxOutputError.
 func (realExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := newTmuxCommand(ctx, args, &stdout, &stderr)
 	err := cmd.Run()
+	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return "", wrapError(err, stderr.String(), args)
+		err = wrapError(err, stderr.String(), args)
+		if out != "" {
+			err = &tmuxOutputError{Stdout: out, Err: err}
+		}
+		return "", err
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return out, nil
 }
 
 // Tmux wraps tmux operations.
@@ -405,6 +488,18 @@ type Tmux struct {
 	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
 	agentSlice agentSliceWrapper
 
+	// capture is the program-status capture capability gate (see
+	// program_capture.go).
+	capture captureGate
+	// programStatus is the live program-status switch: nil until
+	// SetProgramStatusMode first publishes one, and then it overrides
+	// cfg.ProgramStatus (see program_capture.go).
+	programStatus atomic.Pointer[runtime.ProgramStatusMode]
+
+	// shadow is the program-status shadow mode's soft state (see
+	// program_status_shadow.go).
+	shadow programShadow
+
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
 	// (serverConfirmedDead). Nil selects the production observer; tests inject
@@ -420,6 +515,34 @@ type Tmux struct {
 	// terminateProcessKillPlan; tests inject a recorder to observe when
 	// termination happens without signaling real processes.
 	certifiedPaneTerminator func(processKillPlan) error
+
+	// backgroundStopSleep pauses between the steps of closing the background
+	// work an interrupted turn left running (stopCodexBackgroundTerminals,
+	// stopClaudeBackgroundShells). Nil selects sleepWithContext; tests inject
+	// one so the pauses take no wall time.
+	backgroundStopSleep func(context.Context, time.Duration) error
+
+	// codexRolloutHeld returns the one Codex rollout the process tree rooted
+	// at a pane's PID holds open, or "" (see heldCodexRollout). Nil selects
+	// heldCodexRollout; tests inject one so no live process table is read.
+	codexRolloutHeld func(panePID int) string
+
+	// snapshotFailures rate-limits the log of the one-shot pane probes'
+	// failed process-table snapshots (see readProcessSnapshot).
+	snapshotFailures processSnapshotFailureLog
+
+	// subtreeWalks bounds the pane-subtree walks of this Tmux's probes. Nil
+	// selects paneSubtrees, the process's; tests inject one.
+	subtreeWalks *paneSubtreeWalks
+
+	// subtreeFailures rate-limits the log of the one-shot pane probes'
+	// failed pane-subtree walks (see paneSubtree).
+	subtreeFailures processSnapshotFailureLog
+
+	// programArms stamps each capture arm this Tmux runs, so a tap armed
+	// after the state cache's process table was scanned reads unknown
+	// liveness rather than reader_lost (see programArmStamps).
+	programArms programArmStamps
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -430,14 +553,20 @@ type pokeInfo struct {
 	prior time.Time // genuine GetSessionActivity immediately before the poke
 }
 
+// poke is pk in the shared discount's terms. The local tmux server stamps
+// activity on gc's own clock, so at locates the echo (Echo stays zero).
+func (pk pokeInfo) poke() runtime.Poke {
+	return runtime.Poke{At: pk.at, Prior: pk.prior}
+}
+
 const (
 	// pokeEcho is the window within which raw tmux activity is treated as the
 	// poke's own keystroke echo rather than agent output.
-	pokeEcho = 3 * time.Second
+	pokeEcho = runtime.PokeEcho
 	// pokeGrace is how long a just-poked agent still counts as active, so a
 	// responsive agent about to reply is not flipped to idle. After it elapses
 	// with no agent output, the poke is discounted.
-	pokeGrace = 15 * time.Second
+	pokeGrace = runtime.PokeGrace
 )
 
 type hiddenAttachClient struct {
@@ -472,21 +601,38 @@ func (t *Tmux) approvalDedup() *approvalDedup {
 // context is composed with tmuxSubprocessTimeout so a wedged tmux server
 // or fork-blocked host cannot hang the call indefinitely. When the parent
 // already has an earlier deadline, that earlier deadline wins.
+//
+// Inside a fenced operation (see Provider.fenced) every pane input command
+// (send-keys, paste-buffer) runs through the operation's guard instead, so
+// it lands only in the incarnation the fence names. Outside one, an input
+// command runs under context.Background(), as it always has (FI7): a
+// caller's canceled context never cuts an unfenced key sequence short.
 func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
+	if isPaneInputCommand(args) {
+		if g := paneGuardFrom(ctx); g != nil {
+			return g.run(ctx, t, args)
+		}
+		ctx = context.Background()
+	}
+	return t.runCtxRaw(ctx, args...)
+}
+
+// runCtxRaw executes a tmux command as runCtx does, never through a guard.
+func (t *Tmux) runCtxRaw(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
 	defer cancel()
 	allArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
-	}
+	allArgs = append(allArgs, t.socketArgs()...)
 	allArgs = append(allArgs, args...)
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
 // run executes a tmux command and returns stdout. All commands include -u
-// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
-// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
-// Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
+// for UTF-8 regardless of locale; when SocketName is set, the server is
+// addressed after -u: -L <socket> normally, or -S with the socket path
+// pinned from $TMUX when the caller is a pane of that same server (see
+// https://github.com/steveyegge/gastown/issues/1219). Every invocation is
+// bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
 }
@@ -522,7 +668,8 @@ func wrapError(err error, stderr string, args []string) error {
 		strings.Contains(stderr, "no such session") ||
 		strings.Contains(stderr, "can't find session") ||
 		strings.Contains(stderr, "can't find window") ||
-		strings.Contains(stderr, "can't find pane") {
+		strings.Contains(stderr, "can't find pane") ||
+		strings.Contains(stderr, "no such pane") {
 		return ErrSessionNotFound
 	}
 
@@ -547,6 +694,9 @@ func wrapError(err error, stderr string, args []string) error {
 //     server answered and is alive with zero sessions, so new-session attaches
 //     rather than unlinking and rebinding.
 //   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
+//   - nil when ErrNoServer is contradicted by the socket observation but a
+//     single re-probe within the same deadline gets a server answer: a
+//     sibling started the server between the probe and the observation.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -572,14 +722,25 @@ func (t *Tmux) probeServerAlive() error {
 		return nil
 	}
 	if errors.Is(err, ErrNoServer) {
-		path := namedSocketPath(t.cfg.SocketName)
+		path := t.namedServerSocketPath()
 		observationErr := t.observeServerSocket(ctx, path)
 		if observationErr == nil {
 			return nil
 		}
+		// A sibling may have started a server on this socket after the first
+		// probe. Re-probe once within the same deadline; only a server answer
+		// proves the socket is live and responsive. An exhausted budget
+		// refuses without a second request.
+		reprobeErr := ctx.Err()
+		if reprobeErr == nil {
+			_, reprobeErr = t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+			if reprobeErr == nil || errors.Is(reprobeErr, ErrSessionNotFound) || errors.Is(reprobeErr, ErrNoCurrentTarget) {
+				return nil
+			}
+		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
 		// must not retry a guarded no-server result as an ordinary absence.
-		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
+		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w reprobe=%v", ErrServerDegraded, path, observationErr, reprobeErr) //nolint:errorlint // the re-probe result is diagnostic only; wrapping it would expose ErrNoServer to retrying callers
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
@@ -693,16 +854,21 @@ func validateUnsetEnvKeys(env map[string]string) error {
 // SURVIVE into later processes, rather than only applying to the command tmux
 // execs first.
 //
-// That is controller-scope credentials plus the BEADS_ namespace. A selected
-// workspace can pin any current or future BEADS_ key empty to prevent ambient
-// state from redirecting it, and a warm respawn must retain that choice. The
-// other keys a session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the
-// CODEX_ pair — are nesting-detection flags, not authority: the `env -u` prefix
+// That is controller-scope credentials, the BEADS_ namespace, and the
+// demand-spawn keys. A selected workspace can pin any current or future BEADS_
+// key empty to prevent ambient state from redirecting it, and a warm respawn
+// must retain that choice. Any copy of a demand-spawn key pinned empty
+// (processenv.DemandSpawnEnvKeys) names some other spawn, and respawn-pane
+// would hand it to the relaunched agent: a warm box an older gc provisioned
+// holds its own `-e GC_TRIGGER_BEAD_ID`, and a tmux server started from an
+// agent's pane holds that pane's ids in its global env. The other keys a
+// session env pins empty — CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, the CODEX_
+// pair — are nesting-detection flags, not authority: the `env -u` prefix
 // already gives them the behavior they need on the launched command.
 func durableWithholdKeys(env map[string]string) []string {
 	var keys []string
 	for _, k := range sessionEnvUnsetKeys(env) {
-		if processenv.IsControllerOnlyEnv(k) || strings.HasPrefix(k, "BEADS_") {
+		if processenv.IsControllerOnlyEnv(k) || processenv.IsDemandSpawnEnv(k) || strings.HasPrefix(k, "BEADS_") {
 			keys = append(keys, k)
 		}
 	}
@@ -758,18 +924,32 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 // Requires tmux >= 3.2.
 //
 // Empty-valued keys are WITHHELD by the `env -u` command prefix, which covers
-// the command new-session execs. Controller-scope credentials additionally get
-// the durable session-environment marker, which covers every process started in
-// the session afterwards — above all respawn-pane. Both are required for those
-// keys and each was falsified against a real tmux 3.4: new-session starts the
-// command before any follow-up can land, so the marker alone leaves the CREATED
-// pane exposed; the prefix alone leaves the RESPAWNED pane exposed.
+// the command new-session execs. The keys durableWithholdKeys names
+// (controller-scope credentials, the BEADS_ namespace, the demand-spawn keys)
+// additionally get the durable session-environment marker, which covers every
+// process started in the session afterwards — above all respawn-pane. Both are
+// required for those keys and each was falsified against a real tmux 3.4:
+// new-session starts the command before any follow-up can land, so the marker
+// alone leaves the CREATED pane exposed; the prefix alone leaves the RESPAWNED
+// pane exposed.
 //
 // Non-empty values that are not argv-safe (see [runtime.ArgvSafeEnvKey]) never
 // reach the command line: the whole new-session command is staged through a
 // private file instead — see [Tmux.runNewSession]. The session environment tmux
 // ends up holding is identical either way.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
+	return t.newSessionWithCommandAndEnv(name, workDir, command, env, runtime.ProgramStatusArm{})
+}
+
+// newSessionWithCommandAndEnv is NewSessionWithCommandAndEnv arming the
+// session's program-status capture as arm declares (see program_capture.go).
+// The zero arm, and an arm the capability gate refuses, create exactly as
+// NewSessionWithCommandAndEnv always has. An armed create runs one command
+// list: new-session, then the pane's nonce and tap. When a later command of
+// that list fails the session still exists (its pane id was printed): it is
+// marked, fenced and has its credentials withheld as any other, the arm
+// failure is logged, and create succeeds; heal re-arms the pane.
+func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env map[string]string, arm runtime.ProgramStatusArm) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
@@ -779,6 +959,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
+	plan := t.planCapture(arm)
 	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
@@ -799,24 +980,37 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// For vars that need unsetting, prefix the command with env -u flags. The
 	// pane's shell would otherwise inherit them from the tmux server's global
 	// environment, which holds whatever the controller exported when the server
-	// started. This prefix is a property of THIS command only.
+	// started. This prefix is a property of THIS command only. It sits
+	// outside the relay, so the relay never holds a withheld value its
+	// child could read.
 	var err error
-	command, err = withEnvUnsetPrefix(command, unsetKeys)
+	command, err = withEnvUnsetPrefix(plan.wrapRelay(command), unsetKeys)
 	if err != nil {
 		return err
 	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	pane, err := t.runNewSession(args, env)
+	cmds := [][]string{args}
+	if plan != nil {
+		cmds = append(cmds, plan.armCommands(paneTarget(name), false)...)
+	}
+	pane, err := t.runNewSession(cmds, env)
+	t.programArms.noteArmed(plan)
 	if err != nil {
-		return err
+		created := firstLine(outputBeforeError(err))
+		if plan == nil || !wellFormedTmuxID(created, '%') {
+			return err
+		}
+		_, _ = fmt.Fprintf(captureWarningOut, "warning: session %q: arming program-status capture: %v\n", name, err)
+		pane = created
 	}
 	t.markAgentPane(name, pane)
-	// Carry the CREDENTIAL withholding into the session environment, so it
+	t.publishInputFence(name, pane, env)
+	// Carry the durable withholding into the session environment, so it
 	// survives into every later process — above all respawn-pane, which the
 	// warm-box relaunch path uses and which takes no env argument at all. Fail
-	// closed: a session that silently kept a withheld credential is the defect
-	// this prevents.
+	// closed: a session that silently kept a withheld credential or trigger id
+	// is the defect this prevents.
 	if err := t.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
@@ -1214,10 +1408,22 @@ func buildProcessKillPlan(rootPID int, records []proctable.ProcessRecord, exclud
 	// owned group, members outside that tree are its init/subreaper-adopted tail.
 	// Order each orphan tree deepest-first and resolve disconnected/cyclic
 	// components by PID.
-	if root.PGID == root.PID {
+	//
+	// The same proof holds for every captured descendant that leads its own
+	// group: the program-status relay runs its program in a session and group
+	// of its own (as any setsid'd child does), and that group's
+	// reparented members are the program's, never the pane leader's. An
+	// excluded descendant's group stays as preserved as its leader.
+	owned := make(map[int]bool)
+	for pid := range visited {
+		if record := byPID[pid]; record.PGID == pid && (pid == rootPID || !exclude[pid]) {
+			owned[pid] = true
+		}
+	}
+	if len(owned) > 0 {
 		extra := make(map[int]bool)
 		for pid, record := range byPID {
-			if !visited[pid] && record.PGID == root.PGID && record.PPID > 0 {
+			if !visited[pid] && owned[record.PGID] && record.PPID > 0 {
 				extra[pid] = true
 			}
 		}
@@ -1496,32 +1702,80 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
-// window.pane index, pane_dead, pane pid and the pane's window activity.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}"
+// window.pane index, pane_dead, pane pid, the pane's window activity,
+// whether the restart marker's option mirror is set (1, or 0 when unset) and
+// runtimeInventoryEnd. The marker is read as a comparison, never its value:
+// tmux prints a user option raw, so a tab or newline in it could forge
+// fields or another session's line.
+const runtimeInventoryFormat = runtimeInventoryPaneFormat + "\t" + runtimeInventoryEnd
+
+// runtimeInventoryPaneFormat is a runtimeInventoryFormat line's fields before
+// its terminator.
+const runtimeInventoryPaneFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}"
+
+// programRuntimeInventoryFormat is runtimeInventoryFormat with each pane's
+// capture fields (programPaneFormat) before its terminator, read while the
+// program-status switch is not off.
+const programRuntimeInventoryFormat = runtimeInventoryPaneFormat + "\t" + programPaneFormat + "\t" + runtimeInventoryEnd
+
+// runtimeInventoryEnd ends every runtimeInventoryFormat line, so the
+// executor's trim cannot drop an empty last field (#7871) and a line cut
+// short or split by an unescaped tab is visibly malformed. A line split by an
+// unescaped newline need not be: a piece of it can be well-formed (see
+// parseRuntimeInventory). tmux prints the terminator verbatim. It stays a
+// tab-separated field: tmux 3.4 and 3.5 print a raw \x1f in a format as the
+// text \037. Of the values read here, tmux escapes only the session name
+// (3.2+); the rest are numbers, ids or 0/1.
+const runtimeInventoryEnd = "gc-eol"
+
+// runtimeInventoryFields is the field count of a runtimeInventoryFormat line.
+const runtimeInventoryFields = 10
+
+// programRuntimeInventoryFields is the field count of a
+// programRuntimeInventoryFormat line.
+const programRuntimeInventoryFields = runtimeInventoryFields + programPaneFields
+
+// inventoryFaults is what parseRuntimeInventory could not read.
+type inventoryFaults struct {
+	lines    []string // the malformed lines
+	sessions []string // the sessions omitted for them, sorted
+}
 
 // listRuntimeInventory reads every pane on the server with one untargeted
 // list-panes -a and folds the panes into one entry per session. A live server
 // holding no sessions answers "no current target", which is an empty
 // inventory, as in [tmuxFetcher.FetchState]; an unreachable server
-// (ErrNoServer) is an error. A malformed line is an error rather than a
-// dropped pane: dropping the only live pane would report a live session as
-// all-dead.
-func (t *Tmux) listRuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
-	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", runtimeInventoryFormat)
+// (ErrNoServer) is an error. A malformed line costs only its session, which
+// is omitted (see parseRuntimeInventory) and reported in faults; output that
+// leaves no session is an error. With program set (the program-status switch
+// is not off) the read also carries each pane's capture fields, and panes
+// holds each session's agent pane that could be named (see foldProgramPane).
+func (t *Tmux) listRuntimeInventory(ctx context.Context, program bool) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, err error) {
+	format := runtimeInventoryFormat
+	if program {
+		format = programRuntimeInventoryFormat
+	}
+	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", format)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
-			return map[string]runtime.InventoryEntry{}, nil
+			return map[string]runtime.InventoryEntry{}, nil, faults, nil
 		}
-		return nil, err
+		return nil, nil, faults, err
 	}
-	entries, err := parseRuntimeInventory(out)
+	entries, panes, faults, wellFormed := parseRuntimeInventory(out, program)
+	if len(entries) == 0 && len(faults.lines) > 0 {
+		if wellFormed == 0 {
+			return nil, nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
+		}
+		return nil, nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
+	}
 	for name, e := range entries {
 		if e.ActivityKnown { // the poke discount GetLastActivity applies
 			e.LastActivity = t.discountedActivity(name, e.LastActivity)
 			entries[name] = e
 		}
 	}
-	return entries, err
+	return entries, panes, faults, nil
 }
 
 // inventoryFirstPane tracks a session's lowest window.pane index while
@@ -1530,24 +1784,60 @@ type inventoryFirstPane struct {
 	window, pane int
 }
 
-func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error) {
-	entries := make(map[string]runtime.InventoryEntry)
+// parseRuntimeInventory parses each line on its own, and reports the lines
+// it could not parse and how many it could. A malformed line omits its
+// session (its first field, when it has one), every line of it: a session
+// folded from only the panes that parsed could read all-dead when its live
+// pane is the malformed one. An omitted name is unread, not gone
+// ([runtime.InventoryProvider]); the rest of the inventory stands, with one
+// gap. tmux before 3.2 prints a session name unescaped, so a newline in a
+// name splits its line, and the piece after the newline can be a well-formed
+// line under the rest of the name: it reads as a session of its own, or folds
+// into a real session of that name, whose liveness and other facts can then
+// read wrong.
+//
+// program says the lines are programRuntimeInventoryFormat's; a line whose
+// capture fields do not parse is malformed like any other. panes holds each
+// session's agent pane that could be named.
+func parseRuntimeInventory(out string, program bool) (entries map[string]runtime.InventoryEntry, panes map[string]programPane, faults inventoryFaults, wellFormed int) {
+	entries = make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
+	omitted := make(map[string]bool)
+	want := runtimeInventoryFields
+	if program {
+		want = programRuntimeInventoryFields
+	}
+	programRows := make(map[string][]programPane)
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 8 || fields[0] == "" {
-			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
+		name := fields[0]
+		var window, pane int
+		var capture programPane
+		ok := len(fields) == want && fields[want-1] == runtimeInventoryEnd && name != "" &&
+			(fields[8] == "0" || fields[8] == "1")
+		if ok {
+			windowText, paneText, _ := strings.Cut(fields[4], ".")
+			var wErr, pErr error
+			window, wErr = strconv.Atoi(windowText)
+			pane, pErr = strconv.Atoi(paneText)
+			ok = wErr == nil && pErr == nil
 		}
-		name, sessionID, created, attached, index, paneDead, panePID := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
-		windowText, paneText, _ := strings.Cut(index, ".")
-		window, wErr := strconv.Atoi(windowText)
-		pane, pErr := strconv.Atoi(paneText)
-		if wErr != nil || pErr != nil {
-			return nil, fmt.Errorf("tmux list-panes: malformed pane index in inventory line %q", line)
+		if ok && program {
+			capture, ok = parseProgramPane(fields[runtimeInventoryFields-1:want-1], fields[5] == "1")
 		}
+		if !ok {
+			faults.lines = append(faults.lines, line)
+			if name != "" && !omitted[name] {
+				omitted[name] = true
+				faults.sessions = append(faults.sessions, name)
+			}
+			continue
+		}
+		wellFormed++
+		sessionID, created, attached, paneDead, panePID := fields[1], fields[2], fields[3], fields[5], fields[6]
 
 		entry, seen := entries[name]
 		if !seen {
@@ -1555,6 +1845,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			entry.AttachedKnown = err == nil && clients >= 0
 			entry.Attached = entry.AttachedKnown && clients > 0
 			entry.DeadKnown, entry.AllPanesDead = true, true
+			entry.RestartRequested = fields[8] == "1" // a session option: every pane line carries it
 		}
 		switch paneDead {
 		case "0":
@@ -1584,8 +1875,23 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			entry.Incarnation = incarnation
 		}
 		entries[name] = entry
+		if program {
+			programRows[name] = append(programRows[name], capture)
+		}
 	}
-	return entries, nil
+	for _, name := range faults.sessions {
+		delete(entries, name)
+	}
+	sort.Strings(faults.sessions)
+	if program {
+		panes = make(map[string]programPane)
+		for name := range entries {
+			if capture, named := foldProgramPane(programRows[name]); named {
+				panes[name] = capture
+			}
+		}
+	}
+	return entries, panes, faults, wellFormed
 }
 
 // ListSessions returns all session names. An unreachable tmux server is
@@ -1787,12 +2093,12 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 // a mode.
 //
 // target is the pane to probe: callers pass their resolved agent pane.
-func (t *Tmux) cancelCopyModeIfParked(target string) {
-	inMode, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{pane_in_mode}")
+func (t *Tmux) cancelCopyModeIfParked(ctx context.Context, target string) {
+	inMode, err := t.runCtx(ctx, "display-message", "-t", paneTarget(target), "-p", "#{pane_in_mode}")
 	if err != nil || strings.TrimSpace(inMode) != "1" {
 		return
 	}
-	_, _ = t.run("send-keys", "-t", paneTarget(target), "-X", "cancel")
+	_, _ = t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "-X", "cancel")
 }
 
 // SendKeys sends keystrokes to a session and presses Enter.
@@ -1822,13 +2128,13 @@ func (t *Tmux) sendKeysDebouncedTo(session, target, keys string, debounceMs int)
 	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
 	// binding); exit it first so the keystrokes reach the program instead of
 	// being swallowed by copy-mode.
-	t.cancelCopyModeIfParked(target)
+	t.cancelCopyModeIfParked(context.Background(), target)
 	// Record this poke (and the genuine activity just before it) so that
 	// GetSessionActivity can later discount our own keystroke echo for an
 	// agent that never actually responds. See discountPokeActivity.
 	t.recordPoke(session)
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", target, "-l", keys); err != nil {
+	if _, err := t.run(append([]string{"send-keys", "-t", target, "-l"}, runtime.TmuxLiteralArgs(keys)...)...); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -1843,11 +2149,16 @@ func (t *Tmux) sendKeysDebouncedTo(session, target, keys string, debounceMs int)
 // SendKeysRaw sends keystrokes without adding Enter, to the session's agent
 // pane (agentPaneTarget); an already-resolved target is used as is.
 func (t *Tmux) SendKeysRaw(session, keys string) error {
+	return t.sendKeysRawCtx(context.Background(), session, keys)
+}
+
+// sendKeysRawCtx is SendKeysRaw under ctx (and a fenced operation's guard).
+func (t *Tmux) sendKeysRawCtx(ctx context.Context, session, keys string) error {
 	target, err := t.agentPaneTarget(session)
 	if err != nil {
 		return err
 	}
-	_, err = t.run("send-keys", "-t", target, keys)
+	_, err = t.runCtx(ctx, "send-keys", "-t", target, keys)
 	return err
 }
 
@@ -2175,7 +2486,8 @@ func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSoc
 	if witness.canonicalPath != "" {
 		args = append(args, "-N", "-S", witness.canonicalPath)
 	} else if t.cfg.SocketName != "" {
-		args = append(args, "-N", "-L", t.cfg.SocketName)
+		args = append(args, "-N")
+		args = append(args, t.socketArgs()...)
 	}
 	return append(args, "attach-session", "-t", target)
 }
@@ -2327,7 +2639,13 @@ func hiddenAttachedKeyBytes(key string) ([]byte, bool) {
 // agent pane (agentPaneTarget). A hidden client attaches to a session gc
 // created with a single pane, so the two agree unless a human splits or adds
 // windows in a Gemini session; send-keys paths are resolved instead.
-func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, error) {
+//
+// Inside a fenced operation each write is preceded by a check that the
+// session's active pane, which receives the bytes, is the verified agent pane
+// holding the fence (paneGuard.checkLive), so a human's focused split gets
+// nothing. A PTY write cannot be made conditional inside tmux, so this path
+// is checked rather than atomic.
+func (t *Tmux) sendHiddenAttachedKeys(ctx context.Context, target string, keys ...string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
 		return false, nil
@@ -2357,7 +2675,7 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	// after the last key lands. A failed write records nothing.
 	commitPoke := t.beginPoke(target)
 	for _, seq := range seqs {
-		if err := client.write(seq); err != nil {
+		if err := t.writeHiddenAttached(ctx, client, seq, false); err != nil {
 			return true, err
 		}
 	}
@@ -2365,20 +2683,44 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	return true, nil
 }
 
+// writeHiddenAttached writes input (text, or else keys) through a hidden
+// attach client, after a fenced operation's check of the agent pane's fence.
+func (t *Tmux) writeHiddenAttached(ctx context.Context, client *hiddenAttachClient, input []byte, text bool) error {
+	g := paneGuardFrom(ctx)
+	if g != nil {
+		if err := g.checkLive(ctx, t); err != nil {
+			return err
+		}
+	}
+	if err := client.write(input); err != nil {
+		return err
+	}
+	if g != nil {
+		g.markApplied(text)
+	}
+	return nil
+}
+
 // sendHiddenAttachedText types text, then Enter, through target's hidden
-// attach client, and reports whether target has one. Only Gemini sessions get
-// a hidden attach client (requiresHiddenAttachedInterrupt), so this path takes
-// no look for a permission prompt between the text and Enter; it must gain
-// NudgeSession's (#2892) before it serves a Claude session. Like
+// attach client, and reports whether target has one. Like NudgeSession (#2892)
+// it never types into a pending permission prompt or an open question dialog:
+// it looks at the pane before the text and again before Enter, and returns an
+// error wrapping runtime.ErrPendingInteraction (or errPromptLookFailed when the
+// pane cannot be read) with nothing further written. Like
 // sendHiddenAttachedKeys it reaches the client's active pane, not necessarily
-// the marked agent pane.
-func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
+// the marked agent pane; inside a fenced operation each write first checks
+// that the active pane is the verified agent pane (paneGuard.checkLive).
+func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
 		return false, nil
 	}
 	if text == "" {
 		return true, nil
+	}
+	look := t.pendingPromptRecheck(target)
+	if err := look(target); err != nil {
+		return true, err
 	}
 	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
 	// so record a poke here too (the residual NudgeNow gap): capture the
@@ -2387,13 +2729,16 @@ func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	// echo instead of counting this nudge as the agent responding (see
 	// discountPokeActivity). A failed write records nothing.
 	commitPoke := t.beginPoke(target)
-	if err := client.write([]byte(text)); err != nil {
+	if err := t.writeHiddenAttached(ctx, client, []byte(text), true); err != nil {
 		return true, err
 	}
 	if t.cfg.DebounceMs > 0 {
 		time.Sleep(time.Duration(t.cfg.DebounceMs) * time.Millisecond)
 	}
-	if err := client.write([]byte{'\r'}); err != nil {
+	if err := look(target); err != nil {
+		return true, err
+	}
+	if err := t.writeHiddenAttached(ctx, client, []byte{'\r'}, false); err != nil {
 		return true, err
 	}
 	commitPoke()
@@ -2423,18 +2768,28 @@ func nextPasteBufferName() string {
 	return fmt.Sprintf("gc-nudge-%d-%d", os.Getpid(), seq)
 }
 
-func (t *Tmux) sendLiteralText(target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
-		return t.pasteLiteralText(target, text)
+func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
+	if len(text) > maxSendKeysLiteralLen || t.pastesMultilineText(target, text) {
+		return t.pasteLiteralText(ctx, target, text)
 	}
-	_, err := t.run("send-keys", "-t", paneTarget(target), "-l", text)
+	_, err := t.runCtx(ctx, append([]string{"send-keys", "-t", paneTarget(target), "-l"}, runtime.TmuxLiteralArgs(text)...)...)
 	if isCommandTooLongError(err) {
-		return t.pasteLiteralText(target, text)
+		return t.pasteLiteralText(ctx, target, text)
 	}
 	return err
 }
 
-func (t *Tmux) pasteLiteralText(target, text string) error {
+// pastesMultilineText reports whether text must reach target as one bracketed
+// paste even under maxSendKeysLiteralLen. Codex (codex-cli 0.162.1) reads
+// typed multi-line text as a paste burst and takes the submit Enter that
+// follows as one more newline, so the message stays drafted in its composer:
+// every Mayor startup prompt did. A bracketed paste arrives as one paste, and
+// the Enter after it submits.
+func (t *Tmux) pastesMultilineText(target, text string) bool {
+	return strings.Contains(text, "\n") && sessionlog.ProviderFamily(t.providerEnv(target)) == "codex"
+}
+
+func (t *Tmux) pasteLiteralText(ctx context.Context, target, text string) error {
 	tmp, err := os.CreateTemp("", "gc-tmux-paste-*")
 	if err != nil {
 		return fmt.Errorf("creating tmux paste buffer file: %w", err)
@@ -2452,7 +2807,7 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 
 	bufferName := nextPasteBufferName()
 	loaded := false
-	if _, err := t.run("load-buffer", "-b", bufferName, tmpName); err != nil {
+	if _, err := t.runCtx(ctx, "load-buffer", "-b", bufferName, tmpName); err != nil {
 		return fmt.Errorf("loading tmux paste buffer: %w", err)
 	}
 	loaded = true
@@ -2464,7 +2819,7 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 
 	// Force bracketed paste so multiline nudges arrive as one paste operation
 	// instead of being interpreted as individual keypresses by provider TUIs.
-	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", paneTarget(target)); err != nil {
+	if _, err := t.runCtx(ctx, "paste-buffer", "-p", "-d", "-b", bufferName, "-t", paneTarget(target)); err != nil {
 		return fmt.Errorf("pasting tmux buffer: %w", err)
 	}
 	loaded = false
@@ -2528,11 +2883,11 @@ func sendPasteChunks(chunks []string, send func(string) error, pause func()) err
 //
 // This function ONLY addresses the startup race where the agent TUI hasn't
 // initialized yet, causing tmux send-keys to fail with "not in a mode".
-func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
-	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+func (t *Tmux) sendKeysLiteralWithRetry(ctx context.Context, target, text string, timeout time.Duration) error {
+	return t.sendTextWithRetry(ctx, target, text, timeout, t.sendLiteralText)
 }
 
-func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) error {
+func (t *Tmux) sendStartupKeysLiteralWithRetry(ctx context.Context, target, text, provider string, timeout time.Duration) error {
 	if len(text) > copilotMaxPasteBytes && sessionlog.ProviderFamily(provider) == "copilot" {
 		chunks := splitPasteText(text, copilotMaxPasteBytes)
 		// Budget the inter-chunk pauses on top of the retry window rather than
@@ -2548,7 +2903,7 @@ func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, ti
 			if remaining <= 0 {
 				return fmt.Errorf("agent not ready for input after %s", timeout)
 			}
-			return t.sendTextWithRetry(target, chunk, remaining, t.pasteLiteralText)
+			return t.sendTextWithRetry(ctx, target, chunk, remaining, t.pasteLiteralText)
 		}, func() {
 			remaining := time.Until(deadline)
 			if remaining > copilotPasteChunkDelay {
@@ -2559,16 +2914,16 @@ func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, ti
 			}
 		})
 	}
-	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+	return t.sendTextWithRetry(ctx, target, text, timeout, t.sendLiteralText)
 }
 
-func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, send func(string, string) error) error {
+func (t *Tmux) sendTextWithRetry(ctx context.Context, target, text string, timeout time.Duration, send func(context.Context, string, string) error) error {
 	deadline := time.Now().Add(timeout)
 	interval := t.cfg.NudgeRetryInterval
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		err := send(target, text)
+		err := send(ctx, target, text)
 		if err == nil {
 			return nil
 		}
@@ -2624,53 +2979,89 @@ const (
 //     window, and its busy proves nothing about this submit.
 //   - err: the last submit attempted failed at the tmux layer, or a look
 //     refused a submit (isLookRefusal), which ends the call with no further
-//     sends. A nil error with confirmed false means the submit reached tmux
-//     but no idle->busy transition was observed within the budget; the
-//     caller judges delivery from the pane itself (see nudgeSession).
+//     sends. A failed re-send after an earlier send succeeded wraps
+//     ErrNudgeSubmitUnconfirmed: the earlier send may have submitted. A nil
+//     error with confirmed false means the submit reached tmux but no
+//     idle->busy transition was observed within the budget; the caller
+//     judges delivery from the pane itself (see nudgeSession).
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
 func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
+	confirmed, sawIdle, _, err := submitAndConfirm(sendSubmit, wake, busy, nil, sleep)
+	return confirmed, sawIdle, err
+}
+
+// submitAndConfirm is submitEnterAndConfirm for a submit sequence of either
+// kind, also reporting how many submits it sent. mayResend is nil for a
+// sequence that cannot interrupt a turn (plain Enter). For one that can
+// (Codex's Escape-led submit, see submitSequenceInterrupts) it is set, and the
+// loop then sends only into a pane it has evidence is waiting for the submit:
+//
+//   - the first submit is held while the baseline reading is busy (a turn
+//     running since before the call), and is sent at a later round once the
+//     pane reads idle and mayResend agrees;
+//   - every later submit needs mayResend to report, from a look taken right
+//     before the send, that the message still sits unsubmitted in an idle
+//     composer. A drained composer means the earlier submit was taken: its
+//     turn may be running without a visible busy row yet (a UserPromptSubmit
+//     hook, a contended host), and an Escape sent into it aborts the turn
+//     before the provider records the message (healthy-direct, 2026-10-15). A
+//     look that fails is not evidence, so it sends nothing either.
+func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
 	// Baseline reading before the first send: an idle baseline lets send 0's
 	// own polls confirm, while a busy or failed one leaves the pane needing
 	// an idle reading first.
 	watch := busyTransition{busy: busy}
-	watch.observe()
+	baselineBusy, _ := watch.observe()
 
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
-		resend := true
-		if send > 0 {
+		var resend bool
+		if send == 0 {
+			// An interrupting submit is never sent into a running turn.
+			resend = mayResend == nil || !baselineBusy
+		} else {
 			isBusy, confirmed := watch.observe()
 			if confirmed {
-				return true, true, nil
+				return true, true, sent, nil
 			}
 			// Busy without an idle reading yet: the turn running since before
 			// this call has not finished. Never submit into it; keep watching.
 			resend = !isBusy
 			sleep(submitReEnterBackoff)
+			if resend && mayResend != nil {
+				waiting, lookErr := mayResend()
+				resend = lookErr == nil && waiting
+			}
 		}
 		if resend {
 			if err := sendSubmit(); err != nil {
 				if isLookRefusal(err) {
 					// Never re-send into a permission prompt, or into a pane a
 					// look could not read.
-					return false, watch.seenIdle, err
+					return false, watch.seenIdle, sent, err
 				}
 				lastErr = err
+				if sent > 0 {
+					// An earlier send reached the pane and may have
+					// submitted: a failed re-send leaves delivery in doubt.
+					lastErr = fmt.Errorf("%w: re-send failed: %w", ErrNudgeSubmitUnconfirmed, err)
+				}
 				continue
 			}
+			sent++
 			lastErr = nil // a later send succeeded; don't surface an earlier transient failure
 			wake()
 		}
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
 			if _, confirmed := watch.observe(); confirmed {
-				return true, true, nil
+				return true, true, sent, nil
 			}
 			sleep(submitConfirmPollInterval)
 		}
 	}
-	return false, watch.seenIdle, lastErr
+	return false, watch.seenIdle, sent, lastErr
 }
 
 // busyTransition tracks the idle->busy transition that confirms a submit. A
@@ -2725,7 +3116,7 @@ type stagedDraftMarker struct {
 // a placeholder has not drained.
 var stagedDraftMarkers = map[string]stagedDraftMarker{
 	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
-	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
+	"codex":  {promptPrefix: codexPromptPrefix, marker: "[Pasted Content "},
 }
 
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
@@ -2884,12 +3275,19 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 	if provider := t.providerEnv(target); provider != "" {
 		return submitVerifyEligibleFamily(sessionlog.ProviderFamily(provider))
 	}
+	return t.sniffVerifyEligibleFamily(target) != ""
+}
+
+// sniffVerifyEligibleFamily is the first submitVerifyEligibleFamilies entry
+// whose process target's pane runs, or "" when it runs none: how a pane
+// without GC_PROVIDER (ad hoc sessions, some test harnesses) is identified.
+func (t *Tmux) sniffVerifyEligibleFamily(target string) string {
 	for _, family := range submitVerifyEligibleFamilies {
 		if t.targetLooksLikeProvider(target, family) {
-			return true
+			return family
 		}
 	}
-	return false
+	return ""
 }
 
 // submitVerifyEligibleFamilies are the provider families whose busy indicator
@@ -2908,8 +3306,10 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // indicator is unreadable would report every delivery as unconfirmed and burn
 // the queue's attempts re-pasting messages that already landed.
 //
-// Listing a family also widens BusyIndicatorReadable, so callers that wait out
-// a (false, nil) SnapshotIdle begin waiting on that family's indicator.
+// The list is also the leaf's busy-trust policy (busyReadingTrusted): only a
+// listed family's busy reading reaches SnapshotIdle and TurnRunning callers,
+// so listing a family makes callers that wait out a (false, nil) SnapshotIdle
+// begin waiting on that family's indicator.
 var submitVerifyEligibleFamilies = []string{"claude", "codex"}
 
 func submitVerifyEligibleFamily(family string) bool {
@@ -2921,18 +3321,37 @@ func submitVerifyEligibleFamily(family string) bool {
 	return false
 }
 
-// BusyIndicatorReadable reports whether family is one whose busy reading from
-// the pane scan behind SnapshotIdle callers may act on: the families listed in
-// submitVerifyEligibleFamilies. For those families a (false, nil) snapshot
-// means the capture contains a busy-indicator string, usually the live
-// indicator but possibly a stale frame or transcript text; a pane showing
-// neither that nor a ready prompt is [runtime.ErrIdleIndeterminate], not busy.
-// The list is policy, not a property of the scan, which does not tell
-// families apart: paneContainsBusyIndicator also matches Gemini's cancel and
-// shell-tool strings. Callers must not treat an unlisted family's (false, nil)
-// snapshot as busy.
-func BusyIndicatorReadable(family string) bool {
+// busyReadingTrusted reports whether family is one whose busy reading from the
+// pane scan this leaf reports to its callers: the families listed in
+// submitVerifyEligibleFamilies. For those families a busy reading means the
+// capture contains a busy-indicator string, usually the live indicator but
+// possibly a stale frame or transcript text. The list is policy, not a
+// property of the scan, which does not tell families apart:
+// paneContainsBusyIndicator also matches Gemini's cancel and shell-tool
+// strings. For every other family, and a pane whose family cannot be told,
+// SnapshotIdle and TurnRunning report [runtime.ErrIdleIndeterminate] instead
+// of a busy reading, so no caller needs to know which families are trusted.
+func busyReadingTrusted(family string) bool {
 	return submitVerifyEligibleFamily(family)
+}
+
+// busyTrustFamily is target's provider family for busyReadingTrusted,
+// resolved as submitVerifyEligible resolves it: the pane's GC_PROVIDER, else
+// the first submitVerifyEligibleFamilies entry its process runs, else "" for
+// a pane whose family cannot be told. SnapshotIdle and TurnRunning both take
+// it, so they trust the same panes. A GC_PROVIDER read that fails, rather
+// than finding the variable unset, is an error: the family is unknown, not
+// untrusted, so the reading is a failed observation, not
+// [runtime.ErrIdleIndeterminate].
+func (t *Tmux) busyTrustFamily(target string) (string, error) {
+	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
+	if err != nil && !errors.Is(err, errEnvUnset) {
+		return "", fmt.Errorf("reading the provider family: %w", err)
+	}
+	if provider = strings.TrimSpace(provider); provider != "" {
+		return sessionlog.ProviderFamily(provider), nil
+	}
+	return t.sniffVerifyEligibleFamily(target), nil
 }
 
 // nudgeSubmitKeySequence resolves target's declared submit key sequence (see
@@ -2941,15 +3360,21 @@ func BusyIndicatorReadable(family string) bool {
 // GC_PROVIDER pane environment variable, falling back to a process-name
 // sniff for panes without it (ad hoc sessions, some test harnesses).
 func (t *Tmux) nudgeSubmitKeySequence(target string) []string {
+	return nudgeSubmitKeySequenceForFamily(t.nudgeSubmitFamily(target))
+}
+
+// nudgeSubmitFamily is the provider family nudgeSubmitKeySequence resolves
+// for target, or "" for a pane it cannot identify.
+func (t *Tmux) nudgeSubmitFamily(target string) string {
 	if provider := t.providerEnv(target); provider != "" {
-		return nudgeSubmitKeySequenceForFamily(sessionlog.ProviderFamily(provider))
+		return sessionlog.ProviderFamily(provider)
 	}
 	for family := range nudgeSubmitKeySequences {
 		if t.targetLooksLikeProvider(target, family) {
-			return nudgeSubmitKeySequenceForFamily(family)
+			return family
 		}
 	}
-	return defaultNudgeSubmitKeySequence
+	return ""
 }
 
 // nudgeSubmitKeySettle is the pause between successive keys within a
@@ -2965,12 +3390,12 @@ const nudgeSubmitKeySettle = 100 * time.Millisecond
 // nudgeSubmitKeySettle between keys. Returns the first error encountered;
 // remaining keys are not sent after an error, matching sendEnter's previous
 // single-key contract (the caller decides how to react to a failed submit).
-func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
+func (t *Tmux) sendNudgeSubmitSequence(ctx context.Context, target string, keys []string) error {
 	for i, key := range keys {
 		if i > 0 {
 			time.Sleep(nudgeSubmitKeySettle)
 		}
-		if _, err := t.run("send-keys", "-t", paneTarget(target), key); err != nil {
+		if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), key); err != nil {
 			return err
 		}
 	}
@@ -2997,22 +3422,29 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // runtime.ErrPendingInteraction when a prompt is showing, or the capture error
 // when a check cannot read the pane (#2892).
 func (t *Tmux) NudgeSession(session, message string) error {
+	return t.nudgeSessionCtx(context.Background(), session, message)
+}
+
+// nudgeSessionCtx is NudgeSession under ctx (and a fenced operation's guard).
+func (t *Tmux) nudgeSessionCtx(ctx context.Context, session, message string) error {
 	return t.nudgeSession(
+		ctx,
 		session,
 		message,
 		t.sendKeysLiteralWithRetry,
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		t.pendingPromptRecheck(session),
+		true,
 	)
 }
 
 // pendingPromptRecheck returns NudgeSession's under-the-lock look for a
-// permission prompt. A capture that fails refuses the nudge as a prompt on
-// screen does, the way NudgeNow's first check refuses a pane it cannot read:
-// what the look cannot see may be a prompt, and Enter on one approves the tool
-// call. The capture error stays wrapped, so a session that is gone is still
-// recognized as gone.
+// permission prompt or question dialog. A capture that fails refuses the nudge
+// as a prompt on screen does, the way NudgeNow's first check refuses a pane it
+// cannot read: what the look cannot see may be a prompt, and Enter on one
+// approves the tool call or answers the question. The capture error stays
+// wrapped, so a session that is gone is still recognized as gone.
 func (t *Tmux) pendingPromptRecheck(session string) func(target string) error {
 	return func(target string) error {
 		err := t.checkNoApprovalPromptIn(session, target)
@@ -3027,14 +3459,16 @@ func (t *Tmux) pendingPromptRecheck(session string) func(target string) error {
 // prompts use provider-safe paste chunks so its TUI keeps the text inline.
 func (t *Tmux) nudgeStartupSession(session, message string) error {
 	return t.nudgeSession(
+		context.Background(),
 		session,
 		message,
-		func(target, text string, timeout time.Duration) error {
-			return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
+		func(ctx context.Context, target, text string, timeout time.Duration) error {
+			return t.sendStartupKeysLiteralWithRetry(ctx, target, text, t.providerEnv(target), timeout)
 		},
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		nil,
+		false,
 	)
 }
 
@@ -3048,11 +3482,12 @@ func isLookRefusal(err error) bool {
 	return errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, errPromptLookFailed)
 }
 
-// nudgePromptGuard takes a nudge's looks for a permission prompt (#2892):
-// under the nudge lock before the first key, immediately before the paste, and
-// immediately before every submit key. A look that finds a prompt, or cannot
-// read the pane, aborts the nudge with no further keys sent: text typed into a
-// prompt is read as menu input, and Enter picks its highlighted option.
+// nudgePromptGuard takes a nudge's looks for a permission prompt (#2892) or
+// question dialog (#8150): under the nudge lock before the first key,
+// immediately before every key of the composer clear, immediately before the
+// paste, and immediately before every submit key. A look that finds one, or
+// cannot read the pane, aborts the nudge with no further keys sent: text typed
+// into a prompt is read as menu input, and Enter picks its highlighted option.
 type nudgePromptGuard struct {
 	session, target string
 	// look returns a refusal (see isLookRefusal) when a prompt is on screen
@@ -3092,19 +3527,34 @@ func (g *nudgePromptGuard) refused(err error) error {
 }
 
 // noPendingPrompt, when set, is checked under the nudge lock before the first
-// key, immediately before the paste, and immediately before every submit key;
-// its error aborts the nudge with no further keys sent.
+// key, immediately before every key of the composer clear, immediately before
+// the paste, and immediately before every submit key; its error aborts the
+// nudge with no further keys sent.
+//
+// guardTurn makes a nudge whose submit keys would interrupt a running turn
+// (Codex's Escape-led submit, see submitSequenceInterrupts) wait for the
+// agent's composer to be idle before it types anything, and defer with an
+// error wrapping runtime.ErrSessionBusy, nothing typed, when a turn is still
+// running at the end of that wait (see awaitIdleComposerBeforeTyping). The
+// startup nudge does not take that wait (the start's own readiness wait
+// precedes it); like every nudge, it still never sends an interrupting
+// submit into a turn its confirm loop sees running (see submitAndConfirm).
+// A message whose submit that loop held back for its whole window is cleared
+// from the composer, and the nudge defers with runtime.ErrSessionBusy as well
+// (see clearHeldDraft).
 func (t *Tmux) nudgeSession(
+	ctx context.Context,
 	session, message string,
-	sendText func(string, string, time.Duration) error,
+	sendText func(context.Context, string, string, time.Duration) error,
 	shouldSendEscape func(string) bool,
 	submitKeySequence func(string) []string,
 	noPendingPrompt func(target string) error,
+	guardTurn bool,
 ) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+		return fmt.Errorf("%w: nudge lock timeout for session %q: previous nudge may be hung", runtime.ErrNudgeNotSent, session)
 	}
 	defer releaseNudgeLock(session)
 
@@ -3119,7 +3569,7 @@ func (t *Tmux) nudgeSession(
 	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
 	// binding); exit it first so the keystrokes below reach the program
 	// instead of being swallowed by copy-mode. Mirrors SendKeysDebounced.
-	t.cancelCopyModeIfParked(target)
+	t.cancelCopyModeIfParked(ctx, target)
 
 	// Snapshot genuine activity BEFORE the first keystroke, and stamp the poke
 	// only once delivery is actually confirmed (see delivered below). This
@@ -3146,10 +3596,23 @@ func (t *Tmux) nudgeSession(
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session, target)
 
+	// The submit keys this nudge ends with. When they would interrupt a
+	// running turn, nothing is typed until the composer reads idle.
+	submitKeys := submitKeySequence(target)
+	interrupts := submitSequenceInterrupts(submitKeys)
+	if guardTurn && interrupts {
+		if err := t.awaitIdleComposerBeforeTyping(session, target, submitKeys); err != nil {
+			return err
+		}
+	}
+
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
 	prompt := &nudgePromptGuard{session: session, target: target, look: noPendingPrompt}
 	if err := prompt.check(); err != nil {
+		if noPendingPrompt != nil && t.shadowing() {
+			t.shadowTypingGateNow(session, err)
+		}
 		return err
 	}
 
@@ -3160,7 +3623,7 @@ func (t *Tmux) nudgeSession(
 	// peek, so a mid-turn session costs one capture-pane and no delay. This
 	// step is best-effort and never aborts the nudge on a peek/dismiss error
 	// (see dismissMidSessionDialogBeforeNudge).
-	if t.dismissMidSessionDialogBeforeNudge(target) {
+	if t.dismissMidSessionDialogBeforeNudge(ctx, target) {
 		// Give the TUI a beat to retire the dialog before pasting, so the
 		// message lands at the prompt rather than in a closing overlay.
 		time.Sleep(midSessionDialogSettleDelay)
@@ -3181,8 +3644,13 @@ func (t *Tmux) nudgeSession(
 	// tell: a human may be mid-keystroke, and silently wiping their
 	// in-progress input is worse than the concatenation this clear otherwise
 	// prevents (#5192).
+	//
+	// Every key of the clear is preceded by a look for a permission prompt
+	// or question dialog: one that opened since the look above owns the
+	// pane's input, and a Ctrl-U meant for the input box would reach it
+	// (#8150).
 	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
-		if err := t.clearInputBeforePaste(session, target); err != nil {
+		if err := t.clearInputBeforePaste(ctx, session, target, prompt.check); err != nil {
 			return err
 		}
 	}
@@ -3192,17 +3660,38 @@ func (t *Tmux) nudgeSession(
 	// busy indicator, composer prefix still matches), so this cannot be
 	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
 	// is in Provider.Nudge -- it must run unconditionally, here.
-	if err := t.dismissFeedbackSurveyModalIn(session, target); err != nil {
+	if err := t.dismissFeedbackSurveyModalIn(ctx, session, target); err != nil {
 		return fmt.Errorf("dismissing feedback survey before nudge: %w", err)
 	}
 
 	// 2. Send text in literal mode with retry on transient errors, after a
 	// last look for a permission prompt: the clear and the survey check above
 	// take time, and a paste into a prompt is read as menu input.
-	if err := prompt.check(); err != nil {
-		return err
+	//
+	// Under the shadow switch, the program's record is read once, just
+	// before that last look so the read never widens the gap between the
+	// look and the paste: it is the typing gate's comparison and the
+	// baseline the delivery is confirmed against.
+	var shadowReading runtime.ProgramStatus
+	shadowReadOK := false
+	if t.shadowing() {
+		shadowReading, shadowReadOK = t.shadowRead(session)
 	}
-	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
+	lookErr := prompt.check()
+	shadowBase, shadowed := runtime.ProgramBaseline{}, false
+	if shadowReadOK {
+		if noPendingPrompt != nil {
+			t.shadowTypingGate(session, lookErr, shadowReading)
+		}
+		shadowBase, shadowed = shadowReading.Baseline(), lookErr == nil
+	}
+	if lookErr != nil {
+		return lookErr
+	}
+	// The provider's own record of this delivery is read from here on (see
+	// unobservedSubmitVerdict).
+	typedAt := time.Now()
+	if err := sendText(ctx, target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
@@ -3216,7 +3705,7 @@ func (t *Tmux) nudgeSession(
 	// must not synthesize it for them.
 	if shouldSendEscape(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
-		_, _ = t.run("send-keys", "-t", paneTarget(target), "Escape")
+		_, _ = t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "Escape")
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -3235,33 +3724,78 @@ func (t *Tmux) nudgeSession(
 	// with a known staged-draft marker get a slower, bounded recovery
 	// (recoverStagedDraft). Providers without a reliable indicator keep
 	// best-effort delivery.
-	submitKeys := submitKeySequence(target)
-	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
-	// Escape is only safe to repeat while the pane is still idle. If the first
-	// attempt actually submitted and the pane went busy, a re-sent Escape is an
-	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
-	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
-	// re-checks busy before every re-send, which is why the verified path is safe
-	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
-	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
-	// only for single-key (plain Enter) sequences, which is what every family
-	// without a table entry has. Adding a multi-key entry for a family that is
-	// not submit-verify eligible would need that gap closed first.
+	//
+	// RE-SEND HAZARD: a submit sequence that leads with Escape is safe to
+	// repeat only while the message still waits in an idle composer. If the
+	// first attempt submitted, a re-sent Escape is an INTERRUPT for the very
+	// TUIs that need the Escape (codex reads it as cancel), and it kills the
+	// turn it just started. The pane's busy row is not enough to tell: a
+	// Codex turn can run for seconds before it draws one (its
+	// UserPromptSubmit hook runs first, and a contended host draws late), and
+	// an Escape in that window aborts the turn before Codex records the
+	// message (healthy-direct, 2026-10-15: turn_aborted 1609 ms in, the
+	// marker never recorded, the submit reported delivered). So the verified
+	// path sends an interrupting sequence again only when a look right before
+	// the send shows the message still in an idle composer (mayResend below,
+	// see submitAndConfirm). The best-effort fallback below and NudgePane's
+	// retry loop do NOT look; they are safe only for single-key (plain Enter)
+	// sequences, which is what every family without a table entry has. Adding
+	// a multi-key entry for a family that is not submit-verify eligible would
+	// need that gap closed first.
 	//
 	// Every submit is preceded by a look for a permission prompt: Enter on
 	// one picks its highlighted option (see nudgePromptGuard.refused).
 	sendSubmit := func() error {
-		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(target, submitKeys) })
+		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(ctx, target, submitKeys) })
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
-		confirmed, sawIdle, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		busy := func() (bool, error) { return t.paneBusy(target) }
+		var mayResend func() (bool, error)
+		if interrupts {
+			// An interrupting submit is held and sent on the live screen's
+			// turn state alone (turnRunning), so a stale busy row in the
+			// scrollback cannot hold it back for good.
+			family := t.nudgeSubmitFamily(target)
+			busy = func() (bool, error) { return t.turnRunning(target, family) }
+			mayResend = func() (bool, error) { return t.submitStillWaiting(target, family) }
+			if shadowed {
+				mayResend = t.shadowResendLook(session, shadowBase, mayResend)
+			}
+		}
+		confirmed, sawIdle, sent, err := submitAndConfirm(sendSubmit, wake, busy, mayResend, time.Sleep)
+		if shadowed && err == nil && sent > 0 {
+			verdict := runtime.ProgramVerdictUnconfirmed
+			if confirmed {
+				verdict = runtime.ProgramVerdictConfirmed
+			}
+			t.shadowSubmit(session, shadowBase, verdict, time.Now())
+		}
 		if isLookRefusal(err) {
 			delivered = prompt.submitsSent > 0
 			return prompt.refused(err)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
+		}
+		if sent == 0 {
+			// Every round found a turn running (or no message waiting), so the
+			// interrupting submit was never sent: the message sits typed in
+			// the composer, undelivered. It is gc's own draft, so it is
+			// cleared even with a client attached, and the nudge is then
+			// deferred like one that typed nothing (runtime.ErrSessionBusy):
+			// a deferring caller queues it, and the startup ladder re-runs it.
+			// A draft that will not clear is still typed, so that nudge is
+			// neither a deferral nor a submit in doubt (errNudgeSubmitHeld).
+			// The clear's error is kept in the text only: a sentinel it
+			// carries (a permission prompt, a pane gone) would tell a caller
+			// that nothing was typed.
+			if err := t.clearHeldDraft(ctx, target, prompt.check); err != nil {
+				return fmt.Errorf("%w: session %q: a turn held its submit keys (%s) back, and clearing the typed message failed: %s",
+					errNudgeSubmitHeld, session, strings.Join(submitKeys, " "), err.Error())
+			}
+			return fmt.Errorf("%w: session %q: a turn was running when the message was ready to submit, so its submit keys (%s) were held back and the typed message was cleared",
+				runtime.ErrSessionBusy, session, strings.Join(submitKeys, " "))
 		}
 		delivered = true
 		if !confirmed {
@@ -3281,7 +3815,7 @@ func (t *Tmux) nudgeSession(
 					case stagedDraftSubmittedBusy:
 						return nil
 					case stagedDraftCleared:
-						return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+						return t.unobservedSubmitVerdict(session, typedAt, message)
 					}
 					// stagedDraftUnresolved falls through to the handling below.
 				}
@@ -3301,7 +3835,7 @@ func (t *Tmux) nudgeSession(
 			// only the busy-state OBSERVATION missed it — so that case must be
 			// reported as proven delivery, not requeued as a failure.
 			if lines, capErr := t.captureInputLines(target); capErr == nil && paneShowsDrainedComposer(lines) {
-				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+				return t.unobservedSubmitVerdict(session, typedAt, message)
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
@@ -3334,6 +3868,9 @@ func (t *Tmux) nudgeSession(
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
+		if shadowed {
+			t.shadowSubmit(session, shadowBase, runtime.ProgramVerdictNone, time.Now())
+		}
 		t.recordUnconfirmedSubmit(session, message)
 		return nil
 	}
@@ -3386,7 +3923,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	}()
 
 	// 1. Send text in literal mode with retry on transient errors
-	if err := t.sendKeysLiteralWithRetry(pane, message, t.cfg.NudgeReadyTimeout); err != nil {
+	if err := t.sendKeysLiteralWithRetry(context.Background(), pane, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
@@ -3411,7 +3948,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		if err := t.sendNudgeSubmitSequence(pane, submitKeys); err != nil {
+		if err := t.sendNudgeSubmitSequence(context.Background(), pane, submitKeys); err != nil {
 			lastErr = err
 			continue
 		}
@@ -3465,10 +4002,15 @@ func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bo
 	if err != nil || strings.TrimSpace(pid) == "" {
 		return false
 	}
-	if processMatchesNames(pid, providers) {
-		return true
+	names := proctable.ProcessNameSet(providers)
+	if len(names) == 0 {
+		return false
 	}
-	return hasDescendantWithNames(pid, providers, 0)
+	processes, err := t.readPaneProcesses(pid)
+	if err != nil {
+		return false
+	}
+	return paneRuntimeState{PID: pid}.processAlive(names, processes)
 }
 
 // AcceptStartupDialogs dismisses all Claude Code startup dialogs that can block
@@ -3500,7 +4042,7 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 		func(lines int) (string, error) { return t.CapturePane(target, lines) },
 		func(keys ...string) error {
 			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", target, k); err != nil {
+				if _, err := t.runCtx(ctx, "send-keys", "-t", target, k); err != nil {
 					return err
 				}
 			}
@@ -3553,13 +4095,13 @@ const midSessionDialogSettleDelay = 500 * time.Millisecond
 // identical errors.
 //
 // target is the nudge's resolved agent pane (agentInputTarget).
-func (t *Tmux) dismissMidSessionDialogBeforeNudge(target string) bool {
+func (t *Tmux) dismissMidSessionDialogBeforeNudge(ctx context.Context, target string) bool {
 	dismissed, err := runtime.DismissMidSessionDialogs(
 		context.Background(),
 		func() (string, error) { return t.CaptureVisiblePane(target) },
 		func(keys ...string) error {
 			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", paneTarget(target), k); err != nil {
+				if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), k); err != nil {
 					return err
 				}
 			}
@@ -3581,6 +4123,12 @@ func (t *Tmux) dismissMidSessionDialogBeforeNudge(target string) bool {
 // runtime.DismissMidSessionDialogs (see midSessionDialogs) via
 // dismissMidSessionDialogBeforeNudge.
 func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
+	t.dismissModelSwitchModalIfPresentCtx(context.Background(), session)
+}
+
+// dismissModelSwitchModalIfPresentCtx is DismissModelSwitchModalIfPresent
+// under ctx (and a fenced operation's guard).
+func (t *Tmux) dismissModelSwitchModalIfPresentCtx(ctx context.Context, session string) {
 	target, err := t.agentInputTarget(session)
 	if err != nil {
 		return
@@ -3592,7 +4140,7 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	_, _ = dismissModelSwitchModal(content,
 		func(keys ...string) error {
 			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", paneTarget(target), k); err != nil {
+				if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), k); err != nil {
 					return err
 				}
 			}
@@ -3711,15 +4259,15 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	if err != nil {
 		return nil
 	}
-	return t.dismissFeedbackSurveyModalIn(session, target)
+	return t.dismissFeedbackSurveyModalIn(context.Background(), session, target)
 }
 
 // dismissFeedbackSurveyModalIn is DismissFeedbackSurveyModalIfPresent for
 // session's already-resolved agent pane target.
-func (t *Tmux) dismissFeedbackSurveyModalIn(session, target string) error {
+func (t *Tmux) dismissFeedbackSurveyModalIn(ctx context.Context, session, target string) error {
 	sendKeys := func(keys ...string) error {
 		for _, k := range keys {
-			if _, err := t.run("send-keys", "-t", paneTarget(target), k); err != nil {
+			if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), k); err != nil {
 				return err
 			}
 		}
@@ -3766,7 +4314,9 @@ func (t *Tmux) GetPaneCommand(session string) (string, error) {
 // IsRuntimeRunning) for agents started via shell wrappers, then the first
 // pane. One list-panes call, plus a show-environment for process names in
 // unmarked multi-pane sessions only. Pane ids and explicit targets pass
-// through.
+// through. Every row ends in runtimeInventoryEnd so the executor's trim cannot
+// eat the empty #{pane_pid} that tmux 3.8 prints for a dead pane kept by
+// remain-on-exit; a row without the terminator is truncated and rejected.
 func (t *Tmux) agentInputTarget(session string) (string, error) {
 	if !validSessionNameRe.MatchString(session) {
 		return session, nil
@@ -3774,7 +4324,7 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	// List all panes across all windows (-s). Without -s, list-panes only
 	// shows the active window's panes, missing agent panes in other windows.
 	out, err := t.run("list-panes", "-s", "-t", paneTarget(session), "-F",
-		agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
+		agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t"+runtimeInventoryEnd)
 	if err != nil {
 		return "", err
 	}
@@ -3784,8 +4334,9 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	}
 	type row struct{ target, cmd, pid string }
 	parse := func(fields string) (row, bool) {
-		parts := strings.SplitN(fields, "\t", 3)
-		if len(parts) < 3 || !strings.HasPrefix(parts[0], "@") || !strings.Contains(parts[0], ".%") {
+		parts := strings.SplitN(fields, "\t", 4)
+		if len(parts) < 4 || parts[3] != runtimeInventoryEnd ||
+			!strings.HasPrefix(parts[0], "@") || !strings.Contains(parts[0], ".%") {
 			return row{}, false
 		}
 		return row{target: paneTarget(session) + parts[0], cmd: parts[1], pid: parts[2]}, true
@@ -3805,32 +4356,42 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	}
 
 	// Get agent process names from session environment
-	processNames := t.resolveSessionProcessNames(session)
-
-	// Check each pane for agent process
+	names := proctable.ProcessNameSet(t.resolveSessionProcessNames(session))
+	if len(names) == 0 {
+		return first.target, nil
+	}
+	// Each pane is judged as IsRuntimeRunning judges it: a direct
+	// pane_current_command match, the pane process itself
+	// (version-as-argv[0], e.g. "2.1.30"), then its descendants (agents
+	// under shells or wrapper roots such as systemd-run or the gc-osc7501
+	// relay, which stay pane_current_command). A pane without a direct match
+	// is judged by its own subtree; where that read fails, by one
+	// process-table snapshot, taken at the first such pane and serving every
+	// pane after it, so a direct match reads no process table. Without
+	// either (a failed read leaves the snapshot empty) only a direct match
+	// can pick a pane.
+	var (
+		full     processSnapshot
+		fullRead bool
+	)
 	for _, line := range lines {
 		_, fields, _ := strings.Cut(line, "\t")
 		r, ok := parse(fields)
 		if !ok {
 			continue
 		}
-		// Direct command match
-		for _, name := range processNames {
-			if r.cmd == name {
-				return r.target, nil
-			}
-		}
-
-		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
-		if processMatchesNames(r.pid, processNames) {
+		if _, direct := names[r.cmd]; direct {
 			return r.target, nil
 		}
-
-		// Descendant walk: agents under shells ("bash -c 'exec claude'")
-		// or wrapper roots (systemd-run when GC_AGENT_SLICE is set) keep
-		// the shell/wrapper as pane_current_command — same unconditional
-		// descendant fallback as IsRuntimeRunning.
-		if hasDescendantWithNames(r.pid, processNames, 0) {
+		processes, err := t.paneSubtree(r.pid)
+		if err != nil {
+			if !fullRead {
+				full, _ = t.readProcessSnapshot()
+				fullRead = true
+			}
+			processes = full
+		}
+		if (paneRuntimeState{Command: r.cmd, PID: r.pid}).processAlive(names, processes) {
 			return r.target, nil
 		}
 	}
@@ -3921,6 +4482,11 @@ func (t *Tmux) readAgentPane(run func(...string) (string, error), target, format
 	return fields, nil
 }
 
+// readAgentPaneCtx is readAgentPane under ctx.
+func (t *Tmux) readAgentPaneCtx(ctx context.Context, target, format string) (string, error) {
+	return t.readAgentPane(func(args ...string) (string, error) { return t.runCtxRaw(ctx, args...) }, target, format)
+}
+
 // pickAgentPaneRow is [runtime.PickTmuxAgentPaneRow].
 func pickAgentPaneRow(out string) (string, error) { return runtime.PickTmuxAgentPaneRow(out) }
 
@@ -3991,6 +4557,12 @@ func parsePaneProcessState(output, target string) (paneProcessState, error) {
 		return paneProcessState{}, fmt.Errorf("%w for target %s", errEmptyPaneProcessState, target)
 	}
 	fields := strings.Fields(output)
+	// tmux 3.8 prints an empty #{pane_pid} for a dead pane, so the observation
+	// is "\t1" (session targets, after the marker column is cut) or "1" (pane
+	// targets, trimmed by the executor): a lone "1" is a dead pane with no PID.
+	if len(fields) == 1 && fields[0] == "1" {
+		return paneProcessState{Dead: true}, nil
+	}
 	if len(fields) != 2 {
 		return paneProcessState{}, fmt.Errorf("unexpected pane process state %q for target %s", output, target)
 	}
@@ -4153,7 +4725,7 @@ func (t *Tmux) rawSessionActivity(session string) (time.Time, error) {
 		return time.Time{}, err
 	}
 
-	timestamp, err := latestActivityTimestamp(out)
+	timestamp, err := runtime.LatestTmuxWindowActivity(out)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -4217,60 +4789,18 @@ func (t *Tmux) pokePrior(session string) time.Time {
 }
 
 // discountPokeActivity resolves the genuine activity time from the raw tmux
-// window activity (wa), the last recorded gc poke (pk) and the current time.
-//
-// If wa is only the poke's own keystroke echo (within pokeEcho of the poke) AND
-// the grace window has elapsed with no later agent output, it returns the
-// activity seen before the poke — revealing that the agent never actually
-// responded. Otherwise wa stands (a real post-poke turn, or a still-in-grace
-// recent poke). Pure function for testability.
+// window activity (wa), the last recorded gc poke (pk) and the current time:
+// the discount shared with the providers that drive tmux in a box
+// ([runtime.DiscountPokeActivity]).
 func discountPokeActivity(wa time.Time, pk pokeInfo, now time.Time) time.Time {
-	if pk.at.IsZero() || pk.prior.IsZero() {
-		return wa
-	}
-	echoOnly := wa.Sub(pk.at).Abs() <= pokeEcho
-	graceElapsed := now.Sub(pk.at) >= pokeGrace
-	if echoOnly && graceElapsed {
-		return pk.prior
-	}
-	return wa
+	return runtime.DiscountPokeActivity(wa, pk.poke(), now)
 }
 
 // pokePriorBaseline selects the genuine activity to record as a new poke's
-// prior. When an earlier poke is still on record and the current raw window
-// activity is only that poke's own echo (raw within pokeEcho of the earlier
-// poke, i.e. no genuine agent output since), the last genuine activity is the
-// earlier poke's prior, so it is carried forward. This stops chained unanswered
-// nudges inside pokeGrace from recording gc's own earlier nudge echo as the new
-// baseline — which discountPokeActivity would otherwise later surface as
-// last_active, masking a stalled agent. Otherwise the freshly observed raw
-// activity is genuine and becomes the new prior. Pure function for testability.
+// prior, carrying an unanswered earlier poke's baseline forward
+// ([runtime.PokePriorBaseline]).
 func pokePriorBaseline(raw time.Time, pk pokeInfo, hasPoke bool) time.Time {
-	if hasPoke && !pk.at.IsZero() && !pk.prior.IsZero() && raw.Sub(pk.at).Abs() <= pokeEcho {
-		return pk.prior
-	}
-	return raw
-}
-
-func latestActivityTimestamp(out string) (int64, error) {
-	var latest int64
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		timestamp, err := strconv.ParseInt(line, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("parsing window activity %q: %w", line, err)
-		}
-		if timestamp > latest {
-			latest = timestamp
-		}
-	}
-	if latest == 0 {
-		return 0, fmt.Errorf("parsing window activity: no timestamps found")
-	}
-	return latest, nil
+	return runtime.PokePriorBaseline(raw, pk.poke(), hasPoke)
 }
 
 // ZombieStatus describes the liveness state of a tmux agent session.
@@ -4347,61 +4877,67 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 	return SessionHealthy
 }
 
-// processMatchesNames checks if a process's binary name matches any of the given names.
-// Uses ps to get the actual command name from the process's executable path.
-// This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
-func processMatchesNames(pid string, names []string) bool {
-	nameSet := proctable.ProcessNameSet(names)
-	if len(nameSet) == 0 {
-		return false
-	}
-
-	// Use ps to get the command name (COMM column gives the executable name)
-	cmd := exec.Command("ps", "-p", pid, "-o", "comm=")
-	out, err := cmd.Output()
+// readProcessSnapshot takes one process-table snapshot under the state
+// cache's fetch bound. procps reads the whole process table for every ps or
+// pgrep it runs, so a one-shot pane probe that cannot read the pane's own
+// subtree (readPaneProcesses) judges the whole process tree against a single
+// snapshot walked in memory rather than forking a ps per descendant: under a
+// wrapper root (the gc-osc7501 relay -> sudo -> bwrap -> claude) that walk
+// cost 17 full reads per look, seconds on a busy host.
+//
+// The bound can fail a read the per-process walk would have finished: under
+// fleet load the full-OS scan runs past fetchTimeout, and execenv.Environ
+// first waits out any native store open that holds the environment lock. A
+// failure is logged, rate-limited (processSnapshotFailureLog).
+func (t *Tmux) readProcessSnapshot() (processSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	processes, err := fetchProcessSnapshot(ctx)
 	if err != nil {
-		return false
+		t.snapshotFailures.note("process snapshot failed; until one succeeds, pane probes cannot verify an agent that is not its pane's own command", err)
 	}
-	commPath := strings.TrimSpace(string(out))
-
-	// Fall back to argv[0] from the full command line. This catches wrapper
-	// scripts launched as "/path/to/codex" where COMM may report "bash" or
-	// another interpreter instead of the provider name.
-	cmd = exec.Command("ps", "-p", pid, "-o", "args=")
-	out, err = cmd.Output()
-	if err != nil {
-		return false
-	}
-	return proctable.ProcessMatchesNameSet(commPath, string(out), nameSet)
+	return processes, err
 }
 
-// hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
-// matching any of the given names. Recursively traverses the process tree up to maxDepth.
-// Used when the pane command is a shell (bash, zsh) that launched an agent.
-func hasDescendantWithNames(pid string, names []string, depth int) bool {
-	if len(names) == 0 || depth > maxProcessDescendantDepth {
-		return false
+// processSnapshotFailureLogEvery bounds a processSnapshotFailureLog to one
+// line per interval: a start's command wait looks every pollInterval, and on
+// a saturated host every look fails.
+const processSnapshotFailureLogEvery = time.Minute
+
+// processSnapshotFailureLog rate-limits the failure log of one process read
+// the pane probes take: the full snapshot (readProcessSnapshot) or the pane's
+// subtree (paneSubtree).
+type processSnapshotFailureLog struct {
+	mu         sync.Mutex
+	at         time.Time // last failure logged
+	suppressed int       // failures since at, not logged
+	// logf writes the log line. Nil selects log.Printf.
+	logf func(format string, args ...any)
+}
+
+// note logs a failed read, what saying which and what it costs, at most once
+// per processSnapshotFailureLogEvery, counting the failures it skips toward
+// the next line.
+func (l *processSnapshotFailureLog) note(what string, err error) {
+	l.mu.Lock()
+	now, since, suppressed := time.Now(), l.at, l.suppressed
+	if !since.IsZero() && now.Sub(since) < processSnapshotFailureLogEvery {
+		l.suppressed++
+		l.mu.Unlock()
+		return
 	}
-	// Use pgrep to find child processes.
-	cmd := exec.Command("pgrep", "-P", pid)
-	out, err := cmd.Output()
-	if err != nil {
-		return false
+	l.at, l.suppressed = now, 0
+	logf := l.logf
+	l.mu.Unlock()
+
+	if logf == nil {
+		logf = log.Printf
 	}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		childPid := strings.TrimSpace(line)
-		if childPid == "" {
-			continue
-		}
-		if processMatchesNames(childPid, names) {
-			return true
-		}
-		if hasDescendantWithNames(childPid, names, depth+1) {
-			return true
-		}
+	var unlogged string
+	if suppressed > 0 {
+		unlogged = fmt.Sprintf(" (%d more failures since %s)", suppressed, since.Format(time.RFC3339))
 	}
-	return false
+	logf("tmux: %s: %v%s", what, err, unlogged)
 }
 
 // FindSessionByWorkDir finds tmux sessions where the pane's current working directory
@@ -4575,7 +5111,12 @@ func (t *Tmux) GetEnvironment(session, key string) (string, error) {
 
 // GetAllEnvironment returns all environment variables for a session.
 func (t *Tmux) GetAllEnvironment(session string) (map[string]string, error) {
-	out, err := t.run("show-environment", "-t", sessionTarget(session))
+	return t.getAllEnvironmentCtx(context.Background(), session)
+}
+
+// getAllEnvironmentCtx is GetAllEnvironment under ctx.
+func (t *Tmux) getAllEnvironmentCtx(ctx context.Context, session string) (map[string]string, error) {
+	out, err := t.runCtxRaw(ctx, "show-environment", "-t", sessionTarget(session))
 	if err != nil {
 		return nil, err
 	}
@@ -4683,18 +5224,30 @@ func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bo
 // IsRuntimeRunning checks if a runtime appears to be running in the session.
 // Checks both pane command and child processes (for agents started via shell).
 // This is the unified agent detection method for all agent types.
+//
+// When the process table cannot be read it reports true, as the state cache's
+// processAlive does: the agent is unverified, not dead, and a failed probe
+// must never get a live agent reaped. A caller that needs the agent seen, or
+// must tell the two apart, uses runtimeRunning.
 func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
+	running, err := t.runtimeRunning(session, processNames)
+	return running || err != nil
+}
+
+// runtimeRunning is IsRuntimeRunning reporting a process table it cannot read
+// as an error wrapping runtime.ErrRuntimeUnavailable rather than as an answer.
+func (t *Tmux) runtimeRunning(session string, processNames []string) (bool, error) {
 	if len(processNames) == 0 {
-		return false
+		return false, nil
 	}
 	cmd, err := t.GetPaneCommand(session)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	// Check direct pane command match
 	for _, name := range processNames {
 		if cmd == name {
-			return true
+			return true, nil
 		}
 	}
 	// Check for child processes if pane command is a shell or unrecognized.
@@ -4703,28 +5256,24 @@ func (t *Tmux) IsRuntimeRunning(session string, processNames []string) bool {
 	// - Claude Code showing version as argv[0] (e.g., "2.1.29")
 	pid, err := t.GetPanePID(session)
 	if err != nil || pid == "" {
-		return false
+		return false, nil
 	}
-	// If pane command is a shell, check descendants
-	for _, shell := range supportedShells {
-		if cmd == shell {
-			return hasDescendantWithNames(pid, processNames, 0)
-		}
+	// Judge the pane as the state cache does (paneRuntimeState.processAlive):
+	// a shell's descendants; otherwise the process itself, then its
+	// descendants. They are read from the pane's own subtree, so a failing
+	// full snapshot does not blind the probe (readPaneProcesses).
+	processes, err := t.readPaneProcesses(pid)
+	if err != nil {
+		return false, fmt.Errorf("%w: reading the process table: %w", runtime.ErrRuntimeUnavailable, err)
 	}
-	// If pane command is unrecognized (not in processNames, not a shell),
-	// check if the process ITSELF matches (handles version-as-argv[0] like "2.1.30")
-	// before checking descendants.
-	if processMatchesNames(pid, processNames) {
-		return true
-	}
-	// Finally check descendants as fallback
-	return hasDescendantWithNames(pid, processNames, 0)
+	return paneRuntimeState{Command: cmd, PID: pid}.processAlive(proctable.ProcessNameSet(processNames), processes), nil
 }
 
 // IsAgentAlive checks if an agent is running in the session using agent-agnostic detection.
 // It reads GT_PROCESS_NAMES from the session environment for accurate process detection,
 // falling back to GT_AGENT-based lookup for legacy sessions.
-// This is the preferred method for zombie detection across all agent types.
+// This is the preferred method for zombie detection across all agent types: an
+// agent whose process table cannot be read is alive to it (see IsRuntimeRunning).
 func (t *Tmux) IsAgentAlive(session string) bool {
 	return t.IsRuntimeRunning(session, t.resolveSessionProcessNames(session))
 }
@@ -4757,7 +5306,9 @@ func (t *Tmux) resolveSessionProcessNames(session string) []string {
 // (e.g., "bash") or a wrapper root, the agent may be running as a descendant
 // process (e.g., "bash -c 'exec claude'", or systemd-run's scope child). In
 // these cases pane_current_command never changes, but IsAgentAlive detects
-// the descendant.
+// the descendant. Unlike IsAgentAlive, the fallback needs the agent seen: a
+// process table it cannot read shows no agent yet, and the next look reads
+// it again.
 func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeCommands []string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -4790,8 +5341,9 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 		}
 		// Fallback: the pane command is still a shell or a wrapper root;
 		// check whether the agent is running as a descendant (handles
-		// bash-wrapped agents and systemd-run scope children).
-		if t.IsAgentAlive(session) {
+		// bash-wrapped agents and systemd-run scope children). An unread
+		// process table (logged by readProcessSnapshot) is "not yet".
+		if alive, _ := t.runtimeRunning(session, t.resolveSessionProcessNames(session)); alive {
 			return nil
 		}
 		select {
@@ -5033,6 +5585,16 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 	if err != nil {
 		return false, err
 	}
+	return ClassifyIdlePane(lines, promptPrefix)
+}
+
+// ClassifyIdlePane classifies captured pane lines the way every pane-scanning
+// idle check does: a busy-indicator string anywhere in lines is the busy
+// reading, (false, nil); a ready prompt (PaneShowsIdlePrompt) is idle,
+// (true, nil); anything else returns [runtime.ErrIdleIndeterminate], since a
+// pane showing neither is not evidence of work. The tmux idle wait and its
+// exec twin both classify each capture through it.
+func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
 	if paneContainsBusyIndicator(lines) {
 		return false, nil
 	}
@@ -5068,6 +5630,13 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 		return false
 	}
 
+	// An open AskUserQuestion dialog is no idle boundary either: its focused
+	// row ("❯ 1. …") matches the ready prefix, and the nudge's Enter would
+	// select that option.
+	if parseQuestionDialog(lines) != nil {
+		return false
+	}
+
 	// Scan captured lines for the prompt prefix.
 	// Claude Code renders a status bar below the prompt line,
 	// so the prompt may not be the last non-empty line.
@@ -5087,11 +5656,28 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 // boundary right now — a ready prompt with no active-processing indicator — in
 // a single non-blocking observation. It implements
 // [runtime.IdleSnapshotProvider]: (false, nil) means the capture contains a
-// busy-indicator string (see snapshotPaneIdleWithPrefix), and a pane showing
-// neither that nor the ready prompt returns [runtime.ErrIdleIndeterminate]. A
-// session that has gone away is reported as an error, not as idle.
+// busy-indicator string (see snapshotPaneIdleWithPrefix) and the session's
+// provider family is one whose busy reading this leaf trusts
+// (busyReadingTrusted). The same capture for any other family, and a pane
+// showing neither an indicator string nor the ready prompt, returns
+// [runtime.ErrIdleIndeterminate]; a busy capture whose family cannot be read
+// (busyTrustFamily) is an error, as a failed capture is. A session that has
+// gone away is reported as an error, not as idle.
 func (t *Tmux) SnapshotIdle(session string) (bool, error) {
-	return t.snapshotPaneIdle(session)
+	idle, err := t.snapshotPaneIdle(session)
+	if err != nil || idle {
+		return idle, err
+	}
+	// The family resolves only on a busy reading.
+	family, err := t.busyTrustFamily(session)
+	if err != nil {
+		return false, fmt.Errorf("session %q shows a busy indicator: %w", session, err)
+	}
+	if !busyReadingTrusted(family) {
+		return false, fmt.Errorf("session %q shows a busy indicator its provider family's scan cannot vouch for: %w",
+			session, runtime.ErrIdleIndeterminate)
+	}
+	return false, nil
 }
 
 // WaitForIdle polls until the agent appears to be at an idle prompt.
@@ -5104,13 +5690,31 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 //  2. Requires IdleRequiredObservations consecutive idle polls before
 //     confirming idle state.
 //
-// Returns nil if the agent becomes idle within the timeout.
-// Returns an error if the timeout expires while the agent is still busy.
+// Returns nil if the agent becomes idle within the timeout. At the timeout it
+// returns ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well unless
+// a reading showed the session busy.
 //
 // Its twin is the exec provider's waitForPaneIdle loop
 // (internal/runtime/exec/idle.go), which runs the same check over the exec
 // connection; change the two together.
+//
+// With the program-status switch at shadow, the wait's outcome is recorded
+// beside the program's own record (shadowIdleWait), on a reading taken after
+// it is decided and before it returns, unless ctx carries
+// [runtime.WithShadowCallerRecords]; the outcome returned is the scan's
+// alone.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	if !t.shadowing() {
+		return t.waitForIdle(ctx, session, timeout)
+	}
+	started := time.Now()
+	err := t.waitForIdle(ctx, session, timeout)
+	t.shadowIdleWait(ctx, session, started, time.Now(), err)
+	return err
+}
+
+// waitForIdle is WaitForIdle's scan.
+func (t *Tmux) waitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
 	// and re-reading it per tick would add a tmux show-environment exec to
 	// every 200ms poll.
@@ -5124,6 +5728,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	}
 
 	consecutiveIdle := 0
+	sawBusy := false
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -5151,12 +5756,23 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 			}
 		} else {
 			consecutiveIdle = 0
+			sawBusy = true
 		}
 		if err := waitForIdlePoll(ctx); err != nil {
 			return err
 		}
 	}
-	return ErrIdleTimeout
+	return idleTimeout(sawBusy)
+}
+
+// idleTimeout is the error an idle or interrupt-boundary wait returns at its
+// deadline: ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well when
+// no reading showed the session busy.
+func idleTimeout(sawBusy bool) error {
+	if sawBusy {
+		return ErrIdleTimeout
+	}
+	return fmt.Errorf("%w: %w", ErrIdleTimeout, runtime.ErrWaitUnobserved)
 }
 
 func waitForIdlePoll(ctx context.Context) error {
@@ -5170,9 +5786,37 @@ func waitForIdlePoll(ctx context.Context) error {
 	}
 }
 
-// WaitForInterruptBoundary waits for a provider-native interrupt
-// acknowledgement before the next user turn is injected.
+// WaitForInterruptBoundary waits, before the next user turn is injected,
+// until the turn an interrupt sent at since was stopping has ended. For Codex
+// that is the session's own rollout recording no running turn
+// (waitForCodexInterruptBoundary), which a session interrupted between turns
+// does at once.
+//
+// With the program-status switch at shadow, a wait that ran is recorded as
+// the interrupt's settle beside the program's own record (shadowSettleWait),
+// on a reading taken before it returns; the outcome returned is the
+// rollout's alone.
 func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
+	if !t.shadowing() {
+		return t.waitForInterruptBoundary(ctx, session, since, timeout)
+	}
+	mark, marked := t.takeShadowInterrupt(session, time.Now())
+	if !marked {
+		// No interrupt of gc's own was noted (a soft Escape interrupt sends
+		// keys, not Interrupt): the position now stands in for it.
+		if s, ok := t.shadowRead(session); ok {
+			mark, marked = shadowInterrupt{baseline: s.Baseline(), at: since}, true
+		}
+	}
+	err := t.waitForInterruptBoundary(ctx, session, since, timeout)
+	if marked && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.shadowSettleWait(session, mark, time.Now(), err)
+	}
+	return err
+}
+
+// waitForInterruptBoundary is WaitForInterruptBoundary's rollout wait.
+func (t *Tmux) waitForInterruptBoundary(ctx context.Context, session string, since time.Time, timeout time.Duration) error {
 	provider, _ := t.GetEnvironment(session, "GC_PROVIDER")
 	switch strings.TrimSpace(provider) {
 	case "", "codex":
@@ -5184,26 +5828,43 @@ func (t *Tmux) WaitForInterruptBoundary(ctx context.Context, session string, sin
 	if strings.TrimSpace(provider) == "" && !t.targetLooksLikeProvider(session, "codex") {
 		return runtime.ErrInteractionUnsupported
 	}
-	codexHome, err := t.GetEnvironment(session, "CODEX_HOME")
-	if err != nil {
+	// The boundary is read from the rollout the session's own Codex holds
+	// open (see codexRolloutOf), never the newest rollout under a home that
+	// other sessions share. A session whose rollout cannot be named has no
+	// boundary to wait for, as before when it had no CODEX_HOME.
+	rollout := t.codexRolloutOf(session)
+	if rollout == "" {
 		return runtime.ErrInteractionUnsupported
 	}
-	codexHome = strings.TrimSpace(codexHome)
-	if codexHome == "" {
-		return runtime.ErrInteractionUnsupported
-	}
-	return waitForCodexInterruptBoundary(ctx, codexHome, since, timeout)
+	return waitForCodexInterruptBoundary(ctx, rollout, since, timeout)
 }
 
-func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since time.Time, timeout time.Duration) error {
+// waitForCodexInterruptBoundary waits until the Codex rollout at path records
+// no running turn (codexRolloutTurnState reads idle): the interrupted turn
+// ended, whether the interrupt aborted it or it completed before the interrupt
+// landed. Codex records nothing when an interrupt reaches it between turns, so
+// a session that was running no turn reads that way at once and the wait
+// returns at once. Where the rollout cannot tell (it records no lifecycle
+// event, ends in a torn row, or its latest turn start lies beyond the
+// lifecycle scan), the rollout written since since recording the interrupted
+// turn's turn_aborted marker ends the wait. At the timeout it returns
+// ErrIdleTimeout, wrapping [runtime.ErrWaitUnobserved] as well unless a poll
+// read the rollout recording a running turn.
+func waitForCodexInterruptBoundary(ctx context.Context, path string, since time.Time, timeout time.Duration) error {
+	sawRunning := false
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		transcriptPath, modTime, err := latestCodexTranscriptPath(codexHome)
-		if err == nil && !modTime.Before(since) {
-			tail, err := readFileTail(transcriptPath, codexInterruptBoundaryTailBytes)
+		switch codexRolloutTurnState(path) {
+		case codexTurnIdle:
+			return nil
+		case codexTurnRunning:
+			sawRunning = true
+		}
+		if info, err := os.Stat(path); err == nil && !info.ModTime().Before(since) {
+			tail, err := readFileTail(path, codexInterruptBoundaryTailBytes)
 			if err == nil && codexTranscriptTailContainsTurnAborted(tail) {
 				return nil
 			}
@@ -5212,37 +5873,39 @@ func waitForCodexInterruptBoundary(ctx context.Context, codexHome string, since 
 			return err
 		}
 	}
-	return ErrIdleTimeout
+	return idleTimeout(sawRunning)
 }
 
-func latestCodexTranscriptPath(codexHome string) (string, time.Time, error) {
-	root := filepath.Join(codexHome, "sessions")
-	var latestPath string
-	var latestMod time.Time
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() || filepath.Ext(path) != ".jsonl" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if latestPath == "" || info.ModTime().After(latestMod) {
-			latestPath = path
-			latestMod = info.ModTime()
-		}
-		return nil
-	})
-	if latestPath == "" {
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		return "", time.Time{}, os.ErrNotExist
+// codexTurnState is one reading of a Codex rollout's latest turn.
+type codexTurnState int
+
+const (
+	// codexTurnUnknown: the rollout cannot be read, or its activity cannot
+	// be told.
+	codexTurnUnknown codexTurnState = iota
+	// codexTurnIdle: the rollout records its latest turn start as ended.
+	codexTurnIdle
+	// codexTurnRunning: the rollout records a turn start with no end.
+	codexTurnRunning
+)
+
+// codexRolloutTurnState reads the Codex rollout at path the way the
+// session's activity is read (sessionlog.ExtractCodexTailMeta): idle when its
+// latest turn start has ended, running when it has not, and unknown when the
+// rollout cannot be read or its activity cannot be told.
+func codexRolloutTurnState(path string) codexTurnState {
+	meta, err := sessionlog.ExtractCodexTailMeta(path)
+	if err != nil || meta == nil {
+		return codexTurnUnknown
 	}
-	return latestPath, latestMod, nil
+	switch meta.Activity {
+	case "idle":
+		return codexTurnIdle
+	case "in-turn":
+		return codexTurnRunning
+	default:
+		return codexTurnUnknown
+	}
 }
 
 func readFileTail(path string, maxBytes int64) (_ string, err error) {
@@ -5274,6 +5937,11 @@ func readFileTail(path string, maxBytes int64) (_ string, err error) {
 	return string(buf), nil
 }
 
+// codexTranscriptTailContainsTurnAborted reports whether one of the last
+// codexInterruptBoundaryRecentLines rollout rows records an interrupted turn.
+// Codex has recorded it as a <turn_aborted> user message and, since
+// codex-cli 0.162.1, as a <turn_aborted> developer message followed by a
+// turn_aborted event.
 func codexTranscriptTailContainsTurnAborted(tail string) bool {
 	lines := strings.Split(strings.TrimSpace(tail), "\n")
 	seen := 0
@@ -5283,15 +5951,31 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 			continue
 		}
 		seen++
+		if codexRowIsTurnAbortedEvent(line) {
+			return true
+		}
 		if !strings.Contains(line, "<turn_aborted>") {
 			continue
 		}
 		if strings.Contains(line, `"role":"user"`) || strings.Contains(line, `"role": "user"`) ||
+			strings.Contains(line, `"role":"developer"`) || strings.Contains(line, `"role": "developer"`) ||
 			strings.Contains(line, `"type":"user_message"`) || strings.Contains(line, `"type": "user_message"`) {
 			return true
 		}
 	}
 	return false
+}
+
+// codexRowIsTurnAbortedEvent reports whether a rollout row is Codex's
+// turn_aborted event.
+func codexRowIsTurnAbortedEvent(line string) bool {
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	return json.Unmarshal([]byte(line), &row) == nil && row.Type == "event_msg" && row.Payload.Type == "turn_aborted"
 }
 
 // claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
@@ -5603,17 +6287,58 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // (agentPaneTarget), never the active pane: "=name:" would kill whichever pane
 // a human left focused and leave the old agent running.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
+	return t.respawnPaneWithWorkDir(pane, workDir, command, runtime.ProgramStatusArm{})
+}
+
+// respawnPaneWithWorkDir is RespawnPaneWithWorkDir re-arming the pane's
+// program-status capture as arm declares (see program_capture.go). Every
+// respawn runs one list (respawnPaneList): respawn-pane, its marker, then
+// the capture commands. An armed respawn sets a new nonce, unsets the
+// previous incarnation's record and runs pipe-pane -O replacing the previous
+// tap, which reads EOF after its nonce is gone, so its last write cannot
+// land. The previous pipe is never closed ahead of the respawn: pipe-pane
+// fails on an exited pane, which would refuse to respawn a dead agent. A
+// list that fails after the marker printed respawned the pane: the capture
+// failure is logged and the respawn succeeds; heal re-arms the pane.
+//
+// An unarmed respawn (undeclared, the gate refused, or the switch off) runs
+// the command as RespawnPaneWithWorkDir always has and removes, after the
+// marker, the capture an earlier incarnation was armed with: tmux keeps a
+// pane's options and pipe across respawn-pane, so the old tap would vouch
+// for the new program under its nonce. While the switch is not off that is
+// whatever capture the pane carries (disarmCommands). While it is off it is
+// only a capture bound to the pane (disarmIfArmedCommands), so a pane never
+// armed is left as it was, a pipe of its own included, and a capture armed
+// before the switch went off is not read valid for the new program once the
+// switch is back on.
+func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
 		return err
 	}
-	args := []string{"respawn-pane", "-k", "-t", target}
-	if workDir != "" {
-		args = append(args, "-c", workDir)
+	if plan := t.planCapture(arm); plan != nil {
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.wrapRelay(command)), plan.armCommands(target, true))
+		t.programArms.noteArmed(plan)
+		if err != nil {
+			return err
+		}
+		if followErr != nil {
+			_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: re-arming program-status capture: %v\n", target, followErr)
+		}
+		return nil
 	}
-	args = append(args, t.wrapPaneCommand(command))
-	_, err = t.run(args...)
-	return err
+	disarm := disarmIfArmedCommands(target)
+	if t.programStatusMode() != runtime.ProgramStatusOff {
+		disarm = disarmCommands(target)
+	}
+	followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarm)
+	if err != nil {
+		return err
+	}
+	if followErr != nil {
+		_, _ = fmt.Fprintf(captureWarningOut, "warning: pane %s: removing program-status capture: %v\n", target, followErr)
+	}
+	return nil
 }
 
 // ClearHistory clears the scrollback history buffer for a pane.

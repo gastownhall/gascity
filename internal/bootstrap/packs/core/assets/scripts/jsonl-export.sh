@@ -56,13 +56,18 @@ MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
 # Keep the local archive's Git object database bounded. Each export commit
 # creates loose objects even in local-only mode; without periodic packing a
 # busy city can exhaust the host filesystem long before Git's object count
-# alone reaches its built-in auto-gc trigger.
+# alone reaches its built-in auto-gc trigger. Maintenance runs after the
+# export, never before it, and packs incrementally (git repack --geometric,
+# git 2.32 or newer): it merges only the loose objects and the small packs, so
+# the archive's large pack is left as it is.
 GC_LOOSE_OBJECT_LIMIT="${GC_JSONL_GC_LOOSE_OBJECTS:-2000}"
 GC_LOOSE_KB_LIMIT="${GC_JSONL_GC_LOOSE_KB:-262144}"
 GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
-# Packing rewrites the whole object database, so it only starts when the
-# archive's filesystem can hold another copy of it and still keep this many
-# KiB free (default 500 MiB, the managed Dolt floor). 0 disables the check.
+# A repack writes new packs before it removes the old ones, so it only starts
+# when the archive's filesystem can hold the copy and still keep this many KiB
+# free (default 500 MiB, the managed Dolt floor). When it cannot hold a copy
+# of the whole archive, the repack leaves the largest pack out. 0 disables the
+# check.
 GC_MIN_FREE_KB="${GC_JSONL_GC_MIN_FREE_KB:-512000}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
@@ -351,27 +356,27 @@ has_pending_archive_push() {
     [ "$(read_state_json | jq -r '.pending_archive_push // false')" = "true" ]
 }
 
-refresh_archive_remote_main() {
-    git fetch origin main -q 2>/dev/null
+refresh_archive_remote_branch() {
+    git -c maintenance.auto=false -c gc.auto=0 fetch origin "$ARCHIVE_BRANCH" -q 2>/dev/null
 }
 
 archive_has_local_only_commits_from_tracking() {
     local merge_base
 
-    if ! git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    if ! git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1; then
         return 1
     fi
-    merge_base=$(git merge-base refs/remotes/origin/main HEAD 2>/dev/null) || return 1
+    merge_base=$(git merge-base "refs/remotes/origin/$ARCHIVE_BRANCH" HEAD 2>/dev/null) || return 1
     [ "$(git rev-list --count "$merge_base..HEAD" 2>/dev/null || echo "0")" -gt 0 ]
 }
 
 archive_has_local_only_commits() {
-    if refresh_archive_remote_main >/dev/null 2>&1; then
+    if refresh_archive_remote_branch >/dev/null 2>&1; then
         archive_has_local_only_commits_from_tracking
         return
     fi
     if archive_has_local_only_commits_from_tracking; then
-        echo "jsonl-export: fetch failed while checking deferred archive push; using existing origin/main tracking ref" >&2
+        echo "jsonl-export: fetch failed while checking deferred archive push; using existing origin/$ARCHIVE_BRANCH tracking ref" >&2
         return 0
     fi
     return 1
@@ -675,22 +680,22 @@ ESCALATION
     # Successful git commands can emit benign stderr (e.g. "warning: redirecting
     # to https://...", credential-helper notes, protocol upgrade hints) which
     # would otherwise misclassify the run as a failure and falsely escalate.
-    if ! fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
-        if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    if ! fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin "$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
+        if git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1; then
             record_archive_push_failure \
-                "jsonl-export: fetching origin/main failed" \
+                "jsonl-export: fetching origin/$ARCHIVE_BRANCH failed" \
                 "$fetch_err"
             return 1
         fi
-        echo "jsonl-export: origin/main missing; attempting initial push bootstrap" >&2
+        echo "jsonl-export: origin/$ARCHIVE_BRANCH missing; attempting initial push bootstrap" >&2
     fi
 
-    if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
-        if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-            if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+    if git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1; then
+        if ! git merge-base --is-ancestor "refs/remotes/origin/$ARCHIVE_BRANCH" HEAD >/dev/null 2>&1; then
+            if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase "refs/remotes/origin/$ARCHIVE_BRANCH" 2>&1 >/dev/null); then
                 git rebase --abort >/dev/null 2>&1 || true
                 record_archive_push_failure \
-                    "jsonl-export: rebase onto origin/main failed during archive push recovery" \
+                    "jsonl-export: rebase onto origin/$ARCHIVE_BRANCH failed during archive push recovery" \
                     "$rebase_err"
                 return 1
             fi
@@ -709,7 +714,7 @@ ESCALATION
     # in tests to keep failure-path coverage fast.
     push_succeeded=false
     for push_attempt in 1 2 3; do
-        if push_err=$(git push origin main -q 2>&1 >/dev/null); then
+        if push_err=$(git push origin "HEAD:refs/heads/$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
             push_succeeded=true
             if [ "$push_attempt" -gt 1 ]; then
                 echo "jsonl-export: push succeeded on retry attempt $push_attempt" >&2
@@ -722,13 +727,13 @@ ESCALATION
 
             # Refresh origin tracking before retry — a sibling rig may have
             # moved the ref while we slept.
-            if fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
-                if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1 \
-                    && ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-                    if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+            if fetch_err=$(git -c maintenance.auto=false -c gc.auto=0 fetch origin "$ARCHIVE_BRANCH" -q 2>&1 >/dev/null); then
+                if git rev-parse --verify "refs/remotes/origin/$ARCHIVE_BRANCH" >/dev/null 2>&1 \
+                    && ! git merge-base --is-ancestor "refs/remotes/origin/$ARCHIVE_BRANCH" HEAD >/dev/null 2>&1; then
+                    if ! rebase_err=$(git -c maintenance.auto=false -c gc.auto=0 rebase "refs/remotes/origin/$ARCHIVE_BRANCH" 2>&1 >/dev/null); then
                         git rebase --abort >/dev/null 2>&1 || true
                         record_archive_push_failure \
-                            "jsonl-export: rebase onto origin/main failed during retry $push_attempt" \
+                            "jsonl-export: rebase onto origin/$ARCHIVE_BRANCH failed during retry $push_attempt" \
                             "$rebase_err"
                         return 1
                     fi
@@ -741,7 +746,7 @@ ESCALATION
 
     if [ "$push_succeeded" != "true" ]; then
         record_archive_push_failure \
-            "jsonl-export: pushing archive main failed after 3 attempts" \
+            "jsonl-export: pushing archive $ARCHIVE_BRANCH failed after 3 attempts" \
             "$push_err"
         return 1
     fi
@@ -758,38 +763,55 @@ commit_archive_snapshot() {
         GIT_AUTHOR_EMAIL="daemon@gastown.local" \
         GIT_COMMITTER_NAME="Gas Town Daemon" \
         GIT_COMMITTER_EMAIL="daemon@gastown.local" \
-        git commit -q -m "$message"; then
+        git -c maintenance.auto=false -c gc.auto=0 commit -q -m "$message"; then
         echo "jsonl-export: $context commit failed" >&2
         return 1
     fi
 }
 
-run_archive_git_gc() {
-    local -a gc_command=(
+# Git 2.55 and newer start a detached maintenance run after a commit, and
+# fetch and rebase run git's auto-maintenance too; the snapshot commit and the
+# archive's fetches and rebases turn that off for each call (above), so the
+# repack below is the only thing that packs the archive.
+run_archive_repack() {
+    local -a repack_command=(
         git -C "$ARCHIVE_REPO"
         -c "pack.windowMemory=$GC_WINDOW_MEMORY"
         -c pack.threads=1
-        gc --quiet
+        repack -d -l -q --geometric=2
     )
 
+    if [ -n "$ARCHIVE_KEEP_PACK" ]; then
+        repack_command+=("--keep-pack=$ARCHIVE_KEEP_PACK")
+    fi
     # Pack at the lowest CPU and I/O priority the host allows. With -t, ionice
     # still runs git when it cannot set the I/O class; the probe leaves out an
     # ionice that cannot start a command here at all.
     if command -v nice >/dev/null 2>&1; then
-        gc_command=(nice -n 19 "${gc_command[@]}")
+        repack_command=(nice -n 19 "${repack_command[@]}")
     fi
     if command -v ionice >/dev/null 2>&1 && ionice -t -c 3 true >/dev/null 2>&1; then
-        gc_command=(ionice -t -c 3 "${gc_command[@]}")
+        repack_command=(ionice -t -c 3 "${repack_command[@]}")
     fi
-    "${gc_command[@]}"
+    "${repack_command[@]}"
 }
 
-# Fails when rewriting archive_kb KiB of objects would leave less than
-# GC_MIN_FREE_KB free; warns and passes when df cannot report free space.
+# Pack to keep out of the repack ("pack-<id>.pack"), or empty to repack all.
+ARCHIVE_KEEP_PACK=""
+
+# Decides how much of the archive the repack may rewrite when it holds
+# archive_kb KiB of objects. Fails when even a repack that leaves out the
+# largest pack would leave less than GC_MIN_FREE_KB free; sets
+# ARCHIVE_KEEP_PACK when only that repack fits. Warns and passes when df
+# cannot report free space.
 check_archive_gc_free_space() {
     local archive_kb="$1"
     local free_kb
+    local largest_pack
+    local largest_kb
+    local rest_kb
 
+    ARCHIVE_KEEP_PACK=""
     if [ "$GC_MIN_FREE_KB" -eq 0 ]; then
         return 0
     fi
@@ -800,37 +822,51 @@ check_archive_gc_free_space() {
             return 0
             ;;
     esac
-    if [ "$((free_kb - archive_kb))" -lt "$GC_MIN_FREE_KB" ]; then
-        echo "jsonl-export: not packing the archive object database: ${free_kb} KiB free, and rewriting the ${archive_kb} KiB archive would leave less than GC_JSONL_GC_MIN_FREE_KB=${GC_MIN_FREE_KB} KiB; free disk space or set GC_JSONL_GC_MIN_FREE_KB=0 to disable this check" >&2
-        printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c pack.windowMemory=%s -c pack.threads=1 gc\n' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY" >&2
-        return 1
+    if [ "$((free_kb - archive_kb))" -ge "$GC_MIN_FREE_KB" ]; then
+        return 0
     fi
+    # shellcheck disable=SC2012  # pack names are pack-<hex>.pack
+    largest_pack=$(ls -S "$ARCHIVE_REPO"/.git/objects/pack/pack-*.pack 2>/dev/null | head -n 1) || largest_pack=""
+    rest_kb="$archive_kb"
+    if [ -n "$largest_pack" ]; then
+        largest_kb=$(( $(wc -c < "$largest_pack" | tr -d ' ') / 1024 ))
+        rest_kb=$((archive_kb - largest_kb))
+        if [ "$((free_kb - rest_kb))" -ge "$GC_MIN_FREE_KB" ]; then
+            ARCHIVE_KEEP_PACK=$(basename "$largest_pack")
+            echo "jsonl-export: ${free_kb} KiB free is short of a full repack of the ${archive_kb} KiB archive; repacking without its largest pack, ${ARCHIVE_KEEP_PACK}" >&2
+            return 0
+        fi
+    fi
+    echo "jsonl-export: not packing the archive object database: ${free_kb} KiB free, and repacking the ${archive_kb} KiB archive (${rest_kb} KiB without its largest pack) would leave less than GC_JSONL_GC_MIN_FREE_KB=${GC_MIN_FREE_KB} KiB; free disk space or set GC_JSONL_GC_MIN_FREE_KB=0 to disable this check" >&2
+    printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c pack.windowMemory=%s -c pack.threads=1 repack -d -l -q --geometric=2\n' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY" >&2
+    return 1
 }
 
-# Pack the archive once its loose objects reach either limit. Callers treat a
-# non-zero return as a failed run; call it in a condition so the explicit
-# returns below, not set -e, decide the outcome.
-maintain_archive_repository() {
+# Sets ARCHIVE_LOOSE_OBJECTS, ARCHIVE_LOOSE_KB, ARCHIVE_PACKS and
+# ARCHIVE_PACK_KB from git count-objects.
+read_archive_object_stats() {
     local object_stats
-    local loose_objects=""
-    local loose_kb=""
-    local pack_kb=""
     local key
     local value
 
+    ARCHIVE_LOOSE_OBJECTS=""
+    ARCHIVE_LOOSE_KB=""
+    ARCHIVE_PACKS=""
+    ARCHIVE_PACK_KB=""
     object_stats=$(git -C "$ARCHIVE_REPO" count-objects -v) || {
         echo "jsonl-export: reading archive object statistics failed" >&2
         return 1
     }
     while IFS=': ' read -r key value; do
         case "$key" in
-            count) loose_objects="$value" ;;
-            size) loose_kb="$value" ;;
-            size-pack) pack_kb="$value" ;;
+            count) ARCHIVE_LOOSE_OBJECTS="$value" ;;
+            size) ARCHIVE_LOOSE_KB="$value" ;;
+            packs) ARCHIVE_PACKS="$value" ;;
+            size-pack) ARCHIVE_PACK_KB="$value" ;;
         esac
     done <<< "$object_stats"
 
-    case "$loose_objects:$loose_kb:$pack_kb" in
+    case "$ARCHIVE_LOOSE_OBJECTS:$ARCHIVE_LOOSE_KB:$ARCHIVE_PACKS:$ARCHIVE_PACK_KB" in
         *[!0-9:]*)
             echo "jsonl-export: archive object statistics were malformed" >&2
             return 1
@@ -840,17 +876,53 @@ maintain_archive_repository() {
             return 1
             ;;
     esac
+}
 
-    if [ "$loose_objects" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
-        && [ "$loose_kb" -lt "$GC_LOOSE_KB_LIMIT" ]; then
+# Pack the archive once its loose objects reach either limit, and report what
+# the pass did. Callers treat a non-zero return as a failed run; call it in a
+# condition so the explicit returns below, not set -e, decide the outcome.
+maintain_archive_repository() {
+    local loose_objects
+    local loose_kb
+    local packs_before
+    local mode=geometric
+    local started
+    local wall
+
+    read_archive_object_stats || return 1
+    if [ "$ARCHIVE_LOOSE_OBJECTS" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
+        && [ "$ARCHIVE_LOOSE_KB" -lt "$GC_LOOSE_KB_LIMIT" ]; then
         return 0
     fi
+    loose_objects="$ARCHIVE_LOOSE_OBJECTS"
+    loose_kb="$ARCHIVE_LOOSE_KB"
+    packs_before="$ARCHIVE_PACKS"
 
-    check_archive_gc_free_space "$((pack_kb + loose_kb))" || return 1
+    check_archive_gc_free_space "$((ARCHIVE_PACK_KB + loose_kb))" || return 1
+    if [ -n "$ARCHIVE_KEEP_PACK" ]; then
+        mode=geometric-keep-largest
+    fi
     echo "jsonl-export: packing archive object database (loose_objects=$loose_objects, loose_kb=$loose_kb)" >&2
-    if ! run_archive_git_gc; then
-        echo "jsonl-export: archive object database maintenance failed" >&2
+    started=$SECONDS
+    if ! run_archive_repack; then
+        echo "jsonl-export: archive maintenance: mode=$mode wall=$((SECONDS - started))s loose_before=$loose_objects packs_before=$packs_before status=failed" >&2
+        echo "jsonl-export: archive object database maintenance failed (repack --geometric needs git 2.32 or newer)" >&2
         return 1
+    fi
+    wall=$((SECONDS - started))
+    read_archive_object_stats || return 1
+    echo "jsonl-export: archive maintenance: mode=$mode wall=${wall}s loose_before=$loose_objects loose_after=$ARCHIVE_LOOSE_OBJECTS packs_before=$packs_before packs_after=$ARCHIVE_PACKS pack_kb_after=$ARCHIVE_PACK_KB" >&2
+}
+
+# Maintenance runs after the export and its push, so a failed pass never holds
+# the snapshot back. Its failure still fails the run, with the summary the run
+# would have reported.
+maintain_archive_or_exit() {
+    local summary="$1"
+
+    if [ -d "$ARCHIVE_REPO/.git" ] && ! maintain_archive_repository; then
+        echo "jsonl-export: $summary; archive maintenance failed" >&2
+        exit 1
     fi
 }
 
@@ -917,15 +989,6 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 log_archive_mode_if_needed
 retry_pending_spike_alert
-if [ -d "$ARCHIVE_REPO/.git" ] && ! maintain_archive_repository; then
-    # Exporting would only add loose objects to an archive that cannot be
-    # packed. Snapshots already committed still go off-box.
-    cd "$ARCHIVE_REPO"
-    if should_attempt_push && { has_pending_archive_push || archive_has_local_only_commits; }; then
-        push_archive_main || true
-    fi
-    exit 1
-fi
 
 # The first export in the bd format moves a scope's snapshot files from the
 # old `dolt sql -r json` layout ({"rows":[...]} issues.jsonl, the flat
@@ -970,11 +1033,38 @@ move_legacy_snapshot_files() {
     fi
 }
 
-# Ensure archive repo exists.
+# Ensure archive repo exists. A first run initializes the repo beside its
+# final path and renames it into place, so the archive path never exists
+# without its .git: gc doctor's jsonl-archive check reports such a path as a
+# malformed archive, and a doctor run during a first export would fail on it.
+# A path that already exists without .git is initialized in place, as before.
 if [ ! -d "$ARCHIVE_REPO/.git" ]; then
-    mkdir -p "$ARCHIVE_REPO"
-    git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+    if [ -e "$ARCHIVE_REPO" ]; then
+        git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+    else
+        archive_parent=$(dirname "$ARCHIVE_REPO")
+        mkdir -p "$archive_parent"
+        archive_init=$(mktemp -d "$archive_parent/.jsonl-archive-init.XXXXXX") || archive_init=""
+        # Something may create the archive path between the check and the
+        # mv; POSIX mv then moves the staging repo inside it (macOS mv has no
+        # -T to refuse). Such a nested staging repo is removed, and the run
+        # falls back to the in-place init.
+        if [ -n "$archive_init" ] && git -C "$archive_init" init -q 2>/dev/null \
+            && [ ! -e "$ARCHIVE_REPO" ] && mv "$archive_init" "$ARCHIVE_REPO" \
+            && [ ! -e "$ARCHIVE_REPO/$(basename "$archive_init")" ]; then
+            :
+        else
+            [ -n "$archive_init" ] && rm -rf "${ARCHIVE_REPO:?}/$(basename "$archive_init")"
+            [ -n "$archive_init" ] && rm -rf "$archive_init"
+            mkdir -p "$ARCHIVE_REPO"
+            git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
+        fi
+    fi
 fi
+# Existing archives retain their current branch. New repositories use Git's
+# configured default. An explicit override selects the remote destination
+# without requiring the local branch to be renamed.
+ARCHIVE_BRANCH="${GC_JSONL_ARCHIVE_BRANCH:-$(git -C "$ARCHIVE_REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || printf '%s\n' main)}"
 
 TOTAL_EXPORTED=0
 TOTAL_DBS=0
@@ -1223,8 +1313,9 @@ if [ "$HALTED" -eq 1 ]; then
     fi
     # Pack only after the alert is sent or saved for retry: the commit above
     # already advanced the baseline, so this spike is never detected again.
-    maintain_archive_repository || exit 1
-    maintenance_done "jsonl — HALTED on spike detection"
+    SUMMARY="jsonl — HALTED on spike detection"
+    maintain_archive_or_exit "$SUMMARY"
+    maintenance_done "$SUMMARY"
     exit 0
 fi
 
@@ -1244,6 +1335,7 @@ if git diff --cached --quiet 2>/dev/null; then
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
+        maintain_archive_or_exit "$SUMMARY"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
@@ -1251,12 +1343,15 @@ if git diff --cached --quiet 2>/dev/null; then
     if [ -n "$FAILED_DBS" ]; then
         EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
         SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+        maintain_archive_or_exit "$SUMMARY"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
     # No changes.
-    maintenance_done "jsonl — no changes"
+    SUMMARY="jsonl — no changes"
+    maintain_archive_or_exit "$SUMMARY"
+    maintenance_done "$SUMMARY"
     exit 0
 fi
 
@@ -1278,13 +1373,12 @@ else
     PUSH_STATUS="skipped (local-only)"
 fi
 
-# After the push, so a packing failure never holds back the new snapshot.
-maintain_archive_repository || exit 1
-
 SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"
 if [ -n "$FAILED_DBS" ]; then
     SUMMARY="$SUMMARY, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
 fi
 
+# After the push, so a packing failure never holds back the new snapshot.
+maintain_archive_or_exit "$SUMMARY"
 maintenance_done "$SUMMARY"
 echo "jsonl-export: $SUMMARY"

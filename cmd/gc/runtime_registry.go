@@ -74,8 +74,8 @@ func buildRuntimeRegistry() *registry.Registry {
 	// resolves per city via runtimeRegistryForCity. A city without that pack
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
-	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessionk8s.NewSeamBacked()
+	must(r.Register("k8s", func(_ string, _ config.SessionConfig, cityName, _ string) (runtime.Provider, error) {
+		return sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.
@@ -91,12 +91,12 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)
 	}))
-	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+	must(r.RegisterPrefix("exec:", func(name string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
 			return sessiont3bridge.NewSeamBacked(), nil
 		}
-		return sessionexec.NewSeamBacked(script), nil
+		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath), nil
 	}))
 	// "ssh:<[user@]host[:port]>" selects the SSH backend against a fixed
 	// endpoint (the anonymous form; the named, structured form with explicit
@@ -150,8 +150,8 @@ func runtimeRegistryForCity(cfg *config.City) (*registry.Registry, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		rt := cfg.Runtimes[name]
-		if err := r.Register(name, func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-			return sessionexec.NewSeamBacked(rt.Command), nil
+		if err := r.Register(name, func(_ string, _ config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath), nil
 		}); err != nil {
 			return nil, fmt.Errorf("pack %q: %w", rt.PackName, err)
 		}

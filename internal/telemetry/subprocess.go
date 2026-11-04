@@ -109,6 +109,15 @@ func setenvWarn(key, value string) {
 //   - BD_OTEL_LOGS_URL         — bd's own logs var   (resolved logs endpoint)
 //   - CLAUDE_CODE_ENABLE_TELEMETRY=1 — enables Claude Code's built-in telemetry
 //
+// Every bd release reads the two legacy BD_OTEL_* names, but bd v1.2.0, v1.2.1
+// and v1.3.0+ deprecate them and warn on stderr while they are set. A bd
+// command internal/beads runs receives them translated to BD_OTEL_ENABLED plus
+// the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names (translateBdLegacyOTELEnv)
+// when a `bd version` probe shows the target bd reads the standard names and
+// BD_OTEL_STDOUT is not true; otherwise, including when the probe fails, they
+// pass unchanged. Any other bd child, such as `gc bd` passthrough or the bd an
+// agent session runs, still sees the legacy names.
+//
 // Called once at gc startup when telemetry is active.
 // No-op when telemetry is not active — the same activation rule as Init,
 // including the OTEL_EXPORTER_OTLP_ENDPOINT fallback.
@@ -138,6 +147,9 @@ func SetProcessOTELAttrs() {
 // active propagation paths are SetProcessOTELAttrs (inherited process env)
 // and OTELEnvMap (session env merging).
 //
+// It returns bd's legacy BD_OTEL_* names; see SetProcessOTELAttrs for which
+// bd children receive them translated to the standard names.
+//
 // Returns nil when telemetry is not active — the same activation rule as
 // Init, including the OTEL_EXPORTER_OTLP_ENDPOINT fallback.
 func OTELEnvForSubprocess() []string {
@@ -160,6 +172,8 @@ func OTELEnvForSubprocess() []string {
 // OTELEnvMap returns OTEL environment variables as a map for Gas City's
 // mergeEnv() pattern. Returns nil when telemetry is not active — the same
 // activation rule as Init, including the OTEL_EXPORTER_OTLP_ENDPOINT fallback.
+// Like SetProcessOTELAttrs it emits bd's legacy BD_OTEL_* names, which reach a
+// session's own bd commands untranslated.
 func OTELEnvMap() map[string]string {
 	metricsURL, logsURL, enabled := resolveEndpoints()
 	if !enabled {

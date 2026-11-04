@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -45,13 +46,19 @@ type Override struct {
 //     regardless of rig.
 //   - otherwise:     matches only the order with that exact rig.
 //
-// Returns an error if an override targets a nonexistent order (following
-// the agent override pattern where unmatched targets are errors, not
-// silent no-ops).
+// Returns an error if an override has no name or targets a nonexistent
+// order (following the agent override pattern where unmatched targets are
+// errors, not silent no-ops). A bad override never stops the others: every
+// override that matches is applied, and the error joins one entry per bad
+// override, in config order. An override can name an absent order because
+// the order was retired or renamed, its own file disables it, or the city's
+// orders skip list removed it.
 func ApplyOverrides(aa []Order, overrides []Override) error {
+	var errs []error
 	for i, ov := range overrides {
 		if ov.Name == "" {
-			return fmt.Errorf("orders.overrides[%d]: name is required", i)
+			errs = append(errs, fmt.Errorf("orders.overrides[%d]: name is required", i))
+			continue
 		}
 		found := false
 		for j := range aa {
@@ -65,10 +72,10 @@ func ApplyOverrides(aa []Order, overrides []Override) error {
 			found = true
 		}
 		if !found {
-			return notFoundError(i, ov, aa)
+			errs = append(errs, notFoundError(i, ov, aa))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func rigMatches(ovRig, orderRig string) bool {

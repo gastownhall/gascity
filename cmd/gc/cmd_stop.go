@@ -126,6 +126,12 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return stopCommandOutcome{code: 1}
 	}
+	// A worker site's controller is the remote one: stopping here would tear
+	// down sessions and the bead store behind it.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return stopCommandOutcome{code: 1, cityPath: cityPath}
+	}
 
 	stopStdout := stdout
 	if jsonOut {
@@ -419,6 +425,10 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 // default wall-clock cap that extendCap grows (nil when the cap is the
 // operator's --timeout, or there is none).
 func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	cityName := loadedCityName(cfg, cityPath)
 
 	// If a controller is running, ask it to shut down (it stops agents).
@@ -524,15 +534,15 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 	var recorded, recordedUnknown []string
 	var recordedUnread error
 	if !runtime.ListRunningAttested(sp) {
-		listed, listErr := sp.ListRunning("")
+		listed, attested, listErr := runtime.ListRunningWithAttestation(sp, "")
 		unreachable = listErr != nil
-		if recordedSweepAllowed(sp, listErr) {
+		if recordedSweepAllowed(sp, attested, listErr) {
 			skip := maps.Clone(desired)
 			for _, name := range listed {
 				skip[strings.TrimSpace(name)] = true
 			}
 			var found []string
-			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
+			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, attested, "gc stop", stderr)
 			recorded = slices.DeleteFunc(found, func(sn string) bool { return slices.Contains(recordedUnknown, sn) })
 			if extendCap != nil && len(recorded) > 0 {
 				extendCap(stopCapExtensionForRecorded(cfg, len(recorded), !stopTargetsAllResolved(recorded, cfg, sessStore)))
@@ -547,11 +557,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		graceTimeout = 0
 	}
 
-	// A start the controller died in leaves its row creating, a state the stop
-	// sweep's suspend refuses (it is the start's own), so its runtime would
-	// outlive the stop. With no controller left, stop those first.
-	// A start in flight is left to that start: keep it out of the sweep (whose
-	// stop would kill it under its starter) and in desired (so the orphan sweep
+	// A start the controller died in leaves its row creating. The sweep's
+	// suspend tears such a row's runtime down too (its sweep-only latitude),
+	// but this pass is what reports a row the stop could not verify, and what
+	// keeps a start still owned by a live starter out of the sweep (whose stop
+	// would kill it under its starter) and in desired (so the orphan sweep
 	// does not stop it either).
 	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, unreachable, stdout, stderr)
 	if len(inFlight) > 0 {
@@ -628,9 +638,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // for the standalone stop, which runs only once no controller serves the city.
 // A starter holds the runtime name's flock from before it records creating
 // until it commits the start, so a free flock means the process that wrote the
-// row died mid-start (a controller crash). The stop sweep's suspend refuses a
-// creating row, so without this its runtime outlives the stop. The row is left
-// as it is, for the reconciler to resolve on the next start.
+// row died mid-start (a controller crash). The row is left as it is, its
+// in-flight marker with it, for the reconciler to relaunch on the next start:
+// the stop sweep's suspend, which tears a listed creating row's runtime down
+// too, writes nothing to it either. This pass also stops one the runtime does
+// not list, and reports a row the stop could not stop or check.
 //
 // A name whose flock is held is a start in flight, whether or not its runtime
 // is up yet: it is reported and returned in inFlight, for the caller to keep
@@ -869,29 +881,56 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix stri
 	}
 }
 
+// cityStopMarkAttempts bounds a city-stop mark's fenced write against
+// concurrent writers to the row.
+const cityStopMarkAttempts = 3
+
+// cityStopMark is the city-stop mark decided on a fresh read of the row: only
+// a row still active with no sleep reason is marked.
+func cityStopMark(info session.Info, _ session.PersistedResponse) session.MetadataPatch {
+	if sessionMetadataStateInfo(info) != "active" || strings.TrimSpace(info.SleepReason) != "" {
+		return nil
+	}
+	return session.MetadataPatch{"sleep_reason": string(session.SleepReasonCityStop)}
+}
+
 func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
-	if !sessFront.Backed() {
+	markSessionsCityStop(sessFront, nil, "gc stop", stderr)
+}
+
+// markSessionsCityStop stamps sleep_reason=city-stop on the active sessions
+// that carry no sleep reason, or only on those named in names when names is
+// non-nil. min_active_sessions' floor revival (cityStopPoolBeads) wakes
+// exactly the asleep city-stop pool seats, so a stop that should hand its
+// floor back marks it. Each mark is decided again on a fresh read of the
+// row and fenced on its revision (UpdateMetadataFenced), so an operator's
+// suspend or another sleep that lands after the listing is never written
+// over: the floor revival does not honor a user hold. logPrefix opens the
+// warning lines.
+func markSessionsCityStop(sessFront *session.Store, names map[string]bool, logPrefix string, stderr io.Writer) {
+	if !sessFront.Backed() || names != nil && len(names) == 0 {
 		return
 	}
-	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
-	// lister is byte-identical to the former ListByLabel("gc:session") + closed-skip
-	// sweep: it keeps damaged gc:session-labeled beads with a non-"session" type (which
-	// the narrowing Store.List would drop) and reads each row's classifier through the
-	// typed twin (sessionMetadataStateInfo) + the Info.SleepReason mirror.
+	// The label-only, closed-excluded lister reads each row's classifier through
+	// the typed twin (sessionMetadataStateInfo) and the Info.SleepReason mirror.
+	// A gc:session-labeled row that is not a session bead, not even a
+	// repairable one, is skipped: the fenced mark re-reads through the session
+	// front door, which refuses it (ErrSessionNotFound), so it was never marked
+	// and would only warn on every stop.
 	sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
+		fmt.Fprintf(stderr, "%s: marking sessions: %v\n", logPrefix, err) //nolint:errcheck // best-effort warning
 		return
 	}
 	for _, info := range sessions {
-		if sessionMetadataStateInfo(info) != "active" {
+		if !session.IsSessionBeadOrRepairableInfo(info) || sessionMetadataStateInfo(info) != "active" || names != nil && !names[strings.TrimSpace(info.SessionName)] {
 			continue
 		}
 		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
+		if _, err := sessFront.UpdateMetadataFenced(info.ID, cityStopMarkAttempts, cityStopMark); err != nil {
+			fmt.Fprintf(stderr, "%s: marking session %s: %v\n", logPrefix, info.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }

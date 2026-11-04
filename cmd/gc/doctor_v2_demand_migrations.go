@@ -24,9 +24,10 @@ import (
 // real stores. A non-zero count is a warning under v2 and OK under legacy,
 // whose demand pass applies these repairs itself every tick.
 type v2DemandMigrationsCheck struct {
-	cfg      *config.City
-	cityPath string
-	newStore func(string) (beads.Store, error)
+	cfg       *config.City
+	cityPath  string
+	newStore  func(string) (beads.Store, error)
+	lookupEnv func(string) (string, bool) // nil reads reconcilerModeLookupEnv
 }
 
 func newV2DemandMigrationsCheck(cfg *config.City, cityPath string, newStore func(string) (beads.Store, error)) *v2DemandMigrationsCheck {
@@ -77,9 +78,10 @@ func (c *v2DemandMigrationsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	if len(s.problems) > 0 {
 		msg += fmt.Sprintf("; %d read problem(s), counts are a lower bound", len(s.problems))
 	}
-	mode, _, _ := c.cfg.Daemon.SessionReconcilerMode()
+	mode, resolved := doctorReconcilerMode(c.cfg, c.lookupEnv)
+	details = append(details, resolved)
 	switch {
-	case len(s.problems) > 0, total > 0 && mode == config.SessionReconcilerV2:
+	case len(s.problems) > 0, total > 0 && mode == reconcilerV2:
 		return warnCheck(c.Name(), msg, "run gc doctor --check v2-demand-migrations --fix", details)
 	case total > 0:
 		msg += " (the legacy demand pass applies these every tick)"
@@ -102,6 +104,8 @@ type demandMigrationKey struct{ repair, leg string }
 type demandMigrationSweep struct {
 	counts   map[demandMigrationKey]int
 	problems []string
+	// assigned is the assigned work the repairs were run over.
+	assigned []beads.Bead
 }
 
 // sweep runs legacy's demand-pass migration repairs over the city's work legs
@@ -129,7 +133,8 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		}
 		rigs[rig.Name] = store
 	}
-	sessions, err := loadSessionBeadSnapshot(cliSessionStore(city, c.cfg, c.cityPath))
+	sessionsStore := cliSessionStore(city, c.cfg, c.cityPath)
+	sessions, err := loadSessionBeadSnapshot(sessionsStore)
 	if err != nil {
 		// canonicalizeLegacyBoundAssignedWork then refuses to run, counting 0.
 		s.problems = append(s.problems, fmt.Sprintf("session snapshot: %v", err))
@@ -147,7 +152,12 @@ func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrat
 		}
 		return out
 	}
-	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions, newReadyDemandCache())
+	// The sweep leads with the city WORK store, so it names the sessions store
+	// the closed named-session index reads: on a split city closed named
+	// sessions live only in the binding.
+	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions,
+		newReadyDemandCache().withSessionsStore(beads.SessionStore{Store: sessionsStore}))
+	s.assigned = assigned
 	if assignedPartial {
 		s.problems = append(s.problems, "assigned collection partial")
 	}

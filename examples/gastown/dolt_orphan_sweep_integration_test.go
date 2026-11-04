@@ -89,6 +89,24 @@ func TestSweep_ReapsRealDoltDataDirAfterSIGKILL(t *testing.T) {
 	if _, err := os.Stat(dataDir); err != nil {
 		t.Fatalf("top-level data dir %s should survive; only its nested dolt store dir is removed: %v", dataDir, err)
 	}
+
+	// The server's own bookkeeping .dolt in dataDir holds no noms/, so it is
+	// not a store: a later pass, with the removal's fresh mtime on dataDir aged
+	// past MinAge again, must leave dataDir alone.
+	if _, err := os.Stat(filepath.Join(dataDir, ".dolt", "noms")); !os.IsNotExist(err) {
+		t.Fatalf("dataDir/.dolt/noms exists (stat err = %v); the server's bookkeeping .dolt was expected to hold no store", err)
+	}
+	sweepCfg.Clock = &clock.Fake{Time: time.Now().Add(doltorphan.DefaultMinAge + 5*time.Minute)}
+	again := doltorphan.Sweep(sweepCfg)
+	if len(again.Errors) != 0 {
+		t.Fatalf("second sweep errored: %v", again.Errors)
+	}
+	if len(again.Removed) != 0 {
+		t.Fatalf("second sweep.Removed = %v, want none: dataDir's .dolt holds server bookkeeping, not a store", again.Removed)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("data dir %s was removed by the second sweep: %v", dataDir, err)
+	}
 }
 
 // startSweepDoltServer spawns a real dolt sql-server serving dataDir on a

@@ -84,7 +84,8 @@ func TestDecideSmokeMatchesLegacyDesiredState(t *testing.T) {
 		Collected: collectedDemand{
 			DefaultProbed: len(targets.defaultScaleTargets) > 0, DefaultCounts: counts, DefaultDemand: demand, DefaultPartials: partials,
 			ColdWakeTemplates: targets.coldWakeTemplates, NamedOnDemandTemplates: targets.namedOnDemandTemplates,
-			UnassignedRouted: routed, UnassignedRoutedRefs: routedRefs, UnassignedRoutedPartial: routedPartial,
+			NameOnlyTemplates: targets.nameOnlyTemplates,
+			UnassignedRouted:  routed, UnassignedRoutedRefs: routedRefs, UnassignedRoutedPartial: routedPartial,
 		},
 	}
 	d := f.decide()

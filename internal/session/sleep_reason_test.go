@@ -60,6 +60,21 @@ func TestSleepReasonListDivergence(t *testing.T) {
 	}
 }
 
+// TestSleepReasonKilledIsAnOperatorStop pins "killed" (gc session kill) in
+// both lists, like drained and city-stop: an operator kill neither accrues
+// churn nor discards the conversation when its runtime is found missing.
+func TestSleepReasonKilledIsAnOperatorStop(t *testing.T) {
+	if !IsDeliberateSleepReason(string(SleepReasonKilled)) {
+		t.Error("killed must be a deliberate sleep reason")
+	}
+	if !SleepReasonKeepsContinuation(string(SleepReasonKilled)) {
+		t.Error("killed must keep the continuation")
+	}
+	if !resetSuppressed(t, SleepReasonKilled) {
+		t.Error("killed must suppress continuation reset")
+	}
+}
+
 // resetSuppressed reports whether shouldResetContinuation returns false (reset
 // suppressed) for the given reason on an otherwise reset-eligible input.
 func resetSuppressed(t *testing.T, reason SleepReason) bool {

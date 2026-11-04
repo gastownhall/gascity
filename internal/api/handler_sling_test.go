@@ -1436,3 +1436,136 @@ func TestSlingFailsWhenGraphBindingScanFails(t *testing.T) {
 		t.Fatalf("source workflow_id = %q, want a refused launch to leave source metadata untouched", reloaded.Metadata["workflow_id"])
 	}
 }
+
+// Review 6b: a second --on whose formula would double up on an assigned
+// source's live molecule is a 409, not a 400.
+func TestSlingOnAssignedSourceWithALiveMoleculeIsAConflict(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	for _, name := range []string{"first-work", "second-work"} {
+		body := "formula = \"" + name + "\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n"
+		if err := os.WriteFile(filepath.Join(formulaDir, name+".toml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := state.stores["myrig"]
+	source, err := store.Create(beads.Bead{ID: "BL-77", Title: "task", Type: "task", Assignee: "someone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(formula string) *httptest.ResponseRecorder {
+		body := `{"target":"myrig/worker","formula":"` + formula + `","attached_bead_id":"` + source.ID + `"}`
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+		return rec
+	}
+	if rec := post("first-work"); rec.Code >= 300 {
+		t.Fatalf("first --on: status %d body %s", rec.Code, rec.Body.String())
+	}
+	rec := post("second-work")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second --on onto a live molecule: status %d body %s, want 409", rec.Code, rec.Body.String())
+	}
+}
+
+// probeFailingStore fails the read of one id with a store error (not a
+// not-found), the way an unreachable backing answers.
+type probeFailingStore struct {
+	beads.Store
+	failID string
+}
+
+func (s probeFailingStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, errors.New("store unavailable")
+	}
+	return s.Store.Get(id)
+}
+
+// Re-review M26: an attachment probe the guard could not complete is a store
+// fault, answered 500, not a 400 the client should fix.
+func TestSlingAttachmentProbeFailureIsAServerError(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	if err := os.WriteFile(filepath.Join(formulaDir, "probe-work.toml"), []byte("formula = \"probe-work\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inner := state.stores["myrig"]
+	source, err := inner.Create(beads.Bead{ID: "BL-88", Title: "task", Type: "task", Assignee: "someone", Metadata: map[string]string{"molecule_id": "gc-999"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.stores["myrig"] = probeFailingStore{Store: inner, failID: "gc-999"}
+	body := `{"target":"myrig/worker","formula":"probe-work","attached_bead_id":"` + source.ID + `"}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("sling with an unreadable attachment: status %d body %s, want 500", rec.Code, rec.Body.String())
+	}
+}
+
+// subtreeFailingStore fails the subtree read of one root (the root_bead_id
+// query molecule.ListSubtree makes) with a store error.
+type subtreeFailingStore struct {
+	beads.Store
+	rootID string
+}
+
+func (s subtreeFailingStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters[beadmeta.RootBeadIDMetadataKey] == s.rootID {
+		return nil, errors.New("store unavailable")
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+// Review 8: an unassigned source's attachment is burned to make room for a
+// different formula only once its subtree reads clear of held steps. A subtree
+// the guard could not read is a store fault a retry can clear, answered 500
+// like a failed attachment read, not a 409 conflict the client would not retry.
+func TestSlingUnreadableAttachmentSubtreeIsAServerError(t *testing.T) {
+	srv, state := newSlingTestServer(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	for _, name := range []string{"first-work", "second-work"} {
+		body := "formula = \"" + name + "\"\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n"
+		if err := os.WriteFile(filepath.Join(formulaDir, name+".toml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inner := state.stores["myrig"]
+	source, err := inner.Create(beads.Bead{ID: "BL-99", Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(formula string) *httptest.ResponseRecorder {
+		body := `{"target":"myrig/worker","formula":"` + formula + `","attached_bead_id":"` + source.ID + `"}`
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+		return rec
+	}
+	if rec := post("first-work"); rec.Code >= 300 {
+		t.Fatalf("first --on: status %d body %s", rec.Code, rec.Body.String())
+	}
+	attached, err := inner.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := attached.Metadata[beadmeta.MoleculeIDMetadataKey]
+	if rootID == "" || attached.Assignee != "" {
+		t.Fatalf("precondition: the first --on left molecule_id %q and assignee %q, want a molecule on an unassigned source", rootID, attached.Assignee)
+	}
+	state.stores["myrig"] = subtreeFailingStore{Store: inner, rootID: rootID}
+	rec := post("second-work")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("second --on over an attachment whose subtree is unreadable: status %d body %s, want 500", rec.Code, rec.Body.String())
+	}
+	root, err := inner.Get(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Status == "closed" {
+		t.Fatalf("attachment %s was burned although its subtree could not be read", rootID)
+	}
+}

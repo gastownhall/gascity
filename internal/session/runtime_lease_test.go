@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -33,7 +34,7 @@ func openLeaseStore(t *testing.T, dir string) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	return s
@@ -1017,7 +1018,7 @@ func TestRuntimeLeaseRecordTakenAfterAClone(t *testing.T) {
 func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	f := newLeaseFixture(t)
 	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "h/1/n", RuntimeLeaseEpochKey: "3", RuntimeLeaseTTLKey: "240"})
-	if err := ClearRuntimeLeaseForReopen(f.store, f.id); err != nil {
+	if err := ClearRuntimeLeaseForReopen(beadstest.Sessions(f.store), f.id); err != nil {
 		t.Fatal(err)
 	}
 	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseTTLKey] != "" || m[RuntimeLeaseEpochKey] != "3" {
@@ -1027,7 +1028,7 @@ func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ClearRuntimeLeaseForReopen(f.store, other.ID); err != nil {
+	if err := ClearRuntimeLeaseForReopen(beadstest.Sessions(f.store), other.ID); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := f.store.Get(other.ID); b.Metadata[RuntimeLeaseHolderKey] != "h/1/n" {
@@ -1180,5 +1181,43 @@ func TestRuntimeLeaseReleaseChecked(t *testing.T) {
 	logged.Release()
 	if !strings.Contains(buf.String(), "clearing the record at release") {
 		t.Fatalf("Release over a refused clear logged %q, want the failure", buf.String())
+	}
+}
+
+// TestRuntimeLeaseHeldAt: a record lease is held until SafeUntil on the
+// holder's clock and not once released; a flock-only lease is held until
+// released; a nil lease is not held.
+func TestRuntimeLeaseHeldAt(t *testing.T) {
+	f := newLeaseFixture(t)
+	city := t.TempDir()
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.HeldAt(leaseT0) || !l.HeldAt(l.SafeUntil().Add(-time.Second)) {
+		t.Fatal("a record lease reads not held before SafeUntil")
+	}
+	if l.HeldAt(l.SafeUntil()) || l.HeldAt(l.Expires()) {
+		t.Fatal("a record lease reads held at or past SafeUntil, where another holder may take it")
+	}
+	l.Release()
+	if l.HeldAt(leaseT0) {
+		t.Fatal("a released record lease reads held")
+	}
+
+	flock, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-flock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !flock.HeldAt(leaseT0.Add(24 * time.Hour)) {
+		t.Fatal("a flock-only lease reads not held before release")
+	}
+	flock.Release()
+	if flock.HeldAt(leaseT0) {
+		t.Fatal("a released flock-only lease reads held")
+	}
+	var none *RuntimeLease
+	if none.HeldAt(leaseT0) {
+		t.Fatal("a nil lease reads held")
 	}
 }

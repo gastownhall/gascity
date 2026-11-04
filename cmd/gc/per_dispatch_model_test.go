@@ -801,6 +801,12 @@ func TestCityRuntimeBeadReconcileTick_AppliesTriggerPinsThroughResidencyReader(t
 				stdout:              io.Discard,
 				stderr:              io.Discard,
 			}
+			if routes != nil {
+				// The controller registers the routes it opened at boot, which
+				// the pass's work legs resolve the class binding from.
+				registerResidencyRoutes(cr.cityPath, routes, cr.cityBeadStore)
+				t.Cleanup(func() { unregisterResidencyRoutes(cr.cityPath, routes) })
+			}
 
 			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 				State: map[string]TemplateParams{"worker-1": {
@@ -849,4 +855,159 @@ func (s *readCountingStore) Get(id string) (beads.Bead, error) {
 func (s *readCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.reads.Add(1)
 	return s.Store.List(query)
+}
+
+// staleTriggerPinStore is a CachingStore over backing, primed while the
+// trigger id carried no pin, after which the pin landed on backing alone: a
+// write made out of process (a worker's `gc bd update`), which reaches the
+// cache only at its next re-scan, while demand reads ready work live.
+func staleTriggerPinStore(t *testing.T, id string) (*beads.CachingStore, beads.Bead) {
+	t.Helper()
+	backing := &beads.MemStore{HonorExplicitIDs: true}
+	trigger := newTriggerOptionBead(t, backing, id, nil)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := backing.SetMetadata(trigger.ID, dispatchOptionMetadataKey("effort"), "low"); err != nil {
+		t.Fatalf("SetMetadata(backing): %v", err)
+	}
+	if cached, err := cache.Get(trigger.ID); err != nil || cached.Metadata[dispatchOptionMetadataKey("effort")] != "" {
+		t.Fatalf("precondition: cached trigger = %+v, %v; want the pre-pin row", cached.Metadata, err)
+	}
+	return cache, trigger
+}
+
+// TestCityRuntimeBeadReconcileTick_ReadsTriggerPinsPastAStaleCache pins that a
+// pool seat's launch reads its trigger bead's opt_* pins from the store that
+// owns it, not from the controller's bead cache: on a single-store city with
+// the trigger in a rig, and on a split city with the trigger in the class
+// binding.
+func TestCityRuntimeBeadReconcileTick_ReadsTriggerPinsPastAStaleCache(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		triggerID string
+		split     bool
+	}{
+		{name: "rig-resident trigger", triggerID: "ra-1"},
+		{name: "binding-resident graph-class trigger on a split city", triggerID: "gcg-1", split: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := beads.NewMemStore()
+			cache, trigger := staleTriggerPinStore(t, tc.triggerID)
+			rigStores := map[string]beads.Store{"alpha": cache}
+			sessions := beads.Store(work)
+			var routes *storageRoutes
+			if tc.split {
+				rigStores = map[string]beads.Store{"alpha": &beads.MemStore{HonorExplicitIDs: true}}
+				routes = splitRoutes(cache)
+				sessions = cache
+			}
+			if _, err := sessions.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:worker"},
+				Metadata: map[string]string{
+					"session_name":                          "worker-1",
+					"template":                              "worker",
+					"agent_name":                            "worker",
+					"pool_slot":                             "1",
+					poolManagedMetadataKey:                  boolMetadata(true),
+					"state":                                 string(sessionpkg.StateStartPending),
+					"pending_create_claim":                  "true",
+					"generation":                            "1",
+					beadmeta.TriggerBeadIDMetadataKey:       trigger.ID,
+					beadmeta.TriggerBeadStoreRefMetadataKey: "rig:alpha",
+				},
+			}); err != nil {
+				t.Fatalf("Create session bead: %v", err)
+			}
+			cfg := residencyTestConfig()
+			cfg.Agents = []config.Agent{{Name: "worker", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}
+			sp := runtime.NewFake()
+			cr := &CityRuntime{
+				cityPath:            t.TempDir(),
+				cityName:            "test-city",
+				cfg:                 cfg,
+				sp:                  sp,
+				standaloneCityStore: work,
+				standaloneRigStores: rigStores,
+				storageRoutes:       routes,
+				sessionDrains:       newDrainTracker(),
+				rec:                 events.Discard,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+			}
+			if routes != nil {
+				registerResidencyRoutes(cr.cityPath, routes, cr.cityBeadStore)
+				t.Cleanup(func() { unregisterResidencyRoutes(cr.cityPath, routes) })
+			}
+
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
+				State: map[string]TemplateParams{"worker-1": {
+					TemplateName:     "worker",
+					SessionName:      "worker-1",
+					Command:          "claude",
+					ResolvedProvider: optionSchemaProvider(),
+				}},
+				PoolDesiredCounts: map[string]int{"worker": 1},
+			}, cr.loadSessionBeadSnapshot(), nil, true)
+			if !cr.waitForAsyncStarts() {
+				t.Fatal("async starts did not settle after the tick")
+			}
+
+			var starts []runtime.Call
+			for _, call := range sp.SnapshotCalls() {
+				if call.Method == "Start" {
+					starts = append(starts, call)
+				}
+			}
+			if len(starts) != 1 {
+				t.Fatalf("runtime Start calls = %#v, want one start of the bound pool seat", starts)
+			}
+			if got, want := starts[0].Config.Command, "claude --effort low"; got != want {
+				t.Fatalf("started command = %q, want %q (the trigger's pin as its store holds it, not the cache's pre-pin row)", got, want)
+			}
+		})
+	}
+}
+
+// TestV2PrepareRowReadsTriggerPinsPastAStaleCache is the v2 start effect's
+// half of the same contract: prepareRow reads the trigger through the city
+// work legs (legsTriggerResolver), live, on both topologies.
+func TestV2PrepareRowReadsTriggerPinsPastAStaleCache(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		triggerID string
+		split     bool
+	}{
+		{name: "rig-resident trigger", triggerID: "ra-1"},
+		{name: "binding-resident graph-class trigger on a split city", triggerID: "gcg-1", split: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := residencyTestConfig()
+			work := beads.NewMemStore()
+			cache, trigger := staleTriggerPinStore(t, tc.triggerID)
+			rigStores := map[string]beads.Store{"alpha": cache}
+			sessions := beads.Store(work)
+			if tc.split {
+				rigStores = nil
+				routes := splitRoutes(cache)
+				registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+				t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+				sessions = cache
+			}
+			candidate := newTriggerSessionCandidate(t, sessions, trigger.ID, nil, "rig:alpha")
+			r := effectReads{legs: testWorkLegs(cityPath, cfg, work, rigStores).readOnly(), city: sessions, cityPath: cityPath}
+			w := &World{CityPath: cityPath, Env: &reconcileEnv{Cfg: cfg}}
+			prepared, err := prepareRow(r, w, candidate.info, candidate.tp, sessTranscriptUnknown)
+			if err != nil {
+				t.Fatalf("prepareRow: %v", err)
+			}
+			if !strings.Contains(prepared.cfg.Command, "--effort low") {
+				t.Fatalf("v2 prepared command = %q, want the trigger's pin --effort low as its store holds it", prepared.cfg.Command)
+			}
+		})
+	}
 }

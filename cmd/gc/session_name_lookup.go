@@ -446,7 +446,7 @@ func createPoolSessionBeadWithIdentifiers(
 // generations, so what keeps a slot at ONE unconfirmed generation is that a
 // fresh row may not be minted while an OPEN pool row of the same template and
 // identity is still an unconfirmed create — pending-create, or failed-create
-// whose runtime teardown has not been confirmed (releaseBeadScopedPoolRuntime
+// whose runtime teardown has not been confirmed (releaseRowOwnedRuntime
 // holds such a row open). This is the guarantee #5372 got from the
 // identity-derived name collision (ga-vcjr9), keyed on the identity instead of
 // the runtime name. Identities compare in their tmux-safe encoding, the same
@@ -475,7 +475,7 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 	if store == nil {
 		return nil
 	}
-	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
+	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false,
 		map[string]string{"agent_name": agentName},
 		map[string]string{"agent_name": want})
 	if err != nil {
@@ -623,7 +623,7 @@ func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapsho
 	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", selfOwner)
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, name, "", selfOwner)
 }
 
 // poolRuntimeSessionName is the identity-derived name for a pool instance with
@@ -975,7 +975,7 @@ func findSessionNameByAgentLabel(store beads.Store, template string) string {
 }
 
 func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
-	items, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: value})
+	items, err := sessionpkg.ExactMetadataSessionCandidates(beads.SessionStore{Store: store}, false, map[string]string{key: value})
 	if err != nil {
 		return ""
 	}
@@ -989,7 +989,7 @@ func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNa
 		if !sessionpkg.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue
 		}
-		sessionpkg.RepairEmptyType(store, &b)
+		sessionpkg.RepairEmptyType(beads.SessionStore{Store: store}, &b)
 		if key != "" && strings.TrimSpace(b.Metadata[key]) != value {
 			continue
 		}
