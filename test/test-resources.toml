@@ -492,6 +492,17 @@ migration_target = "P0.1"
 expires = "2026-12-31"
 
 [[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRoutedRowsGuard"
+resources = ["subprocess"]
+owner_bead = "ga-dpv5d"
+invariant = "the routed test matrix guard proof is a checked Medium subprocess owner"
+resource_owner = "the bash subprocess per case is confined to TestRoutedRowsGuard, which runs the actual shell guard against isolated fixture trees to verify discovery and manifest failures: the guard is shell, so its behavior requires a real shell execution"
+migration_target = "P0.4b"
+expires = "2026-12-31"
+
+[[medium]]
 package_dir = "tools/nogo/nolinttest"
 package_name = "nolinttest_test"
 owner = "TestNolintNeverSuppressesStoreclass"
