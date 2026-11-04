@@ -499,6 +499,10 @@ type Tmux struct {
 	// shadow is the program-status shadow mode's soft state (see
 	// program_status_shadow.go).
 	shadow programShadow
+	// dialogs is each session's dialog watch, kept from parser captures
+	// while the program-status switch is not off (see
+	// program_status_pending.go).
+	dialogs programDialogs
 
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
@@ -3609,9 +3613,10 @@ func (t *Tmux) nudgeSession(
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
 	prompt := &nudgePromptGuard{session: session, target: target, look: noPendingPrompt}
+	firstLookAt := time.Now()
 	if err := prompt.check(); err != nil {
 		if noPendingPrompt != nil && t.shadowing() {
-			t.shadowTypingGateNow(session, err)
+			t.shadowTypingGateNow(session, err, firstLookAt)
 		}
 		return err
 	}
@@ -3677,11 +3682,12 @@ func (t *Tmux) nudgeSession(
 	if t.shadowing() {
 		shadowReading, shadowReadOK = t.shadowRead(session)
 	}
+	lookAt := time.Now()
 	lookErr := prompt.check()
 	shadowBase, shadowed := runtime.ProgramBaseline{}, false
 	if shadowReadOK {
 		if noPendingPrompt != nil {
-			t.shadowTypingGate(session, lookErr, shadowReading)
+			t.shadowTypingGate(session, lookErr, lookAt, shadowReading)
 		}
 		shadowBase, shadowed = shadowReading.Baseline(), lookErr == nil
 	}

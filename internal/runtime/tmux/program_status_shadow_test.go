@@ -337,7 +337,7 @@ func TestShadowPendingDecisionIdenticalToOff(t *testing.T) {
 	// pending, while the record reports a question.
 	pendingProvider := func(mode runtime.ProgramStatusMode) *Provider {
 		p, _ := readProvider(mode, out, &table)
-		p.tm.exec = &pendingPaneExecutor{fetch: out}
+		p.tm.exec = &pendingPaneExecutor{fetch: out, record: func() string { return blocked }}
 		return p
 	}
 
@@ -492,19 +492,40 @@ func TestShadowGoDropsWhenFull(t *testing.T) {
 	}
 }
 
-// pendingPaneExecutor resolves the agent pane like fakeAgentPaneRow, shows a
-// ready prompt to every capture, answers the state cache's listing with
-// fetch, and every other command with "".
-type pendingPaneExecutor struct{ fetch string }
+// pendingPaneExecutor resolves the agent pane like fakeAgentPaneRow, shows
+// screen() to every capture ("❯ ", a ready prompt, when nil), answers the
+// state cache's listing with fetch and a fresh program read with record()'s
+// armed agent pane, and every other command with "". It counts both kinds of
+// read.
+type pendingPaneExecutor struct {
+	mu      sync.Mutex
+	fetch   string
+	record  func() string
+	screen  func() string
+	fetches int
+	fresh   int
+}
 
 func (e *pendingPaneExecutor) execute(args []string) (string, error) {
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
-	switch tmuxSubcommand(args) {
-	case "capture-pane":
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch {
+	case tmuxSubcommand(args) == "capture-pane":
+		if e.screen != nil {
+			return e.screen(), nil
+		}
 		return "❯ ", nil
-	case "list-panes":
+	case isProgramRead(args):
+		e.fresh++
+		if e.record == nil {
+			return "", errors.New("unscripted fresh read")
+		}
+		return freshRows(armedPane(e.record())), nil
+	case tmuxSubcommand(args) == "list-panes":
+		e.fetches++
 		return e.fetch, nil
 	}
 	return "", nil
@@ -512,6 +533,23 @@ func (e *pendingPaneExecutor) execute(args []string) (string, error) {
 
 func (e *pendingPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
 	return e.execute(args)
+}
+
+// reads is how many state cache listings and fresh program reads e answered.
+func (e *pendingPaneExecutor) reads() (fetches, fresh int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fetches, e.fresh
+}
+
+// freshRows renders programFreshFormat rows for a session's panes.
+func freshRows(panes ...capturePane) string {
+	var lines []string
+	for _, p := range panes {
+		row := append([]string{p.deadField()}, p.fields()...)
+		lines = append(lines, strings.Join(append(row, runtimeInventoryEnd), "\t"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Kills a readiness comparison that ignores the settle after the program's
@@ -1108,23 +1146,27 @@ func TestShadowDecisionReadingPrecedesTheCallersAct(t *testing.T) {
 	}
 }
 
-// heldListingExecutor is pendingPaneExecutor whose state cache listing is
-// listing(), answered after hold.
+// heldListingExecutor is pendingPaneExecutor whose state cache listing and
+// fresh program reads carry the record record() returns, answered after
+// hold.
 type heldListingExecutor struct {
-	hold    func()
-	listing func() string
+	hold   func()
+	record func() string
 }
 
 func (e *heldListingExecutor) execute(args []string) (string, error) {
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
-	switch tmuxSubcommand(args) {
-	case "capture-pane":
+	switch {
+	case tmuxSubcommand(args) == "capture-pane":
 		return "❯ ", nil
-	case "list-panes":
+	case isProgramRead(args):
 		e.hold()
-		return e.listing(), nil
+		return freshRows(armedPane(e.record())), nil
+	case tmuxSubcommand(args) == "list-panes":
+		e.hold()
+		return fetchRows(armedPane(e.record())), nil
 	}
 	return "", nil
 }
@@ -1133,7 +1175,7 @@ func (e *heldListingExecutor) executeCtx(_ context.Context, args []string) (stri
 	return e.execute(args)
 }
 
-// Kills a pending comparison whose state cache reading is taken after
+// Kills a pending comparison whose record reading is taken after
 // Pending returned (review finding: asynchronous decision reading): a
 // delivery made once Pending reads nothing pending starts a turn, and a
 // reading of the listing after it judged that turn. The listing from before
@@ -1144,11 +1186,11 @@ func TestShadowPendingReadingPrecedesTheCallersAct(t *testing.T) {
 		gate := newActGate()
 		blocked := psRecord(t, readNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Kind = runtime.ProgramBlockQuestion })
 		delivered := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts = 2, 2 })
-		ex := &heldListingExecutor{hold: gate.hold, listing: func() string {
+		ex := &heldListingExecutor{hold: gate.hold, record: func() string {
 			if gate.done() {
-				return fetchRows(armedPane(delivered))
+				return delivered
 			}
-			return fetchRows(armedPane(blocked))
+			return blocked
 		}}
 		col := newShadowCollector()
 		tm := &Tmux{cfg: Config{ProgramStatus: runtime.ProgramStatusShadow, ComparisonSink: col.sink}, exec: ex}
