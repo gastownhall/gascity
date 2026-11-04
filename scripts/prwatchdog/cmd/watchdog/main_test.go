@@ -250,3 +250,34 @@ func TestFetchAwaitingApproval_OtherErrorsAreReturned(t *testing.T) {
 		t.Fatal("err = nil, want the unexpected-status error")
 	}
 }
+
+// TestFetchAwaitingApproval_OnlyActionRequiredSuitesCount pins the conclusion
+// half of the lookup. A GitHub Actions suite that has no check runs but ended
+// any way other than action_required, or has not ended, is another reason the
+// tests never ran, so it must not be reported as awaiting maintainer approval.
+func TestFetchAwaitingApproval_OnlyActionRequiredSuitesCount(t *testing.T) {
+	const suite = `{"id":1,"status":%q,"conclusion":%s,"latest_check_runs_count":0,"app":{"slug":"github-actions"}}`
+	for _, tc := range []struct {
+		name       string
+		status     string
+		conclusion string // a JSON value
+		want       bool
+	}{
+		{"action_required is held for approval", "completed", `"action_required"`, true},
+		{"canceled before any job was created", "completed", `"cancelled"`, false}, //nolint:misspell // GitHub check suite conclusion value
+		{"startup_failure", "completed", `"startup_failure"`, false},
+		{"skipped", "completed", `"skipped"`, false},
+		{"not finished yet", "queued", `null`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := suitesHandler(t, fmt.Sprintf(suite, tc.status, tc.conclusion))
+			got, err := newTestFetcher(h).FetchAwaitingApproval(context.Background(), "sha1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("FetchAwaitingApproval = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
