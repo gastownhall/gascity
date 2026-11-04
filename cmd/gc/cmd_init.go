@@ -1471,7 +1471,7 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	if wiz.prefix != "" {
 		cfg.Workspace.Prefix = wiz.prefix
 	}
-	storage, storageNotice, err := resolveInitStorage(&cfg, wiz.storage)
+	storage, storageNotice, err := resolveInitStorage(&cfg, cityPath, wiz.storage)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

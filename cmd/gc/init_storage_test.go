@@ -360,6 +360,32 @@ func TestInitStorageSplitRefusesARemoteSessionRuntime(t *testing.T) {
 	}
 }
 
+// An exec runtime whose handshake declares locality=local runs its sessions
+// on this host, so a split request on it is born split; the handshake is read
+// for the new city's path.
+func TestInitStorageSplitAdmitsAnExecRuntimeDeclaringLocal(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	prevHook := initCityConfigHook
+	initCityConfigHook = func(cfg *config.City) { cfg.Session.Provider = "exec:/opt/runtime.sh" }
+	t.Cleanup(func() { initCityConfigHook = prevHook })
+	var judged []string
+	prevLocal := execRuntimeDeclaresLocal
+	execRuntimeDeclaresLocal = func(script, _, cityPath string) bool {
+		judged = append(judged, script+"@"+cityPath)
+		return true
+	}
+	t.Cleanup(func() { execRuntimeDeclaresLocal = prevLocal })
+	_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
+	if code != 0 {
+		t.Fatalf("doInit = %d: %s", code, stderr)
+	}
+	assertBornSplit(t, cfg)
+	if len(judged) == 0 || judged[0] != "/opt/runtime.sh@/bright-lights" {
+		t.Errorf("locality judged as %v, want /opt/runtime.sh@/bright-lights", judged)
+	}
+}
+
 func TestInitStorageSingleAcceptsARemoteSessionRuntime(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "k8s")

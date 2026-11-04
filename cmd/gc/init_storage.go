@@ -88,16 +88,16 @@ func bornSplitStorageConfig() *config.StorageConfig {
 }
 
 // resolveInitStorage decides the [storage] a plain gc init writes for cfg, the
-// city shape it built, and choice. It returns nil for a single-store city, and
-// a notice for stderr when a split request starts the city single-store. It
-// refuses a split on a remote session runtime: a split city's remote sessions
-// refuse mail, nudges, sessions, orders and workflows until worker-site
-// transport (CN-2) exists.
-func resolveInitStorage(cfg *config.City, choice initStorageChoice) (*config.StorageConfig, string, error) {
+// city shape it built at cityPath, and choice. It returns nil for a
+// single-store city, and a notice for stderr when a split request starts the
+// city single-store. It refuses a split on a remote session runtime: a split
+// city's remote sessions refuse mail, nudges, sessions, orders and workflows
+// until worker-site transport (CN-2) exists.
+func resolveInitStorage(cfg *config.City, cityPath string, choice initStorageChoice) (*config.StorageConfig, string, error) {
 	if choice != initStorageSplit {
 		return nil, "", nil
 	}
-	if runtime, remote := cityRunsRemoteSessions(cfg); remote {
+	if runtime, remote := cityRunsRemoteSessions(cfg, cityPath); remote {
 		return nil, "", fmt.Errorf("--storage=split: this city's session runtime %q runs sessions on remote hosts, and a split city's remote sessions refuse mail, nudges, sessions, orders and workflows until worker-site transport (CN-2) exists; use --storage=single", runtime)
 	}
 	if providerUsesBdStoreContract(initWorkStoreProvider(cfg)) {
