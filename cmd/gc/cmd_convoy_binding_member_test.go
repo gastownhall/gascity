@@ -52,7 +52,7 @@ func TestConvoyCreateRefusesABindingOwnedMember(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("convoy create tracked binding-owned %s; stdout=%q", relicID, stdout.String())
 	}
-	for _, want := range []string{relicID, "is owned by the relocated class binding"} {
+	for _, want := range []string{relicID, `is owned by the "infra" class binding`, "holds at most a frozen pre-migration copy", "tracks work-class beads only"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("refusal missing %q; stderr=%q", want, stderr.String())
 		}
@@ -74,7 +74,7 @@ func TestConvoyAddRefusesABindingOwnedMember(t *testing.T) {
 	if code := doConvoyAddJSON(work, cityDir, []string{convoy.ID, relicID}, false, &stdout, &stderr); code == 0 {
 		t.Fatalf("convoy add tracked binding-owned %s; stdout=%q", relicID, stdout.String())
 	}
-	if !strings.Contains(stderr.String(), relicID+" is owned by the relocated class binding") {
+	if !strings.Contains(stderr.String(), relicID+` is owned by the "infra" class binding`) {
 		t.Errorf("refusal does not name the owner; stderr=%q", stderr.String())
 	}
 	deps, err := work.DepList(convoy.ID, "up")
@@ -111,5 +111,46 @@ func TestConvoyCreateAndAddOnASingleStoreCityAreUnchanged(t *testing.T) {
 	stderr.Reset()
 	if code := doConvoyAddJSON(work, cityPath, []string{convoys[0].ID, other.ID}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("convoy add = %d; stderr=%q", code, stderr.String())
+	}
+}
+
+// TestConvoyCreateMissingMemberLeavesNoConvoy pins that every member is read
+// before the convoy bead is created: a member no store holds fails the
+// command without leaving an orphaned convoy behind.
+func TestConvoyCreateMissingMemberLeavesNoConvoy(t *testing.T) {
+	work := beads.NewMemStore()
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCreateWithOptionsJSON(work, nil, "", events.Discard, []string{"batch", "gc-missing"}, convoyCreateOptions{}, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("convoy create with a missing member exited 0; stdout=%q", stdout.String())
+	}
+	if convoys := convoyBeadsIn(t, work); len(convoys) != 0 {
+		t.Fatalf("a missing member left %d convoy bead(s) behind: %+v", len(convoys), convoys)
+	}
+}
+
+// TestConvoyRejectsABlankMemberID pins the usage error for an empty member id
+// on create and add, before any store is touched.
+func TestConvoyRejectsABlankMemberID(t *testing.T) {
+	work := beads.NewMemStore()
+	convoy, err := work.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCreateWithOptionsJSON(work, nil, "", events.Discard, []string{"x", " "}, convoyCreateOptions{}, false, &stdout, &stderr); code == 0 {
+		t.Fatal("convoy create accepted a blank member id")
+	}
+	if !strings.Contains(stderr.String(), "usage") {
+		t.Errorf("create's blank-id error is not a usage error: %q", stderr.String())
+	}
+	if convoys := convoyBeadsIn(t, work); len(convoys) != 1 {
+		t.Fatalf("a refused create minted a convoy: %+v", convoys)
+	}
+	stderr.Reset()
+	if code := doConvoyAddJSON(work, "", []string{convoy.ID, ""}, false, &stdout, &stderr); code == 0 {
+		t.Fatal("convoy add accepted a blank member id")
+	}
+	if !strings.Contains(stderr.String(), "usage") {
+		t.Errorf("add's blank-id error is not a usage error: %q", stderr.String())
 	}
 }

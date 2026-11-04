@@ -286,18 +286,30 @@ func (unprobedWorkResidual) Get(id string) (beads.Bead, error) {
 }
 
 // firstBindingOwnedID reports the first of ids a relocated class binding owns,
-// and the binding's ref. A command that reads or writes those ids on an exact
-// work store refuses such an id instead: the work store does not hold its
-// authoritative row. A single-store city has no binding leg and owns none.
-func firstBindingOwnedID(cityPath string, ids []string) (id string, binding storeref.StoreRef, owned bool, err error) {
+// and the binding as operator-facing text (its configured [storage.bindings]
+// name). A command that reads or writes those ids on an exact work store
+// refuses such an id instead: the work store does not hold its authoritative
+// row. A single-store city has no binding leg and owns none.
+func firstBindingOwnedID(cityPath string, ids []string) (id, binding string, owned bool, err error) {
 	for _, id := range ids {
-		owner, ok, err := cliByIDBindingOwner(cityPath, id)
+		_, ok, err := cliByIDBindingOwner(cityPath, id)
 		if err != nil {
 			return id, "", false, fmt.Errorf("resolving which store owns %s: %w", id, err)
 		}
 		if ok {
-			return id, owner.Ref, true, nil
+			return id, configuredBindingLabel(cityPath), true, nil
 		}
 	}
 	return "", "", false, nil
+}
+
+// configuredBindingLabel names the city's relocated class binding the way the
+// operator configured it ("the infra class binding"), falling back to a
+// generic phrase when no single binding name resolves.
+func configuredBindingLabel(cityPath string) string {
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil || !relocated || binding.Name == "" {
+		return "the relocated class binding"
+	}
+	return fmt.Sprintf("the %q class binding", binding.Name)
 }

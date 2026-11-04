@@ -268,7 +268,7 @@ func beadsMetadataCASBindingOwnedRefusal(cityPath string, request beadsMetadataC
 	if err != nil || !owned {
 		return "", err
 	}
-	return fmt.Sprintf("gc beads metadata-cas %s: refused: %s is owned by the relocated class binding %q, not by the work store --store-ref %s names; metadata-cas swaps only on a work store, so it would not touch the authoritative row. Nothing was written.", request.beadID, request.beadID, string(binding), request.storeRef), nil
+	return fmt.Sprintf("gc beads metadata-cas %s: refused: %s is owned by %s; the work store --store-ref %s names holds at most a frozen pre-migration copy of it, so a swap there would not touch the authoritative row. metadata-cas swaps work beads only; change this bead through its class's own commands. Nothing was written.", request.beadID, request.beadID, binding, request.storeRef), nil
 }
 
 // beadsMetadataCASClassFlipRefusal is the metadata-cas door onto the one

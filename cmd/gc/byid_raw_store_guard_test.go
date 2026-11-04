@@ -165,6 +165,7 @@ type byIDScanner struct {
 	routed   map[string]bool
 	sanitize map[string]bool
 	summary  map[string]map[int]bool // func key -> beads.Store param indexes reaching a sink
+	rawPos   map[string]map[int]bool // raw function/var name -> raw result positions
 	vars     map[string]ast.Expr     // package-level open*Store* vars -> value
 	declared map[string]bool         // every function, method and package var name
 	// derived are package functions classified raw only because a return
@@ -172,6 +173,7 @@ type byIDScanner struct {
 	derived map[string]bool
 	// stale are list entries naming nothing in the package.
 	stale []string
+	used  map[string]map[int]bool // marker lines that suppressed a hit
 	// unclassified are open*Store* functions/vars returning a store that are
 	// classified neither raw nor routed.
 	unclassified []string
@@ -197,6 +199,8 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 		routed:   map[string]bool{},
 		declared: map[string]bool{},
 		derived:  map[string]bool{},
+		rawPos:   map[string]map[int]bool{},
+		used:     map[string]map[int]bool{},
 		sanitize: byIDSet(byIDSanitizers),
 	}
 	for name := range byIDRoutedOpeners {
@@ -313,6 +317,9 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 // or routed function. A helper outside any naming convention that returns a
 // raw store is therefore raw at its call sites.
 func (s *byIDScanner) deriveRawReturns() {
+	for name := range s.raw {
+		s.rawPos[name] = s.declaredStorePositions(name, map[string]bool{})
+	}
 	for changed := true; changed; {
 		changed = false
 		for name, value := range s.vars {
@@ -323,6 +330,7 @@ func (s *byIDScanner) deriveRawReturns() {
 			switch {
 			case s.raw[id.Name]:
 				s.raw[name] = true
+				s.rawPos[name] = s.rawPos[id.Name]
 				changed = true
 			case s.routed[id.Name]:
 				s.routed[name] = true
@@ -331,37 +339,135 @@ func (s *byIDScanner) deriveRawReturns() {
 			}
 		}
 		for _, fn := range s.funcs {
-			if fn.decl.Recv != nil || s.raw[fn.name] || s.sanitize[fn.name] || fn.decl.Type.Results == nil {
+			if fn.decl.Recv != nil || s.sanitize[fn.name] || fn.decl.Type.Results == nil {
 				continue
 			}
-			if s.returnsRaw(fn.decl.Body) {
-				s.raw[fn.name] = true
-				s.derived[fn.name] = true
-				changed = true
+			if !s.derived[fn.name] && s.raw[fn.name] {
+				continue // listed: its positions come from its declared result types
+			}
+			for pos := range s.rawReturnPositions(fn.decl) {
+				if s.rawPos[fn.name] == nil {
+					s.rawPos[fn.name] = map[int]bool{}
+				}
+				if !s.rawPos[fn.name][pos] {
+					s.rawPos[fn.name][pos] = true
+					s.raw[fn.name] = true
+					s.derived[fn.name] = true
+					changed = true
+				}
 			}
 		}
 	}
 }
 
-// returnsRaw reports whether a return statement of body (not of a closure
-// inside it) hands back a raw store in any position.
-func (s *byIDScanner) returnsRaw(body *ast.BlockStmt) bool {
-	raw := s.rawIdents(body, nil)
-	found := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch x := n.(type) {
+// declaredStorePositions are the result positions of a listed opener whose
+// declared type is a beads store type. An opener the package cannot resolve
+// (or one declaring no such type) is taken as raw at position 0.
+func (s *byIDScanner) declaredStorePositions(name string, seen map[string]bool) map[int]bool {
+	if seen[name] {
+		return map[int]bool{0: true}
+	}
+	seen[name] = true
+	var ft *ast.FuncType
+	for _, fn := range s.byName[name] {
+		if fn.decl.Recv == nil {
+			ft = fn.decl.Type
+		}
+	}
+	if ft == nil {
+		switch v := s.vars[name].(type) {
 		case *ast.FuncLit:
-			return false
-		case *ast.ReturnStmt:
-			for _, r := range x.Results {
-				if !s.isSanitized(r) && s.isRawSource(r, raw) {
-					found = true
+			ft = v.Type
+		case *ast.Ident:
+			return s.declaredStorePositions(v.Name, seen)
+		}
+	}
+	out := map[int]bool{}
+	if ft != nil && ft.Results != nil {
+		pos := 0
+		for _, field := range ft.Results.List {
+			n := max(len(field.Names), 1)
+			for range n {
+				if byIDIsBeadsStoreType(field.Type) {
+					out[pos] = true
 				}
+				pos++
 			}
+		}
+	}
+	if len(out) == 0 {
+		out[0] = true
+	}
+	return out
+}
+
+// byIDIsBeadsStoreType reports a type expression naming a beads store type
+// (beads.Store, *beads.BdStore, beads.StoreOpenResult, map[string]beads.Store,
+// func(...) (beads.Store, error), ...).
+func byIDIsBeadsStoreType(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && byIDExprString(sel.X) == "beads" && strings.Contains(sel.Sel.Name, "Store") {
+			found = true
 		}
 		return !found
 	})
 	return found
+}
+
+// rawReturnPositions are the result positions at which a return statement of
+// fn (not of a closure inside it) hands back a raw store. A `return f()` that
+// forwards a multi-result call forwards f's raw positions.
+func (s *byIDScanner) rawReturnPositions(fn *ast.FuncDecl) map[int]bool {
+	raw := s.rawIdents(fn.Body, nil)
+	out := map[int]bool{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			if len(x.Results) == 1 && fn.Type.Results.NumFields() > 1 {
+				for pos, isRaw := range s.callResultRaw(x.Results[0], fn.Type.Results.NumFields(), raw) {
+					if isRaw {
+						out[pos] = true
+					}
+				}
+				return true
+			}
+			for pos, r := range x.Results {
+				if !s.isSanitized(r) && s.isRawSource(r, raw) {
+					out[pos] = true
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// callResultRaw reports, per position, whether the n values rhs produces are
+// raw stores: a package function's call taints exactly its raw result
+// positions; any other expression (a map index, a type assertion, a
+// single-value call) taints at most position 0.
+func (s *byIDScanner) callResultRaw(rhs ast.Expr, n int, raw map[string]bool) []bool {
+	out := make([]bool, n)
+	if s.isSanitized(rhs) {
+		return out
+	}
+	if call, ok := rhs.(*ast.CallExpr); ok {
+		if id, ok := call.Fun.(*ast.Ident); ok && s.raw[id.Name] {
+			for pos := range s.rawPos[id.Name] {
+				if pos < n {
+					out[pos] = true
+				}
+			}
+			return out
+		}
+	}
+	if n > 0 {
+		out[0] = s.isRawSource(rhs, raw)
+	}
+	return out
 }
 
 // staleListEntries records list entries that name nothing declared in the
@@ -476,7 +582,7 @@ func (s *byIDScanner) isRawSource(e ast.Expr, raw map[string]bool) bool {
 		if slices.Contains(byIDRawQualified, qual) {
 			return true
 		}
-		if _, ok := x.Fun.(*ast.Ident); ok && s.raw[name] {
+		if _, ok := x.Fun.(*ast.Ident); ok && s.raw[name] && (s.rawPos[name] == nil || s.rawPos[name][0]) {
 			return true
 		}
 		if sel, ok := x.Fun.(*ast.SelectorExpr); ok && slices.Contains(byIDRawAccessors, sel.Sel.Name) {
@@ -539,24 +645,33 @@ func (s *byIDScanner) rawIdents(body *ast.BlockStmt, seed map[string]bool) map[s
 		ast.Inspect(body, func(n ast.Node) bool {
 			switch st := n.(type) {
 			case *ast.AssignStmt:
+				if len(st.Rhs) == 1 && len(st.Lhs) > 1 {
+					// A multi-value right-hand side taints each left-hand
+					// variable by its result position.
+					tainted := s.callResultRaw(st.Rhs[0], len(st.Lhs), raw)
+					sanitizedRHS := s.isSanitized(st.Rhs[0])
+					for i, lhs := range st.Lhs {
+						id, ok := lhs.(*ast.Ident)
+						if !ok {
+							continue
+						}
+						switch {
+						case sanitizedRHS && i == 0:
+							sanitized[id.Name] = true
+						case tainted[i]:
+							mark(id.Name)
+						}
+					}
+					break
+				}
 				for i, lhs := range st.Lhs {
 					id, ok := lhs.(*ast.Ident)
-					if !ok {
+					if !ok || i >= len(st.Rhs) {
 						continue
 					}
-					var rhs ast.Expr
-					switch {
-					case len(st.Rhs) == len(st.Lhs):
-						rhs = st.Rhs[i]
-					case len(st.Rhs) == 1 && i == 0:
-						rhs = st.Rhs[0]
-					}
-					if rhs == nil {
-						continue
-					}
-					if s.isSanitized(rhs) {
+					if s.isSanitized(st.Rhs[i]) {
 						sanitized[id.Name] = true
-					} else if s.isRawSource(rhs, raw) {
+					} else if s.isRawSource(st.Rhs[i], raw) {
 						mark(id.Name)
 					}
 				}
@@ -567,6 +682,14 @@ func (s *byIDScanner) rawIdents(body *ast.BlockStmt, seed map[string]bool) map[s
 					}
 				}
 			case *ast.ValueSpec:
+				if len(st.Values) == 1 && len(st.Names) > 1 {
+					for i, isRaw := range s.callResultRaw(st.Values[0], len(st.Names), raw) {
+						if isRaw {
+							mark(st.Names[i].Name)
+						}
+					}
+					break
+				}
 				for i, id := range st.Names {
 					if i < len(st.Values) && !s.isSanitized(st.Values[i]) && s.isRawSource(st.Values[i], raw) {
 						mark(id.Name)
@@ -592,6 +715,7 @@ func (s *byIDScanner) sinks(file string, body *ast.BlockStmt, raw map[string]boo
 	add := func(rule, detail string, anchor ast.Node) {
 		line := s.fset.Position(anchor.Pos()).Line
 		if honorMarkers && s.allow[file][line] {
+			s.markUsed(file, line)
 			return
 		}
 		out = append(out, byIDHit{file: file, rule: rule, detail: detail, line: line})
@@ -691,6 +815,29 @@ func (s *byIDScanner) summarize() {
 			}
 		}
 	}
+}
+
+func (s *byIDScanner) markUsed(file string, line int) {
+	if s.used[file] == nil {
+		s.used[file] = map[int]bool{}
+	}
+	s.used[file][line] = true
+}
+
+// unusedMarkers are byid:allow lines that suppress no hit: a marker left on a
+// line the guard no longer flags, or put on the wrong line of a multi-line
+// call. Valid only after hits.
+func (s *byIDScanner) unusedMarkers() []string {
+	var out []string
+	for file, lines := range s.allow {
+		for line := range lines {
+			if !s.used[file][line] {
+				out = append(out, fmt.Sprintf("%s:%d", file, line))
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // hits returns every flagged site in the package.
@@ -896,7 +1043,10 @@ func checkByIDBaseline(rows []byIDBaselineRow, got map[string]int, sites map[str
 // analysis is flow-insensitive, so a function that swaps one variable between
 // a raw and a routed store is judged by whether it was EVER assigned a routed
 // store. Methods, interfaces and other packages are not followed; that typed
-// reachability is a separate guard.
+// reachability is a separate guard. A raw store wrapped in a typed handle
+// literal (beads.WorkStore{Store: raw}) is not tracked through the handle:
+// operations on the handle, or on its .Store, are not attributed back to the
+// raw store.
 //
 // The counts ratchet against byIDRawStoreBaseline: growth fails, and so does a
 // row the tree no longer reaches. A self-check fails any open*Store* function
@@ -912,6 +1062,9 @@ func TestByIDOpsDoNotTargetRawWorkStores(t *testing.T) {
 		t.Errorf("stale classification entry %s: it names nothing declared in cmd/gc; drop or rename it", e)
 	}
 	hits := s.hits()
+	for _, m := range s.unusedMarkers() {
+		t.Errorf("%s: a %s marker suppresses no hit; remove it, or move it to the line of the flagged selector/callee", m, byIDAllowMarker)
+	}
 	got := map[string]int{}
 	sites := map[string][]string{}
 	for _, h := range hits {
@@ -1116,6 +1269,42 @@ func multiLineMarked(id string) {
 		SetMetadata(id, "k", "v") // byid:allow anchored on the selector line
 }
 
+func pairOpener() (string, beads.Store) {
+	store, _ := openCityStoreAt("/city")
+	return "dir", store
+}
+
+func openSlingStore() (storeDir string, store beads.Store, errCode, errMsg string) {
+	return "", nil, "", ""
+}
+
+func positionOneDerived(id string) {
+	dir, store := pairOpener()
+	_ = dir
+	_, _ = store.Get(id)
+}
+
+func positionOneListed(id string) {
+	storeDir, store, _, _ := openSlingStore()
+	_ = storeDir
+	_, _ = store.Get(id)
+}
+
+func positionOneVar(id string) {
+	var dir, store = pairOpener()
+	_ = dir
+	_, _ = store.Get(id)
+}
+
+func positionZeroIsNotRaw(id string) {
+	storeDir, _, _, _ := openSlingStore()
+	_, _ = storeDir.Get(id) // position 0 is the directory, not the store
+}
+
+func staleMarker() {
+	_ = 1 // byid:allow suppresses nothing
+}
+
 func allowed(id string) {
 	raw, _ := openCityStore(nil, "gc x")
 	_, _ = raw.Get(id) // byid:allow work bead by construction
@@ -1139,19 +1328,27 @@ func allowed(id string) {
 		"qualifiedSink":        "via",
 		"callerOfMarkedHelper": "via",
 		"otherMarker":          "byid",
+		"positionOneDerived":   "byid",
+		"positionOneListed":    "byid",
+		"positionOneVar":       "byid",
 	}
 	for fn, rule := range want {
 		if got[fn] != rule {
 			t.Errorf("%s: flagged as %q, want %q", fn, got[fn], rule)
 		}
 	}
-	for _, fn := range []string{"sessionRouted", "classRouted", "handleClose", "shadowedByClosure", "allowed", "multiLineMarked", "helper", "markedHelper", "derivedHelper"} {
+	for _, fn := range []string{"sessionRouted", "classRouted", "handleClose", "shadowedByClosure", "allowed", "multiLineMarked", "helper", "markedHelper", "derivedHelper", "positionZeroIsNotRaw", "staleMarker", "pairOpener"} {
 		if rule, ok := got[fn]; ok {
 			t.Errorf("%s: flagged as %q; a routed store, a handle Close, a closure parameter shadowing a raw name, a byid:allow line (on the selector's line) and a helper's own parameter are not hits", fn, rule)
 		}
 	}
 	if len(got) != len(want) {
 		t.Errorf("flagged %v, want exactly %v", got, want)
+	}
+	// A marker inside a helper suppresses nothing (the helper's parameter is
+	// not a hit), and neither does one on an unflagged line: both are reported.
+	if unused := s.unusedMarkers(); len(unused) != 2 {
+		t.Errorf("unused markers = %v, want the helper's and staleMarker's", unused)
 	}
 	if len(s.unclassified) != 0 {
 		t.Errorf("unclassified openers in the snippet: %v", s.unclassified)

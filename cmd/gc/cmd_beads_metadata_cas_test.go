@@ -876,7 +876,7 @@ func TestBeadsMetadataCASRefusesABindingOwnedIDOnASplitCity(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("metadata-cas exited 0 for a binding-owned id; stdout=%q stderr=%q", stdout, stderr)
 		}
-		for _, want := range []string{resident.ID, "is owned by the relocated class binding", "refused", "Nothing was written"} {
+		for _, want := range []string{resident.ID, `is owned by the "infra" class binding`, "holds at most a frozen pre-migration copy", "refused", "Nothing was written"} {
 			if !strings.Contains(stderr, want) {
 				t.Errorf("refusal is missing %q; stderr=%q", want, stderr)
 			}
@@ -911,7 +911,7 @@ func TestBeadsMetadataCASRefusesABindingOwnedIDOnASplitCity(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("metadata-cas exited 0 for binding-owned relic %s; stdout=%q stderr=%q", relic.ID, stdout, stderr)
 		}
-		if !strings.Contains(stderr, relic.ID+" is owned by the relocated class binding") {
+		if !strings.Contains(stderr, relic.ID+` is owned by the "infra" class binding`) {
 			t.Errorf("refusal does not name the owner; stderr=%q", stderr)
 		}
 		if got, _ := work.Get(relic.ID); got.Metadata["review_sha"] != "old" {

@@ -224,8 +224,32 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 		return 1
 	}
 
+	if blankConvoyMemberID(issueIDs) {
+		fmt.Fprintln(stderr, "gc convoy create: usage: gc convoy create <name> [issue-id...]: an issue id must not be blank") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if code, refused := refuseBindingOwnedConvoyMembers(cityPath, "gc convoy create", issueIDs, stderr); refused {
 		return code
+	}
+	// Every member is resolved and read BEFORE the convoy bead is created, so
+	// a member no store holds fails the command without orphaning a convoy.
+	childStores := make([]beads.Store, len(issueIDs))
+	for i, id := range issueIDs {
+		// Children may live in a rig store (different from the city root
+		// store where the convoy is created).
+		childStore := store
+		if cfg != nil {
+			if rd := rigDirForBead(cfg, id); rd != "" {
+				if rs, err := openStoreAtForCity(rd, cityPath); err == nil {
+					childStore = rs
+				}
+			}
+		}
+		if _, err := childStore.Get(id); err != nil { // byid:allow binding-owned members were refused above (refuseBindingOwnedConvoyMembers)
+			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		childStores[i] = childStore
 	}
 
 	b := beads.Bead{Title: name, Type: "convoy"}
@@ -248,22 +272,8 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 		// Non-fatal: convoy already created and event will be emitted.
 	}
 
-	for _, id := range issueIDs {
-		// Resolve the correct store for this child bead. Children may
-		// live in a rig store (different from the city root store where
-		// the convoy was created).
-		childStore := store
-		if cfg != nil {
-			if rd := rigDirForBead(cfg, id); rd != "" {
-				if rs, err := openStoreAtForCity(rd, cityPath); err == nil {
-					childStore = rs
-				}
-			}
-		}
-		if _, err := childStore.Get(id); err != nil { // byid:allow binding-owned members were refused before the convoy was created (refuseBindingOwnedConvoyMembers)
-			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	for i, id := range issueIDs {
+		childStore := childStores[i]
 		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: childStore}}, convoy.ID, id); err != nil {
 			fmt.Fprintf(stderr, "gc convoy create: tracking %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1821,6 +1831,17 @@ func cmdConvoyAddJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	return doConvoyAddJSON(store, cityPath, args, jsonOut, stdout, stderr) // byid:allow store is the one openConvoyStoreByIDAt resolved for this convoy id; the member is refused inside if the binding owns it
 }
 
+// blankConvoyMemberID reports an empty or whitespace-only member id, which no
+// store can hold and which would otherwise surface as a confusing not-found.
+func blankConvoyMemberID(ids []string) bool {
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // refuseBindingOwnedConvoyMembers refuses a convoy member a relocated class
 // binding owns. A convoy and its tracks edges live in a work store, and the
 // member is read and tracked there; for a binding-owned id that store holds at
@@ -1838,7 +1859,7 @@ func refuseBindingOwnedConvoyMembers(cityPath, cmdName string, ids []string, std
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	case owned:
-		fmt.Fprintf(stderr, "%s: %s is owned by the relocated class binding %q; a convoy tracks members in its work store, which does not hold that bead, so refusing. Nothing was written.\n", cmdName, id, string(binding)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s is owned by %s; the convoy's work store holds at most a frozen pre-migration copy of it, so refusing to track it. On a split city a convoy tracks work-class beads only; track a work bead instead. Nothing was written.\n", cmdName, id, binding) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
 	return 0, false
@@ -1858,6 +1879,10 @@ func doConvoyAddJSON(store beads.Store, cityPath string, args []string, jsonOut 
 	}
 	convoyID := args[0]
 	issueID := args[1]
+	if blankConvoyMemberID([]string{issueID}) {
+		fmt.Fprintln(stderr, "gc convoy add: usage: gc convoy add <convoy-id> <issue-id>: the issue id must not be blank") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if code, refused := refuseBindingOwnedConvoyMembers(cityPath, "gc convoy add", []string{issueID}, stderr); refused {
 		return code
 	}
