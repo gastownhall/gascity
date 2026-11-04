@@ -57,6 +57,7 @@ go_test(
         "requirements_test.go",
         "resolve_test.go",
         "retry_test.go",
+        "scope_decl_test.go",
         "scope_membership_test.go",
         "selfclose_test.go",
         "source_spec_test.go",
