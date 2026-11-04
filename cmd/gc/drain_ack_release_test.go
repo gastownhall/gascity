@@ -442,6 +442,63 @@ func TestDrainAckKeepsClaimsTheSeatStarted(t *testing.T) {
 	}
 }
 
+// TestDrainAckKeepsConfiguredNamedIdentityClaims: a configured named session
+// (a refinery) holds its work bead under its configured_named_identity, and
+// the next incarnation resumes that claim through the awake set's assigned
+// anchor. A drain-ack that gave the claim back would strand the work bead
+// open and unassigned, so the release leaves a claim assigned to the seat's
+// configured named identity alone: status, assignee and routed_to unchanged.
+//
+// The exemption is exactly that identity. A claim the same named seat holds
+// under its session_name is released as before, and a seat with no
+// configured_named_identity (an ordinary pool worker) releases its claim. Kills
+// dropping the keep, widening it to session_name, and keying it on anything
+// but the seat's own metadata.
+func TestDrainAckKeepsConfiguredNamedIdentityClaims(t *testing.T) {
+	const namedIdentity = "frontend/refinery"
+	for _, c := range []struct {
+		name         string
+		seatIdentity string // the seat's configured_named_identity metadata
+		assignee     string // who holds the claim
+		wantKept     bool
+	}{
+		{"claim under the configured named identity is kept", namedIdentity, namedIdentity, true},
+		{"claim under the named seat's session_name is released", namedIdentity, "worker-1", false},
+		{"pool worker without a named identity is released", "", "worker-1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			work := splittest.NewWorkStore(t, "gc")
+			claim := mustCreateDrainAckBead(t, work, beads.Bead{
+				Title: "claimed work", Type: "task", Metadata: routedToWorker(),
+			}, "in_progress", c.assignee)
+
+			seat := drainAckSessionBead()
+			if c.seatIdentity != "" {
+				seat.Metadata[session.NamedSessionIdentityMetadata] = c.seatIdentity
+			}
+
+			var stderr bytes.Buffer
+			releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", servingCity("worker"), work, nil), seat, drainAckReleaseBudget, &stderr)
+
+			got, err := work.Get(claim.ID)
+			if err != nil {
+				t.Fatalf("reading %s back: %v", claim.ID, err)
+			}
+			if c.wantKept {
+				if got.Status != "in_progress" || got.Assignee != c.assignee || got.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+					t.Errorf("claim %s: status=%q assignee=%q routed_to=%q after drain-ack, want in_progress, %q and worker unchanged; stderr=%s",
+						claim.ID, got.Status, got.Assignee, got.Metadata[beadmeta.RoutedToMetadataKey], c.assignee, stderr.String())
+				}
+				return
+			}
+			if got.Status != "open" || got.Assignee != "" {
+				t.Errorf("claim %s: status=%q assignee=%q after drain-ack, want open and unassigned; stderr=%s",
+					claim.ID, got.Status, got.Assignee, stderr.String())
+			}
+		})
+	}
+}
+
 // TestRefusedDrainAckNamesAFailedLegRead (F2): a seat's own drain-ack is
 // refused because it holds started work, and a second leg could not be read.
 // The refusal releases nothing, but the failed read is still reported. Kills
