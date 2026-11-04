@@ -389,7 +389,10 @@ func TestReviewExecProviderRefusesBeforeAnyWrite(t *testing.T) {
 	f := newRigImportFixture(t, config.Rig{Name: "packs", Prefix: "gp"})
 	f.seed("packs", []beads.Bead{graphRow("gp-a", "gp-a", "closed", nil)}, nil)
 	rigImportHashConfigOpener = defaultRigImportHashConfigOpener
-	if err := os.WriteFile(filepath.Join(f.request.CityPath, "city.toml"), []byte("[workspace]\nname = \"s4b\"\n\n[beads]\nprovider = \"exec:/bin/true\"\n"), 0o644); err != nil {
+	// A no-op provider script: /bin/true does not exist on macOS.
+	provider := filepath.Join(t.TempDir(), "noop-provider")
+	writeExecutable(t, provider, "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(f.request.CityPath, "city.toml"), []byte("[workspace]\nname = \"s4b\"\n\n[beads]\nprovider = \"exec:"+provider+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, _, stderr := f.importRigs()
