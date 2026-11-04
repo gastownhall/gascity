@@ -1066,3 +1066,41 @@ func TestRowFirstRestartRuntimeProofNeverLogsAToken(t *testing.T) {
 		}
 	}
 }
+
+// Kills (review MUST-A, N9) a worker-site rule that fails open: a remote
+// box's config names the controller host's exec script, which the box
+// cannot run, so a probe there would read the latch refused or fallen back
+// (legacy) while the controller runs v2. A worker site with an exec or pack
+// runtime is CAS-only unless session_reconciler pins legacy, explicit v2 or
+// unset alike; a config the box cannot load is CAS-only too.
+func TestCN2WorkerSiteFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, toml string
+		casOnly    bool
+	}{
+		{"absent exec script, explicit v2", "[daemon]\nsession_reconciler = \"v2\"\n\n[session]\nprovider = \"exec:/opt/absent/gc-session-docker\"\n", true},
+		{"absent exec script, unset key", "[session]\nprovider = \"exec:/opt/absent/gc-session-docker\"\n", true},
+		{"exec script by an absent PATH name, unset key", "[session]\nprovider = \"exec:gc-session-absent\"\n", true},
+		{"absent exec script, pinned legacy", "[daemon]\nsession_reconciler = \"legacy\"\n\n[session]\nprovider = \"exec:/opt/absent/gc-session-docker\"\n", false},
+		{"unloadable config", "[[[ not toml", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, _ := newWorkerSiteSessionCity(t, nil)
+			t.Setenv("GC_SESSION", "") // the box's own config decides, not a test double
+			t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off")
+			body := "[workspace]\nname = \"box-city\"\n\n[beads]\nprovider = \"file\"\n\n" + tc.toml
+			if tc.name == "unloadable config" {
+				body = tc.toml
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !onWorkerSite(cityDir) {
+				t.Fatal("not a worker site")
+			}
+			if got := restartRecordsOnlyByCAS(cityDir, nil)(); got != tc.casOnly {
+				t.Fatalf("restartRecordsOnlyByCAS = %v, want %v (CN-2's precondition: a v2 city's worker site never takes the checked write)", got, tc.casOnly)
+			}
+		})
+	}
+}

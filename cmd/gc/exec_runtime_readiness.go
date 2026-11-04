@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -108,15 +109,26 @@ func execReadiness(script, cityName, cityPath string) execHandshake {
 		e = &execReadinessEntry{done: make(chan struct{})}
 		execHandshakeMemo.m[k] = e
 		execHandshakeMemo.Unlock()
-		info, missing, perr := probeExecHandshake(path, cityName, cityPath)
-		e.h, e.at = execHandshake{info: info, missing: missing, err: perr}, execReadinessNow()
-		close(e.done)
+		probeInto(e, path, cityName, cityPath)
 		return e.h
 	}
 	execHandshakeMemo.Unlock()
 	<-e.done
 	return e.h
 }
+
+// probeInto runs the probe for e and always releases its waiters: a probe
+// that panics leaves e an error from the zero time, so the next caller
+// probes again, and the panic goes on to this caller.
+func probeInto(e *execReadinessEntry, path, cityName, cityPath string) {
+	e.h = execHandshake{err: errExecProbePanicked}
+	defer close(e.done)
+	info, missing, perr := probeExecHandshake(path, cityName, cityPath)
+	e.h, e.at = execHandshake{info: info, missing: missing, err: perr}, execReadinessNow()
+}
+
+// errExecProbePanicked is the answer a panicked probe leaves its waiters.
+var errExecProbePanicked = errors.New("the handshake probe panicked")
 
 // forgetExecReadiness drops every remembered handshake: C0.8 found a built
 // provider whose own handshake disagrees with an admitted one, so the next

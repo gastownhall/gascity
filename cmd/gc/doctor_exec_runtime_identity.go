@@ -13,13 +13,13 @@ import (
 )
 
 // execRuntimeIdentityCheck is the migration aid of PAR-EXEC §5 item 8 and
-// §12.2: on a city whose exec session runtime is v2-ready, it reads the
-// runtime's inventory once and counts the running boxes under open session
-// rows that carry no identity (identity null) or no session id (Ownerless).
-// v2 holds such a box, Unknown or Ownerless, instead of adopting it, so a
-// city with any should stop those sessions before it runs v2 (an unset
-// session_reconciler runs v2 on the next start). A city on another runtime,
-// or on an exec runtime that is not v2-ready, is not affected.
+// §12.2: on a city whose exec session runtime is v2-ready and not pinned to
+// legacy, it reads the runtime's inventory once and judges each running box
+// under an open session row as v2 does (compareIdentity on the batched
+// identity, else on the box's observed identity, as the inventory lane
+// reads it): a box v2 holds, Ownerless or Unknown, instead of adopting it
+// is named. A city with any should stop those sessions before it runs v2 (an
+// unset session_reconciler runs v2 on the next start).
 type execRuntimeIdentityCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -31,13 +31,7 @@ func newExecRuntimeIdentityCheck(cfg *config.City, cityPath string) *execRuntime
 	return &execRuntimeIdentityCheck{
 		cfg: cfg, cityPath: cityPath,
 		openLegs: func() []v2SessionLeg { return openV2SessionLegs(cityPath, cfg) },
-		provider: func() (runtime.Provider, error) {
-			reg, err := runtimeRegistryForCity(cfg)
-			if err != nil {
-				return nil, err
-			}
-			return reg.New(v2SessionRuntimeRawName(cfg, reconcilerModeLookupEnv), cfg.Session, loadedCityName(cfg, cityPath), cityPath)
-		},
+		provider: func() (runtime.Provider, error) { return newSessionProviderForCity(cfg, cityPath) },
 	}
 }
 
@@ -60,6 +54,9 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	if !ok {
 		return okCheck(c.Name(), "the session runtime is not an exec runtime")
 	}
+	if mode, _, known := c.cfg.Daemon.SessionReconcilerMode(); known && mode == config.SessionReconcilerLegacy {
+		return okCheck(c.Name(), "session_reconciler pins legacy: v2 does not run on this city")
+	}
 	if !execReadiness(script, c.cfg.EffectiveCityName(), c.cityPath).ready() {
 		return okCheck(c.Name(), fmt.Sprintf("exec session runtime %q is not v2-ready: v2 does not run on it", name))
 	}
@@ -67,37 +64,40 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	if err != nil {
 		return warnCheck(c.Name(), fmt.Sprintf("exec session runtime %q: not checked: %v", name, err), "", nil)
 	}
-	inv, ok := runtime.InventoryFor(sp)
-	if !ok {
-		return warnCheck(c.Name(), fmt.Sprintf("exec session runtime %q serves no inventory: not checked", name), "", nil)
-	}
-	entries, err := inv.RuntimeInventory(context.Background())
+	leaf, entries, err := execInventoryLeaf(sp)
 	if err != nil {
-		return warnCheck(c.Name(), fmt.Sprintf("exec session runtime %q: inventory failed: %v", name, err), "", nil)
+		return warnCheck(c.Name(), fmt.Sprintf("exec session runtime %q: not checked: %v", name, err), "", nil)
 	}
 	rows, unread := c.openRows()
-	var null, ownerless []string
+	var unknown, ownerless []string
 	for _, row := range rows {
-		e, listed := entries[strings.TrimSpace(row.SessionName)]
-		switch {
-		case !listed:
-		case !e.IdentityKnown:
-			null = append(null, fmt.Sprintf("%s (row %s)", row.SessionName, row.ID))
-		case strings.TrimSpace(e.Identity["GC_SESSION_ID"]) == "":
+		sessName := strings.TrimSpace(row.SessionName)
+		e, listed := entries[sessName]
+		if !listed {
+			continue
+		}
+		id := identityOfEnv(e.Identity)
+		if !e.IdentityKnown {
+			id = readIdentityEnv(leaf, sessName) // the observed identity, as the lane reads it
+		}
+		switch compareIdentity(row, id) {
+		case identityOwnerless:
 			ownerless = append(ownerless, fmt.Sprintf("%s (row %s)", row.SessionName, row.ID))
+		case identityUnknown:
+			unknown = append(unknown, fmt.Sprintf("%s (row %s)", row.SessionName, row.ID))
 		}
 	}
-	sort.Strings(null)
+	sort.Strings(unknown)
 	sort.Strings(ownerless)
 	details := append([]string(nil), unread...)
-	for _, n := range null {
-		details = append(details, "identity null: "+n)
+	for _, n := range unknown {
+		details = append(details, "identity unknown: "+n)
 	}
 	for _, n := range ownerless {
-		details = append(details, "no session id (Ownerless): "+n)
+		details = append(details, "Ownerless: "+n)
 	}
-	if len(null)+len(ownerless) == 0 {
-		msg := fmt.Sprintf("every running box under an open session row exposes its identity (%d row(s))", len(rows))
+	if len(unknown)+len(ownerless) == 0 {
+		msg := fmt.Sprintf("v2 would hold no running box under an open session row (%d row(s))", len(rows))
 		if len(unread) > 0 {
 			return warnCheck(c.Name(), msg+"; some session legs were not read", "", details)
 		}
@@ -106,9 +106,29 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 		return r
 	}
 	return warnCheck(c.Name(),
-		fmt.Sprintf("%d running box(es) under open session rows v2 would hold: %d with identity null, %d with no session id", len(null)+len(ownerless), len(null), len(ownerless)),
+		fmt.Sprintf("%d running box(es) under open session rows v2 would hold: %d whose identity is unknown, %d Ownerless", len(unknown)+len(ownerless), len(unknown), len(ownerless)),
 		"stop those sessions before the city runs v2 (an unset session_reconciler runs v2 on the next start), or make the script report their identity (docs/reference/exec-session-provider.md, observe.v1 item 4)",
 		details)
+}
+
+// execInventoryLeaf is sp's exec leaf with an inventory, and its batched
+// inventory: the city's provider may be a composite (an ACP leg beside it).
+func execInventoryLeaf(sp runtime.Provider) (runtime.Provider, map[string]runtime.InventoryEntry, error) {
+	for _, leaf := range inventoryLeaves(sp, "") {
+		if _, ok := leaf.provider.(runtime.V2ReadinessReporter); !ok {
+			continue
+		}
+		inv, ok := runtime.InventoryFor(leaf.provider)
+		if !ok {
+			return nil, nil, fmt.Errorf("the exec leaf serves no inventory")
+		}
+		entries, err := inv.RuntimeInventory(context.Background())
+		if err != nil {
+			return nil, nil, fmt.Errorf("inventory failed: %w", err)
+		}
+		return leaf.provider, entries, nil
+	}
+	return nil, nil, fmt.Errorf("the session provider has no exec leaf")
 }
 
 // openRows are the city's open session rows across its legs, folded by bead

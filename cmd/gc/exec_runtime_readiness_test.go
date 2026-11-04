@@ -423,3 +423,46 @@ func TestDoctorKeepsTheFirstFixHint(t *testing.T) {
 		t.Fatalf("doctor %q hint %q; want both findings, the first one's hint kept", r.Message, r.FixHint)
 	}
 }
+
+// Pins (review N7) the swap's C0.8 check below the legacy branch: a legacy
+// controller's swap onto any provider is not refused by it.
+func TestLegacySwapIsNotCheckedByC08(t *testing.T) {
+	cfg := &config.City{}
+	cr := &CityRuntime{}
+	resume, err := cr.beforeProviderSwap(context.Background(), cfg, readinessLeaf{Provider: runtime.NewFake(), missing: []string{"observe.v1"}})
+	if err != nil {
+		t.Fatalf("a legacy swap onto a gapped provider: %v, want held as legacy holds it", err)
+	}
+	resume()
+}
+
+// Kills (review N-A) a probe panic that strands its waiters: the entry is
+// released with an error, the panic reaches the caller, and the next call
+// probes again rather than waiting forever.
+func TestExecProbePanicReleasesTheEntry(t *testing.T) {
+	saved := probeExecHandshake
+	t.Cleanup(func() { probeExecHandshake = saved })
+	calls := 0
+	probeExecHandshake = func(string, string, string) (runtime.ProtocolInfo, []string, error) {
+		calls++
+		if calls == 1 {
+			panic("probe")
+		}
+		return runtime.ProtocolInfo{}, nil, nil
+	}
+	script := writeRPPScript(t, "exit 2\n")
+	func() {
+		defer func() { _ = recover() }()
+		execReadiness(script, "c", "")
+	}()
+	done := make(chan execHandshake, 1)
+	go func() { done <- execReadiness(script, "c", "") }()
+	select {
+	case h := <-done:
+		if calls != 2 || h.err != nil {
+			t.Fatalf("after a panicked probe: %+v, %d probes; want a fresh probe", h, calls)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call after a panicked probe never returned")
+	}
+}

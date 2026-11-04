@@ -865,11 +865,13 @@ its per-name sweep), and a declared op's exit 2 is a failure. Before
 switching a city with running sessions:
 
 1. Run `gc runtime conformance <script>`.
-2. Run `gc doctor`: `exec-runtime-identity` counts the running boxes under
-   open session rows that report no identity, or no `GC_SESSION_ID`. v2
-   holds those (Unknown or Ownerless) instead of adopting them, so make the
-   script report the identity of boxes it started before the upgrade
-   (observe.v1 item 4).
+2. Run `gc doctor`: `exec-runtime-identity` judges each running box under
+   an open session row as v2 does, on its batched identity or, when that is
+   null, its observed one, and names the boxes v2 would hold instead of
+   adopting them: Ownerless (no `GC_SESSION_ID` and no `GC_INSTANCE_TOKEN`)
+   or Unknown (no token that matches the row, and no proof the box is the
+   row's own). Make the script report the identity of boxes it started
+   before the upgrade (observe.v1 item 4).
 3. Otherwise stop those sessions first.
 
 ## Writing Your Own Script

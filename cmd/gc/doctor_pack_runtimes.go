@@ -56,9 +56,13 @@ func (c *packRuntimesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckRes
 			failures = append(failures, detail)
 			continue
 		}
-		// One handshake, as the latch reads it (execReadiness): its failure
-		// makes the runtime unusable; its v2 readiness is reported once every
-		// runtime is usable, as the check's details.
+		// One handshake, as the latch reads it (execReadiness, bounded at
+		// 10s): its failure makes the runtime unusable; its v2 readiness is
+		// reported once every runtime is usable, as the check's details. The
+		// bound is the admission probe's, not the provider's 30s op timeout:
+		// a handshake slower than 10s is one the latch refuses, so doctor
+		// reports it as the latch reads it, and the answer is shared with
+		// the session reconciler check in the same run.
 		h := execReadiness(rt.Command, c.cfg.EffectiveCityName(), cityPathOf(ctx))
 		if h.err != nil {
 			failures = append(failures, fmt.Sprintf("runtime %q (pack %q): protocol handshake failed: %v", rt.Name, rt.PackName, h.err))

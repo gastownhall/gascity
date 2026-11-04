@@ -285,14 +285,13 @@ var storageVerbSessionInventory = func(cfg *config.City, cityPath string) ([]str
 
 // cityRunsRemoteSessions reports whether the city's session runtime runs its
 // sessions on other hosts: k8s, hybrid (whose remote leg is k8s), ssh:, or an
-// exec: runtime that does not declare itself local (sessionRuntimeIsRemote).
+// exec: or pack runtime whose handshake does not declare itself local
+// (sessionRuntimeIsRemote).
 //
 // The city's own [session] provider decides, not the operator's shell: a
 // GC_SESSION override in the shell running this command (a developer's
 // "fake") must not hide that the city's sessions run in pods. An override
-// that names a remote runtime counts too. Pack-declared runtimes declare no
-// remoteness, so they are not presumed remote; a remote one that cannot list
-// its sessions completely still refuses through the inventory check.
+// that names a remote runtime counts too.
 func cityRunsRemoteSessions(cfg *config.City, cityPath string) (string, bool) {
 	if cfg == nil {
 		return "", false
