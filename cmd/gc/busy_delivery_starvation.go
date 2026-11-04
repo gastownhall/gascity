@@ -89,12 +89,20 @@ func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery work
 // decides as without the record. Under the shadow switch the bypass's
 // verdict is recorded beside the record's (starved_bypass), read fresh.
 func starvedQueuedNudgeBypass(target nudgeTarget, sp runtime.Provider, now time.Time) (worker.NudgeDelivery, bool, error) {
-	how, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
-	if err != nil {
-		return how, hold, err
-	}
-	if how != worker.NudgeDeliveryImmediate {
-		return how, hold, nil
+	how, hold, _, err := starvedBypassLook(target, sp, now)
+	return how, hold, err
+}
+
+// starvedBypassLook is starvedQueuedNudgeBypass's look, which also reports
+// whether the fresh read of the program's record it took decided
+// (runtime.ProgramStatus.Decides): it takes one only for an immediate bypass
+// the screen allows, of a target that declares hold_mid_turn under the
+// switch on (programHoldDeclared), and decided is false wherever it took
+// none.
+func starvedBypassLook(target nudgeTarget, sp runtime.Provider, now time.Time) (how worker.NudgeDelivery, hold, decided bool, err error) {
+	how, hold, err = starvedQueuedNudgeDelivery(sp, target.sessionName)
+	if err != nil || how != worker.NudgeDeliveryImmediate {
+		return how, hold, false, err
 	}
 	scrape := runtime.ProgramVerdictNoHold
 	if hold {
@@ -103,12 +111,10 @@ func starvedQueuedNudgeBypass(target nudgeTarget, sp runtime.Provider, now time.
 	runtime.ShadowCompareFresh(sp, target.sessionName, target.sessionID, target.providerFamily(),
 		runtime.ProgramPointStarvedBypass, scrape, now, runtime.ProgramTurnHoldVerdict)
 	if hold || !target.programHoldDeclared() {
-		return how, hold, nil
+		return how, hold, false, nil
 	}
-	if _, held := runtime.ProgramRecordTypingHold(sp, target.sessionName, now); held {
-		return how, true, nil
-	}
-	return how, false, nil
+	r, held := runtime.ProgramRecordTypingHold(sp, target.sessionName, now)
+	return how, held, r.Status.Decides(), nil
 }
 
 // programHoldDeclared reports whether target's resolved provider declares

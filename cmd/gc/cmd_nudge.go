@@ -2511,6 +2511,7 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 		sessionName:       f.sessionName,
 	}
 	target.agent = parseNudgeAgentIdentity(identity)
+	resolvedByAgent := false
 	for _, candidate := range []string{f.agentName, f.template, f.commonName} {
 		if candidate == "" {
 			continue
@@ -2532,8 +2533,21 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 				}
 			}
 			target.resolved = resolved
+			resolvedByAgent = true
 		}
 		break
+	}
+	if !resolvedByAgent {
+		// No agent resolves the provider, as none does for a provider
+		// session (API or dashboard kind=provider): its starts resolve it by
+		// name (resolveWorkerRuntimeProviderWithConfigAndMetadata), and its
+		// pane is armed with that provider's program-status declaration,
+		// which the starved bypass's holds read (programHoldDeclared,
+		// holdMidTurnWithoutRecord). Only the declaration is taken: the
+		// target's process names and family read as without it.
+		if byName := resolveProviderByName(cfg, f.provider, f.template); byName != nil {
+			target.resolved.ProgramStatus = byName.ProgramStatus
+		}
 	}
 	if target.identity == "" {
 		target.identity = target.agent.QualifiedName()
