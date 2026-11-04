@@ -31,7 +31,13 @@ func newExecRuntimeIdentityCheck(cfg *config.City, cityPath string) *execRuntime
 	return &execRuntimeIdentityCheck{
 		cfg: cfg, cityPath: cityPath,
 		openLegs: func() []v2SessionLeg { return openV2SessionLegs(cityPath, cfg) },
-		provider: func() (runtime.Provider, error) { return newSessionProviderForCity(cfg, cityPath) },
+		provider: func() (runtime.Provider, error) {
+			sp, err := newSessionProviderForCity(cfg, cityPath)
+			if err != nil {
+				return nil, fmt.Errorf("building the session provider: %w", err)
+			}
+			return sp, nil
+		},
 	}
 }
 
