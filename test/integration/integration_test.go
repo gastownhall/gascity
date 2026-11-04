@@ -2888,6 +2888,167 @@ func TestIntegrationDoltSQLServerKillSetMatchesOnlyRootedConfigs(t *testing.T) {
 	}
 }
 
+// TestIsIntegrationControlDispatcherCmd pins both spellings of the dispatcher's
+// --follow argument. Core-pack cities run `--follow core.control-dispatcher`
+// (agent.toml uses --follow {{.Agent}}), so a matcher that knows only the bare
+// name never sweeps an orphaned dispatcher (ga-fld5rg).
+func TestIsIntegrationControlDispatcherCmd(t *testing.T) {
+	const gc = "/var/tmp/gc-integration-123-456/bin/gc convoy control --serve --follow "
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"bare agent name", gc + "control-dispatcher", true},
+		{"core pack agent name", gc + "core.control-dispatcher", true},
+		{"trailing args", gc + "core.control-dispatcher --city /x", true},
+		{"other agent", gc + "core.other-agent", false},
+		{"bare name with suffix", gc + "control-dispatcher-x", false},
+		{"dotted name with suffix", gc + "core.control-dispatcher.x", false},
+		{"no follow argument", "/var/tmp/gc-integration-123-456/bin/gc convoy control --serve --follow", false},
+		{"not under an integration root", "/usr/bin/gc convoy control --serve --follow core.control-dispatcher", false},
+		{"different convoy subcommand", "/var/tmp/gc-integration-1-2/bin/gc convoy status --follow core.control-dispatcher", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIntegrationControlDispatcherCmd(tt.cmd); got != tt.want {
+				t.Fatalf("isIntegrationControlDispatcherCmd(%q) = %v, want %v", tt.cmd, got, tt.want)
+			}
+		})
+	}
+
+	if !isSubprocessTestRoot(gc+"core.control-dispatcher", "/tmp/test/agents/graph-dispatch.sh") {
+		t.Fatal("isSubprocessTestRoot must treat a core.control-dispatcher as a sweep root")
+	}
+}
+
+// TestIntegrationBDProxyKillSetMatchesOnlyRootedProxies pins the per-test
+// cleanup's proxy selection: a bd db-proxy-child is retired with the Dolt it
+// fronts only when its --root lies under the test root (ga-fld5rg).
+func TestIntegrationBDProxyKillSetMatchesOnlyRootedProxies(t *testing.T) {
+	root := "/tmp/gcit-123"
+	procs := map[int]procSnapshot{
+		10: {pid: 10, ppid: 1, cmd: "/usr/local/bin/bd db-proxy-child --root /tmp/gcit-123/x/.beads/dolt --port 0"},
+		11: {pid: 11, ppid: 1, cmd: "/usr/local/bin/bd db-proxy-child --root=/tmp/gcit-123/y/.beads/dolt --port 0"},
+		12: {pid: 12, ppid: 1, cmd: "/usr/local/bin/bd db-proxy-child --root /tmp/gcit-1234/z/.beads/dolt --port 0"},
+		13: {pid: 13, ppid: 1, cmd: "/usr/local/bin/bd db-proxy-child --root /home/u/projects/foo/.beads/dolt --port 0"},
+		14: {pid: 14, ppid: 1, cmd: "/usr/local/bin/bd ready --root /tmp/gcit-123/x/.beads/dolt"},
+		15: {pid: 15, ppid: 1, cmd: "dolt sql-server --config /tmp/gcit-123/x/.beads/dolt/config.yaml"},
+		16: {pid: 16, ppid: 1, cmd: "/usr/local/bin/bd db-proxy-child --port 0"},
+	}
+
+	got := integrationBDProxyKillSet(procs, root)
+	for _, pid := range []int{10, 11} {
+		if !got[pid] {
+			t.Fatalf("kill set missing pid %d: %#v", pid, got)
+		}
+	}
+	for _, pid := range []int{12, 13, 14, 15, 16} {
+		if got[pid] {
+			t.Fatalf("kill set unexpectedly included pid %d: %#v", pid, got)
+		}
+	}
+}
+
+func TestIntegrationOwnerPIDFromEnviron(t *testing.T) {
+	tests := []struct {
+		name    string
+		environ string
+		want    int
+		wantOK  bool
+	}{
+		{"tag present", "A=1\x00GC_MANAGED_DOLT_TEST_PARENT_PID=864536\x00B=2\x00", 864536, true},
+		{"tag last without trailing nul", "A=1\x00GC_MANAGED_DOLT_TEST_PARENT_PID=42", 42, true},
+		{"tag absent", "A=1\x00B=2\x00", 0, false},
+		{"empty", "", 0, false},
+		{"value not a number", "GC_MANAGED_DOLT_TEST_PARENT_PID=abc\x00", 0, false},
+		{"value empty", "GC_MANAGED_DOLT_TEST_PARENT_PID=\x00", 0, false},
+		{"value not positive", "GC_MANAGED_DOLT_TEST_PARENT_PID=0\x00", 0, false},
+		{"different variable sharing the prefix", "XGC_MANAGED_DOLT_TEST_PARENT_PID=5\x00", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := integrationOwnerPIDFromEnviron([]byte(tt.environ))
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("integrationOwnerPIDFromEnviron(%q) = (%d, %v), want (%d, %v)", tt.environ, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestSweepOwnerTaggedTestProcessesReapsOnlyChosenOwners runs the sweep against
+// real processes: one tagged with the pid of an exited helper (a dead run's
+// orphan) and one tagged with this test binary's pid. The dead-owner predicate
+// must reap the first and spare the second; the own-pid predicate (the post-
+// sweep) then reaps the second (ga-fld5rg).
+func TestSweepOwnerTaggedTestProcessesReapsOnlyChosenOwners(t *testing.T) {
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skipf("owner-tag sweep reads /proc/<pid>/environ: %v", err)
+	}
+	exited := exec.Command("sleep", "0")
+	if err := exited.Run(); err != nil {
+		t.Fatalf("run exited-owner helper: %v", err)
+	}
+	deadOwner := exited.ProcessState.Pid()
+	if integrationPIDAlive(deadOwner) {
+		t.Skipf("helper pid %d was reused before the test could use it as a dead owner", deadOwner)
+	}
+
+	// start launches a long sleeper tagged with owner. The Wait goroutine
+	// reaps it as soon as it dies: an unreaped zombie still answers signal 0,
+	// which would hold waitForPIDsReaped for its full deadline.
+	start := func(owner int) (pid int, done <-chan struct{}) {
+		cmd := exec.Command("sleep", "300")
+		cmd.Env = append(filterEnv(os.Environ(), managedDoltTestParentEnv),
+			managedDoltTestParentEnv+"="+strconv.Itoa(owner))
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start sleeper for owner %d: %v", owner, err)
+		}
+		ch := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(ch)
+		}()
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			<-ch
+		})
+		return cmd.Process.Pid, ch
+	}
+	exitedWithin := func(done <-chan struct{}) bool {
+		select {
+		case <-done:
+			return true
+		case <-time.After(10 * time.Second):
+			return false
+		}
+	}
+	stillRunning := func(done <-chan struct{}) bool {
+		select {
+		case <-done:
+			return false
+		default:
+			return true
+		}
+	}
+
+	_, deadDone := start(deadOwner)
+	_, liveDone := start(os.Getpid())
+
+	sweepOwnerTaggedTestProcesses(func(owner int) bool { return !integrationPIDAlive(owner) })
+	if !exitedWithin(deadDone) {
+		t.Fatalf("sleeper tagged with dead owner %d survived the dead-owner sweep", deadOwner)
+	}
+	if !stillRunning(liveDone) {
+		t.Fatal("sleeper tagged with this test binary's pid was reaped by the dead-owner sweep")
+	}
+
+	sweepOwnerTaggedTestProcesses(func(owner int) bool { return owner == os.Getpid() })
+	if !exitedWithin(liveDone) {
+		t.Fatal("sleeper tagged with this test binary's pid survived the own-pid sweep")
+	}
+}
+
 func TestRunCommandDoesNotHangOnInheritedStdoutFromBackgroundChild(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
