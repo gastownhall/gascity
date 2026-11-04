@@ -530,3 +530,92 @@ func writeTailJSONL(t *testing.T, path string, lines []map[string]any) {
 		}
 	}
 }
+
+// Claude's explicit API-error rows are local diagnostics, not model responses.
+// Their activity and usage remain visible while model attribution comes from
+// the newest actual response, or stays unknown when none is in the tail.
+func TestExtractTailMetaAPIErrorModelProvenance(t *testing.T) {
+	row := func(model string, apiError bool, tokens int) map[string]any {
+		return map[string]any{
+			"type":              "assistant",
+			"isApiErrorMessage": apiError,
+			"message": map[string]any{
+				"role": "assistant", "model": model, "stop_reason": "stop_sequence",
+				"usage": map[string]any{"input_tokens": tokens},
+			},
+		}
+	}
+	encodedError := row("<synthetic>", true, 0)
+	encoded, err := json.Marshal(encodedError["message"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedError["message"] = string(encoded)
+
+	for _, tt := range []struct {
+		name        string
+		rows        []map[string]any
+		model       string
+		inputTokens int
+	}{
+		{
+			name:  "later API error retains prior model",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000), row("<synthetic>", true, 0)},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name: "only API errors leave model unknown",
+			rows: []map[string]any{row("<synthetic>", true, 0)},
+		},
+		{
+			name:  "later actual response wins after recovery",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000), row("<synthetic>", true, 0), row("claude-sonnet-4-5", false, 2000)},
+			model: "claude-sonnet-4-5", inputTokens: 2000,
+		},
+		{
+			name:  "string encoded API error retains prior model",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000), encodedError},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name:  "ordinary refusal still identifies its model",
+			rows:  []map[string]any{row("claude-opus-5-5", false, 1000)},
+			model: "claude-opus-5-5", inputTokens: 1000,
+		},
+		{
+			name:  "classification uses explicit flag not model text",
+			rows:  []map[string]any{row("<synthetic>", false, 0)},
+			model: "<synthetic>",
+		},
+		{
+			name:        "API error model is not authority even if named",
+			rows:        []map[string]any{row("claude-opus-5-5", true, 1000)},
+			inputTokens: 1000,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			writeTailJSONL(t, path, tt.rows)
+			meta, err := ExtractTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta == nil {
+				t.Fatal("missing activity metadata")
+			}
+			if meta.Model != tt.model {
+				t.Errorf("model = %q, want %q", meta.Model, tt.model)
+			}
+			if meta.Activity != "idle" || meta.MalformedTail {
+				t.Errorf("activity/malformed = %q/%t, want idle/false", meta.Activity, meta.MalformedTail)
+			}
+			if tt.inputTokens == 0 {
+				if meta.ContextUsage != nil {
+					t.Fatalf("unexpected usage: %+v", meta.ContextUsage)
+				}
+			} else if meta.ContextUsage == nil || meta.ContextUsage.InputTokens != tt.inputTokens {
+				t.Errorf("usage = %+v, want input_tokens=%d", meta.ContextUsage, tt.inputTokens)
+			}
+		})
+	}
+}

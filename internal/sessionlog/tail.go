@@ -190,11 +190,12 @@ func splitLines(data []byte) ([][]byte, error) {
 
 // tailEntry is the minimal structure we decode from each JSONL line.
 type tailEntry struct {
-	Type      string          `json:"type"`
-	Subtype   string          `json:"subtype,omitempty"`
-	UUID      string          `json:"uuid"`
-	Message   json.RawMessage `json:"message"`
-	Timestamp tailTime        `json:"timestamp"`
+	Type              string          `json:"type"`
+	Subtype           string          `json:"subtype,omitempty"`
+	UUID              string          `json:"uuid"`
+	Message           json.RawMessage `json:"message"`
+	Timestamp         tailTime        `json:"timestamp"`
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage,omitempty"`
 }
 
 // tailTime decodes a transcript entry timestamp without letting an
@@ -392,7 +393,9 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 			if err := json.Unmarshal(rawMsg, &msg); err != nil {
 				continue
 			}
-			if model == "" && msg.Model != "" {
+			// Match the canonical Claude API-error classification: these rows
+			// retain their activity/usage, but do not identify an inference model.
+			if model == "" && msg.Model != "" && !entry.IsAPIErrorMessage {
 				model = msg.Model
 			}
 			if lastUsage == nil && msg.Usage != nil && msg.Usage.InputTokens > 0 {
