@@ -2,9 +2,11 @@ package herdr
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -164,6 +166,169 @@ func TestStartServerRefusesRelativeSocketPath(t *testing.T) {
 			}
 			if calls := fake.logLines(t); len(calls) != 0 {
 				t.Errorf("startServer() ran herdr %q; want no launch", calls)
+			}
+		})
+	}
+}
+
+// failingStartClient returns a client whose herdr binary is a POSIX shell
+// script (body receives the path of the server.log startServer must keep beside
+// the session socket) and whose socket therefore never comes up, plus that
+// log's path. The socket's directory is deliberately not created: herdr makes
+// it, and startServer may be the first to need it. readyPolls is cut to one so
+// the readiness timeout takes 250ms, not 10s.
+func failingStartClient(t *testing.T, body func(logPath string) string) (*client, string) {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("fake herdr server is a POSIX shell script")
+	}
+	sockDir := filepath.Join(t.TempDir(), "sessions", "failing")
+	logPath := filepath.Join(sockDir, "server.log")
+	c := newClient("failing", t.TempDir())
+	c.bin = writeFakeHerdr(t, "#!/bin/sh\n"+body(logPath))
+	c.sockPath = filepath.Join(sockDir, "herdr.sock")
+	c.readyPolls = 1
+	return c, logPath
+}
+
+// plainReadyError is the readiness-timeout message startServer returned before
+// it captured herdr's stderr, and still returns whenever there is nothing to
+// add to it.
+func plainReadyError(c *client) string {
+	return fmt.Sprintf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
+}
+
+// herdr's startup diagnostics go to stderr, and startServer used to send them
+// to /dev/null: a server that exited ~50ms in with "local socket name length
+// exceeds capacity of sun_path" surfaced only as a cause-free 10s timeout, read
+// as host load (ga-nqlb8q) and as a stale-session restore (ga-0og0ry). The
+// timeout error must carry what herdr said; stdout stays discarded.
+func TestStartServerTimeoutErrorCarriesServerStderr(t *testing.T) {
+	const diag = "local socket name length exceeds capacity of sun_path of sockaddr_un"
+	c, logPath := failingStartClient(t, func(string) string {
+		return "printf 'stdout-noise-must-stay-discarded\\n'\nprintf '" + diag + "\\n' >&2\nexit 1\n"
+	})
+
+	err := c.startServer()
+	if err == nil {
+		t.Fatal("startServer() = nil for a herdr that never serves; want the readiness timeout")
+	}
+	if !strings.Contains(err.Error(), plainReadyError(c)) {
+		t.Errorf("startServer() error %q lost the readiness-timeout message %q", err, plainReadyError(c))
+	}
+	if !strings.Contains(err.Error(), diag) {
+		t.Errorf("startServer() error %q does not carry herdr's stderr %q", err, diag)
+	}
+	if strings.Contains(err.Error(), "stdout-noise") {
+		t.Errorf("startServer() error %q carries herdr's stdout; only stderr is captured", err)
+	}
+	b, rerr := os.ReadFile(logPath)
+	if rerr != nil {
+		t.Fatalf("herdr's stderr was not kept at %s beside the socket: %v", logPath, rerr)
+	}
+	if strings.Contains(string(b), "stdout-noise") {
+		t.Errorf("%s holds herdr's stdout %q; stdout must stay discarded", logPath, b)
+	}
+}
+
+// Each launch starts a fresh log: a prior run's output explains nothing about
+// this one, and truncating bounds the file across a long-lived city's restarts.
+func TestStartServerTruncatesServerLogPerLaunch(t *testing.T) {
+	c, logPath := failingStartClient(t, func(string) string {
+		return "printf 'this-launch\\n' >&2\nexit 1\n"
+	})
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("prior-launch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := c.startServer()
+	if err == nil {
+		t.Fatal("startServer() = nil; want the readiness timeout")
+	}
+	if !strings.Contains(err.Error(), "this-launch") {
+		t.Errorf("startServer() error %q does not carry this launch's stderr", err)
+	}
+	if strings.Contains(err.Error(), "prior-launch") {
+		t.Errorf("startServer() error %q carries a prior launch's stderr; the log must be truncated", err)
+	}
+}
+
+// The error carries only the last 4096 bytes of the log: a runaway herdr must
+// not bloat the error string every caller up the chain wraps again.
+func TestStartServerErrorBoundsTheStderrTail(t *testing.T) {
+	const bound = 4096
+	c, _ := failingStartClient(t, func(string) string {
+		// ~12KB of filler between a first and a last line.
+		return "echo head-marker >&2\ni=0\nwhile [ $i -lt 300 ]; do echo 'filler-filler-filler-filler-filler-filler' >&2; i=$((i+1)); done\necho tail-marker >&2\nexit 1\n"
+	})
+
+	err := c.startServer()
+	if err == nil {
+		t.Fatal("startServer() = nil; want the readiness timeout")
+	}
+	if !strings.Contains(err.Error(), "tail-marker") {
+		t.Errorf("startServer() error does not end with herdr's last line: %.200q", err)
+	}
+	if strings.Contains(err.Error(), "head-marker") {
+		t.Errorf("startServer() error carries herdr's first line; only the last %d bytes belong in it", bound)
+	}
+	if overhead := len(plainReadyError(c)) + 256; len(err.Error()) > bound+overhead {
+		t.Errorf("startServer() error is %d bytes; want the %d-byte tail plus at most %d of message", len(err.Error()), bound, overhead)
+	}
+}
+
+// Diagnostics are best effort. A server.log that cannot be opened must not stop
+// the server launching (stderr falls back to /dev/null), and a log that cannot
+// be read back, or that herdr never wrote to, must leave the readiness timeout
+// exactly as it was: never replaced, never masked, never a panic.
+func TestStartServerDiagnosticsFailuresLeaveThePlainTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// body is the fake herdr's script; marker is a file it touches when
+		// launched. prep runs before startServer.
+		body func(logPath, marker string) string
+		prep func(t *testing.T, logPath string)
+	}{
+		{
+			name: "log_unopenable",
+			body: func(_, marker string) string { return "touch '" + marker + "'\necho unseen >&2\nexit 1\n" },
+			prep: func(t *testing.T, logPath string) {
+				// A directory where the file belongs: O_WRONLY open fails.
+				if err := os.MkdirAll(logPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "log_gone_by_read_back",
+			body: func(logPath, marker string) string {
+				return "touch '" + marker + "'\nrm -f '" + logPath + "'\necho unseen >&2\nexit 1\n"
+			},
+		},
+		{
+			name: "herdr_wrote_nothing",
+			body: func(_, marker string) string { return "touch '" + marker + "'\nexit 1\n" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "launched")
+			c, logPath := failingStartClient(t, func(logPath string) string { return tc.body(logPath, marker) })
+			if tc.prep != nil {
+				tc.prep(t, logPath)
+			}
+
+			err := c.startServer()
+			if err == nil {
+				t.Fatal("startServer() = nil; want the readiness timeout")
+			}
+			if got, want := err.Error(), plainReadyError(c); got != want {
+				t.Errorf("startServer() error = %q; want the plain %q", got, want)
+			}
+			if _, serr := os.Stat(marker); serr != nil {
+				t.Errorf("herdr was never launched (%v): a diagnostics failure must not block server startup", serr)
 			}
 		})
 	}

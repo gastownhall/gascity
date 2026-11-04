@@ -40,6 +40,7 @@ type client struct {
 	settleDelay time.Duration                                            // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
 	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
 	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
+	readyPolls  int                                                      // test override for how many 250ms readiness polls startServer makes (0 = serverReadyPolls)
 	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
 	// unixListening is serverConfirmedDead's kernel listener check, a test
 	// override; nil selects runtime.UnixPathListening.
@@ -992,6 +993,10 @@ func (c *client) serverAlive() bool {
 // checking whether the server is there.
 const serverDialTimeout = 500 * time.Millisecond
 
+// serverReadyPolls is how many 250ms polls startServer makes for a freshly
+// launched server to accept connections before it gives up (10s).
+const serverReadyPolls = 40
+
 // serverConfirmedDead reports whether this session's herdr server is
 // confirmed dead, the proof tmux's ServerConfirmedDead makes for its own
 // server: the socket is missing or refuses the connection, and the kernel
@@ -1068,7 +1073,11 @@ func (c *client) startServer() error {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
 	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
-	for i := 0; i < 40; i++ {
+	polls := c.readyPolls
+	if polls == 0 {
+		polls = serverReadyPolls
+	}
+	for i := 0; i < polls; i++ {
 		if c.serverAlive() {
 			return nil
 		}
