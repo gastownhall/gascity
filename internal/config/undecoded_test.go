@@ -576,3 +576,18 @@ triger = "cooldown"
 		t.Fatalf("warning = %q, want triger key", warnings[0])
 	}
 }
+
+// TestCheckUndecodedKeysSuggestsEventsScanBudgetKey pins that the
+// [events.scan_budget] table is in the known-keys list behind the "did you
+// mean" hint, so a misspelled budget key still gets a suggestion.
+func TestCheckUndecodedKeysSuggestsEventsScanBudgetKey(t *testing.T) {
+	var cfg City
+	md, err := toml.Decode("[events.scan_budget]\nmax_archive_bytes_per_reqest = 1\n", &cfg)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	joined := strings.Join(CheckUndecodedKeys(md, "city.toml"), "; ")
+	if !strings.Contains(joined, `did you mean "max_archive_bytes_per_request"`) {
+		t.Errorf("expected a suggestion for the misspelled budget key, got: %s", joined)
+	}
+}

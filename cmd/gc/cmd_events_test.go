@@ -2101,3 +2101,45 @@ func TestEventsTestServerIgnoresAForeignLoopbackProbe(t *testing.T) {
 		t.Fatalf("probe status = %d, want 404", resp.StatusCode)
 	}
 }
+
+// TestFetchCityEventsScanTruncatedOnEarlierPageStillWarns pins that the
+// scan-budget diagnostic covers the whole --since walk, not just its last page:
+// the page that hit the server's byte budget is followed by a clean final page,
+// and the operator is still told that the walk needed extra round trips because
+// of the budget.
+func TestFetchCityEventsScanTruncatedOnEarlierPageStillWarns(t *testing.T) {
+	newest := []cliWireEvent{{Actor: "gc", Seq: 9, Type: "e.t", Ts: time.Unix(1700000090, 0).UTC()}}
+	oldest := []cliWireEvent{{Actor: "gc", Seq: 8, Type: "e.t", Ts: time.Unix(1700000080, 0).UTC()}}
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-GC-Index", "9")
+			if r.URL.Query().Get("cursor") == "" {
+				body := cityEventsListResponse(t, newest)
+				next := "v1:eyJrIjoic3EiLCJzIjo4fQ"
+				body.NextCursor = &next
+				truncated := true
+				body.ScanTruncated = &truncated
+				writeJSONResponse(t, w, body)
+				return
+			}
+			writeJSONResponse(t, w, cityEventsListResponse(t, oldest)) // final page: no cursor, no scan_truncated
+		},
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(context.Background(), client, "mc-city", "", "1h", &warn)
+	if err != nil {
+		t.Fatalf("fetchCityEvents: %v", err)
+	}
+	if len(got) != 2 || got[0].Seq != 8 || got[1].Seq != 9 {
+		t.Fatalf("got %d events, want seqs [8 9] (both pages, ascending)", len(got))
+	}
+	if !strings.Contains(warn.String(), "byte budget") {
+		t.Fatalf("expected the scan-budget diagnostic for the earlier truncated page, got %q", warn.String())
+	}
+}

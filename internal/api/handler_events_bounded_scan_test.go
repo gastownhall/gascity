@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -302,4 +303,213 @@ func TestEventListBoundedScanFencedBelowTail(t *testing.T) {
 			t.Errorf("seq %d seen %d times, want exactly 1", seq, seen[seq])
 		}
 	}
+}
+
+// boundedScanPage is the part of a GET /events response the tests below
+// assert on.
+type boundedScanPage struct {
+	Items         []WireEvent `json:"items"`
+	Total         int         `json:"total"`
+	NextCursor    string      `json:"next_cursor"`
+	ScanTruncated bool        `json:"scan_truncated"`
+}
+
+// decodeBoundedScanPage decodes a 200 GET /events response.
+func decodeBoundedScanPage(t *testing.T, rec *httptest.ResponseRecorder) boundedScanPage {
+	t.Helper()
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	var page boundedScanPage
+	if err := json.NewDecoder(rec.Body).Decode(&page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return page
+}
+
+// requireSeqCursor fails the test unless token is an sq-kind keyset cursor at
+// wantSeq.
+func requireSeqCursor(t *testing.T, token string, wantSeq uint64) {
+	t.Helper()
+	c, err := decodeKeysetCursor(token)
+	if err != nil {
+		t.Fatalf("decodeKeysetCursor(%q): %v", token, err)
+	}
+	if c.Kind != cursorKindSeq || c.Seq != wantSeq {
+		t.Fatalf("cursor = %+v, want kind=%s seq=%d", c, cursorKindSeq, wantSeq)
+	}
+}
+
+// requireSeqRun fails the test unless items are exactly the seqs hi down to lo,
+// each once, newest first.
+func requireSeqRun(t *testing.T, items []WireEvent, hi, lo uint64) {
+	t.Helper()
+	for i, it := range items {
+		if it.Seq != hi-uint64(i) {
+			t.Fatalf("items[%d].Seq = %d, want %d (a descending run [%d..%d], each seq once)", i, it.Seq, hi-uint64(i), hi, lo)
+		}
+	}
+	if got, want := uint64(len(items)), hi-lo+1; got != want {
+		t.Fatalf("items = %d rows, want %d spanning [%d..%d]", got, want, hi, lo)
+	}
+}
+
+// emptyTruncatedProvider models a selective filter whose bounded archive scan
+// spends its whole byte budget before it finds a single match: ListNewestBounded
+// returns no rows, truncated=true and a resume boundary. The embedded
+// provider's tail finds no match for the filter either, so the page is empty and
+// the provider's reachedSeq is the only thing that can carry the walk forward.
+type emptyTruncatedProvider struct {
+	*boundedScanFakeProvider
+	reached uint64
+}
+
+func (p *emptyTruncatedProvider) ListNewestBounded(_ context.Context, _ events.Filter, _ int) ([]events.Event, bool, uint64, error) {
+	return nil, true, p.reached, nil
+}
+
+// TestEventListBoundedScanTruncatedEmptyPageMintsReachedSeqCursor pins the one
+// truncated shape where the provider's reachedSeq is the ONLY possible resume
+// boundary: a selective filter whose scan exhausts its byte budget before it
+// finds any match returns an empty page, so there is no oldest row to anchor a
+// cursor on. The response must still say scan_truncated and carry a cursor at
+// the provider's reachedSeq, or the walk strands every older match.
+func TestEventListBoundedScanTruncatedEmptyPageMintsReachedSeqCursor(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	state.eventProv = &emptyTruncatedProvider{
+		boundedScanFakeProvider: &boundedScanFakeProvider{Fake: fake, activeFloor: 13, budgetRows: 4},
+		reached:                 5,
+	}
+	h := newTestCityHandler(t, state)
+	for i := 0; i < 15; i++ {
+		fake.Record(events.Event{Type: "e.t", Actor: "a"})
+	}
+
+	page := decodeBoundedScanPage(t, getList(t, h, cityURL(state, "/events?type=e.rare&limit=10")))
+	if len(page.Items) != 0 {
+		t.Fatalf("items len = %d, want 0 (no event of type e.rare exists)", len(page.Items))
+	}
+	if !page.ScanTruncated {
+		t.Fatal("scan_truncated = false, want true (the scan stopped at its budget before finding a match)")
+	}
+	requireSeqCursor(t, page.NextCursor, 5) // the provider's reachedSeq: an empty page has no oldest row to resume from
+}
+
+// reachedBelowOldestRowProvider reports the truncation boundary strictly below
+// the oldest row the scan returned, the way a FileRecorder does when the last
+// archive it opened begins with events the filter skips: the resume point is
+// the next unopened archive's last seq + 1, not the oldest MATCHING seq.
+type reachedBelowOldestRowProvider struct {
+	*boundedScanFakeProvider
+	gap uint64
+}
+
+func (p *reachedBelowOldestRowProvider) ListNewestBounded(ctx context.Context, filter events.Filter, fetch int) ([]events.Event, bool, uint64, error) {
+	page, truncated, reachedSeq, err := p.boundedScanFakeProvider.ListNewestBounded(ctx, filter, fetch)
+	if truncated {
+		reachedSeq -= p.gap
+	}
+	return page, truncated, reachedSeq, err
+}
+
+// TestEventListBoundedScanTruncatedCursorIsReachedSeqBelowOldestRow pins that
+// the truncated cursor is the provider's reachedSeq even when that boundary
+// lies below the page's oldest returned row. Seqs 7 and 8 do not match the
+// filter, so the oldest matching row the scan returns is 9, while the unopened
+// archive below it ends at seq 6 (reachedSeq 7). A handler that anchored the
+// cursor on the oldest returned row (9) would hand the next request a boundary
+// above the one the scan actually reached.
+func TestEventListBoundedScanTruncatedCursorIsReachedSeqBelowOldestRow(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	state.eventProv = &reachedBelowOldestRowProvider{
+		boundedScanFakeProvider: &boundedScanFakeProvider{Fake: fake, activeFloor: 13, budgetRows: 4},
+		gap:                     2,
+	}
+	h := newTestCityHandler(t, state)
+	for i := 1; i <= 15; i++ { // seqs 1..15; 7 and 8 are the rows the filter skips
+		typ := "e.t"
+		if i == 7 || i == 8 {
+			typ = "e.skip"
+		}
+		fake.Record(events.Event{Type: typ, Actor: "a"})
+	}
+
+	page := decodeBoundedScanPage(t, getList(t, h, cityURL(state, "/events?type=e.t&limit=10")))
+	if !page.ScanTruncated {
+		t.Fatal("scan_truncated = false, want true (budget exhausted before a full page)")
+	}
+	requireSeqRun(t, page.Items, 15, 9) // tail [13..15] + the 4 matching archived rows the budget covered [9..12]
+	requireSeqCursor(t, page.NextCursor, 7)
+}
+
+// TestEventListBoundedScanSkippedWhenSinceIsSet pins the documented limit of
+// the bounded path (fetchEventPageAscending): a query with a lower bound, here
+// since=, is answered by the full read, not by the byte-budgeted archive walk.
+// The provider that truncates an unfiltered read after four archived rows
+// therefore serves the whole page, an exact filtered total and no
+// scan_truncated for the same history.
+func TestEventListBoundedScanSkippedWhenSinceIsSet(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	state.eventProv = &boundedScanFakeProvider{Fake: fake, activeFloor: 13, budgetRows: 4}
+	h := newTestCityHandler(t, state)
+	for i := 0; i < 15; i++ {
+		fake.Record(events.Event{Type: "e.t", Actor: "a"})
+	}
+
+	page := decodeBoundedScanPage(t, getList(t, h, cityURL(state, "/events?since=1h&limit=10")))
+	if page.ScanTruncated {
+		t.Fatal("scan_truncated = true, want false (a since= query is not answered by the byte-budgeted bounded scan)")
+	}
+	requireSeqRun(t, page.Items, 15, 6)
+	if page.Total != 15 {
+		t.Fatalf("total = %d, want 15 (the full read's exact match count)", page.Total)
+	}
+	requireSeqCursor(t, page.NextCursor, 6) // the overfetched row signals more below
+}
+
+// TestEventListBoundedScanFencedBelowTailOnCursorPage pins that the fence
+// below the tail also holds when the request carries a cursor. The cursor
+// (seq 15) lies above the oldest tail row (13), and a rotation between the two
+// reads makes the provider's bounded read re-serve the tail's rows unless the
+// handler caps it at 13.
+func TestEventListBoundedScanFencedBelowTailOnCursorPage(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	state.eventProv = &rotatedBetweenReadsProvider{Fake: fake, activeFloor: 13}
+	h := newTestCityHandler(t, state)
+	for i := 0; i < 15; i++ {
+		fake.Record(events.Event{Type: "e.t", Actor: "a"})
+	}
+
+	cursor := encodeKeysetCursor(keysetCursor{Kind: cursorKindSeq, Seq: 15})
+	page := decodeBoundedScanPage(t, getList(t, h, cityURL(state, "/events?limit=10&cursor="+cursor)))
+	requireSeqRun(t, page.Items, 14, 5)
+	requireSeqCursor(t, page.NextCursor, 5)
+}
+
+// TestEventListBoundedScanAsksOnlyForRowsTheTailDidNotSupply pins that the
+// bounded read is asked for the rows the tail did not already supply (limit+1
+// minus the tail), not for a whole page again. The budget here (9 rows) covers
+// the 8 archived rows the page still needs but not the 11 an unreduced request
+// would want: asking for 11 would make the provider report truncation and mint
+// a cursor at its reachedSeq (4), below rows 4 and 5 that the trimmed page
+// never served.
+func TestEventListBoundedScanAsksOnlyForRowsTheTailDidNotSupply(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	state.eventProv = &boundedScanFakeProvider{Fake: fake, activeFloor: 13, budgetRows: 9}
+	h := newTestCityHandler(t, state)
+	for i := 0; i < 15; i++ {
+		fake.Record(events.Event{Type: "e.t", Actor: "a"})
+	}
+
+	page := decodeBoundedScanPage(t, getList(t, h, cityURL(state, "/events?limit=10")))
+	if page.ScanTruncated {
+		t.Fatal("scan_truncated = true, want false (the 8 archived rows the page needs fit within the 9-row budget)")
+	}
+	requireSeqRun(t, page.Items, 15, 6)
+	requireSeqCursor(t, page.NextCursor, 6) // the overfetched row (seq 5) signals more below
 }
