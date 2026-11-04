@@ -12,6 +12,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// ErrObservationUnanswered reports that a bounded observation produced no
+// answer before its context ended or its observation goroutine exited without
+// returning. ObserveBounded includes it in each such error.
+var ErrObservationUnanswered = errors.New("worker: bounded observation returned no answer")
+
 // ErrObservationOutstanding reports that ObserveBounded declined to start a
 // new observation because an earlier observation under the same key has not
 // returned yet. It always travels with runtime.ErrRuntimeUnavailable: the
@@ -20,7 +25,7 @@ var ErrObservationOutstanding = errors.New("worker: an earlier bounded observati
 
 // errObservationEnded is the answer of an observation whose goroutine ended
 // without returning (runtime.Goexit), so there is no value to hand back.
-var errObservationEnded = fmt.Errorf("worker: bounded observation ended without an answer: %w", runtime.ErrRuntimeUnavailable)
+var errObservationEnded = fmt.Errorf("worker: bounded observation ended without an answer: %w: %w", ErrObservationUnanswered, runtime.ErrRuntimeUnavailable)
 
 // boundedObservations holds the keys with an observation goroutine that has
 // not returned. It is what keeps a wedged session at one leaked goroutine
@@ -112,7 +117,7 @@ func ObserveBounded[T any](ctx context.Context, key string, observe func(context
 // observationUnanswered is the error of an observation that gave no answer in
 // time: unavailable, with the reason the wait ended.
 func observationUnanswered(cause error) error {
-	return fmt.Errorf("worker: observation unanswered: %w: %w", runtime.ErrRuntimeUnavailable, cause)
+	return fmt.Errorf("worker: observation unanswered: %w: %w: %w", ErrObservationUnanswered, runtime.ErrRuntimeUnavailable, cause)
 }
 
 // sharedObservations holds the keys with an ObserveShared observation that

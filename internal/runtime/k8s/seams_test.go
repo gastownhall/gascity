@@ -320,3 +320,59 @@ func TestCutoverForwardsListingAttestation(t *testing.T) {
 		}
 	}
 }
+
+func TestCutoverForwardsErrorBearingLiveness(t *testing.T) {
+	t.Run("transient first tmux exec retries to live", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		raw := newProviderWithOps(fake)
+		addRunningPod(fake, "worker", "worker")
+		var probes int
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if len(cmd) == 4 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+				probes++
+				if probes == 1 {
+					return "", errors.New("transient exec transport failure")
+				}
+			}
+			return "", nil
+		}
+		sp := &seamBackedProvider{Provider: runtime.NewProviderFromSeams(raw.Seams()), raw: raw}
+
+		got, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+		if err != nil || !got.Running || !got.Alive {
+			t.Fatalf("seam liveness = (%+v, %v), want live after retry", got, err)
+		}
+		if probes != 2 {
+			t.Fatalf("tmux probes = %d, want 2", probes)
+		}
+	})
+
+	t.Run("transient pgrep stays unknown through the seam", func(t *testing.T) {
+		fake := newFakeK8sOps()
+		raw := newProviderWithOps(fake)
+		addRunningPod(fake, "worker", "worker")
+		fake.execFunc = func(_ string, cmd []string) (string, error) {
+			if len(cmd) == 4 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+				return "", nil
+			}
+			if len(cmd) == 3 && cmd[0] == "pgrep" {
+				return "", errors.New("transient pgrep transport failure")
+			}
+			return "", nil
+		}
+		sp := &seamBackedProvider{Provider: runtime.NewProviderFromSeams(raw.Seams()), raw: raw}
+
+		got, err := runtime.ObserveLivenessWithError(sp, "worker", []string{"codex"})
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("seam liveness error = %v, want ErrRuntimeUnavailable", err)
+		}
+		if got.Alive {
+			t.Fatalf("seam liveness = %+v, want the failed process probe preserved", got)
+		}
+		for _, call := range fake.calls {
+			if call.method == "deletePod" {
+				t.Fatal("liveness observation deleted the pod after a transient pgrep failure")
+			}
+		}
+	})
+}

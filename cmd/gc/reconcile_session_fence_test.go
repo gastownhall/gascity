@@ -199,8 +199,9 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 		t.Fatalf("escalation class: %+v, want escalate, never proceed", v)
 	}
 
-	// k8s is unhardened; ssh is hardened (error-bearing liveness) and stays
-	// terminal-no-report because a human can attach to it (ssh -t).
+	// k8s reports error-bearing liveness but is not fresh-readable, so
+	// attachment still defers. ssh stays terminal-no-report because a human
+	// can attach to it (ssh -t).
 	for _, p := range []runtime.Profile{runtime.ProfileK8s, runtime.ProfileSSH} {
 		leaf, fake := fakeProfile(p)
 		startRuntime(t, fake, "rt_b", ours("b"))
@@ -209,6 +210,22 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 		}
 		if reason, escalate := attachLeg(context.Background(), leaf, "rt_b", true, now); reason != fenceTerminalNoReport || !escalate {
 			t.Fatalf("%s leaf, escalation class: L3 %q escalate=%v, want terminal-no-report's escalation", p, reason, escalate)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		profile runtime.Profile
+	}{
+		{name: "ACP", profile: runtime.ProfileACP},
+		{name: "subprocess", profile: runtime.ProfileSubprocess},
+	} {
+		leaf, _ := fakeProfile(tc.profile)
+		if !runtime.FreshReadable(leaf) {
+			t.Fatalf("%s fake is not fresh-readable", tc.name)
+		}
+		if reason, escalate := attachLeg(context.Background(), leaf, "rt_c", false, now); reason != "" || escalate {
+			t.Errorf("%s no-terminal leaf: L3 (%q, %v), want pass", tc.name, reason, escalate)
 		}
 	}
 }

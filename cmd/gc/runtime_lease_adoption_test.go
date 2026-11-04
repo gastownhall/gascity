@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -136,8 +137,9 @@ func TestLegacyStartDefersOnAHeldRuntimeLease(t *testing.T) {
 	if !f.sp.watched[0] {
 		t.Fatal("the legacy start's provider call did not run on its lease's Watch")
 	}
-	if f.sp.ttls[0] != "120" {
-		t.Fatalf("lease TTL at Start = %q, want 120 (the 1m startup timeout plus the margin)", f.sp.ttls[0])
+	wantTTL := strconv.FormatInt(int64(startRuntimeLeaseTTL(time.Minute, defaultStartPrepareBudget)/time.Second), 10)
+	if f.sp.ttls[0] != wantTTL {
+		t.Fatalf("lease TTL at Start = %q, want %s from the preparation and wave window", f.sp.ttls[0], wantTTL)
 	}
 	if meta[sessionpkg.RuntimeLeaseHolderKey] != "" || meta[sessionpkg.RuntimeLeaseEpochKey] != "2" {
 		t.Fatalf("record after the commit = %v, want epoch 2 released", meta)

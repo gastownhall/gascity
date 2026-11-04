@@ -1370,7 +1370,11 @@ func TestComposedUndoMatchesLegacyRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	woke, _ := m.Get(row.ID)
-	restorePreWakeState(preparedStart{candidate: startCandidate{info: sessionInfoFromBead(woke)}, preWakeUndo: undo}, sessionFrontDoor(m), io.Discard)
+	wokeInfo := sessionInfoFromBead(woke)
+	restorePreWakeState(preparedStart{
+		candidate:   startCandidate{info: wokeInfo, inc: session.RecordedIncarnationForTest(wokeInfo)},
+		preWakeUndo: undo,
+	}, sessionFrontDoor(m), io.Discard)
 	legacy, _ := m.Get(row.ID)
 	for _, key := range append([]string{"last_woke_at"}, preWakeRestoredKeys...) {
 		if after[key] != legacy.Metadata[key] {

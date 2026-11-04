@@ -1,0 +1,127 @@
+# Fork-only: publishes the images used to validate this integration branch.
+# It never runs upstream and is not part of any topic PR.
+name: Fork image custody
+
+on:
+  push:
+    branches:
+      - codex/gascity-final01-c14-7472f-20261101
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_VERSION: "v0.70.0"
+
+jobs:
+  publish:
+    name: Scan and publish images
+    if: ${{ github.repository == 'chris-sanders/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download Go modules
+        uses: ./.github/actions/go-mod-download
+
+      - name: Install Trivy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bin_dir="${RUNNER_TEMP}/gascity-trivy-bin"
+          TRIVY_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-trivy-archive.sh "${TRIVY_VERSION}"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Prepare image build inputs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . ./deps.env
+          bin_dir="${RUNNER_TEMP}/gascity-container-scan-bin"
+          mkdir -p "$bin_dir"
+          BD_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-bd-archive.sh "$BD_VERSION"
+          BR_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-br-archive.sh "$BR_VERSION"
+          CGO_ENABLED=0 go build -o gc ./cmd/gc
+          cp -f "$bin_dir/bd" bd
+          cp -f "$bin_dir/br" br
+
+      - name: Build images
+        run: |
+          set -euo pipefail
+          . ./deps.env
+          source_label="https://github.com/${GITHUB_REPOSITORY}"
+          docker build --label "org.opencontainers.image.source=${source_label}" \
+            -f contrib/k8s/Dockerfile.base --build-arg DOLT_VERSION="$DOLT_VERSION" \
+            -t "gc-agent-base:${IMAGE_TAG}" .
+          docker tag "gc-agent-base:${IMAGE_TAG}" gc-agent-base:latest
+          docker build --label "org.opencontainers.image.source=${source_label}" \
+            -f contrib/k8s/Dockerfile.agent --build-arg BASE_IMAGE=gc-agent-base:latest \
+            -t "gc-agent:${IMAGE_TAG}" .
+          docker tag "gc-agent:${IMAGE_TAG}" gc-agent:latest
+          docker build --label "org.opencontainers.image.source=${source_label}" \
+            -f contrib/k8s/Dockerfile.controller --build-arg BASE=gc-agent:latest \
+            -t "gc-controller:${IMAGE_TAG}" .
+
+      - name: Enforce image vulnerability policy
+        run: |
+          set -euo pipefail
+          for image in gc-agent-base gc-agent gc-controller; do
+            trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+              --ignorefile .trivyignore.yaml --exit-code 1 --timeout 15m \
+              --format table "${image}:${IMAGE_TAG}"
+          done
+
+      - name: Publish and verify anonymous digest pulls
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          receipt="${RUNNER_TEMP}/custody-receipt.json"
+          jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{source_sha: $sha, run_id: $run, run_attempt: $attempt, images: []}' > "$receipt"
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for image in gc-agent-base gc-agent gc-controller; do
+            package="ghcr.io/${owner}/gascity-c14-${image}"
+            image_id="$(docker image inspect --format '{{.Id}}' "${image}:${IMAGE_TAG}")"
+            docker tag "${image}:${IMAGE_TAG}" "${package}:${tag}"
+            digest="$(docker push "${package}:${tag}" | grep -Eo 'digest: sha256:[0-9a-f]{64}' | tail -n 1 | cut -d' ' -f2)"
+            test -n "$digest"
+            jq --arg image "$image" --arg id "$image_id" --arg package "$package" --arg digest "$digest" \
+              '.images += [{image: $image, image_id: $id, package: $package, digest: $digest}]' \
+              "$receipt" > "$receipt.tmp"
+            mv "$receipt.tmp" "$receipt"
+            docker image rm "${package}:${tag}" "${image}:${IMAGE_TAG}"
+          done
+          docker image rm gc-agent-base:latest gc-agent:latest
+          export DOCKER_CONFIG="$(mktemp -d)"
+          while IFS=$'\t' read -r package digest image_id; do
+            docker pull "${package}@${digest}"
+            test "$(docker image inspect --format '{{.Id}}' "${package}@${digest}")" = "$image_id"
+          done < <(jq -r '.images[] | [.package, .digest, .image_id] | @tsv' "$receipt")
+          cat "$receipt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain custody receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: custody-receipt-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/custody-receipt.json
+          if-no-files-found: warn

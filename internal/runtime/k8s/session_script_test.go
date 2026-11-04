@@ -451,16 +451,21 @@ func runScriptCommand(env []string, stdin io.Reader, name string, args ...string
 	return cmd.CombinedOutput()
 }
 
-// runUnderEnvClearingSu runs the su part of a pod command (from "CMD=$(") in
-// a shell whose environment carries the pod spec's variables, with fakes for
+// runUnderEnvClearingSu runs the pod command's su launch segment with a fake
 // su (which, like `su -`, clears the environment), tmux (which records the
-// environment its server would start with) and sleep. It returns what tmux
-// saw.
-func runUnderEnvClearingSu(t *testing.T, command string, podEnv map[string]string) string {
+// environment its server would start with) and sleep. It skips the container
+// setup prefix, which creates users and waits for the projected workspace and
+// is provided by the real pod environment rather than this shell-level test.
+// It returns what tmux saw.
+func runUnderEnvClearingSu(t *testing.T, command []string, podEnv map[string]string) string {
 	t.Helper()
-	at := strings.Index(command, "CMD=$(")
+	if len(command) < 3 {
+		t.Fatalf("no dynamic-user agent launch in %#v", command)
+	}
+	const launchPrefix = `printf '%s' "$@" | su - `
+	at := strings.Index(command[0], launchPrefix)
 	if at < 0 {
-		t.Fatalf("no agent launch in %q", command)
+		t.Fatalf("no dynamic-user agent launch in %#v", command)
 	}
 	dir := t.TempDir()
 	envOut := filepath.Join(dir, "tmux.env")
@@ -478,7 +483,8 @@ func runUnderEnvClearingSu(t *testing.T, command string, podEnv map[string]strin
 	for k, v := range podEnv {
 		env = append(env, k+"="+v)
 	}
-	if out, err := runScriptCommand(env, nil, "/bin/sh", "-c", command[at:]); err != nil {
+	args := append([]string{"-c", command[0][at:]}, command[1:]...)
+	if out, err := runScriptCommand(env, nil, "/bin/sh", args...); err != nil {
 		t.Fatalf("running the launch: %v\n%s", err, out)
 	}
 	got, err := os.ReadFile(envOut)
@@ -520,7 +526,7 @@ func TestLinuxUsernameAgentCarriesTheRemoteStageEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Run("entrypoint", func(t *testing.T) {
-			want(t, runUnderEnvClearingSu(t, pod.Spec.Containers[0].Args[0], podEnv))
+			want(t, runUnderEnvClearingSu(t, pod.Spec.Containers[0].Args, podEnv))
 		})
 	}
 }
