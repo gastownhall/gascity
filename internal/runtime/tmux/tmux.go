@@ -530,6 +530,11 @@ type Tmux struct {
 	// snapshotFailures rate-limits the log of the one-shot pane probes'
 	// failed process-table snapshots (see readProcessSnapshot).
 	snapshotFailures processSnapshotFailureLog
+
+	// programArms stamps each capture arm this Tmux runs, so a tap armed
+	// after the state cache's process table was scanned reads unknown
+	// liveness rather than reader_lost (see programArmStamps).
+	programArms programArmStamps
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -982,6 +987,7 @@ func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env ma
 		cmds = append(cmds, plan.armCommands(paneTarget(name), false)...)
 	}
 	pane, err := t.runNewSession(cmds, env)
+	t.programArms.noteArmed(plan)
 	if err != nil {
 		created := firstLine(outputBeforeError(err))
 		if plan == nil || !wellFormedTmuxID(created, '%') {
@@ -3992,7 +3998,7 @@ func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bo
 	if len(names) == 0 {
 		return false
 	}
-	processes, err := t.readProcessSnapshot()
+	processes, err := t.readPaneProcesses(pid)
 	if err != nil {
 		return false
 	}
@@ -4350,14 +4356,15 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	// pane_current_command match, the pane process itself
 	// (version-as-argv[0], e.g. "2.1.30"), then its descendants (agents
 	// under shells or wrapper roots such as systemd-run or the gc-osc7501
-	// relay, which stay pane_current_command). One process-table snapshot,
-	// taken at the first pane without a direct match, serves every pane
-	// after it, so a direct match reads no process table. Without a
-	// snapshot (a failed read leaves it empty) only a direct match can pick
-	// a pane.
+	// relay, which stay pane_current_command). A pane without a direct match
+	// is judged by its own subtree; where that read fails, by one
+	// process-table snapshot, taken at the first such pane and serving every
+	// pane after it, so a direct match reads no process table. Without
+	// either (a failed read leaves the snapshot empty) only a direct match
+	// can pick a pane.
 	var (
-		processes processSnapshot
-		read      bool
+		full     processSnapshot
+		fullRead bool
 	)
 	for _, line := range lines {
 		_, fields, _ := strings.Cut(line, "\t")
@@ -4368,9 +4375,13 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 		if _, direct := names[r.cmd]; direct {
 			return r.target, nil
 		}
-		if !read {
-			processes, _ = t.readProcessSnapshot()
-			read = true
+		processes, err := readPaneSubtreeBounded(r.pid, paneSubtreeTimeout)
+		if err != nil {
+			if !fullRead {
+				full, _ = t.readProcessSnapshot()
+				fullRead = true
+			}
+			processes = full
 		}
 		if (paneRuntimeState{Command: r.cmd, PID: r.pid}).processAlive(names, processes) {
 			return r.target, nil
@@ -4860,10 +4871,11 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 
 // readProcessSnapshot takes one process-table snapshot under the state
 // cache's fetch bound. procps reads the whole process table for every ps or
-// pgrep it runs, so the one-shot pane probes judge a whole process tree
-// against a single snapshot walked in memory rather than forking a ps per
-// descendant: under a wrapper root (the gc-osc7501 relay -> sudo -> bwrap ->
-// claude) that walk cost 17 full reads per look, seconds on a busy host.
+// pgrep it runs, so a one-shot pane probe that cannot read the pane's own
+// subtree (readPaneProcesses) judges the whole process tree against a single
+// snapshot walked in memory rather than forking a ps per descendant: under a
+// wrapper root (the gc-osc7501 relay -> sudo -> bwrap -> claude) that walk
+// cost 17 full reads per look, seconds on a busy host.
 //
 // The bound can fail a read the per-process walk would have finished: under
 // fleet load the full-OS scan runs past fetchTimeout, and execenv.Environ
@@ -5235,10 +5247,11 @@ func (t *Tmux) runtimeRunning(session string, processNames []string) (bool, erro
 	if err != nil || pid == "" {
 		return false, nil
 	}
-	// Judge the pane against one process-table snapshot, as the state cache
-	// does (paneRuntimeState.processAlive): a shell's descendants; otherwise
-	// the process itself, then its descendants.
-	processes, err := t.readProcessSnapshot()
+	// Judge the pane as the state cache does (paneRuntimeState.processAlive):
+	// a shell's descendants; otherwise the process itself, then its
+	// descendants. They are read from the pane's own subtree, so a failing
+	// full snapshot does not blind the probe (readPaneProcesses).
+	processes, err := t.readPaneProcesses(pid)
 	if err != nil {
 		return false, fmt.Errorf("%w: reading the process table: %w", runtime.ErrRuntimeUnavailable, err)
 	}
@@ -6294,6 +6307,7 @@ func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime
 	}
 	if plan := t.planCapture(arm); plan != nil {
 		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.wrapRelay(command)), plan.armCommands(target, true))
+		t.programArms.noteArmed(plan)
 		if err != nil {
 			return err
 		}
