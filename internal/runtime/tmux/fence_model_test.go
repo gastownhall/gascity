@@ -618,7 +618,7 @@ func fencedScenarios() []fencedScenario {
 		}, want: "key:C-u"},
 		{name: "dismiss known dialogs", model: func() *fenceModel {
 			m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
-			m.overlay, m.overlayUntil = "Resume from summary\nResume full session as-is\nEnter to confirm", "Enter"
+			m.overlay, m.overlayUntil = knownStartupThemeFixture, "Enter"
 			m.screen = staticShellScreen
 			return m
 		}, run: func(ctx context.Context, p *Provider, f runtime.InputFence) error {

@@ -11,6 +11,25 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// Same captured Claude Code v2.1.197 picker as runtime/dialog_test.go. The
+// generic input-target/fence scenarios need one real Enter path, not an
+// incomplete resume selector that cannot prove which option Enter would pick.
+const knownStartupThemeFixture = `Welcome to Claude Code v2.1.197
+
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+   1. Auto (match terminal)
+ ❯ 2. Dark mode ✔
+   3. Light mode
+   4. Dark mode (colorblind-friendly)
+   5. Light mode (colorblind-friendly)
+   6. Dark mode (ANSI colors only)
+   7. Light mode (ANSI colors only)
+`
+
 // tmux resolves a bare "-t name" by unique prefix: once "worker-1" has exited,
 // "-t worker-1" names a live "worker-10". These tests pin the exact target
 // every session-keyed destructive, meta, fence and input command sends.
@@ -334,7 +353,7 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 		},
 		{
 			"DismissKnownDialogs",
-			scriptedTargetExecutor{capture: "Resume from summary\nResume full session as-is\nEnter to confirm"},
+			scriptedTargetExecutor{captures: []string{knownStartupThemeFixture}, capture: "❯ "},
 			func(tm *Tmux) { _ = tm.DismissKnownDialogs(context.Background(), "worker-1", 10*time.Millisecond) },
 			[]string{"capture-pane", "send-keys"},
 		},
