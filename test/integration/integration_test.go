@@ -2761,6 +2761,35 @@ func TestSubprocessTestKillSetSparesLiveForeignIntegrationRun(t *testing.T) {
 	}
 }
 
+// TestIntegrationPreSweepRunsSupervisorSweepForBothProviders pins the TestMain
+// pre-sweep decision: the stale supervisor / control-dispatcher sweep runs for
+// the default tmux provider and for GC_SESSION=subprocess alike (both boot the
+// same shared TestMain supervisor), while the tmux session kill stays
+// tmux-only. The sweeps are injected, so no real process is started or killed.
+func TestIntegrationPreSweepRunsSupervisorSweepForBothProviders(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		subprocess   bool
+		wantTmuxKill int
+	}{
+		{name: "tmux provider", subprocess: false, wantTmuxKill: 1},
+		{name: "subprocess provider", subprocess: true, wantTmuxKill: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var tmuxKills, supervisorSweeps int
+			runIntegrationPreSweep(tc.subprocess,
+				func() { tmuxKills++ },
+				func() { supervisorSweeps++ })
+			if supervisorSweeps != 1 {
+				t.Fatalf("supervisor pre-sweep ran %d times for subprocess=%v, want 1", supervisorSweeps, tc.subprocess)
+			}
+			if tmuxKills != tc.wantTmuxKill {
+				t.Fatalf("tmux session kill ran %d times for subprocess=%v, want %d", tmuxKills, tc.subprocess, tc.wantTmuxKill)
+			}
+		})
+	}
+}
+
 // TestParsePSLineSurvivesInternalWhitespaceAndRejectsMalformedInput is the
 // falsifiable-floor check for the macOS ps(1) fallback: it must parse real
 // `ps -axwwo pid=,ppid=,command=` rows (including a multi-arg orphaned
