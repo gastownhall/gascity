@@ -324,3 +324,51 @@ func TestDiscoverPackDoctors_PreservesPackDir(t *testing.T) {
 		t.Fatalf("PackDir = %q, want %q", got[0].PackDir, packDir)
 	}
 }
+
+func TestDoctorConfigValidationManifest(t *testing.T) {
+	for _, tc := range []struct{ name, fields, wantError string }{
+		{"opted-in", "config_validate = true\nconfig_validate_formulas = [\"arbitrary-plan\"]", ""},
+		{"empty-input-list", "config_validate = true", ""},
+		{"ordinary", "", ""},
+		{"missing-opt-in", "config_validate_formulas = [\"plan\"]", "requires config_validate"},
+		{"empty-name", "config_validate = true\nconfig_validate_formulas = [\"\"]", "empty formula"},
+		{"duplicate-name", "config_validate = true\nconfig_validate_formulas = [\"plan\", \"plan\"]", "repeats formula"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, discovered := range []bool{false, true} {
+				dir := t.TempDir()
+				writeTestFile(t, dir, "check.sh", "#!/bin/sh\nexit 0\n")
+				var got []DiscoveredDoctor
+				var err error
+				if discovered {
+					writeTestFile(t, dir, "doctor/plan/run.sh", "#!/bin/sh\nexit 0\n")
+					writeTestFile(t, dir, "doctor/plan/doctor.toml", tc.fields)
+					got, err = DiscoverPackDoctors(fsys.OSFS{}, dir, "tools")
+				} else {
+					writeTestFile(t, dir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n[[doctor]]\nname = \"plan\"\nscript = \"check.sh\"\n"+tc.fields)
+					writeTestFile(t, dir, "city.toml", "[workspace]\nname = \"demo\"\n")
+					var cfg *City
+					cfg, _, err = LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+					if cfg != nil {
+						got = cfg.PackDoctors
+					}
+				}
+				if tc.wantError != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+						t.Fatalf("discovered=%v: error=%v, want %s", discovered, err, tc.wantError)
+					}
+					continue
+				}
+				if err != nil || len(got) != 1 {
+					t.Fatalf("discovered=%v: checks=%+v err=%v", discovered, got, err)
+				}
+				if tc.name == "opted-in" && (!got[0].ConfigValidate || len(got[0].ConfigValidateFormulas) != 1 || got[0].ConfigValidateFormulas[0] != "arbitrary-plan") {
+					t.Fatalf("lost manifest fields: %+v", got[0])
+				}
+				if tc.name == "ordinary" && got[0].ConfigValidate {
+					t.Fatal("ordinary check opted in")
+				}
+			}
+		})
+	}
+}

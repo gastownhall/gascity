@@ -969,6 +969,17 @@
         "warmup": {
           "type": "boolean",
           "description": "Warmup, when true, includes this check in the `gc start` warm-up\nscan. Default false. The check still runs on demand via `gc doctor`\nregardless of this flag."
+        },
+        "config_validate": {
+          "type": "boolean",
+          "description": "ConfigValidate opts this diagnostic into explicit config show --validate."
+        },
+        "config_validate_formulas": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "ConfigValidateFormulas names the compiled formula inputs supplied per rig.\nFormula policy remains in the diagnostic script."
         }
       },
       "additionalProperties": false,

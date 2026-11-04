@@ -1424,6 +1424,7 @@ go_test(
         "compute_awake_set_test.go",
         "config_hash_test.go",
         "config_invocation_memo_test.go",
+        "config_pack_validation_test.go",
         "context_inject_test.go",
         "continuation_nudge_test.go",
         "control_dispatch_graph_store_test.go",

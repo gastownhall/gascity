@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -69,7 +73,9 @@ func newConfigShowCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Loads city.toml with all includes, packs, patches, and overrides,
 then outputs the merged result. Use --validate to check for errors
-without printing. Use --provenance to see which file contributed each
+without printing. Explicit validation also runs opted-in pack doctor checks
+with this invocation's resolved configuration and requested formula inputs.
+Use --provenance to see which file contributed each
 config element. Use -f to layer additional config files.`,
 		Example: `  gc config show
   gc config show --validate
@@ -148,8 +154,21 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	validationWarnings = append(validationWarnings, config.RigFederationWarnings(cfg.Rigs)...)
 
 	if validate {
+		packChecks := validatePackConfig(context.Background(), cityPath, cfg)
+		for _, result := range packChecks {
+			message := result.Name + ": " + result.Message
+			if len(result.Details) > 0 {
+				message += "\n" + strings.Join(result.Details, "\n")
+			}
+			switch result.Status {
+			case "warning":
+				validationWarnings = append(validationWarnings, message)
+			case "error":
+				validationErrors = append(validationErrors, message)
+			}
+		}
 		if asJSON {
-			if code := writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil); code != 0 {
+			if code := writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil, packChecks); code != 0 {
 				return code
 			}
 			if len(validationErrors) > 0 {
@@ -175,7 +194,7 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 		if showProvenance {
 			provenance = prov
 		}
-		return writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, provenance)
+		return writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, provenance, nil)
 	}
 
 	// Print validation warnings even in show mode.
@@ -207,21 +226,63 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	return 0
 }
 
-func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, warnings, validationWarnings, validationErrors []string, provenance any) int {
-	payload := map[string]any{
-		"schema_version": "1",
-		"city_path":      cityPath,
-		"config":         configForDisplay(cfg),
-		"warnings":       nonNilStrings(warnings),
-		"validation": map[string]any{
-			"ok":       len(validationErrors) == 0,
-			"warnings": nonNilStrings(validationWarnings),
-			"errors":   nonNilStrings(validationErrors),
-		},
+// configShowResult is the typed config inspection result. Pack diagnostics are
+// present only when explicit validation actually executed opted-in checks.
+type configShowResult struct {
+	SchemaVersion string               `json:"schema_version"`
+	CityPath      string               `json:"city_path"`
+	Config        *config.City         `json:"config"`
+	Warnings      []string             `json:"warnings"`
+	Validation    configShowValidation `json:"validation"`
+	Provenance    any                  `json:"provenance,omitempty"`
+}
+
+type configShowValidation struct {
+	OK         bool                    `json:"ok"`
+	Warnings   []string                `json:"warnings"`
+	Errors     []string                `json:"errors"`
+	PackChecks []configPackCheckResult `json:"pack_checks,omitempty"`
+}
+
+type configPackCheckResult struct {
+	Name    string   `json:"name"`
+	Status  string   `json:"status"`
+	Message string   `json:"message"`
+	Details []string `json:"details"`
+}
+
+func validatePackConfig(ctx context.Context, cityPath string, cfg *config.City) []configPackCheckResult {
+	var results []configPackCheckResult
+	for _, entry := range cfg.PackDoctors {
+		if !entry.ConfigValidate {
+			continue
+		}
+		check := doctor.PackScriptCheck{CheckName: entry.PackName + ":" + entry.Name, Script: entry.RunScript, PackDir: entry.PackDir, PackName: entry.PackName}
+		input := doctor.BuildConfigValidationInput(ctx, cfg, entry.ConfigValidateFormulas)
+		data, err := json.Marshal(input)
+		if err != nil {
+			results = append(results, configPackCheckResult{Name: check.Name(), Status: "error", Message: "encoding config validation input: " + err.Error(), Details: []string{}})
+			continue
+		}
+		result := check.RunConfigValidation(ctx, cityPath, data, 60*time.Second)
+		status := "ok"
+		switch result.Status {
+		case doctor.StatusWarning:
+			status = "warning"
+		case doctor.StatusError:
+			status = "error"
+		}
+		results = append(results, configPackCheckResult{Name: result.Name, Status: status, Message: result.Message, Details: nonNilStrings(result.Details)})
 	}
-	if provenance != nil {
-		payload["provenance"] = provenance
+	return results
+}
+
+func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, warnings, validationWarnings, validationErrors []string, provenance any, packChecks []configPackCheckResult) int {
+	payload := configShowResult{
+		SchemaVersion: "1", CityPath: cityPath, Config: configForDisplay(cfg), Warnings: nonNilStrings(warnings), Provenance: provenance,
+		Validation: configShowValidation{OK: len(validationErrors) == 0, Warnings: nonNilStrings(validationWarnings), Errors: nonNilStrings(validationErrors)},
 	}
+	payload.Validation.PackChecks = packChecks
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		return 1
 	}

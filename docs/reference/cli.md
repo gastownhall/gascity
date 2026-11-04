@@ -891,7 +891,9 @@ Dump the fully resolved city configuration as TOML.
 
 Loads city.toml with all includes, packs, patches, and overrides,
 then outputs the merged result. Use --validate to check for errors
-without printing. Use --provenance to see which file contributed each
+without printing. Explicit validation also runs opted-in pack doctor checks
+with this invocation's resolved configuration and requested formula inputs.
+Use --provenance to see which file contributed each
 config element. Use -f to layer additional config files.
 
 ```

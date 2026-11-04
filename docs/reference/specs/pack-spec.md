@@ -590,6 +590,75 @@ metadata:
 | `run` | string | no | Check script path relative to the check directory. Defaults to `run.sh`. |
 | `fix` | string | no | Fix script path relative to the check directory. Defaults to sibling `fix.sh` when present. |
 | `warmup` | bool | no | When true, includes this check in the `gc start` warm-up scan. The check still runs on demand through `gc doctor`. |
+| `config_validate` | bool | no | Opts this check into explicit `gc config show --validate`. Defaults to false. |
+| `config_validate_formulas` | array of string | no | Unique, nonempty formula names requested for each configured rig. Requires `config_validate = true` when nonempty. Defaults to `[]`. |
+
+#### Explicit configuration validation
+
+Use an opted-in check to diagnose pack-specific configuration before starting
+work. Ordinary config loading and `config show` do not execute these checks.
+Normal doctor and startup diagnostics keep their existing behavior.
+
+```toml
+# doctor/plan/doctor.toml
+config_validate = true
+config_validate_formulas = ["build-plan"]
+```
+
+During explicit validation, the check receives `GC_CONFIG_VALIDATION=1` and
+fresh JSON on stdin:
+
+```json
+{
+  "schema_version": "1",
+  "config": {"Agents": [], "Rigs": []},
+  "formulas": {}
+}
+```
+
+`config` contains this invocation's resolved configuration, including `-f`
+overlays. `Agents` and `Rigs` are always arrays. Each configured rig name maps
+to an object in `formulas`, containing each requested formula name; an empty
+request list produces an empty object per rig. Formula lookup and compilation
+use that rig's resolved formula layers and overrides.
+
+A successful formula entry contains:
+
+| Field | Value |
+|---|---|
+| `name` | The requested formula name. |
+| `vars` | All compiled declarations as objects with `name` and an optional string `default`. An absent default differs from `""`. |
+| `provenance.status` | `complete` when every contributing formula read was captured. |
+| `provenance.sources` | Nonempty array of objects with the selected absolute `path` and `content_sha256` of the actual bytes read, including inherited and expanded inputs. |
+
+Overrides remain separately in each rig's `FormulaVars`. Check map membership:
+an explicit empty override must not silently restore a default. A discovery or
+compilation failure produces an entry with only an actionable `error` string.
+The pack chooses applicable rigs and formulas and decides which errors matter;
+unused formula errors do not independently fail core validation.
+
+Incomplete source evidence uses `provenance.status = "unavailable"`, a
+nonempty `reason`, and a `sources` array containing any captured contributors.
+Never treat unavailable evidence as proof of source pinning. Paths identify
+lookup locations; hashes identify selected bytes. The input is point-in-time
+evidence, rather than an atomic filesystem snapshot or a promise about later
+execution or instruction files.
+
+The script must reject empty or malformed input in explicit mode, unsupported
+schema versions, missing required fields, wrong types and duplicate keys or
+variable names. Unknown additive annotations may be ignored within version 1.
+Do not reload config or formulas through subprocesses, cache the input, execute
+gates, or perform fixes. Keep pack policy, including optional commands and
+instruction-file fallback, in the script.
+
+The diagnostic has a 60-second execution limit. Exit 0 means OK, 1 means warning,
+and 2 or higher means error. The first output line is the message; remaining
+lines are details. Errors fail explicit validation; warnings remain advisory.
+Text output includes warning/error details, and JSON includes typed
+`validation.pack_checks` results alongside its warning/error arrays. Ordinary
+pack doctor checks, startup warm-up checks and fixes strip the reserved marker.
+The same opt-in fields are supported by compatibility `[[doctor]]` entries.
+
 
 > **Compatibility:** Legacy `pack.toml` `[[doctor]]` entries remain loader
 > compatibility for existing packs. New packs should use `doctor/<name>/`.
