@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1370,7 +1369,7 @@ func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
 // whose target is a named session is assigned the canonical session bead's id
 // from ProcessOptions.Sessions.
 func TestProcessControlFanoutRoutesFragmentThroughSessions(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
+	t.Parallel()
 
 	cityPath, sessions, sessionID := namedWorkerSessionCity(t)
 	expansion := `

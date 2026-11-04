@@ -14,7 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -497,7 +496,6 @@ title = "Work {{convoy_id}}"
 // convoy must expand to one row per member, and the pass-with-nothing-expanded
 // state must not be reachable over a convoy that has members.
 func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
 	cityPath := t.TempDir()
 	scopeStore := beads.NewMemStore()
 	graphStore := beads.NewMemStoreFrom(1000, nil, nil)
