@@ -1,5 +1,6 @@
 """Independent-review evidence guards; no provider or runtime is launched."""
 import copy
+import hashlib
 import base64
 import io
 import urllib.error
@@ -14,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from qualify_review import prove_review, canonical_native_identity
+import qualify_review as review_module
 
 
 class Response:
@@ -56,14 +58,25 @@ class ReviewProofTests(unittest.TestCase):
                 'history': {'continuity': {'status': 'continuous'}, 'gc_session_id': sid, 'provider_session_id': native, 'logical_conversation_id': sid},
                 'structured_messages': [{'id': 'native-message', 'role': 'assistant', 'blocks': [{'type': 'text', 'text': 'Retained actual content'}]}]}
         self.calls = []
+        self.schema = {'paths': {'/v0/city/{cityName}/bead/{id}': {'get': {'parameters': [
+            {'in': 'query', 'name': 'fresh', 'schema': {'type': 'boolean'}}]}}}}
+        self.cached_source_open = False
+        self.ignore_fresh = False
 
     def run_proof(self, *, head=None, deadline=None):
         def get(url, timeout):
             self.assertGreater(timeout, 0)
-            suffix = url.split('/v0/city/owned-city/', 1)[1]
-            self.calls.append(suffix)
-            row = self.rows[suffix]
-            if callable(row): row = row()
+            if url == 'http://127.0.0.1:18599/openapi.json':
+                self.calls.append('/openapi.json')
+                row = self.schema() if callable(self.schema) else self.schema
+            else:
+                suffix = url.split('/v0/city/owned-city/', 1)[1]
+                self.calls.append(suffix)
+                key = suffix.removesuffix('?fresh=true') if suffix.startswith('bead/') else suffix
+                row = self.rows[key]
+                if callable(row): row = row()
+                if not isinstance(row, BaseException) and key == 'bead/owned-input' and (self.ignore_fresh or (self.cached_source_open and not suffix.endswith('?fresh=true'))):
+                    row = dict(row, status='open', updated_at='2026-11-04T07:15:37Z')
             if isinstance(row, BaseException): raise row
             return Response(copy.deepcopy(row))
         with patch('qualify_review.urllib.request.urlopen', side_effect=get), \
@@ -72,6 +85,84 @@ class ReviewProofTests(unittest.TestCase):
                                   record=self.record, evidence=self.path/'proof', deadline=deadline or time.monotonic()+30)
             git.assert_called_once()
             return result
+
+    def test_declared_fresh_read_uses_current_input_over_held_open_snapshot(self):
+        # CPU reproduction of hold4: native close is current while the ordinary
+        # cache still holds the older OPEN input. This is not native acceptance.
+        self.cached_source_open = True
+        result = self.run_proof()
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(self.calls[0], '/openapi.json')
+        bead_reads = [call for call in self.calls if call.startswith('bead/')]
+        self.assertEqual(len(bead_reads), 4)
+        self.assertTrue(all(call.endswith('?fresh=true') for call in bead_reads))
+        declaration = json.loads((self.path/'proof/fresh-point-capability.json').read_text())
+        self.assertEqual(declaration['query'], 'fresh=true')
+        self.assertEqual(declaration['openapi_sha256'], hashlib.sha256(json.dumps(self.schema, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+
+    def test_declared_but_query_ignoring_handler_cannot_prove_completion(self):
+        self.ignore_fresh = True
+        with self.assertRaisesRegex(AssertionError, 'Delivery is not terminal'):
+            self.run_proof()
+        self.assertEqual(self.calls, ['/openapi.json', 'bead/owned-root?fresh=true', 'bead/owned-input?fresh=true'])
+        self.assertFalse((self.path/'proof/proof.json').exists())
+
+    def test_undeclared_fresh_capability_refuses_before_any_city_read(self):
+        self.schema['paths']['/v0/city/{cityName}/bead/{id}']['get']['parameters'] = []
+        with self.assertRaisesRegex(AssertionError, 'declared fresh'):
+            self.run_proof()
+        self.assertEqual(self.calls, ['/openapi.json'])
+        self.assertFalse((self.path/'proof/proof.json').exists())
+
+    def test_non_boolean_or_ambiguous_fresh_capability_refuses_before_city_read(self):
+        for parameter in [
+            [{'in': 'query', 'name': 'fresh', 'schema': {'type': 'string'}}],
+            [{'in': 'query', 'name': 'fresh', 'schema': {'type': 'boolean'}}] * 2,
+            [{'in': 'query', 'name': 'fresh', 'schema': {'type': 'boolean', 'enum': [False]}}],
+            [{'in': 'query', 'name': 'fresh', 'required': True, 'schema': {'type': 'boolean'}}],
+            [{'in': 'query', 'name': 'fresh', 'schema': {'type': 'boolean', '$ref': '#/unresolved'}}],
+        ]:
+            with self.subTest(parameter=parameter):
+                schema = copy.deepcopy(self.schema)
+                schema['paths']['/v0/city/{cityName}/bead/{id}']['get']['parameters'] = parameter
+                with self.assertRaises(AssertionError): review_module.require_fresh_bead_contract(schema)
+
+    def test_capability_read_crossing_original_deadline_cannot_start_city_proof(self):
+        now = [10.0]
+        schema = self.schema
+        def late_schema():
+            now[0] = 12.0
+            return schema
+        self.schema = late_schema
+        with patch('qualify_review.time.monotonic', side_effect=lambda: now[0]):
+            with self.assertRaises(TimeoutError): self.run_proof(deadline=11.0)
+        self.assertEqual(self.calls, ['/openapi.json'])
+        self.assertFalse((self.path/'proof/fresh-point-capability.json').exists())
+        self.assertFalse((self.path/'proof/proof.json').exists())
+
+    def test_capability_receipt_crossing_original_deadline_cannot_start_city_proof(self):
+        now = [10.0]
+        original = Path.write_text
+        def write(path, data, *args, **kwargs):
+            result = original(path, data, *args, **kwargs)
+            if path.name == 'fresh-point-capability.json': now[0] = 12.0
+            return result
+        with patch('qualify_review.time.monotonic', side_effect=lambda: now[0]), patch.object(Path, 'write_text', write):
+            with self.assertRaises(TimeoutError): self.run_proof(deadline=11.0)
+        self.assertEqual(self.calls, ['/openapi.json'])
+        self.assertFalse((self.path/'proof/proof.json').exists())
+
+    def test_fresh_contract_extension_preserves_exact_existing_proof_and_warming_policy(self):
+        source = Path(review_module.__file__).read_text()
+        start = source.index('def require_fresh_bead_contract(')
+        end = source.index('def prove_review(', start)
+        restored = source[:start] + source[end:]
+        restored = restored.replace('import hashlib\n', '', 1)
+        restored = restored.replace('def read(label, suffix, *, global_scope=False):', 'def read(label, suffix):', 1)
+        restored = restored.replace("url = base + suffix if global_scope else base + '/v0/city/'", "url = base + '/v0/city/'", 1)
+        restored = restored.replace("        if kind == 'bead':\n            assert not query, 'Fresh bead proof cannot combine an undeclared query'\n            query = '?fresh=true'\n", '', 1)
+        restored = restored.replace("    declaration = require_fresh_bead_contract(read('openapi', '/openapi.json', global_scope=True))\n    (evidence / 'fresh-point-capability.json').write_text(json.dumps(declaration, indent=2) + '\\n')\n    remaining(deadline)\n\n", '', 1)
+        self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), 'd4f65ca5a7aa337e142fd574e857edc5d76ae1c0e9036ee5baf00ba2bd870ce8')
 
     def test_actual_distinct_sessions_and_native_conversations_are_proved(self):
         result = self.run_proof()
@@ -264,7 +355,7 @@ class ReviewProofTests(unittest.TestCase):
         self.assertIn('deadline exceeded', receipt['error'])
 
     def test_http_failure_receipt_preserves_exact_status_url_and_body(self):
-        url = 'http://127.0.0.1:18599/v0/city/owned-city/bead/owned-root'
+        url = 'http://127.0.0.1:18599/v0/city/owned-city/bead/owned-root?fresh=true'
         body = b'{"error":"snapshot unavailable"}\x00\xff'
         self.rows['bead/owned-root'] = urllib.error.HTTPError(url, 503, 'unavailable', {}, io.BytesIO(body))
         with self.assertRaises(urllib.error.HTTPError):

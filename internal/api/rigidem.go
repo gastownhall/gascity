@@ -62,8 +62,10 @@ const (
 	// pre-drop, and the boot sweep can tear exactly those down — never a
 	// preexisting dir or adopted store. Persisted record-then-create so a crash
 	// can never strand an unmanifested resource.
-	metaIdemCreatedDir = "gc.idem.created_dir" // absolute rig working-tree path this request created
-	metaIdemDoltDB     = "gc.idem.dolt_db"     // managed Dolt database name this request minted
+	metaIdemCreatedDirIdentityRequired = "gc.idem.created_dir_identity_required" // new absolute intent must never use legacy cleanup
+	metaIdemCreatedDirIdentity         = "gc.idem.created_dir_identity"          // device/inode of the exclusively created directory
+	metaIdemCreatedDir                 = "gc.idem.created_dir"                   // absolute rig working-tree path this request created
+	metaIdemDoltDB                     = "gc.idem.dolt_db"                       // managed Dolt database name this request minted
 
 	// idemLabel / idemLabelRigCreate are the coarse markers the G13 §6 boot
 	// sweep scans to find orphan in_flight records. They are NOT used to
@@ -165,11 +167,11 @@ func validateRigName(name string) error {
 // spurious 409 body-mismatch.
 type RigCreateBody struct {
 	Name          string `json:"name" doc:"Rig name." minLength:"1"`
-	Path          string `json:"path,omitempty" doc:"Existing project directory; use an absolute path outside the city. Clone destinations are city-contained."`
+	Path          string `json:"path,omitempty" doc:"Existing project or new clone destination; use an explicit absolute path outside the city. A clone requires an absent destination with an existing parent; omitted clone path defaults to rigs/name."`
 	Prefix        string `json:"prefix,omitempty" doc:"Beads issue namespace prefix; inferred from an adopted queue when omitted."`
 	DefaultBranch string `json:"default_branch,omitempty" doc:"Mainline branch (e.g. main, master). Auto-detected when omitted."`
 	GitURL        string `json:"git_url,omitempty" doc:"Git URL to clone (triggers async provisioning)."`
-	RequestID     string `json:"request_id,omitempty" doc:"Client-supplied idempotency key; reuse across retries."`
+	RequestID     string `json:"request_id,omitempty" doc:"Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination."`
 	Adopt         bool   `json:"adopt,omitempty" doc:"Register an existing Beads queue in place, preserving its namespace and history. Cannot be combined with git_url."`
 }
 

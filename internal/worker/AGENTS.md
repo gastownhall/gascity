@@ -368,3 +368,15 @@ sources keep their screen fallback, and explicit steer/replacement controls keep
 their existing contracts. This does not change general runtime input, weaken
 pending-interaction protection or claim exclusion of external inputs after the
 final observation.
+
+## Fresh native first input
+
+An unavailable transcript is unknown even when the native composer looks idle.
+The conversation lane may request the optional runtime-owned bootstrap proof for
+one fresh builtin launch. The proof names the exact input fence and carries no
+claim that a native turn ended. Worker input accepts it only on keyed, atomic,
+live-only default delivery; redelivery, wake, immediate and unfenced paths refuse
+it before input. A request without a proof clears inherited context permission.
+The runtime owns first-input provenance, pristine-screen verification and
+consume-before-effect locking; callers never synthesize credit from empty keys,
+timestamps, quiet screens or missing history.

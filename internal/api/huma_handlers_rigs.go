@@ -178,6 +178,12 @@ func (s *Server) rigCreateSync(sm StateMutator, body RigCreateBody) (*RigCreateO
 func (s *Server) rigCreateAsync(ctx context.Context, sm StateMutator, body RigCreateBody) (*RigCreateOutput, error) {
 	gitURL := strings.TrimSpace(body.GitURL)
 
+	// Absolute clone cleanup requires a durable ownership intent. A synthetic
+	// no-id admission has no record, even though it supplies a callback.
+	if filepath.IsAbs(strings.TrimSpace(body.Path)) && body.RequestID == "" {
+		return nil, huma.Error422UnprocessableEntity("request_id is required for an explicit absolute clone destination")
+	}
+
 	// G13 §2 validation, at the handler edge before any lock/store access.
 	if body.RequestID != "" {
 		if err := validateRequestID(body.RequestID); err != nil {

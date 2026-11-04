@@ -7,6 +7,7 @@ fails qualification. The caller supplies its existing lesson deadline.
 """
 from __future__ import annotations
 import base64
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -46,13 +47,34 @@ def canonical_native_identity(provider, history):
     return canonical
 
 
+def require_fresh_bead_contract(spec):
+    """Validate only an exact declaration; runtime guards still prove behavior."""
+    path = '/v0/city/{cityName}/bead/{id}'
+    assert isinstance(spec, dict) and isinstance(spec.get('paths'), dict), 'OpenAPI capability document is unavailable'
+    route = spec['paths'].get(path)
+    assert isinstance(route, dict) and isinstance(route.get('get'), dict), 'Exact bead GET capability is unavailable'
+    operation = route['get']
+    parameters = route.get('parameters', []) + operation.get('parameters', [])
+    matches = [row for row in parameters if isinstance(row, dict) and row.get('in') == 'query' and row.get('name') == 'fresh']
+    assert len(matches) == 1, 'No unambiguous declared fresh bead point-read capability'
+    parameter = matches[0]
+    schema = parameter.get('schema')
+    assert parameter.get('required', False) is False and isinstance(schema, dict) and schema.get('type') == 'boolean', 'Declared fresh capability is not an optional typed boolean'
+    assert '$ref' not in parameter and '$ref' not in schema, 'Indeterminate referenced fresh capability'
+    assert 'const' not in schema or schema['const'] is True, 'Declared fresh capability excludes true'
+    assert 'enum' not in schema or any(value is True for value in schema['enum']), 'Declared fresh capability excludes true'
+    return {'method': 'GET', 'path': path, 'query': 'fresh=true',
+            'openapi_sha256': hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'claim': 'Declared capability only; completion/identity guards must still pass'}
+
+
 def prove_review(*, base, city, city_root, source, root, record, evidence, deadline):
     """Save GET receipts and reject a shared or unknown native reviewer."""
     evidence = Path(evidence)
     evidence.mkdir(exist_ok=False)
 
-    def read(label, suffix):
-        url = base + '/v0/city/' + urllib.parse.quote(city, safe='') + '/' + suffix
+    def read(label, suffix, *, global_scope=False):
+        url = base + suffix if global_scope else base + '/v0/city/' + urllib.parse.quote(city, safe='') + '/' + suffix
         error_count = 0
         while True:
             try:
@@ -93,9 +115,16 @@ def prove_review(*, base, city, city_root, source, root, record, evidence, deadl
             return row
 
     def item(kind, identity, query=''):
+        if kind == 'bead':
+            assert not query, 'Fresh bead proof cannot combine an undeclared query'
+            query = '?fresh=true'
         row = read(kind + '-' + identity, kind + '/' + urllib.parse.quote(identity, safe='') + query)
         assert row.get('id') == identity, ("Exact supervisor identity mismatch", kind, identity)
         return row
+
+    declaration = require_fresh_bead_contract(read('openapi', '/openapi.json', global_scope=True))
+    (evidence / 'fresh-point-capability.json').write_text(json.dumps(declaration, indent=2) + '\n')
+    remaining(deadline)
 
     workflow = item('bead', root)
     source_row = item('bead', source)

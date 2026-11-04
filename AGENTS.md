@@ -24,15 +24,15 @@ next to that code; read the matching file before changing it.
 
 | When you touch | Read first |
 |---|---|
-| `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI event/API calls, OpenAPI, or the dashboard | `internal/api/AGENTS.md` |
+| HTTP/SSE, events, extmsg, CLI API calls, OpenAPI or dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` | `internal/config/AGENTS.md` |
-| Rig registration, adoption or provisioning | `internal/rig/AGENTS.md` |
+| Rig/storage | `internal/rig/AGENTS.md`, `internal/beads/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | CLI or session lifecycle | `cmd/gc/AGENTS.md`, `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
-| Runtime | `internal/providerreadiness/AGENTS.md` |
+| Runtime | `internal/runtime/AGENTS.md`, `internal/providerreadiness/AGENTS.md` |
 | Provider hooks | `internal/hooks/AGENTS.md` |
 | Gate processes | `internal/convergence/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |

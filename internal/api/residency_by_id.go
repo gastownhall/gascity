@@ -40,6 +40,8 @@ import (
 )
 
 // resolveBeadOwner pins the store that holds id and reads the bead from it.
+// An optional true fresh argument requests authoritative reads for every
+// residency leg; absence preserves the existing cached/read behavior.
 //
 // It is the whole by-id front door of this surface: every handler calls it,
 // gets back the store to write through and the row it just read, and returns
@@ -57,7 +59,7 @@ import (
 // Anything else is a store that could not be read, and it surfaces as a 500
 // with the store named: an unreachable store reported as a missing bead is the
 // root-loss shape this lane exists to prevent.
-func (s *Server) resolveBeadOwner(id string) (beads.Store, beads.Bead, error) {
+func (s *Server) resolveBeadOwner(id string, fresh ...bool) (beads.Store, beads.Bead, error) {
 	if strings.TrimSpace(id) == "" {
 		// The router never dispatches a by-id handler with an empty path
 		// segment, so this is unreachable in practice. It answers "absent"
@@ -70,7 +72,12 @@ func (s *Server) resolveBeadOwner(id string) (beads.Store, beads.Bead, error) {
 	if err != nil {
 		return nil, beads.Bead{}, apierr.Internal.Msg(err.Error())
 	}
-	owner, err := storeref.ResolveOwnerRow(plan, id)
+	var owner storeref.Owner
+	if len(fresh) > 0 && fresh[0] {
+		owner, err = storeref.ResolveOwnerRowLive(plan, id)
+	} else {
+		owner, err = storeref.ResolveOwnerRow(plan, id)
+	}
 	if err != nil {
 		return nil, beads.Bead{}, beadOwnerError(id, err)
 	}

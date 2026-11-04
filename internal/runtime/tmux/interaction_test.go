@@ -292,6 +292,7 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 		outs: []string{
 			approvalPromptPane(), // pre-verify capture: prompt present
 			"0",                  // #{pane_in_mode} probe -> not parked (no cancel)
+			"",                   // native bootstrap invalidation
 			"",                   // send-keys -l result (ignored)
 			`assistant ready`,    // poll capture: prompt cleared
 		},
@@ -463,9 +464,9 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		evidence["error"] = err.Error()
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond, fmt.Sprintf("Respond: %v", err)).WithEvidence(evidence)
 	}
-	if len(calls) != 5 {
+	if len(calls) != 6 {
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond,
-			fmt.Sprintf("tmux calls = %d, want 5", len(calls))).WithEvidence(evidence)
+			fmt.Sprintf("tmux calls = %d, want 6", len(calls))).WithEvidence(evidence)
 	}
 	// The #{pane_in_mode} probe is the ga-c4w major #2 copy-mode guard: Respond
 	// checks whether the pane is parked in copy-mode before delivering the
@@ -477,6 +478,7 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		phase2AgentPaneLookup(session),
 		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-120"},
 		{"-u", "-L", "phase2-sock", "display-message", "-t", pane, "-p", "#{pane_in_mode}"},
+		{"-u", "-L", "phase2-sock", "set-option", "-p", "-t", pane, bootstrapInputOption, "spent"},
 		{"-u", "-L", "phase2-sock", "send-keys", "-t", pane, "-l", "1"},
 		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-120"},
 	}
@@ -492,6 +494,7 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		strings.Join(calls[2], " "),
 		strings.Join(calls[3], " "),
 		strings.Join(calls[4], " "),
+		strings.Join(calls[5], " "),
 	}, " | ")
 	return workertest.Pass(profile, workertest.RequirementInteractionRespond, "tmux provider approved the interaction and cleared the prompt").WithEvidence(evidence)
 }

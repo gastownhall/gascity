@@ -383,6 +383,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
+		resolvedCfg = freshProviderInputConfig(cfg, resolved, resolvedCfg)
 		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())

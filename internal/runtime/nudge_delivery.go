@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -144,6 +145,18 @@ func NudgeWithReceipt(ctx context.Context, p Provider, name string, content []Co
 	f, fp, fenced, err := fencedProvider(ctx, p, name)
 	if err != nil {
 		return DeliveryReceipt{}, err
+	}
+	if proof, required := BootstrapInputFrom(ctx); required {
+		if !fenced || proof.Token == "" || proof.Fence.Digest() != f.Digest() {
+			return DeliveryReceipt{}, fmt.Errorf("%w: bootstrap input requires its exact fence", ErrInputNotSent)
+		}
+		leaf, _, known := ResolveBackend(p, name)
+		if !known {
+			return DeliveryReceipt{}, fmt.Errorf("%w: bootstrap runtime route is unknown", ErrInputNotSent)
+		}
+		if _, supported := leaf.(BootstrapInputObserver); !supported {
+			return DeliveryReceipt{}, fmt.Errorf("%w: selected runtime cannot consume a first-input credit", ErrInputNotSent)
+		}
 	}
 	keyed := keysDeliveries(p, name)
 	if fenced {

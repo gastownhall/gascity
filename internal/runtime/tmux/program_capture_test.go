@@ -268,10 +268,11 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 		if err := tm.respawnPaneWithWorkDir("%5", "/w", "claude --x", arm); err != nil {
 			t.Fatalf("respawnPaneWithWorkDir: %v", err)
 		}
-		if len(rec.calls) != 1 {
-			t.Fatalf("respawn ran %d tmux invocations, want one list: %q", len(rec.calls), rec.calls)
+		if len(rec.calls) != 2 {
+			t.Fatalf("respawn ran %d tmux invocations, want spend then one respawn list: %q", len(rec.calls), rec.calls)
 		}
-		got := rec.calls[0]
+		assertBootstrapSpendCall(t, rec.calls[0], "%5")
+		got := rec.calls[1]
 		i := slices.Index(got, programTapOption)
 		if i < 0 {
 			t.Fatalf("respawn did not re-arm: %q", got)
@@ -305,10 +306,14 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 
 func TestRespawnArmFailureKeepsTheRespawn(t *testing.T) {
 	tm, rec, warnings, _ := captureTestTmux(t)
-	rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux respawn-pane: target pane has exited")}}
+	rec.errs = []error{nil, &tmuxOutputError{Stdout: "%5", Err: errors.New("tmux respawn-pane: target pane has exited")}}
 	if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{Capture: true}); err != nil {
 		t.Fatalf("respawn whose arm failed = %v, want nil (the marker proves it respawned)", err)
 	}
+	if len(rec.calls) != 2 {
+		t.Fatalf("respawn calls=%q", rec.calls)
+	}
+	assertBootstrapSpendCall(t, rec.calls[0], "%5")
 	if !strings.Contains(warnings.String(), "target pane has exited") {
 		t.Fatalf("arm failure not logged: %q", warnings.String())
 	}
@@ -316,7 +321,7 @@ func TestRespawnArmFailureKeepsTheRespawn(t *testing.T) {
 
 func TestRespawnFailureIsReturned(t *testing.T) {
 	tm, rec, _, _ := captureTestTmux(t)
-	rec.errs = []error{ErrSessionNotFound}
+	rec.errs = []error{nil, ErrSessionNotFound}
 	err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{Capture: true})
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("err = %v, want the respawn's own failure", err)
@@ -358,9 +363,10 @@ func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 			{"display-message", "-p", "-t", "%1", "#{pane_id}"},
 			{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
 		})...)
-		if respawn := rec.calls[created:]; len(respawn) != 1 || !slices.Equal(respawn[0], want) {
+		if respawn := rec.calls[created:]; len(respawn) != 2 || !slices.Equal(respawn[1], want) {
 			t.Fatalf("arm %+v: respawn calls\n got %q\nwant [%q]", arm, respawn, want)
 		}
+		assertBootstrapSpendCall(t, rec.calls[created], "%1")
 	}
 }
 
@@ -508,10 +514,11 @@ func TestRelayDeclaredWithoutCompanionRelayStartsUnwrapped(t *testing.T) {
 			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude --x", arm); err != nil {
 				t.Fatalf("respawnPaneWithWorkDir: %v", err)
 			}
-			if len(rec.calls) != 1 {
-				t.Fatalf("respawn ran %d tmux invocations, want one list: %q", len(rec.calls), rec.calls)
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn ran %d tmux invocations, want spend then one respawn list: %q", len(rec.calls), rec.calls)
 			}
-			respawn := rec.calls[0]
+			assertBootstrapSpendCall(t, rec.calls[0], "%2")
+			respawn := rec.calls[1]
 			i = slices.Index(respawn, programTapOption)
 			if i < 0 {
 				t.Fatalf("respawn did not re-arm capture: %q", respawn)
@@ -833,9 +840,10 @@ func TestUnarmedRespawnUnderLiveSwitchRemovesCapture(t *testing.T) {
 					{"set-option", "-pu", "-t", "%5", programHoldOption},
 					{"pipe-pane", "-t", "%5"},
 				})...)
-				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+				if len(rec.calls) != 2 || !slices.Equal(rec.calls[1], want) {
 					t.Fatalf("respawn calls\n got %q\nwant [%q]", rec.calls, want)
 				}
+				assertBootstrapSpendCall(t, rec.calls[0], "%5")
 			})
 		}
 	}
@@ -848,14 +856,18 @@ func TestUnarmedRespawnDisarmFailureKeepsTheRespawn(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			tm, rec, warnings, _ := captureTestTmux(t)
 			tm.cfg.ProgramStatus = mode
-			rec.errs = []error{&tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
+			rec.errs = []error{nil, &tmuxOutputError{Stdout: "%5", Err: errors.New("tmux pipe-pane: target pane has exited")}}
 			if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); err != nil {
 				t.Fatalf("respawn whose disarm failed = %v, want nil (the marker proves it respawned)", err)
 			}
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn calls=%q", rec.calls)
+			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%5")
 			if !strings.Contains(warnings.String(), "removing program-status capture") {
 				t.Fatalf("disarm failure not logged: %q", warnings.String())
 			}
-			rec.errs, rec.idx = []error{ErrSessionNotFound}, 0
+			rec.errs, rec.idx = []error{nil, ErrSessionNotFound}, 0
 			if err := tm.respawnPaneWithWorkDir("%5", "", "codex", runtime.ProgramStatusArm{}); !errors.Is(err, ErrSessionNotFound) {
 				t.Fatalf("err = %v, want the respawn's own failure", err)
 			}
@@ -889,9 +901,10 @@ func TestRespawnUnderSwitchOffRemovesOnlyABoundCapture(t *testing.T) {
 					{"display-message", "-p", "-t", "%5", "#{pane_id}"},
 					{"if-shell", "-F", "-t", "%5", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%5")},
 				})...)
-				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+				if len(rec.calls) != 2 || !slices.Equal(rec.calls[1], want) {
 					t.Fatalf("respawn calls\n got %q\nwant [%q]", rec.calls, want)
 				}
+				assertBootstrapSpendCall(t, rec.calls[0], "%5")
 			})
 		}
 	}

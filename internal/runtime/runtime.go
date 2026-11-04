@@ -1415,6 +1415,9 @@ const (
 
 // Config holds the parameters for starting a new session.
 type Config struct {
+	// BootstrapInputOrigin is internal fresh-launch provenance, excluded from fingerprints.
+	BootstrapInputOrigin BootstrapInputOrigin `json:"-"`
+
 	// WorkDir is the working directory for the session process.
 	WorkDir string
 

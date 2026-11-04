@@ -9823,6 +9823,10 @@ export const zGetV0CityByCityNameBeadByIdPath = z.object({
     id: z.string()
 });
 
+export const zGetV0CityByCityNameBeadByIdQuery = z.object({
+    fresh: z.boolean().optional()
+});
+
 /**
  * OK
  */

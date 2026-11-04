@@ -8553,7 +8553,7 @@
             "type": "string"
           },
           "path": {
-            "description": "Existing project directory; use an absolute path outside the city. Clone destinations are city-contained.",
+            "description": "Existing project or new clone destination; use an explicit absolute path outside the city. A clone requires an absent destination with an existing parent; omitted clone path defaults to rigs/name.",
             "type": "string"
           },
           "prefix": {
@@ -8561,7 +8561,7 @@
             "type": "string"
           },
           "request_id": {
-            "description": "Client-supplied idempotency key; reuse across retries.",
+            "description": "Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination.",
             "type": "string"
           }
         },
@@ -35982,6 +35982,16 @@
             "schema": {
               "description": "Bead ID.",
               "type": "string"
+            }
+          },
+          {
+            "description": "Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.",
+              "type": "boolean"
             }
           }
         ],

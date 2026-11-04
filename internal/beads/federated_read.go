@@ -23,14 +23,19 @@ func FederatedRead(read func() error) error {
 }
 
 // FederatedGet is FederatedRead for the common by-id probe: store.Get(id) on a
-// store that may not hold id.
+// store that may not hold id. An optional true live argument uses the existing
+// authoritative read handle; omitted keeps the original store read semantics.
 //
 //go:noinline
-func FederatedGet(store Store, id string) (Bead, error) {
+func FederatedGet(store Store, id string, live ...bool) (Bead, error) {
 	var bead Bead
 	err := FederatedRead(func() error {
 		var err error
-		bead, err = store.Get(id)
+		if len(live) > 0 && live[0] {
+			bead, err = HandlesFor(store).Live.Get(id)
+		} else {
+			bead, err = store.Get(id)
+		}
 		return err
 	})
 	return bead, err

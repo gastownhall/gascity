@@ -905,6 +905,9 @@ func (h *SessionHandle) historyProvider(info sessionpkg.Info) string {
 
 func (h *SessionHandle) runtimeHints() runtime.Config {
 	cfg := cloneRuntimeConfig(h.session.Hints)
+	// First-input provenance belongs only to createStartedLocked's one fresh
+	// native Start. A later wake/resume must not reseed consumed authority.
+	cfg.BootstrapInputOrigin = ""
 	cfg.Env = mergeStringMaps(cfg.Env, h.session.Env)
 	return cfg
 }

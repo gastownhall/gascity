@@ -196,7 +196,7 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 		&genclient.PostV0CityByCityNameBeadByIdAssignParams{XGCRequest: contractCSRF},
 		genclient.PostV0CityByCityNameBeadByIdAssignJSONRequestBody{Assignee: ptr(sess.Id)})
 	expectStatus(t, "assign bead", assigned, err, http.StatusOK)
-	reread, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, beadID)
+	reread, err := c.GetV0CityByCityNameBeadByIdWithResponse(ctx, city, beadID, nil)
 	expectStatus(t, "reread assigned bead", reread, err, http.StatusOK)
 	if b := mustJSON(t, "reread assigned bead", reread.JSON200, reread); b.Assignee == nil || *b.Assignee != sess.SessionName {
 		t.Fatalf("assignee = %s, want %s", contractBody(reread), sess.SessionName)

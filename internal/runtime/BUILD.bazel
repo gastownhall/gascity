@@ -4,6 +4,7 @@ go_library(
     name = "runtime",
     srcs = [
         "beacon.go",
+        "bootstrap_input.go",
         "carrier.go",
         "carrier_fence.go",
         "composite_forward.go",
@@ -72,6 +73,8 @@ go_test(
         "attach_observer_test.go",
         "attestation_test.go",
         "beacon_test.go",
+        "bootstrap_input_test.go",
+        "bootstrap_profile_test.go",
         "capacity_test.go",
         "carrier_fence_test.go",
         "carrier_test.go",

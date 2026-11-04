@@ -731,3 +731,13 @@ Event append acknowledgment promises readable history, not OS-crash fsync.
 ## Current provider availability diagnostics
 
 Single-session reads may project the worker's optional current native-UI diagnostic as provider_availability. It is independent of runtime/process liveness, transcript activity and OSC program status: unavailable is a qualified current native failure, unknown is an indeterminate supported observation, and omission is no observation, never readiness. Only the session GET and its existing session streams perform this opt-in read; lists and agent/fleet projections do not aggregate it. The session stream sends an initial view (including an explicit null when no diagnostic is observed) and semantic state/code/source/opaque runtime-incarnation changes, ignoring observed_at-only refreshes. Frames name the exact session ID, and runtime_generation is the existing opaque InputFence digest, never raw fence data. These live side frames have no durable transcript/event cursor or history-replay promise. Controls and recovery policy are unchanged.
+
+## Explicit authoritative bead point reads
+
+Bead GET defaults to cached data. Explicit `fresh=true` resolves every visited
+residency leg through the existing authoritative live handle, including the
+work residual. Never select an owner using a stale cached miss/positive and
+claim freshness by reading only that winner. Preserve precedence/refusal
+policies and propagate indeterminate backing reads. Cache-age metadata names
+the actual owner; live reads use0/not applicable. This is a current per-row
+read, not an atomic cross-store snapshot or event-cursor/write fence.

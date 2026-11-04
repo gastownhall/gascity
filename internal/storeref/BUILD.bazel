@@ -35,6 +35,7 @@ go_test(
         "residency_agreement_test.go",
         "residency_conformance_test.go",
         "residency_fixtures_test.go",
+        "resolve_live_test.go",
         "resolve_test.go",
         "storeref_test.go",
         "stores_test.go",

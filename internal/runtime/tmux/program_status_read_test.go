@@ -630,7 +630,8 @@ func TestRespawnFollowsPublishedSwitch(t *testing.T) {
 		{"display-message", "-p", "-t", "%4", "#{pane_id}"},
 		{"if-shell", "-F", "-t", "%4", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%4")},
 	})...)
-	if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
+	if len(rec.calls) != 2 || !slices.Equal(rec.calls[1], want) {
 		t.Fatalf("respawn under a switch published off = %q, want [%q]", rec.calls, want)
 	}
+	assertBootstrapSpendCall(t, rec.calls[0], "%4")
 }

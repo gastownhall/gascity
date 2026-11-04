@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adapter.go",
         "agent_slice.go",
+        "bootstrap_input.go",
         "claude_background_stop.go",
         "claude_question_projection.go",
         "codex_background_stop.go",
@@ -87,6 +88,7 @@ go_test(
         "adapter_unit_test.go",
         "agent_slice_test.go",
         "attach_probe_test.go",
+        "bootstrap_input_test.go",
         "busy_trust_test.go",
         "claude_background_stop_test.go",
         "claude_interrupt_test.go",
@@ -207,6 +209,7 @@ go_test(
         "//conditions:default": [],
     }),
     embed = [":tmux"],
+    embedsrcs = ["testdata/codex-c75-pristine-screen.txt"],
     # program_capture_integration_test.go and
     # program_status_integration_test.go arm capture with the built companion
     # and drive it with the scripted emitter.

@@ -67,6 +67,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"ProgramStatusHoldProvider":            reflect.TypeFor[runtime.ProgramStatusHoldProvider](),
 	"ProgramStatusProvider":                reflect.TypeFor[runtime.ProgramStatusProvider](),
 	"ProgramStatusShadowProvider":          reflect.TypeFor[runtime.ProgramStatusShadowProvider](),
+	"BootstrapInputObserver":               reflect.TypeFor[runtime.BootstrapInputObserver](),
 	"ProviderAvailabilityObserver":         reflect.TypeFor[runtime.ProviderAvailabilityObserver](),
 	"RelaunchProvider":                     reflect.TypeFor[runtime.RelaunchProvider](),
 	"Router":                               reflect.TypeFor[runtime.Router](),

@@ -1237,6 +1237,9 @@ func buildPreparedStartWithTranscript(
 		candidate.tp = tp
 	}
 	tp := candidate.tp
+	// Preserve launch history before stale-key repair can clear its markers.
+	// A repaired/reset conversation must not acquire new first-input credit.
+	bootstrapOriginInfo := candidate.info
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil {
 		return nil, candidate.info, err
@@ -1455,6 +1458,7 @@ func buildPreparedStartWithTranscript(
 			}
 		}
 	}
+	agentCfg.BootstrapInputOrigin = freshBootstrapInputOrigin(tp, cfg, agentCfg, bootstrapOriginInfo, firstStart, forceFresh, resumed, parentSID)
 	generation, _ := strconv.Atoi(candidate.info.Generation)
 	if generation <= 0 {
 		generation = sessionpkg.DefaultGeneration

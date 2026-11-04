@@ -316,20 +316,18 @@ func TestProvisionRigFromGitRejectsEscapingRelativePath(t *testing.T) {
 	}
 }
 
-// TestProvisionRigFromGitRejectsAbsoluteClientPath proves a git_url add refuses
-// a client-supplied absolute path outright: the clone destination is
-// server-derived, so an absolute path (which could point anywhere) is a
-// validation error.
-func TestProvisionRigFromGitRejectsAbsoluteClientPath(t *testing.T) {
+// TestProvisionRigFromGitAbsolutePathRequiresOwnershipRecorder proves a
+// direct caller cannot clone externally without recording cleanup ownership.
+func TestProvisionRigFromGitAbsolutePathRequiresOwnershipRecorder(t *testing.T) {
 	cs := &controllerState{cityPath: t.TempDir()}
 	_, err := cs.ProvisionRigFromGit(context.Background(),
-		config.Rig{Name: "evil", Path: "/etc/evil"},
+		config.Rig{Name: "unrecorded", Path: filepath.Join(t.TempDir(), "project")},
 		"https://example.com/r.git",
 		nil,
 		nil,
 	)
 	if err == nil || !errors.Is(err, configedit.ErrValidation) {
-		t.Fatalf("absolute client path = %v, want a validation error", err)
+		t.Fatalf("unrecorded absolute clone = %v, want a validation error", err)
 	}
 }
 

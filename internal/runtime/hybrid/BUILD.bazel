@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "hybrid",
     srcs = [
+        "bootstrap_input.go",
         "fence.go",
         "hybrid.go",
         "proctable.go",
@@ -17,6 +18,7 @@ go_library(
 go_test(
     name = "hybrid_test",
     srcs = [
+        "bootstrap_input_test.go",
         "composite_forward_test.go",
         "fence_test.go",
         "hybrid_test.go",

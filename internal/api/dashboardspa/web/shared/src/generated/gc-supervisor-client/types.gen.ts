@@ -3538,7 +3538,7 @@ export type RigCreateBody = {
      */
     prefix?: string;
     /**
-     * Client-supplied idempotency key; reuse across retries.
+     * Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination.
      */
     request_id?: string;
 };
@@ -13734,7 +13734,12 @@ export type GetV0CityByCityNameBeadByIdData = {
          */
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.
+         */
+        fresh?: boolean;
+    };
     url: '/v0/city/{cityName}/bead/{id}';
 };
 

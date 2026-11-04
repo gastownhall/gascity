@@ -38,6 +38,13 @@ type RigProvisionManifest struct {
 	// which case the directory is never removed. Removing it subsumes the rig's
 	// .beads store.
 	CreatedDir string
+	// CreatedDirIdentity is the device/inode of an exclusively reserved clone
+	// destination. Required before physical cleanup outside the city.
+	CreatedDirIdentity string
+	// CreatedDirIdentityRequired is recorded in the first absolute-path intent,
+	// before reservation. An interrupted identity write must not fall back to
+	// legacy contained-directory cleanup, even when the path is inside the city.
+	CreatedDirIdentityRequired bool
 	// DoltDB is the managed Dolt database name THIS request minted. Empty when
 	// the city runs a file store, GC_DOLT=skip deferred the DB to the
 	// controller, or the store was adopted/re-added — none of which this request
@@ -59,9 +66,12 @@ func manifestFromRecord(rec *beads.Bead) RigProvisionManifest {
 		return RigProvisionManifest{}
 	}
 	return RigProvisionManifest{
-		RigName:    rec.Metadata[metaIdemRigName],
-		CreatedDir: rec.Metadata[metaIdemCreatedDir],
-		DoltDB:     rec.Metadata[metaIdemDoltDB],
+		RigName:            rec.Metadata[metaIdemRigName],
+		CreatedDir:         rec.Metadata[metaIdemCreatedDir],
+		CreatedDirIdentity: rec.Metadata[metaIdemCreatedDirIdentity],
+		// Any present marker fails closed, including malformed future values.
+		CreatedDirIdentityRequired: rec.Metadata[metaIdemCreatedDirIdentityRequired] != "",
+		DoltDB:                     rec.Metadata[metaIdemDoltDB],
 	}
 }
 
@@ -77,6 +87,12 @@ func persistManifest(store beads.Store, beadID string, m RigProvisionManifest) e
 	updates := map[string]string{}
 	if m.CreatedDir != "" {
 		updates[metaIdemCreatedDir] = m.CreatedDir
+	}
+	if m.CreatedDirIdentityRequired {
+		updates[metaIdemCreatedDirIdentityRequired] = "true"
+	}
+	if m.CreatedDirIdentity != "" {
+		updates[metaIdemCreatedDirIdentity] = m.CreatedDirIdentity
 	}
 	if m.DoltDB != "" {
 		updates[metaIdemDoltDB] = m.DoltDB

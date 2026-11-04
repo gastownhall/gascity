@@ -18,3 +18,16 @@ Return ErrAdoptionRequired when registration encounters an existing queue
 without explicit adoption, before all mutations. API adapters classify this
 as a client validation refusal and offer adoption; never suggest deleting an
 existing queue to complete registration.
+
+## Explicit absolute clone destinations
+
+An async clone with an explicit absolute path requires a durable body request_id
+before admission. Persist the identity-required intent before reserving an absent
+leaf under an existing parent, then persist its physical identity before fetch.
+A recovered intent missing that identity retains data, including destinations
+inside the city; it must not fall back to legacy contained-path cleanup. A live
+request may roll back a directory whose physical identity it independently read,
+only after rechecking that identity. Check ownership before reading or dropping
+storage and again before removing the leaf. Register existing repositories in
+place through the separate registration path. Relative/default clones and genuine
+legacy cleanup keep their existing contracts.

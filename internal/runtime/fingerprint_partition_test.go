@@ -130,6 +130,7 @@ var excludedFromCore = map[string]string{
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
 	"FreshOnly":              "per-call Start mode (LL6), not config identity",
+	"BootstrapInputOrigin":   "per-call first-input provenance, not configuration identity",
 	"ProgramStatus":          "leaf-applied capture declaration; arming and heal never restart the agent",
 }
 

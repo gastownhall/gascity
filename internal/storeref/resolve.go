@@ -583,10 +583,10 @@ type Owner struct {
 	// is true.
 	Bead beads.Bead
 
-	// Read reports whether Bead holds the row. It is FALSE for the work
-	// residual, which is handed back unprobed: the caller must perform its own
-	// read there, and letting the caller's own read produce the caller's own
-	// error message is what keeps a single-store city byte-identical.
+	// Read reports whether Bead holds the row. The default executor returns
+	// FALSE for an unprobed work residual so the caller keeps its own read and
+	// error message. ResolveOwnerRowLive reads every winning leg itself and
+	// returns TRUE, including for a work residual.
 	Read bool
 }
 
@@ -598,7 +598,20 @@ type Owner struct {
 // binding — the hot path, and exactly the funnel cost the identity fast-path
 // exists to avoid.
 func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
-	owner, found, err := resolveByID(p, id, false)
+	return resolveOwnerRow(p, id, false)
+}
+
+// ResolveOwnerRowLive resolves the same by-ID plan using authoritative reads on
+// every visited leg, including the work residual. Cached misses or old copies
+// must not decide residency for a caller requesting a current point read. This
+// does not make independent stores an atomic snapshot; all original refusal and
+// precedence policies remain in force.
+func ResolveOwnerRowLive(p ResolvedPlan, id string) (Owner, error) {
+	return resolveOwnerRow(p, id, true)
+}
+
+func resolveOwnerRow(p ResolvedPlan, id string, live bool) (Owner, error) {
+	owner, found, err := resolveByID(p, id, false, live)
 	switch {
 	case err != nil:
 		return owner, err
@@ -646,7 +659,7 @@ func ResolveOwnerRow(p ResolvedPlan, id string) (Owner, error) {
 // not answer has said nothing about the id, and turning that into "no binding
 // owns it" sends the caller straight at the frozen copy.
 func ResolveBindingOwner(p ResolvedPlan, id string) (Owner, bool, error) {
-	return resolveByID(p, id, true)
+	return resolveByID(p, id, true, false)
 }
 
 // ErrProvenRelicRefusal explains a by-id denial that a refused city's binding
@@ -670,7 +683,7 @@ var ErrProvenRelicRefusal = errors.New("a relic proof for this id (the binding h
 // resolveByID is the leg walk both ModeFirstOwner executors share. found
 // reports whether an owner was pinned; bindingOnly stops the walk at the work
 // axis instead of handing the work leg back unprobed.
-func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, error) {
+func resolveByID(p ResolvedPlan, id string, bindingOnly, live bool) (Owner, bool, error) {
 	if p.Mode != ModeFirstOwner {
 		// Named for the executor the caller actually called. This is the one
 		// message in the package a shared body can get wrong that way, and a
@@ -693,12 +706,12 @@ func resolveByID(p ResolvedPlan, id string, bindingOnly bool) (Owner, bool, erro
 		if bindingOnly && leg.Role.ownedByCallersWorkAxis() {
 			return Owner{}, false, nil
 		}
-		if leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
+		if !live && leg.Role == RoleWorkFallback && i == len(p.Legs)-1 {
 			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref}, true, nil
 		}
 		// Each leg is a planned residence probe: missing here is how the walk
 		// moves to the next leg, so the read is marked federated.
-		b, err := beads.FederatedGet(leg.Leg.Store, id)
+		b, err := beads.FederatedGet(leg.Leg.Store, id, live)
 		switch {
 		case err == nil:
 			return Owner{Store: leg.Leg.Store, Ref: leg.Leg.Ref, Bead: b, Read: true}, true, nil

@@ -4,6 +4,7 @@ go_library(
     name = "worker",
     srcs = [
         "activity_memo.go",
+        "bootstrap_input.go",
         "catalog.go",
         "factory.go",
         "factory_resolved.go",
@@ -70,6 +71,8 @@ go_test(
         "acp_capture_test.go",
         "activity_memo_test.go",
         "actor_helpers_test.go",
+        "bootstrap_create_test.go",
+        "bootstrap_input_test.go",
         "codex_history_metadata_test.go",
         "codex_usage_attach_test.go",
         "factory_deferred_submits_test.go",

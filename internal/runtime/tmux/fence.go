@@ -104,6 +104,7 @@ func withoutInputFence(ctx context.Context) context.Context {
 	if _, ok := runtime.InputFenceFrom(ctx); ok {
 		ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
 	}
+	ctx = runtime.WithBootstrapInput(ctx, nil)
 	if paneGuardFrom(ctx) != nil {
 		ctx = withPaneGuard(ctx, nil)
 	}
@@ -141,6 +142,13 @@ func (p *Provider) fenced(ctx context.Context, name string, f runtime.InputFence
 		return body(ctx) // already inside this fenced operation
 	}
 	g := newPaneGuard(name, f.Digest(), textOnly)
+	if proof, ok := runtime.BootstrapInputFrom(ctx); ok {
+		if !textOnly {
+			return fmt.Errorf("%w: first-input proof is only valid for a fenced nudge", runtime.ErrInputNotSent)
+		}
+		proofCopy := *proof
+		g.bootstrap = &proofCopy
+	}
 	ctx = withPaneGuard(ctx, g)
 	if err := g.verify(ctx, p.tm); err != nil {
 		return g.notSent(err)
@@ -237,8 +245,10 @@ func (t *Tmux) republishInputFence(session string) {
 // must find on the agent pane, whether any of its effect was applied, and
 // the first miss, after which every further input is refused unsent.
 type paneGuard struct {
-	name   string
-	digest string
+	bootstrap        *runtime.BootstrapInputProof
+	bootstrapClaimed bool
+	name             string
+	digest           string
 	// textOnly limits applied to text input and what follows it (a nudge):
 	// a copy-mode exit, composer clear or dialog key before the text is not
 	// the operation's effect, so a miss after it is not partial.
@@ -667,6 +677,9 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 		inner = append(inner, in.keys...)
 	}
 	guarded, err := guardedInputArgs(in.target, g.digest, inner, buffer)
+	if err == nil {
+		guarded, err = g.bootstrapGuardedInputArgs(t, in.target, guarded)
+	}
 	if err != nil {
 		t.deleteBufferBestEffort(buffer)
 		return "", err
@@ -689,6 +702,9 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 	}
 	switch out = strings.TrimSpace(out); {
 	case out == "":
+		if g.bootstrap != nil {
+			g.bootstrapClaimed = true
+		}
 		if !in.copy { // a copy-mode command never reaches the program
 			g.markApplied(in.literal || args[0] == "paste-buffer")
 		}
@@ -699,6 +715,9 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 				// No session, or tmux evaluated the window's active pane: the
 				// agent pane is gone.
 				return "", g.recordMiss(runtime.FenceFoundAbsent)
+			}
+			if g.bootstrap != nil && !r.Dead && r.Own() == g.digest {
+				return "", g.bootstrapRefusal()
 			}
 			return "", g.recordMiss(r.Found())
 		}

@@ -135,6 +135,9 @@ type conversationLaneExec struct {
 	// look takes it by value (probe), so a look its budget abandoned never
 	// reads a later Probe's write.
 	contentSince time.Time
+	// bootstrapInput reads an explicit runtime-owned fresh-input proof; a
+	// missing transcript, quiet pane or absent advisory stamp cannot grant it.
+	bootstrapInput func(context.Context, worker.Handle, runtime.InputFence) (*runtime.BootstrapInputProof, error)
 	// steerable says whether a session row takes a steer from a runtime
 	// that steers in a mode; production reads session.SupportsSteerForInfo,
 	// the source session responses read too.
@@ -248,6 +251,7 @@ func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneEx
 	e.starvedHold = func(t nudgeTarget, now time.Time) (bool, error) {
 		return laneStarvedHold(t, e.deps.sp, now)
 	}
+	e.bootstrapInput = worker.ObserveBootstrapInput
 	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
 		return workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, id)
@@ -459,6 +463,16 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	}
 	if e.traits.readable && l.turn.live != opjournal.TriNo {
 		l.boundary = l.turn.boundary()
+		if l.turn.live == opjournal.TriUnknown && l.pending == "" {
+			proof, proofErr := e.freshInputProof(ctx, h)
+			if proofErr != nil {
+				e.note("bootstrap input", proofErr)
+			}
+			if proof != nil {
+				// This proves one initial input boundary, not idle history.
+				l.boundary = opjournal.TriYes
+			}
+		}
 		return l, nil
 	}
 	l.boundary = opjournal.TriNo
@@ -811,8 +825,11 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 	// refusing here is definitely not delivered, so the lane preserves the
 	// frozen operation/key for a later boundary. Explicit steer/replacement
 	// controls keep their own semantics and fencing.
+	var bootstrap *runtime.BootstrapInputProof
 	if !e.protocol && !d.Steer && !d.Replacement {
-		if err := e.nativeBoundaryBeforeHandoff(ctx); err != nil {
+		var err error
+		bootstrap, err = e.nativeBoundaryBeforeHandoff(ctx, !d.Redelivery)
+		if err != nil {
 			return opjournal.NotDelivered{Transient: true, Cause: err}
 		}
 	}
@@ -848,13 +865,14 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		}
 	}
 	res, err := h.Nudge(ctx, sessionActor(session.ActorController, e.deps.cityPath), worker.NudgeRequest{
-		Text:          d.Text,
-		Delivery:      delivery,
-		Wake:          worker.NudgeWakeLiveOnly,
-		DeliveryKey:   laneDeliveryKeyPrefix + d.Key,
-		Fence:         fence,
-		AllowUnfenced: true,
-		Redelivery:    d.Redelivery,
+		BootstrapInput: bootstrap,
+		Text:           d.Text,
+		Delivery:       delivery,
+		Wake:           worker.NudgeWakeLiveOnly,
+		DeliveryKey:    laneDeliveryKeyPrefix + d.Key,
+		Fence:          fence,
+		AllowUnfenced:  true,
+		Redelivery:     d.Redelivery,
 	})
 	out := laneDeliveryResult(res, err, at, fence.IsZero(), d.Steer)
 	if dv, ok := out.(opjournal.Delivered); ok {
@@ -896,21 +914,54 @@ func (e *conversationLaneExec) starvedSendLook(now time.Time) error {
 // nativeBoundaryBeforeHandoff closes the probe-to-effect gap for a supported
 // native turn source. A backend that explicitly cannot read turns retains its
 // existing screen/quiescence contract; an unavailable supported source does not.
-func (e *conversationLaneExec) nativeBoundaryBeforeHandoff(ctx context.Context) error {
+func (e *conversationLaneExec) nativeBoundaryBeforeHandoff(ctx context.Context, allowBootstrap bool) (*runtime.BootstrapInputProof, error) {
 	if e.turnCapsUnread {
-		return fmt.Errorf("native input boundary: %w", runtime.ErrRuntimeUnavailable)
+		return nil, fmt.Errorf("native input boundary: %w", runtime.ErrRuntimeUnavailable)
 	}
 	if !e.traits.readable {
-		return nil
+		return nil, nil
 	}
 	history, err := e.linkRead(ctx, e.budget)
 	if err != nil {
-		return fmt.Errorf("reading native input boundary: %w", err)
+		if allowBootstrap {
+			proof, proofErr := e.freshInputProof(ctx, e.live)
+			if proofErr != nil {
+				return nil, fmt.Errorf("checking initial native input boundary: %w", errors.Join(err, proofErr))
+			}
+			if proof != nil {
+				return proof, nil
+			}
+		}
+		return nil, fmt.Errorf("reading native input boundary: %w", err)
 	}
 	if history.Current.Active() {
-		return fmt.Errorf("native turn %s still runs: %w", history.Current.TurnID, runtime.ErrSessionBusy)
+		return nil, fmt.Errorf("native turn %s still runs: %w", history.Current.TurnID, runtime.ErrSessionBusy)
 	}
-	return nil
+	return nil, nil
+}
+
+// freshInputProof accepts only the runtime's explicit, incarnation-bound credit.
+// Missing handles/capabilities and non-transcript sources never enter this arm.
+func (e *conversationLaneExec) freshInputProof(ctx context.Context, h worker.Handle) (*runtime.BootstrapInputProof, error) {
+	if h == nil || e.protocol || e.turnCapsUnread || e.turnCaps.Source != worker.TurnSourceTranscript || e.bootstrapInput == nil {
+		return nil, nil
+	}
+	fence, ok := session.InputFenceFor(e.info)
+	if !ok {
+		return nil, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, e.budget)
+	defer cancel()
+	proof, err := worker.ObserveBounded(readCtx, laneObservationKey(e.deps.cityPath, e.info.ID)+":bootstrap-input", func(probeCtx context.Context) (*runtime.BootstrapInputProof, error) {
+		return e.bootstrapInput(probeCtx, h, fence)
+	})
+	if err != nil || proof == nil {
+		return nil, err
+	}
+	if proof.Fence != fence || proof.Token == "" {
+		return nil, fmt.Errorf("initial input proof names another incarnation: %w", runtime.ErrRuntimeUnavailable)
+	}
+	return proof, nil
 }
 
 // laneWaitStarted is when a delivery's wait for its boundary began: its

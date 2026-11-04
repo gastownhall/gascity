@@ -65,9 +65,10 @@ const (
 	// RoleWorkFallback is the work ledger as the RESIDUAL answer of a by-id
 	// plan — or, on a plane with a routed work axis (ByID.WorkAxis), the store
 	// that plane's router pinned. When it is the last leg it is returned
-	// UNPROBED: it is the caller's own store, and letting the caller's own read
-	// produce its own error message is what keeps a single-store city
-	// byte-identical.
+	// UNPROBED by the default executor: it is the caller's own store, and
+	// letting the caller's own read produce its own error message keeps a
+	// single-store city byte-identical. ResolveOwnerRowLive instead reads this
+	// leg authoritatively before returning an owner.
 	RoleWorkFallback
 
 	// RoleShadow is another work store that can hold the id, read BEHIND the

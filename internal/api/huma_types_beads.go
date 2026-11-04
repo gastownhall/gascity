@@ -41,7 +41,8 @@ type BeadGraphInput struct {
 // BeadGetInput is the Huma input for GET /v0/city/{cityName}/bead/{id}.
 type BeadGetInput struct {
 	CityScope
-	ID string `path:"id" doc:"Bead ID."`
+	ID    string `path:"id" doc:"Bead ID."`
+	Fresh bool   `query:"fresh" required:"false" doc:"Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot."`
 }
 
 // BeadDepsInput is the Huma input for GET /v0/city/{cityName}/bead/{id}/deps.

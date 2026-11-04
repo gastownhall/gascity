@@ -470,6 +470,9 @@ func (realExecutor) executeCtx(ctx context.Context, args []string) (string, erro
 
 // Tmux wraps tmux operations.
 type Tmux struct {
+	bootstrapMu     sync.Mutex
+	bootstrapInputs map[string]bootstrapInputCredit
+
 	// claudeQuestionTranscript is an exact native-record reader seam for tests.
 	claudeQuestionTranscript  func(string) (string, error)
 	claudeQuestionProjections func(string) ([]claudeQuestionProjection, error)
@@ -619,7 +622,7 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 		if g := paneGuardFrom(ctx); g != nil {
 			return g.run(ctx, t, args)
 		}
-		ctx = context.Background()
+		return t.ordinaryPaneInput(context.Background(), args)
 	}
 	return t.runCtxRaw(ctx, args...)
 }
@@ -998,6 +1001,7 @@ func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	cmds := [][]string{args}
+	cmds = append(cmds, t.seedBootstrapInputCommands(name)...)
 	if plan != nil {
 		cmds = append(cmds, plan.armCommands(paneTarget(name), false)...)
 	}
@@ -1078,6 +1082,7 @@ func (t *Tmux) EnsureSessionFresh(name, workDir string) error {
 
 // KillSession terminates a tmux session.
 func (t *Tmux) KillSession(name string) error {
+	t.forgetBootstrapInput(name)
 	_, err := t.run("kill-session", "-t", sessionTarget(name))
 	return err
 }
@@ -6326,8 +6331,12 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // before the switch went off is not read valid for the new program once the
 // switch is back on.
 func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
+	t.forgetBootstrapInput(pane)
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
+		return err
+	}
+	if _, err := t.runCtxRaw(context.Background(), "set-option", "-p", "-t", target, bootstrapInputOption, "spent"); err != nil {
 		return err
 	}
 	if plan := t.planCapture(arm); plan != nil {

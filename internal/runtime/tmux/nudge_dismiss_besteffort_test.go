@@ -43,7 +43,7 @@ func TestDismissMidSessionDialogBeforeNudge_SendErrorIsSwallowed(t *testing.T) {
 	sendErr := errors.New("send-keys failed")
 	fe := &fakeExecutor{
 		outs: []string{sessionLimitChooserPane},
-		errs: []error{nil, sendErr},
+		errs: []error{nil, nil, sendErr},
 	}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
@@ -52,14 +52,15 @@ func TestDismissMidSessionDialogBeforeNudge_SendErrorIsSwallowed(t *testing.T) {
 	}
 	// The chooser matched (capture-pane), then the first dismissal keystroke
 	// failed; the error must be swallowed rather than propagated.
-	if len(fe.calls) < 2 {
-		t.Fatalf("executor calls = %d, want >=2 (capture-pane + send-keys)", len(fe.calls))
+	if len(fe.calls) != 3 {
+		t.Fatalf("executor calls = %d, want 3 (capture-pane + native spend + send-keys)", len(fe.calls))
 	}
 	if !slices.Contains(fe.calls[0], "capture-pane") {
 		t.Errorf("first call = %v, want a capture-pane invocation", fe.calls[0])
 	}
-	if !slices.Contains(fe.calls[1], "send-keys") {
-		t.Errorf("second call = %v, want a send-keys invocation", fe.calls[1])
+	assertBootstrapSpendCall(t, fe.calls[1], fakeAgentPane("agent-pane"))
+	if !slices.Contains(fe.calls[2], "send-keys") {
+		t.Errorf("third call = %v, want a send-keys invocation", fe.calls[2])
 	}
 }
 

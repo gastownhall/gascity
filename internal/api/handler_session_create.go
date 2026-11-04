@@ -381,6 +381,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		writeSessionManagerError(w, err)
 		return
 	}
+	resolvedCfg = freshProviderInputConfig(s.state.Config(), resolved, resolvedCfg)
 	handle, err := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)

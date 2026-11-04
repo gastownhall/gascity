@@ -125,6 +125,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 	cfg.Env = injectSessionRuntimeHintsEnv(cfg.Env, cfg)
 
+	if err := p.tm.prepareBootstrapInput(name, cfg); err != nil {
+		return err
+	}
+
 	// Store workDir for CopyTo.
 	if cfg.WorkDir != "" {
 		p.mu.Lock()
@@ -133,6 +137,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	if err := stageStartFiles(cfg, os.Stderr); err != nil {
+		p.tm.forgetBootstrapInput(name)
 		return err
 	}
 
@@ -141,9 +146,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	ctx = withoutInputFence(ctx)
 	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
+		if promoteErr := p.tm.promoteBootstrapInput(ctx, name); promoteErr != nil {
+			p.tm.forgetBootstrapInput(name)
+			log.Printf("tmux: session %q has no first-input credit: %v", name, promoteErr)
+		}
 		p.cache.Invalidate()
 		return nil
 	}
+	p.tm.forgetBootstrapInput(name)
 	if errors.Is(err, ErrServerDegraded) {
 		return err
 	}
@@ -292,6 +302,11 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
+	if len(cfg.SessionLive) != 0 {
+		if err := p.tm.taintBootstrapInput(name); err != nil {
+			return fmt.Errorf("refusing live commands before first-input invalidation: %w", err)
+		}
+	}
 	runSessionLive(context.Background(), p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
@@ -306,6 +321,7 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	p.tm.forgetBootstrapInput(name)
 	// The runtime dir is what makes the startup-nudge and start-crash
 	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
 	// unconfirmed startup nudge on this path was suppressed by

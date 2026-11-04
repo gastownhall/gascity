@@ -1,0 +1,341 @@
+package tmux
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+const (
+	bootstrapInputOption  = "@gc_bootstrap_input"
+	bootstrapInputMiss    = "gc-bootstrap-input-miss"
+	bootstrapInputVersion = "v1"
+)
+
+// The pane owns a versioned, issued first-input credit. Controller memory caches
+// it but never recreates it: recovery can only recover the exact unspent READY
+// marker after native fence/process and pristine-screen bookends.
+type bootstrapInputCredit struct {
+	fence  runtime.InputFence
+	token  string
+	family string
+	ready  bool
+}
+
+func bootstrapInputEligible(cfg runtime.Config) bool {
+	return cfg.BootstrapInputOrigin == runtime.BootstrapInputFreshBuiltin &&
+		(cfg.ProviderName == "claude" || cfg.ProviderName == "codex") &&
+		cfg.Command != "" && cfg.Lifecycle != runtime.LifecycleOneShot &&
+		cfg.PromptSuffix == "" && cfg.Nudge == "" && len(cfg.SessionSetup) == 0 &&
+		cfg.SessionSetupScript == "" && len(cfg.SessionLive) == 0
+}
+
+func (t *Tmux) prepareBootstrapInput(name string, cfg runtime.Config) error {
+	if !bootstrapInputEligible(cfg) {
+		t.forgetBootstrapInput(name)
+		return nil
+	}
+	fence, ok := runtime.InputFenceFromEnv(cfg.Env)
+	if !ok || !bootstrapFreshFence(fence) {
+		t.forgetBootstrapInput(name)
+		return nil
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("seeding first-input credit: %w", err)
+	}
+	t.bootstrapMu.Lock()
+	defer t.bootstrapMu.Unlock()
+	if t.bootstrapInputs == nil {
+		t.bootstrapInputs = make(map[string]bootstrapInputCredit)
+	}
+	t.bootstrapInputs[name] = bootstrapInputCredit{fence: fence, token: hex.EncodeToString(nonce[:]), family: cfg.ProviderName}
+	return nil
+}
+
+func (t *Tmux) bootstrapCredit(name string) (bootstrapInputCredit, bool) {
+	t.bootstrapMu.Lock()
+	defer t.bootstrapMu.Unlock()
+	credit, ok := t.bootstrapInputs[name]
+	return credit, ok
+}
+
+func (t *Tmux) forgetBootstrapInput(name string) {
+	t.bootstrapMu.Lock()
+	defer t.bootstrapMu.Unlock()
+	delete(t.bootstrapInputs, name)
+}
+
+func bootstrapInputValue(state string, credit bootstrapInputCredit) string {
+	return bootstrapInputVersion + "." + string(runtime.BootstrapInputFreshBuiltin) + "." + credit.family + "." + state + "." + credit.token + "." + credit.fence.Digest() + ".#{pane_id}.#{pane_pid}"
+}
+
+// seedBootstrapInputCommands runs in the same native create command list as
+// new-session, before startup code can type into the pane. Promotion is separate
+// and conditional: startup/trust input can burn this candidate, never reseed it.
+func (t *Tmux) seedBootstrapInputCommands(name string) [][]string {
+	credit, ok := t.bootstrapCredit(name)
+	if !ok {
+		return nil
+	}
+	return [][]string{{"set-option", "-p", "-F", "-t", paneTarget(name), bootstrapInputOption, bootstrapInputValue("candidate", credit)}}
+}
+
+func (t *Tmux) promoteBootstrapInput(ctx context.Context, name string) error {
+	credit, ok := t.bootstrapCredit(name)
+	if !ok {
+		return nil
+	}
+	target, err := t.agentPaneTarget(name)
+	if err != nil {
+		return err
+	}
+	candidate := bootstrapInputValue("candidate", credit)
+	ready := bootstrapInputValue("ready", credit)
+	condition := "#{&&:#{==:#{" + bootstrapInputOption + "}," + candidate + "},#{==:#{" + inputFenceOption + "}," + credit.fence.Digest() + ".#{pane_id}}}"
+	set, err := runtime.TmuxCommandString(func(s string) bool { return s == ready }, "set-option", "-p", "-F", "-t", target, bootstrapInputOption, ready)
+	if err != nil {
+		return err
+	}
+	// A spent candidate is a normal no-credit start, not a failed session.
+	miss, err := tmuxCommandString("display-message", "-p", bootstrapInputMiss)
+	if err != nil {
+		return err
+	}
+	out, err := t.runCtxRaw(ctx, "if-shell", "-F", "-t", target, condition, set, miss)
+	if err != nil {
+		return err
+	}
+	if out = strings.TrimSpace(out); out == bootstrapInputMiss {
+		t.forgetBootstrapInput(name)
+		return nil
+	} else if out != "" {
+		return fmt.Errorf("promoting first-input credit: unexpected tmux result %q", out)
+	}
+	t.bootstrapMu.Lock()
+	credit.ready = true
+	t.bootstrapInputs[name] = credit
+	t.bootstrapMu.Unlock()
+	return nil
+}
+
+var _ runtime.BootstrapInputObserver = (*Provider)(nil)
+
+// ObserveBootstrapInput proves a narrow first native input opportunity. A
+// missing transcript key, unknown turn or generic idle composer proves nothing.
+func (p *Provider) ObserveBootstrapInput(ctx context.Context, name string, req runtime.BootstrapInputRequest) (*runtime.BootstrapInputProof, error) {
+	if (req.Family != "claude" && req.Family != "codex") || !bootstrapFreshFence(req.Fence) {
+		return nil, nil
+	}
+	cached, known := p.tm.bootstrapCredit(name)
+	if known && (!cached.ready || cached.family != req.Family || cached.fence.Digest() != req.Fence.Digest()) {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	guard := newPaneGuard(name, req.Fence.Digest(), false)
+	target, before, err := guard.read(ctx, p.tm)
+	if err != nil || before.Dead || before.Own() != req.Fence.Digest() {
+		return nil, err
+	}
+	format := "#{" + bootstrapInputOption + "}|#{pane_id}|#{pane_pid}|#{pane_dead}"
+	first, err := p.tm.runCtxRaw(ctx, "display-message", "-p", "-t", target, format)
+	if err != nil {
+		return nil, err
+	}
+	credit, ok := bootstrapInputReadCredit(first, req, before.Pane)
+	if !ok || (known && cached != credit) {
+		return nil, nil
+	}
+	// -e preserves dim placeholders so they cannot be mistaken for a human
+	// draft; no -S means only the current native screen is examined.
+	screen, err := p.tm.runCtxRaw(ctx, "capture-pane", "-p", "-e", "-J", "-t", target)
+	if err != nil || len(screen) > 64<<10 || !pristineBootstrapScreen(screen, req.Family) {
+		return nil, err
+	}
+	afterTarget, after, err := guard.read(ctx, p.tm)
+	if err != nil || target != afterTarget || before.Pane != after.Pane || after.Dead || after.Own() != req.Fence.Digest() {
+		return nil, err
+	}
+	last, err := p.tm.runCtxRaw(ctx, "display-message", "-p", "-t", target, format)
+	if err != nil || first != last {
+		return nil, err
+	}
+	if !p.tm.rememberBootstrapInput(name, credit) {
+		return nil, nil
+	}
+	return &runtime.BootstrapInputProof{Fence: req.Fence, Token: credit.token}, nil
+}
+
+func bootstrapFreshFence(fence runtime.InputFence) bool {
+	return fence.Validate() == nil && fence.Generation == 1 && fence.Epoch == 1
+}
+
+// bootstrapInputReadCredit recovers authority only from the exact versioned
+// native READY marker issued by a successful fresh builtin Start. It never
+// mints a nonce or promotes candidate/claimed/spent/legacy state.
+func bootstrapInputReadCredit(out string, req runtime.BootstrapInputRequest, pane string) (bootstrapInputCredit, bool) {
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) != 4 || parts[1] != pane || parts[3] != "0" || !bootstrapFreshFence(req.Fence) {
+		return bootstrapInputCredit{}, false
+	}
+	fields := strings.Split(parts[0], ".")
+	if (req.Family != "claude" && req.Family != "codex") || len(fields) != 8 || fields[0] != bootstrapInputVersion || fields[1] != string(runtime.BootstrapInputFreshBuiltin) || fields[2] != req.Family || fields[3] != "ready" || fields[5] != req.Fence.Digest() || fields[6] != pane || fields[7] != parts[2] {
+		return bootstrapInputCredit{}, false
+	}
+	nonce, err := hex.DecodeString(fields[4])
+	if err != nil || len(nonce) != 16 || hex.EncodeToString(nonce) != fields[4] {
+		return bootstrapInputCredit{}, false
+	}
+	if !strings.HasPrefix(pane, "%") {
+		return bootstrapInputCredit{}, false
+	}
+	paneNumber, err := strconv.ParseUint(strings.TrimPrefix(pane, "%"), 10, 64)
+	if err != nil || "%"+strconv.FormatUint(paneNumber, 10) != pane {
+		return bootstrapInputCredit{}, false
+	}
+	pid, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil || pid == 0 || strconv.FormatUint(pid, 10) != parts[2] {
+		return bootstrapInputCredit{}, false
+	}
+	return bootstrapInputCredit{fence: req.Fence, token: fields[4], family: req.Family, ready: true}, true
+}
+
+func (t *Tmux) rememberBootstrapInput(name string, credit bootstrapInputCredit) bool {
+	t.bootstrapMu.Lock()
+	defer t.bootstrapMu.Unlock()
+	if current, ok := t.bootstrapInputs[name]; ok && current != credit {
+		return false
+	}
+	if t.bootstrapInputs == nil {
+		t.bootstrapInputs = make(map[string]bootstrapInputCredit)
+	}
+	t.bootstrapInputs[name] = credit
+	return true
+}
+
+func pristineBootstrapScreen(screen, family string) bool {
+	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
+	plain := make([]string, len(lines))
+	for i, line := range lines {
+		plain[i] = stripDimText(line)
+	}
+	if paneShowsRunningTurn(plain, family) || runtime.CodexStartupPending(strings.Join(plain, "\n")) {
+		return false
+	}
+	text := strings.Join(plain, "\n")
+	switch family {
+	case "codex":
+		if !strings.Contains(text, ">_ OpenAI Codex (v") || !strings.Contains(text, "To get started, describe a task or try one of these commands:") {
+			return false
+		}
+		// The initial native placeholder is an exact allowed empty composer.
+		// Current non-dim captures can contain its words too.
+		for i, line := range plain {
+			if strings.TrimSpace(line) == "› Ask Codex to do anything" {
+				plain[i] = "› "
+			}
+		}
+	case "claude":
+		if !strings.Contains(text, "Claude Code v") || !strings.Contains(text, "Welcome") {
+			return false
+		}
+	default:
+		return false
+	}
+	prompts := 0
+	marker, ok := stagedDraftMarkerForFamily(family)
+	if !ok {
+		return false
+	}
+	for _, line := range plain {
+		if matchesPromptPrefix(line, marker.promptPrefix) {
+			prompts++
+		}
+	}
+	return prompts == 1 && paneShowsDrainedComposer(plain)
+}
+
+// ordinaryPaneInput consumes even a startup/trust/clear/answer key before it
+// can reach the application. It is also used by unfenced GC input; adoption
+// through any Provider burns the same durable native credit.
+func (t *Tmux) ordinaryPaneInput(ctx context.Context, args []string) (string, error) {
+	in, err := parseInputCommand(args)
+	if err != nil {
+		return "", err
+	}
+	if _, err := t.runCtxRaw(ctx, "set-option", "-p", "-t", in.target, bootstrapInputOption, "spent"); err != nil {
+		return "", err
+	}
+	return t.runCtxRaw(ctx, args...)
+}
+
+// bootstrapGuardedInputArgs augments the existing fence's native if-shell.
+// The exact ready credit is consumed in that same command before the first
+// key/paste. Later commands of this operation require its claimed marker;
+// replay and any intervening GC input cannot reuse the original ready credit.
+func (g *paneGuard) bootstrapGuardedInputArgs(t *Tmux, target string, guarded []string) ([]string, error) {
+	if len(guarded) != 7 {
+		return nil, fmt.Errorf("invalid guarded input command")
+	}
+	setValue := "spent"
+	if g.bootstrap != nil {
+		credit, ok := t.bootstrapCredit(g.name)
+		if !ok || !credit.ready || credit.token != g.bootstrap.Token || credit.fence.Digest() != g.digest || g.bootstrap.Fence.Digest() != g.digest {
+			return nil, g.bootstrapRefusal()
+		}
+		state := "ready"
+		if g.bootstrapClaimed {
+			state = "claimed"
+		}
+		condition := "#{==:#{" + bootstrapInputOption + "}," + bootstrapInputValue(state, credit) + "}"
+		guarded[4] = "#{&&:" + guarded[4] + "," + condition + "}"
+		setValue = bootstrapInputValue("claimed", credit)
+	}
+	set, err := runtime.TmuxCommandString(func(s string) bool { return s == setValue }, "set-option", "-p", "-F", "-t", target, bootstrapInputOption, setValue)
+	if err != nil {
+		return nil, err
+	}
+	guarded[5] = set + " ; " + guarded[5]
+	return guarded, nil
+}
+
+func (g *paneGuard) bootstrapRefusal() error {
+	g.mu.Lock()
+	applied := g.applied
+	g.mu.Unlock()
+	if applied {
+		return fmt.Errorf("%w: first-input credit changed after partial input", runtime.ErrNudgeDeliveryUnconfirmed)
+	}
+	return fmt.Errorf("%w: first-input credit is consumed or unavailable", runtime.ErrNudgeNotSent)
+}
+
+// taintBootstrapInput refuses opaque live commands unless the native pane
+// confirms that no first-input proof can survive them. A no-op RunLive never
+// enters this path. Creator memory is dropped even when native state is unknown.
+func (t *Tmux) taintBootstrapInput(name string) error {
+	t.forgetBootstrapInput(name)
+	target, err := t.agentPaneTarget(name)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	if _, err := t.runCtxRaw(ctx, "set-option", "-p", "-t", target, bootstrapInputOption, "spent"); err != nil {
+		return err
+	}
+	out, err := t.runCtxRaw(ctx, "display-message", "-p", "-t", target, "#{"+bootstrapInputOption+"}|#{pane_id}|#{pane_pid}|#{pane_dead}")
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) != 4 || parts[0] != "spent" || parts[1] != guardPaneID(target) || parts[2] == "" {
+		return fmt.Errorf("native first-input invalidation could not be confirmed")
+	}
+	return nil
+}

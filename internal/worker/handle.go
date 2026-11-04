@@ -406,10 +406,13 @@ const (
 
 // NudgeRequest delivers a best-effort wake or redirect message.
 type NudgeRequest struct {
-	Text     string          `json:"text"`
-	Delivery NudgeDelivery   `json:"delivery,omitempty"`
-	Source   string          `json:"source,omitempty"`
-	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// BootstrapInput requires the runtime's exact one-shot fresh-input proof.
+	// It is never a public option or persisted substitute for native history.
+	BootstrapInput *runtime.BootstrapInputProof `json:"-"`
+	Text           string                       `json:"text"`
+	Delivery       NudgeDelivery                `json:"delivery,omitempty"`
+	Source         string                       `json:"source,omitempty"`
+	Wake           NudgeWakePolicy              `json:"wake,omitempty"`
 	// DeliveryKey is the caller's stable identity for this one delivery. A
 	// caller that redelivers the same content after an unknown outcome
 	// passes the same key, so a runtime that deduplicates keyed deliveries
@@ -451,6 +454,13 @@ var ErrFencedNudgeShape = errors.New("a fenced nudge must be live-only with defa
 // validateFencedNudge refuses a fenced request that names no incarnation
 // or lacks the fenced shape. A request with no fence passes.
 func validateFencedNudge(req NudgeRequest) error {
+	if proof := req.BootstrapInput; proof != nil {
+		if req.Fence.IsZero() || proof.Fence != req.Fence || proof.Token == "" ||
+			req.Redelivery || req.DeliveryKey == "" || (req.Delivery != "" && req.Delivery != NudgeDeliveryDefault) ||
+			normalizeNudgeWakePolicy(req.Wake) != NudgeWakeLiveOnly {
+			return ErrFencedNudgeShape
+		}
+	}
 	if req.Fence.IsZero() {
 		return nil
 	}
@@ -476,18 +486,21 @@ func validateFencedNudge(req NudgeRequest) error {
 // refused with runtime.ErrInputFenceUnsupported, or, when req.AllowUnfenced,
 // delivered without the fence and reported unfenced.
 func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (runtime.InputFencing, error)) (context.Context, bool, error) {
+	if err := validateFencedNudge(req); err != nil {
+		return ctx, false, err
+	}
 	if req.Fence.IsZero() {
 		if _, ok := runtime.InputFenceFrom(ctx); ok {
 			ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
 		}
 		return ctx, false, nil
 	}
-	if err := validateFencedNudge(req); err != nil {
-		return ctx, false, err
-	}
 	f, err := fencing()
 	if err != nil {
 		return ctx, false, err
+	}
+	if req.BootstrapInput != nil && f != runtime.InputFencingAtomic {
+		return ctx, false, runtime.ErrInputFenceUnsupported
 	}
 	if f == runtime.InputFencingNone {
 		if req.AllowUnfenced {
@@ -501,6 +514,9 @@ func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (r
 // nudgeDeliveryContext scopes req's delivery key to ctx for this one
 // delivery (see [runtime.WithNudgeDeliveryKey]).
 func nudgeDeliveryContext(ctx context.Context, req NudgeRequest) context.Context {
+	// The request is the only source of bootstrap permission. Clear inherited
+	// context credit when this delivery did not explicitly request it.
+	ctx = runtime.WithBootstrapInput(ctx, req.BootstrapInput)
 	if req.DeliveryKey == "" {
 		return ctx
 	}

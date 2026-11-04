@@ -5381,13 +5381,13 @@ type RigCreateBody struct {
 	// Name Rig name.
 	Name string `json:"name"`
 
-	// Path Existing project directory; use an absolute path outside the city. Clone destinations are city-contained.
+	// Path Existing project or new clone destination; use an explicit absolute path outside the city. A clone requires an absent destination with an existing parent; omitted clone path defaults to rigs/name.
 	Path *string `json:"path,omitempty"`
 
 	// Prefix Beads issue namespace prefix; inferred from an adopted queue when omitted.
 	Prefix *string `json:"prefix,omitempty"`
 
-	// RequestId Client-supplied idempotency key; reuse across retries.
+	// RequestId Client-supplied idempotency key; reuse across retries. Required when git_url uses an explicit absolute clone destination.
 	RequestId *string `json:"request_id,omitempty"`
 }
 
@@ -12888,6 +12888,12 @@ type CreateAgentParams struct {
 type DeleteV0CityByCityNameBeadByIdParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+}
+
+// GetV0CityByCityNameBeadByIdParams defines parameters for GetV0CityByCityNameBeadById.
+type GetV0CityByCityNameBeadByIdParams struct {
+	// Fresh Use authoritative point reads for every visited residency store, bypassing cached rows and misses. Fails on unavailable owners; does not provide a cross-store atomic snapshot.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
 // PatchV0CityByCityNameBeadByIdParams defines parameters for PatchV0CityByCityNameBeadById.
@@ -25910,7 +25916,7 @@ type ClientInterface interface {
 	DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadById request
-	GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBody request with any body
 	PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -26759,8 +26765,8 @@ func (c *Client) DeleteV0CityByCityNameBeadById(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetV0CityByCityNameBeadByIdRequest(c.Server, cityName, id)
+func (c *Client) GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -30325,7 +30331,7 @@ func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id
 }
 
 // NewGetV0CityByCityNameBeadByIdRequest generates requests for GetV0CityByCityNameBeadById
-func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -30355,6 +30361,28 @@ func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id st
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -40630,7 +40658,7 @@ type ClientWithResponsesInterface interface {
 	DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error)
 
 	// GetV0CityByCityNameBeadByIdWithResponse request
-	GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error)
+	GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBodyWithResponse request with any body
 	PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
@@ -46154,8 +46182,8 @@ func (c *ClientWithResponses) DeleteV0CityByCityNameBeadByIdWithResponse(ctx con
 }
 
 // GetV0CityByCityNameBeadByIdWithResponse request returning *GetV0CityByCityNameBeadByIdResponse
-func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.GetV0CityByCityNameBeadById(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.GetV0CityByCityNameBeadById(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}

@@ -67,10 +67,18 @@ func TestRespondRefusalsNameWhy(t *testing.T) {
 	if err := provider.Respond("s", runtime.InteractionResponse{Action: "approve"}); err != nil {
 		t.Fatalf("Respond with no request and no prompt = %v", err)
 	}
+	// If native invalidation itself fails, the actual answer key is refused.
+	spendFailure := &fakeExecutor{agentPane: true, outs: []string{approvalPromptPane(), "0"}, errs: []error{nil, nil, ErrNoServer}}
+	spendErr := (&Provider{tm: &Tmux{exec: spendFailure}}).Respond("s", runtime.InteractionResponse{RequestID: requestID, Action: "approve"})
+	if !errors.Is(spendErr, runtime.ErrRuntimeUnavailable) || len(sentKeys(spendFailure.calls)) != 0 {
+		t.Fatalf("failed spend must refuse answer before key: %v, keys=%q", spendErr, sentKeys(spendFailure.calls))
+	}
+	assertBootstrapSpendCall(t, spendFailure.calls[3], fakeAgentPane("s"))
 	// The pane shows the prompt, out of copy-mode, and the key finds the
 	// server gone: no key reached the prompt.
-	exec := &fakeExecutor{agentPane: true, outs: []string{approvalPromptPane(), "0"}, errs: []error{nil, nil, ErrNoServer}}
+	exec := &fakeExecutor{agentPane: true, outs: []string{approvalPromptPane(), "0"}, errs: []error{nil, nil, nil, ErrNoServer}}
 	err := (&Provider{tm: &Tmux{exec: exec}}).Respond("s", runtime.InteractionResponse{RequestID: requestID, Action: "approve"})
+	assertBootstrapSpendCall(t, exec.calls[3], fakeAgentPane("s"))
 	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !slices.Equal(sentKeys(exec.calls), []string{"1"}) {
 		t.Fatalf("Respond = %v after keys %q, want ErrRuntimeUnavailable from the one key", err, sentKeys(exec.calls))
 	}

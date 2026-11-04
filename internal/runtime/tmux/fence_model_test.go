@@ -32,6 +32,7 @@ type fenceModel struct {
 	screen func(m *fenceModel) string
 
 	paneID, pid    string
+	bootstrap      string
 	own, inherited string // the pane's own @gc_fence value, a window-scope one
 	dead, inMode   bool
 	gone, noServer bool
@@ -163,6 +164,10 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 	case "if-shell":
 		return m.ifShell(args)
 	case "set-option":
+		if slices.Contains(args, bootstrapInputOption) {
+			m.bootstrap = m.expand(args[len(args)-1])
+			return "", nil
+		}
 		if slices.Contains(args, inputFenceOption) {
 			m.own = m.expand(args[len(args)-1])
 			return "", nil
@@ -170,7 +175,7 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 	case "display-message":
 		format := args[len(args)-1]
 		switch {
-		case strings.Contains(format, inputFenceOption), strings.HasPrefix(format, fenceAdoptMissPrefix):
+		case strings.Contains(format, inputFenceOption), strings.Contains(format, bootstrapInputOption), strings.HasPrefix(format, fenceAdoptMissPrefix):
 			if format == fenceReadFormat {
 				m.reads++
 				if m.beforeRead != nil {
@@ -178,6 +183,8 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 				}
 			}
 			return m.expandAt(flagValue(args, "-t"), format), nil
+		case format == bootstrapInputMiss:
+			return bootstrapInputMiss, nil
 		case m.gone:
 			return m.expand(format), nil
 		case m.detached && format == "#{session_name}|#{session_attached}":
@@ -406,6 +413,8 @@ func (m *fenceModel) evalFormat(f string) string {
 		}
 	}
 	switch f {
+	case bootstrapInputOption:
+		return m.bootstrap
 	case inputFenceOption:
 		if m.own != "" {
 			return m.own
