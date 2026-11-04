@@ -139,6 +139,10 @@
           "type": "string",
           "description": "Human-readable native-store fallback reason, when any."
         },
+        "degraded": {
+          "type": "boolean",
+          "description": "Whether the scope's caching store is serving last-good cached data because the backing store is unreachable or the cache itself has degraded. Computed at read time; present only when true."
+        },
         "proxied": {
           "type": "object",
           "description": "The proxied-native read lane's account of the bead store open this output was read through: the CLI's own open on locally built output, the serving controller's on output read from the city's API. Present only when GC_BEADS_PROXIED_NATIVE is on for a proxied-server scope.",

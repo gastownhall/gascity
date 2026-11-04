@@ -162,6 +162,9 @@ func statusBeadsDiagnosticFromGen(g *genclient.BeadsDiagnostic) *beads.BeadsDiag
 		out.PreflightReason = *g.PreflightReason
 	}
 	out.Proxied = statusProxiedDiagnosticFromGen(g.Proxied)
+	if g.Degraded != nil {
+		out.Degraded = *g.Degraded
+	}
 	return out
 }
 
