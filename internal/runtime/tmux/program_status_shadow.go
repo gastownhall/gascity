@@ -713,11 +713,14 @@ func (t *Tmux) shadowStartupLadder(session string, send func() error, busy func(
 	return t.shadowStartupSend(session, baseline, send), t.shadowStartupBusy(session, baseline, busy)
 }
 
-// startupSendVerdict is a startup send's scrape verdict: confirmed when the
+// startupSendVerdict is the scrape verdict of a startup send to a family
+// whose submit the scan verifies (submitVerifyEligible): confirmed when the
 // scan saw the submit start a turn, unconfirmed when the submit was not seen
 // to land (unconfirmed, delivered but never seen busy, or held back by a
-// running turn). ok is false for a send that failed any other way: the
-// ladder ends on it without deciding whether the nudge landed.
+// running turn). Any other family's send is best-effort and returns nil
+// having seen nothing, which shadowStartupSend records as none, as the
+// send's submit_confirm does. ok is false for a send that failed any other
+// way: the ladder ends on it without deciding whether the nudge landed.
 func startupSendVerdict(err error) (runtime.ProgramVerdict, bool) {
 	switch {
 	case err == nil:
@@ -734,7 +737,9 @@ func startupSendVerdict(err error) (runtime.ProgramVerdict, bool) {
 // send's verdict (startupSendVerdict) is recorded beside the record's
 // startup verdict against the baseline taken before the ladder's first
 // send, on a reading taken as the send returns, before the ladder sleeps
-// toward a re-send.
+// toward a re-send. Whether the scan verifies the family of a send that
+// succeeded is read on the shadow goroutine, off the ladder's path
+// (submitVerified); a pane that cannot be resolved then records nothing.
 func (t *Tmux) shadowStartupSend(session string, baseline runtime.ProgramBaseline, send func() error) func() error {
 	return func() error {
 		err := send()
@@ -747,10 +752,30 @@ func (t *Tmux) shadowStartupSend(session string, baseline runtime.ProgramBaselin
 			return err
 		}
 		t.shadowGo(func() {
+			if scrape == runtime.ProgramVerdictConfirmed {
+				verified, ok := t.submitVerified(session)
+				if !ok {
+					return
+				}
+				if !verified {
+					scrape = runtime.ProgramVerdictNone
+				}
+			}
 			t.shadowEmit(session, runtime.ProgramPointStartupLadder, scrape, runtime.ProgramStartupVerdict(d.status, baseline, time.Time{}, d.at), d.status, d.at, 0, false)
 		})
 		return err
 	}
+}
+
+// submitVerified reports whether session's agent pane runs a family whose
+// submit the scan verifies (submitVerifyEligible), as the nudge sent to that
+// pane decided. ok is false when the pane cannot be resolved.
+func (t *Tmux) submitVerified(session string) (verified, ok bool) {
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return false, false
+	}
+	return t.submitVerifyEligible(target), true
 }
 
 // shadowStartupBusy wraps the startup ladder's busy look (startup_ladder):

@@ -43,6 +43,14 @@ func shadowWorking(f *runtime.Fake, name string, sink bool) func() []runtime.Pro
 	}
 }
 
+// shadowTurnEnded ends the turn shadowWorking's record reports on f's
+// session name: the record's next report, idle at an input boundary.
+func shadowTurnEnded(f *runtime.Fake, name string) {
+	row, _ := f.ProgramPane(name)
+	row.Record.State, row.Record.Seq, row.Record.TurnEnds = runtime.ProgramIdle, 3, 1
+	f.SetProgramPane(name, row)
+}
+
 // atPoint is the comparisons in got at point.
 func atPoint(got []runtime.ProgramStatusComparison, point runtime.ProgramStatusPoint) []runtime.ProgramStatusComparison {
 	var out []runtime.ProgramStatusComparison
@@ -153,16 +161,24 @@ func TestLegacyWaitIdleBusyPrereadIsRecorded(t *testing.T) {
 // timeout's stop re-proves idleness on its own reads, so neither reaches
 // provedIdle. Each records its decision beside the record's sleep proof
 // (proved_idle), over a reading taken before its reads and one taken as it
-// decides. The effect settles as with the switch off, which records nothing.
+// decides: a turn that ends while the fence reads leaves the record's proof
+// busy. The effect settles as with the switch off, which records nothing.
 func TestV2IdleSleepsRecordTheirProof(t *testing.T) {
 	type outcome struct {
 		s   settlement
 		got []runtime.ProgramStatusComparison
 	}
-	begin := func(t *testing.T, shadow bool) outcome {
-		p, it, _, leaf := admittedBegin(t, func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep })
-		got := shadowWorking(leaf.Fake, "s-gc-1", shadow)
-		return outcome{runBegin(p, it), got()}
+	begin := func(turnEnds bool) func(t *testing.T, shadow bool) outcome {
+		return func(t *testing.T, shadow bool) outcome {
+			p, it, _, leaf := admittedBegin(t, func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep })
+			got := shadowWorking(leaf.Fake, "s-gc-1", shadow)
+			if turnEnds {
+				// The turn ends while the fence reads its attach leg: two
+				// readings taken after the legs would both read it idle.
+				leaf.OnAttachRead = func(name string) { shadowTurnEnded(leaf.Fake, name) }
+			}
+			return outcome{runBegin(p, it), got()}
+		}
 	}
 	stop := func(active bool) func(t *testing.T, shadow bool) outcome {
 		return func(t *testing.T, shadow bool) outcome {
@@ -180,7 +196,8 @@ func TestV2IdleSleepsRecordTheirProof(t *testing.T) {
 		scrape runtime.ProgramVerdict
 		lands  bool
 	}{
-		{"a non-interactive idle begin", begin, runtime.ProgramVerdictIdle, true},
+		{"a non-interactive idle begin", begin(false), runtime.ProgramVerdictIdle, true},
+		{"a non-interactive idle begin whose turn ends during its reads", begin(true), runtime.ProgramVerdictIdle, true},
 		{"an idle-timeout stop", stop(false), runtime.ProgramVerdictIdle, true},
 		{"an idle-timeout stop active since the pass", stop(true), runtime.ProgramVerdictBusy, false},
 	} {

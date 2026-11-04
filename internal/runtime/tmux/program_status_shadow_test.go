@@ -1258,11 +1258,59 @@ func (o shadowedStartOps) shadowStartupLadder(name string, send func() error, bu
 	return o.tm.shadowStartupLadder(name, send, busy)
 }
 
+// providerPaneExecutor serves a session's agent pane (fakeAgentPaneRow),
+// whose GC_PROVIDER is provider, and answers every other command with "".
+// paneErr, when set, fails the agent-pane lookup.
+type providerPaneExecutor struct {
+	provider string
+	paneErr  error
+}
+
+func (e providerPaneExecutor) execute(args []string) (string, error) {
+	if row, ok := fakeAgentPaneRow(args); ok {
+		if e.paneErr != nil {
+			return "", e.paneErr
+		}
+		return row, nil
+	}
+	if tmuxSubcommand(args) == "show-environment" && args[len(args)-1] == "GC_PROVIDER" {
+		return "GC_PROVIDER=" + e.provider, nil
+	}
+	return "", nil
+}
+
+func (e providerPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// Kills a submit verification read off a pane other than the one the nudge
+// sent to, or a pane that cannot be resolved read as one the scan does not
+// verify: only claude and codex are verified.
+func TestSubmitVerifiedReadsTheAgentPane(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		ex           providerPaneExecutor
+		verified, ok bool
+	}{
+		{"claude", providerPaneExecutor{provider: "claude"}, true, true},
+		{"codex", providerPaneExecutor{provider: "codex"}, true, true},
+		{"pi", providerPaneExecutor{provider: "pi"}, false, true},
+		{"no pane", providerPaneExecutor{provider: "claude", paneErr: errors.New("no server running")}, false, false},
+	} {
+		tm := &Tmux{cfg: DefaultConfig(), exec: c.ex}
+		if verified, ok := tm.submitVerified("s"); verified != c.verified || ok != c.ok {
+			t.Errorf("%s: submitVerified = %v, %v; want %v, %v", c.name, verified, ok, c.verified, c.ok)
+		}
+	}
+}
+
 // Kills a startup ladder whose decisions go unrecorded on the path a start
 // takes (ga-f4ovjm.69): a startup nudge the scan confirms on its first send
 // ends the ladder with no busy look, and that send is the ladder's decision;
-// a ladder that retries records each send and each look. The ladder sends
-// exactly as it does with the switch off, and off records nothing.
+// a ladder that retries records each send and each look. A family the scan
+// does not verify is sent best-effort, so its send that succeeded saw no
+// turn start: none. The ladder sends exactly as it does with the switch
+// off, and off records nothing.
 func TestShadowStartupLadderRecordsEachDecision(t *testing.T) {
 	stubShadowFollow(t)
 	origBackoffs := startupNudgeRetryBackoffs
@@ -1277,25 +1325,28 @@ func TestShadowStartupLadderRecordsEachDecision(t *testing.T) {
 		}
 		return started
 	}
-	cfg := runtime.Config{Command: "claude", Nudge: "start working"}
 	for _, c := range []struct {
-		name   string
-		sends  []error
-		scrape []runtime.ProgramVerdict
+		name     string
+		provider string
+		sends    []error
+		scrape   []runtime.ProgramVerdict
 	}{
-		{"confirmed on the first send", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictConfirmed}},
-		{"confirmed on a retry", []error{ErrNudgeSubmitUnconfirmed, nil}, []runtime.ProgramVerdict{
+		{"confirmed on the first send", "claude", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictConfirmed}},
+		{"confirmed on a retry", "claude", []error{ErrNudgeSubmitUnconfirmed, nil}, []runtime.ProgramVerdict{
 			runtime.ProgramVerdictUnconfirmed, runtime.ProgramVerdictUnconfirmed, runtime.ProgramVerdictConfirmed,
 		}},
+		{"sent best-effort to a family the scan does not verify", "pi", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictNone}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			cfg := runtime.Config{Command: c.provider, Nudge: "start working"}
+			pane := providerPaneExecutor{provider: c.provider}
 			offOps := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(c.sends)}
-			off, offEx := shadowTmux(runtime.ProgramStatusOff, &fakeExecutor{}, record, nil)
+			off, offEx := shadowTmux(runtime.ProgramStatusOff, pane, record, nil)
 			offErr := doStartSession(context.Background(), shadowedStartOps{offOps, off}, "s", cfg, DefaultConfig().SetupTimeout)
 
 			col := newShadowCollector()
 			shOps := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(c.sends)}
-			sh, _ := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, record, col.sink)
+			sh, _ := shadowTmux(runtime.ProgramStatusShadow, pane, record, col.sink)
 			shErr := doStartSession(context.Background(), shadowedStartOps{shOps, sh}, "s", cfg, DefaultConfig().SetupTimeout)
 
 			if offErr != nil || shErr != nil {
