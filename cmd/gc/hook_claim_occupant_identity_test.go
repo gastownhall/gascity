@@ -79,7 +79,7 @@ func TestHookClaimAssigneeIdentityPrecedence(t *testing.T) {
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hookClaimAssigneeIdentity(tc.alias, tc.sessionID, tc.agentForQuery, tc.resolved, tc.sessionName)
+			got := hookClaimAssigneeIdentity(tc.alias, tc.sessionID, tc.agentForQuery, tc.resolved, tc.sessionName, "")
 			if got != tc.want {
 				t.Fatalf("hookClaimAssigneeIdentity = %q, want %q", got, tc.want)
 			}
@@ -278,7 +278,7 @@ func TestPoolWorkerClaimIdentityDistinguishesOccupantsOfOneSlot(t *testing.T) {
 				beadID, env["GC_SESSION_ID"])
 		}
 
-		assignee := hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"])
+		assignee := hookClaimIdentityFromRuntimeEnv(env)
 		if assignee == chair {
 			t.Fatalf("%s claimed under the chair %q: that string is shared by every occupant of pool slot 1, "+
 				"so a liveness read about the holder answers about the slot instead", beadID, assignee)
@@ -330,7 +330,7 @@ func TestPoolWorkerClaimAndCloseIdentity(t *testing.T) {
 		t.Fatalf("GC_ALIAS = %q, want empty for an unaliased pool slot", env["GC_ALIAS"])
 	}
 
-	assignee := hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"])
+	assignee := hookClaimIdentityFromRuntimeEnv(env)
 	if assignee != beadID {
 		t.Fatalf("hookClaimAssigneeIdentity = %q, want the session bead id %q", assignee, beadID)
 	}
@@ -344,7 +344,7 @@ func TestPoolWorkerClaimAndCloseIdentity(t *testing.T) {
 // claim door feeds it: GC_ALIAS, GC_SESSION_ID, GC_AGENT and GC_SESSION_NAME
 // from the projection, with no separately resolved agent name.
 func hookClaimIdentityFromRuntimeEnv(env map[string]string) string {
-	return hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"])
+	return hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"], env["GC_SESSION_ORIGIN"])
 }
 
 // TestManualUnaliasedSessionClaimAndCloseIdentity is the manual-session sibling
@@ -481,5 +481,39 @@ func TestCmdHookClaimUnaliasedManualSessionClaimsUnderItsSessionName(t *testing.
 	}
 	if !strings.Contains(string(logData), sessionName+"\t") {
 		t.Fatalf("no bd subprocess ran under BEADS_ACTOR=%q; the whole log:\n%s", sessionName, logData)
+	}
+}
+
+// The manual-origin rule only reorders the name and id forms. With no
+// session_name in the environment a manual session still claims under its bead
+// id rather than failing the empty-assignee guard, and the pre-existing origins
+// (pool, named, unset) are untouched.
+func TestHookClaimAssigneeIdentityManualOriginFallbacks(t *testing.T) {
+	const (
+		sessionID   = "gcg-session-manual-worker"
+		sessionName = "s-gcg-manual-worker"
+	)
+	tests := []struct {
+		name   string
+		origin string
+		alias  string
+		sName  string
+		agent  string
+		want   string
+	}{
+		{"manual, no session name, falls back to the bead id", "manual", "", "", "", sessionID},
+		{"manual with a name prefers the name", "manual", "", sessionName, sessionName, sessionName},
+		{"manual with an alias keeps the alias", "manual", "rig/mine", sessionName, sessionName, "rig/mine"},
+		{"ephemeral keeps the bead id over the name", "ephemeral", "", sessionName, sessionName, sessionID},
+		{"named without an alias keeps the bead id over the name", "named", "", sessionName, sessionName, sessionID},
+		{"unset origin keeps the bead id over the name", "", "", sessionName, sessionName, sessionID},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hookClaimAssigneeIdentity(tc.alias, sessionID, tc.agent, "", tc.sName, tc.origin)
+			if got != tc.want {
+				t.Fatalf("hookClaimAssigneeIdentity = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
