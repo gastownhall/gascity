@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -197,5 +198,56 @@ func TestSlingConvoySuccessReportsChildren(t *testing.T) {
 	}
 	if len(resp.Children) != 1 || resp.Children[0].BeadID != child.ID || resp.Children[0].Outcome != "routed" {
 		t.Fatalf("children = %+v, want the one routed child", resp.Children)
+	}
+}
+
+// TestSlingChildOutcomesHintMatchesRootShape pins ga-x9hgdu on the wire: the
+// per-child hint must name a command that clears the roots listed beside it.
+// delete-source cannot see a convoy-tracked root (no gc.source_bead_id), so
+// that root gets `gc workflow delete <root> --force`.
+func TestSlingChildOutcomesHintMatchesRootShape(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		conflict *sourceworkflow.ConflictError
+		want     string
+	}{
+		{
+			name:     "source-bead root",
+			conflict: &sourceworkflow.ConflictError{SourceBeadID: "ga-src", WorkflowIDs: []string{"wf-1"}},
+			want:     "gc workflow delete-source ga-src --store-ref rig:myrig --apply",
+		},
+		{
+			name: "convoy-tracked root",
+			conflict: &sourceworkflow.ConflictError{
+				SourceBeadID:             "ga-src",
+				WorkflowIDs:              []string{"wf-9"},
+				ConvoyTrackedWorkflowIDs: []string{"wf-9"},
+			},
+			want: "gc workflow delete wf-9 --force",
+		},
+		{
+			name: "both shapes",
+			conflict: &sourceworkflow.ConflictError{
+				SourceBeadID:             "ga-src",
+				WorkflowIDs:              []string{"wf-1", "wf-9"},
+				ConvoyTrackedWorkflowIDs: []string{"wf-9"},
+			},
+			want: "gc workflow delete-source ga-src --store-ref rig:myrig --apply; gc workflow delete wf-9 --force",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := slingChildOutcomes([]sling.SlingChildResult{{
+				BeadID:     "ga-src",
+				Failed:     true,
+				FailReason: "conflict",
+				Conflict:   tc.conflict,
+			}}, "rig:myrig")
+			if len(out) != 1 || out[0].Conflict == nil {
+				t.Fatalf("outcomes = %+v, want one child carrying a conflict", out)
+			}
+			if got := out[0].Conflict.Hint; got != tc.want {
+				t.Fatalf("hint = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -38,6 +38,10 @@ import (
 type ConflictError struct {
 	SourceBeadID string
 	WorkflowIDs  []string
+	// ConvoyTrackedWorkflowIDs is the subset of WorkflowIDs reachable only
+	// through the source bead's input-convoy tracking edge. Those roots carry
+	// no gc.source_bead_id, so `gc workflow delete-source` cannot clear them.
+	ConvoyTrackedWorkflowIDs []string
 }
 
 // SourceStoreRefMetadataKey is the bead metadata key recording which store

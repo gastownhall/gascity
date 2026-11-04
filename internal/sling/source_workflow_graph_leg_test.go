@@ -111,6 +111,28 @@ func TestListSourceWorkflowRootsStillToleratesNonStrictLegFailure(t *testing.T) 
 	}
 }
 
+// TestCheckLegacySourceWorkflowConflictLeavesSourceBeadRootsUnmarked is the
+// other half of ga-x9hgdu: a root that carries gc.source_bead_id is one
+// `gc workflow delete-source` clears, so it must not be reported as
+// convoy-tracked, or the hint would send the user to the wrong command.
+func TestCheckLegacySourceWorkflowConflictLeavesSourceBeadRootsUnmarked(t *testing.T) {
+	store := beads.NewMemStore()
+	root := newLiveWorkflowRoot(t, store, "mc-source", "city:test")
+
+	deps := SlingDeps{Store: store, StoreRef: "city:test"}
+	err := checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("WorkflowIDs = %v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+	if len(conflictErr.ConvoyTrackedWorkflowIDs) != 0 {
+		t.Fatalf("ConvoyTrackedWorkflowIDs = %v, want none for a source-bead-linked root", conflictErr.ConvoyTrackedWorkflowIDs)
+	}
+}
+
 // TestListSourceWorkflowRootsNamesOneRootOnceAcrossOverlappingLegs is decision
 // (4). Two legs can reach one physical root — a converged city's work ledger
 // still holds the frozen copy the storage migration retained under the id the

@@ -632,6 +632,75 @@ func TestSourceWorkflowCleanupCommandQuotesUntrustedArgs(t *testing.T) {
 	}
 }
 
+// TestPrintSourceWorkflowConflictCleanupMatchesRootShape pins ga-x9hgdu: the
+// hint must name a remedy that clears the roots it lists. `gc workflow
+// delete-source` finds roots by gc.source_bead_id, which a convoy-first launch
+// never stamps, so a convoy-tracked root needs `gc workflow delete <root>
+// --force` (the bare delete only previews).
+func TestPrintSourceWorkflowConflictCleanupMatchesRootShape(t *testing.T) {
+	const sourceCleanup = "gc workflow delete-source ga-src --store-ref rig:demo --apply"
+	for _, tc := range []struct {
+		name         string
+		err          *sourceworkflow.ConflictError
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name: "convoy-tracked root only",
+			err: &sourceworkflow.ConflictError{
+				SourceBeadID:             "ga-src",
+				WorkflowIDs:              []string{"wf-9"},
+				ConvoyTrackedWorkflowIDs: []string{"wf-9"},
+			},
+			wantContains: []string{
+				"already has live workflow(s): wf-9",
+				"use --force to override, or gc workflow delete wf-9 --force to clean up",
+			},
+			wantAbsent: []string{"delete-source"},
+		},
+		{
+			name: "source-bead root only",
+			err: &sourceworkflow.ConflictError{
+				SourceBeadID: "ga-src",
+				WorkflowIDs:  []string{"wf-1"},
+			},
+			wantContains: []string{
+				"already has live workflow(s): wf-1",
+				"use --force to override, or " + sourceCleanup + " to clean up",
+			},
+			wantAbsent: []string{"gc workflow delete wf-"},
+		},
+		{
+			name: "both shapes",
+			err: &sourceworkflow.ConflictError{
+				SourceBeadID:             "ga-src",
+				WorkflowIDs:              []string{"wf-1", "wf-9"},
+				ConvoyTrackedWorkflowIDs: []string{"wf-9"},
+			},
+			wantContains: []string{
+				"already has live workflow(s): wf-1,wf-9",
+				sourceCleanup + "; gc workflow delete wf-9 --force",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			printSourceWorkflowConflict(&stderr, tc.err, "rig:demo")
+			out := stderr.String()
+			for _, want := range tc.wantContains {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(out, absent) {
+					t.Errorf("output must not contain %q:\n%s", absent, out)
+				}
+			}
+		})
+	}
+}
+
 func TestDoSlingBeadToPool(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

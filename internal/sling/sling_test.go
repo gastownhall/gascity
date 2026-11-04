@@ -4019,6 +4019,45 @@ func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
 	}
 }
 
+// TestCheckLegacySourceWorkflowConflictMarksConvoyTrackedRoots pins the
+// information the cleanup hint needs (ga-x9hgdu). A root found only through the
+// synthetic input convoy carries no gc.source_bead_id, so `gc workflow
+// delete-source` cannot see it: the ConflictError must say which of its
+// WorkflowIDs came by that route, or every renderer would suggest a remedy that
+// cannot clear it.
+func TestCheckLegacySourceWorkflowConflictMarksConvoyTrackedRoots(t *testing.T) {
+	deps := graphV2ConvoyFirstSlingTestConfig(t)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-81", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err := deps.Store.Create(beads.Bead{
+		Title:    "input convoy for " + source.ID,
+		Type:     "convoy",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(deps.Store)}, convoy.ID, source.ID); err != nil {
+		t.Fatal(err)
+	}
+	root := trackedGraphV2Root(t, deps.Store, convoy.ID, "graph-work", "open")
+
+	err = checkLegacySourceWorkflowConflict(deps, source.ID, "graph-work", false)
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("checkLegacySourceWorkflowConflict error = %v, want ConflictError", err)
+	}
+	if !slices.Equal(conflictErr.WorkflowIDs, []string{root.ID}) {
+		t.Fatalf("WorkflowIDs = %v, want [%s]", conflictErr.WorkflowIDs, root.ID)
+	}
+	if !slices.Equal(conflictErr.ConvoyTrackedWorkflowIDs, []string{root.ID}) {
+		t.Fatalf("ConvoyTrackedWorkflowIDs = %v, want [%s]: the root is reachable only through the convoy-tracking route", conflictErr.ConvoyTrackedWorkflowIDs, root.ID)
+	}
+}
+
 // TestSlingAttachGraphFormulaDistinctFormulasBothLaunch pins the other half
 // of the "(formula, target bead)" contract: two DIFFERENT formulas against
 // one bead are legitimate concurrent work (a review workflow and a build
