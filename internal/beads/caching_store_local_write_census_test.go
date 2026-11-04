@@ -20,6 +20,7 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.Children":                              "read",
 	"CachingStore.ChildrenOfAny":                         "read",
 	"CachingStore.Count":                                 "read",
+	"CachingStore.Degraded":                              "read",
 	"CachingStore.DepList":                               "read",
 	"CachingStore.DepListBatch":                          "read",
 	"CachingStore.DepMetadata":                           "read",
@@ -82,6 +83,8 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.ReconcileIfDueForTest":     "test hook",
 	"CachingStore.ReconcileNowForTest":       "test hook",
 	"CachingStore.SetPrimeRetryDelayForTest": "test hook",
+	// Wiring: swaps the injected availability gate and writes no row.
+	"CachingStore.SetAvailabilityGate": "wiring, writes no row",
 	// Clone-local data is never cached, so there is no cached row to fence.
 	"CachingStore.SetLocalString": "clone-local, never cached",
 }
