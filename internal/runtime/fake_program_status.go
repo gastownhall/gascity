@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -100,6 +101,14 @@ func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
 		return ProgramStatus{}, false
 	}
 	return JudgeProgramStatus(f.ProgramPanes[name]), true
+}
+
+// ProgramStatusShadowIdleWait implements [ProgramStatusShadowProvider]: the
+// idle wait is recorded untimed beside the record's idle verdict on a fresh
+// reading ([FullFake.ProgramStatusShadowRead]); the fake follows no record
+// past a decision.
+func (f FullFake) ProgramStatusShadowIdleWait(name string, _, _ time.Time, scrape ProgramVerdict) {
+	recordIdleWaitUntimed(f, name, scrape)
 }
 
 // ProgramStatusHoldRead implements [ProgramStatusHoldProvider]: name's

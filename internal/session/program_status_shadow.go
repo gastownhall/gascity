@@ -25,9 +25,6 @@ func (m *Manager) RecordObservationShadow(info Info, phase runtime.ProgramVerdic
 	if info.SessionName == "" {
 		return
 	}
-	now := time.Now()
-	runtime.ShadowCompare(m.sp, info.SessionName, info.ID, ProviderFamilyFromInfo(info, ""),
-		runtime.ProgramPointObservation, phase, func(s runtime.ProgramStatus) runtime.ProgramVerdict {
-			return runtime.ProgramIdleVerdict(s, time.Time{}, now)
-		})
+	runtime.ShadowCompareIdle(m.sp, info.SessionName, info.ID, ProviderFamilyFromInfo(info, ""),
+		runtime.ProgramPointObservation, phase)
 }

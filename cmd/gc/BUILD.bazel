@@ -1874,6 +1874,7 @@ go_test(
         "program_status_hold_test.go",
         "program_status_mode_test.go",
         "program_status_shadow_test.go",
+        "program_status_shadow_wiring_test.go",
         "program_status_wiring_test.go",
         "prompt_delivery_test.go",
         "prompt_meta_test.go",

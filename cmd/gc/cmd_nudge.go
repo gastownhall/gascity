@@ -1562,6 +1562,10 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
 	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerFamily() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
+			// This busy pre-read stands in for the worker's (which records
+			// its own when it runs): under the shadow switch it is recorded
+			// beside the record (wait_idle_preread).
+			runtime.ShadowCompareIdle(sp, target.sessionName, target.sessionID, target.providerFamily(), runtime.ProgramPointWaitIdlePreread, runtime.ProgramVerdictBusy)
 			return queueSessionNudgeWithWorker(target, store, sp, message, worker.NudgeUndeliveredNoIdleBoundary)
 		}
 	}
