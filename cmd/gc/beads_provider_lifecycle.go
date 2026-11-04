@@ -2151,7 +2151,19 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 		if err != nil {
 			return err
 		}
-		return execute(script, providerEnv, args...)
+		err = execute(script, providerEnv, args...)
+		if err == nil || !isBdInitDirtyTablesError(err) {
+			return err
+		}
+		// Same circular `bd dolt commit` advice as the canonical branch; the
+		// commit only runs against a managed local Dolt, so on an external
+		// endpoint the returned error carries both the refusal and why the
+		// commit could not run.
+		reinit := func() error { return execute(script, providerEnv, args...) }
+		if recoverErr := recoverBdInitFromDirtyTables(cityPath, doltDatabase, err, reinit); recoverErr != nil && !isBdAlreadyInitializedError(recoverErr) {
+			return recoverErr
+		}
+		return nil
 	}
 	if shouldInitDefaultRigBdStore(cityPath, dir, provider) {
 		return initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase)
@@ -2236,11 +2248,19 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	if canonicalDoltDatabase != "" {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}
-	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
-		if isBdAlreadyInitializedError(err) {
-			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+	runInit := func() error {
+		_, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...)
+		return err
+	}
+	if err := runInit(); err != nil {
+		if isBdInitDirtyTablesError(err) {
+			// beads' own remedy for a dirty working set hits the same refusal;
+			// clear it here as the provider-owned init branch does.
+			err = recoverBdInitFromDirtyTables(cityPath, canonicalDoltDatabase, err, runInit)
 		}
-		return fmt.Errorf("bd init: %w", err)
+		if err != nil && !isBdAlreadyInitializedError(err) {
+			return fmt.Errorf("bd init: %w", err)
+		}
 	}
 	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
 }
