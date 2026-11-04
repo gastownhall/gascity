@@ -260,6 +260,209 @@ func TestHookRootStoreFallback(t *testing.T) {
 	}
 }
 
+// rootGetFaultStore fails a workflow ancestry read without failing the root
+// selector's separate canonical lookup or the assignment census.
+type rootGetFaultStore struct {
+	beads.Store
+}
+
+func (s rootGetFaultStore) Get(id string) (beads.Bead, error) {
+	if id == "root-a" {
+		return beads.Bead{}, errors.New("injected ancestry read failure")
+	}
+	return s.Store.Get(id)
+}
+
+func TestHookRootDomainReadFailures(t *testing.T) {
+	for _, tier := range []string{"fresh", "ready", "existing"} {
+		for _, fault := range []string{"input before claim", "input before delivery", "ancestry before claim", "ancestry before delivery", "reservation ancestry"} {
+			t.Run(tier+"/"+fault, func(t *testing.T) {
+				step := scopedHookBead("step-a", "root-a", "open", "")
+				if tier != "fresh" {
+					step.Assignee = "seat"
+				}
+				if tier == "existing" {
+					step.Status = "in_progress"
+				}
+				opts, ops, run, claims := scopedHookFixture(t, "open", []beads.Bead{step})
+				store := ops.WorkflowStore(context.Background(), "/rig", nil, "", "")
+				opts.Env = []string{"GC_SESSION_ID=test-session"}
+				opts.StartedFence = hookStartedFence{Token: "test-token"}
+				ops.DrainPending = func(string) (bool, error) { return false, nil }
+				ops.ResolveSessionWorkDir = func(string) string { return "" }
+				ops.ResolveWorkBranch = func(hookClaimWorkTree) string { return "" }
+				afterClaim := false
+				claim := ops.Claim
+				ops.Claim = func(ctx context.Context, dir string, env []string, id, actor string) (beads.Bead, bool, error) {
+					b, ok, err := claim(ctx, dir, env, id, actor)
+					afterClaim = ok && err == nil
+					return b, ok, err
+				}
+				// Adoption has no CAS; its canonical read marks the corresponding
+				// boundary before the workflow/delivery checks.
+				read := ops.ReadWorkMeta
+				stepReads := 0
+				ops.ReadWorkMeta = func(ctx context.Context, dir string, env []string, id, actor string) (beads.Bead, error) {
+					b, err := read(ctx, dir, env, id, actor)
+					if tier == "existing" && id == step.ID {
+						stepReads++
+						afterClaim = stepReads >= 2
+					}
+					return b, err
+				}
+				ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+					if fault == "input before claim" || (fault == "input before delivery" && afterClaim) {
+						return "", false, errors.New("injected input read failure")
+					}
+					return "", false, nil
+				}
+				ops.WorkflowStore = func(_ context.Context, _ string, _ []string, id, actor string) beads.Store {
+					if id != "" && ((fault == "ancestry before claim") || (fault == "ancestry before delivery" && afterClaim) || (fault == "reservation ancestry" && actor == "")) {
+						return rootGetFaultStore{Store: store}
+					}
+					return store
+				}
+				sibling, err := store.Create(scopedHookBead("next-a", "root-a", "open", ""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+					return []beads.Bead{sibling}, nil
+				}
+				sideEffects := []string{}
+				ops.RecordWorkStarted = func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+					sideEffects = append(sideEffects, "work started")
+					return hookStartedRecorded, nil
+				}
+				ops.ForgetWorkStarted = func(string, hookStartedKey) error { return nil }
+				ops.EmitClaimReleased = func(hookClaimReleaseRecord) {}
+				ops.StampWorkMeta = func(context.Context, string, []string, string, string, map[string]string) error {
+					sideEffects = append(sideEffects, "work stamp")
+					return nil
+				}
+				ops.StampSessionClaim = func(string, string) error { sideEffects = append(sideEffects, "session stamp"); return nil }
+				ops.PublishRunMap = func(string, string, ...string) error { sideEffects = append(sideEffects, "run map"); return nil }
+				ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) { sideEffects = append(sideEffects, "step started") }
+				ops.Release = func(_ context.Context, _ string, _ []string, id, actor string) (bool, error) {
+					b, err := store.Get(id)
+					if err != nil || b.Assignee != actor {
+						return false, err
+					}
+					status, owner := "open", ""
+					return true, store.Update(id, beads.UpdateOpts{Status: &status, Assignee: &owner})
+				}
+				var out, errOut bytes.Buffer
+				code := claimHookWorkWithRunner("unused generic query", "/rig", opts.Env, nil, opts, ops, run, nil, &out, &errOut)
+				if code == 0 || out.Len() != 0 || !strings.Contains(errOut.String(), "injected") {
+					t.Fatalf("code=%d out=%s err=%s", code, &out, &errOut)
+				}
+				if len(sideEffects) != 0 {
+					t.Fatalf("execution exposed after failed domain read: %v", sideEffects)
+				}
+				if tier != "existing" && strings.Contains(fault, "before claim") && len(*claims) != 0 {
+					t.Fatalf("claimed before resolving domain state: %v", *claims)
+				}
+				got, err := store.Get(sibling.ID)
+				if err != nil || got.Assignee != "" {
+					t.Fatalf("reserved sibling after unresolved read: %+v err=%v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestHookUnscopedDomainReadFailuresKeepV1(t *testing.T) {
+	for _, fault := range []string{"input", "ancestry"} {
+		t.Run(fault, func(t *testing.T) {
+			step := scopedHookBead("step-a", "root-a", "open", "")
+			opts, ops, _, claims := scopedHookFixture(t, "open", []beads.Bead{step})
+			opts.RootBeadID = ""
+			rows, err := json.Marshal([]beads.Bead{step})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops.Runner = func(string, string) (string, error) { return string(rows), nil }
+			if fault == "input" {
+				ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+					return "", false, errors.New("input read failed")
+				}
+			} else {
+				store := ops.WorkflowStore(context.Background(), "/rig", nil, "", "")
+				ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store {
+					return rootGetFaultStore{Store: store}
+				}
+			}
+			var out, errOut bytes.Buffer
+			code := doHookClaim("query", "/rig", opts, ops, &out, &errOut)
+			var got hookClaimJSONResult
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err, out.String(), errOut.String())
+			}
+			if code != 0 || got.SchemaVersion != "1" || got.Action != "work" || got.BeadID != step.ID || len(*claims) != 1 {
+				t.Fatalf("v1 changed: code=%d result=%+v err=%s claims=%v", code, got, &errOut, *claims)
+			}
+			validateJSONAgainstBuiltinSchema(t, []string{"hook"}, out.Bytes())
+		})
+	}
+}
+
+func TestHookRootOwnedAssignmentStoreFallback(t *testing.T) {
+	for _, status := range []string{"open", "in_progress"} {
+		for _, fault := range []error{beads.ErrNotFound, errors.New("owning store lookup unavailable")} {
+			t.Run(status+"/"+fault.Error(), func(t *testing.T) {
+				opts, ops, run, claims := scopedHookFixture(t, "open", []beads.Bead{scopedHookBead("step-a", "root-a", status, "seat")})
+				read, claim := ops.ReadWorkMeta, ops.Claim
+				ops.ReadWorkMeta = func(ctx context.Context, dir string, env []string, id, actor string) (beads.Bead, error) {
+					if dir == "/first" {
+						if id == "root-a" {
+							return beads.Bead{}, beads.ErrNotFound
+						}
+						return beads.Bead{}, fault
+					}
+					return read(ctx, dir, env, id, actor)
+				}
+				ops.Claim = func(ctx context.Context, dir string, env []string, id, actor string) (beads.Bead, bool, error) {
+					if dir == "/first" {
+						return beads.Bead{}, false, beads.ErrNotFound
+					}
+					return claim(ctx, dir, env, id, actor)
+				}
+				var deliveredFrom string
+				ops.StampWorkMeta = func(_ context.Context, dir string, _ []string, _, _ string, _ map[string]string) error {
+					deliveredFrom = dir
+					return nil
+				}
+				class := newClaimRouteClassStore(t)
+				classCopy := mintClaimRouteBead(t, class, "step-a", map[string]string{"gc.root_bead_id": "root-a"})
+				ops = classRoutedHookClaimOps(ops, newClaimRouteFor(t, class))
+				var out, errOut bytes.Buffer
+				code := claimHookWorkWithRunner("unused generic query", "/first", nil, []hookStore{{dir: "/first"}, {dir: "/second"}}, opts, ops, run, nil, &out, &errOut)
+				unchanged, err := class.Get(classCopy.ID)
+				if err != nil || unchanged.Revision != classCopy.Revision || unchanged.Assignee != classCopy.Assignee {
+					t.Fatalf("fallback changed a class-store copy: %+v err=%v", unchanged, err)
+				}
+				if !errors.Is(fault, beads.ErrNotFound) {
+					if code == 0 || out.Len() != 0 || len(*claims) != 0 || deliveredFrom != "" {
+						t.Fatalf("read failure became work: code=%d out=%s err=%s claims=%v store=%s", code, &out, &errOut, *claims, deliveredFrom)
+					}
+					return
+				}
+				var got hookRootJSONResult
+				if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+					t.Fatal(err, out.String(), errOut.String())
+				}
+				wantClaims := 0
+				if status == "open" {
+					wantClaims = 1
+				}
+				if code != 0 || got.Action != "work" || got.BeadID != "step-a" || len(*claims) != wantClaims || deliveredFrom != "/second" {
+					t.Fatalf("code=%d result=%+v err=%s claims=%v store=%s", code, got, &errOut, *claims, deliveredFrom)
+				}
+			})
+		}
+	}
+}
+
 func TestHookRootReadinessGapKeepsScope(t *testing.T) {
 	rows := []beads.Bead{scopedHookBead("step-a", "root-a", "open", ""), scopedHookBead("step-b", "root-b", "open", "")}
 	opts, ops, _, claims := scopedHookFixture(t, "open", rows)

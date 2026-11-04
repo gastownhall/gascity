@@ -2,6 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "gc hook claim result",
   "description": "Version 1 is generic acquisition; version 2 is explicit workflow-root continuation.",
+  "type": "object",
+  "required": ["ok"],
+  "properties": {
+    "ok": {"const": true}
+  },
   "oneOf": [
     {
       "$ref": "#/$defs/v1"
