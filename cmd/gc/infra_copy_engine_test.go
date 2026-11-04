@@ -195,6 +195,38 @@ func (c engineCity) assertNotLossy(t *testing.T) {
 	if len(left) != len(c.rows)-len(want) {
 		t.Fatalf("the work store holds %d rows after the clear, want its %d work rows", len(left), len(c.rows)-len(want))
 	}
+
+	// Every cross-store edge from a work bead into a moved row is back in
+	// the work store after the clear, unless it was a blocking edge the
+	// binding's copy already satisfies, which the clear releases. A resumed
+	// clear that forgot a row an earlier run removed would leave it out.
+	kept := 0
+	for _, d := range c.deps {
+		if infraIDs[d.IssueID] || !infraIDs[d.DependsOnID] {
+			continue
+		}
+		target := want[d.DependsOnID]
+		released := beads.IsReadyBlockingDependencyType(d.Type) && beads.DependencySatisfied(target.Status, beads.ReadinessWorkOutcome(target.Metadata))
+		deps, err := c.source.DepList(d.IssueID, "down")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held := false
+		for _, got := range deps {
+			if got.DependsOnID == d.DependsOnID && got.Type == d.Type {
+				held = true
+			}
+		}
+		if held == released {
+			t.Fatalf("the cross-store edge %s -[%s]-> %s is held=%v after the clear, want held=%v (released only when the binding satisfies it)", d.IssueID, d.Type, d.DependsOnID, held, !released)
+		}
+		if held {
+			kept++
+		}
+	}
+	if kept == 0 {
+		t.Fatal("the fixture has no kept cross-store edge, so the check above proves nothing")
+	}
 }
 
 func backupEdgeKeys(edges []infraBackupEdge, key func(infraBackupEdge) string) []string {

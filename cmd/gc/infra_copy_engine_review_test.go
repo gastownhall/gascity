@@ -389,20 +389,25 @@ func (s batchRemovingStore) DepRemove(issueID, dependsOnID string) error {
 
 // TestTheClearRemovesAChunksEdgesInOneBatch (review S3): a work store that
 // removes edges in batches has a chunk's edges removed in one call, not one
-// commit per edge; over a wrapper whose store cannot, the clear removes them
-// edge by edge. Either way no work bead's text is rewritten.
+// commit per edge, and so does the policy wrapper every production open
+// returns over one (review X1); over a wrapper whose store cannot, the clear
+// removes them edge by edge. Either way no work bead's text is rewritten.
 func TestTheClearRemovesAChunksEdgesInOneBatch(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		batched bool
-	}{{"batched", true}, {"wrapper over a store without it", false}} {
+		wrapped bool
+	}{{"batched", true, false}, {"policy wrapper over a batching store", true, true}, {"wrapper over a store without it", false, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubInfraControllerPing(t, 0)
 			rewriting := setRewritingStore{beads.NewMemStore()}
 			var batches, single int
-			var source beads.Store = batchRemovingStore{setRewritingStore: rewriting, batches: &batches, single: &single}
-			if !tc.batched {
-				source = wrapStoreWithBeadPolicies(rewriting, nil)
+			var source beads.Store = rewriting
+			if tc.batched {
+				source = batchRemovingStore{setRewritingStore: rewriting, batches: &batches, single: &single}
+			}
+			if tc.wrapped {
+				source = wrapStoreWithBeadPolicies(source, nil)
 			}
 			prev := openInfraMigrationSource
 			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
@@ -645,5 +650,55 @@ func TestTheClearSubBatchesADenseChunksEdges(t *testing.T) {
 	}
 	if want := (edges + infraDetachEdgeBatch - 1) / infraDetachEdgeBatch; batches < want || single != 0 {
 		t.Fatalf("the %d edges went in %d batch(es) and %d single call(s), want at least %d batches and no single calls", edges, batches, single, want)
+	}
+}
+
+// TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved (round 3
+// X7): on a store that deletes in batches, a clear killed after its first
+// chunk resumes from the whole session the note names. The kept edge from a
+// work bead into a row the first chunk removed is re-added only after the
+// delete loop, so a session that dropped that row would resume without it.
+func TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	prevChunk := infraClearChunk
+	infraClearChunk = 1
+	t.Cleanup(func() { infraClearChunk = prevChunk })
+	source := setRewritingStore{beads.NewMemStore()}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	first := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	second := mustCreateInfraBead(t, source, beads.Bead{Title: "graft queued", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on the running graft", Type: "task"})
+	if err := source.DepAdd(work.ID, first.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	prevBefore := infraClearBeforeDelete
+	infraClearBeforeDelete = func(id string) error {
+		if id == second.ID {
+			return errors.New("killed between chunks")
+		}
+		return nil
+	}
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
+	infraClearBeforeDelete = prevBefore
+	if report.Outcome != infraMigrationRetained {
+		t.Fatalf("migrate = %s, want the kill to leave the clear pending: %s", report.Outcome, log.String())
+	}
+	if _, err := source.Get(first.ID); err == nil {
+		t.Fatalf("precondition: %s should go in the first chunk", first.ID)
+	}
+	log.Reset()
+	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("resume = %s: %s", report.Outcome, log.String())
+	}
+	deps, err := source.DepList(work.ID, "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != first.ID || deps[0].Type != "blocks" {
+		t.Fatalf("%s deps after the resumed clear = %+v; the kept edge into %s, removed by the first run, must be back", work.ID, deps, first.ID)
 	}
 }
