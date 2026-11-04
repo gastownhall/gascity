@@ -14,13 +14,14 @@ import (
 )
 
 // execRuntimeIdentityCheck is the migration aid of PAR-EXEC §5 item 8 and
-// §12.2: on a city whose exec session runtime is v2-ready and not pinned to
-// legacy, it reads the runtime's inventory once and judges each running box
-// under an open session row as v2 does (compareIdentity on the batched
+// §12.2: on a city with an exec session runtime whose config resolves to v2
+// as the controller latches it (resolveReconcilerMode: the runtime v2-ready,
+// and session_reconciler a v2 the latch admits, or unset with no default
+// fallback), it reads the runtime's inventory once and judges each running
+// box under an open session row as v2 does (compareIdentity on the batched
 // identity, else on the box's observed identity, as the inventory lane
 // reads it): a box v2 holds, Ownerless or Unknown, instead of adopting it
-// is named. A city with any should stop those sessions before it runs v2 (an
-// unset session_reconciler runs v2 on the next start).
+// is named. A city with any should stop those sessions before it runs v2.
 type execRuntimeIdentityCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -64,15 +65,17 @@ func (*execRuntimeIdentityCheck) Fix(_ *doctor.CheckContext) error { return nil 
 // Run implements doctor.Check.
 func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	name := v2SessionRuntimeName(c.cfg, reconcilerModeLookupEnv)
-	script, ok := execRuntimeScript(c.cfg, name)
-	if !ok {
+	if _, ok := execRuntimeScript(c.cfg, name); !ok {
 		return okCheck(c.Name(), "the session runtime is not an exec runtime")
 	}
-	if mode, _, known := c.cfg.Daemon.SessionReconcilerMode(); known && mode == config.SessionReconcilerLegacy {
-		return okCheck(c.Name(), "session_reconciler pins legacy: v2 does not run on this city")
-	}
-	if !execReadiness(script, c.cfg.EffectiveCityName(), c.cityPath).ready() {
-		return okCheck(c.Name(), fmt.Sprintf("exec session runtime %q is not v2-ready: v2 does not run on it", name))
+	// The latch's own resolution, which reads the runtime's admission
+	// handshake: a legacy pin, a default fallback and a refused v2 run
+	// legacy or nothing, so v2 holds no box.
+	switch res, err := resolveReconcilerMode(c.cfg, c.cityPath, reconcilerModeLookupEnv); {
+	case err != nil:
+		return okCheck(c.Name(), "v2 does not run on this city: "+err.Error())
+	case res.Mode != reconcilerV2:
+		return okCheck(c.Name(), "v2 does not run on this city: session reconciler: "+res.String())
 	}
 	sp, err := c.provider()
 	if err != nil {
@@ -136,7 +139,7 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	}
 	return warnCheck(c.Name(),
 		fmt.Sprintf("%d running box(es) under open session rows v2 would hold: %d whose identity is unknown, %d Ownerless%s", len(unknown)+len(ownerless), len(unknown), len(ownerless), notCheckedNote(len(notChecked))),
-		"stop those sessions before the city runs v2 (an unset session_reconciler runs v2 on the next start), or make the script report their identity (docs/reference/exec-session-provider.md, observe.v1 item 4)",
+		"stop those sessions before the city runs v2 (its config resolves to v2), or make the script report their identity (docs/reference/exec-session-provider.md, observe.v1 item 4)",
 		details)
 }
 

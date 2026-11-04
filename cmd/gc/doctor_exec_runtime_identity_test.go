@@ -18,8 +18,9 @@ import (
 // when that is null, its observed one, and a box v2 holds (Unknown,
 // Ownerless) is named; a Current box (the row's token, with or without a
 // session id, batched or observed) and another row's box (Foreign) are not;
-// and a city on another runtime, an exec runtime that is not v2-ready, or a
-// city pinned to legacy is not checked.
+// and a city whose config does not resolve to v2 is not checked: another
+// runtime, an exec runtime that is not v2-ready, a legacy pin, an unset key
+// that falls back to legacy, or an explicit v2 the latch refuses.
 func TestExecRuntimeIdentityCheckJudgesBoxesAsV2Does(t *testing.T) {
 	obj := func(id string) string { return `"object":{"id":"` + id + `","created":"t"}` }
 	inventory := `echo '{"complete":true,"sessions":[` +
@@ -49,8 +50,13 @@ esac
 		poolRow("gc-5", "worker", 5, "active", "instance_token", "tok-5"),
 		poolRow("gc-6", "worker", 6, "active", "instance_token", "tok-6"),
 	)
-	check := func(provider, reconciler string) *doctor.CheckResult {
-		cfg := &config.City{Session: config.SessionConfig{Provider: provider}, Daemon: config.DaemonConfig{SessionReconciler: reconciler}}
+	check := func(provider, reconciler string, mutate func(*config.City)) *doctor.CheckResult {
+		cfg := v2DefaultCity(func(c *config.City) {
+			c.Session.Provider, c.Daemon.SessionReconciler = provider, reconciler
+			if mutate != nil {
+				mutate(c)
+			}
+		})
 		c := newExecRuntimeIdentityCheck(cfg, t.TempDir(), nil, nil)
 		c.openLegs = func() []v2SessionLeg { return []v2SessionLeg{{ref: "city", store: rows}} }
 		c.provider = func() (runtime.Provider, error) {
@@ -58,7 +64,7 @@ esac
 		}
 		return c.Run(&doctor.CheckContext{})
 	}
-	r := check("exec:"+ready, "")
+	r := check("exec:"+ready, "", nil)
 	details := strings.Join(r.Details, "\n")
 	if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "3 running box(es)") ||
 		!strings.Contains(details, "identity unknown: s-gc-2 (row gc-2)") || !strings.Contains(details, "identity unknown: s-gc-4 (row gc-4)") ||
@@ -75,9 +81,20 @@ esac
 	}
 	gapped := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":["observe.v1"]}'; exit 0; }; exit 2
 `)
-	for _, c := range []struct{ provider, reconciler string }{{"tmux", ""}, {"exec:" + gapped, ""}, {"exec:" + ready, "legacy"}} {
-		if r := check(c.provider, c.reconciler); r.Status != doctor.StatusOK {
-			t.Errorf("%s (session_reconciler %q): %v %q, want OK (v2 does not run on it)", c.provider, c.reconciler, r.Status, r.Message)
+	dependsOn := func(c *config.City) { c.Agents = []config.Agent{{Name: "worker", DependsOn: []string{"db"}}} }
+	for _, c := range []struct {
+		name, provider, reconciler string
+		mutate                     func(*config.City)
+		why                        string // in the message: why v2 does not run
+	}{
+		{"another runtime", "tmux", "", nil, "not an exec runtime"},
+		{"not v2-ready", "exec:" + gapped, "", nil, "legacy (default fallback"},
+		{"pinned legacy", "exec:" + ready, "legacy", nil, "legacy (set by [daemon] session_reconciler)"},
+		{"unset key, default fallback", "exec:" + ready, "", dependsOn, "legacy (default fallback"},
+		{"explicit v2 the latch refuses", "exec:" + ready, "v2", dependsOn, "is refused"},
+	} {
+		if r := check(c.provider, c.reconciler, c.mutate); r.Status != doctor.StatusOK || !strings.Contains(r.Message, c.why) {
+			t.Errorf("%s: %v %q, want OK naming %q (v2 does not run on it)", c.name, r.Status, r.Message, c.why)
 		}
 	}
 }
@@ -127,6 +144,12 @@ esac
 	return script, func() []v2SessionLeg { return []v2SessionLeg{{ref: "city", store: store}} }
 }
 
+// execIdentityCity is a city on script whose unset session_reconciler resolves
+// to v2, so the identity check runs.
+func execIdentityCity(script string) *config.City {
+	return v2DefaultCity(func(c *config.City) { c.Session.Provider = "exec:" + script })
+}
+
 // Kills (review SA8) an identity check that reads the first leg with an
 // inventory: under a composite whose ACP leg comes first, the exec leg's
 // inventory is the one judged (s-gc-1 Current, s-gc-2 Unknown), not the ACP
@@ -135,7 +158,7 @@ func TestExecRuntimeIdentityCheckReadsTheExecLeg(t *testing.T) {
 	script, legs := identityFixture(t)
 	execLeg := sessionexec.NewSeamBacked(script)
 	sp := composite{Provider: execLeg, backends: []runtime.Backend{{Label: "acp", Provider: acpInventoryLeg{Provider: runtime.NewFake()}}, {Label: "default", Provider: execLeg}}}
-	c := newExecRuntimeIdentityCheck(&config.City{Session: config.SessionConfig{Provider: "exec:" + script}}, t.TempDir(), sp, nil)
+	c := newExecRuntimeIdentityCheck(execIdentityCity(script), t.TempDir(), sp, nil)
 	c.openLegs = legs
 	r := c.Run(&doctor.CheckContext{})
 	details := strings.Join(r.Details, "\n")
@@ -153,7 +176,7 @@ func TestExecRuntimeIdentityCheckBoundsItsObserves(t *testing.T) {
 	execIdentityObserveBudget = 0
 	script, legs := identityFixture(t)
 	start := time.Now()
-	c := newExecRuntimeIdentityCheck(&config.City{Session: config.SessionConfig{Provider: "exec:" + script}}, t.TempDir(), sessionexec.NewSeamBacked(script), nil)
+	c := newExecRuntimeIdentityCheck(execIdentityCity(script), t.TempDir(), sessionexec.NewSeamBacked(script), nil)
 	c.openLegs = legs
 	r := c.Run(&doctor.CheckContext{})
 	details := strings.Join(r.Details, "\n")
@@ -166,7 +189,7 @@ func TestExecRuntimeIdentityCheckBoundsItsObserves(t *testing.T) {
 		t.Fatalf("the check took %s with its budget spent", time.Since(start))
 	}
 	// Without a provider, nothing is checked, and doctor says why.
-	none := newExecRuntimeIdentityCheck(&config.City{Session: config.SessionConfig{Provider: "exec:" + script}}, t.TempDir(), nil, errSimBackendDown)
+	none := newExecRuntimeIdentityCheck(execIdentityCity(script), t.TempDir(), nil, errSimBackendDown)
 	if r := none.Run(&doctor.CheckContext{}); r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "not checked") {
 		t.Fatalf("no provider: %v %q, want not checked", r.Status, r.Message)
 	}

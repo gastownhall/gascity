@@ -348,6 +348,49 @@ func TestBootRunsC08AfterC07BeforeTheEnv(t *testing.T) {
 	}
 }
 
+// Kills (review: C0.8's production wiring) a city runtime whose planner host
+// drops C0.8 or reads another provider: booted through the city runtime's own
+// host (attachTestV2 binds newPlannerHost), a provider the city built whose
+// handshake lacks report-attachment refuses the boot with the boot-refused
+// alert, before the env is published or the planner starts, nothing is
+// written, the running session is not stopped, and the boot state reads
+// runtime.
+func TestBootRunsC08OnTheCityRuntimesProvider(t *testing.T) {
+	cr, store := newPhaseFixtureRuntime(t, false, true)
+	stderr := &lockedBuffer{}
+	cr.stderr = stderr
+	cr.sp = readinessLeaf{Provider: cr.sp, missing: []string{runtime.ProtocolCapabilityReportAttachment}}
+	rt := attachTestV2(t, cr)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if cr.bootV2(ctx) {
+		t.Fatal("bootV2 reached ready on a provider whose handshake lacks report-attachment")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("bootV2 waited out the deadline instead of refusing at C0.8")
+	}
+	if got := stderr.String(); !strings.Contains(got, "(C0.8)") || !strings.Contains(got, runtime.ProtocolCapabilityReportAttachment) || !strings.Contains(got, "alert "+alertBootRefused) {
+		t.Errorf("stderr = %q, want C0.8's refusal naming %s and the %s alert", got, runtime.ProtocolCapabilityReportAttachment, alertBootRefused)
+	}
+	if got := rt.bootState(); got != plannerBootRuntime {
+		t.Errorf("boot state %q after C0.8 refused, want %q", got, plannerBootRuntime)
+	}
+	rt.mu.Lock()
+	started := rt.started
+	rt.mu.Unlock()
+	if started || rt.env.Load() != nil {
+		t.Errorf("started=%v env=%v: C0.8's refusal published the env or started the planner", started, rt.env.Load())
+	}
+	for _, op := range store.recorded() {
+		if !strings.HasPrefix(op, "List") && !strings.HasPrefix(op, "Get") {
+			t.Errorf("store op %q during a refused boot", op)
+		}
+	}
+	if !cr.sp.IsRunning("worker") {
+		t.Error("a refused boot stopped the running session")
+	}
+}
+
 // Kills a swap that trusts the latch's probe over the provider it builds
 // (review S-4): under v2, a swap onto a provider whose own handshake has a
 // gap, or cannot be read, is refused before anything pauses.

@@ -665,8 +665,9 @@ runtime, naming what its handshake lacks. Admission asks the script's
 `protocol` once per version of the file (its path, size, modification time
 and inode), within 10 seconds, and remembers the answer; at boot the
 controller checks that the provider it built reads the same. With
-`session_reconciler` unset, a v2-ready script switches the city to v2, and
-the boot log and `gc doctor` say so. `input-fence` is not required, but
+`session_reconciler` unset, a v2-ready script switches the city to v2
+unless the city falls back to legacy for another reason, and the boot log
+and `gc doctor` say which. `input-fence` is not required, but
 without it (with `proc.exec`) input gc fences to one incarnation is refused
 on the box, and `gc doctor` warns. The handshake's `locality` decides
 whether gc's storage verbs treat the runtime as remote (absent: remote).
@@ -858,7 +859,8 @@ the reference implementation.
 Upgrading gc alone changes nothing for a script that does not declare the
 profile: the city stays legacy. Declaring `observe.v1` and
 `report-attachment` makes an unset `session_reconciler` resolve to v2 at the
-next controller start (pin `session_reconciler = "legacy"` to stay). It
+next controller start, unless the city falls back to legacy for another
+reason (pin `session_reconciler = "legacy"` to stay). It
 also changes what the script's legacy city sees: a failed `observe` reads
 unknown rather than not running, listings are attested (so `gc stop` skips
 its per-name sweep), and a declared op's exit 2 is a failure. Before
@@ -915,11 +917,12 @@ live on one host keys that state by host as well, or one host reads the
 other's boxes as dead and removes them.
 
 gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
-the city the provider serves. A script shared by several cities on one
-backend scopes its boxes and listings by them. The one exception is the
-admission probe's `protocol` (see [observe.v1](#observev1-reconciler-v2)):
-it carries the city's name and no path, so a handshake must not depend on
-the path, and should read no state.
+the city the provider serves, the admission probe's `protocol` (see
+[observe.v1](#observev1-reconciler-v2)) included. A script shared by
+several cities on one backend scopes its boxes and listings by them. A
+handshake should still read no state and answer the same for every city:
+`gc start`, the orchestrator and `gc doctor` each probe it in their own
+process and remember the answer per version of the file.
 
 A script runs with gc's own environment. The session's environment arrives
 in the start config's `env` (see [Session environment](#session-environment)).
