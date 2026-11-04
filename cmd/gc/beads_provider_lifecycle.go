@@ -3743,6 +3743,11 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 		if err != nil {
 			return nil, err
 		}
+		// These are scope overrides, not a complete subprocess environment.
+		// Retain the qualified executable path and process context, then drop
+		// ambient city database coordinates before resolving the lifecycle.
+		env = runtimeEnvEntriesToMap(mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), env))
+		applyProviderOwnedDirectLocalEnv(env)
 		projected, err := providerLifecycleProcessEnvFromBase(cityPath, provider, mergeRuntimeEnv(nil, env))
 		if err != nil {
 			return nil, err

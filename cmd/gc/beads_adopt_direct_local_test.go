@@ -403,3 +403,45 @@ func TestAdoptNativeDirectLocalCanonicalManagedAdmissionRequiresValidatedAuthori
 		})
 	}
 }
+
+// The native provider script must retain the qualified executable search path
+// while its adopted store remains independent of ambient city coordinates.
+func TestAdoptNativeDirectLocalLifecycleRetainsQualifiedProcessEnvironment(t *testing.T) {
+	city, rig, before := nativeDirectAdoptFixture(t)
+	oldResolve := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/qualified/gc/bin/gc", nil }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
+	t.Setenv("GC_BIN", "/wrong/gc")
+	processPath := filepath.Join(t.TempDir(), "qualified-tools") + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", processPath)
+	t.Setenv("GC_DOLT_HOST", "wrong-city.example")
+	t.Setenv("GC_DOLT_PORT", "43361")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "wrong-city.example")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "43361")
+	t.Setenv("GC_DOLT_DATA_DIR", "/wrong/city")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	provider := "exec:" + gcBeadsBdScriptPath(city)
+	entries, err := providerLifecycleProcessEnvForScopeInitWithError(city, rig, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := runtimeEnvEntriesToMap(entries)
+	if env["PATH"] != processPath {
+		t.Fatalf("provider lost qualified executable PATH: %q", env["PATH"])
+	}
+	if env["HOME"] != os.Getenv("HOME") {
+		t.Fatal("provider lost process home context")
+	}
+	if env["BEADS_DIR"] != filepath.Join(rig, ".beads") {
+		t.Fatal("provider changed native scope")
+	}
+	if env["GC_BIN"] != "/qualified/gc/bin/gc" {
+		t.Fatalf("provider lost verified invoking GC binary pin: %q", env["GC_BIN"])
+	}
+	for _, key := range append(append([]string{}, projectedDoltEnvKeys...), "GC_DOLT_DATA_DIR", "BEADS_DOLT_AUTO_START") {
+		if env[key] != "" {
+			t.Fatalf("process merge reintroduced foreign city coordinate %s=%q", key, env[key])
+		}
+	}
+	assertNativeDirectPreserved(t, rig, before)
+}
