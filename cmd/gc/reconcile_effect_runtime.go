@@ -44,9 +44,9 @@ type txRuntime struct {
 // Alive reports a runtime proven alive, its identity read on that object.
 func (r *txRuntime) Alive() bool { return r.Class == rtAlive && r.Same }
 
-// readRuntime reads name fresh on sp since since, with processNames (the
-// row's template's, processNamesFor), the bracketing read at now(); or
-// refuses with a cause when no backend resolves the name, or it is blank.
+// readRuntime brackets the runtime identity with fresh presence reads. The
+// first uses the template hints; the second uses the names recorded when the
+// runtime started, which remain valid across configuration reloads.
 func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time, now func() time.Time) (*txRuntime, string) {
 	name = strings.TrimSpace(name)
 	leaf, _, known := runtime.ResolveBackend(sp, name)
@@ -68,7 +68,7 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 		return rt, ""
 	}
 	rt.Identity = readRuntimeIdentity(ctx, leaf, name)
-	again, ok := freshRead(ctx, leaf, name, processNames, now())
+	again, ok := freshRead(ctx, leaf, name, rt.Identity.ProcessNames, now())
 	if rt.Again = again; !ok {
 		return rt, ""
 	}
@@ -82,7 +82,11 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 			rt.Class = rtCorpse
 		}
 	case !again.Alive:
-		rt.Class = rtZombie
+		// A missing launch identity cannot prove that the current template
+		// describes this process. Do not recycle on an uncertain probe.
+		if rt.Identity.Known && len(rt.Identity.ProcessNames) > 0 {
+			rt.Class = rtZombie
+		}
 	default:
 		rt.Class = rtAlive
 	}
