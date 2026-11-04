@@ -2713,6 +2713,8 @@ go_variant_test(
     size = "medium",
     args = ["-test.run=^(TestSim[A-Za-z0-9]*|TestI10V510mExemptions|TestDormantChangeFollowsRule2|TestCloseEndsSuspend|TestNamedPaneCountsAnOwnerlessRuntime|TestQuarantinedCommitBoundCountsOnlyV2sTime|TestQuietBoundFollowsRowTimersArmedInQuiescence|TestQuarantineAloneIsTheOnlyHold|TestStartRefusesARowClosedBeforeItsPreWake|TestFailedCreateCloseRetiresHolds|TestRollbackScreenParkRewritesHolds)$$"],
     env = {"GC_V2_SIM_LEAF": "exec"},
+    # Keep each corpus result's diagnostics within remote stdout upload limits.
+    shard_count = 4,
     test = ":gc_test",
 )
 
