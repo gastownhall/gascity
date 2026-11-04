@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1061,8 +1062,18 @@ func (c *client) startServer() error {
 		return fmt.Errorf("herdr server: open devnull: %w", err)
 	}
 	defer func() { _ = devnull.Close() }()
+	// herdr's stderr is where it says why it cannot start (a socket path over
+	// sun_path's limit, a bind failure), so keep it beside the session socket
+	// for the readiness timeout below to quote. Best effort: a log that cannot
+	// be opened must never stop the server launching.
+	logPath := filepath.Join(filepath.Dir(c.socketPath()), serverLogName)
+	stderr := devnull
+	if logFile, err := openServerLog(logPath); err == nil {
+		defer func() { _ = logFile.Close() }()
+		stderr = logFile
+	}
 	cmd := exec.Command(c.bin, "--session", c.session, "server")
-	cmd.Stdout, cmd.Stderr = devnull, devnull
+	cmd.Stdout, cmd.Stderr = devnull, stderr
 	// Launch the shared daemon in the city root, not the inherited cwd (which is
 	// often $HOME when gc is invoked from a login shell). Sessions whose --cwd is
 	// empty/nonexistent fall back to this server cwd, so a $HOME-rooted server
@@ -1083,7 +1094,51 @@ func (c *client) startServer() error {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+	if tail := serverLogTail(logPath); tail != "" {
+		return fmt.Errorf("herdr server for session %q did not become ready on %q; herdr's stderr (%s):\n%s", c.session, c.socketPath(), logPath, tail)
+	}
 	return fmt.Errorf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
+}
+
+// serverLogName is the file, beside the session socket, that holds the stderr
+// of the herdr server startServer last launched.
+const serverLogName = "server.log"
+
+// serverLogTailBytes bounds how much of the server log the readiness timeout
+// quotes. The diagnostics seen so far are under 200 bytes.
+const serverLogTailBytes = 4096
+
+// openServerLog opens path for a fresh launch's stderr, creating its directory
+// (herdr may not have yet) and truncating what an earlier launch left: that has
+// no diagnostic value now, and truncating bounds the file across restarts.
+func openServerLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+}
+
+// serverLogTail returns the last serverLogTailBytes of the log at path, or ""
+// when it is missing, unreadable or empty. It reports no error on purpose: it
+// only enriches an error startServer is already returning, and a failure to
+// read diagnostics must neither replace nor mask that one.
+func serverLogTail(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	off := max(fi.Size()-serverLogTailBytes, 0)
+	buf := make([]byte, fi.Size()-off)
+	n, err := f.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	return strings.TrimSpace(string(buf[:n]))
 }
 
 // relativeSocketError is startServer's refusal of the relative socket path
