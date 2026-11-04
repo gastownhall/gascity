@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -27,19 +28,26 @@ type execRuntimeIdentityCheck struct {
 	provider func() (runtime.Provider, error)
 }
 
-func newExecRuntimeIdentityCheck(cfg *config.City, cityPath string) *execRuntimeIdentityCheck {
+// newExecRuntimeIdentityCheck reads the session provider doctor already
+// built for its session checks (sp, or spErr for why there is none).
+func newExecRuntimeIdentityCheck(cfg *config.City, cityPath string, sp runtime.Provider, spErr error) *execRuntimeIdentityCheck {
 	return &execRuntimeIdentityCheck{
 		cfg: cfg, cityPath: cityPath,
 		openLegs: func() []v2SessionLeg { return openV2SessionLegs(cityPath, cfg) },
 		provider: func() (runtime.Provider, error) {
-			sp, err := newSessionProviderForCity(cfg, cityPath)
-			if err != nil {
-				return nil, fmt.Errorf("building the session provider: %w", err)
+			if sp == nil {
+				return nil, spErr
 			}
 			return sp, nil
 		},
 	}
 }
+
+// execIdentityObserveBudget bounds the boxes the check observes one by one,
+// those whose batched identity is null: each observe can take seconds, so
+// once the budget is spent the rest are reported not checked. A variable so
+// a test can spend it.
+var execIdentityObserveBudget = 20 * time.Second
 
 // Name implements doctor.Check.
 func (*execRuntimeIdentityCheck) Name() string { return "exec-runtime-identity" }
@@ -75,7 +83,8 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 		return warnCheck(c.Name(), fmt.Sprintf("exec session runtime %q: not checked: %v", name, err), "", nil)
 	}
 	rows, unread := c.openRows()
-	var unknown, ownerless []string
+	var unknown, ownerless, notChecked []string
+	start := time.Now()
 	for _, row := range rows {
 		sessName := strings.TrimSpace(row.SessionName)
 		e, listed := entries[sessName]
@@ -84,6 +93,10 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 		}
 		id := identityOfEnv(e.Identity)
 		if !e.IdentityKnown {
+			if time.Since(start) >= execIdentityObserveBudget {
+				notChecked = append(notChecked, fmt.Sprintf("%s (row %s)", row.SessionName, row.ID))
+				continue
+			}
 			id = readIdentityEnv(leaf, sessName) // the observed identity, as the lane reads it
 		}
 		switch compareIdentity(row, id) {
@@ -102,17 +115,27 @@ func (c *execRuntimeIdentityCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	for _, n := range ownerless {
 		details = append(details, "Ownerless: "+n)
 	}
+	sort.Strings(notChecked)
+	for _, n := range notChecked {
+		details = append(details, "not checked (observe budget spent): "+n)
+	}
 	if len(unknown)+len(ownerless) == 0 {
 		msg := fmt.Sprintf("v2 would hold no running box under an open session row (%d row(s))", len(rows))
+		if len(notChecked) > 0 {
+			msg = fmt.Sprintf("v2 would hold none of the boxes checked; %d box(es) not checked: the observe budget (%s) was spent", len(notChecked), execIdentityObserveBudget)
+		}
 		if len(unread) > 0 {
-			return warnCheck(c.Name(), msg+"; some session legs were not read", "", details)
+			msg += "; some session legs were not read"
+		}
+		if len(unread)+len(notChecked) > 0 {
+			return warnCheck(c.Name(), msg, "", details)
 		}
 		r := okCheck(c.Name(), msg)
 		r.Details = details
 		return r
 	}
 	return warnCheck(c.Name(),
-		fmt.Sprintf("%d running box(es) under open session rows v2 would hold: %d whose identity is unknown, %d Ownerless", len(unknown)+len(ownerless), len(unknown), len(ownerless)),
+		fmt.Sprintf("%d running box(es) under open session rows v2 would hold: %d whose identity is unknown, %d Ownerless%s", len(unknown)+len(ownerless), len(unknown), len(ownerless), notCheckedNote(len(notChecked))),
 		"stop those sessions before the city runs v2 (an unset session_reconciler runs v2 on the next start), or make the script report their identity (docs/reference/exec-session-provider.md, observe.v1 item 4)",
 		details)
 }
@@ -163,4 +186,12 @@ func (c *execRuntimeIdentityCheck) openRows() ([]session.Info, []string) {
 		}
 	}
 	return rows, unread
+}
+
+// notCheckedNote is the check message's note on boxes left unchecked.
+func notCheckedNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d more not checked (the observe budget was spent)", n)
 }
