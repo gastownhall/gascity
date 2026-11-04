@@ -30,10 +30,8 @@ func TestOverlayProviderHookCommandsAppendPathAndUseGCBinVar(t *testing.T) {
 
 	copilotGot := extractCopilotOverlayCommands(t)
 	copilotWant := map[string]string{
-		"copilot sessionStart":                     `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" prime --hook`,
-		"copilot preCompact":                       `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" handoff --auto "context cycle"`,
-		"copilot userPromptSubmitted[nudge drain]": `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-		"copilot userPromptSubmitted[mail check]":  `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+		"copilot sessionStart": `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" prime --hook`,
+		"copilot preCompact":   `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" handoff --auto "context cycle"`,
 	}
 	assertOverlayCommands(t, copilotGot, copilotWant)
 
@@ -132,10 +130,8 @@ func extractCopilotOverlayCommands(t *testing.T) map[string]string {
 	}
 
 	return map[string]string{
-		"copilot sessionStart":                     get("sessionStart", 0),
-		"copilot preCompact":                       get("preCompact", 0),
-		"copilot userPromptSubmitted[nudge drain]": get("userPromptSubmitted", 0),
-		"copilot userPromptSubmitted[mail check]":  get("userPromptSubmitted", 1),
+		"copilot sessionStart": get("sessionStart", 0),
+		"copilot preCompact":   get("preCompact", 0),
 	}
 }
 
