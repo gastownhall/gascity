@@ -1,0 +1,88 @@
+package beadstest
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
+
+// identityFixture is TestScanStoreIdentity's input package: every shape the
+// store-identity guard must flag, and the ones it must not. It is written to a
+// temporary directory rather than kept as a source file, so no build compiles
+// (or lints) its deliberate raw stores.
+const identityFixture = `package fixture
+
+import (
+	b "github.com/gastownhall/gascity/internal/beads"
+)
+
+type holder struct {
+	store  b.Store
+	graph  b.GraphStore
+	legs   map[string]b.Store
+	opener func() b.Store
+	name   string
+}
+
+type state interface {
+	CityBeadStore() b.Store
+	GraphBeadStore() b.GraphStore
+	BeadStores() map[string]b.Store
+}
+
+func cityOf(st state) b.Store { return st.CityBeadStore() }
+
+// flagged holds 7 identity comparisons and 1 store-keyed map.
+func flagged(st state, h holder, w b.WorkStore, m b.MoleculeTarget, n b.MoleculeTarget) {
+	graph := st.GraphBeadStore().Store
+	_ = graph == st.CityBeadStore()  // 1: unwrap vs accessor
+	_ = h.store != cityOf(st)        // 2: field vs package function
+	_ = w == b.WorkStore{Store: nil} // 3: a non-empty handle literal
+	for _, leg := range st.BeadStores() {
+		_ = leg == h.graph // 4: range value vs handle field
+	}
+	_ = h.legs["x"] == h.opener() // 5: map index vs func field
+	_ = m != n                    // 6: molecule targets
+	other, ok := h.legs["y"]
+	_ = ok && other == w.Store // 7: comma-ok index vs handle's store
+	_ = map[b.Store]bool{}     // map-key
+}
+
+// clean compares nothing by store identity.
+func clean(st state, h holder, w b.WorkStore) {
+	_ = h.store == nil
+	_ = w == (b.WorkStore{})
+	_ = h.name == "x"
+	_ = b.SameStore(h.store, st.CityBeadStore())
+	_ = map[string]b.Store{}
+}
+`
+
+// TestScanStoreIdentity pins what the store-identity guard counts, over a
+// fixture holding each shape: == and != whose operand is a store, a class
+// handle or a molecule target, typed from parameters, fields, range values,
+// map indexes, accessors, package functions and function-valued fields; and
+// a map keyed by a store. Nil and zero-handle checks, SameStore and maps
+// whose values are stores are not identity.
+func TestScanStoreIdentity(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(identityFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ScanStoreIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for k, lines := range got {
+		counts[k] = len(lines)
+	}
+	want := map[string]int{
+		"fixture.go flagged eq":      7,
+		"fixture.go flagged map-key": 1,
+	}
+	if !reflect.DeepEqual(counts, want) {
+		t.Errorf("ScanStoreIdentity = %v (lines %v), want %v", counts, got, want)
+	}
+}
