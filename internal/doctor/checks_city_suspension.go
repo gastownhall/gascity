@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -61,9 +62,17 @@ func (c *CitySuspensionCheck) Run(ctx *CheckContext) *CheckResult {
 		return r
 	}
 
+	if os.Getenv("GC_SUSPENDED") == "1" {
+		r.Status = StatusWarning
+		r.Severity = SeverityAdvisory
+		r.Message = "city is suspended via GC_SUSPENDED=1 in this environment; agent work is intentionally paused regardless of infrastructure health. Unset GC_SUSPENDED to resume, or run `gc status` to inspect."
+		return r
+	}
+
 	st, err := suspensionstate.Load(fsys.OSFS{}, ctx.CityPath)
 	if err != nil {
 		r.Status = StatusWarning
+		r.Severity = SeverityAdvisory
 		r.Message = fmt.Sprintf("city suspension state is unknown: failed to read suspension-state.json: %v", err)
 		return r
 	}
@@ -80,9 +89,9 @@ func (c *CitySuspensionCheck) Run(ctx *CheckContext) *CheckResult {
 	r.Status = StatusWarning
 	r.Severity = SeverityAdvisory
 	if hasOverride {
-		r.Message = "city is suspended via an explicit runtime override (gc suspend); agent work is intentionally paused even though infrastructure is healthy. Run `gc resume` to resume it, or `gc status` to inspect."
+		r.Message = "city is suspended via an explicit runtime override (gc suspend); agent work is intentionally paused regardless of infrastructure health. Run `gc resume` to resume it, or `gc status` to inspect."
 	} else {
-		r.Message = "city is suspended via the configured suspended_on_start default in city.toml; agent work is intentionally paused even though infrastructure is healthy. Run `gc resume` to resume for now, edit suspended_on_start to change the default, or `gc status` to inspect."
+		r.Message = "city is suspended via the configured suspended_on_start default in city.toml; agent work is intentionally paused regardless of infrastructure health. Run `gc resume` to resume for now, edit suspended_on_start to change the default, or `gc status` to inspect."
 	}
 	return r
 }

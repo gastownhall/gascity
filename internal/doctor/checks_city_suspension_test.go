@@ -22,6 +22,7 @@ func writeSuspensionStateFile(t *testing.T, cityPath, body string) {
 }
 
 func TestCitySuspensionCheck_OK_NotSuspended(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
 	dir := t.TempDir()
 	cfg := &config.City{Workspace: config.Workspace{SuspendedOnStart: false}}
 	r := NewCitySuspensionCheck(cfg).Run(&CheckContext{CityPath: dir})
@@ -72,6 +73,7 @@ func TestCitySuspensionCheck_Warns_ExplicitOverride(t *testing.T) {
 }
 
 func TestCitySuspensionCheck_ExplicitResumeOverridesConfiguredDefault(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
 	dir := t.TempDir()
 	writeSuspensionStateFile(t, dir, `{"city":{"suspended":false}}`)
 	// Configured default says suspended, but an explicit resume override
@@ -80,6 +82,24 @@ func TestCitySuspensionCheck_ExplicitResumeOverridesConfiguredDefault(t *testing
 	r := NewCitySuspensionCheck(cfg).Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %v, want StatusOK (explicit resume should win); message: %s", r.Status, r.Message)
+	}
+}
+
+func TestCitySuspensionCheck_Warns_GCSuspendedEnv(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "1")
+	dir := t.TempDir()
+	// No state file and a not-suspended default: the env override alone
+	// suspends the city, matching effectiveCitySuspended in cmd/gc.
+	cfg := &config.City{Workspace: config.Workspace{SuspendedOnStart: false}}
+	r := NewCitySuspensionCheck(cfg).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message: %s", r.Status, r.Message)
+	}
+	if r.Severity != SeverityAdvisory {
+		t.Errorf("severity = %v, want SeverityAdvisory", r.Severity)
+	}
+	if !strings.Contains(r.Message, "GC_SUSPENDED") {
+		t.Errorf("message should name the GC_SUSPENDED override, got: %q", r.Message)
 	}
 }
 
@@ -93,6 +113,9 @@ func TestCitySuspensionCheck_UnreadableState_ReportsUnknown(t *testing.T) {
 	r := NewCitySuspensionCheck(cfg).Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %v, want StatusWarning for an unreadable state file", r.Status)
+	}
+	if r.Severity != SeverityAdvisory {
+		t.Errorf("severity = %v, want SeverityAdvisory", r.Severity)
 	}
 	if !strings.Contains(strings.ToLower(r.Message), "unknown") {
 		t.Errorf("message should say the suspension state is unknown, got: %q", r.Message)
