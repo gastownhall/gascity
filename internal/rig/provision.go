@@ -478,6 +478,7 @@ func buildNextRigConfig(deps Deps, req ProvisionRequest, rigPath, resolvedDefaul
 			Prefix:           storedPrefix,
 			DefaultBranch:    resolvedDefaultBranch,
 			SuspendedOnStart: req.StartSuspended,
+			FormulasDir:      strings.TrimSpace(cfg.Defaults.Rig.FormulasDir),
 		}
 		switch {
 		case len(explicitRigImports) > 0:

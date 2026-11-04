@@ -2341,6 +2341,10 @@
     },
     "PackRigDefaults": {
       "properties": {
+        "formulas_dir": {
+          "type": "string",
+          "description": "FormulasDir seeds the rig-local formulas_dir of every rig added by\n`gc rig add`. Rigs already in city.toml are not changed; an explicit\nformulas_dir on a [[rigs]] entry always wins. Relative paths resolve\nagainst the city directory."
+        },
         "imports": {
           "additionalProperties": {
             "$ref": "#/$defs/Import"

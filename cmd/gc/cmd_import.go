@@ -82,7 +82,8 @@ type cityPackDefaults struct {
 }
 
 type cityPackRigDefaults struct {
-	Imports map[string]config.Import `toml:"imports,omitempty"`
+	FormulasDir string                   `toml:"formulas_dir,omitempty"`
+	Imports     map[string]config.Import `toml:"imports,omitempty"`
 }
 
 type cityPackManifestBody struct {

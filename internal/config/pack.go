@@ -84,6 +84,11 @@ type PackDefaults struct {
 // to rigs created from this pack.
 type PackRigDefaults struct {
 	Imports map[string]Import `toml:"imports,omitempty"`
+	// FormulasDir seeds the rig-local formulas_dir of every rig added by
+	// `gc rig add`. Rigs already in city.toml are not changed; an explicit
+	// formulas_dir on a [[rigs]] entry always wins. Relative paths resolve
+	// against the city directory.
+	FormulasDir string `toml:"formulas_dir,omitempty"`
 }
 
 // ExpandPacks resolves pack references on all rigs. For each rig

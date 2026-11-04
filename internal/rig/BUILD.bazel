@@ -34,6 +34,7 @@ go_test(
     name = "rig_test",
     srcs = [
         "clone_seam_test.go",
+        "formulas_dir_default_test.go",
         "imports_test.go",
         "include_spec_test.go",
         "path_durability_test.go",

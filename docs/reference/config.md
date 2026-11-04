@@ -675,6 +675,7 @@ PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs crea
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `formulas_dir` | string |  |  | FormulasDir seeds the rig-local formulas_dir of every rig added by `gc rig add`. Rigs already in city.toml are not changed; an explicit formulas_dir on a [[rigs]] entry always wins. Relative paths resolve against the city directory. |
 | `imports` | map[string]Import |  |  |  |
 
 ## Patches
