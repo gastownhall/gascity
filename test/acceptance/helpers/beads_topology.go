@@ -769,7 +769,8 @@ func LegacyInitEnv(env *Env) *Env {
 //
 // It keeps base's bd mode: on an Env that runs the real bd (NewEnv's default)
 // gc runs bdPath itself, ahead of the wrapper; on a wrapped Env
-// (WithWrappedBD, WithHostHome) gc finds the wrapper first.
+// (WithWrappedBD, WithHostHome) gc finds the wrapper first. StartTopology's
+// shapes run the wrapper (topologyRunEnv).
 func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	t.Helper()
 	linkDir := filepath.Join(root, "bin")
@@ -801,23 +802,36 @@ func (r *TopologyRun) NativeLaneEnv() *Env {
 	return r.Env.Clone().With(EnvProxiedNative, "1")
 }
 
-// StartTopology builds one shape: its root, its environment, its upstream if it
-// has one, and the `gc init` that brings the city up. It registers the cleanup
-// that proves nothing survived.
-func StartTopology(t *testing.T, base *Env, topo BeadsTopology, bdPath, doltPath string) *TopologyRun {
+// topologyRunEnv is the environment one topology shape runs under: TopologyEnv
+// on the tool-home wrapper (WithWrappedBD), with the shape's own variables.
+//
+// Every shape is a single-store city, and the matrix's rig add recovers a
+// proved lost backend port only from the dolt logs the wrapper prints after a
+// failed bd init (RigAddRecovery): gc rig add removes the rig's new .beads on
+// the way out, and a real bd prints nothing. A shape that runs a split city
+// needs the real bd (WithRealBD), which gives that recovery up.
+func topologyRunEnv(t *testing.T, base *Env, root string, topo BeadsTopology, bdPath, doltPath string) *Env {
 	t.Helper()
-	root := TempDir(t)
-	env := TopologyEnv(t, base, root, bdPath, doltPath)
+	env := TopologyEnv(t, base, root, bdPath, doltPath).WithWrappedBD()
 	for k, v := range topo.Env {
 		env.With(k, v)
 	}
-
 	if topo.LegacyInit {
 		// The whole shape, not just the legacy init: every scope this shape
 		// creates goes through gc's bd pack against a gc-managed server, and
 		// `gc rig add` runs under the binary being tested. See LegacyInitEnv.
 		env = LegacyInitEnv(env)
 	}
+	return env
+}
+
+// StartTopology builds one shape: its root, its environment, its upstream if it
+// has one, and the `gc init` that brings the city up. It registers the cleanup
+// that proves nothing survived.
+func StartTopology(t *testing.T, base *Env, topo BeadsTopology, bdPath, doltPath string) *TopologyRun {
+	t.Helper()
+	root := TempDir(t)
+	env := topologyRunEnv(t, base, root, topo, bdPath, doltPath)
 
 	run := &TopologyRun{Topology: topo, Env: env, Root: root}
 	if topo.LegacyInit {

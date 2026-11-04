@@ -45,7 +45,7 @@ type Env struct {
 	// realBD is the bd binary gc runs unwrapped (BD_BIN and the lead of PATH),
 	// or "" when gc runs bd through the tool-home wrapper. NewEnv sets it to
 	// the configured bd; WithWrappedBD, WithHostHome and any HOME other than
-	// the isolated one clear it.
+	// the isolated one, or none, clear it.
 	realBD string
 }
 
@@ -314,9 +314,10 @@ func (e *Env) WithHostHome() *Env {
 // user-level state under gc's HOME instead of the tool home. That keeps the
 // operator's home out of reach only because NewEnv isolated gc's HOME and
 // pinned bd's shared-server mode and metrics off, so it panics on an Env whose
-// gc has any other HOME, and leaving that HOME (WithHostHome, With("HOME"))
-// drops back to the wrapper. A failed bd init also no longer prints its dolt
-// logs (ParseBDInitDiagnostics); a test that needs them calls WithWrappedBD.
+// gc has any other HOME, and leaving that HOME (WithHostHome, With("HOME"),
+// Without("HOME")) drops back to the wrapper. A failed bd init also no longer
+// prints its dolt logs (ParseBDInitDiagnostics); a test that needs them calls
+// WithWrappedBD.
 func (e *Env) WithRealBD(bdPath string) *Env {
 	if !filepath.IsAbs(bdPath) {
 		panic(fmt.Sprintf("acceptance: WithRealBD needs an absolute bd path, got %q (gc ignores a relative BD_BIN)", bdPath))
@@ -448,9 +449,14 @@ func IsolatedHome(gcHome string) string {
 	return filepath.Join(gcHome, "home")
 }
 
-// Without removes a variable.
+// Without removes a variable. Removing HOME puts bd back behind the tool-home
+// wrapper (WithWrappedBD), as setting it elsewhere does: an unwrapped bd with
+// no HOME would resolve user-level state from the passwd home.
 func (e *Env) Without(key string) *Env {
 	delete(e.vars, key)
+	if key == "HOME" {
+		e.WithWrappedBD()
+	}
 	return e
 }
 

@@ -1,6 +1,7 @@
 package acceptancehelpers
 
 import (
+	"bytes"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -525,6 +526,7 @@ func TestEnvLeavesTheRealBDWhenGCLeavesTheIsolatedHome(t *testing.T) {
 	for name, apply := range map[string]func(*Env) *Env{
 		"WithHostHome": func(e *Env) *Env { return e.WithHostHome() },
 		"With HOME":    func(e *Env) *Env { return e.With("HOME", t.TempDir()) },
+		"Without HOME": func(e *Env) *Env { return e.Without("HOME") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			hostHomeWithBdSharedServer(t)
@@ -601,4 +603,34 @@ func TestTopologyEnvFollowsTheBaseBDMode(t *testing.T) {
 
 	wrapped := TopologyEnv(t, NewEnv("", t.TempDir(), t.TempDir()).WithWrappedBD(), t.TempDir(), bd, "/bin/true")
 	assertWrappedBD(t, wrapped, bd)
+}
+
+// The topology matrix's rig add recovers a proved lost backend port once
+// (RigAddRecovery, #8171), and its only proof is the dolt log the tool-home
+// wrapper prints after a failed bd init: gc rig add removes the rig's new
+// .beads on the way out, and a real bd prints nothing. gc's provider script
+// runs every bd init as "${BD_BIN:-bd}" init, so a topology shape must resolve
+// the wrapper there.
+func TestTopologyRunEnvKeepsTheRigAddRecoveryProof(t *testing.T) {
+	bd, _ := fakeInitBD{
+		status:    1,
+		stderr:    "Error: failed to open uow provider: uow: ping db: dial tcp 127.0.0.1:43599: connect: connection refused\n",
+		serverLog: strPtr("Starting server\n" + portConflictLine + "\n"),
+	}.install(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+	env := topologyRunEnv(t, NewEnv("", t.TempDir(), t.TempDir()), t.TempDir(), BeadsTopology{}, bd, "/bin/true")
+
+	rig := filepath.Join(t.TempDir(), "rig")
+	cmd := ToolCommand(t, "/bin/sh", "-c", `"${BD_BIN:-bd}" init --proxied-server`)
+	cmd.Env = append(env.List(), "BEADS_DIR="+filepath.Join(rig, ".beads"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	initErr := cmd.Run()
+	if initErr == nil {
+		t.Fatal("the fake bd's init succeeded")
+	}
+	out := "gc rig add: provider-owned beads init: " + stderr.String()
+	if _, err := portCollisionProof(out, initErr, rigRoots(rig)); err != nil {
+		t.Fatalf("a topology shape's failed bd init leaves RigAddRecovery no proof (%v); BD_BIN=%q:\n%s", err, env.Get("BD_BIN"), out)
+	}
 }
