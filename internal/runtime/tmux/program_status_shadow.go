@@ -698,6 +698,61 @@ func (t *Tmux) shadowReadiness(session string, decidedAt time.Time, err error) {
 	})
 }
 
+// shadowStartupLadder wraps the startup ladder's send and busy look to
+// record each decision they make (startup_ladder) against a baseline read
+// now, before the ladder's first send. A first send the scan confirms ends
+// the ladder without a busy look, so the ladder decides at the send as well
+// as at the look. Off shadow, or without a baseline, both are returned as
+// they are.
+func (t *Tmux) shadowStartupLadder(session string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	s, ok := t.shadowRead(session)
+	if !ok {
+		return send, busy
+	}
+	baseline := s.Baseline()
+	return t.shadowStartupSend(session, baseline, send), t.shadowStartupBusy(session, baseline, busy)
+}
+
+// startupSendVerdict is a startup send's scrape verdict: confirmed when the
+// scan saw the submit start a turn, unconfirmed when the submit was not seen
+// to land (unconfirmed, delivered but never seen busy, or held back by a
+// running turn). ok is false for a send that failed any other way: the
+// ladder ends on it without deciding whether the nudge landed.
+func startupSendVerdict(err error) (runtime.ProgramVerdict, bool) {
+	switch {
+	case err == nil:
+		return runtime.ProgramVerdictConfirmed, true
+	case errors.Is(err, ErrNudgeSubmitUnconfirmed), errors.Is(err, ErrNudgeSubmitDeliveredUnobserved),
+		errors.Is(err, runtime.ErrSessionBusy), errors.Is(err, errNudgeSubmitHeld):
+		return runtime.ProgramVerdictUnconfirmed, true
+	default:
+		return "", false
+	}
+}
+
+// shadowStartupSend wraps the startup ladder's send (startup_ladder): each
+// send's verdict (startupSendVerdict) is recorded beside the record's
+// startup verdict against the baseline taken before the ladder's first
+// send, on a reading taken as the send returns, before the ladder sleeps
+// toward a re-send.
+func (t *Tmux) shadowStartupSend(session string, baseline runtime.ProgramBaseline, send func() error) func() error {
+	return func() error {
+		err := send()
+		scrape, decided := startupSendVerdict(err)
+		if !decided {
+			return err
+		}
+		d, read := t.shadowDecide(session)
+		if !read {
+			return err
+		}
+		t.shadowGo(func() {
+			t.shadowEmit(session, runtime.ProgramPointStartupLadder, scrape, runtime.ProgramStartupVerdict(d.status, baseline, time.Time{}, d.at), d.status, d.at, 0, false)
+		})
+		return err
+	}
+}
+
 // shadowStartupBusy wraps the startup ladder's busy look (startup_ladder):
 // each look's verdict (a busy pane confirms the nudge) is recorded beside the
 // record's startup verdict against the baseline taken before the ladder's
@@ -719,4 +774,17 @@ func (t *Tmux) shadowStartupBusy(session string, baseline runtime.ProgramBaselin
 		})
 		return isBusy, err
 	}
+}
+
+// ProgramStatusShadowIdleWait implements
+// [runtime.ProgramStatusShadowProvider]: an idle wait decided outside the
+// leaf (the op lane's boundary) is recorded as the leaf records its own
+// (shadowWaitForIdle), on a decision reading taken here, before the caller
+// acts on the decision, and followed to time the record's boundary.
+func (p *Provider) ProgramStatusShadowIdleWait(name string, started, decidedAt time.Time, scrape runtime.ProgramVerdict) {
+	d, ok := p.tm.shadowDecide(name)
+	if !ok {
+		return
+	}
+	p.tm.shadowWaitForIdle(name, started, decidedAt, scrape, d)
 }

@@ -315,6 +315,9 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
 				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 			}
+			if running {
+				shadowObservation(configuredProgramStatusMode(cfg), sp, sessionName, sessionID, "", resp.Activity)
+			}
 			obs := observeProgram(program, resp.Activity)
 			resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 
@@ -459,6 +462,9 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)
+	}
+	if running {
+		shadowObservation(configuredProgramStatusMode(cfg), sp, sessionName, sessionID, "", resp.Activity)
 	}
 	obs := observeProgram(program, resp.Activity)
 	resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource

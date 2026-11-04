@@ -307,6 +307,59 @@ func TestPublishedSwitchCapsProgramStatusWithoutRestart(t *testing.T) {
 	}
 }
 
+// Kills an observation point (observation) recorded only on the worker's
+// SessionHandle.State, which the session and agent reads a dashboard or a
+// client polls never call (ga-f4ovjm.69): under the shadow switch each of
+// those reads records its transcript-derived activity beside the record,
+// and the switch off records nothing.
+func TestObservationShadowRecordedOnSessionAndAgentReads(t *testing.T) {
+	fs, h, id, name := programStatusSessionServer(t)
+	since := time.Now().Add(-time.Second)
+	fs.sp.SetProgramPane(name, programRowAt(runtime.ProgramStatusShadow, runtime.ProgramWorking, "", since))
+	if err := fs.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	fs.sp.SetProgramPane("myrig--worker", programRowAt(runtime.ProgramStatusShadow, runtime.ProgramWorking, "", since))
+	var got []runtime.ProgramStatusComparison
+	fs.sp.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { got = append(got, c) }
+	reads := []struct{ url, session string }{
+		{cityURL(fs, "/session/") + id, name},
+		{cityURL(fs, "/sessions"), name},
+		{cityURL(fs, "/agent/myrig/worker"), "myrig--worker"},
+		{cityURL(fs, "/agents"), "myrig--worker"},
+	}
+
+	publishProgramStatusSwitch(fs, runtime.ProgramStatusShadow)
+	for _, r := range reads {
+		got = nil
+		var body any
+		getProgramStatusJSON(t, h, r.url, &body)
+		var matched bool
+		for _, c := range got {
+			if c.Point != runtime.ProgramPointObservation || c.Session != r.session {
+				continue
+			}
+			matched = true
+			if c.Scrape != runtime.ProgramVerdictIndeterminate || c.Program != runtime.ProgramVerdictBusy {
+				t.Errorf("GET %s recorded %+v, want observation indeterminate (no transcript activity) beside busy", r.url, c)
+			}
+		}
+		if !matched {
+			t.Errorf("GET %s under shadow recorded %+v, want an observation of %s", r.url, got, r.session)
+		}
+	}
+
+	publishProgramStatusSwitch(fs, runtime.ProgramStatusOff)
+	got = nil
+	for _, r := range reads {
+		var body any
+		getProgramStatusJSON(t, h, r.url, &body)
+	}
+	if len(got) != 0 {
+		t.Fatalf("published off recorded %+v, want nothing", got)
+	}
+}
+
 // Kills a program-status read that probes liveness first. A session or agent
 // row answered IsRunning for its running field, and the stream needs no
 // probe: a stopped session reads Unread or exited, which nothing shows. A
