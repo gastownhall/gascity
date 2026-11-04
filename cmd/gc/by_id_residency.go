@@ -307,9 +307,9 @@ func firstBindingOwnedID(cityPath string, ids []string) (id, binding string, own
 // operator configured it ("the infra class binding"), falling back to a
 // generic phrase when no single binding name resolves.
 func configuredBindingLabel(cityPath string) string {
-	binding, relocated, err := cliSoleClassBinding(cityPath)
-	if err != nil || !relocated || binding.Name == "" {
+	routes := cliStorageRoutes(cityPath)
+	if routes == nil || routes.binding == "" {
 		return "the relocated class binding"
 	}
-	return fmt.Sprintf("the %q class binding", binding.Name)
+	return fmt.Sprintf("the %q class binding", routes.binding)
 }
