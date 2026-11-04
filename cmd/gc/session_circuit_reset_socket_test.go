@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -344,6 +345,8 @@ func TestBindingsMemoDerivedAcrossARegistrationIsAMiss(t *testing.T) {
 		defer close(registered)
 		registerResidencyRoutes(cityDir, reg, func() beads.Store { return beads.NewMemStore() })
 	}()
+	// The registering goroutine records the registration before its retirement
+	// parks on the in-flight resolution, so this waits only for that store.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, ok := registeredResidencyEntry(cityDir); ok {
@@ -353,7 +356,7 @@ func TestBindingsMemoDerivedAcrossARegistrationIsAMiss(t *testing.T) {
 			close(release)
 			t.Fatal("the registration never landed")
 		}
-		time.Sleep(time.Millisecond)
+		runtime.Gosched()
 	}
 	close(release)
 	<-registered
