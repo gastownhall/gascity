@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"sort"
 	"time"
@@ -227,10 +226,10 @@ func (c *CachingStore) recomputeCadenceLocked() {
 	if hadPrev && prev != next {
 		switch {
 		case prev == cacheReconcileIntervalSmall && next == cacheReconcileIntervalMedium:
-			log.Printf("beads cache: cadence promoted small→medium driver=%s p95=%.0fms window=%d",
+			c.logf("beads cache: cadence promoted small→medium driver=%s p95=%.0fms window=%d",
 				driver, c.stats.LatencyP95Ms, cacheLatencyWindowSize)
 		case prev == cacheReconcileIntervalMedium && next == cacheReconcileIntervalSmall:
-			log.Printf("beads cache: cadence demoted medium→small driver=%s p95=%.0fms window=%d",
+			c.logf("beads cache: cadence demoted medium→small driver=%s p95=%.0fms window=%d",
 				driver, c.stats.LatencyP95Ms, cacheLatencyWindowSize)
 		}
 	}
@@ -429,7 +428,7 @@ func (c *CachingStore) runReconciliation() {
 	logLine, emit := c.reconcileSuccessLogLocked(now, time.Since(start), res.adds, res.removes, res.updates)
 	c.mu.Unlock()
 	if emit {
-		log.Print(logLine)
+		c.logf("%s", logLine)
 	}
 	c.notifyChanges(ChangeScan, res.notifications)
 	// The pass may have evicted a row some read had already installed as
