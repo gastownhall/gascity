@@ -6278,6 +6278,88 @@ func TestAppendRalphRetryRemapsNestedRetryLogicalRefs(t *testing.T) {
 	}
 }
 
+// countingGraphApplyStore is a graph-apply-capable store that counts the
+// plans it applies.
+type countingGraphApplyStore struct {
+	*graphApplyOuterDepFailStore
+	applies int
+}
+
+func (s *countingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	s.applies++
+	return s.graphApplyOuterDepFailStore.ApplyGraphPlan(ctx, plan)
+}
+
+// TestAppendRalphRetryAppliesTheGraphThroughTheGraphHandle pins that with
+// graph apply on, a ralph retry over a graph-apply-capable store reaches that
+// store's ApplyGraphPlan through the GraphStore handle it is given, rather
+// than falling back to the one-bead-at-a-time legacy append.
+func TestAppendRalphRetryAppliesTheGraphThroughTheGraphHandle(t *testing.T) {
+	prev := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prev) })
+
+	// failed is preset so the wrapped store's DepAdd never injects a fault.
+	store := &countingGraphApplyStore{graphApplyOuterDepFailStore: &graphApplyOuterDepFailStore{MemStore: beads.NewMemStore(), failed: true}}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review loop",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "attempt 1 body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "scope",
+			"gc.scope_role":      "body",
+			"gc.scope_name":      "review-loop",
+			"gc.step_ref":        "demo.review-loop.run.1",
+			"gc.step_id":         "review-loop",
+			"gc.ralph_step_id":   "review-loop",
+			"gc.attempt":         "1",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	check1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "check review loop",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "check",
+			"gc.step_id":         "review-loop",
+			"gc.ralph_step_id":   "review-loop",
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "2",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+			"gc.step_ref":        "demo.review-loop.check.1",
+		},
+	})
+	mustDepAdd(t, store, check1.ID, run1.ID, "blocks")
+	mustDepAdd(t, store, logical.ID, check1.ID, "blocks")
+
+	mapping, err := appendRalphRetry(beadstest.Graph(store), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("appendRalphRetry: %v", err)
+	}
+	if store.applies != 1 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 1: the retry did not reach the graph-apply store through its GraphStore handle", store.applies)
+	}
+	if mapping[run1.ID] == "" || mapping[check1.ID] == "" {
+		t.Fatalf("mapping = %v, want the body and the check re-minted", mapping)
+	}
+}
+
 func TestBuildRalphRetryGraphNodeRemapsNestedRetryLogicalRef(t *testing.T) {
 	t.Parallel()
 

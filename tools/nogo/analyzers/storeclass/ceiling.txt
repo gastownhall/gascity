@@ -6,7 +6,7 @@
 cmd/gc	cap-assert	107
 cmd/gc	mint	170
 cmd/gc	raw-field	178
-cmd/gc	raw-param	1100
+cmd/gc	raw-param	1098
 cmd/gc	raw-result	269
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38
@@ -23,8 +23,8 @@ internal/api	unwrap	173
 internal/dispatch	mint	5
 internal/dispatch	raw-field	2
 internal/dispatch	raw-param	14
-internal/dispatch	raw-result	6
-internal/dispatch	unwrap	10
+internal/dispatch	raw-result	5
+internal/dispatch	unwrap	7
 internal/doctor	raw-field	1
 internal/doctor	raw-param	2
 internal/orders	raw-param	2

@@ -741,6 +741,9 @@ func bdBindingDependents(cityPath string, ids []string) (map[string][]string, er
 				out[id] = append(out[id], d.IssueID)
 			}
 		}
+		// A cross-store gate is a graph bead, and the sole class binding holds
+		// the relocated classes, graph among them. The binding is still a raw
+		// residency leg, so this relabels it (typed-store T7 types it).
 		gates, err := dispatch.OpenCrossStoreGatesNaming(beads.GraphStore{Store: binding.Store}, id)
 		if err != nil {
 			return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", id, err)

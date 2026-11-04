@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1248,6 +1249,199 @@ max_active_sessions = 1
 	}
 	if got := attempt2.Metadata["gc.continuation_group"]; got != "" {
 		t.Errorf("attempt 2 gc.continuation_group = %q, want unset for one_shot lifecycle target", got)
+	}
+}
+
+// namedWorkerSessionCity writes a city whose "worker" target is a named
+// session and returns the city path and a sessions store holding that named
+// session's canonical bead. The sessions store is its own store, apart from
+// the graph store a test dispatches over, so a step that routes to the bead's
+// id can only have resolved it through ProcessOptions.Sessions.
+func namedWorkerSessionCity(t *testing.T) (cityPath string, sessions *beads.MemStore, sessionID string) {
+	t.Helper()
+	cityPath = t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[agent]]
+name = "worker"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+mode = "on_demand"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	sessions = beads.NewMemStoreFrom(5000, nil, nil)
+	named, err := sessions.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "on_demand",
+			"state":                     "asleep",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	return cityPath, sessions, named.ID
+}
+
+// TestProcessControlRetryRoutesAttemptThroughSessions pins that a retry's
+// next attempt resolves a named-session target through ProcessOptions.Sessions:
+// the attempt is assigned the canonical session bead's id, which only the
+// sessions store holds.
+func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
+	t.Parallel()
+
+	cityPath, sessions, sessionID := namedWorkerSessionCity(t)
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:       "run",
+		Title:    "Run",
+		Type:     "task",
+		Retry:    &formula.RetrySpec{MaxAttempts: 3},
+		Metadata: map[string]string{"gc.run_target": "worker"},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "run retry",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.run",
+			"gc.step_id":          "run",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.run.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "timeout",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	if _, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{
+		Work:     beadstest.Work(store),
+		Sessions: beadstest.Sessions(sessions),
+		CityPath: cityPath,
+	}); err != nil {
+		t.Fatalf("ProcessControl(retry): %v", err)
+	}
+
+	attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 not created")
+	}
+	if attempt2.Assignee != sessionID {
+		t.Fatalf("attempt 2 assignee = %q, want the named session's id %q from ProcessOptions.Sessions", attempt2.Assignee, sessionID)
+	}
+	if got := attempt2.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("attempt 2 gc.routed_to = %q, want none for a direct session route", got)
+	}
+}
+
+// TestProcessControlFanoutRoutesFragmentThroughSessions is the fanout half of
+// TestProcessControlRetryRoutesAttemptThroughSessions: a fragment member step
+// whose target is a named session is assigned the canonical session bead's id
+// from ProcessOptions.Sessions.
+func TestProcessControlFanoutRoutesFragmentThroughSessions(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	cityPath, sessions, sessionID := namedWorkerSessionCity(t)
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+metadata = { "gc.run_target" = "{reviewer}" }
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{"name":"worker"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "fanout",
+			"gc.root_bead_id":        workflow.ID,
+			"gc.control_for":         "demo.survey",
+			"gc.execution_routed_to": "worker",
+			"gc.for_each":            "output.items",
+			"gc.bond":                "expansion-review",
+			"gc.bond_vars":           `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":         "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
+		Sessions:           beadstest.Sessions(sessions),
+		CityPath:           cityPath,
+		FormulaSearchPaths: []string{cityPath},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout spawn): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-spawn" {
+		t.Fatalf("result = %+v, want processed fanout-spawn", result)
+	}
+	member := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
+	if member.ID == "" {
+		t.Fatal("member step not created")
+	}
+	if member.Assignee != sessionID {
+		t.Fatalf("member assignee = %q, want the named session's id %q from ProcessOptions.Sessions", member.Assignee, sessionID)
 	}
 }
 

@@ -29,6 +29,10 @@ func drainResidency(store beads.GraphStore, opts ProcessOptions) (storeref.Topol
 	if len(opts.MemberStores) > 1 {
 		return storeref.Topology{}, fmt.Errorf("drain residency: %d member stores, want at most 1", len(opts.MemberStores))
 	}
+	if opts.Work == (beads.WorkStore{}) {
+		// The tail's work leg is Work: a zero one would be a nil leg.
+		return storeref.Topology{}, fmt.Errorf("drain residency: %w", errDispatchNoWorkStore)
+	}
 	bindings, refused := storeref.BuildBinding(store.Store, drainInfrastructureClasses(), storeref.BindingOptions{})
 	return storeref.Topology{
 		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: opts.Work.Store},

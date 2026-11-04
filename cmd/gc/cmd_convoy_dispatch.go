@@ -268,8 +268,15 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
+	// A control kind that reads beads it did not create gets the scope store
+	// as its work-class member tail, but only when the graph class relocated:
+	// on any other city graphStore IS store and an empty tail keeps each of
+	// those reads on the single store the control runs in.
 	kind := bead.Metadata[beadmeta.KindMetadataKey]
-	opts := controlDispatchOptions(cityPath, storePath, store, graphStore, kind == "drain" || kind == "retry-eval" || kind == "retry" || kind == "ralph")
+	relocated := graphStore != store // residency:allow route-gated work-leg tail: the drain's membership and the retry lane's cross-store required-artifact source read
+	memberTail := relocated && (kind == "drain" || kind == "retry-eval" || kind == "retry" || kind == "ralph")
+	graph := beads.GraphStore{Store: graphStore}
+	opts := controlDispatchOptions(cityPath, storePath, graph, beads.WorkStore{Store: store}, memberTail)
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -347,7 +354,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		}
 	}
 
-	result, err := dispatch.ProcessControl(beads.GraphStore{Store: graphStore}, bead, opts)
+	result, err := dispatch.ProcessControl(graph, bead, opts)
 	if err != nil {
 		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
 	}
@@ -381,7 +388,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 }
 
 // controlDispatchOptions is the store half of a control dispatch's options.
-// store is the scope store the control was dispatched from and graphStore the
+// work is the scope store the control was dispatched from and graph the
 // ledger that holds the control.
 //
 // Work is the scope store: it owns every convoy and the work members a drain
@@ -391,23 +398,21 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 //
 // Sessions is the graph store: attempt routing has always resolved session
 // targets through the control's own store, which on a split city is the
-// binding that holds the sessions class too (typed-store T9: the city's
-// sessions handle).
+// binding that holds the sessions class too. The conversion relabels it until
+// typed-store T9 hands dispatch the city's sessions handle.
 //
-// With memberTail, a control kind that reads beads it did not create also gets
-// the scope store as its work-class member tail when the graph class
-// relocated, so membership and member reads cross the class boundary; on any
-// other city the tail stays empty and each read stays on the single store the
-// control runs in.
-func controlDispatchOptions(cityPath, storePath string, store, graphStore beads.Store, memberTail bool) dispatch.ProcessOptions {
+// With memberTail the scope store is also the work-class member tail, so
+// membership and member reads cross the class boundary. The caller asks for it
+// only when the graph class relocated.
+func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, work beads.WorkStore, memberTail bool) dispatch.ProcessOptions {
 	opts := dispatch.ProcessOptions{
 		CityPath:  cityPath,
 		StorePath: storePath,
-		Work:      beads.WorkStore{Store: store},
-		Sessions:  beads.SessionStore{Store: graphStore},
+		Work:      work,
+		Sessions:  beads.SessionStore(graph),
 	}
-	if memberTail && graphStore != store { // residency:allow route-gated work-leg tail: the drain's membership and the retry lane's cross-store required-artifact source read
-		opts.MemberStores = []beads.WorkStore{opts.Work}
+	if memberTail {
+		opts.MemberStores = []beads.WorkStore{work}
 	}
 	return opts
 }

@@ -84,7 +84,11 @@ type ProcessOptions struct {
 	// store as the graph store ProcessControl is handed.
 	Work beads.WorkStore
 	// Sessions is the sessions-class store attempt routing resolves a session
-	// target through.
+	// target through. A zero Sessions is no session store: a named-session
+	// target then routes by its configured name (metadata only), exactly as
+	// it does when the store holds no canonical bead for it. The control
+	// dispatcher always sets it; tests that route no named session may leave
+	// it zero.
 	Sessions beads.SessionStore
 	Tracef   func(format string, args ...any)
 

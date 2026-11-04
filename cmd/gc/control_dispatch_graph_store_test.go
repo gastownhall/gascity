@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -496,6 +497,7 @@ title = "Work {{convoy_id}}"
 // convoy must expand to one row per member, and the pass-with-nothing-expanded
 // state must not be reachable over a convoy that has members.
 func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
 	cityPath := t.TempDir()
 	scopeStore := beads.NewMemStore()
 	graphStore := beads.NewMemStoreFrom(1000, nil, nil)
@@ -548,7 +550,11 @@ func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 		t.Fatalf("create drain control: %v", err)
 	}
 
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		// The drain item roots route to the control dispatcher.
+		Agents: []config.Agent{{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"}},
+	}
 	cfg.FormulaLayers.City = []string{splitClassDrainFormulaDir(t)}
 	var stdout, stderr bytes.Buffer
 	// The dispatch may fail loudly downstream of the expansion; what it may not
@@ -560,25 +566,67 @@ func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 	if strings.TrimSpace(raw) == "" {
 		t.Fatalf("drain recorded no manifest at all; status=%q outcome=%q stderr=%q", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], stderr.String())
 	}
+	manifest := parseDrainManifestRows(t, raw)
+	if got.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass && len(manifest) == 0 {
+		t.Fatalf("drain closed gc.outcome=pass with an empty manifest over a convoy of %d members; every member is left open and the run reports green. stdout=%q", len(memberIDs), stdout.String())
+	}
+	if len(manifest) != len(memberIDs) {
+		t.Fatalf("manifest rows = %d, want %d — one per convoy member; the dispatch did not name the work leg that owns this convoy's tracks edges", len(manifest), len(memberIDs))
+	}
+	for i, id := range memberIDs {
+		if manifest[i].MemberID != id {
+			t.Fatalf("manifest row %d member = %q, want %q", i, manifest[i].MemberID, id)
+		}
+		if manifest[i].UnitConvoyID == "" {
+			t.Fatalf("manifest row %d has no unit convoy; manifest=%s stderr=%q", i, raw, stderr.String())
+		}
+	}
+
+	// A resume pass reads the unit convoys the first pass minted. They are
+	// work beads minted through the work leg, so a resume that reads them
+	// anywhere else reports them missing and the drain is quarantined, or
+	// mints a second set.
+	if err := graphStore.SetMetadata(drain.ID, beadmeta.DrainStateMetadataKey, beadmeta.DrainStateExpanding); err != nil {
+		t.Fatalf("rewind gc.drain_state: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, scopeStore, drain.ID, cfg, &stdout, &stderr); err != nil {
+		t.Fatalf("resume dispatch: %v; stderr=%q", err, stderr.String())
+	}
+	// A quarantine is reported on stderr and returns nil, so the drain's own
+	// state is what says the resume went through.
+	after := beadByID(t, graphStore, drain.ID)
+	if after.Status != "open" || after.Metadata[beadmeta.DrainStateMetadataKey] != beadmeta.DrainStateExpanded {
+		t.Fatalf("after the resume pass: status=%q gc.drain_state=%q, want open and %q; stderr=%q", after.Status, after.Metadata[beadmeta.DrainStateMetadataKey], beadmeta.DrainStateExpanded, stderr.String())
+	}
+	resumed := parseDrainManifestRows(t, after.Metadata[beadmeta.DrainManifestMetadataKey])
+	if len(resumed) != len(manifest) {
+		t.Fatalf("resumed manifest rows = %d, want %d", len(resumed), len(manifest))
+	}
+	for i := range manifest {
+		if resumed[i].UnitConvoyID != manifest[i].UnitConvoyID {
+			t.Fatalf("resumed row %d unit convoy = %q, want the first pass's %q", i, resumed[i].UnitConvoyID, manifest[i].UnitConvoyID)
+		}
+	}
+}
+
+// drainManifestRow is the slice of a gc.drain_manifest row the split-city
+// drain tests read.
+type drainManifestRow struct {
+	MemberID     string `json:"member_id"`
+	UnitConvoyID string `json:"unit_convoy_id"`
+}
+
+func parseDrainManifestRows(t *testing.T, raw string) []drainManifestRow {
+	t.Helper()
 	var manifest struct {
-		Rows []struct {
-			MemberID string `json:"member_id"`
-		} `json:"rows"`
+		Rows []drainManifestRow `json:"rows"`
 	}
 	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
 		t.Fatalf("parse drain manifest %q: %v", raw, err)
 	}
-	if got.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass && len(manifest.Rows) == 0 {
-		t.Fatalf("drain closed gc.outcome=pass with an empty manifest over a convoy of %d members; every member is left open and the run reports green. stdout=%q", len(memberIDs), stdout.String())
-	}
-	if len(manifest.Rows) != len(memberIDs) {
-		t.Fatalf("manifest rows = %d, want %d — one per convoy member; the dispatch did not name the work leg that owns this convoy's tracks edges", len(manifest.Rows), len(memberIDs))
-	}
-	for i, id := range memberIDs {
-		if manifest.Rows[i].MemberID != id {
-			t.Fatalf("manifest row %d member = %q, want %q", i, manifest.Rows[i].MemberID, id)
-		}
-	}
+	return manifest.Rows
 }
 
 // TestSourceWorkflowStoresScanTheLedgerThatHoldsWorkflowRoots pins the

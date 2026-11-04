@@ -40,7 +40,8 @@ func (s *countingCapStore) UpdateReporting(id string, opts UpdateOpts) (UpdatedR
 // write helpers a typed caller hands a class handle (typed-stores T5b) reach
 // the store's own optional capability, exactly as they do on the raw store:
 // GetMany and PrefetchExact its exact batch read, UpdateAndReadBack its
-// reporting update, and DirectMembers its live read past a cache.
+// reporting update, and DirectMembers and DirectMembersWithRoot the cache's
+// own live read, which reads past the cache without refreshing it.
 func TestGenericHelpersSeeThroughClassHandles(t *testing.T) {
 	for name, wrap := range map[string]func(Store) Store{
 		"the store":        func(s Store) Store { return s },
@@ -81,6 +82,18 @@ func TestGenericHelpersSeeThroughClassHandles(t *testing.T) {
 			if m.ID == member.ID && m.Status != "closed" {
 				t.Errorf("%s: DirectMembers read member %s as %q, want the live closed status", name, m.ID, m.Status)
 			}
+		}
+		// The live read goes to the backing store past the cache, as the
+		// cache's own live handle does: it must not refresh the cached row
+		// (CachingStore.List with Live set would install the closed status).
+		if cached, err := cache.cachedGetOnly(member.ID); err != nil || cached.Status != "open" {
+			t.Errorf("%s: after DirectMembers the cache holds member %s as %q (%v), want the primed open row untouched", name, member.ID, cached.Status, err)
+		}
+		if _, err := DirectMembersWithRoot(wrap(cache), root); err != nil {
+			t.Fatalf("%s: DirectMembersWithRoot: %v", name, err)
+		}
+		if cached, err := cache.cachedGetOnly(member.ID); err != nil || cached.Status != "open" {
+			t.Errorf("%s: after DirectMembersWithRoot the cache holds member %s as %q (%v), want the primed open row untouched", name, member.ID, cached.Status, err)
 		}
 	}
 }

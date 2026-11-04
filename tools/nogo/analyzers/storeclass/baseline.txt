@@ -485,8 +485,7 @@ cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	cmdWorkflowDelete	read-marker	1
 cmd/gc/cmd_convoy_dispatch.go	controlBeadLedger	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlBeadLedger	raw-result	1
-cmd/gc/cmd_convoy_dispatch.go	controlDispatchOptions	mint	2
-cmd/gc/cmd_convoy_dispatch.go	controlDispatchOptions	raw-param	2
+cmd/gc/cmd_convoy_dispatch.go	controlDispatchOptions	mint	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-result	1
@@ -530,7 +529,7 @@ cmd/gc/cmd_convoy_dispatch.go	recycleDispatchSubjectSession	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	reopenTrackingConvoysForReopenedSource	mint	1
 cmd/gc/cmd_convoy_dispatch.go	reopenTrackingConvoysForReopenedSource	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	restoreWorkflowDeleteDeps	raw-param	1
-cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherDeferringEmits	mint	1
+cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherDeferringEmits	mint	2
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherDeferringEmits	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherWithStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	runControlDispatcherWithStoreAndConfig	raw-param	1
@@ -2055,10 +2054,9 @@ internal/dispatch/drain.go	drainMemberOwningStore	raw-result	1
 internal/dispatch/drain.go	drainMemberOwningStore	unwrap	1
 internal/dispatch/drain.go	drainUnitConvoyByKey	raw-param	1
 internal/dispatch/drain.go	drainUnitConvoyByKey	raw-result	1
+internal/dispatch/drain.go	drainUnitConvoyStore	mint	1
 internal/dispatch/drain.go	drainUnitConvoyStore	raw-param	1
-internal/dispatch/drain.go	drainUnitConvoyStore	raw-result	1
-internal/dispatch/drain.go	drainUnitConvoyStore	unwrap	3
-internal/dispatch/drain.go	ensureDrainUnitConvoy	mint	2
+internal/dispatch/drain.go	ensureDrainUnitConvoy	mint	1
 internal/dispatch/drain.go	releaseDrainReservation	raw-param	1
 internal/dispatch/drain.go	reloadDrainUnitConvoy	raw-param	1
 internal/dispatch/drain.go	walkDrainUnitConvoyLegs	raw-param	2

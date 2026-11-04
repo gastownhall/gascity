@@ -56,13 +56,22 @@ type drainManifestRow struct {
 	Failure      string `json:"failure_reason,omitempty"`
 }
 
-// errNoWorkStore reports a drain dispatched without the work-class store that
-// owns its convoys and members.
-var errNoWorkStore = errors.New("drain dispatch: ProcessOptions.Work names no work store")
+// errDispatchNoWorkStore reports a control kind that reads work beads
+// dispatched without the work-class store that owns them.
+var errDispatchNoWorkStore = errors.New("control dispatch: ProcessOptions.Work names no work store")
+
+// errDrainWorkLegMismatch reports a drain whose member tail disagrees with
+// ProcessOptions.Work. The drain reads its membership, member reservations and
+// unit convoys partly through Work and partly through the tail (or, with no
+// tail, through the graph store), so the two must name one store: with no tail
+// Work must be the graph store, and a one-store tail must be Work itself.
+// Anything else mints unit convoys in one store and reloads them from another,
+// which a resume pass reports as a missing convoy and quarantines.
+var errDrainWorkLegMismatch = errors.New("drain dispatch: member tail does not agree with ProcessOptions.Work")
 
 func processDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
-	if opts.Work == (beads.WorkStore{}) {
-		return ControlResult{}, fmt.Errorf("%s: %w", bead.ID, errNoWorkStore)
+	if err := checkDrainWorkLeg(store, opts); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: %w", bead.ID, err)
 	}
 	switch strings.TrimSpace(bead.Metadata[beadmeta.DrainStateMetadataKey]) {
 	case "", beadmeta.DrainStatePending, beadmeta.DrainStateExpanding:
@@ -74,6 +83,26 @@ func processDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) 
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported gc.drain_state %q", bead.ID, bead.Metadata[beadmeta.DrainStateMetadataKey])
 	}
+}
+
+// checkDrainWorkLeg refuses the drain options errDispatchNoWorkStore and
+// errDrainWorkLegMismatch describe. A tail of more than one store is
+// drainResidency's to refuse.
+func checkDrainWorkLeg(store beads.GraphStore, opts ProcessOptions) error {
+	if opts.Work == (beads.WorkStore{}) {
+		return errDispatchNoWorkStore
+	}
+	switch len(opts.MemberStores) {
+	case 0:
+		if !beads.SameStore(opts.Work, store) {
+			return fmt.Errorf("%w: no member tail, but Work is not the graph store", errDrainWorkLegMismatch)
+		}
+	case 1:
+		if !beads.SameStore(opts.MemberStores[0], opts.Work) {
+			return fmt.Errorf("%w: the member tail names a store other than Work", errDrainWorkLegMismatch)
+		}
+	}
+	return nil
 }
 
 func expandDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -1313,18 +1342,13 @@ func walkDrainUnitConvoyLegs(store beads.GraphStore, opts ProcessOptions, visit 
 // With no member stores configured — every single-store caller — it returns the
 // work store without any probe (on such a city the drain's own store), so the
 // create is the same single-store write it is today, with no extra round-trip.
-func drainUnitConvoyStore(store beads.GraphStore, member beads.Bead, opts ProcessOptions) (beads.Store, error) {
-	// The answer is raw: the member's owner comes from the federated walk
-	// below, which holds raw plan legs until T7, so the work store is unwrapped
-	// to match.
+func drainUnitConvoyStore(store beads.GraphStore, member beads.Bead, opts ProcessOptions) (beads.WorkStore, error) {
 	if len(opts.MemberStores) == 0 {
-		return opts.Work.Store, nil
+		return opts.Work, nil
 	}
 	memberID := strings.TrimSpace(member.ID)
 	if memberID == "" || convoycore.IsUnresolvedTrackedItem(member) {
-		// The work class: the federated owner walk below holds raw stores
-		// (T7 types it).
-		return opts.Work.Store, nil
+		return opts.Work, nil
 	}
 	var owner beads.Store
 	err := walkDrainUnitConvoyLegs(store, opts, func(probe beads.Store) (bool, error) {
@@ -1338,12 +1362,14 @@ func drainUnitConvoyStore(store beads.GraphStore, member beads.Bead, opts Proces
 		return true, nil
 	})
 	if err != nil {
-		return nil, err
+		return beads.WorkStore{}, err
 	}
 	if owner != nil {
-		return owner, nil
+		// owner is the member's store from the federated walk, a raw plan leg
+		// until T7; a unit convoy is work class wherever it is minted.
+		return beads.WorkStore{Store: owner}, nil
 	}
-	return opts.Work.Store, nil
+	return opts.Work, nil
 }
 
 // drainUnitConvoyByKey finds the unit convoy a previous pass already minted for
@@ -1423,9 +1449,7 @@ func ensureDrainUnitConvoy(store beads.GraphStore, control beads.Bead, parentCon
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: creating unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
-	// unitStore is the work store the unit convoy was minted in, a raw store
-	// from the federated owner walk until T7.
-	if err := trackDrainMember(beads.WorkStore{Store: unitStore}, created.ID, member); err != nil {
+	if err := trackDrainMember(unitStore, created.ID, member); err != nil {
 		return beads.Bead{}, false, fmt.Errorf("%s: tracking member %s from unit convoy %s: %w", control.ID, member.ID, created.ID, err)
 	}
 	return created, true, nil

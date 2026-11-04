@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -1905,5 +1906,44 @@ func TestAnOperatorReopenedOverriddenGateIsJudgedAfreshAfterATeardown(t *testing
 				})
 			}
 		})
+	}
+}
+
+// TestCrossStoreGateFencesReadPastACache pins that the gate's live re-reads
+// (writeGateIfStill's fence and reReadGateAnswer) read past a cache under the
+// graph handle, as the cache's own live handle does. An operator's close the
+// cache has not yet seen must stop a controller close from overwriting it,
+// and must answer the re-read as released.
+func TestCrossStoreGateFencesReadPastACache(t *testing.T) {
+	backing := beads.NewMemStore()
+	held, err := backing.Create(beads.Bead{Title: "cross-store gate", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The operator's close lands behind the cache.
+	if err := backing.Close(held.ID); err != nil {
+		t.Fatal(err)
+	}
+	if cached, err := cache.Get(held.ID); err != nil || cached.Status != "open" {
+		t.Fatalf("fixture: cache.Get = %q (%v), want the stale open row", cached.Status, err)
+	}
+	store := beadstest.Graph(cache)
+
+	if answer, err := reReadGateAnswer(store, held.ID); err != nil || answer != "" {
+		t.Fatalf("reReadGateAnswer = %q (%v), want \"\": the live row is closed", answer, err)
+	}
+	wrote, err := closeCrossStoreGate(store, held.ID, CrossStoreGateStateReleased, "released")
+	if err != nil {
+		t.Fatalf("closeCrossStoreGate: %v", err)
+	}
+	if wrote {
+		t.Fatal("closeCrossStoreGate wrote over a gate whose live row is already closed: its fence read the cache")
+	}
+	if got := mustGetBead(t, backing, held.ID); got.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
+		t.Fatalf("gate state = %q, want the operator's close left as it was", got.Metadata[beadmeta.CrossStoreGateStateMetadataKey])
 	}
 }

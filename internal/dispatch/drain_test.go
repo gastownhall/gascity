@@ -2354,6 +2354,81 @@ func seedSplitClassDrainWorkflowIn(t *testing.T, work beads.Store, carryConvoyCo
 	return drain, memberIDs
 }
 
+// TestProcessDrainRefusesAWorkLegTheTailDisagreesWith pins that a drain
+// refuses options whose Work and member tail name different stores. Part of
+// the drain reads Work and part reads the tail (or the graph store, with no
+// tail), so a disagreement mints unit convoys in one store and reloads them
+// from another: the first pass expands and the resume pass quarantines on a
+// missing convoy. The refusal is loud and comes before any write.
+func TestProcessDrainRefusesAWorkLegTheTailDisagreesWith(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts func(work, graph beads.Store) ProcessOptions
+		want error
+	}{
+		{
+			name: "no work store",
+			opts: func(work, _ beads.Store) ProcessOptions {
+				return ProcessOptions{MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+			},
+			want: errDispatchNoWorkStore,
+		},
+		{
+			name: "no tail and a work store that is not the graph store",
+			opts: func(work, _ beads.Store) ProcessOptions {
+				return ProcessOptions{Work: beadstest.Work(work)}
+			},
+			want: errDrainWorkLegMismatch,
+		},
+		{
+			name: "a tail that is not the work store",
+			opts: func(work, graph beads.Store) ProcessOptions {
+				return ProcessOptions{Work: beadstest.Work(graph), MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+			},
+			want: errDrainWorkLegMismatch,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			work, graph, drain, _ := seedSplitClassDrainWorkflow(t, false)
+			opts := tc.opts(work, graph)
+			opts.FormulaSearchPaths = []string{dir}
+
+			_, err := ProcessControl(beadstest.Graph(graph), drain, opts)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("ProcessControl = %v, want %v", err, tc.want)
+			}
+			if got := mustGetBead(t, graph, drain.ID); got.Metadata[beadmeta.DrainStateMetadataKey] != "" {
+				t.Fatalf("gc.drain_state = %q after a refused drain, want it unwritten", got.Metadata[beadmeta.DrainStateMetadataKey])
+			}
+		})
+	}
+}
+
+// TestRequiredArtifactSourceReadRefusesATailWithNoWorkStore pins the retry
+// lanes' half of errDispatchNoWorkStore: with a member tail the required
+// artifact source resolves over the drain's residency frame, whose work leg is
+// Work, so a zero Work fails loudly instead of probing a nil leg.
+func TestRequiredArtifactSourceReadRefusesATailWithNoWorkStore(t *testing.T) {
+	work, graph, _, memberIDs := seedSplitClassDrainWorkflow(t, false)
+	root := beads.Bead{ID: "gc-root", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: memberIDs[0]}}
+
+	_, _, err := resolveRequiredArtifactSourceBead(beadstest.Graph(graph), root, memberIDs[0], true, ProcessOptions{
+		MemberStores: []beads.WorkStore{beadstest.Work(work)},
+	})
+	if !errors.Is(err, errDispatchNoWorkStore) {
+		t.Fatalf("resolveRequiredArtifactSourceBead = %v, want %v", err, errDispatchNoWorkStore)
+	}
+	if _, found, err := resolveRequiredArtifactSourceBead(beadstest.Graph(graph), root, memberIDs[0], true, ProcessOptions{
+		Work:         beadstest.Work(work),
+		MemberStores: []beads.WorkStore{beadstest.Work(work)},
+	}); err != nil || !found {
+		t.Fatalf("resolveRequiredArtifactSourceBead with Work = found %v, %v; want the work-store source", found, err)
+	}
+}
+
 // TestDrainReadsConvoyMembershipAcrossTheClassBoundary pins the head of the
 // membership lookup, which opts.MemberStores does not reach.
 //
@@ -2590,7 +2665,7 @@ func TestDrainUnitConvoyStoreIsTheAmbientStoreOnASingleStoreCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drainUnitConvoyStore: %v", err)
 	}
-	if got != beads.Store(store) {
+	if !beads.SameStore(got, store) {
 		t.Fatalf("drainUnitConvoyStore returned a different handle than the ambient store; the optional-capability assertions the drain makes are against that instance")
 	}
 	if store.gets != 0 {
@@ -2614,7 +2689,7 @@ func TestDrainUnitConvoyStoreFollowsTheMemberAcrossTheClassBoundary(t *testing.T
 	if err != nil {
 		t.Fatalf("drainUnitConvoyStore: %v", err)
 	}
-	if got != beads.Store(work) {
+	if !beads.SameStore(got, work) {
 		t.Fatalf("drainUnitConvoyStore chose the ambient graph store for a work-resident member; the tracks edge it is about to write cannot reference an id that store cannot resolve")
 	}
 }

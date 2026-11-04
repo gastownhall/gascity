@@ -530,12 +530,7 @@ func processControlUnderFault(fx crashFixture, bead beads.Bead, inj *writeFaultI
 			crashed = true
 		}
 	}()
-	opts := fx.opts
-	if opts.Work == (beads.WorkStore{}) {
-		// A single-store fixture: its one store serves the work class too.
-		opts.Work = beadstest.Work(fx.dispatch)
-	}
-	result, err = ProcessControl(beadstest.Graph(fx.dispatch), bead, opts)
+	result, err = ProcessControl(beadstest.Graph(fx.dispatch), bead, fx.opts)
 	return result, false, err
 }
 
@@ -681,10 +676,11 @@ func ralphCheckCrashScenario(name, script string, maxAttempts int, hardSubject b
 				t.Fatalf("close subject: %v", err)
 			}
 			logicalID, checkID = logical.ID, check1.ID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
-				opts:     ProcessOptions{CityPath: cityPath},
+				dispatch: dispatch,
+				opts:     ProcessOptions{CityPath: cityPath, Work: beadstest.Work(dispatch)},
 			}
 		},
 		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, logicalID, checkID) },
@@ -756,6 +752,7 @@ func workflowFinalizeCrashScenario(name, stepOutcome string, check func(t *testi
 				ledger:   []*beads.MemStore{f.rigStore, f.cityStore},
 				dispatch: rig,
 				opts: ProcessOptions{
+					Work: beadstest.Work(rig),
 					ResolveStoreRef: func(ref string) (beads.Store, error) {
 						switch ref {
 						case "city:test":
@@ -826,9 +823,11 @@ func retryEvalCrashScenario(name string, runOutcome, evalOverrides map[string]st
 				}
 			}
 			logicalID, evalID = logical.ID, eval.ID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
+				dispatch: dispatch,
+				opts:     ProcessOptions{Work: beadstest.Work(dispatch)},
 			}
 		},
 		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, logicalID, evalID) },
@@ -925,9 +924,11 @@ func teardownMoleculeCrashScenario(name, formulaDir, workOutcome string) crashSc
 				t.Fatalf("Cook: %v", err)
 			}
 			rootID := cooked.RootID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
+				dispatch: dispatch,
+				opts:     ProcessOptions{Work: beadstest.Work(dispatch)},
 				work: func(t *testing.T) bool {
 					members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 					if err != nil {
@@ -1028,11 +1029,13 @@ func fanoutScopeCrashScenario(name, formulaDir string, source map[string]string,
 			bodyID, fanoutID = body.ID, fanout.ID
 			// The expanded members carry the scope ref, so each gets a
 			// scope-check routed to the control dispatcher.
+			dispatch := wrap(store)
 			opts := testProcessOptionsWithControlDispatcher("")
 			opts.FormulaSearchPaths = []string{formulaDir}
+			opts.Work = beadstest.Work(dispatch)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
+				dispatch: dispatch,
 				opts:     opts,
 				work: func(t *testing.T) bool {
 					open, err := store.ListOpen()
@@ -1152,10 +1155,11 @@ func drainScopeCrashScenario(name, formulaDir string, memberCount int, drainMeta
 			drain := mustCreateWorkflowBead(t, store, beads.Bead{Title: "drain", Type: "task", Metadata: meta})
 			mustDepAdd(t, store, body.ID, drain.ID, "blocks")
 			bodyID, drainID = body.ID, drain.ID
+			dispatch := wrap(store)
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(store),
-				opts:     ProcessOptions{FormulaSearchPaths: []string{formulaDir}},
+				dispatch: dispatch,
+				opts:     ProcessOptions{FormulaSearchPaths: []string{formulaDir}, Work: beadstest.Work(dispatch)},
 			}
 		},
 		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, bodyID, drainID) },
