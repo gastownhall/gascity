@@ -205,7 +205,8 @@
         "cmd/gc/reconcile_sim_test.go"
       ],
       "go_test": "TestSimInvariantsCatchSeededMutants",
-      "tier": "landing"
+      "tier": "qualification",
+      "reason": "Existing mutation detector searches up to 64 generated schedules per mutant; retain the complete seed-search proof in the separate qualification run and leave its CI registration unchanged."
     },
     {
       "name": "cmd/gc/reconcile_sim_test.go::TestQuietBoundFollowsRowTimersArmedInQuiescence",
