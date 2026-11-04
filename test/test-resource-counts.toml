@@ -898,11 +898,13 @@ calls = 2
 path = "cmd/gc/gc_beads_bd_bind_host_test.go"
 resource = "subprocess"
 calls = 2
+tagged = true
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_force_reinit_guard_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_journal_recovery_test.go"
@@ -913,6 +915,7 @@ calls = 2
 path = "cmd/gc/gc_beads_bd_server_reachable_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/gitignore_test.go"
@@ -1107,7 +1110,7 @@ tagged = true
 [[count]]
 path = "cmd/gc/path_helpers_test.go"
 resource = "fixed_sleep"
-calls = 5
+calls = 3
 
 [[count]]
 path = "cmd/gc/path_helpers_test.go"
@@ -1129,6 +1132,7 @@ tagged = true
 path = "cmd/gc/pool_hook_processgroup_test.go"
 resource = "fixed_sleep"
 calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/pool_test.go"
@@ -1195,6 +1199,11 @@ calls = 1
 [[count]]
 path = "cmd/gc/provider_factory_e2c3_test.go"
 resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/provider_owned_fake_bd_test.go"
+resource = "fixed_sleep"
 calls = 1
 
 [[count]]
@@ -1410,6 +1419,12 @@ calls = 2
 path = "cmd/gc/test_orphan_sweep_test.go"
 resource = "environment"
 calls = 1
+
+[[count]]
+path = "cmd/gc/test_process_control_unix_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
 
 [[count]]
 path = "cmd/gc/testenv_test.go"
