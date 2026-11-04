@@ -269,6 +269,12 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	}
 
 	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
+	inputClasses := cliStores(cityPath, store)
+	if relicGraphLeg {
+		inputClasses = scopeStores(cityPath, nil, store)
+	}
+	inputStores := sourceworkflow.InputStores{Graph: inputClasses.Graph(), Work: []beads.WorkStore{scopeStores(cityPath, nil, store).Work()}}
+	opts.InputStores = &inputStores
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city

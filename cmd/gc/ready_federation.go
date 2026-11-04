@@ -112,6 +112,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -188,7 +189,24 @@ func readyLegsForTopology(topo storeref.Topology) ([]readywork.Leg, error) {
 			ReservedPrefixes: readyLegReservedPrefixes(topo, leg, classBinding),
 		})
 	})
-	return legs, nil
+	return readyLegsWithClassHandles(legs), nil
+}
+
+// readyLegsWithClassHandles attaches handles at the composition edge, including
+// after request-scoping the raw leg readers. The graph handle follows the leg
+// that served the candidate; input convoys remain in the named work scopes.
+func readyLegsWithClassHandles(legs []readywork.Leg) []readywork.Leg {
+	for i := range legs {
+		leg := &legs[i]
+		if leg.ClassBinding {
+			routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: leg.Store}}
+			leg.Graph = scopeStores("", routes, nil).Graph()
+		} else {
+			classes := scopeStores("", nil, leg.Store)
+			leg.Work, leg.Graph = classes.Work(), classes.Graph()
+		}
+	}
+	return legs
 }
 
 // readyLegReservedPrefixes is the reserved id namespaces a class-binding leg

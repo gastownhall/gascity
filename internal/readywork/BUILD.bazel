@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "crossstore.go",
         "doc.go",
+        "input_admission.go",
         "pushdown.go",
         "query.go",
         "read.go",
@@ -15,6 +16,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/fanout",
+        "//internal/sourceworkflow",
         "//internal/storeref",
     ],
 )
@@ -25,6 +27,7 @@ go_test(
         "crossstore_test.go",
         "enrich_test.go",
         "federate_test.go",
+        "input_admission_test.go",
         "pushdown_test.go",
         "query_test.go",
         "testenv_import_test.go",
@@ -32,6 +35,7 @@ go_test(
     embed = [":readywork"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/splittest",
         "//internal/fanout/fanouttest",
         "//internal/testenv",

@@ -28,9 +28,9 @@ import (
 // rather than under-counting demand (see readyDemandCache).
 const crossStoreGateDeadline = 10 * time.Second
 
-// crossStoreGateLegs returns the ready legs a split city's demand is gated
-// over, or nil for a city that relocates nothing (or whose topology cannot be
-// planned, which its readers report themselves).
+// crossStoreGateLegs returns the ready legs whose demand passes shared native
+// input admission, plus cross-store blockers when classes are relocated. A
+// topology that cannot be planned returns nil; its readers report that failure.
 //
 // The legs are planned over the city's registered WORK store
 // (censusWorkLeg), not the store handed in: every caller hands the sessions
@@ -43,7 +43,7 @@ func crossStoreGateLegs(cityPath string, cfg *config.City, cityStore beads.Store
 		return nil
 	}
 	legs, err := readyLegsForTopology(residencyTopologyForCity(cityPath, cfg, censusWorkLeg(cityPath, cityStore), servingRigStores(cfg, rigStores, suspendedRigPaths))) // residency:allow — the same planned legs `gc ready` federates, so demand gates exactly as serve does
-	if err != nil || !readywork.IsSplit(legs) {
+	if err != nil {
 		return nil
 	}
 	return legs

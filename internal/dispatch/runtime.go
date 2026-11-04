@@ -38,6 +38,9 @@ type SourceWorkflowStore struct {
 
 // ProcessOptions provides control-dispatcher execution context.
 type ProcessOptions struct {
+	// InputStores supplies native execution admission's named class handles.
+	// Required for ordinary execution under a root carrying gc.input_convoy_id.
+	InputStores *sourceworkflow.InputStores
 	// Context optionally cancels bounded retry waits inside ProcessControl.
 	Context            context.Context
 	CityPath           string
@@ -206,6 +209,35 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	}
 	if root.ID != "" {
 		opts.gateRoot = &root
+	}
+	if bead.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflowFinalize {
+		if root.ID == "" {
+			if rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
+				root, err = store.Get(rootID)
+				if err != nil {
+					return ControlResult{}, fmt.Errorf("input admission: reading root %s: %w", rootID, err)
+				}
+			}
+		}
+		if root.Metadata[beadmeta.InputConvoyIDMetadataKey] != "" && !rootSettled(root) && !rootCanceled(root) {
+			if opts.InputStores == nil {
+				if bead.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleTeardown {
+					return ControlResult{}, fmt.Errorf("%s: native input admission requires named class handles", bead.ID)
+				}
+			} else {
+				ctx := opts.Context
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				admission, err := opts.InputStores.Admission(ctx, bead)
+				if err != nil {
+					return ControlResult{}, err
+				}
+				if !admission.Ready {
+					return ControlResult{}, fmt.Errorf("%w: %s", ErrControlPending, admission.Reason)
+				}
+			}
+		}
 	}
 
 	switch bead.Metadata[beadmeta.KindMetadataKey] {

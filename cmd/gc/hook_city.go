@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"sync"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // hookCity is the city one `gc hook` invocation works in: resolved once, its
@@ -80,6 +82,14 @@ func (h *hookCity) recorder() events.Recorder {
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidate beads.Bead) (sourceworkflow.InputAdmission, error) {
+		if !hookClaimWorkflowLinked(candidate) {
+			return sourceworkflow.InputAdmission{Ready: true}, nil
+		}
+		work := hookClaimBdStoreContext(ctx, dir, env, "")
+		classes := scopeStores(h.path, nil, work)
+		return (sourceworkflow.InputStores{Graph: classes.Graph(), Work: []beads.WorkStore{classes.Work()}}).Admission(ctx, candidate)
+	}
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}
