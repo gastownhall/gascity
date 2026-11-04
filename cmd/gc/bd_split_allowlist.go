@@ -112,6 +112,10 @@ var bdSplitAllowlist = map[string]bdSplitCommand{
 	"backup status":  {why: "read"},
 	"dolt status":    {why: "read"},
 	"dolt show":      {why: "read"},
+	// It reads the Linear config keys and counts the work store's beads by
+	// external ref; it writes nothing. The work store is the ledger a Linear
+	// sync works on, so its count is the one this status is about.
+	"linear status": {why: "read (the work store's Linear sync status)"},
 
 	// Writes that touch no field Classify reads.
 	"close":        {why: "status and close reason"},
@@ -476,7 +480,7 @@ func resolveBdSplitCommand(inv *bdflags.Inventory, bdArgs []string, scopeRoot st
 	}
 	res, err := inv.Resolve(bdArgs)
 	if err != nil {
-		return refuse("gc bd: refused on this split city: bd would reject this argv (%v), and gc forwards only vetted commands and flags here. Nothing was written.", err)
+		return refuse("gc bd: refused on this split city: bd would reject this argv (%v), and gc forwards only vetted commands and flags here.%s Nothing was written.", err, bdSplitRejectedArgvHint(bdArgs))
 	}
 	path := res.Path
 	label := path
@@ -559,6 +563,34 @@ func resolveBdSplitCommand(inv *bdflags.Inventory, bdArgs []string, scopeRoot st
 		}
 	}
 	return bdSplitResolution{path: path, cmd: cmd, args: bdSplitArgs{flags: res.Flags, positionals: res.Positionals}}
+}
+
+// bdSplitRejectedArgvHint names the spelling bd does take for a flag bd itself
+// rejects, when gc knows one (bdReadFlagHints), as a sentence to append to the
+// refusal: " <sentence>." or "". The id is the verb's one positional when it
+// has exactly one.
+func bdSplitRejectedArgvHint(bdArgs []string) string {
+	verb, verbArgs, ok := bdRelocatedClassVerb(bdArgs)
+	if !ok {
+		return ""
+	}
+	id := "<id>"
+	var positionals []string
+	for _, arg := range verbArgs {
+		if !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, arg)
+		}
+	}
+	if len(positionals) == 1 {
+		id = positionals[0]
+	}
+	for _, arg := range verbArgs {
+		name, _, _ := strings.Cut(arg, "=")
+		if hint := bdReadFlagInstead(verb, name, []string{id}); hint != "" {
+			return " " + hint + "."
+		}
+	}
+	return ""
 }
 
 // bdReadResult is what a pre-read of a bead found.
