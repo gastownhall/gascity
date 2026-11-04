@@ -409,6 +409,18 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	// store can no longer stand in for the binding, a binding root that later
 	// reads as empty must not be mistaken for a city with nothing to move, and
 	// a run killed from here on is resumed from the session it names.
+	//
+	// Pending is written once, whole, and does not shrink as chunks go (the
+	// design's §3.3 had it shrink per chunk; that is wrong). A resumed run
+	// takes its session from Pending, and the session is what the plan above
+	// is decided over: the kept cross edges into a row an earlier chunk
+	// already removed are re-added only after the delete loop, and only a
+	// session that still names that row finds them in its backup entry. A
+	// Pending that dropped the row would resume without them, and on a
+	// cascading or bd-like store those edges would be gone for good, with no
+	// warning (TestReviewCrashResumeKeepsOpenBlockerEdgeOnCascadingBackend).
+	// The same session tells a removed row's leftover internal edges from an
+	// edge its backup does not record.
 	pending := sortedMapKeys(session)
 	note = infraClearedNote{Binding: target.Binding, Database: target.Database, Backup: target.RetainedBackupPath(), Pending: pending, LostCrossEdges: note.LostCrossEdges}
 	if err := writeInfraClearedNote(cityPath, note); err != nil {
