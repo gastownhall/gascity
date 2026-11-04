@@ -1485,6 +1485,9 @@ func configureSupervisorRuntime() {
 func runSupervisor(stdout, stderr io.Writer) int {
 	configureSupervisorRuntime()
 	markProgramShadowLongLived()
+	// Guarded rig stores in this process use each city's controller resolver,
+	// never a one-shot one.
+	defer markRigNamespaceControllerProcess()()
 
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck

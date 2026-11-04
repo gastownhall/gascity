@@ -252,7 +252,7 @@ func TestAutocloseSweepCensus(t *testing.T) {
 	if got := s.due(sweepTestClock(3)); len(got) != 1 || got[0] != "a" {
 		t.Fatalf("due = %v, want [a]", got)
 	}
-	s.retain(map[*beads.CachingStore]struct{}{})
+	s.retain(map[autocloseCensusCache]struct{}{})
 	if len(s.census) != 0 {
 		t.Fatal("retain kept a replaced cache's census")
 	}
@@ -371,7 +371,7 @@ func TestAutocloseSweepCachesFindsEveryFedCache(t *testing.T) {
 		beadStores:    map[string]beads.Store{"r": &beadPolicyStore{Store: work}},
 		storageRoutes: splitRoutes(relocated),
 	}
-	got := map[*beads.CachingStore]bool{}
+	got := map[autocloseCensusCache]bool{}
 	for _, cache := range cs.sweepCaches() {
 		if got[cache] {
 			t.Fatal("sweepCaches listed a cache twice")

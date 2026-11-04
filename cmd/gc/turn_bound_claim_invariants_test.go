@@ -48,17 +48,23 @@ import (
 //     the landed claim to the city event log; it holds no candidate, no
 //     assignee and no policy of its own, and claimHookWork (the fenced worker
 //     pull path above) is the only place it is composed.
+//   - rig_namespace_store_writes.go FORWARDS too: the guarded rig store
+//     (federation = "rig") sits under the policy layer and passes a claim
+//     through after refusing an actor or a row outside the rig's namespace. It
+//     holds no candidate and decides no assignment; it only narrows a claim
+//     some worker pull path already chose.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
 var claimCASAllowedFiles = map[string]bool{
-	"cmd_hook_claim.go":         true,
-	"claim_class_route.go":      true,
-	"cmd_bd_by_id.go":           true,
-	"cmd_agent_script.go":       true,
-	"class_store_emit.go":       true,
-	"bead_policy_store.go":      true,
-	"hook_claim_bead_events.go": true,
+	"cmd_hook_claim.go":             true,
+	"claim_class_route.go":          true,
+	"cmd_bd_by_id.go":               true,
+	"cmd_agent_script.go":           true,
+	"class_store_emit.go":           true,
+	"bead_policy_store.go":          true,
+	"hook_claim_bead_events.go":     true,
+	"rig_namespace_store_writes.go": true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

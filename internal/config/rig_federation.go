@@ -378,8 +378,27 @@ func validateGuardedRigSlingTargets(g *Rig) error {
 
 // RigFederationWarnings returns one operator warning per rig that sets
 // federation = "rig". This build validates the setting but does not yet
-// enforce it on the rig's bead store, so a guarded rig is not protected;
-// callers surface these as non-fatal warnings at start and reload.
+// enforce it everywhere, so a guarded rig is not protected; callers surface
+// these as non-fatal warnings at start and reload.
+//
+// TODO(rig-federation): the guarded rig store (cmd/gc rig_namespace_store.go)
+// enforces the setting on the rig's Go store handles, but paths that bypass
+// them do not yet honor it: the hook claim cycle's bd writes, sling and graph
+// routing, gc agent-script's claim redirect, gc bd writes, gc agent
+// is-foreign, the orphan sweep and the core-pack scripts. In the change that
+// lands the last of those, delete this warning and its callers (start,
+// supervisor load, reload, config show, doctor, the config API), the
+// "not enforced by this build" marking of gc rig list's text output
+// (cmd/gc/cmd_rig.go), the "does not enforce them yet" warning of
+// docs/guides/sharing-a-rig-store.md, the "not enforced yet" wording of the
+// CHANGELOG entries, the guide's "not covered by this build yet" sentence and
+// the store-guard CHANGELOG entry's "not covered yet" sentence, and the
+// warning's tests (TestRigFederationWarnings here; in cmd/gc,
+// TestConfigShowValidateWarnsThatRigFederationIsNotEnforced,
+// TestTryReloadConfigWarnsThatRigFederationIsNotEnforced,
+// TestPrintRigFederationStartWarnings and the "not enforced by this build"
+// assertions of TestDoRigListTextShowsRigFederation and
+// TestRenderRigListFromAPIShowsRigFederation).
 func RigFederationWarnings(rigs []Rig) []string {
 	var warnings []string
 	for i := range rigs {

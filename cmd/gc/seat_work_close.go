@@ -83,6 +83,18 @@ func closeTimeLister(store beads.Store, isWork bool) func(beads.ListQuery) ([]be
 	switch {
 	case cached && (isWork || bd):
 		return func(q beads.ListQuery) ([]beads.Bead, error) {
+			if g, guarded := cache.(*rigNamespaceStore); guarded {
+				// A guarded rig's cached read that the guard could not
+				// answer completely is an error, never "no late work".
+				items, ok, err := g.cachedListChecked(q)
+				if err != nil {
+					return nil, err
+				}
+				if ok || bd {
+					return items, nil
+				}
+				return live(q)
+			}
 			if items, ok := cache.CachedList(q); ok || bd {
 				return items, nil
 			}
@@ -94,8 +106,11 @@ func closeTimeLister(store beads.Store, isWork bool) func(beads.ListQuery) ([]be
 	return live
 }
 
-// storeLayer finds the first layer of store, through the class, policy and
-// cache wrappers, that is a T.
+// storeLayer finds the first layer of store, through the class, policy,
+// guard and cache wrappers, that is a T. A guarded rig store
+// (federation = "rig") is asked before the layers under it, so a reader it
+// carries (CachedList) comes back filtered; it is looked through only for a
+// T it does not carry, such as the bd engine underneath.
 func storeLayer[T any](store beads.Store) (T, bool) {
 	for i := 0; store != nil && i < 8; i++ {
 		if t, ok := store.(T); ok {
@@ -106,6 +121,8 @@ func storeLayer[T any](store beads.Store) (T, bool) {
 			store = v.Store
 		case beads.WorkStore:
 			store = v.Store
+		case *rigNamespaceStore:
+			store = v.inner
 		case interface{ Backing() beads.Store }:
 			store = v.Backing()
 		case interface{ ConditionalWritesResolveTarget() beads.Store }:

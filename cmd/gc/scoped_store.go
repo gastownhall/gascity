@@ -128,6 +128,10 @@ func bdStoreBacking(store beads.Store) (*beads.BdStore, bool) {
 			store = inner
 			continue
 		}
+		if inner, _, ok := unwrapRigNamespaceStore(store); ok {
+			store = inner
+			continue
+		}
 		return nil, false
 	}
 	return nil, false
@@ -140,6 +144,10 @@ func beadPolicyConfig(store beads.Store) (*config.City, bool) {
 	for range 8 {
 		if _, policy, ok := unwrapBeadPolicyStore(store); ok {
 			return policy.cfg, true
+		}
+		if inner, _, ok := unwrapRigNamespaceStore(store); ok {
+			store = inner
+			continue
 		}
 		cached, ok := store.(*beads.CachingStore)
 		if !ok || cached == nil || cached.Backing() == nil {
@@ -175,6 +183,11 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	}
 	if err != nil {
 		return nil, err
+	}
+	// A guarded rig's clone keeps its guard (federation = "rig"):
+	// policy(guard(clone)), never a bare bd store over the shared ledger.
+	if ns := rigNamespaceOfStore(existing); ns != nil {
+		scoped = newRigNamespaceStore(scoped, ns)
 	}
 	if policyWrapped {
 		scoped = wrapStoreWithBeadPolicies(scoped, policyCfg)

@@ -1043,6 +1043,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config validation API warn about each one, and `gc rig list` marks it "not
   enforced by this build". A city that sets neither key is unchanged, except
   that `gc config show --json` lists both fields, empty, on every rig.
+- **A rig with `federation = "rig"` opens behind a store guard.** Every
+  place this city opens the rig's bead store (the controller, and one-shot
+  commands, including subdirectories and redirected worktrees of the rig)
+  serves only this city's rows from discovery reads (rows whose owners are
+  all inside the rig's namespace, rows a session of this city's own pools of
+  the rig claimed, and rows the guard created, which carry
+  `gc.owner_namespace`; owners decide before that stamp, so a row the guard
+  created whose assignee or route names an identity outside the namespace
+  counts as another city's), refuses every write to another city's row, refuses
+  bare routes and outside holders, and keeps another city's changes from
+  waking this one. Reads by id, by parent and of dependencies are unchanged.
+  Each guarded write costs one extra read of the row it writes. A guarded rig
+  whose store is the city's or another rig's is not opened, and neither is an
+  unguarded rig whose store is a guarded rig's. Paths that bypass the rig's
+  store handles are not covered yet, so the warnings above stay.
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

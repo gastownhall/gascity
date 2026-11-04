@@ -4,56 +4,34 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// poolSessionBeadIDPattern is the shape of a pool session bead id the city
-// pins itself: "<store prefix>-session-<instance token>", the token being 16
-// random bytes in lower-case hex (session.NewInstanceToken,
-// poolSessionExplicitBeadID). Ids of that shape cannot collide across cities.
-// Every other session id is minted by the store ("<prefix>-<n>", or a short
-// hash) and repeats across cities, so it is never admitted by provenance.
-//
-// A prefix segment may hold '_' and '.': bd init turns dots in a prefix into
-// underscores, and a derived prefix can keep a dot.
-var poolSessionBeadIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.]+(?:-[A-Za-z0-9_.]+)*-session-[0-9a-f]{32}$`)
-
-// embeddedPoolSessionIDPattern matches any value that ends in a pool session
-// bead id of any city's prefix: the id itself, or a pool session's runtime
-// name "<template base>-<bead id>" (PoolSessionName). Such a value names a
-// session of whichever city minted the id, so it is admitted only through
-// this city's own session records, never by its spelling.
-//
-// It requires nothing before "-session-": a store prefix may end in any
-// character a store accepts, and matching more values only sends more of
-// them to the record check.
-var embeddedPoolSessionIDPattern = regexp.MustCompile(`-session-[0-9a-f]{32}$`)
+// The pool session id shapes live in config (config.PoolSessionBeadIDPattern,
+// config.EmbeddedPoolSessionIDPattern), shared with the routing checks
+// outside this package.
 
 // maxOwnSessionIdentityLen bounds the identities looked up in the session
 // store. A pool session name is "<template base>-<bead id>"; anything longer
 // is not one of ours. It bounds lookups only: a longer value that embeds a
 // pool id is still refused by the lexical arm.
-const maxOwnSessionIdentityLen = 512
+const maxOwnSessionIdentityLen = config.MaxPoolSessionIdentityLen
 
 // isPoolSessionBeadID reports whether id has the unguessable pool shape.
-func isPoolSessionBeadID(id string) bool {
-	return len(id) <= maxOwnSessionIdentityLen && poolSessionBeadIDPattern.MatchString(id)
-}
+func isPoolSessionBeadID(id string) bool { return config.IsPoolSessionBeadID(id) }
 
 // embedsPoolSessionID reports whether v, trimmed, is a pool session bead id
 // or ends in one after a separator: whatever its spelling, it names a pool
 // session, and only the session records of the city that minted it can say
 // whose.
-func embedsPoolSessionID(v string) bool {
-	return embeddedPoolSessionIDPattern.MatchString(strings.TrimSpace(v))
-}
+func embedsPoolSessionID(v string) bool { return config.EmbedsPoolSessionID(v) }
 
 // ownPoolSessionIDCandidates returns the bead ids v could name in this
 // city's session store: for each of the city's session id prefixes p, the

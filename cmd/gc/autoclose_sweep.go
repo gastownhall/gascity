@@ -67,7 +67,7 @@ const (
 type autocloseSweep struct {
 	mu sync.Mutex
 	// census is each cache's active ids at its last clean read.
-	census map[*beads.CachingStore]map[string]struct{}
+	census map[autocloseCensusCache]map[string]struct{}
 	// pending maps an id owed a check to when it is due.
 	pending map[string]time.Time
 	// ran holds ids the event path ran autoclose to the end for since they
@@ -86,7 +86,7 @@ type autocloseSweep struct {
 
 func newAutocloseSweep() *autocloseSweep {
 	return &autocloseSweep{
-		census:     map[*beads.CachingStore]map[string]struct{}{},
+		census:     map[autocloseCensusCache]map[string]struct{}{},
 		pending:    map[string]time.Time{},
 		ran:        map[string]struct{}{},
 		interval:   clock.Backstop(autocloseSweepInterval),
@@ -147,7 +147,7 @@ func (s *autocloseSweep) deferLocked(id string, due time.Time) {
 // observe folds one cache's active census in. A departure is owed a check
 // after the grace; an arrival forgets the id, so a reopened row's next close
 // is checked afresh. The first census of a cache only seeds it.
-func (s *autocloseSweep) observe(cache *beads.CachingStore, active map[string]struct{}, now time.Time) {
+func (s *autocloseSweep) observe(cache autocloseCensusCache, active map[string]struct{}, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, seen := s.census[cache]
@@ -169,7 +169,7 @@ func (s *autocloseSweep) observe(cache *beads.CachingStore, active map[string]st
 }
 
 // retain drops the census of every cache not in keep (a reload replaced it).
-func (s *autocloseSweep) retain(keep map[*beads.CachingStore]struct{}) {
+func (s *autocloseSweep) retain(keep map[autocloseCensusCache]struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for cache := range s.census {
@@ -262,6 +262,29 @@ type autocloseSweepResult struct {
 	Ran, Refuted, Retried int
 }
 
+// skipForeignRow reports whether the sweep must not act on live, the row it
+// read for id from a store guarded by ns (nil when the store is not
+// guarded), and counts it. Another city's close in a guarded rig's shared
+// store (the ledger feed defers every close it absorbs) is not this city's
+// to act on; a row the guard cannot classify this pass is retried, never
+// concluded from.
+func (s *autocloseSweep) skipForeignRow(ns *rigNamespace, id string, live beads.Bead, now time.Time, res *autocloseSweepResult) bool {
+	if ns == nil {
+		return false
+	}
+	c := ns.classifyRow(live)
+	switch {
+	case c.Class == rowForeign && c.Err != nil:
+		res.Retried++
+		s.deferID(id, now.Add(s.interval))
+		return true
+	case c.Class == rowForeign:
+		res.Refuted++
+		return true
+	}
+	return false
+}
+
 // runAutocloseSweepPass takes every live cache's census, then checks the ids
 // due by now: a row read closed gets its completion fact (once) and autoclose,
 // an open or gone row is dropped, and an unreadable one, or one whose
@@ -273,7 +296,7 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		return autocloseSweepResult{}
 	}
 	sweep := cs.autocloseSweepOf()
-	keep := map[*beads.CachingStore]struct{}{}
+	keep := map[autocloseCensusCache]struct{}{}
 	for _, cache := range cs.sweepCaches() {
 		keep[cache] = struct{}{}
 		// Both tiers: a wisp molecule's steps are ephemeral rows.
@@ -309,7 +332,9 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			stores = withRelicStore(stores, relic)
 		}
 		// The sweep's reads see the split-strict gate's views, like the
-		// event path's (identity in production).
+		// event path's (identity in production). The rig namespace guard is
+		// read off the store under the view: the view hides its layers.
+		unviewed := stores
 		stores, relic = splitStrictEventStores(id, stores, relic)
 		if len(stores) == 0 {
 			continue
@@ -322,6 +347,15 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			continue
 		}
 		store, live, err := liveCloseOwner(stores, id, relic)
+		guard := rigNamespaceOfStore(store)
+		for i := range stores {
+			if guard == nil && i < len(unviewed) && sameBeadStore(stores[i], store) {
+				guard = rigNamespaceOfStore(unviewed[i])
+			}
+		}
+		if err == nil && sweep.skipForeignRow(guard, id, live, now, &res) {
+			continue
+		}
 		switch confirmInferredClose(live, err) {
 		case closeConfirmed:
 			cs.emitCompletedFact(live, autocloseSweepActor)
@@ -364,8 +398,16 @@ func (cs *controllerState) anySuspendedRigStoreLocked(stores []beads.Store) bool
 	return false
 }
 
-// sweepCaches returns the distinct CachingStores the bead event watcher feeds.
-func (cs *controllerState) sweepCaches() []*beads.CachingStore {
+// autocloseCensusCache is the cache view the autoclose sweep takes its census
+// from: a *beads.CachingStore, or a guarded rig store over one, whose census
+// holds this city's rows only.
+type autocloseCensusCache interface {
+	CachedList(beads.ListQuery) ([]beads.Bead, bool)
+}
+
+// sweepCaches returns the distinct caches the bead event watcher feeds; a
+// guarded rig's comes back as its guard.
+func (cs *controllerState) sweepCaches() []autocloseCensusCache {
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked("")
 	for _, class := range infraMigrationClasses {
@@ -375,9 +417,16 @@ func (cs *controllerState) sweepCaches() []*beads.CachingStore {
 	}
 	cs.mu.RUnlock()
 	seen := map[*beads.CachingStore]struct{}{}
-	var out []*beads.CachingStore
+	var out []autocloseCensusCache
 	for _, store := range stores {
 		store, _, _ = unwrapBeadPolicyStore(store)
+		var view autocloseCensusCache
+		if inner, _, ok := unwrapRigNamespaceStore(store); ok {
+			if view, ok = beads.As[autocloseCensusCache](store); !ok {
+				continue // never the cache under a guard
+			}
+			store = inner
+		}
 		cache, ok := store.(*beads.CachingStore)
 		if !ok || cache == nil {
 			continue
@@ -386,7 +435,10 @@ func (cs *controllerState) sweepCaches() []*beads.CachingStore {
 			continue
 		}
 		seen[cache] = struct{}{}
-		out = append(out, cache)
+		if view == nil {
+			view = cache
+		}
+		out = append(out, view)
 	}
 	return out
 }

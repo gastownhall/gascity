@@ -100,6 +100,35 @@ not the default:
 {"name":"beta","path":"/srv/work/beta","prefix":"be","hq":false,"suspended":false,"running":true,"federation":"rig","namespace":"exclusive","beads":"initialized"}
 ```
 
+## What the store guard does
+
+Wherever this city opens a guarded rig's bead store, the store is wrapped in a
+guard:
+
+- Discovery reads (lists, ready queries, the dashboard and API listings) show
+  only rows whose owners are all inside the namespace, rows a session of this
+  city's own pools of the rig claimed, rows the guard created (they carry
+  `gc.owner_namespace`) and rows no one can be attributed to. A query for an
+  identity outside the namespace returns nothing.
+- A row's owners (its assignee and routes) decide before the creation stamp.
+  A row the guard created whose assignee or route later names an identity
+  outside the namespace is another city's row to this city: discovery reads
+  hide it and writes to it are refused.
+- Reads by id, by parent and of dependencies show every row.
+- Writes to another city's row are refused, as are bare routes and holders
+  outside the namespace. Each guarded write reads the row it writes once
+  more, live, before writing it.
+- Another city's changes to the store wake nothing in this city.
+- A guarded rig whose store is the city's or another rig's is not opened, and
+  neither is an unguarded rig whose store is a guarded rig's.
+
+`gc doctor` reports a guarded rig's store as the bd front door even when its
+scope runs the proxied native lane: the guard does not hand out the proxied
+store's internals, so the check cannot see the lane.
+
+Paths that do not go through the rig's store handles are not covered by this
+build yet; see the warning at the top of this page.
+
 ## What it does not cover
 
 - `bd` run directly by people or agents, and any writer other than Gas City.

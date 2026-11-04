@@ -664,6 +664,11 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 // accessors read it under RLock.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	if cs != nil && cityHasGuardedRig(cr.cfg) {
+		// The guard resolver of the city's guarded rigs reads the runtime's
+		// own sessions store.
+		cs.setRigNamespaceSessionStore(cr.sessionsBeadStore(), cr.cfg)
+	}
 	if hook := controllerStateWiredHook; hook != nil {
 		hook(cr)
 	}
@@ -1453,6 +1458,11 @@ func (cr *CityRuntime) tick(
 ) {
 	if ctx.Err() != nil {
 		return
+	}
+	if cr.cs != nil {
+		// Once per pass: a session-store failure in the last pass stops
+		// failing guarded-rig lookups fast.
+		cr.cs.rigSessions.beginPass()
 	}
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
@@ -4674,6 +4684,7 @@ func (cr *CityRuntime) loadTickSessionBeadSnapshot(trigger string) *sessionBeadS
 	sessionBeads, err := loadSessionBeadSnapshotLive(store.Store, true)
 	if err == nil {
 		cr.seedACPRoutes(sessionBeads)
+		cr.publishRigNamespaceSnapshot(sessionBeads)
 		return sessionBeads
 	}
 	fmt.Fprintf(cr.stderr, "%s: loading session beads live for %s tick: %v (using cached snapshot)\n", cr.logPrefix, trigger, err) //nolint:errcheck
@@ -4693,7 +4704,16 @@ func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapsho
 		return nil, true
 	}
 	cr.seedACPRoutes(sessionBeads)
+	cr.publishRigNamespaceSnapshot(sessionBeads)
 	return sessionBeads, false
+}
+
+// publishRigNamespaceSnapshot hands a session snapshot loaded from the city's
+// sessions store to the resolver of its guarded rig stores.
+func (cr *CityRuntime) publishRigNamespaceSnapshot(sessionBeads *sessionBeadSnapshot) {
+	if cr.cs != nil {
+		cr.cs.rigSessions.publishSnapshot(sessionBeads)
+	}
 }
 
 // acpRouteSeedKey identifies the inputs of the last ACP route seed.

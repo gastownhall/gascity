@@ -252,22 +252,8 @@ func isRigNamespaceRouteKey(key string) bool {
 }
 
 // rigRouteQualified reports whether a routing value names a rig-scoped
-// identity: its fold contains "/" and no segment of it is empty ("/x",
-// "--x", "x/" and "a//b" are not qualified). A bare value is city-scoped.
-// Every comparison here uses config.FoldIdentity, the normalization config
-// validation uses.
-func rigRouteQualified(v string) bool {
-	f := config.FoldIdentity(v)
-	if !strings.Contains(f, "/") {
-		return false
-	}
-	for _, seg := range strings.Split(f, "/") {
-		if seg == "" {
-			return false
-		}
-	}
-	return true
-}
+// identity (config.RigRouteQualified).
+func rigRouteQualified(v string) bool { return config.RigRouteQualified(v) }
 
 // newRigNamespace returns the namespace of rig, or (nil, false) when the rig
 // is not guarded. A guarded rig without a usable name still returns a
