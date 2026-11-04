@@ -1258,7 +1258,22 @@ func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.C
 		return
 	}
 	printSourceWorkflowConflictLines(stderr, conflictErr.SourceBeadID, conflictErr.WorkflowIDs,
-		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef))
+		sourceWorkflowConflictCleanup(conflictErr, storeRef))
+}
+
+// sourceWorkflowConflictCleanup returns the commands that clear a conflict's
+// blocking roots, joined with "; ". A convoy-tracked root has no
+// gc.source_bead_id, so delete-source cannot see it and it needs `gc workflow
+// delete <root> --force` (the bare delete only previews).
+func sourceWorkflowConflictCleanup(conflictErr *sourceworkflow.ConflictError, storeRef string) string {
+	var cmds []string
+	if conflictErr.HasSourceBeadRoots() {
+		cmds = append(cmds, sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef))
+	}
+	for _, id := range conflictErr.ConvoyTrackedWorkflowIDs {
+		cmds = append(cmds, shellquote.Join([]string{"gc", "workflow", "delete", id, "--force"}))
+	}
+	return strings.Join(cmds, "; ")
 }
 
 // printSourceWorkflowConflictLines prints what gc sling shows for a source

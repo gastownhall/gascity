@@ -133,7 +133,7 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		// them and adds the stable type/code.
 		if conflict != nil && status == http.StatusConflict {
 			storeRef := s.slingStoreRef(body.Rig, agentCfg, slingStoreBeadID(body))
-			hint := sourceWorkflowCleanupHint(conflict.SourceBeadID, storeRef)
+			hint := sourceWorkflowCleanupHint(conflict, storeRef)
 			return nil, apierr.SlingSourceWorkflowConflict.With(message,
 				&huma.ErrorDetail{Location: "body.source_bead_id", Value: conflict.SourceBeadID},
 				&huma.ErrorDetail{Location: "body.blocking_workflow_ids", Value: conflict.WorkflowIDs},

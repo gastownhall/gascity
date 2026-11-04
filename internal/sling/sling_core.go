@@ -2020,9 +2020,14 @@ func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName strin
 			return fmt.Errorf("list convoy-tracked live workflows for %s: %w", beadID, err)
 		}
 	}
+	// A root found only here carries no gc.source_bead_id, so `gc workflow
+	// delete-source` cannot clear it; the conflict records which roots those
+	// are so the hint names a remedy that works for each.
+	var convoyTracked []string
 	for _, root := range convoyRoots {
 		if !slices.Contains(ids, root.ID) {
 			ids = append(ids, root.ID)
+			convoyTracked = append(convoyTracked, root.ID)
 		}
 	}
 
@@ -2030,9 +2035,11 @@ func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName strin
 		return nil
 	}
 	slices.Sort(ids)
+	slices.Sort(convoyTracked)
 	return &sourceworkflow.ConflictError{
-		SourceBeadID: beadID,
-		WorkflowIDs:  ids,
+		SourceBeadID:             beadID,
+		WorkflowIDs:              ids,
+		ConvoyTrackedWorkflowIDs: convoyTracked,
 	}
 }
 

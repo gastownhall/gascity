@@ -113,7 +113,7 @@ func slingChildOutcomes(children []sling.SlingChildResult, storeRef string) []Sl
 			outcome.Conflict = &SlingChildConflict{
 				SourceBeadID:        c.SourceBeadID,
 				BlockingWorkflowIDs: append([]string{}, c.WorkflowIDs...),
-				Hint:                sourceWorkflowCleanupHint(c.SourceBeadID, storeRef),
+				Hint:                sourceWorkflowCleanupHint(c, storeRef),
 			}
 		}
 		out = append(out, outcome)
@@ -390,16 +390,25 @@ func slingStoreBeadID(body slingBody) string {
 	return strings.TrimSpace(body.Bead)
 }
 
-// sourceWorkflowCleanupHint renders the CLI command that clears the blocking
-// source workflow. Surfaced in the conflict response body so users can fix
-// the state without grepping docs.
-func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
-	args := []string{"gc workflow delete-source", sourceBeadID}
-	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
-		args = append(args, "--store-ref", storeRef)
+// sourceWorkflowCleanupHint renders the CLI commands that clear the blocking
+// source workflows, joined with "; ". Surfaced in the conflict response body so
+// users can fix the state without grepping docs. A convoy-tracked root carries
+// no gc.source_bead_id, so delete-source cannot see it and it needs `gc
+// workflow delete <root> --force` (the bare delete only previews).
+func sourceWorkflowCleanupHint(c *sourceworkflow.ConflictError, storeRef string) string {
+	var cmds []string
+	if c.HasSourceBeadRoots() {
+		args := []string{"gc workflow delete-source", c.SourceBeadID}
+		if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
+			args = append(args, "--store-ref", storeRef)
+		}
+		args = append(args, "--apply")
+		cmds = append(cmds, strings.Join(args, " "))
 	}
-	args = append(args, "--apply")
-	return strings.Join(args, " ")
+	for _, id := range c.ConvoyTrackedWorkflowIDs {
+		cmds = append(cmds, "gc workflow delete "+id+" --force")
+	}
+	return strings.Join(cmds, "; ")
 }
 
 // findSlingStore returns the bead store for sling operations.

@@ -33,8 +33,9 @@ import (
 
 // ConflictError is returned when a graph workflow launch is blocked by one
 // or more already-live workflow roots for the same source bead. The CLI
-// maps this to exit code 3 and renders a `gc workflow delete-source`
-// cleanup hint; the API maps it to HTTP 409.
+// maps this to exit code 3 and renders a cleanup hint (`gc workflow
+// delete-source`, or `gc workflow delete <root> --force` for a convoy-tracked
+// root); the API maps it to HTTP 409.
 type ConflictError struct {
 	SourceBeadID string
 	WorkflowIDs  []string
@@ -42,6 +43,21 @@ type ConflictError struct {
 	// through the source bead's input-convoy tracking edge. Those roots carry
 	// no gc.source_bead_id, so `gc workflow delete-source` cannot clear them.
 	ConvoyTrackedWorkflowIDs []string
+}
+
+// HasSourceBeadRoots reports whether `gc workflow delete-source` can clear at
+// least part of the conflict: some root in WorkflowIDs is not convoy-tracked,
+// or WorkflowIDs names none (nothing to rule delete-source out).
+func (e *ConflictError) HasSourceBeadRoots() bool {
+	if len(e.WorkflowIDs) == 0 {
+		return true
+	}
+	for _, id := range e.WorkflowIDs {
+		if !slices.Contains(e.ConvoyTrackedWorkflowIDs, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // SourceStoreRefMetadataKey is the bead metadata key recording which store
