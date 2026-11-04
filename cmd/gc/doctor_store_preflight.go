@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,7 +22,15 @@ const (
 // City-scoped store probe before store-dependent checks (also used at gc start warmup). Tests override.
 var doctorBeadStorePreflight = defaultDoctorBeadStorePreflight
 
+// errDoctorStorePreflightNotApplicable: a file-backed city store has no server
+// whose outage the bd probe could detect. Not outage-shaped, so store checks
+// stay registered and only the bd-forking gate-sandbox differential is dropped.
+var errDoctorStorePreflightNotApplicable = errors.New("bead-store preflight not applicable: city store is file-backed")
+
 func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Store, error)) error {
+	if rawBeadsProviderForScope(cityPath, cityPath) == "file" {
+		return errDoctorStorePreflightNotApplicable
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), doctorBeadStorePreflightTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
