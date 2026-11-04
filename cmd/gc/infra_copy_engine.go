@@ -260,6 +260,9 @@ func (p infraCopyPlan) internalEdges() []beads.DepWithPayload {
 type infraPrepared struct {
 	kept  map[string]bool
 	edges map[beads.DepPair]beads.DepWithPayload
+	// stamped counts the rows an earlier attempt left in the binding, kept
+	// or not.
+	stamped int
 }
 
 // infraPayloadDifference compares the payloads on one bead's within-infra edges
@@ -299,14 +302,14 @@ func infraKeepStampedRow(plan infraCopyPlan, want beads.Bead, got beads.Bead, go
 	if beadCopyDifference(want, got) != "" || infraCopyClassDifference(want, got) != "" {
 		return false
 	}
-	planned := map[string]string{}
+	planned := map[string]bool{}
 	for _, d := range plan.down[want.ID] {
 		if plan.infraIDs[d.DependsOnID] {
-			planned[d.DependsOnID] = d.Type
+			planned[d.DependsOnID] = true
 		}
 	}
 	for _, d := range gotDeps {
-		if _, ok := planned[d.DependsOnID]; !ok {
+		if !planned[d.DependsOnID] {
 			return false
 		}
 	}

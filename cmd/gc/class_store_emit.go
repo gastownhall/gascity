@@ -981,7 +981,7 @@ func (s *emittingClassStore) DepAddWithMetadata(issueID, dependsOnID, depType, m
 // CreateWithForeignIDBatch forwards the engine's batch create
 // (beads.ForeignIDBatchCreator) and emits bead.created for each row as the
 // engine stored it, as CreateWithForeignID does for one. An engine without
-// it reports beads.ErrBatchCopyUnsupported, and the caller creates per row.
+// it reports beads.ErrBatchCopyUnsupported, and the copy refuses the binding.
 func (s *emittingClassStore) CreateWithForeignIDBatch(rows []beads.Bead) error {
 	creator, ok := beads.As[beads.ForeignIDBatchCreator](s.Store)
 	if !ok {

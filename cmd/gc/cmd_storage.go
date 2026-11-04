@@ -874,7 +874,19 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		}
 	}
 	if notePresent && !note.Complete {
-		fmt.Fprintf(stdout, "  clear: INTERRUPTED (%d bead(s) in the unfinished session)\nblocking invariant: an earlier clear of the retained copies did not finish. Stop the city and finish it with `%s`\n", len(note.Pending), storageClearInstruction()) //nolint:errcheck // best-effort stdout
+		// Pending is the whole session and never shrinks (see the clear), so
+		// what remains is the part of it the work store still holds.
+		held := make(map[string]bool, len(gap.Retained))
+		for _, id := range gap.Retained {
+			held[id] = true
+		}
+		left := 0
+		for _, id := range note.Pending {
+			if held[id] {
+				left++
+			}
+		}
+		fmt.Fprintf(stdout, "  clear: INTERRUPTED (%d of the %d bead(s) in the unfinished session are still in the work store)\nblocking invariant: an earlier clear of the retained copies did not finish. Stop the city and finish it with `%s`\n", left, len(note.Pending), storageClearInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if len(gap.Retained) > 0 {

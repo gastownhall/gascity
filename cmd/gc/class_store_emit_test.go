@@ -1744,8 +1744,8 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource",
 			// The batch create and edge write report beads.ErrBatchCopyUnsupported
-			// over native Dolt, and the copy then writes per row: the path it
-			// takes when the wrapper lacks them.
+			// over native Dolt, and the copy then refuses the binding: the
+			// answer it gives when the wrapper lacks them.
 			"CreateWithForeignIDBatch", "CreateWithStorage", "DepAddBatch", "DepAddWithMetadata",
 			// DepMetadataAbsentByProtocol forwards the engine's declaration, and
 			// neither engine declares one: ("", false), as its absence answers.

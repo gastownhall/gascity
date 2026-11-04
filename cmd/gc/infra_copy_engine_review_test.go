@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -500,5 +501,43 @@ func TestInfraEngineDropsAStampedRowTheSourceDeletedSincePausing(t *testing.T) {
 	if m := infraCopiedCount.FindStringSubmatch(said); m == nil || m[1] != "0" {
 		t.Fatalf("the run copied %v rows, want none: every row it kept still equals the work store: %s", m, said)
 	}
+	infra := 0
+	for _, b := range city.rows {
+		if isInfra(b) {
+			infra++
+		}
+	}
+	if want := fmt.Sprintf("kept %d of %d stamped row(s)", infra, infra+1); !strings.Contains(said, want) {
+		t.Fatalf("the resume does not say %q: %s", want, said)
+	}
 	city.assertNotLossy(t)
+}
+
+// edgeCountingMuteSource is a work store that cannot be asked for payloads (it
+// carries only the Store interface) and counts its edge reads.
+type edgeCountingMuteSource struct {
+	beads.Store
+	reads *int
+}
+
+func (s edgeCountingMuteSource) DepList(id, direction string) ([]beads.Dep, error) {
+	*s.reads++
+	return s.Store.DepList(id, direction)
+}
+
+// TestThePlanRefusesAnUnaskableSourceBeforeReadingItsEdges (review NIT): a
+// work store that cannot report payloads is refused before the walk over its
+// edges, which on an MC-sized city is the expensive part of the plan.
+func TestThePlanRefusesAnUnaskableSourceBeforeReadingItsEdges(t *testing.T) {
+	mem := beads.NewMemStore()
+	row := mustCreateInfraBead(t, mem, beads.Bead{Title: "a session", Type: "session"})
+	reads := 0
+	source := edgeCountingMuteSource{Store: mem, reads: &reads}
+	_, err := infraSourceEdgePayloadRefusal(source, []beads.Bead{row}, nil)
+	if !errors.Is(err, beads.ErrDepMetadataUnsupported) {
+		t.Fatalf("infraSourceEdgePayloadRefusal = %v, want ErrDepMetadataUnsupported", err)
+	}
+	if reads != 0 {
+		t.Fatalf("the plan read edges %d time(s) before refusing a source it cannot ask", reads)
+	}
 }

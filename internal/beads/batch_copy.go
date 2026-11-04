@@ -11,12 +11,14 @@ import (
 
 // The batch capabilities of a store-to-store copy (S5 §3.2). The infra-class
 // migration copies tens of thousands of rows; one transaction, and on Dolt one
-// commit, per row and per edge is what made a 40k-row city take minutes. Each
-// capability is optional: a store without it takes the per-row path.
+// commit, per row and per edge is what made a 40k-row city take minutes. The
+// capabilities are optional on a store; the migration requires the copy's two
+// on its binding, and reads and removes edge by edge where a work store lacks
+// the others.
 
 // ErrBatchCopyUnsupported signals that a wrapper implements a batch copy
 // capability only to forward it, and the store under it has none: the caller
-// takes the per-row path, as it would had the wrapper not advertised it.
+// answers as it would had the wrapper not advertised it.
 var ErrBatchCopyUnsupported = errors.New("batch copy unsupported by backing store")
 
 // DepPair names one dependency edge by its two ends.

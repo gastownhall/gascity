@@ -1389,6 +1389,9 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err != nil {
 		return fail(err)
 	}
+	if prepared.stamped > 0 {
+		fmt.Fprintf(stderr, "%s: resuming: kept %d of %d stamped row(s) an earlier run copied that still equal the work store; the rest are deleted, and copied again where the work store still holds them\n", logPrefix, len(prepared.kept), prepared.stamped) //nolint:errcheck // best-effort stderr
+	}
 	if err := infraEngineCrashPoint("prepare"); err != nil {
 		return fail(err)
 	}
@@ -2045,6 +2048,13 @@ func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead, allIDs
 	for _, b := range rows {
 		plan.infraIDs[b.ID] = true
 	}
+	// Whether the payloads can be read at all is asked first: a source that
+	// cannot answer is refused before the walk over every edge it holds.
+	protocol, blind := beads.DepMetadataAbsent(source)
+	reader, ok := source.(beads.DepMetadataReader)
+	if !blind && !ok {
+		return plan, fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace (%w)", source, beads.ErrDepMetadataUnsupported)
+	}
 	// The edges, in one batched pass over every row the work store holds
 	// when it can list them in batches (the dependents of an infra row are
 	// the down edges of whatever row holds them), otherwise both directions
@@ -2084,13 +2094,9 @@ func infraSourceEdgePayloadRefusal(source beads.Store, rows []beads.Bead, allIDs
 			}
 		}
 	}
-	if protocol, absent := beads.DepMetadataAbsent(source); absent {
+	if blind {
 		plan.blind, plan.payloads = protocol, map[beads.DepPair]string{}
 		return plan, nil
-	}
-	reader, ok := source.(beads.DepMetadataReader)
-	if !ok {
-		return plan, fmt.Errorf("work store %T cannot report whether its dependency edges carry payloads, and an unanswerable source is not an empty one: refusing to copy edges whose payloads would be dropped without a trace (%w)", source, beads.ErrDepMetadataUnsupported)
 	}
 	// Every edge the copy or the clear reads a payload of: each infra row's
 	// edges down, and its edges up from a row outside the slice.
@@ -2250,6 +2256,7 @@ func prepareInfraDestination(destination beads.Store, plan *infraCopyPlan) (infr
 	if err := infraDestinationPopulatedRefusal(existing); err != nil {
 		return prepared, err
 	}
+	prepared.stamped = len(existing)
 	// Resumable copy: a stamped row that still equals the source stays, and
 	// so does an edge between two kept rows that already carries the planned
 	// type and payload. The proof is the verify that follows, against a
