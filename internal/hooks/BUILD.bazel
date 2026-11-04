@@ -30,6 +30,7 @@ go_test(
         "hooks_test.go",
         "instructions_windows_test.go",
         "kiro_agents_md_test.go",
+        "overlay_discarded_output_test.go",
         "overlay_provider_hook_path_shape_test.go",
         "plugin_node_test.go",
         "preserve_test.go",
