@@ -1771,6 +1771,10 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 			// which reads a store without the capability whole and reports
 			// ordered=false: the path a caller takes when the wrapper lacks it.
 			"ReadOnly", "ReadyOrdered", "SawRows",
+			// SchemaCursor over a SQLite binding reports
+			// beads.ErrSchemaCursorUnavailable, which CheckSchemaAtTarget reads
+			// as "not asked": what a store without the capability gets.
+			"SchemaCursor",
 			"SupportsEphemeralGraphApply", "TransferIfCurrent", "WaitForParentProjection",
 		},
 	}

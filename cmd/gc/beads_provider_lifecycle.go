@@ -2553,7 +2553,19 @@ func waitForBeadsScopeReadyAfterRecovery(ctx context.Context, scopeRoot, cityPat
 	for {
 		store, err := openStoreAtForCity(scopeRoot, cityPath)
 		if err == nil {
+			// Ping needs only the issues table (migration 1), so it passes a
+			// store whose schema migration stalled part-way; ready also means
+			// the migration cursor reached this build's target. A scope that
+			// stays behind is reported, never completed (beads#5920).
 			pingErr := store.Ping()
+			if pingErr == nil {
+				cursorCtx, cancel := context.WithDeadline(ctx, deadline)
+				pingErr = beads.CheckSchemaAtTarget(cursorCtx, store)
+				cancel()
+				if pingErr != nil {
+					pingErr = fmt.Errorf("beads scope %s: %w", scopeRoot, pingErr)
+				}
+			}
 			if pingErr == nil {
 				return nil
 			}

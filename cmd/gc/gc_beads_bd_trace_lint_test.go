@@ -117,7 +117,7 @@ func forksBareBd(line string) bool {
 // it IS the census: a fork budget is only meaningful against a known number of
 // call sites, and a site that appears without this number moving is a site
 // nobody counted.
-const bdForkSiteCount = 6
+const bdForkSiteCount = 7
 
 // bdForkOffset returns the byte offset at which line forks bd, or -1.
 //

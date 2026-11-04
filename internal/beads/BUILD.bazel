@@ -32,6 +32,7 @@ go_library(
         "@com_github_steveyegge_beads//:beads",
         "@com_github_steveyegge_beads//issueops",
         "@com_github_steveyegge_beads//journalops",
+        "@com_github_steveyegge_beads//schema",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@org_golang_x_sync//singleflight",
         "@org_modernc_sqlite//:sqlite",
