@@ -5312,11 +5312,13 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
 
---time-budget bounds the copy and the clear. The run checks it between
-batches, never inside one, and when it is spent stops at the next boundary and
-exits 75, naming the phase and how far it got. Running the same command again
-continues: the copy keeps every row an earlier run copied that still equals the
-work store, and the clear resumes from the rows it had not yet removed.
+--time-budget bounds the copy and the clear of --from-work and --from-backup;
+the rig import does not check it, so it is refused there. The run checks it
+between batches, never inside one, and when it is spent stops at the next
+boundary and exits 75, naming the phase and how far it got. Running the same
+command again continues: the copy keeps every row an earlier run copied that
+still equals the work store, and the clear resumes from the rows it had not yet
+removed.
 
 ```
 gc storage migrate [flags]

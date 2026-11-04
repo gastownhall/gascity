@@ -315,11 +315,13 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
 
---time-budget bounds the copy and the clear. The run checks it between
-batches, never inside one, and when it is spent stops at the next boundary and
-exits 75, naming the phase and how far it got. Running the same command again
-continues: the copy keeps every row an earlier run copied that still equals the
-work store, and the clear resumes from the rows it had not yet removed.`,
+--time-budget bounds the copy and the clear of --from-work and --from-backup;
+the rig import does not check it, so it is refused there. The run checks it
+between batches, never inside one, and when it is spent stops at the next
+boundary and exits 75, naming the phase and how far it got. Running the same
+command again continues: the copy keeps every row an earlier run copied that
+still equals the work store, and the clear resumes from the rows it had not yet
+removed.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sources := 0
 			for _, set := range []bool{fromWork, fromBackup, fromRigs} {
@@ -330,6 +332,13 @@ work store, and the clear resumes from the rows it had not yet removed.`,
 			if sources != 1 {
 				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s, --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
 					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag, storageFromRigsFlag)
+				return errExit
+			}
+			// The rig import and the abandon do not check the budget, so a
+			// budget passed to either is refused rather than silently ignored.
+			if cmd.Flags().Changed(storageTimeBudgetFlag) && (fromRigs || abandonRig) {
+				fmt.Fprintf(stderr, "gc %s %s: --%s bounds the work-store copy and clear (--%s, --%s); the rig import and --%s do not check it, so it is refused rather than ignored\n", //nolint:errcheck // best-effort stderr
+					surface.Namespace, surface.Verb, storageTimeBudgetFlag, surface.Flag, storageFromBackupFlag, storageAbandonRigStoreFlag)
 				return errExit
 			}
 			if len(rigNames) > 0 && !fromRigs {

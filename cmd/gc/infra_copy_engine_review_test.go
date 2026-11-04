@@ -321,6 +321,46 @@ func TestTheClearNamesADependentTheListLeavesOut(t *testing.T) {
 	}
 }
 
+// TestStorageMigrateRefusesATimeBudgetTheRigPathsIgnore (review S7): the rig
+// import and the abandon do not check the budget, so an explicit
+// --time-budget with either is refused, not silently dropped; the default
+// budget, unstated, does not stand in their way.
+func TestStorageMigrateRefusesATimeBudgetTheRigPathsIgnore(t *testing.T) {
+	surface, err := parseOperatorCommandSpelling(storageMigrationCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := "--" + storageTimeBudgetFlag + "=5m"
+	for _, args := range [][]string{
+		{"--" + storageFromRigsFlag, budget},
+		{"--" + storageFromRigsFlag, "--" + storageRigFlag, "r", "--" + storageAbandonRigStoreFlag, budget},
+		{"--" + storageAbandonRigStoreFlag, budget, "--" + storageFromRigsFlag, "--" + storageRigFlag, "r"},
+	} {
+		var stdout, stderr bytes.Buffer
+		cmd := newStorageMigrateCmd(surface, &stdout, &stderr)
+		cmd.SetArgs(args)
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("migrate %v succeeded; an explicit budget the rig paths ignore must be refused", args)
+		}
+		if !strings.Contains(stderr.String(), "--"+storageTimeBudgetFlag) || !strings.Contains(stderr.String(), "refused rather than ignored") {
+			t.Fatalf("migrate %v: the refusal does not name the budget: %s", args, stderr.String())
+		}
+	}
+	// Unstated, the default passes this check and the run stops at the next
+	// one (--rig without --from-rigs), before any city is resolved.
+	var stdout, stderr bytes.Buffer
+	cmd := newStorageMigrateCmd(surface, &stdout, &stderr)
+	cmd.SetArgs([]string{"--" + surface.Flag, "--" + storageRigFlag, "r", "--" + storageAbandonRigStoreFlag})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	_ = cmd.Execute()
+	if strings.Contains(stderr.String(), "refused rather than ignored") || !strings.Contains(stderr.String(), "means nothing without it") {
+		t.Fatalf("the default budget, unstated, was refused with the abandon: %s", stderr.String())
+	}
+}
+
 // batchRemovingStore is a setRewritingStore that removes edges in batches and
 // counts how the clear removed them.
 type batchRemovingStore struct {
