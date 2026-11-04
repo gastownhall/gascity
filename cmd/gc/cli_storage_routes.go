@@ -22,7 +22,10 @@ package main
 // several class resolvers, so the resolution is memoized per city and the open
 // happens at most once, whichever call site arrives first. The routes are closed
 // where the process ends (main.go), which is the only place that knows the last
-// call site has run.
+// call site has run, or earlier in a long-lived process: registering or
+// unregistering a runtime for the city retires its memo
+// (retireCLIStorageRoutesFor), and while a runtime is registered the funnel
+// answers with that runtime's routes and memoizes nothing.
 //
 // # It resolves the config itself
 //
@@ -100,6 +103,12 @@ type cliStorageRoutesEntry struct {
 	// until expires and then resolved again.
 	unsettled bool
 	expires   time.Time
+	// abandoned marks a slot a retirement or close completed the Once on
+	// before any resolver ran it (retireCLIStorageRoutesFor,
+	// closeCLIStorageRoutes): it holds no answer, so a resolver that finds it
+	// forgets it and resolves again rather than reading its nil routes as a
+	// city that relocates nothing.
+	abandoned bool
 }
 
 // cliStorageRoutesUnsettledTTL is how long an unsettled answer is reused. A
@@ -137,9 +146,6 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	if cityPath == "" {
 		return nil
 	}
-	if entry, ok := registeredResidencyEntry(cityPath); ok {
-		return entry.routes
-	}
 	clean := filepath.Clean(cityPath)
 	resolve := func(entry *cliStorageRoutesEntry) {
 		entry.once.Do(func() {
@@ -149,14 +155,29 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 			}
 		})
 	}
-	entry := cliStorageRoutesEntryFor(clean)
-	resolve(entry)
-	if entry.unsettled && !time.Now().Before(entry.expires) {
-		forgetCLIStorageRoutesEntry(clean, entry)
-		entry = cliStorageRoutesEntryFor(clean)
+	for {
+		if registered, ok := registeredResidencyEntry(cityPath); ok {
+			return registered.routes
+		}
+		entry := cliStorageRoutesEntryFor(clean)
 		resolve(entry)
+		if entry.abandoned {
+			forgetCLIStorageRoutesEntry(clean, entry)
+			continue
+		}
+		if entry.unsettled && !time.Now().Before(entry.expires) {
+			// An expired unsettled answer is resolved again exactly once; the
+			// fresh answer is returned even if it is unsettled too.
+			forgetCLIStorageRoutesEntry(clean, entry)
+			entry = cliStorageRoutesEntryFor(clean)
+			resolve(entry)
+			if entry.abandoned {
+				forgetCLIStorageRoutesEntry(clean, entry)
+				continue
+			}
+		}
+		return entry.routes
 	}
-	return entry.routes
 }
 
 // cliStorageRefusalsPrinted holds every refusal this process has already put
@@ -405,9 +426,11 @@ func retireCLIStorageRoutesFor(cityPath string, keep *storageRoutes) {
 		return
 	}
 	// A resolution in flight finishes before the entry is judged; sync.Once.Do
-	// returns only after the resolving call has.
+	// returns only after the resolving call has. A slot no resolver has entered
+	// yet is marked abandoned instead, so the resolver about to enter it
+	// resolves again rather than taking the empty answer.
 	cliStorageRoutesMu.Unlock()
-	entry.once.Do(func() {})
+	entry.once.Do(func() { entry.abandoned = true })
 	if keep != nil && entry.routes == keep {
 		return
 	}
@@ -450,7 +473,7 @@ func closeCLIStorageRoutes() error {
 		// A resolution still in flight owns a store this close would otherwise
 		// leak: sync.Once.Do returns only after the resolving call has returned,
 		// so waiting on it here is what makes the opened routes visible.
-		entry.once.Do(func() {})
+		entry.once.Do(func() { entry.abandoned = true })
 		if err := entry.routes.close(); err != nil {
 			errs = append(errs, err)
 		}

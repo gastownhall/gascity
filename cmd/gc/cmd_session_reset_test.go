@@ -955,8 +955,6 @@ func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
 	}
 }
 
-// startSessionResetTestController serves the real controller socket for
-// cityDir until the test ends.
 // registerSessionResetTestRuntime registers a single-store runtime for cityDir
 // over a store opened at the city, as a real controller registers its runtime:
 // the controller socket's session commands answer from that registration.
@@ -970,6 +968,8 @@ func registerSessionResetTestRuntime(t *testing.T, cityDir string) {
 	t.Cleanup(func() { unregisterResidencyRoutes(cityDir, nil) })
 }
 
+// startSessionResetTestController serves the real controller socket for
+// cityDir until the test ends, behind a registered runtime.
 func startSessionResetTestController(t *testing.T, cityDir string) {
 	t.Helper()
 	registerSessionResetTestRuntime(t, cityDir)

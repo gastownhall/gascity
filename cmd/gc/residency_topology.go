@@ -129,7 +129,9 @@ func residencyTopologyForCity(cityPath string, cfg *config.City, work beads.Stor
 // registration exists at all. The proof's own gate happens to exclude that case
 // today (a refused city aborts controller construction, so registered routes
 // are never refusing), but a branch that is correct only because of an
-// invariant three files away is one edit from being wrong.
+// invariant three files away is one edit from being wrong. cliStorageRoutes now
+// applies the same preference itself; the explicit check keeps this function's
+// answer independent of that.
 func residencyRoutesForCity(cityPath string) *storageRoutes {
 	if entry, ok := registeredResidencyEntry(cityPath); ok {
 		return entry.routes
@@ -200,8 +202,8 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func()
 	}
 	residencyRoutesByCity[key] = residencyRegistration{routes: routes, work: work}
 	residencyRoutesMu.Unlock()
-	dropCLIResidencyBindings(key)
 	retireCLIStorageRoutesFor(key, routes)
+	dropCLIResidencyBindings(key)
 }
 
 // unregisterResidencyRoutes drops a runtime's registration, and ONLY its own.
@@ -230,8 +232,8 @@ func unregisterResidencyRoutes(cityPath string, routes *storageRoutes) {
 		delete(residencyRoutesByCity, key)
 	}
 	residencyRoutesMu.Unlock()
-	dropCLIResidencyBindings(key)
 	retireCLIStorageRoutesFor(key, routes)
+	dropCLIResidencyBindings(key)
 }
 
 // residencyRegistration is what one long-running runtime declares about a city:
@@ -266,6 +268,10 @@ var (
 type cliResidencyBindingsEntry struct {
 	bindings []storeref.ClassBinding
 	refused  error
+	// from is the routes the bindings were derived from. An entry whose routes
+	// are no longer the funnel's answer (a runtime registered, or a retired
+	// memo was closed, while the derivation was in flight) is a miss.
+	from *storageRoutes
 }
 
 var (
@@ -295,15 +301,16 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	}
 	entry, ok := cliResidencyBindingsByCity[key]
 	cliResidencyBindingsMu.Unlock()
-	if ok {
+	routes := cliStorageRoutes(cityPath)
+	if ok && entry.from == routes {
 		return entry.bindings, entry.refused
 	}
 
-	bindings, refused := residencyBindingsFromRoutes(cliStorageRoutes(cityPath))
+	bindings, refused := residencyBindingsFromRoutes(routes)
 
 	cliResidencyBindingsMu.Lock()
 	defer cliResidencyBindingsMu.Unlock()
-	if existing, raced := cliResidencyBindingsByCity[key]; raced {
+	if existing, raced := cliResidencyBindingsByCity[key]; raced && existing.from == routes {
 		return existing.bindings, existing.refused
 	}
 	// A nil map HERE is not the cold start the first section handles — that
@@ -317,7 +324,7 @@ func cliResidencyBindings(cityPath string) ([]storeref.ClassBinding, error) {
 	if cliResidencyBindingsByCity == nil {
 		return bindings, refused
 	}
-	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused}
+	cliResidencyBindingsByCity[key] = &cliResidencyBindingsEntry{bindings: bindings, refused: refused, from: routes}
 	return bindings, refused
 }
 

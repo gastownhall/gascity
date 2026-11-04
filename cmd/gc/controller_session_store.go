@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -22,15 +23,21 @@ import (
 // own stores rather than a second handle on the same roots.
 //
 // No registration is an error, not a fallback: a standalone controller starts
-// its socket before its runtime registers, and the only other answer available
-// then is the funnel.
+// its socket before its runtime registers (and keeps it open while it shuts
+// down after unregistering), and the only other answer available then is the
+// funnel.
 func registeredSessionFrontDoor(cityPath string) (*session.Store, error) {
 	entry, ok := registeredResidencyEntry(cityPath)
 	if !ok {
-		return nil, fmt.Errorf("this controller is not serving city %s yet; retry once it has started", cityPath)
+		return nil, fmt.Errorf("no runtime in this controller is serving city %s right now (it is starting or stopping); retry once it is running", cityPath)
 	}
-	if entry.work == nil || entry.work() == nil {
-		return nil, fmt.Errorf("the controller serving city %s has no city work store open yet; retry once it has started", cityPath)
+	var work beads.Store
+	if entry.work != nil {
+		work = entry.work()
 	}
-	return session.NewStore(scopeStores(cityPath, entry.routes, entry.work()).Sessions()), nil
+	sessions := scopeStores(cityPath, entry.routes, work).Sessions()
+	if sessions == (beads.SessionStore{}) {
+		return nil, fmt.Errorf("the runtime serving city %s has no session store open (its city work store is not open); retry once it is running", cityPath)
+	}
+	return session.NewStore(sessions), nil
 }

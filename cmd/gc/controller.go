@@ -298,7 +298,7 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 	}
 	// This runs inside the controller, so the session bead is read and written
 	// through the session store of the runtime this process serves, never the
-	// one-shot funnel (see registeredSessionStore).
+	// one-shot funnel (see registeredSessionFrontDoor).
 	sessFront, err := registeredSessionFrontDoor(cityPath)
 	if err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{

@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // circuitResetSocketCity is a file-store city directory whose city.toml
@@ -47,10 +50,10 @@ func seedOpenCircuitSessionBead(t *testing.T, store beads.Store, id string) {
 }
 
 // runCircuitResetSocketCmd drives handleSessionCircuitResetSocketCmd over a pipe
-// and returns its reply.
-func runCircuitResetSocketCmd(t *testing.T, cityDir, sessionID, identity string) sessionCircuitResetReply {
+// for the named session "riley" and returns its reply.
+func runCircuitResetSocketCmd(t *testing.T, cityDir, sessionID string) sessionCircuitResetReply {
 	t.Helper()
-	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: identity, SessionID: sessionID})
+	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: "riley", SessionID: sessionID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +121,7 @@ func TestSessionCircuitResetSocketReadsTheRegisteredSessionBinding(t *testing.T)
 	const relicID = "pl-wisp-35xhai"
 	seedOpenCircuitSessionBead(t, binding, relicID)
 
-	reply := runCircuitResetSocketCmd(t, cityDir, relicID, "riley")
+	reply := runCircuitResetSocketCmd(t, cityDir, relicID)
 	if reply.Outcome != "ok" {
 		t.Fatalf("reset reply = %+v, want ok: the session bead is in the registered binding", reply)
 	}
@@ -145,7 +148,7 @@ func TestSessionCircuitResetSocketReadsTheWorkStoreOnASingleStoreCity(t *testing
 	const id = "demo-42"
 	seedOpenCircuitSessionBead(t, work, id)
 
-	reply := runCircuitResetSocketCmd(t, cityDir, id, "riley")
+	reply := runCircuitResetSocketCmd(t, cityDir, id)
 	if reply.Outcome != "ok" {
 		t.Fatalf("reset reply = %+v, want ok", reply)
 	}
@@ -164,12 +167,12 @@ func TestSessionCircuitResetSocketReadsTheWorkStoreOnASingleStoreCity(t *testing
 // to the one-shot funnel there is the bug: it can answer from a stale memo.
 func TestSessionCircuitResetSocketRefusesWithoutARegisteredRuntime(t *testing.T) {
 	cityDir := circuitResetSocketCity(t)
-	reply := runCircuitResetSocketCmd(t, cityDir, "demo-42", "riley")
+	reply := runCircuitResetSocketCmd(t, cityDir, "demo-42")
 	if reply.Outcome != "failed" {
 		t.Fatalf("reset reply = %+v, want failed", reply)
 	}
-	if !strings.Contains(reply.Error, "not serving") {
-		t.Errorf("reset error = %q, want it to say the controller is not serving the city yet", reply.Error)
+	if !strings.Contains(reply.Error, "no runtime in this controller is serving city") {
+		t.Errorf("reset error = %q, want it to say no runtime is serving the city", reply.Error)
 	}
 }
 
@@ -276,4 +279,165 @@ func TestRegisteringARuntimeRetiresAStaleFunnelMemo(t *testing.T) {
 	if _, err := staleSessions.Create(beads.Bead{Title: "riley", Type: "session"}); err == nil {
 		t.Error("the retired funnel routes still accept a write: they were detached but never closed")
 	}
+}
+
+// TestRetireMarksARacingResolversSlotAbandoned is the interleaving where a
+// resolver has created its memo slot but not yet run the slot's Once when a
+// retirement completes it. The slot must say it holds no answer, so the
+// resolver re-resolves instead of reading nil routes, the identity answer, as a
+// split city that relocates nothing.
+func TestRetireMarksARacingResolversSlotAbandoned(t *testing.T) {
+	_, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	t.Cleanup(func() { _ = closeCLIStorageRoutes() })
+
+	// The resolver is inside cliStorageRoutes: no registration, slot created.
+	entry := cliStorageRoutesEntryFor(filepath.Clean(cityDir))
+	// A runtime that already lost its registration unregisters: its retire
+	// runs the slot's Once first.
+	unregisterResidencyRoutes(cityDir, splitRoutesOver(beads.NewMemStore()))
+	// The resolver resumes with the closure cliStorageRoutes runs.
+	entry.once.Do(func() {
+		entry.routes, entry.unsettled = resolveCLIStorageRoutes(cityDir)
+	})
+	if !entry.abandoned {
+		t.Fatal("the slot the retirement completed is not marked abandoned; its resolver would take nil routes on a split city")
+	}
+	if got := cliStorageRoutes(cityDir); got == nil {
+		t.Fatal("cliStorageRoutes resolved nil routes for a split city after the retirement")
+	}
+}
+
+// TestBindingsMemoDerivedAcrossARegistrationIsAMiss is the first residency read
+// whose funnel resolution is still in flight when the runtime registers. The
+// bindings it derives are over the funnel routes the registration retires and
+// closes, so they must not answer for the registered city.
+func TestBindingsMemoDerivedAcrossARegistrationIsAMiss(t *testing.T) {
+	_, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	t.Cleanup(func() { _ = closeCLIStorageRoutes() })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	orig := newStorageRegistryForPlan
+	var gate sync.Once
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		gate.Do(func() { close(entered); <-release })
+		return orig()
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = orig })
+
+	derived := make(chan struct{})
+	go func() {
+		defer close(derived)
+		_, _ = cliResidencyBindings(cityDir)
+	}()
+	<-entered
+
+	reg := splitRoutesOver(pinnedIDMemStore())
+	registered := make(chan struct{})
+	go func() {
+		defer close(registered)
+		registerResidencyRoutes(cityDir, reg, func() beads.Store { return beads.NewMemStore() })
+	}()
+	for {
+		if _, ok := registeredResidencyEntry(cityDir); ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	<-registered
+	<-derived
+	t.Cleanup(func() { unregisterResidencyRoutes(cityDir, reg) })
+
+	sole, relocated, err := cliSoleClassBinding(cityDir)
+	if err != nil || !relocated {
+		t.Fatalf("cliSoleClassBinding = %v, %v", relocated, err)
+	}
+	regStore, _ := reg.storeFor(coordclass.ClassSessions)
+	if sole.Store != regStore {
+		t.Fatalf("cliSoleClassBinding answers from %T, not the registered binding", sole.Store)
+	}
+	if _, err := sole.Store.Get("gc-absent"); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("cliSoleClassBinding answers from a closed store: %v", err)
+	}
+}
+
+// TestUnregisteringRetiresAMemoTakenWhileRegistered covers the memo a resolver
+// can still leave while a runtime is registered (it entered the funnel just
+// before the registration landed): the runtime's unregistration retires it, so
+// the stopped city's next one-shot resolution reads its config again.
+func TestUnregisteringRetiresAMemoTakenWhileRegistered(t *testing.T) {
+	cityDir := circuitResetSocketCity(t)
+	routes := splitRoutesOver(pinnedIDMemStore())
+	registerResidencyRoutes(cityDir, routes, func() beads.Store { return pinnedIDMemStore() })
+
+	late := cliStorageRoutesEntryFor(filepath.Clean(cityDir))
+	late.once.Do(func() {})
+	if !cliStorageRoutesResolved(cityDir) {
+		t.Fatal("precondition: a memo slot exists")
+	}
+	unregisterResidencyRoutes(cityDir, routes)
+	if cliStorageRoutesResolved(cityDir) {
+		t.Error("the unregistration left a memo taken while the runtime was registered")
+	}
+}
+
+// TestSessionCircuitResetSocketLeavesAFrozenWorkCopyAlone is the worse shape of
+// the production bug: the work store still holds the pre-migration copy of the
+// session bead. The old handler cleared that copy and reported success while
+// the live row in the binding stayed OPEN.
+func TestSessionCircuitResetSocketLeavesAFrozenWorkCopyAlone(t *testing.T) {
+	cityDir := circuitResetSocketCity(t)
+	binding := pinnedIDMemStore()
+	work := pinnedIDMemStore()
+	registerCircuitResetRuntime(t, cityDir, splitRoutesOver(binding), work)
+
+	const relicID = "pl-wisp-35xhai"
+	seedOpenCircuitSessionBead(t, binding, relicID)
+	seedOpenCircuitSessionBead(t, work, relicID)
+
+	if reply := runCircuitResetSocketCmd(t, cityDir, relicID); reply.Outcome != "ok" {
+		t.Fatalf("reset reply = %+v, want ok", reply)
+	}
+	live, err := binding.Get(relicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := live.Metadata[sessionCircuitStateMetadata]; state != "" {
+		t.Errorf("live binding row still records circuit state %q", state)
+	}
+	frozen, err := work.Get(relicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := frozen.Metadata[sessionCircuitStateMetadata]; state != "open" {
+		t.Errorf("frozen work copy circuit state = %q, want it untouched (open)", state)
+	}
+}
+
+// TestSessionCircuitResetSocketNeedsNoWorkStoreWhenSessionsAreRelocated pins
+// that a runtime whose city work store is not open still serves the reset on a
+// split city, where the session store is the binding; and refuses on a
+// single-store city, where the work store IS the session store.
+func TestSessionCircuitResetSocketNeedsNoWorkStoreWhenSessionsAreRelocated(t *testing.T) {
+	t.Run("split", func(t *testing.T) {
+		cityDir := circuitResetSocketCity(t)
+		binding := pinnedIDMemStore()
+		routes := splitRoutesOver(binding)
+		registerResidencyRoutes(cityDir, routes, nil)
+		t.Cleanup(func() { unregisterResidencyRoutes(cityDir, routes) })
+		seedOpenCircuitSessionBead(t, binding, "pl-wisp-1")
+		if reply := runCircuitResetSocketCmd(t, cityDir, "pl-wisp-1"); reply.Outcome != "ok" {
+			t.Fatalf("reset reply = %+v, want ok", reply)
+		}
+	})
+	t.Run("single-store", func(t *testing.T) {
+		cityDir := circuitResetSocketCity(t)
+		registerResidencyRoutes(cityDir, nil, func() beads.Store { return nil })
+		t.Cleanup(func() { unregisterResidencyRoutes(cityDir, nil) })
+		reply := runCircuitResetSocketCmd(t, cityDir, "demo-1")
+		if reply.Outcome != "failed" || !strings.Contains(reply.Error, "has no session store open") {
+			t.Fatalf("reset reply = %+v, want a refusal naming the missing session store", reply)
+		}
+	})
 }
