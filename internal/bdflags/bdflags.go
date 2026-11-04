@@ -64,6 +64,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"-s": true, "--status": true, "--storage-class": true, "--title": true,
 		"-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
+		// Hidden aliases bd accepts without listing them in its help:
+		// --label for --labels; --body, -m/--message and --description-file
+		// for --description.
+		"--label": true, "--body": true, "-m": true, "--message": true,
+		"--description-file": true,
 	},
 	"update": {
 		"--acceptance": true, "--add-label": true, "--append-notes": true,
@@ -75,6 +80,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--session": true, "--set-labels": true, "--set-metadata": true,
 		"-s": true, "--status": true, "-t": true, "--type": true,
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
+		// Hidden aliases bd accepts without listing them in its help: --body,
+		// -m/--message and --description-file for --description,
+		// --acceptance-criteria for --acceptance.
+		"--body": true, "-m": true, "--message": true,
+		"--description-file": true, "--acceptance-criteria": true,
 		// The compare-and-set guards. Pinned as well as discovered: help
 		// discovery swallows its own errors, so a bd that is missing, renamed
 		// or slow leaves the pinned table as the only answer, and these two
@@ -87,6 +97,9 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
 		"--if-revision": true,
+		// Hidden aliases bd accepts for --reason without listing them in its
+		// help.
+		"--resolution": true, "-m": true, "--message": true, "--comment": true,
 	},
 	"reopen": {
 		"-r": true, "--reason": true, "--if-revision": true,

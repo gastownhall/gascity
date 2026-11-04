@@ -33,12 +33,12 @@ func stale(st runtime.ProgramState) runtime.ProgramStatus {
 
 // Kills a token that strays from the payload's closed vocabulary: every
 // point and verdict is lower_snake_case, unique, and the point list has the
-// design's sixteen.
+// design's sixteen and the starved-queue bypass.
 func TestProgramStatusShadowTokensAreClosed(t *testing.T) {
 	token := regexp.MustCompile(`^[a-z]+(_[a-z]+)*$`)
 	points := runtime.ProgramStatusPoints()
-	if len(points) != 16 {
-		t.Fatalf("%d decision points, want the design's 16", len(points))
+	if len(points) != 17 {
+		t.Fatalf("%d decision points, want the design's 16 and starved_bypass", len(points))
 	}
 	seen := map[string]bool{}
 	for _, p := range points {

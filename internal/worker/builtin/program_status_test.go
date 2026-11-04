@@ -10,6 +10,7 @@ type builtinProgramStatus struct {
 	Protocol string
 	App      string
 	Relay    bool
+	Hold     bool
 	Env      map[string]string
 }
 
@@ -30,8 +31,9 @@ type builtinProgramStatus struct {
 //     user-actor service, so nothing past the probe was observed under the
 //     relay.
 var wantBuiltinProgramStatus = map[string]builtinProgramStatus{
-	// codex-cli 0.165.0 reports unprompted (tap only).
-	"codex": {Protocol: "osc7501", App: "codex"},
+	// codex-cli 0.165.0 reports unprompted (tap only), and input typed into
+	// a running turn aborts it (the 2026-11-03 shadow), so it holds.
+	"codex": {Protocol: "osc7501", App: "codex", Hold: true},
 	// Claude Code 2.1.311 reports only once its support probe is answered,
 	// so it runs under the relay.
 	"claude": {Protocol: "osc7501", App: "claude-code", Relay: true},
@@ -54,10 +56,11 @@ func TestBuiltinProgramStatusDeclarations(t *testing.T) {
 			Protocol: spec.ProgramStatusProtocol,
 			App:      spec.ProgramStatusApp,
 			Relay:    spec.ProgramStatusRelay,
+			Hold:     spec.ProgramStatusHoldMidTurn,
 			Env:      spec.ProgramStatusEnv,
 		}
 		want := wantBuiltinProgramStatus[name]
-		if got.Protocol != want.Protocol || got.App != want.App || got.Relay != want.Relay || !maps.Equal(got.Env, want.Env) {
+		if got.Protocol != want.Protocol || got.App != want.App || got.Relay != want.Relay || got.Hold != want.Hold || !maps.Equal(got.Env, want.Env) {
 			t.Errorf("%s: program status = %+v, want %+v", name, got, want)
 		}
 		// The forced env must not also be launch env: profile Env is hashed

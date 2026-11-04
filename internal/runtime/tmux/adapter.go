@@ -98,7 +98,7 @@ func NewProviderWithConfig(cfg Config) *Provider {
 	}
 	// Shadow reads take tap liveness from the cache's last process table,
 	// never refreshing it.
-	tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+	tm.shadow.taps = func() programTaps { return tm.snapshotTaps(p.cache.observation().state) }
 	return p
 }
 
@@ -579,21 +579,23 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if strings.TrimSpace(name) == "" {
 		return runtime.Liveness{}
 	}
-	running := p.cache.IsRunning(name)
+	// A session the snapshot does not hold running (absent, or a corpse) has
+	// no live agent process either, so it answers without reading
+	// GT_PROCESS_NAMES: that read forks tmux once per call.
+	state := p.cache.currentState()
+	if session, ok := state.Sessions[name]; !ok || !session.Running {
+		return runtime.Liveness{}
+	}
 	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
 	if len(processNames) == 0 {
-		return runtime.Liveness{Running: running, Alive: running}
-	}
-	alive := p.cache.ProcessAlive(name, processNames)
-	if alive && !running {
-		running = true
+		return runtime.Liveness{Running: true, Alive: true}
 	}
 	return runtime.Liveness{
-		Running: running,
-		Alive:   alive,
+		Running: true,
+		Alive:   state.processAlive(name, processNames),
 	}
 }
 

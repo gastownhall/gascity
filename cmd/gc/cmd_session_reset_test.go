@@ -1042,7 +1042,7 @@ func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
 	if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
 		t.Fatalf("op rows = %+v, want none", ops)
 	}
-	row, err := c.reload(t).Get(c.bead.ID)
+	row, err := c.reloadSessions(t).Get(c.bead.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", c.bead.ID, err)
 	}
@@ -1063,7 +1063,7 @@ func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
 func TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode(t *testing.T) {
 	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
 	c := newCLIOpCity(t, h, map[string]string{"state": "gc_swept"})
-	if err := c.store.Close(c.bead.ID); err != nil {
+	if err := c.sessions.Close(c.bead.ID); err != nil {
 		t.Fatalf("Close(%s): %v", c.bead.ID, err)
 	}
 	startSessionResetTestController(t, c.dir)
