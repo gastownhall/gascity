@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -113,4 +117,93 @@ func (s *doctorListSpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 		s.sawStatus[query.Status] = true
 	}
 	return s.MemStore.List(query)
+}
+
+func TestSessionModelDoctorSeparatesMailAndResolvesAliases(t *testing.T) {
+	store := beads.NewMemStore()
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		got, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%s): %v", b.Title, err)
+		}
+		return got
+	}
+	active := create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"alias": "gc-packs/seat.current", "alias_history": "gc-packs/seat.former", "session_name": "s-active",
+	}})
+	closed := create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}})
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	retired := create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"state": "archived", "continuity_eligible": "false"}})
+	for _, b := range []beads.Bead{
+		{Type: "message", Title: "historical mail", Assignee: closed.ID, Metadata: map[string]string{"gc.routed_to": "gone"}},
+		{Type: "message", Title: "unread mail", Assignee: "gc-missing1"},
+		{Type: "task", Title: "valid ID", Assignee: active.ID},
+		{Type: "task", Title: "current alias", Assignee: "gc-packs/seat.current"},
+		{Type: "task", Title: "old alias", Assignee: "gc-packs/seat.former"},
+		{Type: "task", Title: "closed owner", Assignee: closed.ID},
+		{Type: "task", Title: "retired owner", Assignee: retired.ID},
+		{Type: "task", Title: "missing owner", Assignee: "ga-abc12"},
+	} {
+		create(b)
+	}
+	check := &sessionModelDoctorCheck{cfg: &config.City{}, newStore: func(string) (beads.Store, error) { return store, nil }}
+	result := check.Run(&doctor.CheckContext{})
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{"historical-alias-owner", "closed-bead-owner", "retired-bead-owner", "missing-bead-owner: "} {
+		if !strings.Contains(details, want) {
+			t.Errorf("missing %q: %s", want, details)
+		}
+	}
+	if len(result.Details) != 4 {
+		t.Errorf("got %d findings, want 4: %s", len(result.Details), details)
+	}
+}
+
+func TestSessionModelDoctorIDShapes(t *testing.T) {
+	for _, tc := range []struct {
+		token string
+		want  bool
+	}{
+		{"gc-packs/seat.current", false},
+		{"gc-packs/seat.former", false},
+		{"gc-abc12", true},
+		{"bd-123", true},
+		{"mc-a23", true},
+		{"ga-abc12", true},
+		{"fa-wisp-7rqp9u9", true},
+	} {
+		if got := looksLikeSessionBeadID(tc.token); got != tc.want {
+			t.Errorf("looksLikeSessionBeadID(%q) = %v, want %v", tc.token, got, tc.want)
+		}
+	}
+}
+
+// Each class must fail the diagnostic rather than silently producing a partial census.
+type sessionModelFailListStore struct{ beads.Store }
+
+func (sessionModelFailListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, errors.New("store unavailable")
+}
+
+func TestLoadSessionModelDoctorBeadsReportsClassFailures(t *testing.T) {
+	good := beads.NewMemStore()
+	bad := sessionModelFailListStore{Store: good}
+	for _, tc := range []struct {
+		name           string
+		work, sessions beads.Store
+		want           string
+	}{
+		{"work", bad, good, "open work: store unavailable"},
+		{"sessions", good, bad, "session beads: store unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadSessionModelDoctorBeads(tc.work, tc.sessions)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
 }
