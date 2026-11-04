@@ -61,8 +61,8 @@ func TestHerdrServerPgidHelperProcess(_ *testing.T) {
 		os.Exit(2)
 	}
 	// Reap ourselves if the test that launched us never gets to its cleanup.
-	time.Sleep(time.Minute)
-	os.Exit(0)
+	time.AfterFunc(time.Minute, func() { os.Exit(0) })
+	select {}
 }
 
 // startServer spawns the city's herdr server detached from gc. Release() only
