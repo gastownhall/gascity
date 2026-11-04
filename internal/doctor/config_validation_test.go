@@ -101,3 +101,20 @@ func TestConfigValidationHashesActualRead(t *testing.T) {
 		t.Fatalf("capture=%+v reads=%d", source.sources, underlying.reads)
 	}
 }
+
+func TestConfigValidationNormalizesAbsentOverrideMap(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "alpha"},
+		{Name: "beta", FormulaVars: map[string]string{"command": ""}},
+	}}
+	input := BuildConfigValidationInput(context.Background(), cfg, nil)
+	if input.Config.Rigs[0].FormulaVars == nil {
+		t.Fatal("validation input must encode absent formula overrides as {}, not null")
+	}
+	if cfg.Rigs[0].FormulaVars != nil {
+		t.Fatal("normalizing input mutated the invocation config")
+	}
+	if value, ok := input.Config.Rigs[1].FormulaVars["command"]; !ok || value != "" {
+		t.Fatal("explicit empty override was lost")
+	}
+}

@@ -631,7 +631,8 @@ A successful formula entry contains:
 | `provenance.status` | `complete` when every contributing formula read was captured. |
 | `provenance.sources` | Nonempty array of objects with the selected absolute `path` and `content_sha256` of the actual bytes read, including inherited and expanded inputs. |
 
-Overrides remain separately in each rig's `FormulaVars`. Check map membership:
+Overrides remain separately in each rig's `FormulaVars`; absent override maps
+are encoded as `{}`. Check map membership:
 an explicit empty override must not silently restore a default. A discovery or
 compilation failure produces an entry with only an actionable `error` string.
 The pack chooses applicable rigs and formulas and decides which errors matter;

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -59,6 +60,13 @@ func BuildConfigValidationInput(ctx context.Context, cfg *config.City, names []s
 	}
 	if resolved.Rigs == nil {
 		resolved.Rigs = []config.Rig{}
+	} else {
+		resolved.Rigs = slices.Clone(cfg.Rigs)
+	}
+	for i := range resolved.Rigs {
+		if resolved.Rigs[i].FormulaVars == nil {
+			resolved.Rigs[i].FormulaVars = map[string]string{}
+		}
 	}
 	input := ConfigValidationInput{SchemaVersion: "1", Config: &resolved, Formulas: make(map[string]map[string]ConfigValidationFormula, len(cfg.Rigs))}
 	for _, rig := range cfg.Rigs {
