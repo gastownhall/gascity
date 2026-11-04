@@ -1,6 +1,7 @@
 package acceptancehelpers
 
 import (
+	"bytes"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -355,25 +356,30 @@ func TestWithRealBDLeadsPathAndPinsBDBin(t *testing.T) {
 	if got := env.Get("BD_BIN"); got != bd {
 		t.Fatalf("BD_BIN = %q, want %q", got, bd)
 	}
-	first := filepath.SplitList(env.Get("PATH"))[0]
-	target, err := filepath.EvalSymlinks(filepath.Join(first, "bd"))
-	if err != nil {
-		t.Fatalf("PATH's first entry %s holds no bd: %v", first, err)
-	}
-	want, err := filepath.EvalSymlinks(bd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target != want {
-		t.Fatalf("the first bd on PATH resolves to %s, want %s", target, want)
-	}
-	entries, err := os.ReadDir(first)
+	assertFirstPathBDIs(t, env, bd)
+	dir := filepath.Dir(findInPath(env.Get("PATH"), "bd"))
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("PATH's first entry %s holds %d entries, want only the bd link (anything else would shadow host tools)", first, len(entries))
+		t.Fatalf("the real-bd directory %s holds %d entries, want only the bd link (anything else would shadow host tools)", dir, len(entries))
 	}
+}
+
+// Tier A's hermetic provider doubles (GC_HOME/bin) must lead PATH; the real bd
+// goes behind them, ahead of every other bd.
+func TestNewEnvKeepsTheProviderDoublesFirst(t *testing.T) {
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+	gcHome := t.TempDir()
+
+	env := NewEnv("", gcHome, t.TempDir())
+
+	if first := filepath.SplitList(env.Get("PATH"))[0]; first != filepath.Join(gcHome, "bin") {
+		t.Fatalf("PATH starts with %s, want the provider doubles directory %s", first, filepath.Join(gcHome, "bin"))
+	}
+	assertFirstPathBDIs(t, env, bd)
 }
 
 // An unwrapped bd resolves user-level state under gc's HOME, so WithRealBD
@@ -407,5 +413,224 @@ func TestNewEnvPinsTheWrapperBdSwitches(t *testing.T) {
 		if got := env.Get(key); got != want {
 			t.Errorf("NewEnv() %s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// writeFakeBD stands in for a real bd binary at an absolute path.
+func writeFakeBD(t *testing.T) string {
+	t.Helper()
+	bd := filepath.Join(t.TempDir(), "bd-real")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // stands in for an executable
+		t.Fatal(err)
+	}
+	return bd
+}
+
+// assertFirstPathBDIs fails unless the first bd on env's PATH resolves to want.
+func assertFirstPathBDIs(t *testing.T, env *Env, want string) {
+	t.Helper()
+	found := findInPath(env.Get("PATH"), "bd")
+	if found == "" {
+		t.Fatalf("no bd on PATH %q", env.Get("PATH"))
+	}
+	got, err := filepath.EvalSymlinks(found)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantResolved {
+		t.Fatalf("the first bd on PATH (%s) resolves to %s, want %s", found, got, wantResolved)
+	}
+}
+
+// assertWrappedBD fails unless env runs bd through the tool-home wrapper: no
+// BD_BIN, and the first bd on PATH is the wrapper script rather than bd itself.
+func assertWrappedBD(t *testing.T, env *Env, bd string) {
+	t.Helper()
+	if got := env.Get("BD_BIN"); got != "" {
+		t.Fatalf("BD_BIN = %q, want it unset so gc resolves the tool-home wrapper", got)
+	}
+	if env.RunsRealBD() {
+		t.Fatal("RunsRealBD() = true, want false")
+	}
+	found := findInPath(env.Get("PATH"), "bd")
+	if found == "" {
+		t.Fatalf("no bd on PATH %q", env.Get("PATH"))
+	}
+	resolved, err := filepath.EvalSymlinks(found)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved == bd {
+		t.Fatalf("the first bd on PATH resolves to the real bd %s, want the tool-home wrapper", bd)
+	}
+	body, err := os.ReadFile(found)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), "#!") || !strings.Contains(string(body), "bd-tool-home") {
+		t.Fatalf("the first bd on PATH (%s) is not the tool-home wrapper:\n%s", found, body)
+	}
+}
+
+// Split cities refuse the wrapper, so every Env runs the real bd unless a test
+// asks for the wrapper (A2a).
+func TestNewEnvRunsTheRealBDByDefault(t *testing.T) {
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("BD_BIN"); got != bd {
+		t.Fatalf("BD_BIN = %q, want the real bd %q", got, bd)
+	}
+	if !env.RunsRealBD() {
+		t.Fatal("RunsRealBD() = false, want true")
+	}
+	assertFirstPathBDIs(t, env, bd)
+}
+
+func TestNewEnvWithoutABDPinsNoBDBin(t *testing.T) {
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", filepath.Join(t.TempDir(), "missing-bd"))
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("BD_BIN"); got != "" {
+		t.Fatalf("BD_BIN = %q, want it unset when no bd is configured", got)
+	}
+	if env.RunsRealBD() {
+		t.Fatal("RunsRealBD() = true with no bd configured")
+	}
+}
+
+func TestWithWrappedBDRestoresTheToolHomeWrapper(t *testing.T) {
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithWrappedBD()
+
+	assertWrappedBD(t, env, bd)
+	for _, dir := range filepath.SplitList(env.Get("PATH")) {
+		if strings.Contains(dir, realBDDirName) {
+			t.Fatalf("PATH still holds the real-bd directory %s", dir)
+		}
+	}
+}
+
+// An unwrapped bd resolves user-level state under gc's HOME, so any HOME but
+// NewEnv's isolated one puts the Env back on the wrapper.
+func TestEnvLeavesTheRealBDWhenGCLeavesTheIsolatedHome(t *testing.T) {
+	for name, apply := range map[string]func(*Env) *Env{
+		"WithHostHome": func(e *Env) *Env { return e.WithHostHome() },
+		"With HOME":    func(e *Env) *Env { return e.With("HOME", t.TempDir()) },
+		"Without HOME": func(e *Env) *Env { return e.Without("HOME") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			hostHomeWithBdSharedServer(t)
+			bd := writeFakeBD(t)
+			t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+
+			env := apply(NewEnv("", t.TempDir(), t.TempDir()))
+
+			assertWrappedBD(t, env, bd)
+		})
+	}
+}
+
+func TestEnvWithTheIsolatedHomeKeepsTheRealBD(t *testing.T) {
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	env.With("HOME", env.Get("HOME"))
+
+	if !env.RunsRealBD() || env.Get("BD_BIN") != bd {
+		t.Fatalf("re-setting the isolated HOME dropped the real bd (BD_BIN=%q)", env.Get("BD_BIN"))
+	}
+}
+
+func TestCloneKeepsTheBDMode(t *testing.T) {
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if !env.Clone().RunsRealBD() {
+		t.Fatal("Clone() of a real-bd Env runs the wrapper")
+	}
+	if env.Clone().WithWrappedBD(); !env.RunsRealBD() {
+		t.Fatal("WithWrappedBD on a clone changed the original Env")
+	}
+}
+
+// WithRealBD on an Env that already runs a real bd, or twice in a row, leaves
+// exactly one real-bd directory on PATH, leading it.
+func TestWithRealBDReplacesAnEarlierRealBD(t *testing.T) {
+	first := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", first)
+	second := writeFakeBD(t)
+
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithRealBD(second).WithRealBD(second)
+
+	if got := env.Get("BD_BIN"); got != second {
+		t.Fatalf("BD_BIN = %q, want %q", got, second)
+	}
+	assertFirstPathBDIs(t, env, second)
+	count := 0
+	for _, dir := range filepath.SplitList(env.Get("PATH")) {
+		if strings.Contains(dir, realBDDirName) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("PATH holds %d real-bd directories, want 1: %s", count, env.Get("PATH"))
+	}
+}
+
+// A topology on a default Env keeps the real bd its gc runs; one on a wrapped
+// Env keeps the wrapper.
+func TestTopologyEnvFollowsTheBaseBDMode(t *testing.T) {
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+
+	realEnv := TopologyEnv(t, NewEnv("", t.TempDir(), t.TempDir()), t.TempDir(), bd, "/bin/true")
+	if got := realEnv.Get("BD_BIN"); got != bd {
+		t.Fatalf("TopologyEnv on a default Env: BD_BIN = %q, want %q", got, bd)
+	}
+	assertFirstPathBDIs(t, realEnv, bd)
+
+	wrapped := TopologyEnv(t, NewEnv("", t.TempDir(), t.TempDir()).WithWrappedBD(), t.TempDir(), bd, "/bin/true")
+	assertWrappedBD(t, wrapped, bd)
+}
+
+// The topology matrix's rig add recovers a proved lost backend port once
+// (RigAddRecovery, #8171), and its only proof is the dolt log the tool-home
+// wrapper prints after a failed bd init: gc rig add removes the rig's new
+// .beads on the way out, and a real bd prints nothing. gc's provider script
+// runs every bd init as "${BD_BIN:-bd}" init, so a topology shape must resolve
+// the wrapper there.
+func TestTopologyRunEnvKeepsTheRigAddRecoveryProof(t *testing.T) {
+	bd, _ := fakeInitBD{
+		status:    1,
+		stderr:    "Error: failed to open uow provider: uow: ping db: dial tcp 127.0.0.1:43599: connect: connection refused\n",
+		serverLog: strPtr("Starting server\n" + portConflictLine + "\n"),
+	}.install(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+	env := topologyRunEnv(t, NewEnv("", t.TempDir(), t.TempDir()), t.TempDir(), BeadsTopology{}, bd, "/bin/true")
+
+	rig := filepath.Join(t.TempDir(), "rig")
+	cmd := ToolCommand(t, "/bin/sh", "-c", `"${BD_BIN:-bd}" init --proxied-server`)
+	cmd.Env = append(env.List(), "BEADS_DIR="+filepath.Join(rig, ".beads"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	initErr := cmd.Run()
+	if initErr == nil {
+		t.Fatal("the fake bd's init succeeded")
+	}
+	out := "gc rig add: provider-owned beads init: " + stderr.String()
+	if _, err := portCollisionProof(out, initErr, rigRoots(rig)); err != nil {
+		t.Fatalf("a topology shape's failed bd init leaves RigAddRecovery no proof (%v); BD_BIN=%q:\n%s", err, env.Get("BD_BIN"), out)
 	}
 }

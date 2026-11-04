@@ -26,7 +26,8 @@
 // bd's own Go binary, identified by the Go build info a shell script does not
 // carry, and refuses every forwarded command otherwise. A harness that runs a
 // split city must hand gc the real bd, and so must first give gc itself an
-// isolated HOME (the acceptance Env's WithRealBD does both).
+// isolated HOME. The acceptance Env does both by default (WithRealBD) and
+// falls back to WrapperScript whenever gc's HOME is not its isolated one.
 package toolhome
 
 import (
