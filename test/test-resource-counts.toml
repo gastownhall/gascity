@@ -202,6 +202,11 @@ resource = "http_test_server"
 calls = 11
 
 [[count]]
+path = "cmd/gc/cmd_citystatus_fresh_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
 path = "cmd/gc/cmd_citystatus_test.go"
 resource = "http_test_server"
 calls = 4
@@ -1631,6 +1636,11 @@ calls = 4
 path = "internal/api/client_sling_test.go"
 resource = "http_test_server"
 calls = 6
+
+[[count]]
+path = "internal/api/client_status_test.go"
+resource = "http_test_server"
+calls = 1
 
 [[count]]
 path = "internal/api/client_test.go"

@@ -1225,6 +1225,7 @@ go_test(
         "cmd_beads_metadata_cas_test.go",
         "cmd_beads_test.go",
         "cmd_build_image_test.go",
+        "cmd_citystatus_fresh_test.go",
         "cmd_citystatus_test.go",
         "cmd_commands_test.go",
         "cmd_config_chain_annotations_test.go",

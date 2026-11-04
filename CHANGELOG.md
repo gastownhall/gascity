@@ -173,39 +173,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is not read from the cache reports no age (0): `gc rig list`,
     `gc maintenance status`, and `gc status` and `gc rig status` on a
     suspended city; a stale-while-revalidate `/status` serve still reports
-    how long ago its response was built. In 1.5.1 (and since 1.3.0) the
-    supervisor reported the cache's age as 0, so the `(cache age: ...)`
-    footer printed only on `gc status` and `gc rig status`, when a
-    stale-while-revalidate `/status` serve (added in 1.5.0) was more than
-    30 s old.
+    how long ago its response was built. That serve still applies to other
+    clients, such as the dashboard; `gc status` and `gc rig status`
+    against this build get a saved response only when the build they wait
+    for runs past about 10 s (see the footer note below). In 1.5.1 (and
+    since 1.3.0) the supervisor reported the cache's age as 0, so the
+    `(cache age: ...)` footer printed only on `gc status` and
+    `gc rig status`, when a stale-while-revalidate `/status` serve (added
+    in 1.5.0) was more than 30 s old.
   - **The `(cache age: ...)` footer moved to stderr and names its cause.**
     It used to print on stdout after human output, over 15 s on
     `gc session list` and over 30 s on other API-served reads, saying
-    "reconciler may be lagging". It now prints on stderr, and only once the
-    age passes twice the re-scan interval the server reports in
+    "reconciler may be lagging". It now prints on stderr, and only once
+    the age passes twice the re-scan interval the server reports in
     `X-GC-Cache-Refresh-Interval-S` (over 60, 120 or 240 s), so a healthy
     idle city prints none on reads served from the cache. `gc status` and
-    `gc rig status` still print it, naming a saved response the server is
-    rebuilding, when that saved response is more than twice the interval
-    old. It says what the server reports bounds the age:
-    the cache's re-scans are not landing on schedule, they are paused while
-    the city is suspended, they are failing, or the answer is a saved
-    `gc status` / `gc rig status` response the server is rebuilding. Against
-    a supervisor that reports no interval it prints only past 240 s, without
-    a cause. The 15 s `gc session list` footer ("STATE may lag the runtime")
-    is gone, and `gc rig list` and `gc maintenance status`, whose output is
-    not read from the cache, print no footer. A script that read the footer
-    from stdout must read stderr instead; stdout now carries only the
-    result, byte-identical to the local route's.
+    `gc rig status` now ask the server to build the status for the read
+    (`?fresh=true`), so against a supervisor running this build they get a
+    saved response only when that build runs past about 10 s, and
+    otherwise print the footer only when the bead cache itself is behind.
+    A supervisor that predates the parameter ignores it and serves its
+    saved response. A stale-while-revalidate serve reports that response's
+    age in `_cache_age_s`, and since such a supervisor sends neither
+    `X-GC-Cache-Refresh` nor `X-GC-Cache-Refresh-Interval-S`, the footer
+    prints only past the 240 s fallback, without a cause. These two reads
+    now wait for a server build of the status, where they used to answer
+    in milliseconds with a saved response. #8801 removed the per-pool
+    runtime listing that was most of that build on large cities (about
+    11 s of a 676-pool city's 11–13 s); its hermetic benchmark of such a
+    city, at 1 ms per listing, builds `/status` in under 2 ms. The build
+    time on a production city since #8801 has not been measured. The wait
+    is bounded: a build not done within 10 s of the read, as on a runtime
+    that stops answering (tmux waits up to 30 s a call), finishes in the
+    background, and the read gets the saved response with its age; only a
+    supervisor with nothing saved yet makes the read wait for the build. A
+    read never takes a build that started before it: one that arrives
+    while a build runs waits for the build queued behind it, which every
+    read that arrives meanwhile shares, so concurrent and retried
+    `gc status` runs never stack builds. Each build saves its body, which
+    also refreshes the saved response the dashboard reads. The footer says
+    what the server reports bounds the age: the cache's re-scans are not
+    landing on schedule, they are paused while the city is suspended, they
+    are failing, or the answer is a saved `gc status` / `gc rig status`
+    response the server is rebuilding. Against a supervisor that reports
+    no interval it prints only past 240 s, without a cause. The 15 s
+    `gc session list` footer ("STATE may lag the runtime") is gone, and
+    `gc rig list` and `gc maintenance status`, whose output is not read
+    from the cache, print no footer. A script that read the footer from
+    stdout must read stderr instead; stdout now carries only the result,
+    byte-identical to the local route's.
   - **Restart the supervisor after you install this build**
     (`gc supervisor stop --wait`, then `gc start`). A supervisor still
     running an earlier gc serves the old rows: it ignores
     `gc session peek`'s new request option and keeps the old best-effort
-    preview, leaves out `session_id` on `gc rig status` rows and
-    `agent_name`, `transport`, `worker_dir` and wake reasons on session
-    rows, does not report convoy member IDs, still reads suspended rigs'
-    convoy stores, and reports a cache age of 0. Until it restarts:
-    a supervisor-hosted city's open-session listing reads the city's store
+    preview, ignores `gc status`'s and `gc rig status`'s fresh request and
+    answers them with its saved status response, leaves out `session_id` on
+    `gc rig status` rows and `agent_name`, `transport`, `worker_dir` and
+    wake reasons on session rows, does not report convoy member IDs, still
+    reads suspended rigs' convoy stores, and reports a cache age of 0
+    except on a stale-while-revalidate `/status` serve, which reports its
+    saved response's age. Until it restarts: a supervisor-hosted city's open-session listing reads the city's store
     directly (`route=fallback reason=session-list-predates-agent-name`
     under `GC_DEBUG`), without `running` or `_cache_age_s`; `gc convoy list`
     on a local city reads the stores directly
@@ -887,6 +914,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was built from, and its interval is then 0. The CLI uses them to decide
   when to print its cache-age footer.
 
+- **API: `GET /v0/city/{cityName}/status` accepts `fresh` (#8453).** When
+  true, the server skips the response cache's time-bucket and TTL-floor
+  reuse and waits for a build of the body that starts no earlier than the
+  read: one the read starts, or, while another build of that view runs, the
+  one queued behind it, which every fresh read that arrives meanwhile
+  shares. A build not done within 10 s of the read finishes in the
+  background, and the read is answered with the saved body as a
+  stale-while-revalidate serve is (`X-GC-Cache-Refresh` is `rebuilding`
+  when that body is older than the bead cache); with no saved body the read
+  waits for the build. Every build saves its body for later readers.
+  Default false keeps stale-while-revalidate for pollers; the dashboard
+  does not send it. `gc status` and `gc rig status` send it. #8801 made the
+  build much cheaper on cities with many unlimited pools.
+
 - **The work ladder nudges a step only daily while its seat waits on a
   person, and hourly when the seat's turns say its answer's turn may have
   died.** With `[daemon] work_ladder` on (the default), a claimed step whose
@@ -1179,6 +1220,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bead backend cannot count closed history. Every other StoreHealth failure
   is still retried on the next build, so a transient store error clears as
   soon as the store recovers. The response bodies are unchanged.
+
+- **`gc status` and `gc rig status` showed the state the previous run saw
+  (#8453).** The supervisor answered `/status` from a response it had saved,
+  however old, and rebuilt it in the background for the next caller, so a
+  run more than about 3 s after the previous one printed that run's state,
+  often minutes old. Both commands now ask the server for a body built for
+  the read (`?fresh=true`), which it waits up to about 10 s for before
+  answering with the saved response and its age; the dashboard and other
+  pollers keep the saved response and its background refresh.
 
 - **The supervisor API route printed different JSON from the local route
   for the commands supervisor-hosted cities read through it (#8453).**
