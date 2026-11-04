@@ -481,6 +481,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-12-31",
 		},
 		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestRoutedRowsGuard",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-dpv5d",
+			Invariant:       "the routed test matrix guard proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the bash subprocess per case is confined to TestRoutedRowsGuard, which runs the actual shell guard against isolated fixture trees to verify discovery and manifest failures: the guard is shell, so its behavior requires a real shell execution",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-12-31",
+		},
+		{
 			PackageDir:      "tools/nogo/nolinttest",
 			PackageName:     "nolinttest_test",
 			Owner:           "TestNolintNeverSuppressesStoreclass",
