@@ -1073,8 +1073,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reclaim, adoption re-stamp, workflow-stop close or continuation pin
     needs an actor inside the namespace or one of this city's own pool
     sessions of the rig (`gc hook --claim: not claiming <id>: ... claim actor
-    "<x>" is outside it`). `gc hook --claim` no longer searches guarded
-    rigs for a city-scoped agent.
+    "<x>" is outside it`). Retiring a finished workflow needs such an
+    actor too, and leaves another city's rows under the same root open.
+    `gc hook --claim` no longer searches guarded rigs for a city-scoped
+    agent.
   - `gc sling`, its batch and custom `sling_query` forms, and every graph
     decoration refuse a route into a guarded rig that is not one of its own
     agents (`gc sling: refusing route into rig "beta": target "<x>" is
@@ -1083,12 +1085,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rig's row exactly as `gc bd` would, with no fallback store.
   - `gc bd` on a guarded rig's scope runs an allowlist: reads pass; by-id
     writes are checked against the row they name (refused when another
-    city owns it); claims need an admitted actor and `ready --claim`,
-    `close --claim-next` and `close --continue` (without `--no-auto`) are
-    refused; a create is stamped with the rig's namespace; and every other
-    verb is refused with "use raw bd". Raw `bd` is unchanged. A write
+    city owns it); a claim stamp is checked as the store guard checks it;
+    claims need an admitted actor and `ready --claim`, `close --claim-next`
+    and `close --continue` (without `--no-auto`) are refused; a create is
+    stamped with the rig's namespace; and every other verb is refused with
+    "use raw bd". Raw `bd` is unchanged. It reads the command the way `bd`
+    does, so only `bd`'s global flags may come before the command or a
+    sub-command such as `comments add`, and a write that points `bd` at
+    another store (`--db`, `--database`, `--server-url`, `--global`,
+    `--profile`, or a `-C` that opens another store) is refused. A write
     naming a guarded rig's bead from any other scope (`--rig` another rig,
-    `--city`, `-C`, or ids from two stores) is refused too.
+    `--city`, `-C`, or ids from two stores), or whose `-C` opens a guarded
+    rig's store from another scope, is refused too: a `ready --claim`
+    counts as such a write, and `-C` counts in every spelling `bd` reads
+    (`-C<dir>`, `-qC <dir>`).
+  - The dolt pack's backup order (`mol-dog-backup`) skips a guarded rig,
+    notes it on stderr and declares it in the run's outcome: the rig's
+    store is shared with other cities, so its operator backs it up.
   - A new bead routed by `gc sling`, graph routing or `gc bd create` may
     name only one of the rig's own agents. The store guard is looser on
     create by design: it accepts a rig-qualified route outside the namespace

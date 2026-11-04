@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -442,5 +443,76 @@ func TestRigNamespaceScopeFollowsRedirectIntoGuardedStore(t *testing.T) {
 	}
 	if _, _, refused := c.check([]string{"create", "--title", "x"}); !refused {
 		t.Error("a create into a shared guarded store passes")
+	}
+}
+
+// gc bd and agent-script apply the store guard's claim-stamp rule: a stamp
+// naming another city's pool session is refused on any row, and any other
+// stamp where it decides the row's class (the row has no owner key once
+// written), since it would hand the row to whoever it names.
+func TestBdRigNamespaceRefusesForeignClaimStamps(t *testing.T) {
+	c := brnCheck(t, "beta/crew.worker", brnOwned, brnPlain)
+	for _, args := range [][]string{
+		{"update", "bt-3", "--set-metadata", "gc.session_id=" + poolIDA},
+		{"update", "bt-3", "--metadata", `{"gc.session_id":"` + poolIDA + `"}`},
+		{"update", "bt-3", "--set-metadata", "gc.stranded_session=" + poolIDA},
+		{"update", "bt-3", "--set-metadata", "gc.session_name=crew.worker"},
+		{"update", "bt-1", "--set-metadata", "gc.session_id=" + poolIDA},
+		{"update", "bt-1", "--set-metadata", "gc.session_name=" + poolNameA},
+		{"update", "bt-1", "--assignee", "", "--unset-metadata", beadmeta.RoutedToMetadataKey, "--set-metadata", "gc.session_name=crew.worker"},
+		{"create", "--title", "x", "--metadata", `{"gc.session_id":"` + poolIDA + `"}`},
+	} {
+		if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, "claim stamp") {
+			t.Errorf("gc bd %q: refused=%v msg=%q; want the claim-stamp refusal", args, refused, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"update", "bt-3", "--set-metadata", "gc.session_id=" + poolIDB},
+		{"update", "bt-1", "--set-metadata", "gc.session_name=crew.worker"},
+		{"update", "bt-3", "--assignee", "beta/crew.worker", "--set-metadata", "gc.session_name=crew.worker"},
+		{"create", "--title", "x", "--assignee", "beta/crew.worker", "--metadata", `{"gc.session_name":"crew.worker"}`},
+	} {
+		if _, msg, refused := c.check(args); refused {
+			t.Errorf("gc bd %q refused: %q", args, msg)
+		}
+	}
+	args, err := agentScriptBDUpdateArgs(map[string]any{"id": "bt-3", "metadata": map[string]any{"gc.session_id": poolIDA}}, agentScriptContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agentScriptRigNamespaceCheck(c.ns, c.get, args); !errors.Is(err, errRigNamespace) {
+		t.Errorf("agent-script bd %v: err = %v, want the claim-stamp refusal", args, err)
+	}
+}
+
+// The two layers decide a claim stamp with one rule: for each row and stamp,
+// gc bd refuses exactly the writes the guarded store refuses.
+func TestBdRigNamespaceClaimStampParityWithStoreGuard(t *testing.T) {
+	ns, _ := rnsCityBNamespace(t)
+	owned := map[string]string{beadmeta.RoutedToMetadataKey: "beta/crew.worker"}
+	for _, tc := range []struct {
+		row        map[string]string
+		key, value string
+	}{
+		{nil, beadmeta.SessionIDMetadataKey, poolIDA},
+		{nil, beadmeta.SessionIDMetadataKey, poolIDB},
+		{nil, beadmeta.SessionNameMetadataKey, "crew.worker"},
+		{nil, beadmeta.StrandedSessionMetadataKey, poolIDA},
+		{owned, beadmeta.SessionIDMetadataKey, poolIDA},
+		{owned, beadmeta.SessionIDMetadataKey, poolIDB},
+		{owned, beadmeta.SessionNameMetadataKey, "crew.worker"},
+		{owned, beadmeta.SessionNameMetadataKey, poolNameA},
+	} {
+		inner := beads.NewMemStore()
+		row, err := inner.Create(beads.Bead{Title: "row", Metadata: maps.Clone(tc.row)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		storeErr := newRigNamespaceStore(inner, ns).SetMetadata(row.ID, tc.key, tc.value)
+		c := &bdRigNamespaceCheck{ns: ns, actor: "beta/crew.worker", get: inner.Get}
+		_, msg, refused := c.check([]string{"update", row.ID, "--set-metadata", tc.key + "=" + tc.value})
+		if refused != (storeErr != nil) {
+			t.Errorf("row %v, %s=%s: gc bd refused=%v (%q), store guard err=%v", tc.row, tc.key, tc.value, refused, msg, storeErr)
+		}
 	}
 }

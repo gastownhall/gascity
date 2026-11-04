@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -44,8 +45,13 @@ import (
 //     argv cannot be read exactly, or that cannot be stamped (a batch file or
 //     graph, two --metadata flags, an ambiguous guarded scope), is refused, as
 //     is one carrying --deps.
-//   - A write naming another database (--db, --database, create --repo) is
-//     refused: the check reads this scope's store, not that one.
+//   - An argv whose command cannot be read the way bd's cobra resolves it (a
+//     flag other than bd's global ones before the verb, or before a compound
+//     verb's sub-verb) is refused: cobra may take the token after such a flag
+//     as its value, and run another command than the one checked.
+//   - A write aimed at another store (--db, --database, --server-url,
+//     --global, --profile, create --repo, or a -C that opens another store)
+//     is refused: the check reads this scope's store, not that one.
 //   - relate and unrelate pass (a documented residual): they record a
 //     symmetric "relates-to" link, which blocks nothing and changes no row's
 //     owner, status or routing. link is not one of them: `link <a> <b>` is
@@ -53,13 +59,19 @@ import (
 //     -t parent-child), so it is checked on <a>'s row like dep add.
 type bdRigNamespaceCheck struct {
 	// ns is the namespace of the guarded rig whose store the scope opens, or
-	// nil when the scope is no guarded rig's: then only the per-id check of
-	// bdCrossRigSubjectRefusal runs.
+	// nil when the scope is no guarded rig's: then only storeRefusal runs.
 	ns *rigNamespace
 	// cfg is the city's config, for the per-id prefix check; nil skips it.
 	cfg *config.City
+	// cityPath and scopeRoot locate the store the scope opens, which a -C
+	// in the argv must not move bd off (directoryRefusal). scopeRoot is the
+	// directory bd runs in; "" when the caller runs bd elsewhere.
+	cityPath, scopeRoot string
 	// get reads a row for classification through the scope's bd front door.
 	get func(id string) (beads.Bead, error)
+	// rows holds the rows one check has read (row), so a row it judges
+	// twice costs one bd process.
+	rows map[string]beads.Bead
 	// actor is the claim actor when the argv names none (--actor): the
 	// BEADS_ACTOR bd inherits, or "" when unset (bd then picks a default gc
 	// cannot predict, which is never admitted).
@@ -68,8 +80,8 @@ type bdRigNamespaceCheck struct {
 
 // newBdRigNamespaceCheck returns the check for a gc bd invocation whose
 // scope is scopeRoot, or nil when the city has no guarded rig. When no
-// guarded rig owns the scope, the check only refuses a write naming a
-// guarded rig's bead (bdCrossRigSubjectRefusal).
+// guarded rig owns the scope, the check only refuses a write that lands
+// outside the store it judged (storeRefusal).
 func newBdRigNamespaceCheck(cfg *config.City, cityPath, scopeRoot string, get func(string) (beads.Bead, error)) *bdRigNamespaceCheck {
 	if !cityHasGuardedRig(cfg) {
 		return nil
@@ -82,7 +94,7 @@ func newBdRigNamespaceCheck(cfg *config.City, cityPath, scopeRoot string, get fu
 		return cliStores(cityPath, cityStore).Sessions(), nil
 	})
 	ns := rigNamespaceForScopeOrDeny(cfg, cityPath, scopeRoot, sessions)
-	return &bdRigNamespaceCheck{ns: ns, cfg: cfg, get: get, actor: bdEffectiveActorFromEnv(os.Getenv)}
+	return &bdRigNamespaceCheck{ns: ns, cfg: cfg, cityPath: cityPath, scopeRoot: scopeRoot, get: get, actor: bdEffectiveActorFromEnv(os.Getenv)}
 }
 
 // bdEffectiveActorFromEnv is the BEADS_ACTOR the bd child inherits from
@@ -143,13 +155,17 @@ func (c *bdRigNamespaceCheck) check(bdArgs []string) ([]string, string, bool) {
 	if c == nil {
 		return bdArgs, "", false
 	}
-	if msg, refused := bdCrossRigSubjectRefusal(c.cfg, c.ns, bdArgs); refused {
+	c.rows = nil
+	w := splitBdVerbCall(bdArgs)
+	if msg, refused := c.storeRefusal(w); refused {
 		return nil, msg, true
 	}
 	if c.ns == nil {
 		return bdArgs, "", false
 	}
-	w := splitBdVerbCall(bdArgs)
+	if !w.readable {
+		return nil, c.unreadableCommand(w), true
+	}
 	if w.verb == "" {
 		return bdArgs, "", false
 	}
@@ -178,30 +194,125 @@ func (c *bdRigNamespaceCheck) check(bdArgs []string) ([]string, string, bool) {
 }
 
 // bdVerbCall is one gc bd argv as the guard reads it: the verb ("new" read
-// as "create"), its first positional when it has one (a compound verb's
-// sub-verb), the argv after the verb, and the whole argv.
+// as "create"), the sub-verb of a compound verb (any other verb's first
+// positional), the argv after the verb, the argv a compound verb's sub-verb
+// parses (the whole argv without the verb and the sub-verb), and the whole
+// argv.
+//
+// readable is false when the verb, or a compound verb's sub-verb, cannot be
+// read the way bd's cobra resolves it (bdflags.SplitGlobalFlagsStrict): a
+// flag other than bd's global ones, a "--" or an empty token comes before
+// it, and cobra may take the token after such a flag as that flag's value,
+// so bd could run another command than the one the guard reads.
 type bdVerbCall struct {
-	verb, sub    string
-	rest, bdArgs []string
+	verb, sub             string
+	rest, subArgs, bdArgs []string
+	readable              bool
 }
 
-// splitBdVerbCall reads bdArgs' verb past the global flags.
+// bdRigNamespaceCompoundVerbs are the verbs whose sub-verb the guard reads
+// (cobra resolves `<verb> <sub>` as a command of its own), so it is read as
+// strictly as the verb.
+var bdRigNamespaceCompoundVerbs = map[string]bool{
+	"comments": true, "config": true, "dep": true, "formula": true, "gate": true,
+	"human": true, "label": true, "mol": true, "todo": true,
+}
+
+// splitBdVerbCall reads bdArgs' verb, and a compound verb's sub-verb, the way
+// bd's cobra resolves them.
 func splitBdVerbCall(bdArgs []string) bdVerbCall {
 	w := bdVerbCall{bdArgs: bdArgs}
-	w.verb, w.rest = bdflags.SplitGlobalFlags(bdArgs)
+	w.verb, w.rest, w.readable = bdflags.SplitGlobalFlagsStrict(bdArgs)
 	if w.verb == "new" {
 		w.verb = "create"
 	}
-	if len(w.rest) > 0 && !strings.HasPrefix(w.rest[0], "-") {
+	switch {
+	case !w.readable:
+	case bdRigNamespaceCompoundVerbs[w.verb]:
+		at := w.verbAt()
+		w.sub, w.subArgs, w.readable = bdflags.SplitSubcommandStrict(append(bdArgs[:at:at], bdArgs[at+1:]...))
+	case len(w.rest) > 0 && !strings.HasPrefix(w.rest[0], "-"):
 		w.sub = w.rest[0]
 	}
 	return w
 }
 
+// verbAt is the index of the verb in the whole argv; w must have a verb.
+func (w bdVerbCall) verbAt() int {
+	return len(w.bdArgs) - len(w.rest) - 1
+}
+
+// storeRefusal is the check every scope of a city with a guarded rig runs,
+// guarded or not: a write must land in the store the guard judged. It
+// refuses a write naming a guarded rig's bead outside that rig's scope
+// (bdCrossRigSubjectRefusal) and one whose -C opens another store
+// (directoryRefusal). Reads pass; a claim (ready --claim) is a write.
+func (c *bdRigNamespaceCheck) storeRefusal(w bdVerbCall) (string, bool) {
+	verb, ids, write := bdWriteSubjects(w)
+	if !write {
+		return "", false
+	}
+	if msg, refused := bdCrossRigSubjectRefusal(c.cfg, c.ns, verb, ids); refused {
+		return msg, true
+	}
+	return c.directoryRefusal(w)
+}
+
+// directoryRefusal refuses a write whose -C (--directory) makes bd open a
+// store other than the one the guard judged. bd changes to that directory,
+// read from the scope root it runs in, and opens the store it finds there,
+// while gc picked the scope by --rig, --city or a bead's prefix first: gc bd
+// -C <guarded rig> update <another rig's bead> would write the guarded rig's
+// store unchecked. -C is read in every spelling pflag accepts, attached and
+// in a shorthand run too (-Cdir, -qC dir; bdflags.FlagValues). Stores are
+// compared by identity (rigNamespaceForScopeOrDeny), so the scope's own rig, a
+// directory inside it and a worktree redirected into it pass, and so does any
+// store no guarded rig owns from a scope no guarded rig owns.
+func (c *bdRigNamespaceCheck) directoryRefusal(w bdVerbCall) (string, bool) {
+	for _, dir := range bdflags.FlagValues(w.bdArgs, bdValueFlagsFor(w.verb, w.sub), "-C", "--directory") {
+		if !filepath.IsAbs(dir) {
+			if c.scopeRoot == "" {
+				return fmt.Sprintf("gc bd: refusing -C %s: gc bd cannot tell which directory a relative -C names here, so it cannot check the store bd would write; give an absolute path\n", dir), true
+			}
+			dir = filepath.Join(c.scopeRoot, dir)
+		}
+		opened := rigNamespaceForScopeOrDeny(c.cfg, c.cityPath, dir, nil)
+		if sameGuardedStore(opened, c.ns) {
+			continue
+		}
+		return fmt.Sprintf("gc bd: refusing -C %s: bd would write %s there, but gc bd checked this command against %s; drop -C and choose the scope with gc bd --rig\n", dir, bdStoreLabel(opened), bdStoreLabel(c.ns)), true
+	}
+	return "", false
+}
+
+// sameGuardedStore reports whether two stores, named by the guarded
+// namespace that owns each (nil for none), are one store as far as the guard
+// is concerned: both owned by no guarded rig, or both by the same one with a
+// usable namespace.
+func sameGuardedStore(a, b *rigNamespace) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.namespace() != "" && a.rigName() == b.rigName()
+}
+
+// bdStoreLabel names, for a refusal, the store a guarded namespace owns.
+func bdStoreLabel(ns *rigNamespace) string {
+	if ns == nil {
+		return "a store that is no guarded rig's"
+	}
+	return "rig " + rigNamespaceLabel(ns) + "'s store (federation = \"rig\")"
+}
+
+// bdRigNamespaceStoreSelectors are the global flags that point bd at another
+// store than the scope's: another database, another bd serve endpoint, the
+// global shared-server database, or a named storage profile.
+var bdRigNamespaceStoreSelectors = []string{"--db", "--database", "--server-url", "--global", "--profile"}
+
 // checkWritePreconditions applies the rules every write verb shares. done
 // reports that the check ends here, with args, msg and refused its answer:
 // an argv the guard cannot read exactly, a help request (bd runs nothing),
-// or a write aimed at another database.
+// or a write aimed at another store.
 func (c *bdRigNamespaceCheck) checkWritePreconditions(w bdVerbCall) (args []string, msg string, refused, done bool) {
 	// pflag reads "-reason" as -r with the attached value "eason", while the
 	// id scan reads it as --reason taking the next token: the next token
@@ -211,14 +322,15 @@ func (c *bdRigNamespaceCheck) checkWritePreconditions(w bdVerbCall) (args []stri
 	if tok, ok := bdShorthandCluster(w.bdArgs); ok {
 		return nil, fmt.Sprintf("gc bd: refusing %s: cannot read %q exactly (a shorthand cluster or attached value), so rig %s (federation = \"rig\") cannot check what it writes; spell flags out (--flag value)\n", w.verb, tok, rigNamespaceLabel(c.ns)), true, true
 	}
-	if bdRigNamespaceHelpOn(w.verb, w.sub, w.rest) {
+	if bdRigNamespaceHelpOn(w) {
 		// cobra prints help and runs nothing.
 		return w.bdArgs, "", false, true
 	}
-	// Everything below writes: it must write this scope's store.
-	for _, f := range []string{"--db", "--database"} {
+	// Everything below writes: it must write this scope's store (a -C is
+	// storeRefusal's).
+	for _, f := range bdRigNamespaceStoreSelectors {
 		if bdRigNamespaceFlagSet(w.verb, w.sub, w.bdArgs, f) {
-			return nil, fmt.Sprintf("gc bd: refusing %s %s: rig %s (federation = \"rig\") checks writes against its own store only; use raw bd for another database\n", w.verb, f, rigNamespaceLabel(c.ns)), true, true
+			return nil, fmt.Sprintf("gc bd: refusing %s %s: rig %s (federation = \"rig\") checks writes against its own store only; use raw bd for another store\n", w.verb, f, rigNamespaceLabel(c.ns)), true, true
 		}
 	}
 	return nil, "", false, false
@@ -263,7 +375,7 @@ func handledCheck(args []string, msg string, refused bool) ([]string, string, bo
 }
 
 func (c *bdRigNamespaceCheck) verbCreate(w bdVerbCall) ([]string, string, bool, bool) {
-	return handledCheck(c.checkCreate(w.bdArgs, w.rest))
+	return handledCheck(c.checkCreate(w))
 }
 
 func (c *bdRigNamespaceCheck) verbByID(w bdVerbCall) ([]string, string, bool, bool) {
@@ -300,7 +412,7 @@ func (c *bdRigNamespaceCheck) verbLink(w bdVerbCall) ([]string, string, bool, bo
 func (c *bdRigNamespaceCheck) verbComments(w bdVerbCall) ([]string, string, bool, bool) {
 	switch w.sub {
 	case "add":
-		return handledCheck(c.checkSubjects("comments add", w.bdArgs, w.rest[1:], bdSubjectsFirst))
+		return handledCheck(c.checkSubjects("comments add", w.bdArgs, w.subArgs, bdSubjectsFirst))
 	case "delete", "edit", "remove", "rm", "update":
 		return nil, "", false, false
 	}
@@ -313,7 +425,7 @@ func (c *bdRigNamespaceCheck) verbDep(w bdVerbCall) ([]string, string, bool, boo
 	if w.sub != "add" && w.sub != "remove" {
 		return nil, "", false, false
 	}
-	ids, ambiguous := bdScanPositionalIDs(w.rest[1:], bdSubcmdValueFlags("dep "+w.sub), bdSubcmdBoolFlags("dep "+w.sub), nil)
+	ids, ambiguous := bdScanPositionalIDs(w.subArgs, bdSubcmdValueFlags("dep "+w.sub), bdSubcmdBoolFlags("dep "+w.sub), nil)
 	if ambiguous || len(ids) == 0 {
 		return handledCheck(nil, c.unreadable("dep "+w.sub), true)
 	}
@@ -336,7 +448,7 @@ func bdSubVerbSubjectsCheck(rule bdSubjectRule, subs ...string) bdVerbCheck {
 		if !slices.Contains(subs, w.sub) {
 			return nil, "", false, false
 		}
-		return handledCheck(c.checkSubjects(w.verb+" "+w.sub, w.bdArgs, w.rest[1:], rule))
+		return handledCheck(c.checkSubjects(w.verb+" "+w.sub, w.bdArgs, w.subArgs, rule))
 	}
 }
 
@@ -405,11 +517,11 @@ func bdRigNamespaceManifest(key string) (value, bools map[string]bool) {
 // bdRigNamespaceHelpOn reports whether a write verb's argv really asks for
 // help, read the way pflag reads it. A verb without a known manifest never
 // counts as a help request: a value flag could be hiding the token.
-func bdRigNamespaceHelpOn(verb, sub string, rest []string) bool {
-	key, args := verb, rest
-	if sub != "" {
-		if v, _ := bdRigNamespaceManifest(verb + " " + sub); v != nil {
-			key, args = verb+" "+sub, rest[1:]
+func bdRigNamespaceHelpOn(w bdVerbCall) bool {
+	key, args := w.verb, w.rest
+	if w.sub != "" {
+		if v, _ := bdRigNamespaceManifest(w.verb + " " + w.sub); v != nil {
+			key, args = w.verb+" "+w.sub, w.subArgs
 		}
 	}
 	value, bools := bdRigNamespaceManifest(key)
@@ -445,22 +557,27 @@ func bdShorthandCluster(args []string) (string, bool) {
 	return "", false
 }
 
+// bdValueFlagsFor returns the value flags pflag reads a verb's argv with:
+// the manifest of its sub-verb, else of the verb, else the global flags.
+func bdValueFlagsFor(verb, sub string) map[string]bool {
+	if sub != "" {
+		if v, _ := bdRigNamespaceManifest(verb + " " + sub); v != nil {
+			return v
+		}
+	}
+	if v, _ := bdRigNamespaceManifest(verb); v != nil {
+		return v
+	}
+	return bdflags.GlobalValueFlags()
+}
+
 // bdRigNamespaceFlagSet reports whether flag is given in an argv read the
 // way pflag reads it with the verb's manifest (a "--" consumed as a value
 // hides nothing): as a value flag with a value, or as a bool flag that is
 // on or carries a value ParseBool rejects (fail closed). A verb without a
 // manifest is read with the global flags only.
 func bdRigNamespaceFlagSet(verb, sub string, args []string, flag string) bool {
-	key := verb
-	if sub != "" {
-		if v, _ := bdRigNamespaceManifest(verb + " " + sub); v != nil {
-			key = verb + " " + sub
-		}
-	}
-	value, _ := bdRigNamespaceManifest(key)
-	if value == nil {
-		value = bdflags.GlobalValueFlags()
-	}
+	value := bdValueFlagsFor(verb, sub)
 	if value[flag] {
 		return len(bdflags.FlagValues(args, value, flag)) > 0
 	}
@@ -487,9 +604,9 @@ func (c *bdRigNamespaceCheck) checkUnclaim(bdArgs, rest []string) ([]string, str
 	if !ok || len(pos) == 0 {
 		return nil, c.unreadable("unclaim"), true
 	}
-	actor := c.claimActor(bdArgs)
+	actor := c.claimActor("unclaim", bdArgs)
 	for _, id := range pos {
-		row, err := c.get(id)
+		row, err := c.row(id)
 		if err != nil {
 			return nil, c.unreadableRow("unclaim", id, err), true
 		}
@@ -507,28 +624,32 @@ func (c *bdRigNamespaceCheck) checkUnclaim(bdArgs, rest []string) ([]string, str
 	return bdArgs, "", false
 }
 
-func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, string, bool) {
+func (c *bdRigNamespaceCheck) checkCreate(w bdVerbCall) ([]string, string, bool) {
 	stamp, ok := c.ns.ownerStamp()
 	if !ok {
 		return nil, fmt.Sprintf("gc bd: refusing create: rig %s (federation = \"rig\") cannot stamp the rows it creates\n", rigNamespaceLabel(c.ns)), true
 	}
-	if msg, refused := c.createArgvRefusal(rest); refused {
+	if msg, refused := c.createArgvRefusal(w.rest); refused {
 		return nil, msg, true
 	}
-	writes, msg, refused := bdMetadataWrites("create", rest)
+	writes, msg, refused := bdMetadataWrites("create", w.rest)
 	if refused {
 		return nil, msg, true
 	}
 	if msg, refused := c.checkStampKey("create", writes); refused {
 		return nil, msg, true
 	}
-	if msg, refused := c.assigneeFlagRefusal("create", "a new bead", rest); refused {
+	if msg, refused := c.assigneeFlagRefusal("create", "a new bead", w.rest); refused {
 		return nil, msg, true
 	}
 	if msg, refused := c.createWritesRefusal(writes); refused {
 		return nil, msg, true
 	}
-	out, err := bdArgsWithOwnerStamp(bdArgs, stamp)
+	assignee, _ := bdLastFlagValue("create", w.rest, "--assignee", "-a")
+	if msg, refused := c.claimStampWritesRefusal("create", "a new bead", bdRowAfter(beads.Bead{}, assignee, writes), writes); refused {
+		return nil, msg, true
+	}
+	out, err := bdArgsWithOwnerStamp(w.bdArgs, w.verbAt(), stamp)
 	if err != nil {
 		return nil, fmt.Sprintf("gc bd: refusing create: %v\n", err), true
 	}
@@ -633,7 +754,7 @@ func (c *bdRigNamespaceCheck) checkByID(verb string, bdArgs, rest []string) ([]s
 func (c *bdRigNamespaceCheck) updateValueRefusal(verb string, bdArgs, rest, ids []string, writes []bdMetadataWrite) (string, bool) {
 	subject := strings.Join(ids, ", ")
 	if _, claims := bdflags.ClaimFlag(verb, rest); claims {
-		if actor := c.claimActor(bdArgs); !rigNamespacePinAdmitted(c.ns, actor) {
+		if actor := c.claimActor(verb, bdArgs); !rigNamespacePinAdmitted(c.ns, actor) {
 			return c.actorRefusal(verb, subject, actor), true
 		}
 	}
@@ -651,7 +772,95 @@ func (c *bdRigNamespaceCheck) updateValueRefusal(verb string, bdArgs, rest, ids 
 			return msg, true
 		}
 	}
+	return c.updateClaimStampRefusal(verb, bdArgs, rest, ids, writes)
+}
+
+// updateClaimStampRefusal applies the store guard's claim-stamp rule to an
+// update of the rows ids: a stamp is checked when it names a pool session,
+// or when the row carries no owner key once the update lands
+// (claimStampDecides), since the stamp then decides whose row it is.
+func (c *bdRigNamespaceCheck) updateClaimStampRefusal(verb string, bdArgs, rest, ids []string, writes []bdMetadataWrite) (string, bool) {
+	if !bdWritesClaimStamp(writes) {
+		return "", false
+	}
+	// The assignee the update leaves: a claim's actor, else the last
+	// --assignee, else the row's own.
+	assignee, assigned := bdLastFlagValue(verb, rest, "--assignee", "-a")
+	if _, claims := bdflags.ClaimFlag(verb, rest); claims {
+		assignee, assigned = c.claimActor(verb, bdArgs), true
+	}
+	for _, id := range ids {
+		row, err := c.row(id)
+		if err != nil {
+			return c.unreadableRow(verb, id, err), true
+		}
+		after := row.Assignee
+		if assigned {
+			after = assignee
+		}
+		if msg, refused := c.claimStampWritesRefusal(verb, id, bdRowAfter(row, after, writes), writes); refused {
+			return msg, true
+		}
+	}
 	return "", false
+}
+
+// claimStampWritesRefusal refuses a claim stamp in writes that the store
+// guard would refuse on a row that reads as after once written: the shared
+// rule (claimStampDecides, rigNamespace.claimStampRefusal).
+func (c *bdRigNamespaceCheck) claimStampWritesRefusal(verb, subject string, after beads.Bead, writes []bdMetadataWrite) (string, bool) {
+	ownersAfter := len(rowOwnerValues(after)) > 0
+	for _, w := range writes {
+		if w.unset || !isRigNamespaceClaimStampKey(w.key) || !claimStampDecides(w.value, ownersAfter) {
+			continue
+		}
+		if reason, err := c.ns.claimStampRefusal(w.key, w.value); reason != "" {
+			if err != nil {
+				reason += fmt.Sprintf(" (%v)", err)
+			}
+			return fmt.Sprintf("gc bd: refusing %s on %s: rig %s (federation = \"rig\") refuses it: %s\n", verb, subject, rigNamespaceLabel(c.ns), reason), true
+		}
+	}
+	return "", false
+}
+
+// bdWritesClaimStamp reports whether writes set a claim stamp.
+func bdWritesClaimStamp(writes []bdMetadataWrite) bool {
+	for _, w := range writes {
+		if !w.unset && isRigNamespaceClaimStampKey(w.key) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdRowAfter is row as a write leaves it: assignee as its assignee and the
+// metadata writes applied.
+func bdRowAfter(row beads.Bead, assignee string, writes []bdMetadataWrite) beads.Bead {
+	after := row
+	after.Assignee = assignee
+	after.Metadata = make(map[string]string, len(row.Metadata)+len(writes))
+	for k, v := range row.Metadata {
+		after.Metadata[k] = v
+	}
+	for _, w := range writes {
+		if w.unset {
+			delete(after.Metadata, strings.TrimSpace(w.key))
+			continue
+		}
+		after.Metadata[strings.TrimSpace(w.key)] = w.value
+	}
+	return after
+}
+
+// bdLastFlagValue is the value pflag keeps for a value flag of verb's argv
+// (the last one given), and whether it is given at all.
+func bdLastFlagValue(verb string, args []string, names ...string) (string, bool) {
+	vs := bdflags.FlagValues(args, bdValueFlagsFor(verb, ""), names...)
+	if len(vs) == 0 {
+		return "", false
+	}
+	return vs[len(vs)-1], true
 }
 
 // updateRouteRefusal refuses an update's route write w that is not
@@ -669,7 +878,7 @@ func (c *bdRigNamespaceCheck) updateRouteRefusal(verb, subject string, ids []str
 		return "", false
 	}
 	for _, id := range ids {
-		row, err := c.get(id)
+		row, err := c.row(id)
 		if err != nil || c.ns.classify(row) != rowOwned {
 			return c.routeRefusal(verb, id, w), true
 		}
@@ -691,7 +900,7 @@ func (c *bdRigNamespaceCheck) checkStampKey(verb string, writes []bdMetadataWrit
 // read to tell.
 func (c *bdRigNamespaceCheck) checkRows(verb string, bdArgs, ids []string) ([]string, string, bool) {
 	for _, id := range ids {
-		row, err := c.get(id)
+		row, err := c.row(id)
 		if err != nil {
 			return nil, c.unreadableRow(verb, id, err), true
 		}
@@ -700,6 +909,22 @@ func (c *bdRigNamespaceCheck) checkRows(verb string, bdArgs, ids []string) ([]st
 		}
 	}
 	return bdArgs, "", false
+}
+
+// row reads id through get, once per check.
+func (c *bdRigNamespaceCheck) row(id string) (beads.Bead, error) {
+	if b, ok := c.rows[id]; ok {
+		return b, nil
+	}
+	b, err := c.get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if c.rows == nil {
+		c.rows = map[string]beads.Bead{}
+	}
+	c.rows[id] = b
+	return b, nil
 }
 
 func (c *bdRigNamespaceCheck) foreignRow(verb, id string, row beads.Bead) (string, bool) {
@@ -716,15 +941,10 @@ func (c *bdRigNamespaceCheck) foreignRow(verb, id string, row beads.Bead) (strin
 	return fmt.Sprintf("gc bd: refusing %s on %s: rig %s (federation = \"rig\") does not own it (owner %q)\n", verb, id, rigNamespaceLabel(c.ns), cls.Value), true
 }
 
-// claimActor is the identity bd runs the command as: the last --actor, else
-// the inherited BEADS_ACTOR.
-func (c *bdRigNamespaceCheck) claimActor(bdArgs []string) string {
-	verb, _ := bdflags.SplitGlobalFlags(bdArgs)
-	value, _ := bdRigNamespaceManifest(verb)
-	if value == nil {
-		value = bdflags.GlobalValueFlags()
-	}
-	if vs := bdflags.FlagValues(bdArgs, value, "--actor"); len(vs) > 0 {
+// claimActor is the identity bd runs verb as: the last --actor, else the
+// inherited BEADS_ACTOR.
+func (c *bdRigNamespaceCheck) claimActor(verb string, bdArgs []string) string {
+	if vs := bdflags.FlagValues(bdArgs, bdValueFlagsFor(verb, ""), "--actor"); len(vs) > 0 {
 		return strings.TrimSpace(vs[len(vs)-1])
 	}
 	return c.actor
@@ -736,6 +956,16 @@ func (c *bdRigNamespaceCheck) unvettedClaim(verb, flag string) string {
 
 func (c *bdRigNamespaceCheck) unreadable(verb string) string {
 	return fmt.Sprintf("gc bd: refusing %s: cannot tell which beads it writes, so rig %s (federation = \"rig\") cannot check them (name the beads, and give flag values inline as --flag=value)\n", verb, rigNamespaceLabel(c.ns))
+}
+
+// unreadableCommand is the refusal of an argv whose command the guard
+// cannot read the way bd's cobra resolves it (bdVerbCall.readable).
+func (c *bdRigNamespaceCheck) unreadableCommand(w bdVerbCall) string {
+	what := "this argv"
+	if w.verb != "" {
+		what = w.verb
+	}
+	return fmt.Sprintf("gc bd: refusing %s: cannot tell which command bd would run (bd reads the token after a flag it does not know yet as that flag's value), so rig %s (federation = \"rig\") cannot check it; put only bd's global flags before the command and its sub-command, and the command's own flags after them\n", what, rigNamespaceLabel(c.ns))
 }
 
 func (c *bdRigNamespaceCheck) unreadableRow(verb, id string, err error) string {
@@ -849,26 +1079,11 @@ func bdMetadataJSONWrites(value string) ([]bdMetadataWrite, string, bool) {
 	return out, "", false
 }
 
-// bdArgsWithOwnerStamp returns a create argv whose metadata carries the
-// creation stamp: merged into its --metadata object when it has one,
-// otherwise as a new --metadata flag right after the verb (so a "--"
-// terminator never turns it into a positional).
-func bdArgsWithOwnerStamp(bdArgs []string, stamp string) ([]string, error) {
-	verbAt := -1
-	globals := bdflags.GlobalValueFlags()
-	for i := 0; i < len(bdArgs); i++ {
-		a := bdArgs[i]
-		if !strings.HasPrefix(a, "-") {
-			verbAt = i
-			break
-		}
-		if !strings.Contains(a, "=") && globals[a] && i+1 < len(bdArgs) {
-			i++
-		}
-	}
-	if verbAt < 0 {
-		return nil, fmt.Errorf("cannot find the create verb")
-	}
+// bdArgsWithOwnerStamp returns a create argv, its verb at verbAt, whose
+// metadata carries the creation stamp: merged into its --metadata object
+// when it has one, otherwise as a new --metadata flag right after the verb
+// (so a "--" terminator never turns it into a positional).
+func bdArgsWithOwnerStamp(bdArgs []string, verbAt int, stamp string) ([]string, error) {
 	out := append([]string(nil), bdArgs...)
 	valueFlags := bdflags.ValueFlags("create")
 	for i := verbAt + 1; i < len(out); i++ {
@@ -937,19 +1152,18 @@ func mergeOwnerStampJSON(raw, stamp string) (string, error) {
 // claim and agent-script apply (rigNamespaceForLeg): the guard above checks
 // the scope gc bd resolved, but a write's ids need not live there (an
 // explicit --rig or --city, -C, or ids from two stores), and bd may follow
-// an id to another store. So a write naming a bead whose prefix maps to a
-// guarded rig other than the scope's (or to any guarded rig, when the scope
-// is no guarded rig's) is refused before bd runs; a prefix two guarded rigs
-// share is refused too. scope is the scope's guarded namespace, or nil.
-// Reads and help requests pass. A write whose subjects cannot be read
-// exactly is judged by every positional token instead, failing closed.
-func bdCrossRigSubjectRefusal(cfg *config.City, scope *rigNamespace, bdArgs []string) (string, bool) {
+// an id to another store. So a write verb naming the bead ids ids
+// (bdWriteSubjects) whose prefix maps to a guarded rig other than the
+// scope's (or to any guarded rig, when the scope is no guarded rig's) is
+// refused before bd runs; a prefix two guarded rigs share is refused too.
+// scope is the scope's guarded namespace, or nil. verb is "" for an argv
+// whose command cannot be read.
+func bdCrossRigSubjectRefusal(cfg *config.City, scope *rigNamespace, verb string, ids []string) (string, bool) {
 	if !cityHasGuardedRig(cfg) {
 		return "", false
 	}
-	verb, ids, write := bdWriteSubjects(bdArgs)
-	if !write {
-		return "", false
+	if verb == "" {
+		verb = "this command"
 	}
 	scopeName := ""
 	scopeLabel := "a scope that is no guarded rig's store"
@@ -977,20 +1191,29 @@ func bdCrossRigSubjectRefusal(cfg *config.City, scope *rigNamespace, bdArgs []st
 // bdWriteSubjects names the beads a gc bd write addresses, the way the
 // guard's dispatch reads them: verb is its name, write reports whether it
 // writes at all (reads, relate/unrelate and real help requests do not). A
-// write whose subjects cannot be read exactly (an unknown verb, an argv a
-// flag it does not know could hide an id in, a shorthand cluster) returns
-// every positional token, so a guarded rig's id anywhere in it is seen.
-func bdWriteSubjects(bdArgs []string) (verb string, ids []string, write bool) {
-	w := splitBdVerbCall(bdArgs)
+// read verb that claims (ready --claim) writes the row it picks, and names
+// none. A write whose subjects cannot be read exactly (an unknown verb, an
+// argv a flag it does not know could hide an id in, a shorthand cluster)
+// returns every positional token, so a guarded rig's id anywhere in it is
+// seen; an argv whose command cannot be read is such a write, and every
+// positional token of the whole argv counts.
+func bdWriteSubjects(w bdVerbCall) (verb string, ids []string, write bool) {
 	verb = w.verb
-	if verb == "" || bdRigNamespaceReadVerbs[verb] {
+	if !w.readable {
+		return verb, bdPositionalTokens(w.bdArgs), true
+	}
+	if verb == "" {
 		return verb, nil, false
+	}
+	if bdRigNamespaceReadVerbs[verb] {
+		_, claims := bdflags.ClaimFlag(verb, w.rest)
+		return verb, nil, claims
 	}
 	if bdRigNamespaceCompoundReads[verb][w.sub] || verb == "relate" || verb == "unrelate" {
 		return verb, nil, false
 	}
-	_, cluster := bdShorthandCluster(bdArgs)
-	if !cluster && bdRigNamespaceHelpOn(verb, w.sub, w.rest) {
+	_, cluster := bdShorthandCluster(w.bdArgs)
+	if !cluster && bdRigNamespaceHelpOn(w) {
 		return verb, nil, false
 	}
 	if cluster {
@@ -1101,7 +1324,7 @@ func bdSubVerbSubjectScan(rule bdSubjectRule, subs ...string) bdSubjectScan {
 		if !slices.Contains(subs, w.sub) {
 			return nil, false, false
 		}
-		pos, ok := bdScanManifestPositionals(w.verb+" "+w.sub, w.rest[1:])
+		pos, ok := bdScanManifestPositionals(w.verb+" "+w.sub, w.subArgs)
 		pos, ok = bdPickSubjects(rule, pos, ok)
 		return pos, ok, false
 	}

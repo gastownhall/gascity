@@ -261,7 +261,9 @@ type hookClaimOps struct {
 	// returning the workflow root id so SkipDoneWorkflow can retire it.
 	InputDone hookInputDoneFunc
 	// SkipDoneWorkflow closes a workflow root and its open steps with
-	// gc.outcome=skipped after InputDone reported the input terminal.
+	// gc.outcome=skipped after InputDone reported the input terminal. keep,
+	// when set, names the rows it may close (the rig namespace guard's
+	// retireFilter); nil closes them all.
 	SkipDoneWorkflow hookSkipDoneWorkflowFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
@@ -411,7 +413,7 @@ type (
 	hookDrainAckFunc              func(io.Writer) error
 	hookDrainPendingFunc          func(sessionID string) (bool, error)
 	hookInputDoneFunc             func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
-	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string) error
+	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string, keep func(beads.Bead) bool) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
@@ -2318,7 +2320,10 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 		now := ops.nowOrWallClock()
 		served := hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateClaimable(candidate, opts.RouteTargets, now)
-		if served && hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
+		// Retiring closes rows, so a guarded rig must admit the actor first;
+		// a candidate it refuses goes on to the claim tiers, which say why.
+		if served && ops.RigGuard.claimRefusal(candidate, opts.Assignee) == nil &&
+			hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
 			continue
 		}
 		kept = append(kept, candidate)
@@ -2342,7 +2347,7 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 	if !done {
 		return false
 	}
-	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID); err != nil {
+	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID, ops.RigGuard.retireFilter()); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input work is already terminal: %v\n", rootID, err) //nolint:errcheck
 		return false
 	}
@@ -2459,8 +2464,10 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 }
 
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
-// with gc.outcome=skipped so pool demand and continuation claims drop.
-func skipDoneWorkflow(store beads.Store, rootID string) error {
+// with gc.outcome=skipped so pool demand and continuation claims drop. keep,
+// when set, names the rows it may close: a step or root it rejects (another
+// city's, on a guarded rig) is left open, and the root is read to judge it.
+func skipDoneWorkflow(store beads.Store, rootID string, keep func(beads.Bead) bool) error {
 	steps, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
@@ -2474,10 +2481,26 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) {
 			continue
 		}
+		if keep != nil && !keep(step) {
+			continue
+		}
 		seen[step.ID] = true
 		ids = append(ids, step.ID)
 	}
-	ids = append(ids, rootID)
+	if keep == nil {
+		ids = append(ids, rootID)
+	} else {
+		root, err := store.Get(rootID)
+		if err != nil {
+			return fmt.Errorf("loading workflow root %s: %w", rootID, err)
+		}
+		if keep(root) {
+			ids = append(ids, rootID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
 	_, err = store.CloseAll(ids, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              hookSkipDoneWorkflowCloseReason,
@@ -2491,8 +2514,8 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 	return workflowInputDone(beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates)
 }
 
-func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string, keep func(beads.Bead) bool) error {
+	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID, keep)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {

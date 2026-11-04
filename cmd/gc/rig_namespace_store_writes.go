@@ -31,7 +31,13 @@ func (s *rigNamespaceStore) refuse(op, id, reason string, err error) error {
 // outsideReason is the refusal reason for an identity outside the
 // namespace.
 func (s *rigNamespaceStore) outsideReason(what, value string) string {
-	ns := s.ns.namespace()
+	return s.ns.outsideReason(what, value)
+}
+
+// outsideReason is the refusal reason for an identity outside the
+// namespace.
+func (n *rigNamespace) outsideReason(what, value string) string {
+	ns := n.namespace()
 	if ns == "" {
 		return fmt.Sprintf("%s %q: the rig's namespace admits nothing (its store is ambiguous or the rig has no usable name)", what, value)
 	}
@@ -201,10 +207,7 @@ func (s *rigNamespaceStore) checkMetadataWriteAfter(op, id string, row beads.Bea
 				return err
 			}
 		case isRigNamespaceClaimStampKey(k):
-			// A claim stamp decides the row's class only when it carries no
-			// owner key; on any other row it is bookkeeping, unless it names a
-			// pool session: another city's could later hand the row to it.
-			if ownersAfter && !config.EmbedsPoolSessionID(v) {
+			if !claimStampDecides(v, ownersAfter) {
 				continue
 			}
 			if err := s.checkClaimStamp(op, id, k, v); err != nil {
@@ -238,22 +241,43 @@ func isRigNamespaceClaimStampKey(key string) bool {
 	return false
 }
 
-// checkClaimStamp refuses a non-empty claim stamp that names no session of
-// this city's pools of the rig (the claim-stamp admission the classifier
-// applies): stamping another city's session would hand the row to it.
-func (s *rigNamespaceStore) checkClaimStamp(op, id, key, value string) error {
+// claimStampDecides reports whether a write of claim stamp value must be
+// admitted, given whether the row carries an owner key once written
+// (ownersAfter). A claim stamp decides the row's class only when the row has
+// no owner key; on any other row it is bookkeeping, unless it names a pool
+// session: another city's could later hand the row to it. The store guard and
+// gc bd's check both decide with it.
+func claimStampDecides(value string, ownersAfter bool) bool {
+	return !ownersAfter || config.EmbedsPoolSessionID(value)
+}
+
+// claimStampRefusal returns why the namespace refuses claim stamp key=value
+// (it names no session of this city's pools of the rig, the claim-stamp
+// admission the classifier applies), or "" when it admits the stamp or the
+// value is empty; err is the admission's lookup error. Stamping another
+// city's session would hand the row to it.
+func (n *rigNamespace) claimStampRefusal(key, value string) (reason string, err error) {
 	if strings.TrimSpace(value) == "" {
-		return nil
+		return "", nil
 	}
 	key = strings.TrimSpace(key)
-	a := s.ns.stampAdmission(keyValue{Key: key, Value: value})
-	if a.Admitted() {
-		return nil
+	a := n.stampAdmission(keyValue{Key: key, Value: value})
+	switch {
+	case a.Admitted():
+		return "", nil
+	case n.admitsLexically(value):
+		return fmt.Sprintf("claim stamp %s %q names no session of this city's agents of the rig", key, value), a.Err
 	}
-	if s.ns.admitsLexically(value) {
-		return s.refuse(op, id, fmt.Sprintf("claim stamp %s %q names no session of this city's agents of the rig", key, value), a.Err)
+	return n.outsideReason("claim stamp "+key, value), a.Err
+}
+
+// checkClaimStamp refuses a non-empty claim stamp the namespace does not
+// admit (claimStampRefusal).
+func (s *rigNamespaceStore) checkClaimStamp(op, id, key, value string) error {
+	if reason, err := s.ns.claimStampRefusal(key, value); reason != "" {
+		return s.refuse(op, id, reason, err)
 	}
-	return s.refuse(op, id, s.outsideReason("claim stamp "+key, value), a.Err)
+	return nil
 }
 
 // checkSessionRowOwner applies the owner rules to a session row's template
@@ -371,7 +395,7 @@ func (s *rigNamespaceStore) stampMetadata(op, id string, in map[string]string, s
 				return nil, err
 			}
 		case isRigNamespaceClaimStampKey(k):
-			if !hasOwners || config.EmbedsPoolSessionID(v) {
+			if claimStampDecides(v, hasOwners) {
 				if err := s.checkClaimStamp(op, id, k, v); err != nil {
 					return nil, err
 				}

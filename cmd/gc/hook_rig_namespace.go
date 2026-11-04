@@ -15,8 +15,9 @@ import (
 // a guarded Go store, so it checks every candidate and every claim-cycle
 // write itself: a candidate whose bead id carries a guarded rig's prefix is
 // dropped when it is Foreign, and no claim, promotion, reclaim, adoption
-// re-stamp, workflow-stop close or continuation pin is attempted (and no bd
-// process spawned for it) unless the actor is admitted by that rig.
+// re-stamp, workflow-stop close, done-workflow retirement or continuation pin
+// is attempted (and no bd process spawned for it) unless the actor is
+// admitted by that rig. A retirement leaves the workflow's Foreign rows open.
 //
 // A row is judged by the leg it was read from (rigNamespaceForLeg): every
 // row on a guarded rig's leg by that rig, whatever its id prefix, and a
@@ -171,6 +172,20 @@ func (g *hookRigGuard) claimRefusal(bead beads.Bead, actors ...string) error {
 		return newRigNamespacePathError("gc hook --claim: not claiming %s: rig %s (federation = \"rig\") serves only %s and this city's pool sessions; claim actor %q is outside it%s", bead.ID, rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
 	}
 	return nil
+}
+
+// retireFilter returns the rows a done-workflow retirement on this guard's
+// leg may close: every row but a Foreign one (another city's step or root
+// that carries the workflow's root id, such as a step handed off to it). It
+// returns nil, which closes every row, when the city guards no rig.
+func (g *hookRigGuard) retireFilter() func(beads.Bead) bool {
+	if g == nil {
+		return nil
+	}
+	return func(row beads.Bead) bool {
+		ns := g.namespaceFor(row.ID)
+		return ns == nil || ns.classify(row) != rowForeign
+	}
 }
 
 // refuseClaim reports a refused claim-cycle write on stderr and returns true,

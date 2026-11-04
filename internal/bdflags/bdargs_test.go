@@ -2,6 +2,7 @@ package bdflags
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -197,4 +198,160 @@ func contains(s, sub string) bool {
 		}
 		return false
 	}()
+}
+
+// TestSplitGlobalFlagsStrictReadsTheCommandCobraRuns pins the strict split
+// against the way bd's cobra resolves a subcommand: before it only the global
+// flags are read, a separate help flag takes the next token (cobra has not
+// declared it yet), and anything else makes the subcommand unreadable rather
+// than guessed. `--reason show close <id>` is the bypass: SplitGlobalFlags
+// reads "show", and bd runs close.
+func TestSplitGlobalFlagsStrictReadsTheCommandCobraRuns(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantVerb string
+		wantRest []string
+		wantOK   bool
+	}{
+		{"plain", []string{"update", "bd-1"}, "update", []string{"bd-1"}, true},
+		{"value global", []string{"--actor", "bob", "update", "bd-1"}, "update", []string{"bd-1"}, true},
+		{"inline value global", []string{"--actor=bob", "update", "bd-1"}, "update", []string{"bd-1"}, true},
+		{"-C dir", []string{"-C", "/d", "close", "bd-1"}, "close", []string{"bd-1"}, true},
+		{"-C=dir", []string{"-C=/d", "close", "bd-1"}, "close", []string{"bd-1"}, true},
+		{"value that looks like a flag", []string{"--actor", "--json", "close", "bd-1"}, "close", []string{"bd-1"}, true},
+		{"bool global", []string{"--json", "-q", "update", "bd-1"}, "update", []string{"bd-1"}, true},
+		{"root's own -V", []string{"-V", "update"}, "update", nil, true},
+		{"help takes the next token", []string{"-h", "show", "close", "bd-1"}, "close", []string{"bd-1"}, true},
+		{"inline help takes nothing", []string{"--help=false", "close", "bd-1"}, "close", []string{"bd-1"}, true},
+		{"unknown long flag", []string{"--reason", "show", "close", "bd-1"}, "", nil, false},
+		{"unknown short flag", []string{"-r", "show", "close", "bd-1"}, "", nil, false},
+		{"unknown inline flag", []string{"--reason=x", "close", "bd-1"}, "", nil, false},
+		{"shorthand run", []string{"-qv", "close", "bd-1"}, "", nil, false},
+		{"dash-dash", []string{"--", "close", "bd-1"}, "", nil, false},
+		{"empty token", []string{"", "close", "bd-1"}, "", nil, false},
+		{"no subcommand", []string{"--actor", "bob"}, "", nil, true},
+		{"help alone", []string{"--help"}, "", nil, true},
+		{"empty", nil, "", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verb, rest, ok := SplitGlobalFlagsStrict(tc.args)
+			sameRest := len(rest) == 0 && len(tc.wantRest) == 0 || reflect.DeepEqual(rest, tc.wantRest)
+			if verb != tc.wantVerb || ok != tc.wantOK || !sameRest {
+				t.Errorf("SplitGlobalFlagsStrict(%q) = %q, %q, %v; want %q, %q, %v", tc.args, verb, rest, ok, tc.wantVerb, tc.wantRest, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestSplitSubcommandStrictReadsTheSubVerb pins the sub-verb half, read from
+// the argv without its subcommand: the persistent global flags may come before
+// the sub-verb, wherever they stand, the root's own -V may not (`bd -V comments
+// add` reads [-V add], and cobra takes "add" as -V's value), and the sub-verb's
+// argv keeps every other token in order.
+func TestSplitSubcommandStrictReadsTheSubVerb(t *testing.T) {
+	cases := []struct {
+		name        string
+		rest        []string
+		wantSub     string
+		wantSubArgs []string
+		wantOK      bool
+	}{
+		{"plain", []string{"add", "bd-1", "x"}, "add", []string{"bd-1", "x"}, true},
+		{"bool global first", []string{"--json", "add", "bd-1"}, "add", []string{"--json", "bd-1"}, true},
+		{"value global first", []string{"--actor", "x", "add", "bd-1"}, "add", []string{"--actor", "x", "bd-1"}, true},
+		{"help takes the next token", []string{"-h", "list", "add", "bd-1"}, "add", []string{"-h", "list", "bd-1"}, true},
+		{"root's own -V", []string{"-V", "add", "bd-1"}, "", nil, false},
+		{"the verb's own flag", []string{"--local-time", "add", "bd-1"}, "", nil, false},
+		{"dash-dash", []string{"--", "add", "bd-1"}, "", nil, false},
+		{"no sub-verb", []string{"--json"}, "", []string{"--json"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sub, subArgs, ok := SplitSubcommandStrict(tc.rest)
+			if sub != tc.wantSub || ok != tc.wantOK || (ok && !reflect.DeepEqual(subArgs, tc.wantSubArgs)) {
+				t.Errorf("SplitSubcommandStrict(%q) = %q, %q, %v; want %q, %q, %v", tc.rest, sub, subArgs, ok, tc.wantSub, tc.wantSubArgs, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestSplitStrictAgreesWithCobra checks the strict split against cobra itself:
+// every argv over a small token alphabet that the split reads is resolved by
+// the pinned inventories' cobra mirror (the cobra version bd runs) to the
+// command the split names, sub-verb included. The help flag is left out of the
+// alphabet: the mirror declares it before resolving, which bd does not (its
+// own case is pinned above).
+func TestSplitStrictAgreesWithCobra(t *testing.T) {
+	alphabet := []string{
+		"--actor", "x", "--actor=x", "-C", "--json", "-q", "-V", "--reason", "-r",
+		"--", "", "show", "close", "comments", "add", "bt-1", "new", "list", "dep",
+	}
+	var argvs [][]string
+	var gen func(prefix []string)
+	gen = func(prefix []string) {
+		if len(prefix) > 0 {
+			argvs = append(argvs, append([]string(nil), prefix...))
+		}
+		if len(prefix) == 4 {
+			return
+		}
+		for _, tok := range alphabet {
+			gen(append(prefix, tok))
+		}
+	}
+	gen(nil)
+	for _, inv := range Inventories() {
+		root, byCmd := inv.buildCobra()
+		aliases := inv.Aliases()
+		canonical := func(p string) string {
+			if to, ok := aliases[p]; ok {
+				return to
+			}
+			return p
+		}
+		read := 0
+		for _, argv := range argvs {
+			verb, rest, ok := SplitGlobalFlagsStrict(argv)
+			if !ok {
+				continue
+			}
+			cmd, _, err := root.Find(argv)
+			if err != nil {
+				continue // bd runs nothing
+			}
+			read++
+			path := strings.Fields(byCmd[cmd])
+			if verb == "" {
+				if len(path) != 0 {
+					t.Errorf("%s: %q: the split reads no command, cobra runs %q", inv.Name, argv, byCmd[cmd])
+				}
+				continue
+			}
+			want := canonical(verb)
+			if len(path) == 0 || path[0] != want {
+				t.Errorf("%s: %q: the split reads %q, cobra runs %q", inv.Name, argv, want, byCmd[cmd])
+				continue
+			}
+			if len(inv.Subcommands(want)) == 0 {
+				continue
+			}
+			at := len(argv) - len(rest) - 1
+			sub, _, subOK := SplitSubcommandStrict(append(argv[:at:at], argv[at+1:]...))
+			if !subOK {
+				continue
+			}
+			if c := inv.Command(canonical(want + " " + sub)); sub != "" && c != nil {
+				if len(path) < 2 || want+" "+path[1] != c.Path {
+					t.Errorf("%s: %q: the split reads sub-verb %q, cobra runs %q", inv.Name, argv, sub, byCmd[cmd])
+				}
+			} else if len(path) != 1 {
+				t.Errorf("%s: %q: the split reads no sub-verb, cobra runs %q", inv.Name, argv, byCmd[cmd])
+			}
+		}
+		if read < 1000 {
+			t.Fatalf("%s: only %d argvs were read and resolved; the alphabet no longer exercises the split", inv.Name, read)
+		}
+	}
 }

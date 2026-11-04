@@ -73,11 +73,11 @@ func hrgGuard(t *testing.T) *hookRigGuard {
 // hrgWrites records every claim-cycle write seam, so a test can assert that
 // none ran (no bd process would have been spawned).
 type hrgWrites struct {
-	claims, reclaims, restamps, assigns, closes, stamps []string
+	claims, reclaims, restamps, assigns, closes, stamps, retires []string
 }
 
 func (w *hrgWrites) total() int {
-	return len(w.claims) + len(w.reclaims) + len(w.restamps) + len(w.assigns) + len(w.closes) + len(w.stamps)
+	return len(w.claims) + len(w.reclaims) + len(w.restamps) + len(w.assigns) + len(w.closes) + len(w.stamps) + len(w.retires)
 }
 
 func hrgOps(t *testing.T, w *hrgWrites, guard *hookRigGuard, rows []beads.Bead) hookClaimOps {
@@ -121,6 +121,15 @@ func hrgOps(t *testing.T, w *hrgWrites, guard *hookRigGuard, rows []beads.Bead) 
 		WorkflowStore: func(context.Context, string, []string, string, string) beads.Store {
 			w.closes = append(w.closes, "workflow-store")
 			return beads.NewMemStore()
+		},
+		// No workflow's input is done unless a test says so; a retirement
+		// is recorded as a write.
+		InputDone: func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+			return "", false, nil
+		},
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string, _ func(beads.Bead) bool) error {
+			w.retires = append(w.retires, rootID)
+			return nil
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
 			for _, r := range rows {
@@ -271,6 +280,11 @@ func TestHookClaimRefusedActorSpawnsNoBd(t *testing.T) {
 				rows[i].Metadata = withWorkflowLink(rows[i].Metadata)
 			}
 			ops := hrgOps(t, &w, g, rows)
+			// Every candidate's workflow is done, so an ungated retirement
+			// would close it.
+			ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+				return "bt-root", true, nil
+			}
 			var stdout, stderr bytes.Buffer
 			tc.opts.JSON = true
 			doHookClaim("query", hrgDir(g.cfg, "beta"), tc.opts, ops, &stdout, &stderr)
@@ -407,5 +421,100 @@ func TestAppendRigHookStoresSkipsGuardedRigs(t *testing.T) {
 		if s.rig == "beta" {
 			t.Fatalf("a guarded rig got a fan-out leg: %+v", stores)
 		}
+	}
+}
+
+// The retirement of a done workflow closes rows like any other claim-cycle
+// write: only for an actor the guarded rig admits, and never another city's
+// rows that carry the workflow's root id.
+func TestHookRigGuardRetiresOnlyForAnAdmittedActor(t *testing.T) {
+	g := hrgGuard(t)
+	row := beads.Bead{ID: "bt-1", Status: "open", Metadata: withWorkflowLink(rnsMD(beadmeta.RoutedToMetadataKey, "beta/crew.worker"))}
+	done := func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+		return "bt-root", true, nil
+	}
+	for _, tc := range []struct {
+		actor      string
+		wantRetire bool
+	}{
+		{"beta/crew.worker", true},
+		{"mayor", false},
+		{shortIDB, false},
+	} {
+		var w hrgWrites
+		ops := hrgOps(t, &w, g, []beads.Bead{row})
+		ops.InputDone = done
+		var stdout, stderr bytes.Buffer
+		doHookClaim("query", hrgDir(g.cfg, "beta"), hookClaimOptions{
+			Assignee: tc.actor, RouteTargets: []string{"beta/crew.worker"}, JSON: true,
+		}, ops, &stdout, &stderr)
+		if got := len(w.retires) == 1; got != tc.wantRetire {
+			t.Errorf("actor %q: retired %v, want %v (writes %+v; stderr=%s)", tc.actor, w.retires, tc.wantRetire, w, stderr.String())
+		}
+		if !tc.wantRetire && w.total() != 0 {
+			t.Errorf("actor %q: writes ran despite the refusal: %+v", tc.actor, w)
+		}
+	}
+}
+
+func TestSkipDoneWorkflowLeavesForeignRowsOpen(t *testing.T) {
+	keep := hrgGuard(t).forLeg("beta", "").retireFilter()
+	seed := func(t *testing.T, rootMD map[string]string) (*beads.MemStore, beads.Bead, map[string]beads.Bead) {
+		t.Helper()
+		store := beads.NewMemStore()
+		root, err := store.Create(beads.Bead{Title: "mol", Metadata: rootMD})
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps := map[string]beads.Bead{}
+		for name, b := range map[string]beads.Bead{
+			"own":     {Title: "own", Metadata: rnsMD(beadmeta.RoutedToMetadataKey, "beta/crew.worker")},
+			"foreign": {Title: "foreign", Status: "in_progress", Assignee: "alpha/crew.worker"},
+			"plain":   {Title: "plain"},
+		} {
+			if b.Metadata == nil {
+				b.Metadata = map[string]string{}
+			}
+			b.Metadata[beadmeta.RootBeadIDMetadataKey] = root.ID
+			created, err := store.Create(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps[name] = created
+		}
+		return store, root, steps
+	}
+	status := func(t *testing.T, store *beads.MemStore, id string) string {
+		t.Helper()
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.Status
+	}
+
+	store, root, steps := seed(t, rnsMD(beadmeta.RoutedToMetadataKey, "beta/crew.worker"))
+	if err := skipDoneWorkflow(store, root.ID, keep); err != nil {
+		t.Fatalf("skipDoneWorkflow: %v", err)
+	}
+	for _, id := range []string{root.ID, steps["own"].ID, steps["plain"].ID} {
+		if got := status(t, store, id); got != "closed" {
+			t.Errorf("%s status = %q, want closed", id, got)
+		}
+	}
+	if got := status(t, store, steps["foreign"].ID); got == "closed" {
+		t.Error("another city's step was closed by the retirement")
+	}
+
+	// Another city's root stays open; this city's own steps under it close.
+	store, root, steps = seed(t, rnsMD(beadmeta.RoutedToMetadataKey, "alpha/crew.worker"))
+	if err := skipDoneWorkflow(store, root.ID, keep); err != nil {
+		t.Fatalf("skipDoneWorkflow: %v", err)
+	}
+	if got := status(t, store, root.ID); got == "closed" {
+		t.Error("another city's root was closed by the retirement")
+	}
+	if got := status(t, store, steps["own"].ID); got != "closed" {
+		t.Errorf("own step status = %q, want closed", got)
 	}
 }

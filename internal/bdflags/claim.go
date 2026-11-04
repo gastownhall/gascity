@@ -83,6 +83,10 @@ func BoolFlagValue(args []string, valueFlags map[string]bool, names ...string) (
 // way pflag reads it (see BoolFlagValue), in order, in the separate and the
 // inline spelling. A flag whose value is missing at the end of the argv
 // yields nothing.
+//
+// A shorthand name ("-C") is read in every spelling pflag accepts: "-C dir",
+// "-C=dir" and "-Cdir", and inside a run of shorthands, "-qC dir", "-qC=dir"
+// and "-qCdir" (shorthandRunValue).
 func FlagValues(args []string, valueFlags map[string]bool, names ...string) []string {
 	var out []string
 	for i := 0; i < len(args); i++ {
@@ -90,7 +94,21 @@ func FlagValues(args []string, valueFlags map[string]bool, names ...string) []st
 		if a == "--" {
 			break
 		}
-		if !strings.HasPrefix(a, "-") {
+		if len(a) < 2 || a[0] != '-' {
+			continue // a lone "-" is a positional too
+		}
+		if a[1] != '-' {
+			value, found, next := shorthandRunValue(a[1:], valueFlags, names)
+			if next {
+				if i+1 == len(args) {
+					break
+				}
+				i++
+				value = args[i]
+			}
+			if found {
+				out = append(out, value)
+			}
 			continue
 		}
 		name, value, inline := strings.Cut(a, "=")
@@ -108,6 +126,28 @@ func FlagValues(args []string, valueFlags map[string]bool, names ...string) []st
 		}
 	}
 	return out
+}
+
+// shorthandRunValue reads a single-dash token without its dash ("C", "qCdir")
+// as pflag reads a run of shorthands, for the value it gives any of names.
+// Each shorthand takes the rest after an "=" as its value ("-q=x", "-qC=dir");
+// one that valueFlags lists, or one of names, takes the rest of the run
+// ("-Cdir"), or the next token when it ends the run (next). Any other
+// shorthand is read as a bool, and the run goes on: found is false when the
+// value went to another flag ("-aC" gives -a the value "C").
+func shorthandRunValue(run string, valueFlags map[string]bool, names []string) (value string, found, next bool) {
+	for i := 0; i < len(run); i++ {
+		flag, rest := "-"+run[i:i+1], run[i+1:]
+		named := matchesName(flag, names)
+		if len(rest) > 1 && rest[0] == '=' {
+			return rest[1:], named, false
+		}
+		if !named && !valueFlags[flag] {
+			continue
+		}
+		return rest, named, rest == ""
+	}
+	return "", false, false
 }
 
 func matchesName(name string, names []string) bool {

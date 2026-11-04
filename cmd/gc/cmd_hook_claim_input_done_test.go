@@ -255,7 +255,7 @@ func TestSkipDoneWorkflowClosesRootAndSteps(t *testing.T) {
 		t.Fatalf("update step: %v", err)
 	}
 
-	if err := skipDoneWorkflow(store, root.ID); err != nil {
+	if err := skipDoneWorkflow(store, root.ID, nil); err != nil {
 		t.Fatalf("skipDoneWorkflow: %v", err)
 	}
 	for _, id := range []string{root.ID, step.ID} {
@@ -298,7 +298,7 @@ func TestDoHookClaimSkipsWorkflowWhoseInputIsDone(t *testing.T) {
 		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
 			return "root-1", true, nil
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string, _ func(beads.Bead) bool) error {
 			skipped = rootID
 			return nil
 		},
@@ -361,7 +361,7 @@ func TestDoHookClaimSkipsExistingAssignmentWhoseInputIsDone(t *testing.T) {
 		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
 			return "root-1", true, nil
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string, _ func(beads.Bead) bool) error {
 			skipped = rootID
 			return nil
 		},
@@ -414,7 +414,7 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 		InputDone: func(_ context.Context, _ string, _ []string, _ beads.Bead, _ []string) (string, bool, error) {
 			return "root-1", false, nil
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string, _ func(beads.Bead) bool) error {
 			t.Fatalf("unexpected skip of %s", rootID)
 			return nil
 		},

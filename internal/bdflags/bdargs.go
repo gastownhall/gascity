@@ -27,6 +27,77 @@ func SplitGlobalFlags(args []string) (string, []string) {
 	return "", nil
 }
 
+// SplitGlobalFlagsStrict is SplitGlobalFlags for a caller that must know the
+// subcommand bd runs rather than guess it: ok is false when the argv does not
+// say which one that is.
+//
+// cobra finds the subcommand before it parses a single flag, and while it
+// looks it knows only the root command's flags: it takes the token after any
+// other flag as that flag's value, so `bd --reason show close <id>` runs close
+// with the reason "show", where SplitGlobalFlags reads show. Before the
+// subcommand only the global flags are read, then. The help flag is not one of
+// them yet (cobra adds it to the command it has found), so a separate -h or
+// --help takes the next token too. Any other dash token, a "--" (cobra stops
+// looking there) or an empty token (which it skips) leaves ok false. An argv
+// with no subcommand returns "" and true.
+func SplitGlobalFlagsStrict(args []string) (verb string, rest []string, ok bool) {
+	at, ok := commandPathIndex(args, true)
+	if !ok || at == len(args) {
+		return "", nil, ok
+	}
+	return args[at], args[at+1:], true
+}
+
+// SplitSubcommandStrict reads the sub-verb of a compound subcommand (the "add"
+// of `comments add`) the way SplitGlobalFlagsStrict reads the subcommand.
+// args is the whole argv without the subcommand: cobra looks for the sub-verb
+// in every other token, the flags before the subcommand included, and it
+// looks with the subcommand's flags, which inherit the persistent global
+// flags but not the root's own -V/--version, so only those may come before
+// it. subArgs is the argv the sub-verb's command parses: args without the
+// sub-verb. With no sub-verb, sub is "" and subArgs is args.
+func SplitSubcommandStrict(args []string) (sub string, subArgs []string, ok bool) {
+	at, ok := commandPathIndex(args, false)
+	if !ok || at == len(args) {
+		return "", args, ok
+	}
+	subArgs = append(append(make([]string, 0, len(args)-1), args[:at]...), args[at+1:]...)
+	return args[at], subArgs, true
+}
+
+// rootOnlyFlags are the global bool flags only bd's root command declares; a
+// subcommand looking for its sub-verb does not know them.
+var rootOnlyFlags = map[string]bool{"-V": true, "--version": true}
+
+// helpFlags are the spellings of the help flag, which cobra declares on a
+// command only once it has found it.
+var helpFlags = map[string]bool{"-h": true, "--help": true}
+
+// commandPathIndex returns the index of the first token of args cobra takes
+// as a command name, past the flags it reads while it resolves the command
+// path, or len(args) when there is none. ok is false when a token before it
+// is one cobra may read otherwise than this scan does. root reports the root
+// command's own resolution, which also knows -V/--version.
+func commandPathIndex(args []string, root bool) (int, bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a != "" && !strings.HasPrefix(a, "-") {
+			return i, true
+		}
+		name, _, inline := strings.Cut(a, "=")
+		switch {
+		case globalValueFlags[name] || helpFlags[name]:
+			if !inline {
+				i++ // the value, whatever it looks like
+			}
+		case globalBoolFlags[name] && (root || !rootOnlyFlags[name]):
+		default:
+			return i, false
+		}
+	}
+	return len(args), true
+}
+
 // Positionals returns the positional arguments of a bd subcommand's argv,
 // skipping every token consumed as a flag's value.
 //

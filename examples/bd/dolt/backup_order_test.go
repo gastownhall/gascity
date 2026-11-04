@@ -753,6 +753,50 @@ func TestBackupOrderUnreachableScopeIsFailedAndDeclared(t *testing.T) {
 	}
 }
 
+// A guarded rig (federation = "rig") shares its bead store with other cities:
+// its operator backs it up, and gc bd refuses this order's verbs in its scope.
+// The order skips it and declares the skip, with no backup-failure alarm. Any
+// federation value but "" and "city" counts as guarded.
+func TestBackupOrderSkipsGuardedRigs(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		`FAKE_RIG_LIST_JSON={"rigs":[{"name":"api","hq":false},{"name":"shared","hq":false,"federation":"rig"},{"name":"odd","hq":false,"federation":"Rig-ish"},{"name":"plain","hq":false,"federation":"city"}]}`,
+		"FAKE_SCOPE_DBS=city=prod rig:api=apidb rig:plain=plaindb rig:shared=shareddb rig:odd=odddb",
+		"FAKE_CONFIGURED_DBS=prod apidb plaindb shareddb odddb",
+		// gc bd refuses this order's verbs in a guarded rig's scope.
+		"FAKE_UNREACHABLE_SCOPES=rig:shared rig:odd",
+		"GC_ORDER_OUTCOME_FILE="+outcomeFile,
+	)
+	if !strings.Contains(out, "synced: 3/3") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	log := gc.log(t)
+	for _, rig := range []string{"shared", "odd"} {
+		if strings.Contains(log, "--rig "+rig+" ") {
+			t.Errorf("the order ran gc bd in guarded rig %s's scope:\n%s", rig, log)
+		}
+		if !strings.Contains(out, "backup: skipping rig "+rig+`: federation = "rig"`) {
+			t.Errorf("no skip note for guarded rig %s:\n%s", rig, out)
+		}
+	}
+	if !strings.Contains(log, "--rig plain backup sync") {
+		t.Errorf("the rig with federation = \"city\" was not backed up:\n%s", log)
+	}
+	if strings.Contains(log, "mail send") || strings.Contains(out, "failed to sync") {
+		t.Fatalf("a guarded rig raised a backup-failure alarm:\n%s\n%s", out, log)
+	}
+	outcome, ok := readBackupOutcome(t, outcomeFile)
+	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 2 ||
+		outcome.Scopes[0].Scope != "rig:shared" || outcome.Scopes[1].Scope != "rig:odd" ||
+		outcome.Scopes[0].Reason != "federation = rig: its operator backs it up" {
+		t.Fatalf("outcome = %+v (declared %v), want partial declaring rig:shared and rig:odd skipped for federation = rig", outcome, ok)
+	}
+}
+
 func TestBackupOrderHonorsDatabaseFilter(t *testing.T) {
 	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()

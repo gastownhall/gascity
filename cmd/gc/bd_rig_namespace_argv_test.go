@@ -299,3 +299,305 @@ func TestAgentScriptBeadEnvRunsGcBdCheck(t *testing.T) {
 		t.Fatalf("the check did not read the row through bd: %q", data)
 	}
 }
+
+// bd's cobra finds the command before it parses a flag, and takes the token
+// after a flag it does not know yet as that flag's value: `--reason show close
+// <id>` runs close. The guard reads the command the same way, and refuses an
+// argv it cannot read that way rather than checking the wrong command.
+func TestBdRigNamespaceReadsTheCommandCobraRuns(t *testing.T) {
+	c := brnCheck(t, "beta/crew.worker", brnOwned, brnForeign)
+	for _, args := range [][]string{
+		{"--reason", "show", "close", "bt-2"},
+		{"-r", "show", "close", "bt-2"},
+		{"--append-notes", "list", "update", "bt-2", "--claim"},
+		{"--status", "blocked", "update", "bt-1", "--assignee", "alpha/crew.worker"},
+		{"--title", "show", "create"},
+		{"--reason=x", "close", "bt-2"},
+		{"comments", "--local-time", "add", "bt-1", "text"},
+		{"comments", "-V", "add", "bt-1", "text"},
+		{"-V", "comments", "add", "bt-1", "text"}, // cobra reads "add" as -V's value under comments
+		{"--", "close", "bt-2"},
+		{"", "close", "bt-2"},
+	} {
+		if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, "cannot tell which command bd would run") {
+			t.Errorf("gc bd %q: refused=%v msg=%q; want the unreadable-command refusal", args, refused, msg)
+		}
+	}
+	// A compound verb's sub-verb is read past the global flags, so these are
+	// the writes they are, and the Foreign row refuses them.
+	for _, args := range [][]string{
+		{"comments", "--json", "add", "bt-2", "text"},
+		{"comments", "--actor", "beta/crew.worker", "add", "bt-2", "text"},
+		{"--actor", "beta/crew.worker", "comments", "add", "bt-2", "text"},
+		{"label", "--json", "add", "bt-2", "gc:hold"},
+		{"dep", "--json", "add", "bt-2", "bt-1"},
+		{"-h", "show", "close", "bt-2"}, // the help flag takes "show"; bd would print close's help
+	} {
+		if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, `does not own it (owner "alpha/crew.worker")`) {
+			t.Errorf("gc bd %q: refused=%v msg=%q; want the Foreign-row refusal", args, refused, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"comments", "--json", "add", "bt-1", "text"},
+		{"comments", "--json", "bt-2"},
+		{"dep", "--json", "list", "bt-2"},
+		{"--json", "--actor", "beta/crew.worker", "close", "bt-1"},
+		{"--help"},
+		{"-V"},
+		{"--actor", "beta/crew.worker"},
+	} {
+		if _, msg, refused := c.check(args); refused {
+			t.Errorf("gc bd %q refused: %q", args, msg)
+		}
+	}
+}
+
+// The scope that is no guarded rig's cannot tell a guarded rig's bead in an
+// argv whose command it cannot read: every positional token is judged.
+func TestBdCrossRigCheckJudgesAnUnreadableArgvByEveryToken(t *testing.T) {
+	cfg := hrgCity(t)
+	c := newBdRigNamespaceCheck(cfg, "/cities/b", hrgDir(cfg, "alpha"), nil)
+	if c == nil || c.ns != nil {
+		t.Fatalf("fixture: alpha's check = %+v, want the cross-scope check only", c)
+	}
+	for _, args := range [][]string{
+		{"--reason", "show", "close", "bt-2"},
+		{"-r", "show", "close", "bt-2"},
+		{"--append-notes", "list", "update", "bt-2", "--claim"},
+		{"--title", "show", "create", "bt-2"},
+		{"comments", "--json", "add", "bt-2", "text"},
+		{"comments", "--actor", "x", "add", "bt-2", "text"},
+		{"comments", "--local-time", "add", "bt-2", "text"},
+	} {
+		if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, `on bt-2: it is rig "beta"'s bead`) {
+			t.Errorf("gc bd %q from alpha's scope: refused=%v msg=%q; want beta's bead refused", args, refused, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"--reason", "show", "close", "al-1"},
+		{"comments", "--json", "bt-2"},
+		{"--json", "show", "bt-2"},
+	} {
+		if _, msg, refused := c.check(args); refused {
+			t.Errorf("gc bd %q from alpha's scope refused: %q", args, msg)
+		}
+	}
+}
+
+// A guarded write must land in the scope's own store: every flag that points
+// bd at another store is refused, in every spelling and position.
+func TestBdRigNamespaceRefusesStoreSelectors(t *testing.T) {
+	c := brnCheck(t, "beta/crew.worker", brnOwned)
+	for _, sel := range []struct{ flag, value string }{
+		{"--db", "/other/beads.db"},
+		{"--database", "other_db"},
+		{"--server-url", "https://other-service"},
+		{"--profile", "other"},
+	} {
+		for _, args := range [][]string{
+			{sel.flag, sel.value, "close", "bt-1"},
+			{sel.flag + "=" + sel.value, "close", "bt-1"},
+			{"close", "bt-1", sel.flag, sel.value},
+			{"update", "bt-1", "--status", "closed", sel.flag + "=" + sel.value},
+		} {
+			if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, "checks writes against its own store only") {
+				t.Errorf("gc bd %q: refused=%v msg=%q; want the store-selector refusal", args, refused, msg)
+			}
+		}
+		if _, msg, refused := c.check([]string{sel.flag, sel.value, "show", "bt-1"}); refused {
+			t.Errorf("a read with %s refused: %q", sel.flag, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"--global", "close", "bt-1"},
+		{"--global=true", "close", "bt-1"},
+		{"close", "bt-1", "--global"},
+		{"update", "bt-1", "--status", "closed", "--global=1"},
+		{"close", "bt-1", "--global=maybe"},
+	} {
+		if _, msg, refused := c.check(args); !refused || !strings.Contains(msg, "checks writes against its own store only") {
+			t.Errorf("gc bd %q: refused=%v msg=%q; want the store-selector refusal", args, refused, msg)
+		}
+	}
+	if _, msg, refused := c.check([]string{"close", "bt-1", "--global=false"}); refused {
+		t.Errorf("--global=false refused: %q", msg)
+	}
+}
+
+// bd opens the store its -C names (from the directory it runs in, the scope
+// root), and gc chose the scope by --rig, --city or the bead prefix first: a
+// write whose -C opens another store than the one checked is refused, from a
+// guarded scope and into one, in every spelling of -C bd reads. A claim that
+// names no bead (ready --claim) is such a write.
+func TestBdRigNamespaceDirectoryMustOpenTheCheckedStore(t *testing.T) {
+	root := t.TempDir()
+	beta := filepath.Join(root, "beta")
+	alpha := filepath.Join(root, "alpha")
+	for _, d := range []string{filepath.Join(beta, ".beads"), filepath.Join(beta, "sub"), filepath.Join(alpha, ".beads")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g := rnsGuardedRig("beta")
+	g.Path, g.Prefix = beta, "bt"
+	cfg := &config.City{Rigs: []config.Rig{g, {Name: "alpha", Path: alpha, Prefix: "al"}}}
+	t.Setenv("BEADS_ACTOR", "beta/crew.worker")
+	rows := map[string]beads.Bead{"bt-1": brnOwned, "al-1": {ID: "al-1", Status: "open"}}
+	get := func(id string) (beads.Bead, error) {
+		if b, ok := rows[id]; ok {
+			return b, nil
+		}
+		return beads.Bead{}, beads.ErrNotFound
+	}
+
+	inBeta := newBdRigNamespaceCheck(cfg, root, beta, get)
+	if inBeta == nil || inBeta.ns.rigName() != "beta" {
+		t.Fatalf("fixture: beta's check = %+v", inBeta)
+	}
+	for _, args := range [][]string{
+		{"-C", alpha, "close", "bt-1"},
+		{"-C=" + alpha, "close", "bt-1"},
+		{"close", "bt-1", "--directory", alpha},
+		{"close", "bt-1", "--directory=" + alpha},
+		{"-C", "../alpha", "close", "bt-1"},
+		{"-C", beta, "-C", alpha, "close", "bt-1"},
+		{"-C" + alpha, "close", "bt-1"},
+		{"close", "bt-1", "-qC", alpha},
+		{"close", "bt-1", "-qC=" + alpha},
+	} {
+		if _, msg, refused := inBeta.check(args); !refused || !strings.Contains(msg, "a store that is no guarded rig's") {
+			t.Errorf("gc bd %q in beta's scope: refused=%v msg=%q; want the -C refusal", args, refused, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"-C", beta, "close", "bt-1"},
+		{"-C", filepath.Join(beta, "sub"), "close", "bt-1"},
+		{"-C", "sub", "close", "bt-1"},
+		{"-C", alpha, "show", "bt-1"},
+	} {
+		if _, msg, refused := inBeta.check(args); refused {
+			t.Errorf("gc bd %q in beta's scope refused: %q", args, msg)
+		}
+	}
+	// A claim in the rig's own store is still the rig's guard to refuse.
+	for _, args := range [][]string{{"ready", "--claim"}, {"-C", beta, "ready", "--claim"}} {
+		if _, msg, refused := inBeta.check(args); !refused || !strings.Contains(msg, "lets gc claim only rows it can check first") {
+			t.Errorf("gc bd %q in beta's scope: refused=%v msg=%q; want the unvetted-claim refusal", args, refused, msg)
+		}
+	}
+
+	// gc picks alpha's scope by the bead prefix, which outranks -C; bd would
+	// then write beta's store with no check.
+	inAlpha := newBdRigNamespaceCheck(cfg, root, alpha, get)
+	if inAlpha == nil || inAlpha.ns != nil {
+		t.Fatalf("fixture: alpha's check = %+v", inAlpha)
+	}
+	for _, args := range [][]string{
+		{"-C", beta, "update", "al-1", "--status", "closed"},
+		{"-C", filepath.Join(beta, "sub"), "close", "al-1"},
+		{"--reason", "x", "-C", beta, "close", "al-1"},
+		{"-C", beta, "ready", "--claim"},
+		{"-C=" + beta, "ready", "--claim"},
+		{"ready", "--claim", "--directory", beta},
+		{"-C" + beta, "update", "al-1", "--status", "closed"},
+		{"update", "al-1", "-C" + beta, "--status", "closed"},
+		{"-qC", beta, "update", "al-1", "--status", "closed"},
+		{"update", "al-1", "-qC", beta, "--status", "closed"},
+		{"update", "al-1", "-qC" + beta},
+		{"update", "al-1", "-qC=" + beta},
+		{"--json", "assign", "al-1", "someone", "-C" + beta},
+	} {
+		if _, msg, refused := inAlpha.check(args); !refused || !strings.Contains(msg, `rig "beta"'s store`) {
+			t.Errorf("gc bd %q in alpha's scope: refused=%v msg=%q; want the -C refusal", args, refused, msg)
+		}
+	}
+	for _, args := range [][]string{
+		{"-C", alpha, "update", "al-1", "--status", "closed"},
+		{"-C", beta, "show", "al-1"},
+		{"-C", beta, "ready"},
+		{"ready", "--claim"},
+		{"-C", alpha, "ready", "--claim"},
+		{"-C" + alpha, "update", "al-1", "--status", "closed"},
+		{"update", "al-1", "-qC", alpha, "--status", "closed"},
+		{"update", "al-1", "-aC" + beta}, // -a takes "C<beta>": an assignee, not a -C
+	} {
+		if _, msg, refused := inAlpha.check(args); refused {
+			t.Errorf("gc bd %q in alpha's scope refused: %q", args, msg)
+		}
+	}
+}
+
+// doBd runs the guard on the command bd would run: an argv that hides a write
+// behind a read verb never reaches bd, in the rig's scope or from another,
+// and neither does a write whose -C, in any spelling bd reads, opens the rig's
+// store from another scope (a claim that names no bead included).
+func TestDoBdRigNamespaceRefusesAHiddenWrite(t *testing.T) {
+	capture, cityDir := bdSQLRefusalCityDir(t, "")
+	var toml strings.Builder
+	for _, r := range []struct{ name, prefix, extra string }{
+		{"alpha", "al", ""},
+		{"beta", "bt", "federation = \"rig\"\n"},
+	} {
+		dir := filepath.Join(cityDir, r.name)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: "+r.prefix+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		toml.WriteString("\n[[rigs]]\nname = \"" + r.name + "\"\npath = \"" + dir + "\"\nprefix = \"" + r.prefix + "\"\n" + r.extra)
+	}
+	f, err := os.OpenFile(filepath.Join(cityDir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(toml.String()); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	t.Setenv("BEADS_ACTOR", "mayor")
+	// bd answers every read with a row another city holds.
+	foreign, _ := json.Marshal([]beads.Bead{{ID: "bt-2", Status: "in_progress", Assignee: "alpha/crew.worker", Type: "task"}})
+	t.Setenv("BD_STUB_STDOUT", string(foreign))
+	refused := func(args []string, want string) {
+		t.Helper()
+		_ = os.Remove(capture)
+		var stdout, stderr bytes.Buffer
+		if code := doBd(args, &stdout, &stderr); code == 0 {
+			t.Errorf("doBd(%q) exited 0; stderr=%q", args, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("doBd(%q): stderr lacks %q: %q", args, want, stderr.String())
+		}
+		data, _ := os.ReadFile(capture)
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line != "" && !strings.HasPrefix(line, "show ") {
+				t.Errorf("doBd(%q): bd ran %q", args, line)
+			}
+		}
+	}
+	for _, args := range [][]string{
+		{"--rig", "beta", "--reason", "show", "close", "bt-2"},
+		{"--rig", "beta", "--append-notes", "list", "update", "bt-2", "--claim"},
+		{"--rig", "beta", "--title", "show", "create"},
+		{"--rig", "beta", "comments", "--json", "add", "bt-2", "text"},
+		{"--rig", "alpha", "--reason", "show", "close", "bt-2"},
+		{"--rig", "alpha", "comments", "--json", "add", "bt-2", "text"},
+		{"--rig", "beta", "close", "bt-2", "--server-url", "https://other-service"},
+	} {
+		refused(args, "gc bd: refusing")
+	}
+	beta := filepath.Join(cityDir, "beta")
+	for _, args := range [][]string{
+		{"--rig", "alpha", "-C", beta, "update", "al-1", "--status", "closed"},
+		{"--rig", "alpha", "-C", beta, "ready", "--claim"},
+		{"--rig", "alpha", "-C=" + beta, "ready", "--claim"},
+		{"--rig", "alpha", "-C" + beta, "update", "al-1", "--status", "closed"},
+		{"--rig", "alpha", "--json", "update", "al-1", "-C" + beta, "--status", "closed"},
+		{"--rig", "alpha", "-qC", beta, "update", "al-1", "--status", "closed"},
+		{"--rig", "alpha", "--json", "update", "al-1", "-qC", beta, "--status", "closed"},
+		{"--rig", "alpha", "assign", "al-1", "someone", "-C" + beta},
+	} {
+		refused(args, "gc bd: refusing -C")
+	}
+}
