@@ -82,7 +82,8 @@ type BuiltinProviderSpec struct {
 	// declare, ProgramStatusApp names the reporting program,
 	// ProgramStatusRelay wraps the agent in the probe-answering relay,
 	// ProgramStatusHoldMidTurn declares that input typed mid-turn aborts the
-	// program's turn (gc holds it under the switch on), and
+	// program's turn (under the switch on, only a starved queue's bypass is
+	// deferred while a fresh read shows a live working record), and
 	// ProgramStatusEnv is forced into the session env when capture is armed.
 	ProgramStatusProtocol    string
 	ProgramStatusApp         string

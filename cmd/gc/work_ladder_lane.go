@@ -981,10 +981,6 @@ func (p *ladderPass) nudgeText(row beads.Bead, n workladder.Nudge) string {
 	}
 }
 
-// refused records, by CAS, that the seat could not take counted nudge n (a
-// permission prompt, the runtime unavailable): the attempt is re-counted as
-// paused and the entry backs off (workladder.NudgeRefused). It reports
-// whether this refusal is the one to raise the nudge_refused alert for.
 // deferred re-counts n, which the runtime deferred with nothing typed, as
 // paused (workladder.NudgeDeferred).
 func (p *ladderPass) deferred(id string, n workladder.Nudge) {
@@ -993,6 +989,10 @@ func (p *ladderPass) deferred(id string, n workladder.Nudge) {
 	})
 }
 
+// refused records, by CAS, that the seat could not take counted nudge n (a
+// permission prompt, the runtime unavailable): the attempt is re-counted as
+// paused and the entry backs off (workladder.NudgeRefused). It reports
+// whether this refusal is the one to raise the nudge_refused alert for.
 func (p *ladderPass) refused(id string, n workladder.Nudge) bool {
 	var alert bool
 	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {

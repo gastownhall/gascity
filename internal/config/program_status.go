@@ -37,11 +37,11 @@ type ProgramStatusBinding struct {
 	Relay *bool `toml:"relay,omitempty"`
 	// HoldMidTurn declares that the program aborts its running turn when
 	// input is typed into it mid-turn. Under the [session] program_status
-	// switch on, gc then holds typed input and queued delivery while a
-	// fresh read of the program's own record says working or blocked,
-	// within the record's hold bound; under off or shadow it changes
-	// nothing. It reaches a pane when its capture is armed (create,
-	// respawn, heal). Unset inherits.
+	// switch on, only a starved queue's bypass of the quiescence gate is
+	// deferred, while a fresh read of the program's own record shows a live
+	// working record; every other delivery is unchanged, and under off or
+	// shadow nothing changes. It reaches a pane when its capture is armed
+	// (create, respawn, heal), and heal keeps it current. Unset inherits.
 	HoldMidTurn *bool `toml:"hold_mid_turn,omitempty"`
 	// Env is forced into the session environment when capture is armed (for
 	// example PI_PROGRAM_STATUS = "1"). It is not part of the launch

@@ -90,12 +90,12 @@ func TestHoldReadDeclaredOnlyByAnOptionBoundToThePane(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tm, ex := holdTmux(runtime.ProgramStatusOn, &fakeExecutor{}, func(int) string { return holdPaneRow(working, c.hold, activity) })
-			r, ok := tm.holdRead("s", fakeAgentPane("s"))
+			r, ok := tm.holdRead("s")
 			if ok != c.ok {
 				t.Fatalf("holdRead ok = %v, want %v (reading %+v)", ok, c.ok, r)
 			}
-			if got := ex.holdReads(); got != 1 || tmuxSubcommand(ex.reads[0]) != "display-message" {
-				t.Fatalf("hold reads %q, want one display-message", ex.reads)
+			if got := ex.holdReads(); got != 1 || tmuxSubcommand(ex.reads[0]) != "list-panes" {
+				t.Fatalf("hold reads %q, want one list-panes of the session", ex.reads)
 			}
 			if !c.ok {
 				return
@@ -105,10 +105,6 @@ func TestHoldReadDeclaredOnlyByAnOptionBoundToThePane(t *testing.T) {
 			}
 		})
 	}
-	tm, ex := holdTmux(runtime.ProgramStatusOn, &fakeExecutor{}, func(int) string { return holdPaneRow(working, "%1", activity) })
-	if _, ok := tm.holdRead("s", ""); !ok || tmuxSubcommand(ex.reads[0]) != "list-panes" {
-		t.Fatalf("a session-name hold read: ok=%v reads %q, want one list-panes of the session", ok, ex.reads)
-	}
 }
 
 // Kills a hold read taken under a switch that is not on.
@@ -116,7 +112,7 @@ func TestHoldReadReadsNothingUnlessOn(t *testing.T) {
 	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusOff, runtime.ProgramStatusShadow} {
 		inner := &fakeExecutor{}
 		tm, ex := holdTmux(mode, inner, func(int) string { return "" })
-		if _, ok := tm.holdRead("s", fakeAgentPane("s")); ok {
+		if _, ok := tm.holdRead("s"); ok {
 			t.Errorf("switch %s: holdRead ok", mode)
 		}
 		if ex.holdReads() != 0 || len(inner.calls) != 0 {

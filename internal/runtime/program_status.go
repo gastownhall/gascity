@@ -209,9 +209,9 @@ type ProgramStatusArm struct {
 	App     string // reader drops reports naming another program
 	Relay   bool   // wrap the agent in the probe-answering relay (only with Capture)
 	// HoldMidTurn marks the pane as one whose program aborts a turn that
-	// input is typed into (only with Capture): under the switch on, a fresh
-	// live working or blocked record then holds typed input and queued
-	// delivery ([ProgramStatusHoldProvider]).
+	// input is typed into (only with Capture): under the switch on, only a
+	// starved queue's bypass is deferred while a fresh read shows a live
+	// working record ([ProgramStatusHoldProvider], [ProgramTypingHolds]).
 	HoldMidTurn bool
 }
 

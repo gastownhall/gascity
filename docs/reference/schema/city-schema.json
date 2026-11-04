@@ -2447,7 +2447,7 @@
         },
         "hold_mid_turn": {
           "type": "boolean",
-          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. Under the [session] program_status\nswitch on, gc then holds typed input and queued delivery while a\nfresh read of the program's own record says working or blocked,\nwithin the record's hold bound; under off or shadow it changes\nnothing. It reaches a pane when its capture is armed (create,\nrespawn, heal). Unset inherits."
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. Under the [session] program_status\nswitch on, only a starved queue's bypass of the quiescence gate is\ndeferred, while a fresh read of the program's own record shows a live\nworking record; every other delivery is unchanged, and under off or\nshadow nothing changes. It reaches a pane when its capture is armed\n(create, respawn, heal), and heal keeps it current. Unset inherits."
         },
         "env": {
           "additionalProperties": {

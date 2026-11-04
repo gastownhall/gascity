@@ -53,31 +53,21 @@ func parseProgramHoldRow(line string) (programHoldRow, bool) {
 	return programHoldRow{pane: pane, activity: fields[1+programPaneFields]}, true
 }
 
-// holdRead takes one fresh hold reading of session's agent pane: a
-// display-message of target, an agent pane the caller already resolved, or,
-// with no target, a list-panes of the session folded to its agent pane. It
-// is bounded by shadowReadTimeout. ok is false, and nothing is read, unless
+// holdRead takes one fresh hold reading of session's agent pane: one
+// list-panes of the session folded to its agent pane, bounded by
+// shadowReadTimeout. ok is false, and nothing is read, unless
 // the switch is on; it is false as well when the read failed, the agent
 // pane cannot be named, or the pane does not declare the hold. The record is
 // judged under the switch with the tap liveness of the state cache's last
 // process table, and the activity has gc's own keystroke echo discounted.
-func (t *Tmux) holdRead(session, target string) (runtime.ProgramHoldReading, bool) {
+func (t *Tmux) holdRead(session string) (runtime.ProgramHoldReading, bool) {
 	mode := t.programStatusMode()
-	if mode != runtime.ProgramStatusOn {
+	if mode != runtime.ProgramStatusOn || !validSessionNameRe.MatchString(session) {
 		return runtime.ProgramHoldReading{}, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shadowReadTimeout)
 	defer cancel()
-	var out string
-	var err error
-	switch {
-	case target != "":
-		out, err = t.runCtx(ctx, "display-message", "-p", "-t", target, programHoldFormat)
-	case validSessionNameRe.MatchString(session):
-		out, err = t.runCtx(ctx, "list-panes", "-s", "-t", paneTarget(session), "-F", programHoldFormat)
-	default:
-		return runtime.ProgramHoldReading{}, false
-	}
+	out, err := t.runCtx(ctx, "list-panes", "-s", "-t", paneTarget(session), "-F", programHoldFormat)
 	if err != nil {
 		return runtime.ProgramHoldReading{}, false
 	}
@@ -118,7 +108,7 @@ func (t *Tmux) holdRead(session, target string) (runtime.ProgramHoldReading, boo
 // fresh hold reading of session name's agent pane (holdRead), past the
 // state cache.
 func (p *Provider) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReading, bool) {
-	return p.tm.holdRead(name, "")
+	return p.tm.holdRead(name)
 }
 
 var _ runtime.ProgramStatusHoldProvider = (*Provider)(nil)
