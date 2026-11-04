@@ -142,11 +142,16 @@ func (f *fakeState) SessionProvider() runtime.Provider {
 // each is the gate's work view of the physical store (split_strict_gate_test.go).
 func (f *fakeState) BeadStore(rig string) beads.Store { return splittest.GateWorkView(f.stores[rig]) }
 
+// BeadStores is shaped as controllerState.BeadStores is (typed-stores T6
+// plan, OD-5): a fresh map holding the city store under the city's name when
+// there is one, then every rig, so a rig named like the city replaces it.
+// Callers that need an order sort the names, so the city sits at its name's
+// sorted position, not first.
 func (f *fakeState) BeadStores() map[string]beads.Store {
-	if !splittest.GateEnabled() {
-		return f.stores
+	out := make(map[string]beads.Store, len(f.stores)+1)
+	if f.cityBeadStore != nil {
+		out[f.cityName] = splittest.GateWorkView(f.cityBeadStore)
 	}
-	out := make(map[string]beads.Store, len(f.stores))
 	for rig, store := range f.stores {
 		out[rig] = splittest.GateWorkView(store)
 	}

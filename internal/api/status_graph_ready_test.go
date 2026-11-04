@@ -43,8 +43,8 @@ func TestStatusReadyCountIncludesTheSplitGraphBinding(t *testing.T) {
 			if wc.Ready != want {
 				t.Errorf("status ready = %d, want %d", wc.Ready, want)
 			}
-			if wc.Open != 0 {
-				t.Errorf("status open = %d, want 0: the binding's stored rows are not added, as a single-store city's work-store counts never included them", wc.Open)
+			if wc.Open != 1 {
+				t.Errorf("status open = %d, want 1: the work store's own open row, counted once; the binding's stored rows are not added, as a single-store city's work-store counts never included them", wc.Open)
 			}
 		})
 	}
