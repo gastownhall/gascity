@@ -1026,11 +1026,6 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
 	}
-	// Every reload, changed or not, repeats that a guarded rig is not
-	// protected by this build.
-	for _, w := range config.RigFederationWarnings(newCfg.Rigs) {
-		reloadWarnings = append(reloadWarnings, "config reload: "+w)
-	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
 }

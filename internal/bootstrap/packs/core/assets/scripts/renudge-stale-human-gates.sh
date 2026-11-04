@@ -64,6 +64,19 @@
 # city-scoped: recipients (mayor / human / coordinators) are city-level
 # identities.
 #
+# In a rig with federation = "rig" (a bead store other cities also attach), a
+# gate whose own addressee (assignee or gc.deferred_assignee) this city cannot
+# vouch for (`gc agent is-foreign --rig-namespace <rig>`) is another city's or
+# a person's, and is left alone. A gate that names no addressee is left alone
+# when its creation stamp (gc.owner_namespace) names another namespace;
+# otherwise it keeps the escalation fallback. In a city gc reports as having
+# no guarded rig (GC_GUARDED_RIGS set and empty, see
+# rig_namespace_city_may_guard) none of that is checked, and a rig list that
+# cannot be read leaves the sweep to HQ, as it always has. Otherwise a sweep
+# that cannot read `gc rig list` can neither list the rigs' gates nor tell a
+# guarded rig apart, so it re-nudges nothing (fail closed) and fails, so the
+# controller records order.failed with the reason; the next sweep reads again.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
@@ -72,6 +85,8 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$__SCRIPT_DIR/_bd_trace.sh" "renudge-stale-human-gates"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 # jq is a hard dependency: it decodes the gate list and the re-fetched gate
 # record. Without it every re-nudge would be silently skipped. Fail loud.
@@ -142,12 +157,21 @@ trap 'rm -f "$SCOPES_FILE"' EXIT
 READY_ERR_FILE="$(mktemp "$PACK_STATE_DIR/.renudge-ready-err.XXXXXX")"
 trap 'rm -f "$SCOPES_FILE" "$READY_ERR_FILE"' EXIT
 printf '\n' > "$SCOPES_FILE" # HQ scope: an empty line
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
-if [ -n "$RIGS_JSON" ]; then
-    printf '%s' "$RIGS_JSON" \
-        | jq -r '(.rigs // [])[] | select(.hq != true and .suspended != true) | .name' 2>/dev/null \
-        >> "$SCOPES_FILE" || true
+CITY_MAY_GUARD=""
+if rig_namespace_city_may_guard; then
+    CITY_MAY_GUARD=1
 fi
+RIGS_JSON="$(gc rig list --json 2>/dev/null)" || RIGS_JSON=""
+if [ -n "$CITY_MAY_GUARD" ] && ! rig_namespace_rig_list_readable "$RIGS_JSON"; then
+    # Fail closed, loudly: a non-zero exit makes the controller record
+    # order.failed with this line, which the dashboard's attention list and
+    # gc doctor report.
+    echo "renudge-stale-human-gates: gc rig list failed in a city that may have a guarded rig (federation = \"rig\"); no gate was re-nudged (will retry next sweep)" >&2
+    exit 1
+fi
+printf '%s' "$RIGS_JSON" \
+    | jq -r '(.rigs // [])[] | select(.hq != true and .suspended != true) | .name' 2>/dev/null \
+    >> "$SCOPES_FILE" || true
 
 # Load dedup state (object mapping "<gate-id>" -> ISO timestamp of last
 # re-nudge). A missing or corrupt file resets to an empty object.
@@ -213,6 +237,38 @@ renudge_gate() {
     ADDRESSEE="$(printf '%s' "$GATE_JSON" | jq -r \
         '[.assignee, .metadata."gc.deferred_assignee"]
          | map(select(. != null and . != "")) | (.[0] // "")' 2>/dev/null)"
+    # A guarded rig's gate is re-nudged only at an addressee this city can
+    # vouch for there. The rig is the scope the gate was listed in or, for a
+    # formula gate gc ready listed (no --rig), the guarded rig its id maps to.
+    gate_rig=""
+    if [ -z "$CITY_MAY_GUARD" ]; then
+        : # gc reports no guarded rig: nothing to judge.
+    elif [ "${1:-}" = "--rig" ]; then
+        gate_rig="${2:-}"
+        rig_namespace_rig_is_guarded "$RIGS_JSON" "$gate_rig" || gate_rig=""
+    else
+        if ! gate_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$gate_id")"; then
+            # The rig list could not be read: fail closed, re-nudge nothing.
+            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+            return 0
+        fi
+    fi
+    if [ -n "$ADDRESSEE" ] && [ -n "$gate_rig" ] && ! rig_namespace_admits "$gate_rig" "$ADDRESSEE"; then
+        SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+        return 0
+    fi
+    # A guarded rig's gate that names no addressee is judged by its creation
+    # stamp, as the store guard judges such a row: one another city's guard
+    # created (gc.owner_namespace names another namespace) is that city's,
+    # and its escalation is not this city's to send. An unstamped gate keeps
+    # the escalation fallback.
+    if [ -z "$ADDRESSEE" ] && [ -n "$gate_rig" ]; then
+        owner_stamp="$(printf '%s' "$GATE_JSON" | jq -r '.metadata."gc.owner_namespace" // "" | tostring' 2>/dev/null)" || owner_stamp="?"
+        if rig_namespace_stamp_names_other "$gate_rig" "$owner_stamp"; then
+            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+            return 0
+        fi
+    fi
     [ -n "$ADDRESSEE" ] || ADDRESSEE="$ESCALATION_RECIPIENT"
 
     TITLE="$(printf '%s' "$GATE_JSON" | jq -r '.title // ""' 2>/dev/null)"
@@ -242,6 +298,7 @@ Resolve with: gc bd close $gate_id"
 }
 
 # 1. bd's own human gates (await_type == "human"), listed per scope.
+SKIPPED_FOREIGN=0
 while IFS= read -r scope; do
     RIG_ARG1=""
     RIG_ARG2=""
@@ -324,6 +381,9 @@ order_outcome_write
 
 if [ "$RENUDGED" -gt 0 ]; then
     echo "renudge-stale-human-gates: re-notified $RENUDGED stale human gate addressee(s)"
+fi
+if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
+    echo "renudge-stale-human-gates: left $SKIPPED_FOREIGN gate(s) in guarded rigs that are not this city's (an addressee it cannot vouch for, or another city's creation stamp)"
 fi
 
 # Loud-fail: state has been written (successful re-nudges are deduped), so a

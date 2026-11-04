@@ -642,21 +642,3 @@ func TestValidateRigFederationLayoutResolvesSymlinkedRigPaths(t *testing.T) {
 		t.Fatalf("ValidateRigFederationLayout error = %v, want the shared-directory error", err)
 	}
 }
-
-func TestRigFederationWarnings(t *testing.T) {
-	if got := RigFederationWarnings([]Rig{{Name: "alpha"}, {Name: "beta", Federation: "city"}}); len(got) != 0 {
-		t.Fatalf("RigFederationWarnings for unguarded rigs = %v, want none", got)
-	}
-	got := RigFederationWarnings([]Rig{
-		{Name: "alpha"},
-		{Name: "beta", Federation: RigFederationRig, Namespace: RigNamespaceExclusive},
-	})
-	if len(got) != 1 {
-		t.Fatalf("RigFederationWarnings = %v, want one warning", got)
-	}
-	for _, want := range []string{`rig "beta"`, `federation = "rig"`, "does not enforce", "NOT protected", "do not attach a bead store that another city also uses"} {
-		if !strings.Contains(got[0], want) {
-			t.Errorf("warning %q does not contain %q", got[0], want)
-		}
-	}
-}

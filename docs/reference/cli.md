@@ -153,11 +153,20 @@ session name, alias, configured named identity or sole alias-history entry.
 Anything else is foreign: on a shared rig store, another city's claims look
 exactly like this. Every identity shape is checked, qualified or bare.
 
+With --rig-namespace &lt;rig&gt;, the claim is one in that rig's bead store. The
+rig must be one this city configures (exact name), or the verb cannot answer.
+On a rig with federation = "rig", an identity outside the rig's namespace
+("&lt;rig&gt;/...") that is none of this city's own pool sessions of the rig is
+foreign, with reason "namespace"; on any other rig the flag changes nothing.
+The JSON echoes rig_namespace: a caller must not read a local answer about a
+rig claim unless it does, because an older gc that lacks the flag cannot have
+applied the namespace.
+
 Exit codes:
   0  local    this city can vouch for the identity
   1  foreign  this city cannot vouch for it; protect the claim
-  2  unknown  this city cannot answer (no roster, a failed lookup, bad usage);
-              protect the claim
+  2  unknown  this city cannot answer (no roster, a failed lookup, an unknown
+              rig, bad usage); protect the claim
 
 "local" is not a liveness claim: a dead local claimant is still local, and the
 caller has to establish liveness itself.
@@ -175,11 +184,13 @@ gc agent is-foreign <identity> [flags]
 ```
 gc agent is-foreign repo/worker-3
 gc agent is-foreign --json -- "$assignee"
+gc agent is-foreign --rig-namespace beta --json -- "$assignee"
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSON format |
+| `--rig-namespace` | string |  | Ask about a claim in this rig's bead store, applying its namespace when federation = "rig" |
 
 ## gc agent list
 

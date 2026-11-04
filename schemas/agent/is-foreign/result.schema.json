@@ -32,12 +32,13 @@
     },
     "reason": {
       "type": "string",
-      "description": "The test that decided the verdict. 'roster' and 'session_record' are local; 'foreign_binding' (another city's canonical naming, ga-8yi7ne; 'detail' names the binding) and 'absent_from_roster' (possibly one of ours whose config and records are gone) are foreign; 'no_config' (bad usage, an unresolvable city, or a city config that would not load or carries no roster; 'detail' says which) and 'lookup_failed' are unknown.",
+      "description": "The test that decided the verdict. 'roster' and 'session_record' are local; 'foreign_binding' (another city's canonical naming, ga-8yi7ne; 'detail' names the binding), 'absent_from_roster' (possibly one of ours whose config and records are gone) and 'namespace' (with --rig-namespace on a rig with federation = \"rig\": the identity is outside the rig's namespace and is none of this city's own pool sessions of the rig; 'detail' names the namespace) are foreign; 'no_config' (bad usage, an unresolvable city, an unknown rig, or a city config that would not load or carries no roster; 'detail' says which) and 'lookup_failed' are unknown.",
       "enum": [
         "roster",
         "session_record",
         "foreign_binding",
         "absent_from_roster",
+        "namespace",
         "no_config",
         "lookup_failed"
       ]
@@ -52,6 +53,22 @@
     },
     "city_name": {
       "type": "string"
+    },
+    "rig_namespace": {
+      "type": "string",
+      "description": "Echoes --rig-namespace: the rig whose bead store the claim is in. Its presence acknowledges that this gc applied the rig's namespace; a caller must not read a 'local' answer about a rig claim unless it is echoed, because an older gc cannot have applied it."
+    },
+    "namespace_checked": {
+      "type": "boolean",
+      "description": "True when the rig is guarded (federation = \"rig\") and its namespace decided the identity's admission. Absent for an unguarded rig, where --rig-namespace changes nothing."
+    },
+    "namespace_via": {
+      "type": "string",
+      "description": "The namespace arm that admitted the identity on a guarded rig: 'lexical' (inside \"<rig>/\"; the roster and session records then decide the verdict as on any rig) or 'session_record' (one of this city's own pool sessions of the rig).",
+      "enum": [
+        "lexical",
+        "session_record"
+      ]
     }
   }
 }

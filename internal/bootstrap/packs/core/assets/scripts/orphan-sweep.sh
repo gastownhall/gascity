@@ -14,6 +14,17 @@
 # whose config and session records are gone -- is never released; it is
 # counted, named, and declared as a partial outcome (gastownhall/gascity#5955).
 #
+# Each row carries the scope it was listed from. A claim in a rig's store is
+# asked about with `gc agent is-foreign --rig-namespace <rig>`: on a rig with
+# federation = "rig" (a store other cities also attach), a holder outside the
+# rig's namespace that is none of this city's own pool sessions of the rig is
+# never released either. Those claims are the normal state of a shared store,
+# so they are counted per rig in the summary, not named and not declared as a
+# partial outcome. A local answer about a rig claim counts only when the JSON
+# echoes rig_namespace: an older gc rejects the flag, and a claim it could not
+# judge is protected. A claim that only the federated read lists, and whose
+# id carries a guarded rig's bead prefix, is that rig's claim (Step 1d).
+#
 # Does NOT do worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
 #
@@ -29,6 +40,8 @@ esac
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 # Where the recovery summary goes. Cities that staff a coordinator role (e.g.
 # the gastown pack's mayor) can point this at it; "human" is the reserved
@@ -121,6 +134,30 @@ read_federated_claims() {
     return 1
 }
 
+# append_scope_rows tags every row of a bead listing with the scope it came
+# from ("" for HQ, else the rig name) and appends it to $TMP. The scope decides
+# how the foreign-identity gate is asked about the row's claim, so a listing
+# that cannot be tagged (text that does not parse, or JSON that is not an
+# array, such as bd's schema-version envelope) is dropped (its claims are
+# kept), never appended untagged. A third argument "federated" also marks the
+# rows as the federated read's (read_federated_claims): that read names no
+# scope, so a row a scope read also listed is judged under that scope's tag
+# (Step 1c), and only a row no scope read listed keeps the HQ tag.
+append_scope_rows() {
+    local scope="$1"
+    local listing="$2"
+    local federated="false"
+    local tagged
+    [ "${3:-}" = federated ] && federated="true"
+    if ! tagged=$(jq -c --arg scope "$scope" --argjson federated "$federated" '
+        if type == "array" then map(if type == "object" then . + {_gc_scope: $scope} + (if $federated then {_gc_federated: true} else {} end) else . end) else error("not a listing") end
+    ' "$listing" 2>/dev/null); then
+        echo "orphan-sweep: could not read the in-progress listing of ${scope:-HQ}; its claims are kept this pass" >&2
+        return 0
+    fi
+    [ -z "$tagged" ] || printf '%s\n' "$tagged" >>"$TMP"
+}
+
 append_hq_scope() {
     local bead_fetch_tmp
     local federated_tmp
@@ -136,13 +173,14 @@ append_hq_scope() {
     gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
     # The city's scope also stages the claims only the federated reader
     # returns, between the same two liveness reads. Its rows overlap the scope
-    # reads' rows; the first row staged for an id wins (Step 1c).
+    # reads' rows; a scope read's row for an id wins (Step 1c).
     read_federated_claims "$federated_tmp" || true
     append_session_list gc session list --json || {
         rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" "$federated_tmp" >>"$TMP"
+    append_scope_rows "" "$bead_fetch_tmp"
+    append_scope_rows "" "$federated_tmp" federated
     rm -f "$bead_fetch_tmp" "$federated_tmp"
 }
 
@@ -159,7 +197,7 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
+    append_scope_rows "$rig" "$bead_fetch_tmp"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -185,9 +223,56 @@ if [ -n "$FEDERATED_READ_ERROR" ]; then
     order_outcome_scope_skipped "every store (gc ready)" "$FEDERATED_READ_ERROR; only the claims gc bd list returned scope by scope were considered"
 fi
 
-IN_PROGRESS=$(jq -c -s 'add // [] | reduce .[] as $b ({seen: {}, out: []};
+# A scope read's row for an id wins over the federated read's, so a rig's claim
+# keeps the rig scope its gate question and reset need.
+IN_PROGRESS=$(jq -c -s 'add // []
+    | map(select((type == "object" and ._gc_federated == true) | not)) + map(select(type == "object" and ._gc_federated == true))
+    | reduce .[] as $b ({seen: {}, out: []};
     ($b.id // "") as $id
     | if $id != "" and .seen[$id] then . else .seen[$id] = true | .out += [$b] end) | .out' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
+
+# Step 1d: a claim only the federated read returned names no scope and keeps
+# the HQ tag. One whose id carries a guarded rig's bead prefix sits in that
+# rig's store (a wisp-plane row, or a rig whose scope read was skipped above),
+# so it takes the rig's tag: the gate is asked with --rig-namespace and the
+# release names the rig with --rig, as for the rig's scope-read rows. An older
+# gc rejects the flag and the claim is kept. When the tagging cannot finish,
+# the federated read's untagged rows are dropped this pass and their claims
+# kept, never judged as HQ claims. A row whose id holds a tab or line break is
+# left as it is: it is never released (Step 3).
+GUARDED_RIGS=""
+[ -z "$RIG_LIST" ] || GUARDED_RIGS="$(rig_namespace_guarded_rigs "$RIG_LIST")"
+if [ -n "$GUARDED_RIGS" ] && [ "$IN_PROGRESS" != "[]" ]; then
+    _tag_ok=1
+    _federated_ids=""
+    _rig_tags=""
+    _tagged=""
+    _federated_ids=$(jq -r '.[]
+        | select(type == "object" and ._gc_federated == true and ._gc_scope == "")
+        | (.id // "") | tostring | select(. != "" and (test("[\\t\\n\\r]") | not))' <<<"$IN_PROGRESS" 2>/dev/null) || _tag_ok=0
+    if [ "$_tag_ok" = 1 ] && [ -n "$_federated_ids" ]; then
+        while IFS= read -r _fid; do
+            [ -n "$_fid" ] || continue
+            _frig="$(rig_namespace_guarded_rig_for_bead "$RIG_LIST" "$_fid")" || { _tag_ok=0; break; }
+            [ -z "$_frig" ] || _rig_tags="${_rig_tags}${_fid}"$'\t'"${_frig}"$'\n'
+        done <<<"$_federated_ids"
+    fi
+    if [ "$_tag_ok" = 1 ] && [ -n "$_rig_tags" ]; then
+        if _tagged=$(jq -c --arg tags "$_rig_tags" '
+            ($tags | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries) as $rig
+            | map(if type == "object" and ._gc_federated == true and ._gc_scope == ""
+                     and ($rig[(.id // "") | tostring] // "") != ""
+                  then ._gc_scope = $rig[(.id // "") | tostring] else . end)' <<<"$IN_PROGRESS" 2>/dev/null) && [ -n "$_tagged" ]; then
+            IN_PROGRESS="$_tagged"
+        else
+            _tag_ok=0
+        fi
+    fi
+    if [ "$_tag_ok" != 1 ]; then
+        echo "orphan-sweep: could not tag the federated read's claims with their guarded rigs; those claims are kept this pass" >&2
+        IN_PROGRESS=$(jq -c 'map(select((type == "object" and ._gc_federated == true and ._gc_scope == "") | not))' <<<"$IN_PROGRESS" 2>/dev/null) || IN_PROGRESS="[]"
+    fi
+fi
 if [ "$IN_PROGRESS" = "[]" ]; then
     order_outcome_write
     exit 0
@@ -406,13 +491,25 @@ session_bead_shows_live_assignment() {
     return 1
 }
 
+# reset_orphan_if_current releases bead_id from expected_assignee in the store
+# the claim was listed from: scope is "" for HQ, else the rig. A rig claim's
+# release names the rig with --rig (gc bd takes it anywhere in argv), so the
+# release never runs in another
+# store: an assignee that is a pool session's bead id carries the city's
+# prefix, and a release resolved by its arguments alone could land in HQ,
+# find the bead absent and answer skipped.
 reset_orphan_if_current() {
     local bead_id="$1"
     local expected_assignee="$2"
+    local scope="${3:-}"
     local reset_output
     local reset_state
+    local -a scope_args=()
+    if [ -n "$scope" ]; then
+        scope_args=(--rig "$scope")
+    fi
 
-    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
+    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" ${scope_args[@]+"${scope_args[@]}"} 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
@@ -422,7 +519,7 @@ reset_orphan_if_current() {
             # --append-notes whole (notes have no representation in the class
             # store contract), while every store serves --set-metadata. The
             # value is text, so bd and the class store both keep a string.
-            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" ${scope_args[@]+"${scope_args[@]}"} >/dev/null 2>&1; then
                 echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
             fi
             return 0
@@ -498,8 +595,15 @@ is_known_agent() {
 # resolves against this city's roster or one of its own session records, open
 # or closed, answers to it. Exit 1 (foreign) and any other exit (the gate could
 # not answer) both PROTECT the claim: it is not probed, not released, and is
-# counted and named below. The verdict is asked once per identity per sweep,
-# ahead of revalidation and liveness probes, as in the Go pool sweep.
+# counted and named below. The verdict is asked once per (scope, identity) per
+# sweep, ahead of revalidation and liveness probes, as in the Go pool sweep.
+#
+# A claim listed from a rig is asked about with --rig-namespace <rig>. A
+# foreign answer with reason "namespace" (the rig has federation = "rig" and
+# the holder is outside its namespace) keeps the claim too, but it is counted
+# per rig rather than named: on a store other cities attach, their claims and
+# people's are always there, and naming them would declare every sweep
+# partial. A local answer counts only when the JSON echoes rig_namespace.
 #
 # The skip has to be loud: a decommissioned local agent whose session records
 # are gone is indistinguishable from a foreign one, and a silent skip would
@@ -532,7 +636,10 @@ GATE_BUDGET_SKIPPED=0
 GATE_LOCAL=""
 GATE_FOREIGN=""
 GATE_UNKNOWN=""
+GATE_NAMESPACE=""
 GATE_VERDICT=""
+NAMESPACE_KEPT=0
+NAMESPACE_KEPT_RIGS=""
 GATE_REASONS=""
 PROTECTED=0
 PROTECTED_ROWS=""
@@ -547,54 +654,81 @@ gate_list_has() {
     [ -n "$candidate" ] && [ -n "$list" ] && grep -Fxq -- "$candidate" <<<"$list"
 }
 
-# claim_gate_verdict sets GATE_VERDICT to local, foreign or unknown for an
-# assignee. It must be called directly, not in $(...), so its memo survives.
+# claim_gate_verdict sets GATE_VERDICT to local, foreign, namespace or unknown
+# for an assignee of a claim listed from scope ("" for HQ, else the rig). The
+# memo is keyed by (scope, identity): one identity can be local on one rig and
+# outside another rig's namespace. It must be called directly, not in $(...),
+# so its memo survives.
 claim_gate_verdict() {
-    local identity="$1"
+    local scope="$1"
+    local identity="$2"
+    local key="${scope}"$'\t'"${identity}"
     local verdict_json=""
     local rc=0
     local answered=""
     local reason=""
+    local reason_code=""
+    local echoed=""
     local remaining=0
     local bounded=""
-    if gate_list_has "$GATE_LOCAL" "$identity"; then GATE_VERDICT=local; return 0; fi
-    if gate_list_has "$GATE_FOREIGN" "$identity"; then GATE_VERDICT=foreign; return 0; fi
-    if gate_list_has "$GATE_UNKNOWN" "$identity"; then GATE_VERDICT=unknown; return 0; fi
+    local -a ask
+    if gate_list_has "$GATE_LOCAL" "$key"; then GATE_VERDICT=local; return 0; fi
+    if gate_list_has "$GATE_FOREIGN" "$key"; then GATE_VERDICT=foreign; return 0; fi
+    if gate_list_has "$GATE_NAMESPACE" "$key"; then GATE_VERDICT=namespace; return 0; fi
+    if gate_list_has "$GATE_UNKNOWN" "$key"; then GATE_VERDICT=unknown; return 0; fi
     # Read the clock once: the ask is bounded by the remainder this check
     # passed, and a second read could find it spent -- `timeout 0` disables
     # the bound instead of enforcing it.
     remaining=$((GATE_DEADLINE - SECONDS))
     if [ "$remaining" -le 0 ]; then
         GATE_VERDICT=unknown
-        GATE_UNKNOWN="${GATE_UNKNOWN}${identity}"$'\n'
+        GATE_UNKNOWN="${GATE_UNKNOWN}${key}"$'\n'
         GATE_BUDGET_SKIPPED=$((GATE_BUDGET_SKIPPED + 1))
-        gate_record_reason "$identity" "the foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; not asked this pass"
+        gate_record_reason "$scope" "$identity" "the foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; not asked this pass"
         return 0
+    fi
+    ask=(gc agent is-foreign --json -- "$identity")
+    if [ -n "$scope" ]; then
+        ask=(gc agent is-foreign --rig-namespace "$scope" --json -- "$identity")
     fi
     if command -v timeout >/dev/null 2>&1; then
         bounded=1
-        verdict_json=$(timeout "$remaining" gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
+        verdict_json=$(timeout "$remaining" "${ask[@]}" 2>/dev/null) || rc=$?
     else
-        verdict_json=$(gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
+        verdict_json=$("${ask[@]}" 2>/dev/null) || rc=$?
     fi
     # The exit code is the verdict, and it must agree with the JSON verdict:
     # a missing verb, a crash, or unparseable output reads as "could not
-    # answer" and protects the claim -- never as local.
+    # answer" and protects the claim -- never as local. For a rig claim the
+    # JSON must also echo the rig: a gc that did not apply --rig-namespace
+    # cannot vouch for a claim in a guarded rig.
     answered=$(jq -r 'select(type == "object") | .verdict // empty' <<<"$verdict_json" 2>/dev/null) || answered=""
+    reason_code=$(jq -r 'select(type == "object") | .reason // empty' <<<"$verdict_json" 2>/dev/null) || reason_code=""
+    echoed=$(jq -r 'select(type == "object") | .rig_namespace // empty' <<<"$verdict_json" 2>/dev/null) || echoed=""
     reason=$(jq -r 'select(type == "object") | [.reason, .detail] | map(select(. != null and . != "")) | join(": ")' <<<"$verdict_json" 2>/dev/null) || reason=""
+    if [ -n "$scope" ] && [ "$rc:$answered" = "0:local" ] && [ "$echoed" != "$scope" ]; then
+        rc=2
+        answered=""
+        reason="gc did not acknowledge --rig-namespace $scope"
+    fi
     case "$rc:$answered" in
         0:local)
             GATE_VERDICT=local
-            GATE_LOCAL="${GATE_LOCAL}${identity}"$'\n'
+            GATE_LOCAL="${GATE_LOCAL}${key}"$'\n'
             return 0
             ;;
         1:foreign)
+            if [ -n "$scope" ] && [ "$reason_code" = "namespace" ]; then
+                GATE_VERDICT=namespace
+                GATE_NAMESPACE="${GATE_NAMESPACE}${key}"$'\n'
+                return 0
+            fi
             GATE_VERDICT=foreign
-            GATE_FOREIGN="${GATE_FOREIGN}${identity}"$'\n'
+            GATE_FOREIGN="${GATE_FOREIGN}${key}"$'\n'
             ;;
         *)
             GATE_VERDICT=unknown
-            GATE_UNKNOWN="${GATE_UNKNOWN}${identity}"$'\n'
+            GATE_UNKNOWN="${GATE_UNKNOWN}${key}"$'\n'
             if [ -n "$bounded" ] && [ "$rc" -eq 124 ]; then
                 # Whatever it printed before the bound is not an answer: only
                 # an exit code that agrees with it is.
@@ -604,67 +738,103 @@ claim_gate_verdict() {
             fi
             ;;
     esac
-    gate_record_reason "$identity" "$reason"
+    gate_record_reason "$scope" "$identity" "$reason"
     return 0
 }
 
-# gate_record_reason remembers why an identity was protected, when there is a
-# reason to give.
+# spool_field neutralizes text read off a bead (which another city may have
+# written) for a tab-separated spool: tabs, newlines and carriage returns
+# become spaces, so it cannot re-key a grouping or forge a row.
+spool_field() {
+    local v="${1//$'\t'/ }"
+    v="${v//$'\n'/ }"
+    printf '%s' "${v//$'\r'/ }"
+}
+
+# scope_token_of names a scope ("" for HQ, else the rig) the way the claim
+# rows do: "hq" or "rig:<name>".
+scope_token_of() {
+    if [ -n "$1" ]; then printf 'rig:%s' "$1"; else printf 'hq'; fi
+}
+
+# gate_record_reason remembers why a (scope, identity) was protected, when
+# there is a reason to give. One identity can be protected for different
+# reasons in different scopes.
 gate_record_reason() {
-    local identity="$1"
-    local reason="$2"
+    local scope="$1"
+    local identity="$2"
+    local reason="$3"
     [ -n "$reason" ] || return 0
-    # Keyed the way record_protected_claim spools the identity.
-    local key="${identity//$'\t'/ }"
-    reason="${reason//$'\t'/ }"
-    GATE_REASONS="${GATE_REASONS}${key//$'\n'/ }"$'\t'"${reason//$'\n'/ }"$'\n'
+    GATE_REASONS="${GATE_REASONS}$(scope_token_of "$scope")"$'\t'"$(spool_field "$identity")"$'\t'"$(spool_field "$reason")"$'\n'
 }
 
-# record_protected_claim spools one protected claim. Identity and bead are read
-# off beads another city may have written: tabs and newlines are neutralized so
-# they cannot re-key the grouping or forge a row in the summary.
+# record_protected_claim spools one protected claim under its scope token.
+# Identity and bead are neutralized (spool_field).
 record_protected_claim() {
-    local identity="${1//$'\t'/ }"
-    local bead="${2//$'\t'/ }"
-    identity="${identity//$'\n'/ }"
-    bead="${bead//$'\n'/ }"
+    local scope_tok="$1"
+    local identity
+    local bead
+    identity="$(spool_field "$2")"
+    bead="$(spool_field "$3")"
     PROTECTED=$((PROTECTED + 1))
-    PROTECTED_ROWS="${PROTECTED_ROWS}${identity}"$'\t'"${bead}"$'\n'
+    PROTECTED_ROWS="${PROTECTED_ROWS}${scope_tok}"$'\t'"${identity}"$'\t'"${bead}"$'\n'
     return 0
 }
 
-# protected_claims_json groups the spool by identity, sorted, with each
-# identity's gate reason when the gate gave one.
+# protected_claims_json groups the spool by identity, sorted, with the gate's
+# reasons for that identity in each scope it was protected in.
 protected_claims_json() {
     jq -R -s -c --arg reasons "$GATE_REASONS" '
-        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
-        | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], bead: (.[1] // "")})
+        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: (.[0] + "\u001f" + (.[1] // "")), value: (.[2] // "")}) | from_entries) as $why
+        | split("\n") | map(select(length > 0) | split("\t") | {scope: .[0], identity: (.[1] // ""), bead: (.[2] // "")})
         | group_by(.identity)
-        | map({identity: .[0].identity, beads: map(.bead), reason: ($why[.[0].identity] // "")})
+        | map({identity: .[0].identity, beads: map(.bead),
+               reason: ([.[] | $why[.scope + "\u001f" + .identity] // empty | select(. != "")] | unique | join("; "))})
     ' <<<"$PROTECTED_ROWS"
 }
 
-# The claims to consider, one "<bead>\t<assignee>" row each: those whose
-# holder neither the roster nor a live session recognizes. Each claim is
-# classified once, here; a recognized holder's claim is never released, so it
-# needs no gate answer and no probe.
-CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null) || CLAIM_ROWS=""
+# A row carries its scope through tab-separated rows as a token, "hq" for HQ
+# and "rig:<name>" for a rig, so the field is never empty (read collapses
+# empty tab-separated fields). token_scope turns a token back into the scope.
+token_scope() {
+    case "$1" in
+        rig:*) printf '%s' "${1#rig:}" ;;
+        *) printf '' ;;
+    esac
+}
+
+# The claims to consider, one "<bead>\t<scope token>\t<assignee>" row each:
+# those whose holder neither the roster nor a live session recognizes. Each
+# claim is classified once, here; a recognized holder's claim is never
+# released, so it needs no gate answer and no probe. A row without a scope tag
+# is skipped: the gate could not be asked the right question about it.
+#
+# The rows are re-read line by line, so a bead id or assignee carrying a tab,
+# newline or carriage return could forge a row of its own, with any scope
+# token. Such a row gets the scope token "untrusted" and that text replaced by
+# spaces: it is never asked about or released, only protected and named.
+CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[]
+    | select(type == "object" and (._gc_scope | type) == "string")
+    | select(.assignee != null and .assignee != "")
+    | ([.id, .assignee] | map(tostring | test("[\\t\\n\\r]")) | any) as $untrusted
+    | "\(.id | tostring | gsub("[\\t\\n\\r]"; " "))\t\(if $untrusted then "untrusted" elif ._gc_scope == "" then "hq" else "rig:" + ._gc_scope end)\t\(.assignee | tostring | gsub("[\\t\\n\\r]"; " "))"' 2>/dev/null) || CLAIM_ROWS=""
 UNRECOGNIZED_ROWS=""
 if [ -n "$CLAIM_ROWS" ]; then
-    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _assignee; do
-        is_known_agent "$_assignee" || printf '%s\t%s\n' "$_bead" "$_assignee"
+    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _scope _assignee; do
+        is_known_agent "$_assignee" || printf '%s\t%s\t%s\n' "$_bead" "$_scope" "$_assignee"
     done <<<"$CLAIM_ROWS")
 fi
 
-# Ask the gate about every distinct unrecognized claimant, before any per-bead
-# read, in sorted order rotated from a random start. The sweep below reads the memo;
-# an identity the budget did not reach is protected there.
+# Ask the gate about every distinct unrecognized (scope, claimant), before any
+# per-bead read, in sorted order rotated from a random start. The sweep below
+# reads the memo; a claimant the budget did not reach is protected there.
 UNRECOGNIZED=()
 if [ -n "$UNRECOGNIZED_ROWS" ]; then
-    while IFS= read -r _identity; do
-        [ -n "$_identity" ] && UNRECOGNIZED+=("$_identity")
-    done < <(while IFS=$'\t' read -r _bead _assignee; do
-        printf '%s\n' "$_assignee"
+    while IFS= read -r _pair; do
+        [ -n "$_pair" ] && UNRECOGNIZED+=("$_pair")
+    done < <(while IFS=$'\t' read -r _bead _scope _assignee; do
+        [ "$_scope" = untrusted ] && continue
+        printf '%s\t%s\n' "$_scope" "$_assignee"
     done <<<"$UNRECOGNIZED_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
 fi
 _gate_offset=0
@@ -677,7 +847,8 @@ fi
 # gate time, and must not spend the budget before any claimant is asked.
 GATE_DEADLINE=$((SECONDS + GATE_BUDGET_SECONDS))
 for ((_i = 0; _i < ${#UNRECOGNIZED[@]}; _i++)); do
-    claim_gate_verdict "${UNRECOGNIZED[$(((_gate_offset + _i) % ${#UNRECOGNIZED[@]}))]}"
+    _pair="${UNRECOGNIZED[$(((_gate_offset + _i) % ${#UNRECOGNIZED[@]}))]}"
+    claim_gate_verdict "$(token_scope "${_pair%%$'\t'*}")" "${_pair#*$'\t'}"
 done
 
 ORPHANED=0
@@ -686,10 +857,21 @@ UNVERIFIABLE=0
 FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
-while IFS=$'\t' read -r bead_id assignee; do
-    claim_gate_verdict "$assignee"
+while IFS=$'\t' read -r bead_id scope_tok assignee; do
+    if [ "$scope_tok" = untrusted ]; then
+        GATE_REASONS="${GATE_REASONS}untrusted"$'\t'"${assignee}"$'\t'"its bead id or assignee contains a tab or line break; never asked about or released"$'\n'
+        record_protected_claim untrusted "$assignee" "$bead_id"
+        continue
+    fi
+    scope=$(token_scope "$scope_tok")
+    claim_gate_verdict "$scope" "$assignee"
+    if [ "$GATE_VERDICT" = "namespace" ]; then
+        NAMESPACE_KEPT=$((NAMESPACE_KEPT + 1))
+        NAMESPACE_KEPT_RIGS="${NAMESPACE_KEPT_RIGS}${scope}"$'\n'
+        continue
+    fi
     if [ "$GATE_VERDICT" != "local" ]; then
-        record_protected_claim "$assignee" "$bead_id"
+        record_protected_claim "$scope_tok" "$assignee" "$bead_id"
         continue
     fi
     if work_bead_still_resettable "$bead_id" "$assignee"; then
@@ -710,7 +892,7 @@ while IFS=$'\t' read -r bead_id assignee; do
             continue
         fi
     fi
-    if reset_orphan_if_current "$bead_id" "$assignee"; then
+    if reset_orphan_if_current "$bead_id" "$assignee" "$scope"; then
         ORPHANED=$((ORPHANED + 1))
     else
         reset_status=$?
@@ -750,13 +932,24 @@ orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted;
     fi
 fi
 
-if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
+# Claims kept outside guarded rig namespaces are counted per rig, never named
+# and never declared as order_outcome scopes: on a shared store they are the
+# normal state, not a partial run.
+NAMESPACE_DETAIL=""
+if [ "$NAMESPACE_KEPT" -gt 0 ]; then
+    NAMESPACE_DETAIL=$(jq -R -s -r 'split("\n") | map(select(length > 0)) | group_by(.) | map("\(.[0]): \(length)") | join(", ")' <<<"$NAMESPACE_KEPT_RIGS" 2>/dev/null) || NAMESPACE_DETAIL=""
+fi
+
+if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ] || [ "$NAMESPACE_KEPT" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
     if [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
     if [ "$PROTECTED" -gt 0 ]; then
         SUMMARY="$SUMMARY, protected $PROTECTED foreign/unknown claims"
+    fi
+    if [ "$NAMESPACE_KEPT" -gt 0 ]; then
+        SUMMARY="$SUMMARY, kept $NAMESPACE_KEPT claims outside guarded rig namespaces${NAMESPACE_DETAIL:+ ($NAMESPACE_DETAIL)}"
     fi
     echo "$SUMMARY"
     if [ -n "$PROTECTED_DETAIL" ]; then

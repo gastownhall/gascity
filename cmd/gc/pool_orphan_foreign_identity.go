@@ -148,6 +148,9 @@ type foreignClaimGate struct {
 	// looked up stays protected for the rest of the pass.
 	lookupsStopped bool
 	protected      protectedForeignAssignees
+	// namespaces is the rig namespace gate for claims in guarded rigs
+	// (federation = "rig"); nil when the pass has none to apply.
+	namespaces *poolRigNamespaceGate
 }
 
 func newForeignClaimGate(cfg *config.City, sessionStore beads.SessionStore) *foreignClaimGate {
@@ -155,10 +158,16 @@ func newForeignClaimGate(cfg *config.City, sessionStore beads.SessionStore) *for
 }
 
 // claimMayStillBeHeld reports whether the sweep must keep assignee's claim on
-// workID: either this city cannot observe the identity, and the claim is
-// recorded as protected, or a live open session answers to it.
-// liveAssignee is the sweep's per-assignee memo for that live probe.
-func (g *foreignClaimGate) claimMayStillBeHeld(assignee, workID string, liveAssignee map[string]bool) bool {
+// workID: the claim sits in a guarded rig and the rig's namespace does not
+// admit the identity (counted, not named), or this city cannot observe the
+// identity, and the claim is recorded as protected, or a live open session
+// answers to it. leg is the claim's store as claimStoreRef folds it ("" when
+// unknown). liveAssignee is the sweep's per-assignee memo for that live
+// probe.
+func (g *foreignClaimGate) claimMayStillBeHeld(assignee, workID, leg string, liveAssignee map[string]bool) bool {
+	if g.namespaces.keeps(g, assignee, workID, leg) {
+		return true
+	}
 	if !g.observable(assignee) {
 		g.protected.add(assignee, workID)
 		return true
@@ -202,6 +211,7 @@ func (g *foreignClaimGate) log() {
 		log.Printf("releaseOrphanedPoolAssignments: looking up session records for claim provenance: %v (identities outside the roster with no record found stay protected this pass)", g.lookupErr)
 	}
 	g.protected.log()
+	g.namespaces.log()
 }
 
 // poolAssigneeIsLocallyObservable reports whether local configuration alone

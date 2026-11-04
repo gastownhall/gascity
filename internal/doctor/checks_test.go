@@ -223,7 +223,10 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	}
 }
 
-func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
+// A guarded rig with its own directory is valid; the check carries no "not
+// enforced" warning about it (it may still warn that the rig has no control
+// dispatcher of its own).
+func TestConfigValidCheck_GuardedRigHasNoNotEnforcedWarning(t *testing.T) {
 	cityPath := t.TempDir()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
@@ -232,8 +235,8 @@ func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
 	}
 	c := NewConfigValidCheck(cfg)
 	r := c.Run(&CheckContext{CityPath: cityPath})
-	if r.Status != StatusWarning || !strings.Contains(r.Message, "NOT protected") {
-		t.Errorf("status = %d, msg = %q; want a warning that rig beta is not protected", r.Status, r.Message)
+	if r.Status == StatusError || strings.Contains(r.Message, "not enforce") || strings.Contains(r.Message, "NOT protected") {
+		t.Errorf("status = %d, msg = %q; want a valid guarded rig with no not-enforced warning", r.Status, r.Message)
 	}
 }
 

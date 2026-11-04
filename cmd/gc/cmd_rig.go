@@ -897,7 +897,7 @@ func renderRigListText(displayName string, result RigListJSON, stdout io.Writer)
 			if rig.Namespace != "" {
 				line += " (namespace: " + rig.Namespace + ")"
 			}
-			w(line + " (not enforced by this build)")
+			w(line)
 		}
 		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}

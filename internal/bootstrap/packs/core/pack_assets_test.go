@@ -130,6 +130,7 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		"assets/scripts/jsonl-export.sh",
 		"assets/scripts/order_outcome.sh",
 		"assets/scripts/reaper.sh",
+		"assets/scripts/rig_namespace_gate.sh",
 		"assets/scripts/scope_bd.sh",
 		"orders/jsonl-export.toml",
 		"orders/reaper.toml",

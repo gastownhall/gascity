@@ -13,15 +13,13 @@ releases the other city's rows.
 A rig's **federation** setting is the opt-in that keeps a city to its own rig's
 work in a shared store.
 
-<Warning>
-This build validates `federation` and `namespace` but does **not enforce them
-yet**. A rig with `federation = "rig"` is not protected: the city still acts
-on every row of the rig's store. `gc start`, every `gc reload`,
-`gc config show --validate`, `gc doctor` and the config validation API warn
-about each guarded rig, and `gc rig list` marks it "not enforced by this
-build". Do not attach a bead store that another city also uses until you run
-a build that enforces the setting.
-</Warning>
+With the setting, this city's discovery reads, claims, routes, wake-ups and
+releases in the rig's store keep to its own rows; reads by id, by parent and
+of dependencies, and `gc bd` reads, still show every row. The store guard
+covers every store handle the city opens, the paths that run `bd` directly
+check the setting themselves, and the core pack's maintenance orders respect
+it. The sections below describe each, and the last one lists what stays
+outside.
 
 ## Set it
 
@@ -199,11 +197,9 @@ write, with `bd show`), and `--force` never overrides one.
   counts in every spelling `bd` reads, attached (`-C<dir>`) or in a run of
   short flags (`-qC <dir>`).
 
-The core pack's maintenance orders (the orphan sweep and the scripts that ask
-`gc agent is-foreign`) are not covered by this build yet; see the warning at
-the top of this page. The dolt pack's backup order (`mol-dog-backup`) skips a
-guarded rig and records the skip in its run: the rig's store is shared with
-other cities, so whoever operates it backs it up.
+The dolt pack's backup order (`mol-dog-backup`) skips a guarded rig and
+records the skip in its run: the rig's store is shared with other cities, so
+whoever operates it backs it up.
 
 ### Routes on a new bead
 
@@ -226,6 +222,57 @@ A hand-off is one way. Owners decide before the creation stamp, so once a
 row's route names an identity outside the namespace the row is another
 city's to this city: it drops out of this city's discovery reads, and this
 city's writes to it, a route back included, are refused.
+
+## Maintenance orders on a guarded rig
+
+The core pack's orders treat a guarded rig's store as shared:
+
+- The reaper, the JSONL export and `gate-sweep` skip guarded rigs, and so
+  does the one-shot `is_blocked` repair `gc start`, `gc rig add` and a
+  resumed rig run after a bd upgrade. This city neither reaps, archives nor
+  repairs the shared store, and it does not close the timer and GitHub gates
+  there, so their dependents stay blocked until someone does. Whoever
+  operates the store must maintain and back it up, close those gates
+  (`bd gate check`), and run `bd recompute-blocked` there after a bd upgrade.
+- `cross-rig-deps` leaves dependents in guarded rigs alone, whether written
+  as bd writes them (`external:<project>:<capability>`) or in gc's own
+  `external:<rig>/<id>` spelling, and rewrites nothing in a run where it
+  cannot read `gc rig list`.
+- The orphan sweep asks `gc agent is-foreign --rig-namespace <rig>` about
+  every rig claim whose holder it does not recognize (neither a configured
+  agent nor a live session). A claim held outside the rig's namespace
+  (another city's agent or a person) is never released; the sweep counts
+  such claims per rig (`kept N claims outside guarded rig namespaces
+  (beta: N)`) without naming them. It releases a rig claim in that rig's
+  store. A claim that only `gc ready` lists (a wisp, or a rig whose own read
+  was skipped) is the guarded rig's whose bead prefix its id carries. The
+  verb decides the rig's namespace by store identity, as the store
+  guard does. The controller's own pool sweep keeps and counts the same
+  claims, and admits this city's pool sessions with the same session records
+  as the store guard.
+- The nudge and gate-notification orders check a guarded rig's assignee,
+  route or addressee first. Both gate notifications leave a gate with no
+  addressee alone when its creation stamp (`gc.owner_namespace`) names
+  another namespace. The controller tells every exec order which rigs are
+  guarded (`GC_GUARDED_RIGS`, the names from the loaded config), so in a city
+  with no guarded rig these checks are skipped and `nudge-on-route` makes no
+  `gc rig list` call. In a city with one, a run where `gc rig list` cannot be
+  read cannot tell a guarded rig apart, so it nudges and notifies nothing new
+  and fails, as `cross-rig-deps` does: the controller records `order.failed`
+  with the reason, which the dashboard flags (and `gc doctor` after three in
+  a row). A later run tries again: the event orders while the event is in
+  their lookback window, the stale-gate re-nudge on its next sweep. An order
+  that a `gc` without the variable runs reads the rig list and fails closed
+  the same way.
+
+<Warning>
+Run the core pack from the same build as `gc`. Only the core pack's own
+scripts ask with `--rig-namespace`: an older copy of the core pack (pinned,
+vendored or left from an earlier install) running under a newer `gc` asks
+without it, gets the answer for the city's roster, and does not apply the
+namespace. That combination does not fail closed. (A newer core pack under an
+older `gc` does: the older `gc` rejects the flag, and the claim is kept.)
+</Warning>
 
 ## What it does not cover
 
