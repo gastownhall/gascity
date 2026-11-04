@@ -750,6 +750,12 @@ stale-while-revalidate hits, add elapsed time to that frozen age; later point
 reads or writes must never make an older body appear younger. Preserve cache
 TTLs, coalescing, body/index pairing, partial metadata and uncached behavior.
 
+Do not cache a partial status build. A cold partial response keeps its survivor
+counts and diagnostics for that request; a partial background refresh leaves
+the last complete body, index and observation age intact. A later complete
+refresh may replace it. Never hide ready-cache uncertainty by manufacturing
+counts or falling back to an unbounded backing read.
+
 `X-GC-Cache-Age-S` describes a latest fresh observation, not a full-store causal
 watermark: a point read/write may advance `LastFreshAt` without synchronizing
 every row. The existing zero value means unknown or not applicable, not proven

@@ -418,9 +418,15 @@ func TestHandleStatusServesRecentResponseDespiteIndexAdvance(t *testing.T) {
 		listForbidden: true,
 	}
 	state.stores["myrig"] = counter
+	// The count wrapper owns the rig projection; the same complete in-memory
+	// backing supplies city/session/graph readiness for this cache fixture.
+	state.cityBeadStore = counter.Store
 	h := newTestCityHandler(t, state)
 
 	first := getStatusFrom(t, h, state)
+	if first.Partial {
+		t.Fatalf("complete counter cache fixture returned partial status: %v", first.PartialErrors)
+	}
 	if first.Work.Open != 2 {
 		t.Fatalf("Work.Open = %d, want 2", first.Work.Open)
 	}
@@ -432,6 +438,9 @@ func TestHandleStatusServesRecentResponseDespiteIndexAdvance(t *testing.T) {
 	counter.counts["open"] = 7
 
 	second := getStatusFrom(t, h, state)
+	if second.Partial {
+		t.Fatalf("cached counter response became partial: %v", second.PartialErrors)
+	}
 	if second.Work.Open != 2 {
 		t.Fatalf("Work.Open = %d, want 2 (cached within TTL floor)", second.Work.Open)
 	}

@@ -29,23 +29,34 @@ var capturedCodexPristine string
 //go:embed testdata/codex-95-compact-pristine-screen.txt
 var capturedCodexCompactPristine string
 
+// Actual F4 supervisor API current-frame capture for Codex0.162.1 suggest mode.
+// Only cwd strings are anonymized; this is unstyled API output, not a native
+// -e capture. The existing styled native fixture remains unchanged.
+//
+//go:embed testdata/codex-f4-suggest-pristine-screen.txt
+var capturedCodexSuggestPristine string
+
 func TestBootstrapCompactNativeCapturedReadyRequiresIssuedAuthority(t *testing.T) {
-	p, m := bootstrapModel(t)
-	m.screen = func(*fenceModel) string { return capturedCodexCompactPristine }
-	req := runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}
-	if got, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, req); err != nil || got != nil {
-		t.Fatalf("compact screen minted pre-start authority: %+v %v", got, err)
-	}
-	if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
-		t.Fatal(err)
-	}
-	proof := bootstrapProof(t, p)
-	if proof.Fence != bootstrapFence || proof.Token == "" {
-		t.Fatal("compact native ready lost issued authority")
-	}
-	recovered := fenceModelProvider(m)
-	if got := bootstrapProof(t, recovered); got.Token != proof.Token {
-		t.Fatal("compact recovery changed issued native authority")
+	for mode, frame := range map[string]string{"unrestricted": capturedCodexCompactPristine, "suggest": capturedCodexSuggestPristine} {
+		t.Run(mode, func(t *testing.T) {
+			p, m := bootstrapModel(t)
+			m.screen = func(*fenceModel) string { return frame }
+			req := runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}
+			if got, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, req); err != nil || got != nil {
+				t.Fatalf("compact screen minted pre-start authority: %+v %v", got, err)
+			}
+			if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+				t.Fatal(err)
+			}
+			proof := bootstrapProof(t, p)
+			if proof.Fence != bootstrapFence || proof.Token == "" {
+				t.Fatal("compact native ready lost issued authority")
+			}
+			recovered := fenceModelProvider(m)
+			if got := bootstrapProof(t, recovered); got.Token != proof.Token {
+				t.Fatal("compact recovery changed issued native authority")
+			}
+		})
 	}
 }
 
@@ -61,7 +72,7 @@ func TestBootstrapCompactPristineLayoutKeepsNativeVetoes(t *testing.T) {
 	withoutBanner := brand + afterBrand
 	dim := strings.ReplaceAll(capturedCodexCompactPristine, "› Ask Codex to do anything", "› \x1b[2mAsk Codex to do anything\x1b[22m")
 	dim = strings.ReplaceAll(dim, "GPT-6.1-Sol medium", "\x1b[2mGPT-6.1-Sol medium\x1b[22m")
-	for name, frame := range map[string]string{"without optional update panel": withoutBanner, "dim native placeholder and status": dim} {
+	for name, frame := range map[string]string{"without optional update panel": withoutBanner, "dim native placeholder and status": dim, "actual suggest frame without permission row": capturedCodexSuggestPristine} {
 		t.Run(name, func(t *testing.T) {
 			if !pristineBootstrapScreen(frame, "codex") {
 				t.Fatal("qualified compact layout refused")
@@ -69,6 +80,13 @@ func TestBootstrapCompactPristineLayoutKeepsNativeVetoes(t *testing.T) {
 		})
 	}
 	for name, frame := range map[string]string{
+		"suggest unknown permissions":      strings.Replace(capturedCodexSuggestPristine, "› Ask Codex to do anything", "permissions: unrecognized mode\n› Ask Codex to do anything", 1),
+		"suggest prior history":            "Previous assistant output\n" + capturedCodexSuggestPristine,
+		"suggest draft":                    strings.Replace(capturedCodexSuggestPristine, "› Ask Codex to do anything", "› user's draft", 1),
+		"suggest native busy":              strings.Replace(capturedCodexSuggestPristine, "› Ask Codex to do anything", "• Working (1s • esc to interrupt)\n› Ask Codex to do anything", 1),
+		"suggest spoofed brand":            strings.Replace(capturedCodexSuggestPristine, ">_ OpenAI Codex (v0.162.1)", ">_ Other program (v0.162.1)", 1),
+		"suggest missing footer":           strings.Replace(capturedCodexSuggestPristine, "? for shortcuts", "", 1),
+		"suggest unknown control":          "\x1b[1G" + capturedCodexSuggestPristine,
 		"draft":                            strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "› user's draft", 1),
 		"pasted draft":                     strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "› [Pasted Content 24 chars]", 1),
 		"native busy":                      strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "• Working (1s • esc to interrupt)\n› Ask Codex to do anything", 1),
@@ -79,7 +97,7 @@ func TestBootstrapCompactPristineLayoutKeepsNativeVetoes(t *testing.T) {
 		"native question":                  strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "Which animal should we choose?\n1. Otter\n2. Owl\n› Ask Codex to do anything", 1),
 		"second composer":                  capturedCodexCompactPristine + "\n› ",
 		"missing brand":                    strings.Replace(capturedCodexCompactPristine, ">_ OpenAI Codex (v0.162.1)", "", 1),
-		"missing permissions":              strings.Replace(capturedCodexCompactPristine, "permissions: YOLO mode", "", 1),
+		"unknown permissions":              strings.Replace(capturedCodexCompactPristine, "permissions: YOLO mode", "permissions: unrecognized mode", 1),
 		"missing model footer":             strings.Replace(capturedCodexCompactPristine, "GPT-6.1-Sol medium ·", "", 1),
 		"missing shortcuts footer":         strings.Replace(capturedCodexCompactPristine, "? for shortcuts", "", 1),
 		"truncated update panel":           strings.Replace(capturedCodexCompactPristine, "╰─────────────────────────────────────────────────╯", "", 1),
@@ -223,35 +241,40 @@ func TestBootstrapNativeBusyDraftHistoryAndWrongIncarnationRefuse(t *testing.T) 
 }
 
 func TestBootstrapFirstFencedInputConsumesCreditAndRefusesReplay(t *testing.T) {
-	p, m := bootstrapModel(t)
-	if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
-		t.Fatal(err)
-	}
-	proof := bootstrapProof(t, p)
-	g := newPaneGuard(fenceModelSession, bootstrapFence.Digest(), true)
-	g.bootstrap = proof
-	if err := g.verify(t.Context(), p.tm); err != nil {
-		t.Fatal(err)
-	}
-	text := []string{"send-keys", "-t", "=lab:@1.%1", "-l", "first complete input"}
-	if _, err := g.run(t.Context(), p.tm, text); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := g.run(t.Context(), p.tm, []string{"send-keys", "-t", "=lab:@1.%1", "Enter"}); err != nil {
-		t.Fatal("same operation must finish its submit:", err)
-	}
-	_, before, _ := m.snapshot()
-	replay := newPaneGuard(fenceModelSession, bootstrapFence.Digest(), true)
-	replay.bootstrap = proof
-	if _, err := replay.run(t.Context(), p.tm, text); !errors.Is(err, runtime.ErrNudgeNotSent) {
-		t.Fatalf("first-input replay was not refused unsent: %v", err)
-	}
-	_, after, buffers := m.snapshot()
-	if strings.Join(before, "|") != strings.Join(after, "|") || buffers != 0 {
-		t.Fatalf("replay leaked input or staged buffers: before=%v after=%v buffers=%d", before, after, buffers)
-	}
-	if got, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}); err != nil || got != nil {
-		t.Fatalf("consumed credit observed again: %+v %v", got, err)
+	for mode, frame := range map[string]string{"intro": capturedCodexPristine, "unrestricted": capturedCodexCompactPristine, "suggest": capturedCodexSuggestPristine} {
+		t.Run(mode, func(t *testing.T) {
+			p, m := bootstrapModel(t)
+			m.screen = func(*fenceModel) string { return frame }
+			if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+				t.Fatal(err)
+			}
+			proof := bootstrapProof(t, p)
+			g := newPaneGuard(fenceModelSession, bootstrapFence.Digest(), true)
+			g.bootstrap = proof
+			if err := g.verify(t.Context(), p.tm); err != nil {
+				t.Fatal(err)
+			}
+			text := []string{"send-keys", "-t", "=lab:@1.%1", "-l", "first complete input"}
+			if _, err := g.run(t.Context(), p.tm, text); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.run(t.Context(), p.tm, []string{"send-keys", "-t", "=lab:@1.%1", "Enter"}); err != nil {
+				t.Fatal("same operation must finish its submit:", err)
+			}
+			_, before, _ := m.snapshot()
+			replay := newPaneGuard(fenceModelSession, bootstrapFence.Digest(), true)
+			replay.bootstrap = proof
+			if _, err := replay.run(t.Context(), p.tm, text); !errors.Is(err, runtime.ErrNudgeNotSent) {
+				t.Fatalf("first-input replay was not refused unsent: %v", err)
+			}
+			_, after, buffers := m.snapshot()
+			if strings.Join(before, "|") != strings.Join(after, "|") || buffers != 0 {
+				t.Fatalf("replay leaked input or staged buffers: before=%v after=%v buffers=%d", before, after, buffers)
+			}
+			if got, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}); err != nil || got != nil {
+				t.Fatalf("consumed credit observed again: %+v %v", got, err)
+			}
+		})
 	}
 }
 

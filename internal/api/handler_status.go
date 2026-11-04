@@ -198,7 +198,9 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 
 	observation := cachedStatusResponse{ObservedAt: livenessClock.Now(), SourceAgeS: cacheAgeSeconds(store).ageS}
 	resp := s.buildStatusBody(ctx, input.Lite)
-	if !blocking {
+	// Partial reads retain their survivor counts and diagnostics for this
+	// request, but must not turn a transient store failure into a cached body.
+	if !blocking && !resp.Partial {
 		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
 		s.storeResponse(cacheKey, bucket, observation)
 	}
@@ -378,6 +380,12 @@ func (s *Server) runStatusBuild(cacheKey string, lite bool, b *statusBuild) {
 			SourceAgeS: cacheAgeSeconds(s.state.CityBeadStore()).ageS,
 		}
 		resp := s.buildStatusBody(ctx, lite)
+		// Keep any prior complete snapshot with its original index/age. A
+		// partial refresh is not a newer reusable observation; the next stale
+		// request can try the same bounded, coalesced refresh again.
+		if resp.Partial {
+			return
+		}
 		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
 		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), observation)
 		b.built = &observation

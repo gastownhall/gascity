@@ -399,7 +399,7 @@ var (
 		`^(?:╭─+╮\n│ ✨ Update available! [0-9]+(?:\.[0-9]+){2} -> [0-9]+(?:\.[0-9]+){2} │\n` +
 			`│ Run npm install -g @openai/codex to update\. │\n│ │\n│ See full release notes: │\n` +
 			`│ https://github\.com/openai/codex/releases/latest │\n╰─+╯\n)?` +
-			`>_ OpenAI Codex \(v0\.162\.1\)\n(?:~/|/)[^\n]+\npermissions: YOLO mode\n` +
+			`>_ OpenAI Codex \(v0\.162\.1\)\n(?:~/|/)[^\n]+\n(?:permissions: YOLO mode\n)?` +
 			`› Ask Codex to do anything\nGPT-[A-Za-z0-9_.-]+ (?:minimal|low|medium|high|xhigh|max) · (?:~/|/)[^\n]+\n` +
 			`\? for shortcuts(?: ⚠ [1-9][0-9]* warnings? · f2 to view)?$`)
 )

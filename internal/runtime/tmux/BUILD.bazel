@@ -212,6 +212,7 @@ go_test(
     embedsrcs = [
         "testdata/codex-c75-pristine-screen.txt",
         "testdata/codex-95-compact-pristine-screen.txt",
+        "testdata/codex-f4-suggest-pristine-screen.txt",
         "testdata/codex-f567-styled-pristine-screen.txt",
     ],
     # program_capture_integration_test.go and

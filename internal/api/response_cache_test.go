@@ -26,6 +26,43 @@ type countingStore struct {
 	listByAssigneeCalls int
 }
 
+// These cache fixtures wrap an in-memory store. Preserve its bounded Ready
+// capability instead of accidentally making every status build partial.
+func (s *countingStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return testReadyContext(ctx, s.Store, query...)
+}
+
+// statusCacheLivenessReporter adds the Ready capability only to the complete
+// status-cache fixtures; the general liveness-only stub remains unchanged.
+type statusCacheLivenessReporter struct {
+	stubLivenessReporter
+}
+
+func (s statusCacheLivenessReporter) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return testReadyContext(ctx, s.Store, query...)
+}
+
+// Stored-count List still blocks in the SWR fixture. Ready is answered by its
+// in-memory backing without changing that barrier or its List-call assertions.
+type statusCacheBlockingListStore struct {
+	*blockingListStore
+}
+
+func (s *statusCacheBlockingListStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return testReadyContext(ctx, s.Store, query...)
+}
+
+func requireCompleteCachedStatus(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	var body StatusBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Partial {
+		t.Fatalf("complete cache fixture returned partial status: %v", body.PartialErrors)
+	}
+}
+
 func (s *countingStore) ListOpen(status ...string) ([]beads.Bead, error) {
 	s.listCalls++
 	return s.Store.ListOpen(status...)
@@ -69,7 +106,7 @@ func TestHandleStatusCachedObservationAgeSurvivesStoreRefresh(t *testing.T) {
 					now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 					fc := &clock.Fake{Time: now}
 					t.Cleanup(SetLivenessClockForTest(fc))
-					store := &stubLivenessReporter{Store: beads.NewMemStore(), live: true}
+					store := &statusCacheLivenessReporter{stubLivenessReporter{Store: beads.NewMemStore(), live: true}}
 					initialAge := 0.0
 					if known {
 						store.lastFresh = now.Add(-time.Minute)
@@ -90,6 +127,7 @@ func TestHandleStatusCachedObservationAgeSurvivesStoreRefresh(t *testing.T) {
 						if rec.Code != http.StatusOK {
 							t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 						}
+						requireCompleteCachedStatus(t, rec)
 						age, err := strconv.ParseFloat(rec.Header().Get("X-GC-Cache-Age-S"), 64)
 						if err != nil || age != wantAge {
 							t.Fatalf("cached observation age = %v (%v), want %v", age, err, wantAge)
@@ -142,7 +180,7 @@ func TestHandleStatusBackgroundRefreshFreezesObservation(t *testing.T) {
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	fc := &clock.Fake{Time: now}
 	t.Cleanup(SetLivenessClockForTest(fc))
-	store := &stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-time.Minute)}
+	store := &statusCacheLivenessReporter{stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-time.Minute)}}
 	state := newFakeState(t)
 	state.cityBeadStore = store
 	srv := New(state)
@@ -158,6 +196,7 @@ func TestHandleStatusBackgroundRefreshFreezesObservation(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}
+		requireCompleteCachedStatus(t, rec)
 		age, err := strconv.ParseFloat(rec.Header().Get("X-GC-Cache-Age-S"), 64)
 		if err != nil || age != wantAge {
 			t.Fatalf("observation age = %v (%v), want %v", age, err, wantAge)
@@ -171,6 +210,120 @@ func TestHandleStatusBackgroundRefreshFreezesObservation(t *testing.T) {
 	fc.Time = now.Add(10 * time.Second)
 	store.lastFresh = fc.Time
 	read(5)
+}
+
+// A transient cache-only Ready refusal is a partial response, not a reusable
+// snapshot of healthy status. Recovery must be visible on the next request,
+// without waiting for a bucket, TTL floor or stale refresh to expire.
+func TestHandleStatusPartialReadyFailureIsNotCached(t *testing.T) {
+	oldTTL, oldFloor := timeBucketResponseCacheTTL, statusResponseTTLFloor
+	timeBucketResponseCacheTTL, statusResponseTTLFloor = time.Hour, time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL, statusResponseTTLFloor = oldTTL, oldFloor
+	})
+	state := newFakeState(t)
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{Type: "task", Title: "ready after cache recovery"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &failingBeadStore{
+		Store:    backing,
+		readyErr: fmt.Errorf("reading complete ready projection from cache: %w", beads.ErrCacheUnavailable),
+	}
+	state.cityBeadStore = store
+	state.stores["myrig"] = store
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	read := func() StatusBody {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var body StatusBody
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	first := read()
+	if !first.Partial || !statusPartialErrorsContain(first.PartialErrors, "city work ready:") || first.Work.Open != 1 {
+		t.Fatalf("partial ready failure lost its diagnostic or stored survivor: %+v", first)
+	}
+	store.readyErr = nil
+	recovered := read()
+	if recovered.Partial || len(recovered.PartialErrors) != 0 || recovered.Work.Ready != 1 || recovered.Work.Open != 1 {
+		t.Fatalf("recovered store still served cached partial status: %+v", recovered)
+	}
+}
+
+func TestHandleStatusBackgroundPartialDoesNotReplaceCompleteSnapshot(t *testing.T) {
+	oldTTL, oldFloor := timeBucketResponseCacheTTL, statusResponseTTLFloor
+	timeBucketResponseCacheTTL, statusResponseTTLFloor = time.Hour, time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL, statusResponseTTLFloor = oldTTL, oldFloor
+	})
+	for _, prime := range []bool{false, true} {
+		t.Run(fmt.Sprintf("primed=%t", prime), func(t *testing.T) {
+			state := newFakeState(t)
+			backing := beads.NewMemStore()
+			bead, err := backing.Create(beads.Bead{Type: "task", Title: "last complete ready work"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &failingBeadStore{Store: backing}
+			state.cityBeadStore = store
+			state.stores["myrig"] = store
+			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
+			read := func() (*httptest.ResponseRecorder, StatusBody) {
+				t.Helper()
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+				}
+				var body StatusBody
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				return rec, body
+			}
+			var initial *httptest.ResponseRecorder
+			if prime {
+				var body StatusBody
+				initial, body = read()
+				if body.Partial || body.Work.Ready != 1 {
+					t.Fatalf("initial complete status = %+v", body)
+				}
+			}
+			ep := state.eventProv.(*events.Fake)
+			ep.Record(events.Event{Type: events.BeadUpdated, Actor: "human"})
+			store.readyErr = fmt.Errorf("reading complete ready projection from cache: %w", beads.ErrCacheUnavailable)
+			srv.refreshStatusResponseInBackground("status", false)
+			srv.waitForBackground()
+			store.readyErr = nil
+			rec, body := read()
+			if body.Partial || len(body.PartialErrors) != 0 || body.Work.Ready != 1 || body.Work.Open != 1 {
+				t.Fatalf("failed background ready read poisoned cached status: %+v", body)
+			}
+			if prime && (rec.Body.String() != initial.Body.String() || responseIndex(t, rec) != responseIndex(t, initial)) {
+				t.Fatal("partial refresh replaced the last complete body/index")
+			}
+			closed := "closed"
+			if err := backing.Update(bead.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+				t.Fatal(err)
+			}
+			ep.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
+			srv.refreshStatusResponseInBackground("status", false)
+			srv.waitForBackground()
+			fresh, after := read()
+			if after.Partial || after.Work.Ready != 0 || after.Work.Open != 0 || responseIndex(t, fresh) <= responseIndex(t, rec) {
+				t.Fatalf("complete refresh after recovery failed: index=%d body=%+v", responseIndex(t, fresh), after)
+			}
+		})
+	}
 }
 
 // TestHandleStatusCachesAcrossIndexChanges pins the gascity#3186 fix: /status
@@ -199,6 +352,7 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
@@ -207,6 +361,7 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	builtIndex := rec.Header().Get("X-GC-Index")
 	if builtIndex == "" {
 		t.Fatal("first status missing X-GC-Index")
@@ -217,6 +372,7 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	if store.listCalls != 1 {
 		t.Fatalf("List calls after cached repeat = %d, want 1", store.listCalls)
 	}
@@ -230,6 +386,7 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status after event %d = %d, want 200", i, rec.Code)
 		}
+		requireCompleteCachedStatus(t, rec)
 	}
 	if store.listCalls != 1 {
 		t.Fatalf("List calls after %d index changes = %d, want 1 (time-bucketed cache must survive sequence churn)", 5, store.listCalls)
@@ -268,6 +425,7 @@ func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
@@ -276,6 +434,7 @@ func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	if store.listCalls != 1 {
 		t.Fatalf("List calls after cold first request = %d, want 1", store.listCalls)
 	}
@@ -299,6 +458,7 @@ func TestHandleStatusTTLFloorHitReportsBuildIndex(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -308,6 +468,7 @@ func TestHandleStatusTTLFloorHitReportsBuildIndex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	builtIndex := responseIndex(t, rec)
 	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 
@@ -316,6 +477,7 @@ func TestHandleStatusTTLFloorHitReportsBuildIndex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	// No rebuild, inline or in the background: the repeat was a TTL-floor
 	// hit, not a stale-while-revalidate serve.
 	srv.waitForBackground()
@@ -356,11 +518,11 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	state := newFakeState(t)
 	fastStore := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = fastStore
-	state.cityBeadStore = stubLivenessReporter{
+	state.cityBeadStore = statusCacheLivenessReporter{stubLivenessReporter{
 		Store:     beads.NewMemStore(),
 		live:      true,
 		lastFresh: now.Add(-time.Duration(staleSnapshotAgeS) * time.Second),
-	}
+	}}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -372,6 +534,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("priming status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	var primed statusResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &primed); err != nil {
 		t.Fatalf("decode priming response: %v", err)
@@ -396,7 +559,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	release := make(chan struct{})
 	closeRelease := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(closeRelease) // safety net if the test fails before the explicit close below
-	state.stores["myrig"] = &blockingListStore{Store: fastStore, release: release}
+	state.stores["myrig"] = &statusCacheBlockingListStore{&blockingListStore{Store: fastStore, release: release}}
 
 	rec2 := httptest.NewRecorder()
 	served := make(chan struct{})
@@ -409,6 +572,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("stale-served status = %d, want 200", rec2.Code)
 	}
+	requireCompleteCachedStatus(t, rec2)
 	var stale statusResponse
 	if err := json.Unmarshal(rec2.Body.Bytes(), &stale); err != nil {
 		t.Fatalf("decode stale response: %v", err)
@@ -478,6 +642,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("concurrent stale-served status #%d = %d, want 200", i, rec.Code)
 		}
+		requireCompleteCachedStatus(t, rec)
 	}
 
 	// Release the blocked store and let the background refresh finish, then
@@ -568,6 +733,7 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 	state := newFakeState(t)
 	fastStore := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = fastStore
+	state.cityBeadStore = fastStore.Store
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -579,6 +745,7 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("priming status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	var primed statusResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &primed); err != nil {
 		t.Fatalf("decode priming response: %v", err)
@@ -593,6 +760,7 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("stale-served status = %d, want 200", rec2.Code)
 	}
+	requireCompleteCachedStatus(t, rec2)
 	var stale statusResponse
 	if err := json.Unmarshal(rec2.Body.Bytes(), &stale); err != nil {
 		t.Fatalf("decode stale response: %v", err)
@@ -618,6 +786,7 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	h := newTestCityHandler(t, state)
 
 	// Prime the time-bucketed cache with a non-blocking request.
@@ -627,6 +796,7 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("priming status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	if store.listCalls != 1 {
 		t.Fatalf("List calls after priming = %d, want 1", store.listCalls)
 	}
@@ -639,6 +809,7 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("blocking status = %d, want 200", rec.Code)
 	}
+	requireCompleteCachedStatus(t, rec)
 	if store.listCalls != 2 {
 		t.Fatalf("List calls after blocking request = %d, want 2 (blocking must bypass time cache)", store.listCalls)
 	}
