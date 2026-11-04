@@ -1838,14 +1838,9 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		}
 	}
 	for path, wants := range map[string][]string{
-		"/work/.github/hooks/gascity.json": {
-			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
-		},
-		"/work/.cursor/hooks.json": {
-			`hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
-		},
+		// Copilot and cursor are absent on purpose: both discard prompt-hook
+		// output, so they run no nudge drain or mail check
+		// (TestDiscardedOutputOverlaysRunNoConsumptiveHooks).
 		"/work/.kiro/agents/gascity.json": {
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
 			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
