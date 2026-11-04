@@ -12,8 +12,8 @@ import (
 
 // heldTurnProvider is a liveTurnProvider (its screen's turn look scripted)
 // whose agent pane also answers the program-status reads a FullFake
-// answers: the cached reading, the shadow's fresh read and sink, and the
-// mid-turn hold's fresh read.
+// answers: the cached reading, the shadow's fresh read, idle wait and sink,
+// and the mid-turn hold's fresh read.
 type heldTurnProvider struct {
 	*liveTurnProvider
 }
@@ -30,6 +30,10 @@ func (p heldTurnProvider) ProgramStatusShadowSink() runtime.ProgramStatusCompari
 
 func (p heldTurnProvider) ProgramStatusShadowRead(name string) (runtime.ProgramStatus, bool) {
 	return p.full().ProgramStatusShadowRead(name)
+}
+
+func (p heldTurnProvider) ProgramStatusShadowIdleWait(name string, started, decidedAt time.Time, scrape runtime.ProgramVerdict) {
+	p.full().ProgramStatusShadowIdleWait(name, started, decidedAt, scrape)
 }
 
 func (p heldTurnProvider) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReading, bool) {

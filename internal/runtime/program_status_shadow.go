@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -273,6 +274,12 @@ type ProgramStatusShadowProvider interface {
 	// a point that judges two readings taken apart ([ShadowIdleProof]). ok
 	// is false unless the switch is shadow and the read succeeded.
 	ProgramStatusShadowRead(name string) (ProgramStatus, bool)
+	// ProgramStatusShadowIdleWait records session name's idle wait decided
+	// outside the leaf's own WaitForIdle (wait_for_idle; [ShadowWaitForIdle]):
+	// begun at started, decided at decidedAt with scrape. It does nothing
+	// unless the switch is shadow, and takes the decision's reading before it
+	// returns, so the caller's act on the decision cannot reach it.
+	ProgramStatusShadowIdleWait(name string, started, decidedAt time.Time, scrape ProgramVerdict)
 }
 
 // ProgramStatusShadowFor reads session name's program status on the leaf
@@ -334,24 +341,113 @@ func programStatusShadowFresh(p Provider, name string) (ProgramStatus, ProgramSt
 // marked ([WithShadowCallerRecords]) and that wait records no wait_for_idle
 // of its own: a busy seat's idle proof fails every tick.
 func ShadowIdleProof(ctx context.Context, p Provider, name string, prove func(context.Context) bool) bool {
-	before, sink, shadowed := programStatusShadowFresh(p, name)
+	sample := BeginShadowIdleProof(p, name)
 	proved := prove(WithShadowCallerRecords(ctx))
-	if !shadowed {
-		return proved
-	}
-	after, _, ok := programStatusShadowFresh(p, name)
-	if !ok {
-		return proved
-	}
-	scrape := ProgramVerdictBusy
-	if proved {
-		scrape = ProgramVerdictIdle
-	}
-	sink(ProgramStatusComparison{
-		Session: name, Point: ProgramPointProvedIdle,
-		Scrape: scrape, Program: ProgramQuiescentVerdict(before, after), Status: after,
-	})
+	sample.Record(proved)
 	return proved
+}
+
+// ShadowIdleSample is the record's side of one decision that a session is
+// idle enough to sleep (proved_idle), begun before the decision's own reads
+// ([BeginShadowIdleProof]) and recorded when it is made
+// ([ShadowIdleSample.Record]), so its two readings bracket them. A nil
+// sample, which a leaf that is not shadowing begins, records nothing.
+type ShadowIdleSample struct {
+	p      Provider
+	name   string
+	before ProgramStatus
+	sink   ProgramStatusComparisonSink
+	once   sync.Once
+}
+
+// BeginShadowIdleProof takes the record's first reading of session name for
+// an idle decision whose own reads follow, fresh from the runtime
+// ([ProgramStatusShadowProvider.ProgramStatusShadowRead]). It returns nil,
+// having read nothing past the leaf's sink, unless the leaf serving the
+// session is shadowing.
+func BeginShadowIdleProof(p Provider, name string) *ShadowIdleSample {
+	before, sink, ok := programStatusShadowFresh(p, name)
+	if !ok {
+		return nil
+	}
+	return &ShadowIdleSample{p: p, name: name, before: before, sink: sink}
+}
+
+// Record records the decision made since the sample began, proved idle or
+// not, beside the record's own sleep proof ([ProgramQuiescentVerdict]) over
+// the sample's first reading and one taken fresh now. A sample records once:
+// a decision re-made on the same reads records nothing more. It never feeds
+// the decision.
+func (s *ShadowIdleSample) Record(proved bool) {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		after, _, ok := programStatusShadowFresh(s.p, s.name)
+		if !ok {
+			return
+		}
+		scrape := ProgramVerdictBusy
+		if proved {
+			scrape = ProgramVerdictIdle
+		}
+		s.sink(ProgramStatusComparison{
+			Session: s.name, Point: ProgramPointProvedIdle,
+			Scrape: scrape, Program: ProgramQuiescentVerdict(s.before, after), Status: after,
+		})
+	})
+}
+
+// ShadowWaitForIdle records an idle wait for session name decided outside
+// the leaf's own WaitForIdle (wait_for_idle): begun at started, decided at
+// decidedAt with scrape (idle when it let a delivery go), handed to the leaf
+// serving the session ([ProgramStatusShadowProvider.ProgramStatusShadowIdleWait]).
+// The caller makes the call after the decision and before acting on it, so
+// the reading cannot judge what it then does. It records nothing unless the
+// leaf is shadowing, and returns nothing: a comparison never feeds a
+// decision.
+func ShadowWaitForIdle(p Provider, name string, started, decidedAt time.Time, scrape ProgramVerdict) {
+	if p == nil || name == "" {
+		return
+	}
+	leaf, _, _ := ResolveBackend(p, name)
+	if sh, ok := leaf.(ProgramStatusShadowProvider); ok {
+		sh.ProgramStatusShadowIdleWait(name, started, decidedAt, scrape)
+	}
+}
+
+// recordIdleWaitUntimed records an idle wait decided outside leaf p, which
+// takes no follow-up, beside the record's idle verdict on a reading of
+// session name taken fresh now: the decision's verdict, untimed.
+func recordIdleWaitUntimed(p Provider, name string, scrape ProgramVerdict) {
+	s, sink, ok := programStatusShadowFresh(p, name)
+	if !ok {
+		return
+	}
+	judged := time.Now()
+	sink(ProgramStatusComparison{
+		Session: name, Point: ProgramPointWaitForIdle,
+		Scrape: scrape, Program: ProgramIdleVerdict(s, time.Time{}, judged), Status: s, JudgedAt: judged,
+	})
+}
+
+// ShadowCompareIdle is [ShadowCompare] for a point that sets an idle
+// reading beside the record's idle verdict ([ProgramIdleVerdict]), judged
+// when the leaf's reading is taken: the observation point, and the op
+// lane's wait-idle pre-read.
+func ShadowCompareIdle(p Provider, name, sessionID, family string, point ProgramStatusPoint, scrape ProgramVerdict) {
+	if p == nil || name == "" {
+		return
+	}
+	s, sink, ok := ProgramStatusShadowFor(p, name)
+	if !ok {
+		return
+	}
+	judged := time.Now()
+	sink(ProgramStatusComparison{
+		Session: name, SessionID: sessionID, Family: family, Point: point,
+		Scrape: scrape, Program: ProgramIdleVerdict(s, time.Time{}, judged), Status: s, JudgedAt: judged,
+	})
 }
 
 // ShadowCompare records one comparison for session name at a decision

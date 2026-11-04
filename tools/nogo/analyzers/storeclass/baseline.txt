@@ -747,7 +747,6 @@ cmd/gc/cmd_wait.go	waitFrameGap	raw-param	1
 cmd/gc/cmd_wait.go	withdrawQueuedWaitNudges	mint	1
 cmd/gc/controller.go	controllerLoop	raw-param	1
 cmd/gc/controller.go	gracefulStopAllWithForceSignal	unwrap	9
-cmd/gc/controller.go	resetAndClearSessionCircuitBreakerState	raw-param	1
 cmd/gc/controller.go	resetSessionCircuitBreakerState	raw-param	1
 cmd/gc/controller.go	runController	raw-param	2
 cmd/gc/convergence_store.go	activateDeferredAssigneesIn	raw-param	1

@@ -1675,21 +1675,17 @@ func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *Runtim
 }
 
 // startupLadderShadower is the start ops' shadow seam for the startup
-// ladder's busy look (startup_ladder); ops that do not implement it record
-// nothing.
+// ladder's decisions, at each send and each busy look (startup_ladder); ops
+// that do not implement it record nothing.
 type startupLadderShadower interface {
-	shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error)
+	shadowStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
 }
 
-// shadowStartupBusy wraps busy to record each look beside the program's
-// record, against a baseline read now, before the ladder's first send. Off
-// shadow, busy is returned as is.
-func (o *tmuxStartOps) shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error) {
-	s, ok := o.tm.shadowRead(name)
-	if !ok {
-		return busy
-	}
-	return o.tm.shadowStartupBusy(name, s.Baseline(), busy)
+// shadowStartupLadder wraps send and busy to record each ladder decision
+// beside the program's record (Tmux.shadowStartupLadder). Off shadow, both
+// are returned as they are.
+func (o *tmuxStartOps) shadowStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.shadowStartupLadder(name, send, busy)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -2303,12 +2299,13 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		send := func() error { return ops.sendKeys(name, cfg.Nudge) }
 		busy := func() (bool, error) { return ops.paneBusy(name) }
 		if sh, ok := ops.(startupLadderShadower); ok {
-			busy = sh.shadowStartupBusy(name, busy)
+			send, busy = sh.shadowStartupLadder(name, send, busy)
 		}
 		if err := sendStartupNudgeWithRetry(ctx,
-			func() error { return ops.sendKeys(name, cfg.Nudge) },
+			send,
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
 			busy); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the

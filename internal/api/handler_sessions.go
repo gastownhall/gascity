@@ -717,7 +717,9 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
 	if resp.Running {
-		ps := programStatusUnder(configuredProgramStatusMode(cfg), s.state.SessionProvider(), info.SessionName)
+		published, sp := configuredProgramStatusMode(cfg), s.state.SessionProvider()
+		ps := programStatusUnder(published, sp, info.SessionName)
+		shadowObservation(published, sp, info.SessionName, info.ID, session.ProviderFamilyFromInfo(info, ""), resp.Activity)
 		obs := observeProgram(ps, resp.Activity)
 		resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 	}
