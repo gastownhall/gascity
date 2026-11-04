@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -123,9 +124,13 @@ func (s *NativeDoltStore) DepMetadataBatch(ids []string) (map[DepPair]string, er
 }
 
 // DepRemoveBatch removes the edges in one transaction, one Dolt commit, each
-// through the transaction's RemoveDependency (the structural teardown
-// DepRemove's editor does, writing no event). A backend with no transaction to
-// open reports ErrDepRemoveBatchUnsupported before anything is written.
+// through the transaction's RemoveDependency. Unlike DepRemove, whose editor
+// records a dependency_removed history event per edge, it records none: the
+// transaction's RemoveDependency is the library's structural teardown, and a
+// batch removal is structural (the clear detaching rows it moved), not an edit
+// an operator made. The deadline grows with the batch, as a graph apply's does
+// (nativeDepRemoveBatchDeadline). A backend with no transaction to open reports
+// ErrDepRemoveBatchUnsupported before anything is written.
 func (s *NativeDoltStore) DepRemoveBatch(pairs []DepPair) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
@@ -139,7 +144,7 @@ func (s *NativeDoltStore) DepRemoveBatch(pairs []DepPair) error {
 	}
 	defer release()
 	err = retryOnNativeDoltSerializationConflict(func() error {
-		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		ctx, cancel := context.WithTimeout(context.Background(), nativeDepRemoveBatchDeadline(len(pairs)))
 		defer cancel()
 		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: remove %d dependencies", len(pairs)), func(tx beadslib.Transaction) error {
 			for _, p := range pairs {
@@ -155,4 +160,12 @@ func (s *NativeDoltStore) DepRemoveBatch(pairs []DepPair) error {
 		return fmt.Errorf("%w: %w", ErrDepRemoveBatchUnsupported, err)
 	}
 	return err
+}
+
+// nativeDepRemoveBatchDeadline scales DepRemoveBatch's budget with the edges
+// it removes: the flat operation budget plus a second per edge, about fifteen
+// times the 55-65 ms an edge measured on a loaded host, so a slow host does
+// not hit the wall inside one batch.
+func nativeDepRemoveBatchDeadline(edges int) time.Duration {
+	return bdCommandTimeout + time.Duration(edges)*time.Second
 }

@@ -217,6 +217,7 @@ go_test(
         "native_dolt_store_count_test.go",
         "native_dolt_store_dep_batch_test.go",
         "native_dolt_store_dep_metadata_batch_integration_test.go",
+        "native_dolt_store_dep_remove_batch_test.go",
         "native_dolt_store_exact_batch_embedded_test.go",
         "native_dolt_store_exact_batch_test.go",
         "native_dolt_store_facade_integration_test.go",

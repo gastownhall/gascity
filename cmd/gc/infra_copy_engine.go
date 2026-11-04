@@ -48,6 +48,13 @@ var (
 	// infraClearChunk is the rows one DeleteBatch removes: native Dolt's
 	// maximum, one commit each.
 	infraClearChunk = 1000
+	// infraDetachEdgeBatch is the edges one DepRemoveBatch removes. Native
+	// Dolt removes an edge in about 55-65 ms on a loaded host (each removal
+	// re-derives the blocked state it touched), so 250 take about 16 s, a
+	// sevenfold margin under the 120 s operation budget; a molecule-shaped
+	// chunk of 1,000 rows has about 2,000 edges and blew it in one call. The
+	// extra commits cost about 65 ms each, under 1% of a sub-batch.
+	infraDetachEdgeBatch = 250
 )
 
 // infraEngineCrashPoint is the test seam at every batch and phase boundary of

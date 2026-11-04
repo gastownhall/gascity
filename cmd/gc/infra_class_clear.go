@@ -536,29 +536,32 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 // delete rather than lose it. listed is every row the work store's list
 // returned, which the batched backup read the dependents from.
 //
-// The edges go in one beads.DepBatchRemover call, one commit on Dolt, where
-// the store has one: DepRemove commits once per edge. On native Dolt that
+// The edges go in beads.DepBatchRemover calls of infraDetachEdgeBatch, one
+// commit each on Dolt, where the store has one: DepRemove commits once per
+// edge. On native Dolt that
 // halves the cost (measured on a loaded host: about 130 ms an edge one by
 // one, 60 ms in one transaction, where the library re-derives the blocked
 // state the edge touched). The remainder is then read row by row, and the
 // session-internal edges it finds go in a second call.
 func detachInfraClearedRow(source beads.Store, chunk []infraBackupEntry, session, listed map[string]bool) error {
+	batch, canBatch := beads.As[beads.DepBatchRemover](source)
 	remove := func(pairs []beads.DepPair) error {
-		if len(pairs) == 0 {
-			return nil
-		}
-		if batch, ok := beads.As[beads.DepBatchRemover](source); ok {
-			err := batch.DepRemoveBatch(pairs)
-			if !errors.Is(err, beads.ErrDepRemoveBatchUnsupported) {
-				if err != nil {
-					return fmt.Errorf("removing %d dep(s) of the retained copies from the work store: %w", len(pairs), err)
+		for start := 0; start < len(pairs); start += infraDetachEdgeBatch {
+			sub := pairs[start:min(start+infraDetachEdgeBatch, len(pairs))]
+			if canBatch {
+				err := batch.DepRemoveBatch(sub)
+				if !errors.Is(err, beads.ErrDepRemoveBatchUnsupported) {
+					if err != nil {
+						return fmt.Errorf("removing %d dep(s) of the retained copies from the work store: %w", len(sub), err)
+					}
+					continue
 				}
-				return nil
+				canBatch = false
 			}
-		}
-		for _, p := range pairs {
-			if err := source.DepRemove(p.IssueID, p.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return fmt.Errorf("removing dep %s -> %s from the work store: %w", p.IssueID, p.DependsOnID, err)
+			for _, p := range sub {
+				if err := source.DepRemove(p.IssueID, p.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing dep %s -> %s from the work store: %w", p.IssueID, p.DependsOnID, err)
+				}
 			}
 		}
 		return nil

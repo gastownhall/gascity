@@ -363,14 +363,17 @@ func TestStorageMigrateRefusesATimeBudgetTheRigPathsIgnore(t *testing.T) {
 }
 
 // batchRemovingStore is a setRewritingStore that removes edges in batches and
-// counts how the clear removed them.
+// counts how the clear removed them, and the largest batch it was sent.
 type batchRemovingStore struct {
 	setRewritingStore
-	batches, single *int
+	batches, single, largest *int
 }
 
 func (s batchRemovingStore) DepRemoveBatch(pairs []beads.DepPair) error {
 	*s.batches++
+	if s.largest != nil {
+		*s.largest = max(*s.largest, len(pairs))
+	}
 	for _, p := range pairs {
 		if err := s.setRewritingStore.DepRemove(p.IssueID, p.DependsOnID); err != nil {
 			return err
@@ -601,5 +604,46 @@ func TestTheClearDetachesAnEdgeFromALaterChunkBeforeTheDelete(t *testing.T) {
 	log.Reset()
 	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged {
 		t.Fatalf("resume = %s: %s", report.Outcome, log.String())
+	}
+}
+
+// TestTheClearSubBatchesADenseChunksEdges (round 3 MUST-1): a molecule-shaped
+// chunk, a thousand pour steps each blocking on the two before it, has about
+// two thousand edges. One DepRemoveBatch of them all ran past native Dolt's
+// operation budget on a loaded host and failed the clear after the marker on
+// every run; no call may carry more than infraDetachEdgeBatch.
+func TestTheClearSubBatchesADenseChunksEdges(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	rewriting := setRewritingStore{beads.NewMemStore()}
+	var batches, single, largest int
+	source := batchRemovingStore{setRewritingStore: rewriting, batches: &batches, single: &single, largest: &largest}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	const steps = 1000
+	ids := make([]string, 0, steps)
+	edges := 0
+	for i := 0; i < steps; i++ {
+		ids = append(ids, mustCreateInfraBead(t, rewriting, beads.Bead{Title: fmt.Sprintf("step %d", i), Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}}).ID)
+		for back := 1; back <= 2 && i-back >= 0; back++ {
+			if err := rewriting.DepAdd(ids[i], ids[i-back], "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			edges++
+		}
+	}
+	if steps > infraClearChunk {
+		t.Fatalf("the fixture spans %d chunks; it must be one dense chunk", (steps+infraClearChunk-1)/infraClearChunk)
+	}
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged || report.Clear.Cleared != steps {
+		t.Fatalf("migrate = %s (cleared %d): %s", report.Outcome, report.Clear.Cleared, log.String())
+	}
+	if largest > infraDetachEdgeBatch {
+		t.Fatalf("one DepRemoveBatch carried %d edges, over the cap of %d", largest, infraDetachEdgeBatch)
+	}
+	if want := (edges + infraDetachEdgeBatch - 1) / infraDetachEdgeBatch; batches < want || single != 0 {
+		t.Fatalf("the %d edges went in %d batch(es) and %d single call(s), want at least %d batches and no single calls", edges, batches, single, want)
 	}
 }
