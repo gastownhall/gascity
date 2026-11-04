@@ -58,11 +58,11 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 	for _, tc := range v2RefusalCases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := v2City(tc.cfg)
-			got := v2LatchRefusals(cfg, nil)
+			got := v2LatchRefusals(cfg, "", nil)
 			if len(got) != 1 || got[0].Config != tc.config || got[0].ParityPR != tc.pr {
 				t.Fatalf("v2LatchRefusals = %+v, want one refusal of %q by %s", got, tc.config, tc.pr)
 			}
-			mode, err := latchReconcilerMode(cfg, noEnv)
+			mode, err := latchReconcilerMode(cfg, "", noEnv)
 			if err == nil || mode != reconcilerLegacy || !strings.Contains(err.Error(), got[0].String()) {
 				t.Fatalf("latch = %v, %v; want legacy and an error naming %q", mode, err, got[0])
 			}
@@ -75,14 +75,14 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 		c.ChatSessions.IdleTimeout = "30m"
 		c.Session.Provider = "k8s"
 	})
-	if got := len(v2LatchRefusals(all, nil)); got != 4 {
-		t.Errorf("v2LatchRefusals(every feature, nil) = %d refusals, want 4", got)
+	if got := len(v2LatchRefusals(all, "", nil)); got != 4 {
+		t.Errorf("v2LatchRefusals(every feature) = %d refusals, want 4", got)
 	}
-	_, err := latchReconcilerMode(all, noEnv)
+	_, err := latchReconcilerMode(all, "", noEnv)
 	if err == nil {
 		t.Fatal("latch(every feature) admitted v2")
 	}
-	for _, r := range v2LatchRefusals(all, nil) {
+	for _, r := range v2LatchRefusals(all, "", nil) {
 		if !strings.Contains(err.Error(), r.String()) {
 			t.Errorf("latch(every feature) error lacks %q: %v", r, err)
 		}
@@ -110,10 +110,10 @@ func TestV2LatchAdmitsInScopeFeatures(t *testing.T) {
 	})
 	for _, provider := range []string{"", "tmux", "acp", "subprocess", "fake", "fail"} {
 		cfg.Session.Provider = provider
-		if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
+		if got := v2LatchRefusals(cfg, "", nil); len(got) != 0 {
 			t.Errorf("provider %q: v2LatchRefusals = %+v, want none", provider, got)
 		}
-		if mode, err := latchReconcilerMode(cfg, noEnv); err != nil || mode != reconcilerV2 {
+		if mode, err := latchReconcilerMode(cfg, "", noEnv); err != nil || mode != reconcilerV2 {
 			t.Errorf("provider %q: latch = %v, %v; want v2, nil", provider, mode, err)
 		}
 	}
@@ -130,7 +130,7 @@ func TestV2LatchRuntimeAllowlist(t *testing.T) {
 	if runtimeRegistry.Resolves("undeclared-name") {
 		t.Fatal("the builtin registry resolves undeclared-name; pick another name")
 	}
-	if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
+	if got := v2LatchRefusals(cfg, "", nil); len(got) != 0 {
 		t.Errorf("undeclared provider (tmux fallback): v2LatchRefusals = %+v, want none", got)
 	}
 	future := runtimeRegistry.Clone()
@@ -145,14 +145,14 @@ func TestV2LatchRuntimeAllowlist(t *testing.T) {
 	}
 	for _, provider := range []string{"nomad", "fly:app"} {
 		cfg.Session.Provider = provider
-		r, ok := v2SessionRuntimeRefusal(cfg, future, v2SessionRuntimeName(cfg, nil))
+		r, ok := v2SessionRuntimeRefusal(cfg, "", future, v2SessionRuntimeRawName(cfg, nil), v2SessionRuntimeName(cfg, nil))
 		want := `[session] provider = "` + provider + `" (unsupported session runtime) is not available under v2`
 		if !ok || r.String() != want {
 			t.Errorf("future provider %q: refusal = %q, %v; want %q", provider, r, ok, want)
 		}
 	}
 	cfg.Session.Provider = "tmux"
-	if _, ok := v2SessionRuntimeRefusal(cfg, future, v2SessionRuntimeName(cfg, nil)); ok {
+	if _, ok := v2SessionRuntimeRefusal(cfg, "", future, v2SessionRuntimeRawName(cfg, nil), v2SessionRuntimeName(cfg, nil)); ok {
 		t.Error("tmux refused by a registry that resolves it, want admitted")
 	}
 }
@@ -191,7 +191,7 @@ func TestDoctorListsLatchRefusalsUnderLegacy(t *testing.T) {
 func TestLatchRefusalNamesParityPR(t *testing.T) {
 	parityPR := regexp.MustCompile(`^PAR-[A-Z0-9]+(-[0-9])?$`)
 	for _, tc := range v2RefusalCases {
-		for _, r := range v2LatchRefusals(v2City(tc.cfg), nil) {
+		for _, r := range v2LatchRefusals(v2City(tc.cfg), "", nil) {
 			if !parityPR.MatchString(r.ParityPR) || r.Feature == "" {
 				t.Errorf("%s: refusal %+v lacks a feature or a PAR- parity PR", tc.name, r)
 			}
@@ -230,7 +230,7 @@ func TestV2RunsOnlyOnRuntimesThatReadFresh(t *testing.T) {
 	}
 	for _, f := range execAdmissionFixtures(t) {
 		cfg := v2City(func(c *config.City) { c.Session.Provider = "exec:" + f.script })
-		admitted := len(v2LatchRefusals(cfg, nil)) == 0
+		admitted := len(v2LatchRefusals(cfg, "", nil)) == 0
 		sp, err := runtimeRegistry.New("exec:"+f.script, config.SessionConfig{}, "test-city", t.TempDir())
 		if err != nil {
 			t.Fatal(err)
@@ -309,7 +309,7 @@ func TestExecRefusalNamesTheMissingCapabilities(t *testing.T) {
 		}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := v2LatchRefusals(v2City(c.cfg), nil)
+			got := v2LatchRefusals(v2City(c.cfg), "", nil)
 			if c.fix == nil {
 				if len(got) != 0 {
 					t.Fatalf("refusals %v, want a ready exec runtime admitted", got)
@@ -331,37 +331,37 @@ func TestExecRefusalNamesTheMissingCapabilities(t *testing.T) {
 
 // Kills an admission probe that forks on every latch, or remembers what it
 // should not: the decision reads config and, outside it, only the exec
-// handshake, one probe per version of the script file. The latch, the
-// default resolution, the swap check and doctor's detail all reuse it; a
-// rewrite of the script (size, modification time or inode) probes again;
-// a handshake that cannot be read is never remembered. Not parallel: it
-// replaces probeExecHandshake.
+// handshake, one probe per version of the script file and city. The latch,
+// the default resolution, the swap check and doctor's detail all reuse it;
+// a rewrite of the script probes again; a handshake that cannot be read is
+// remembered only for its retry window. Not parallel: it replaces
+// probeExecHandshake.
 func TestExecAdmissionProbeIsRemembered(t *testing.T) {
 	saved := probeExecHandshake
 	probes := 0
-	probeExecHandshake = func(path, cityName string) (runtime.ProtocolInfo, []string, error) {
+	probeExecHandshake = func(path, cityName, cityPath string) (runtime.ProtocolInfo, []string, error) {
 		probes++
-		return saved(path, cityName)
+		return saved(path, cityName, cityPath)
 	}
 	t.Cleanup(func() { probeExecHandshake = saved })
 	script := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'; exit 0; }; exit 2
 `)
 	cfg := v2City(func(c *config.City) { c.Session.Provider = "exec:" + script })
 	for range 3 {
-		if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
+		if got := v2LatchRefusals(cfg, "", nil); len(got) != 0 {
 			t.Fatalf("refusals %v, want the ready script admitted", got)
 		}
 	}
 	cfg.Daemon.SessionReconciler = ""
-	for _, f := range v2DefaultFallbacks(cfg, nil) {
+	for _, f := range v2DefaultFallbacks(cfg, "", nil) {
 		if strings.Contains(f, script) {
 			t.Fatalf("default fallback %q, want the ready script admitted", f)
 		}
 	}
-	if _, refused := v2ProviderSwapRefusal(cfg, func(string) (string, bool) { return "", false }); refused {
+	if _, refused := v2ProviderSwapRefusal(cfg, "", func(string) (string, bool) { return "", false }); refused {
 		t.Fatal("the swap check refused a ready script")
 	}
-	execRuntimeDoctorDetail(cfg, nil, reconcilerV2)
+	execRuntimeDoctorDetail(cfg, "", nil, reconcilerV2)
 	if probes != 1 {
 		t.Fatalf("%d probes for one version of the script, want 1", probes)
 	}
@@ -369,16 +369,17 @@ func TestExecAdmissionProbeIsRemembered(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\n[ \"$1\" = protocol ] && { echo '{\"version\":0,\"capabilities\":[\"observe.v1\"]}'; exit 0; }; exit 2\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := v2LatchRefusals(cfg, nil); len(got) != 1 || probes != 2 {
+	if got := v2LatchRefusals(cfg, "", nil); len(got) != 1 || probes != 2 {
 		t.Fatalf("after a rewrite: refusals %v, %d probes; want refused on a second probe", got, probes)
 	}
-	// An error is not remembered.
+	// An error is remembered for the handshake's retry window
+	// (TestExecAdmissionProbeIsBoundedAndShared), not for good.
 	broken := writeRPPScript(t, "exit 1\n")
 	bcfg := v2City(func(c *config.City) { c.Session.Provider = "exec:" + broken })
-	v2LatchRefusals(bcfg, nil)
-	v2LatchRefusals(bcfg, nil)
-	if probes != 4 {
-		t.Fatalf("%d probes after two latches over a broken handshake, want 4 (no error remembered)", probes)
+	v2LatchRefusals(bcfg, "", nil)
+	v2LatchRefusals(bcfg, "", nil)
+	if probes != 3 {
+		t.Fatalf("%d probes after two latches over a broken handshake, want 3 (its error remembered in its window)", probes)
 	}
 }
 
@@ -398,7 +399,7 @@ func TestExecRuntimeLocalityComesFromTheHandshake(t *testing.T) {
 	} {
 		script := writeRPPScript(t, `[ "$1" = protocol ] && { `+c.protocol+`; exit $?; }; exit 2
 `)
-		if got := sessionRuntimeIsRemote("exec:" + script); got != c.remote {
+		if got := sessionRuntimeIsRemote(&config.City{}, "", "exec:"+script); got != c.remote {
 			t.Errorf("handshake %s: remote %t, want %t", c.protocol, got, c.remote)
 		}
 	}
@@ -413,21 +414,21 @@ func TestV2LatchJudgesTheEffectiveProvider(t *testing.T) {
 	env := map[string]string{"GC_SESSION": "herdr"}
 	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
 	cfg := v2City(func(c *config.City) { c.Session.Provider = "tmux" })
-	if got := v2LatchRefusals(cfg, lookup); len(got) != 1 || !strings.Contains(got[0].String(), "herdr") {
+	if got := v2LatchRefusals(cfg, "", lookup); len(got) != 1 || !strings.Contains(got[0].String(), "herdr") {
 		t.Fatalf("GC_SESSION=herdr over tmux: refusals %v, want herdr's", got)
 	}
-	if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
+	if got := v2LatchRefusals(cfg, "", nil); len(got) != 0 {
 		t.Fatalf("tmux, no override: refusals %v, want none", got)
 	}
 	saved := reconcilerModeLookupEnv
 	reconcilerModeLookupEnv = lookup
 	t.Cleanup(func() { reconcilerModeLookupEnv = saved })
 	cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
-	if _, err := cr.beforeProviderSwap(context.Background(), cfg); err == nil || cr.v2.planner.paused.Load() {
+	if _, err := cr.beforeProviderSwap(context.Background(), cfg, nil); err == nil || cr.v2.planner.paused.Load() {
 		t.Fatalf("swap onto herdr under v2: err %v, paused %t; want refused before any pause", err, cr.v2.planner.paused.Load())
 	}
 	env = map[string]string{}
-	if resume, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+	if resume, err := cr.beforeProviderSwap(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("swap onto tmux under v2: %v, want it held and applied", err)
 	} else {
 		resume()

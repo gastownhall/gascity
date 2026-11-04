@@ -17,9 +17,9 @@ import (
 // the sessions and graph class stores must be a kind that fences and whose
 // list reads carry revisions. Store-state refusals (the boot census) are not
 // config: they stay hard boot refusals, which doctor reports ahead of time.
-func v2DefaultFallbacks(cfg *config.City, lookupEnv func(string) (string, bool)) []string {
+func v2DefaultFallbacks(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) []string {
 	var out []string
-	for _, r := range v2LatchRefusals(cfg, lookupEnv) {
+	for _, r := range v2LatchRefusals(cfg, cityPath, lookupEnv) {
 		out = append(out, r.String())
 	}
 	if reason := v2DefaultConditionalWritesFallback(cfg, lookupEnv); reason != "" {

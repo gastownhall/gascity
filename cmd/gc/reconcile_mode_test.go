@@ -108,7 +108,7 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 		if tc.refused {
 			cfg.ChatSessions.IdleTimeout = "30m"
 		}
-		mode, err := latchReconcilerMode(cfg, nil)
+		mode, err := latchReconcilerMode(cfg, "", nil)
 		if tc.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("latch(%q) err = %v, want %q", tc.raw, err, tc.wantErr)
@@ -135,10 +135,10 @@ func TestLatchAdmitsV2WithIgnoredSettings(t *testing.T) {
 		Daemon:  config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true},
 		Session: config.SessionConfig{ProgressStallTimeout: "30m", ClaimHolderStallTimeout: "45m"},
 	}
-	if got := v2LatchRefusals(cfg, noEnv); len(got) != 0 {
+	if got := v2LatchRefusals(cfg, "", noEnv); len(got) != 0 {
 		t.Fatalf("v2LatchRefusals = %+v, want none", got)
 	}
-	res, err := resolveReconcilerMode(cfg, noEnv)
+	res, err := resolveReconcilerMode(cfg, "", noEnv)
 	if err != nil || res.Mode != reconcilerV2 {
 		t.Fatalf("resolve(v2, breaker, stalls) = %+v, %v; want v2, nil", res, err)
 	}
@@ -171,7 +171,7 @@ func TestLatchAdmitsV2WithIgnoredSettings(t *testing.T) {
 	}
 
 	cfg.Daemon.SessionReconciler = "legacy"
-	res, err = resolveReconcilerMode(cfg, noEnv)
+	res, err = resolveReconcilerMode(cfg, "", noEnv)
 	if err != nil || res.Mode != reconcilerLegacy {
 		t.Fatalf("resolve(legacy, breaker, stalls) = %+v, %v; want legacy, nil", res, err)
 	}

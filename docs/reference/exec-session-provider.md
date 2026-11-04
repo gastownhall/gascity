@@ -18,6 +18,12 @@ export GC_SESSION=exec:/path/to/gc-session-screen
 export GC_SESSION=exec:gc-session-screen
 ```
 
+Prefer an absolute path. A PATH lookup resolves in each gc process's own
+environment, so the supervisor, `gc start` and a cron job can run different
+files under one name, and reconciler v2's admission (see
+[observe.v1](#observev1-reconciler-v2)) reads the handshake of the file the
+deciding process resolves.
+
 ## Pack-Declared Runtimes
 
 A pack can ship (or install) a runtime executable and bind it to a
@@ -813,6 +819,25 @@ stops a box only when a fresh `observe` shows it carrying that start's token.
 group (`RPP-OBSERVE-001` to `RPP-OBSERVE-015`); `gc runtime check` runs a
 smoke check of the three ops. `contrib/session-scripts/gc-session-screen` is
 the reference implementation.
+
+### Switching an existing exec city to v2
+
+Upgrading gc alone changes nothing for a script that does not declare the
+profile: the city stays legacy. Declaring `observe.v1` and
+`report-attachment` makes an unset `session_reconciler` resolve to v2 at the
+next controller start (pin `session_reconciler = "legacy"` to stay). It
+also changes what the script's legacy city sees: a failed `observe` reads
+unknown rather than not running, listings are attested (so `gc stop` skips
+its per-name sweep), and a declared op's exit 2 is a failure. Before
+switching a city with running sessions:
+
+1. Run `gc runtime conformance <script>`.
+2. Run `gc doctor`: `exec-runtime-identity` counts the running boxes under
+   open session rows that report no identity, or no `GC_SESSION_ID`. v2
+   holds those (Unknown or Ownerless) instead of adopting them, so make the
+   script report the identity of boxes it started before the upgrade
+   (observe.v1 item 4).
+3. Otherwise stop those sessions first.
 
 ## Writing Your Own Script
 

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // The planner as the controller runs it behind session_reconciler=v2, beside
@@ -174,43 +175,19 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 // boot gate open (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a
 // startup retry after a panic resumes it (MAINT-005).
 func (rt *plannerRuntime) boot(ctx context.Context) error {
-	for failures := 0; !rt.capable.Load(); {
-		var verdict error
-		if rt.host.capabilities != nil {
-			verdict = rt.host.capabilities()
-		}
+	if err := rt.bootCheck(ctx, &rt.capable, "C0.7 store read", rt.host.capabilities, func(err error) bool {
 		var unread *v2CapabilityUnreadError
-		if !errors.As(verdict, &unread) {
-			if verdict != nil {
-				rt.planner.alert(alertBootRefused, "", verdict.Error())
-				return verdict
-			}
-			rt.capable.Store(true)
-			break
-		}
-		failures++
-		if err := rt.bootBackoff(ctx, failures, "C0.7 store read", verdict); err != nil {
-			return err
-		}
+		return errors.As(err, &unread)
+	}, 0); err != nil {
+		return err
 	}
-	for failures := 0; !rt.runtimeOK.Load(); {
-		var verdict error
-		if rt.host.runtimeReadiness != nil {
-			verdict = rt.host.runtimeReadiness()
-		}
+	// A failed handshake stays cached by the provider for
+	// sessionexec.HandshakeRetryAfter, so C0.8 retries no sooner.
+	if err := rt.bootCheck(ctx, &rt.runtimeOK, "C0.8 runtime handshake", rt.host.runtimeReadiness, func(err error) bool {
 		var unread *v2RuntimeUnreadError
-		if !errors.As(verdict, &unread) {
-			if verdict != nil {
-				rt.planner.alert(alertBootRefused, "", verdict.Error())
-				return verdict
-			}
-			rt.runtimeOK.Store(true)
-			break
-		}
-		failures++
-		if err := rt.bootBackoff(ctx, failures, "C0.8 runtime handshake", verdict); err != nil {
-			return err
-		}
+		return errors.As(err, &unread)
+	}, sessionexec.HandshakeRetryAfter); err != nil {
+		return err
 	}
 	if rt.env.Load() == nil {
 		rt.publishEnv()
@@ -395,10 +372,41 @@ func laneBackoff(failures int, rand func() float64) time.Duration {
 	return time.Duration(float64(d) * (1 + v2Jitter*(2*rand()-1)))
 }
 
+// bootCheck runs one boot check until it passes (setting passed) or
+// refuses: read's nil passes, an error unread reports is no verdict and is
+// retried with the boot backoff (at least floor), and any other error is
+// the refusal, alerted as boot-refused. A nil read passes.
+func (rt *plannerRuntime) bootCheck(ctx context.Context, passed *atomic.Bool, what string, read func() error, unread func(error) bool, floor time.Duration) error {
+	for failures := 0; !passed.Load(); {
+		var verdict error
+		if read != nil {
+			verdict = read()
+		}
+		if verdict == nil {
+			passed.Store(true)
+			return nil
+		}
+		if !unread(verdict) {
+			rt.planner.alert(alertBootRefused, "", verdict.Error())
+			return verdict
+		}
+		failures++
+		if err := rt.bootBackoffAtLeast(ctx, failures, what, verdict, floor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // bootBackoff reports a failed boot read and waits out its backoff, or
 // returns ctx's error.
 func (rt *plannerRuntime) bootBackoff(ctx context.Context, failures int, what string, err error) error {
-	d := laneBackoff(failures, rand.Float64)
+	return rt.bootBackoffAtLeast(ctx, failures, what, err, 0)
+}
+
+// bootBackoffAtLeast is bootBackoff waiting no less than floor.
+func (rt *plannerRuntime) bootBackoffAtLeast(ctx context.Context, failures int, what string, err error, floor time.Duration) error {
+	d := max(laneBackoff(failures, rand.Float64), floor)
 	fmt.Fprintf(rt.host.stderr, "v2 planner: %s failed (retry in %s): %v\n", what, d.Round(time.Millisecond), err) //nolint:errcheck // best-effort stderr
 	t := time.NewTimer(d)
 	select {

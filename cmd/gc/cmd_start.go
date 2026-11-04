@@ -809,7 +809,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// which no gc code sets, and an exec runtime's admission handshake,
 	// remembered per version of its script (execReadiness); a script
 	// rewritten between the two is caught at boot (C0.8).
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	mode, err := latchReconcilerMode(cfg, cityPath, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

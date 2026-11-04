@@ -77,6 +77,15 @@ func (r reconcilerResolution) String() string {
 // an exec runtime's handshake chose.
 const v2ExecOptInHint = `set session_reconciler = "v2" to keep v2 and silence this warning, or "legacy" to keep legacy`
 
+// firstHint is hint, unless one is already set: a doctor finding never
+// replaces an earlier finding's fix.
+func firstHint(set, hint string) string {
+	if set != "" {
+		return set
+	}
+	return hint
+}
+
 // v2ExecOptInNote is the note for a default v2 (session_reconciler unset)
 // on an exec session runtime: its handshake, not the config, switched the
 // city to v2 (D6). "" for any other resolution or runtime.
@@ -97,8 +106,8 @@ const reconcilerFallbackHint = `to run v2, remove or change the settings named; 
 
 // latchReconcilerMode resolves the boot mode (resolveReconcilerMode); a
 // refused mode is legacy with the error.
-func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)) (reconcilerMode, error) {
-	r, err := resolveReconcilerMode(cfg, lookupEnv)
+func latchReconcilerMode(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) (reconcilerMode, error) {
+	r, err := resolveReconcilerMode(cfg, cityPath, lookupEnv)
 	if err != nil {
 		return reconcilerLegacy, err
 	}
@@ -114,14 +123,14 @@ func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)
 // silently; its load warning already tells the operator. On an error the
 // resolution still carries the mode the key names (v2 for a refused v2), for
 // doctor.
-func resolveReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)) (reconcilerResolution, error) {
+func resolveReconcilerMode(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) (reconcilerResolution, error) {
 	raw := cfg.Daemon.SessionReconciler
 	mode, _, ok := cfg.Daemon.SessionReconcilerMode()
 	switch {
 	case !ok:
 		return reconcilerResolution{}, fmt.Errorf(`[daemon] session_reconciler = %q is not a known value; set session_reconciler = "legacy" or "v2"`, raw)
 	case mode == "":
-		if fallbacks := v2DefaultFallbacks(cfg, lookupEnv); len(fallbacks) > 0 {
+		if fallbacks := v2DefaultFallbacks(cfg, cityPath, lookupEnv); len(fallbacks) > 0 {
 			return reconcilerResolution{Mode: reconcilerLegacy, Reason: reconcilerFallbackLegacy, Fallbacks: fallbacks}, nil
 		}
 		return reconcilerResolution{Mode: reconcilerV2, Reason: reconcilerDefaultV2}, nil
@@ -129,7 +138,7 @@ func resolveReconcilerMode(cfg *config.City, lookupEnv func(string) (string, boo
 		return reconcilerResolution{}, nil
 	}
 	r := reconcilerResolution{Mode: reconcilerV2}
-	if refusals := v2LatchRefusals(cfg, lookupEnv); len(refusals) > 0 {
+	if refusals := v2LatchRefusals(cfg, cityPath, lookupEnv); len(refusals) > 0 {
 		parts := make([]string, len(refusals))
 		for i, refusal := range refusals {
 			parts[i] = refusal.String()
@@ -161,11 +170,11 @@ func reconcilerBootWarnings(cfg *config.City, lookupEnv func(string) (string, bo
 // latch's resolution under lookupEnv (reconcilerModeLookupEnv when nil), with
 // a refused explicit v2 read as the v2 it names, and the line naming the mode
 // and why, for the check's details.
-func doctorReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)) (reconcilerMode, string) {
+func doctorReconcilerMode(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) (reconcilerMode, string) {
 	if lookupEnv == nil {
 		lookupEnv = reconcilerModeLookupEnv
 	}
-	res, err := resolveReconcilerMode(cfg, lookupEnv)
+	res, err := resolveReconcilerMode(cfg, cityPath, lookupEnv)
 	switch {
 	case err == nil:
 		return res.Mode, "session reconciler: " + res.String()
@@ -182,7 +191,8 @@ func doctorReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool
 // last reason). It never re-latches: the running mode is fixed until the
 // controller restarts.
 type reconcilerModeDrift struct {
-	running reconcilerMode
+	running  reconcilerMode
+	cityPath string // the city whose exec runtime's admission handshake it reads
 	// fellBack is set when this controller runs legacy because its default
 	// v2 failed the boot probe (reconcile_boot_fallback.go): an unset key
 	// that resolves to the v2 default is then not a pending restart, since
@@ -208,7 +218,7 @@ const reconcilerDriftCLINote = "until it restarts, gc runtime drain, drain-ack a
 // unknown-value load warning is strict-fatal. Only --no-strict and the
 // supervisor reach observe with one.
 func (d *reconcilerModeDrift) observe(cfg *config.City) string {
-	r, err := resolveReconcilerMode(cfg, d.lookupEnv)
+	r, err := resolveReconcilerMode(cfg, d.cityPath, d.lookupEnv)
 	if err == nil && r.Mode == d.running {
 		d.reported = ""
 		return ""
@@ -238,6 +248,9 @@ func (d *reconcilerModeDrift) observe(cfg *config.City) string {
 	warning := fmt.Sprintf("pending restart: session_reconciler on disk is %s; this controller runs %s", onDisk, d.running)
 	if err != nil {
 		warning += "; the next controller start will refuse it: " + err.Error()
+	}
+	if note := v2ExecOptInNote(cfg, d.lookupEnv, r); err == nil && note != "" {
+		warning += "; " + note
 	}
 	return warning + "; " + reconcilerDriftCLINote
 }
@@ -285,7 +298,7 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	r := &doctor.CheckResult{Name: c.Name()}
 	raw := c.cfg.Daemon.SessionReconciler
 	_, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
-	res, err := resolveReconcilerMode(c.cfg, c.lookupEnv)
+	res, err := resolveReconcilerMode(c.cfg, cityPathOf(ctx), c.lookupEnv)
 	mode := res.Mode
 	switch {
 	case err != nil:
@@ -306,9 +319,14 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Message = "session reconciler: " + res.String()
 	}
 	// The O6 safety net's finding: the last default-v2 boot fell back to
-	// legacy over a refusal (reconcile_boot_fallback.go).
+	// legacy over a refusal (reconcile_boot_fallback.go). The controller
+	// then runs legacy, so the exec opt-in and fence findings below, which
+	// are about running v2, are not made, and no later finding replaces the
+	// repair hint.
+	fellBack := false
 	if err == nil && res.Reason == reconcilerDefaultV2 && ctx != nil && ctx.CityPath != "" {
 		if rec, ok := readReconcilerV2FallbackRecord(ctx.CityPath); ok {
+			fellBack = true
 			r.Status = doctor.StatusWarning
 			r.Message += fmt.Sprintf("; the last boot (%s) FELL BACK TO LEGACY because v2 would refuse it: %s", rec.At, rec.Refusal)
 			r.FixHint = `repair what the refusal names so the default v2 boots, or set session_reconciler = "legacy" to keep legacy`
@@ -317,24 +335,22 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	if ignored := v2IgnoredSettings(c.cfg); mode == reconcilerV2 && len(ignored) > 0 {
 		r.Status = doctor.StatusWarning
 		r.Message += "; " + strings.Join(ignored, "; ")
-		r.FixHint = "remove the settings v2 ignores"
+		r.FixHint = firstHint(r.FixHint, "remove the settings v2 ignores")
 	}
-	if note := v2ExecOptInNote(c.cfg, c.lookupEnv, res); err == nil && note != "" {
+	if note := v2ExecOptInNote(c.cfg, c.lookupEnv, res); err == nil && note != "" && !fellBack {
 		r.Status = doctor.StatusWarning
 		r.Message += "; " + note
-		r.FixHint = v2ExecOptInHint
+		r.FixHint = firstHint(r.FixHint, v2ExecOptInHint)
 	}
-	if detail, warn := execRuntimeDoctorDetail(c.cfg, c.lookupEnv, mode); detail != "" {
+	if detail, warn := execRuntimeDoctorDetail(c.cfg, cityPathOf(ctx), c.lookupEnv, mode); detail != "" && !fellBack {
 		r.Details = append(r.Details, detail)
 		if warn != "" {
-			if r.Status == doctor.StatusOK {
-				r.Status = doctor.StatusWarning
-				r.FixHint = "declare proc.exec and input-fence in the script's handshake if it fences input"
-			}
+			r.Status = doctor.StatusWarning
 			r.Message += "; " + warn
+			r.FixHint = firstHint(r.FixHint, "declare proc.exec and input-fence in the script's handshake if it fences input")
 		}
 	}
-	for _, refusal := range v2LatchRefusals(c.cfg, c.lookupEnv) {
+	for _, refusal := range v2LatchRefusals(c.cfg, cityPathOf(ctx), c.lookupEnv) {
 		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())
 	}
 	if mode == reconcilerV2 && ctx != nil && ctx.CityPath != "" && c.queryPass != nil {
