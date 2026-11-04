@@ -14,18 +14,6 @@
         "bash": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" handoff --auto \"context cycle\"",
         "timeoutSec": 30
       }
-    ],
-    "userPromptSubmitted": [
-      {
-        "type": "command",
-        "bash": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject",
-        "timeoutSec": 30
-      },
-      {
-        "type": "command",
-        "bash": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject",
-        "timeoutSec": 30
-      }
     ]
   }
 }
