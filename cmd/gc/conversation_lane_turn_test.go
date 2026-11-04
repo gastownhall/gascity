@@ -501,9 +501,9 @@ func TestLaneExecProbeReportsTurns(t *testing.T) {
 	}
 }
 
-// TestLaneExecKeystrokeReprobeReadsNoTurns proves a keystroke-mode runtime's
-// busy re-probe reads no turns: its boundary is the quiescence rule.
-func TestLaneExecKeystrokeReprobeReadsNoTurns(t *testing.T) {
+// TestLaneExecKeystrokeReprobeReadsNativeTurns proves a keystroke runtime's
+// re-probe retains supported turn evidence before trusting a quiet composer.
+func TestLaneExecKeystrokeReprobeReadsNativeTurns(t *testing.T) {
 	f := newTurnLaneFixture(t, runtime.ProfileACP, laneTransport("acp"))
 	f.laneFixture.sp.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{f.name: {{
 		Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact,
@@ -517,8 +517,8 @@ func TestLaneExecKeystrokeReprobeReadsNoTurns(t *testing.T) {
 	if _, err := e.Probe(context.Background(), v); err != nil || reads != 1 {
 		t.Fatalf("Probe = %v with %d turn reads; want one", err, reads)
 	}
-	if _, err := e.Reprobe(context.Background(), v); err != nil || reads != 1 {
-		t.Fatalf("Reprobe = %v; turn reads %d, want none more", err, reads)
+	if _, err := e.Reprobe(context.Background(), v); err != nil || reads != 2 {
+		t.Fatalf("Reprobe = %v; turn reads %d, want a fresh native boundary read", err, reads)
 	}
 }
 

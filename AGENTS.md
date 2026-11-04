@@ -30,7 +30,7 @@ next to that code; read the matching file before changing it.
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
-| CLI/API session creation or lifecycle | `internal/worker/AGENTS.md` |
+| CLI or session lifecycle | `cmd/gc/AGENTS.md`, `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | Runtime | `internal/providerreadiness/AGENTS.md` |
 | Provider hooks | `internal/hooks/AGENTS.md` |

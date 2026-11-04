@@ -1480,6 +1480,7 @@ go_test(
         "conversation_lane_host_test.go",
         "conversation_lane_interrupt_test.go",
         "conversation_lane_kinds_test.go",
+        "conversation_lane_native_boundary_test.go",
         "conversation_lane_now_test.go",
         "conversation_lane_produce_test.go",
         "conversation_lane_protocol_test.go",

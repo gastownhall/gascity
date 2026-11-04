@@ -1020,13 +1020,13 @@ func TestE1GlobalJSONControlDoesNotBlockScopedPackResolution(t *testing.T) {
 			name:       "city success after binding",
 			args:       []string{"backstage", "--json", "--city", cityB, "hello", "payload"},
 			wantCode:   0,
-			wantStdout: "selected-hello args:<--city><" + cityB + "><--json><payload>\n",
+			wantStdout: "selected-hello args:<--json><payload>\n",
 		},
 		{
 			name:       "rig success before binding",
 			args:       []string{"--json=1", "--rig", targetRig, "backstage", "hello", "payload"},
 			wantCode:   0,
-			wantStdout: "selected-hello args:<--rig><" + targetRig + "><--json=1><payload>\n",
+			wantStdout: "selected-hello args:<--json=1><payload>\n",
 		},
 		{
 			name:          "selected missing schema fails despite ambient schema",
@@ -1415,6 +1415,18 @@ func TestPreparePackCommandArgsOwnsPreLeafHelpAndScope(t *testing.T) {
 		want    []string
 	}{
 		{
+			name:    "global city belongs to GC before pack leaf",
+			args:    []string{"--city", "/selected", "backstage", "hello", "--city", "/child", "payload"},
+			request: packCommandTreePreparation{binding: "backstage", city: "/selected", citySet: true, scopeCount: 1, preLeafCommandIndex: 3},
+			want:    []string{"backstage", "hello", "--city", "/child", "payload"},
+		},
+		{
+			name:    "namespace scopes consumed once while leaf controls remain exact",
+			args:    []string{"backstage", "--city=/selected", "repo", "--rig", "project", "sync", "--", "--city=/child", "--rig", "child-rig"},
+			request: packCommandTreePreparation{binding: "backstage", city: "/selected", citySet: true, rig: "project", rigSet: true, scopeCount: 2, preLeafCommandIndex: 5},
+			want:    []string{"backstage", "repo", "sync", "--", "--city=/child", "--rig", "child-rig"},
+		},
+		{
 			name: "false removes help and pre-leaf scope",
 			args: []string{"backstage", "--help=false", "--city", "/city", "hello", "payload"},
 			request: packCommandTreePreparation{
@@ -1496,10 +1508,19 @@ func TestPreparePackCommandArgsOwnsPreLeafHelpAndScope(t *testing.T) {
 }
 
 func TestE1ExplicitCityOverridesEagerPackBinding(t *testing.T) {
-	cityA := setupPackExitCity(t)
-	cityB := setupPackExitCity(t)
+	cityA, cityB, _ := setupE1PreLeafHelpFixture(t)
+	if err := os.WriteFile(filepath.Join(cityB, "city.toml"), []byte("[workspace]\nname = \"selected-context\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("GC_HOME"), "supervisor.toml"), []byte("[supervisor]\nport = 18561\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityB, "selected-context"); err != nil {
+		t.Fatal(err)
+	}
 	cityBScript := filepath.Join(cityB, "commands", "hello", "run.sh")
-	if err := os.WriteFile(cityBScript, []byte("#!/bin/sh\nprintf 'city-b\\n'\n"), 0o755); err != nil {
+	script := "#!/bin/sh\nprintf 'city=%s supervisor=%s args:' \"$GC_CITY_NAME\" \"$GC_SUPERVISOR_URL\"\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nprintf '\\n'\n"
+	if err := os.WriteFile(cityBScript, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1512,10 +1533,15 @@ func TestE1ExplicitCityOverridesEagerPackBinding(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityB, "backstage", "hello"}, &stdout, &stderr)
-	if code != 0 || stdout.String() != "city-b\n" || stderr.Len() != 0 {
-		t.Fatalf("explicit city selected wrong pack: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	for _, scenario := range []string{"eager", "lazy"} {
+		t.Run(scenario, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runPackCommandScenario(t, scenario, []string{"--city", cityB, "backstage", "hello", "payload"}, &stdout, &stderr)
+			want := "city=city-b supervisor=http://127.0.0.1:18561 args:<payload>\n"
+			if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+				t.Fatalf("explicit city context/arguments differ: code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), want)
+			}
+		})
 	}
 }
 
@@ -2013,14 +2039,29 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 		want string
 	}{
 		{
+			name: "global city separate consumed before binding",
+			args: []string{"--city", cityB, "backstage", "hello", "payload"},
+			want: "city-b-hello args:<payload>\n",
+		},
+		{
+			name: "global city equals preserves later leaf city",
+			args: []string{"--city=" + cityB, "backstage", "hello", "--city", cityA, "payload"},
+			want: "city-b-hello args:<--city><" + cityA + "><payload>\n",
+		},
+		{
+			name: "repeated global city keeps final context without forwarding either",
+			args: []string{"--city", cityA, "--city=" + cityB, "backstage", "hello", "--", "--city=" + cityA},
+			want: "city-b-hello args:<--><--city=" + cityA + ">\n",
+		},
+		{
 			name: "namespace city remains root owned",
 			args: []string{"backstage", "--city", cityB, "hello", "payload"},
-			want: "city-b-hello args:<--city><" + cityB + "><payload>\n",
+			want: "city-b-hello args:<payload>\n",
 		},
 		{
 			name: "intermediate rig remains root owned",
 			args: []string{"backstage", "repo", "--rig=" + targetRig, "sync", "payload"},
-			want: "city-b-sync args:<--rig=" + targetRig + "><payload>\n",
+			want: "city-b-sync args:<payload>\n",
 		},
 		{
 			name: "leaf city separate is child owned",

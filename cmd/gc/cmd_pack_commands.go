@@ -226,7 +226,7 @@ func materializeSelectedPackCommandTree(root *cobra.Command, args []string, requ
 		failClosedPackCommandTree(root, request.binding, stderr)
 		return
 	case packCommandTreeResolutionStable:
-		applyResolvedPackCommandArgs(root, args, request, selectedRequest)
+		applyResolvedPackCommandArgs(root, args, selectedRequest)
 	}
 	selectedCandidate.addToRoot(root, stdout, stderr)
 	// The root's normal usage-error installation already ran before this lazy
@@ -245,18 +245,8 @@ func failClosedPackCommandTree(root *cobra.Command, binding string, stderr io.Wr
 	}
 }
 
-func applyResolvedPackCommandArgs(root *cobra.Command, args []string, blindRequest, resolvedRequest packCommandTreePreparation) {
-	prepared := preparePackCommandArgs(args, resolvedRequest)
-	if blindRequest.scopeCount > resolvedRequest.scopeCount &&
-		(resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpNone || resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpTrue) {
-		// Compatibility: established eager/lazy dispatch passes an ordinary
-		// pre-leaf scope through to DisableFlagParsing children. When a blind
-		// missing-tree scan over-counted later child-owned scopes, remove only
-		// the proven root-owned prefix so the later tokens reach the child
-		// exactly once without changing the established single-scope path.
-		prepared = packCommandArgsWithoutLeadingScopes(prepared, resolvedRequest.scopeCount)
-	}
-	root.SetArgs(prepared)
+func applyResolvedPackCommandArgs(root *cobra.Command, args []string, resolvedRequest packCommandTreePreparation) {
+	root.SetArgs(preparePackCommandArgs(args, resolvedRequest))
 }
 
 type packCommandTreeCandidate struct {
@@ -617,9 +607,11 @@ func applyPackCommandPreLeafArgs(root *cobra.Command, args []string, request pac
 func preparePackCommandArgs(args []string, request packCommandTreePreparation) []string {
 	prepared, adjusted := movePackCommandPreLeafJSONControls(args, request)
 	if adjusted.preLeafHelpKind != packCommandPreLeafHelpNone {
-		prepared = packCommandPreLeafArgs(prepared, adjusted)
+		return packCommandPreLeafArgs(prepared, adjusted)
 	}
-	return prepared
+	// The selected tree has already consumed these scopes. A pack leaf owns
+	// only its following arguments, even though Cobra disables flag parsing.
+	return packCommandArgsWithoutLeadingScopes(prepared, adjusted.scopeCount)
 }
 
 func movePackCommandPreLeafJSONControls(args []string, request packCommandTreePreparation) ([]string, packCommandTreePreparation) {

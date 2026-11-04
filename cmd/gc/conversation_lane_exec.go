@@ -278,24 +278,34 @@ func (e *conversationLaneExec) Probe(ctx context.Context, conv opjournal.Convers
 // (DES-O1 §4.3): it reuses the caps the pass's Probe read and observes the
 // runtime by the row's bead id through the cached sessions store, so over
 // the controller's cache it reads nothing from the backing store. It reads
-// the session's turns only where they decide the boundary (protocol mode).
+// the session's supported native turns too: a current turn vetoes a quiet
+// composer even on a keystroke runtime.
 func (e *conversationLaneExec) Reprobe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
 	if err := e.readCaps(ctx, conv); err != nil {
 		return laneCapsProbe(conv, err)
 	}
-	return e.probe(ctx, conv, e.lastCaps, e.protocol)
+	return e.probe(ctx, conv, e.lastCaps, true)
 }
 
 // readCaps reads the runtime's interrupt mode, the session's turn traits
 // and then the runtime's caps, once per executor; a read that failed is read
 // again by the next probe.
 func (e *conversationLaneExec) readCaps(ctx context.Context, conv opjournal.ConversationView) error {
-	if e.capsRead {
+	if e.capsRead && !e.turnCapsUnread {
 		return nil
 	}
+	// An unavailable native source is not a cached unsupported capability.
+	// Busy reprobes must be able to recover it without a new external poke.
+	e.capsRead = false
 	e.protocol = runtime.TurnInterruptModeFor(e.deps.sp, e.target.sessionName) == runtime.TurnInterruptProtocol
 	if err := e.readTurnTraits(ctx); err != nil {
 		return fmt.Errorf("reading session %s's turn capabilities: %w", e.info.ID, err)
+	}
+	// A disappeared source did not declare turns unsupported. Only a
+	// successfully resolved handle with explicit no-source capabilities may
+	// retain the screen-only contract while the runtime still looks alive.
+	if e.turnHandle == nil {
+		e.turnCapsUnread = true
 	}
 	caps, err := e.caps(conv)
 	if err != nil {
@@ -378,11 +388,9 @@ type laneLook struct {
 // incarnation the row names, resolves its handle once and reads the pending
 // interaction through it, and, when some content may reach it, the
 // session's turns (with withTurns) and the boundary. The boundary is the
-// quiescence rule for a keystroke-mode runtime, confirmed on the agent's
-// screen (quietBoundary) or, for content the rule has starved since
-// contentSince (the pass's content age), decided by its turn
-// (starvedBoundary), and for a protocol-mode one its turns: never the
-// quiescence rule. Neither the content gate nor the stop request holds
+// supported native turns first, then the quiescence rule and agent screen
+// (quietBoundary) for a keystroke runtime with no current native turn. A
+// protocol-mode runtime uses only its turns, never the quiescence rule. Neither the content gate nor the stop request holds
 // control (DES-O1 I7, §10.5): a draining, held or stop-requested session
 // blocked on a prompt still has it read, so a respond can answer it. A
 // running live runtime of another incarnation reads lanePendingUnknown:
@@ -438,6 +446,18 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 		l.turn = laneTurnLookOf(e.readTurns(ctx))
 	}
 	if e.protocol {
+		l.boundary = l.turn.boundary()
+		return l, nil
+	}
+	// A native recorded turn is stronger evidence than a quiet composer.
+	// Codex can stream output without drawing a busy status row; its default
+	// Escape-led submit would interrupt that turn. A supported read that
+	// failed is unknown, never permission to fall back to the screen.
+	if e.turnCapsUnread {
+		l.boundary = opjournal.TriUnknown
+		return l, nil
+	}
+	if e.traits.readable && l.turn.live != opjournal.TriNo {
 		l.boundary = l.turn.boundary()
 		return l, nil
 	}
@@ -786,6 +806,16 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 	if h == nil {
 		return opjournal.NotDelivered{Transient: true, Cause: errLaneNoProbedHandle}
 	}
+	// The take's probe may have preceded a human or another native input.
+	// Recheck supported native turns before any ordinary boundary nudge;
+	// refusing here is definitely not delivered, so the lane preserves the
+	// frozen operation/key for a later boundary. Explicit steer/replacement
+	// controls keep their own semantics and fencing.
+	if !e.protocol && !d.Steer && !d.Replacement {
+		if err := e.nativeBoundaryBeforeHandoff(ctx); err != nil {
+			return opjournal.NotDelivered{Transient: true, Cause: err}
+		}
+	}
 	fence := runtime.InputFence{}
 	if d.Fence.Token != "" {
 		fence = runtime.InputFence{Generation: d.Fence.Generation, Epoch: d.Fence.Epoch, Token: d.Fence.Token}
@@ -859,6 +889,26 @@ func (e *conversationLaneExec) starvedSendLook(now time.Time) error {
 		return fmt.Errorf("looking at session %s's turn again before typing content its activity clock starved: %w", e.info.ID, err)
 	case hold:
 		return fmt.Errorf("session %s's turn, looked at again before typing content its activity clock starved, holds it", e.info.ID)
+	}
+	return nil
+}
+
+// nativeBoundaryBeforeHandoff closes the probe-to-effect gap for a supported
+// native turn source. A backend that explicitly cannot read turns retains its
+// existing screen/quiescence contract; an unavailable supported source does not.
+func (e *conversationLaneExec) nativeBoundaryBeforeHandoff(ctx context.Context) error {
+	if e.turnCapsUnread {
+		return fmt.Errorf("native input boundary: %w", runtime.ErrRuntimeUnavailable)
+	}
+	if !e.traits.readable {
+		return nil
+	}
+	history, err := e.linkRead(ctx, e.budget)
+	if err != nil {
+		return fmt.Errorf("reading native input boundary: %w", err)
+	}
+	if history.Current.Active() {
+		return fmt.Errorf("native turn %s still runs: %w", history.Current.TurnID, runtime.ErrSessionBusy)
 	}
 	return nil
 }

@@ -354,3 +354,17 @@ status. Unsupported/no evidence stays absent; an indeterminate supported read
 is unknown. Session-backed reads use the existing input fence and a bounded,
 shared observation keyed by city and exact session ID. Surface only the public
 incarnation digest. Availability never authorizes lifecycle changes or input.
+
+### Conversation-lane boundary handoff
+
+On keystroke runtimes, boundary delivery reads supported native turns: a current
+turn vetoes a quiet screen, and an unreadable supported source remains unknown.
+Reprobes retry transient capability failures and retain native-turn observation.
+Immediately before an ordinary boundary/default keystroke handoff, recheck the
+native turn; busy or unknown returns transient definitely-not-delivered without
+Nudge, preserving the operation and delivery key for a later boundary. Protocol
+held replay keeps its existing fenced delivery semantics. Explicit unsupported
+sources keep their screen fallback, and explicit steer/replacement controls keep
+their existing contracts. This does not change general runtime input, weaken
+pending-interaction protection or claim exclusion of external inputs after the
+final observation.
