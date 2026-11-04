@@ -1017,9 +1017,19 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
 		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
 	}
+	// Refuse, not warn: a running city must not adopt a rig layout that
+	// start and the supervisor would refuse on the next restart.
+	if err := config.ValidateRigFederationLayout(cityRoot, newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating rigs: %w", err))
+	}
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
+	}
+	// Every reload, changed or not, repeats that a guarded rig is not
+	// protected by this build.
+	for _, w := range config.RigFederationWarnings(newCfg.Rigs) {
+		reloadWarnings = append(reloadWarnings, "config reload: "+w)
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil

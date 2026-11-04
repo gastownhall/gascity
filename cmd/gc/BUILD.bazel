@@ -1341,6 +1341,7 @@ go_test(
         "cmd_restart_test.go",
         "cmd_restart_worker_boundary_test.go",
         "cmd_rig_endpoint_test.go",
+        "cmd_rig_federation_test.go",
         "cmd_rig_include_canonical_test.go",
         "cmd_rig_include_registry_integration_test.go",
         "cmd_rig_list_hq_running_test.go",

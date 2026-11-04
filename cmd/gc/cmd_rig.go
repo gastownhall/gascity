@@ -816,6 +816,7 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	for i := range cfg.Rigs {
 		rig := cfg.Rigs[i]
 		suspended, running := suspNames[rig.Name], false
+		federation, namespace := rigListFederation(&rig)
 		if view, ok := loaded[rig.Name]; ok {
 			suspended, running = view.Suspended, view.RunningCount > 0
 		}
@@ -828,6 +829,8 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Running:             running,
 			DefaultSlingTarget:  rig.DefaultSlingTarget,
 			DefaultSlingTargets: rig.DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, rig.Path),
 		})
 	}
@@ -889,6 +892,13 @@ func renderRigListText(displayName string, result RigListJSON, stdout io.Writer)
 		if rig.DefaultBranch != "" {
 			w(fmt.Sprintf("    Default branch: %s", rig.DefaultBranch))
 		}
+		if rig.Federation != "" {
+			line := "    Federation: " + rig.Federation
+			if rig.Namespace != "" {
+				line += " (namespace: " + rig.Namespace + ")"
+			}
+			w(line + " (not enforced by this build)")
+		}
 		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}
 }
@@ -917,7 +927,24 @@ type RigListItem struct {
 	Running             bool     `json:"running"`
 	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
 	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
-	Beads               string   `json:"beads"`
+	// Federation and Namespace mirror the rig's federation settings. Each is
+	// present only when it differs from its default ("city" and "shared"), so
+	// output for a rig that sets neither is unchanged.
+	Federation string `json:"federation,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
+	Beads      string `json:"beads"`
+}
+
+// rigListFederation returns the rig's federation and namespace for rig-list
+// output, each blank when it is the default.
+func rigListFederation(r *config.Rig) (federation, namespace string) {
+	if r.FederationGuarded() {
+		federation = r.EffectiveFederation()
+	}
+	if r.NamespaceExclusive() {
+		namespace = r.EffectiveNamespace()
+	}
+	return federation, namespace
 }
 
 type RigListSummary struct {
@@ -993,6 +1020,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		if jsonOutput {
 			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
+		federation, namespace := rigListFederation(&cfg.Rigs[i])
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                cfg.Rigs[i].Name,
 			Path:                cfg.Rigs[i].Path,
@@ -1002,6 +1030,8 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running:             running,
 			DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
 			DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
 		})
 	}
