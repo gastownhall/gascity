@@ -2691,7 +2691,7 @@ type DoctorConfig struct {
 	// the operator runs `gc doctor --fix`. Actual removal still
 	// requires --fix; this flag does not auto-prune. Safety is
 	// enforced by mechanical checks (no uncommitted changes, no
-	// unpushed commits, no stashes) — never by role identity.
+	// unpushed commits) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 
 	// Checks holds city-local inline doctor checks declared via
