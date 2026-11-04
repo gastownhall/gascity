@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -232,7 +233,7 @@ func pristineBootstrapScreen(screen, family string) bool {
 	text := strings.Join(plain, "\n")
 	switch family {
 	case "codex":
-		if !strings.Contains(text, ">_ OpenAI Codex (v") || !strings.Contains(text, "To get started, describe a task or try one of these commands:") {
+		if !strings.Contains(text, ">_ OpenAI Codex (v") || (!strings.Contains(text, "To get started, describe a task or try one of these commands:") && !compactCodexBootstrapScreen(screen)) {
 			return false
 		}
 		// The initial native placeholder is an exact allowed empty composer.
@@ -260,6 +261,32 @@ func pristineBootstrapScreen(screen, family string) bool {
 		}
 	}
 	return prompts == 1 && paneShowsDrainedComposer(plain)
+}
+
+// Compact 0.162.1 renders no command menu. Recognize its complete initial UI,
+// including only the known optional update notice, never arbitrary transcript
+// rows surrounding an empty composer. SGR styles are discarded only for this
+// structural match; draft draining and native-turn vetoes above stay separate.
+var (
+	compactCodexBootstrapSGR   = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
+	compactCodexBootstrapFrame = regexp.MustCompile(
+		`^(?:╭─+╮\n│ ✨ Update available! [0-9]+(?:\.[0-9]+){2} -> [0-9]+(?:\.[0-9]+){2} │\n` +
+			`│ Run npm install -g @openai/codex to update\. │\n│ │\n│ See full release notes: │\n` +
+			`│ https://github\.com/openai/codex/releases/latest │\n╰─+╯\n)?` +
+			`>_ OpenAI Codex \(v0\.162\.1\)\n(?:~/|/)[^\n]+\npermissions: YOLO mode\n` +
+			`› Ask Codex to do anything\nGPT-[A-Za-z0-9_.-]+ (?:minimal|low|medium|high|xhigh|max) · (?:~/|/)[^\n]+\n` +
+			`\? for shortcuts(?: ⚠ [1-9][0-9]* warnings? · f2 to view)?$`)
+)
+
+func compactCodexBootstrapScreen(screen string) bool {
+	var visible []string
+	for _, line := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
+		line = strings.Join(strings.Fields(compactCodexBootstrapSGR.ReplaceAllString(line, "")), " ")
+		if line != "" {
+			visible = append(visible, line)
+		}
+	}
+	return compactCodexBootstrapFrame.MatchString(strings.Join(visible, "\n"))
 }
 
 // ordinaryPaneInput consumes even a startup/trust/clear/answer key before it

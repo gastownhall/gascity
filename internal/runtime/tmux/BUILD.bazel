@@ -209,7 +209,10 @@ go_test(
         "//conditions:default": [],
     }),
     embed = [":tmux"],
-    embedsrcs = ["testdata/codex-c75-pristine-screen.txt"],
+    embedsrcs = [
+        "testdata/codex-c75-pristine-screen.txt",
+        "testdata/codex-95-compact-pristine-screen.txt",
+    ],
     # program_capture_integration_test.go and
     # program_status_integration_test.go arm capture with the built companion
     # and drive it with the scripted emitter.

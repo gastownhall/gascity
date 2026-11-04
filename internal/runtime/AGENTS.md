@@ -16,3 +16,5 @@ preserve credit. Wake/resume must never reseed it. Preserve outcome-unknown
 after ambiguous handoff; this is not an idle identity or crash exactly-once
 claim. External same-user terminal input remains outside the narrow atomic GC
 input boundary. Do not retain raw credit nonces in evidence logs.
+
+First-input pristine recognition may accept either the qualified Codex0.162.1 intro/menu or the complete compact branded startup layout. Keep the native READY issuer/pane/process/fence proof separate; exact empty composer and all header/status/footer rows are required, with only the known optional update notice. Never map advisory activity or missing native turn data to idle; native-running/startup/draft/history/dialog/authority vetoes remain.

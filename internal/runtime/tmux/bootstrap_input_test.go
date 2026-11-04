@@ -21,6 +21,85 @@ import (
 //go:embed testdata/codex-c75-pristine-screen.txt
 var capturedCodexPristine string
 
+// Exact compact Codex 0.162.1 startup captured through the supervisor API on
+// frozen95. The introductory command menu is optional in this native layout.
+//
+//go:embed testdata/codex-95-compact-pristine-screen.txt
+var capturedCodexCompactPristine string
+
+func TestBootstrapCompactNativeCapturedReadyRequiresIssuedAuthority(t *testing.T) {
+	p, m := bootstrapModel(t)
+	m.screen = func(*fenceModel) string { return capturedCodexCompactPristine }
+	req := runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}
+	if got, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, req); err != nil || got != nil {
+		t.Fatalf("compact screen minted pre-start authority: %+v %v", got, err)
+	}
+	if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+		t.Fatal(err)
+	}
+	proof := bootstrapProof(t, p)
+	if proof.Fence != bootstrapFence || proof.Token == "" {
+		t.Fatal("compact native ready lost issued authority")
+	}
+	recovered := fenceModelProvider(m)
+	if got := bootstrapProof(t, recovered); got.Token != proof.Token {
+		t.Fatal("compact recovery changed issued native authority")
+	}
+}
+
+func TestBootstrapCompactPristineLayoutKeepsNativeVetoes(t *testing.T) {
+	if !pristineBootstrapScreen(capturedCodexCompactPristine, "codex") {
+		t.Fatal("actual compact native startup frame refused")
+	}
+	const brand = "  >_ OpenAI Codex"
+	_, afterBrand, found := strings.Cut(capturedCodexCompactPristine, brand)
+	if !found {
+		t.Fatal("captured compact frame lacks its native brand")
+	}
+	withoutBanner := brand + afterBrand
+	dim := strings.ReplaceAll(capturedCodexCompactPristine, "› Ask Codex to do anything", "› \x1b[2mAsk Codex to do anything\x1b[22m")
+	dim = strings.ReplaceAll(dim, "GPT-6.1-Sol medium", "\x1b[2mGPT-6.1-Sol medium\x1b[22m")
+	for name, frame := range map[string]string{"without optional update panel": withoutBanner, "dim native placeholder and status": dim} {
+		t.Run(name, func(t *testing.T) {
+			if !pristineBootstrapScreen(frame, "codex") {
+				t.Fatal("qualified compact layout refused")
+			}
+		})
+	}
+	for name, frame := range map[string]string{
+		"draft":                            strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "› user's draft", 1),
+		"pasted draft":                     strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "› [Pasted Content 24 chars]", 1),
+		"native busy":                      strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "• Working (1s • esc to interrupt)\n› Ask Codex to do anything", 1),
+		"startup pending":                  strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "Connecting to MCP servers (0/1)\n› Ask Codex to do anything", 1),
+		"prior user input":                 "› previous human input\n" + capturedCodexCompactPristine,
+		"prior assistant output":           "The previous task completed.\n" + capturedCodexCompactPristine,
+		"assistant output before composer": strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "Previous answer text\n› Ask Codex to do anything", 1),
+		"native question":                  strings.Replace(capturedCodexCompactPristine, "› Ask Codex to do anything", "Which animal should we choose?\n1. Otter\n2. Owl\n› Ask Codex to do anything", 1),
+		"second composer":                  capturedCodexCompactPristine + "\n› ",
+		"missing brand":                    strings.Replace(capturedCodexCompactPristine, ">_ OpenAI Codex (v0.162.1)", "", 1),
+		"missing permissions":              strings.Replace(capturedCodexCompactPristine, "permissions: YOLO mode", "", 1),
+		"missing model footer":             strings.Replace(capturedCodexCompactPristine, "GPT-6.1-Sol medium ·", "", 1),
+		"missing shortcuts footer":         strings.Replace(capturedCodexCompactPristine, "? for shortcuts", "", 1),
+		"truncated update panel":           strings.Replace(capturedCodexCompactPristine, "╰─────────────────────────────────────────────────╯", "", 1),
+		"foreign update notice":            strings.Replace(capturedCodexCompactPristine, "Run npm install -g @openai/codex to update.", "Previous assistant message", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pristineBootstrapScreen(frame, "codex") {
+				t.Fatal("unsafe compact native frame accepted")
+			}
+		})
+	}
+	p, m := bootstrapModel(t)
+	m.screen = func(*fenceModel) string { return capturedCodexCompactPristine }
+	if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+		t.Fatal(err)
+	}
+	m.pid = "9999"
+	if got, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}); err != nil || got != nil {
+		t.Fatalf("compact frame recovered another native process: %+v %v", got, err)
+	}
+}
+
 var bootstrapFence = runtime.InputFence{Generation: 1, Epoch: 1, Token: "bootstrap-model-token"}
 
 func bootstrapModel(t *testing.T) (*Provider, *fenceModel) {

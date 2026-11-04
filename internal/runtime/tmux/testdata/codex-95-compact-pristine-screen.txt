@@ -1,0 +1,24 @@
+╭─────────────────────────────────────────────────╮
+│ ✨ Update available! 0.162.1 -> 0.166.0         │
+│ Run npm install -g @openai/codex to update.     │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.162.1)
+     ~/rfc8191/…/codex/default-public-codex-0a3bca5c44a7422499dd266b253534d1
+  permissions: YOLO mode
+
+
+
+
+
+
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol medium · ~/rfc8191/default-public/95f184a8c-codex-firstinput2/cod…
+  ? for shortcuts                                      ⚠ 1 warning · f2 to view
