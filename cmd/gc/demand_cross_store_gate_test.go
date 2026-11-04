@@ -229,3 +229,52 @@ func TestSplitCityV2DemandIsGatedOffThePass(t *testing.T) {
 		t.Fatalf("graph blocker closed: v2 demand counts %v, want %s, %s and %s", got, clean.ID, stranded.ID, held.ID)
 	}
 }
+
+// A unified exact leg keeps Ready and the claim census on their existing
+// cached read tier, while input admission still sees live parks. Otherwise a
+// claim's disappearance from live Ready can precede its cached in_progress
+// row and turn an idle-respawn cancellation into an ordinary idle stop.
+func TestUnifiedExactDemandKeepsClaimSnapshotAndLiveInputAdmission(t *testing.T) {
+	plain := routedDemandBead("gc-plain")
+	plain.Assignee = "session-1"
+	step := routedDemandBead("gc-step")
+	step.Metadata["gc.root_bead_id"] = "gc-root"
+	cache, backing := newDemandCache(t, true, plain, step,
+		beads.Bead{ID: "gc-root", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "gc-inputs"}},
+		beads.Bead{ID: "gc-inputs", Type: "convoy", Status: "open"},
+		beads.Bead{ID: "gc-input", Type: "task", Status: "open"})
+	if err := cache.DepAdd("gc-inputs", "gc-input", "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	env := externalReadsEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: cache}
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	ready := func() []string {
+		t.Helper()
+		rec := fixtureDemandRecording(now, env)
+		leg, ok := recordedLeg(rec, cache)
+		rows, err := leg.gatedReady()
+		if !ok || err != nil {
+			t.Fatalf("recorded=%t, ready error=%v", ok, err)
+		}
+		return beadIDsOf(rows)
+	}
+	if got := ready(); !slices.Contains(got, plain.ID) || !slices.Contains(got, step.ID) {
+		t.Fatalf("initial ready = %v, want both candidates", got)
+	}
+	claimed := "in_progress"
+	if err := backing.Update(plain.ID, beads.UpdateOpts{Status: &claimed}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Update("gc-input", beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ready(); !slices.Contains(got, plain.ID) || slices.Contains(got, step.ID) {
+		t.Fatalf("before cache delivery, ready = %v: retain the cached claim candidate, withhold the live-held native step", got)
+	}
+	if err := cache.Update(plain.ID, beads.UpdateOpts{Status: &claimed}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ready(); slices.Contains(got, plain.ID) || slices.Contains(got, step.ID) {
+		t.Fatalf("after cache delivery, ready = %v: neither candidate is ready", got)
+	}
+}

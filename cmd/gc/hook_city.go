@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -92,7 +93,7 @@ func (h *hookCity) claimOps() hookClaimOps {
 		return inputWorkStoresForScope(ctx, h.path, scopePath, h.cfg, primary)
 	}
 	ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidate beads.Bead) (sourceworkflow.InputAdmission, error) {
-		if !hookClaimWorkflowLinked(candidate) && strings.TrimSpace(candidate.Metadata["gc.input_convoy_id"]) == "" {
+		if !hookClaimWorkflowLinked(candidate) && strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
 			return sourceworkflow.InputAdmission{Ready: true}, nil
 		}
 		work := hookClaimBdStoreContext(ctx, dir, env, "")

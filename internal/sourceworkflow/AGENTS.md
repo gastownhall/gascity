@@ -6,6 +6,13 @@ candidate rows; hooks check before a new claim and revalidate before delivery;
 ordinary native controls check after their existing lifecycle cleanup gate.
 Keep those consumers on this domain predicate.
 
+Use `beads.LiveFor` for authoritative reads through typed class handles;
+`HandlesFor(handle).Live` can fall back to a cached logical reader. The demand
+lane keeps unified exact-store candidates on their existing cached tier, then
+applies live input admission off the planner pass. Preserve the split-store
+and non-exact live candidate reads. Moving only Ready ahead of the cached claim
+census can hide a new claim and turn a canceled respawn into an idle stop.
+
 Drain and fanout only expand/reconcile graphs: they validate input relations
 without requiring descendant members to be execution-ready. The input convoy's
 own prerequisites and parks, root/control parks, and existing graph dependency,

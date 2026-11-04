@@ -766,7 +766,16 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 		recorded[key] = true
 		add(key, func() (sourcePayload, error) {
 			var r legRecording
-			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) { return reads.ReadyAll(leg.Store) })
+			r.ReadyAll, r.ReadyAllErr = guardedRead(func() ([]beads.Bead, error) {
+				if !readywork.IsSplit(gateLegs) {
+					// Keep unified exact candidates on the same cached tier as
+					// the claim census. Live Ready can lose a newly claimed row
+					// before that census sees it, inviting an idle drain.
+					// The gate below still reads native input relations live.
+					return newV2DemandReads(time.Time{}, nil).ReadyAll(leg.Store)
+				}
+				return reads.ReadyAll(leg.Store)
+			})
 			r.gateReady(gate, own)
 			return sourcePayload{Leg: r}, nil
 		})

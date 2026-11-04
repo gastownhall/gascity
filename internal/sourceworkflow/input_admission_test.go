@@ -12,12 +12,20 @@ import (
 )
 
 func TestInputAdmissionCurrentRelations(t *testing.T) {
-	for _, split := range []bool{false, true} {
-		t.Run(map[bool]string{false: "unified", true: "split"}[split], func(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		split, cached bool
+	}{
+		{"unified", false, false},
+		{"split", true, false},
+		{"cached unified", false, true},
+		{"cached split", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
 			work := beads.NewMemStore()
 			work.HonorExplicitIDs = true
 			graph := work
-			if split {
+			if c.split {
 				graph = beads.NewMemStore()
 				graph.HonorExplicitIDs = true
 			}
@@ -40,7 +48,23 @@ func TestInputAdmissionCurrentRelations(t *testing.T) {
 			dep(work, conv.ID, input.ID, "tracks")
 			root := create(graph, beads.Bead{ID: "graph-root", Title: "workflow", Metadata: map[string]string{"gc.kind": "workflow", "gc.input_convoy_id": conv.ID}})
 			step := create(graph, beads.Bead{ID: "graph-step", Title: "early step", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
-			stores := InputStores{Graph: beadstest.Graph(graph), Work: []beads.WorkStore{beadstest.Work(work)}}
+			var workRead, graphRead beads.Store = work, graph
+			if c.cached {
+				cache := func(store beads.Store) *beads.CachingStore {
+					t.Helper()
+					cached := beads.NewCachingStoreForTest(store, nil)
+					if err := cached.Prime(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+					return cached
+				}
+				workRead = cache(work)
+				graphRead = workRead
+				if c.split {
+					graphRead = cache(graph)
+				}
+			}
+			stores := InputStores{Graph: beadstest.Graph(graphRead), Work: []beads.WorkStore{beadstest.Work(workRead)}}
 			check := func(want bool) {
 				t.Helper()
 				got, err := stores.Admission(context.Background(), step)
@@ -71,6 +95,11 @@ func TestInputAdmissionCurrentRelations(t *testing.T) {
 			check(true) // Terminal members use convoy terminal semantics.
 			dep(work, conv.ID, gate.ID, "blocks")
 			check(false) // The convoy's own prerequisites are also required.
+			replacement := create(work, beads.Bead{ID: "work-replacement", Title: "replacement inputs", Type: "convoy"})
+			if err := graph.SetMetadata(root.ID, "gc.input_convoy_id", replacement.ID); err != nil {
+				t.Fatal(err)
+			}
+			check(true) // The root's current input relation must also bypass caches.
 		})
 	}
 }

@@ -65,7 +65,7 @@ func (s InputStores) Admission(ctx context.Context, candidate beads.Bead) (Input
 	if beads.IsNilStore(s.Graph) {
 		return InputAdmission{}, fmt.Errorf("input admission: graph store missing for %s", candidate.ID)
 	}
-	root, err := beads.HandlesFor(s.Graph).Live.Get(rootID)
+	root, err := beads.LiveFor(s.Graph).Get(rootID)
 	if err != nil {
 		return InputAdmission{}, fmt.Errorf("input admission: reading workflow root %s: %w", rootID, err)
 	}
@@ -196,7 +196,7 @@ func (w *inputAdmissionWalk) resolve(id string, includeGraph bool) (beads.Bead, 
 		if err := w.check(); err != nil {
 			return beads.Bead{}, nil, err
 		}
-		live := beads.HandlesFor(store).Live
+		live := beads.LiveFor(store)
 		b, err := live.Get(id)
 		if errors.Is(err, beads.ErrNotFound) {
 			continue
