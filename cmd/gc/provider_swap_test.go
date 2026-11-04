@@ -529,7 +529,7 @@ func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
 			if _, ok := cr.asyncStarts.start(); !ok {
 				t.Fatal("start refused")
 			}
-			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg, nil); err != nil {
 				t.Fatalf("swap waited on a reservation that launched nothing: %v", err)
 			}
 		})
@@ -539,7 +539,7 @@ func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
 			cr := &CityRuntime{}
 			release := make(chan struct{})
 			cr.asyncStarts.goStart(func() { <-release })
-			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err == nil {
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg, nil); err == nil {
 				t.Fatal("swap went ahead over a start still running past startup_timeout + slack")
 			}
 			close(release)
@@ -549,7 +549,7 @@ func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			cr := &CityRuntime{}
 			cr.asyncStarts.goStart(func() { <-time.After(5 * time.Second) })
-			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg, nil); err != nil {
 				t.Fatalf("swap aborted over a start that finished within the wait: %v", err)
 			}
 		})
@@ -562,7 +562,7 @@ func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
 				panic("start blew up")
 			})
 			synctest.Wait()
-			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg, nil); err != nil {
 				t.Fatalf("a panicked start left the count raised: %v", err)
 			}
 		})
@@ -574,7 +574,7 @@ func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
 			cr.asyncStarts.goStart(func() { <-release })
 			ctx, cancel := context.WithCancel(context.Background())
 			time.AfterFunc(time.Second, cancel)
-			if _, err := cr.beforeProviderSwap(ctx, cfg); !errors.Is(err, context.Canceled) {
+			if _, err := cr.beforeProviderSwap(ctx, cfg, nil); !errors.Is(err, context.Canceled) {
 				t.Fatalf("err = %v, want the controller stop to abort the swap", err)
 			}
 			close(release)
@@ -584,7 +584,7 @@ func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
 		cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		resume, err := cr.beforeProviderSwap(ctx, cfg)
+		resume, err := cr.beforeProviderSwap(ctx, cfg, nil)
 		resume()
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want a done ctx to abort the v2 swap", err)

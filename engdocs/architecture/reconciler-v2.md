@@ -57,12 +57,53 @@ the drain-pending hint, so a claim makes no socket call.
 
 ### Admission
 
-Since the cutover (C9), a city that selects `v2` latches it from config
-alone, and its passes act. The latch still refuses v2 when the composed
-config enables a feature v2 defers (`v2LatchRefusals`: `depends_on`,
+Since the cutover (C9), a city that selects `v2` latches it from config,
+and its passes act. The latch still refuses v2 when the composed config
+enables a feature v2 defers (`v2LatchRefusals`: `depends_on`,
 `max_session_age`, chat auto-suspend, an unadmitted runtime), and a city
 whose class stores fail C0.7 does not boot. An explicit `v2` that is
 refused never falls back to legacy: set `session_reconciler = "legacy"`.
+
+v2 runs on tmux, acp and subprocess (the allowlist,
+`v2SessionRuntimesAdmitted`), and on an exec session runtime
+(`exec:<script>`, or a pack's `[runtimes.<name>]`) whose live handshake is
+v2-ready: it declares `observe.v1` and `report-attachment`, and
+`observe.v1` obliges `observe`, `inventory` and `kill-object`
+(`cmd/gc/exec_runtime_readiness.go`; PAR-EXEC). Any other exec runtime is
+refused, the refusal's fix naming the capabilities its handshake lacks, or
+the error that kept it from being read. `input-fence` is not required:
+doctor warns when v2 runs without it.
+
+The handshake is the one thing the admission decision reads that is not
+config. `execReadiness` runs `<script> protocol` (10s bound, the city's
+name and path in its env, as the provider runs it) once per version of the
+script file (its resolved path, size, modification time and inode) and
+city, and remembers the answer: a handshake until the file changes, an
+error for the handshake's 30s retry window. Concurrent latches that miss
+wait for one probe. Within one process the latch, a provider swap
+(`v2ProviderSwapRefusal`), the default resolution and doctor share that
+answer, so they agree; each process (`gc start`, the controller it starts,
+`gc doctor`) probes once for itself, and C0.8 catches a script that answers
+the built provider otherwise. The same handshake's
+`locality` decides whether an `exec:` or pack runtime counts as remote for
+the storage verbs (`execRuntimeDeclaresLocal`; absent or unknown is remote).
+
+At boot, C0.8 asks the provider the city built, not the probe: every leaf
+that reports v2 readiness (`runtime.V2ReadinessReporter`) must have no
+gaps in its own handshake. A gap refuses the boot (alert `boot-refused`:
+the script answers the provider otherwise than it answered the probe) and
+forgets the remembered handshakes, so the next latch probes again (an unset
+key then falls back to legacy); a handshake that cannot be read is retried
+with the boot backoff, no sooner than the provider's 30s handshake retry.
+A v2 provider swap runs the same check on the provider it would swap to,
+and refuses on a gap or an unread handshake.
+
+An unset key on a v2-ready exec runtime resolves to v2 like any other
+admitted runtime (owner decision D6): the handshake opted the city in, so
+the controller logs it at boot, a reload that makes it the pending mode says
+so, and the `daemon-session-reconciler` check warns until
+`session_reconciler` is set. An `exec:` or pack runtime is remote for the
+storage verbs unless its handshake declares `locality: "local"`.
 
 v2 accepts and ignores the identity circuit breaker and the two stall
 timeouts (`v2IgnoredSettings`, mc-ymynp): the work ladder replaces them,
@@ -71,7 +112,7 @@ controller logs each one as deprecated at boot, and doctor warns. Legacy
 still honours them, and only a legacy controller refuses a wake for an open
 respawn circuit (`wakeWillNotStart`).
 
-An unset key resolves from config alone too (`resolveReconcilerMode`,
+An unset key resolves from config too, with the same exec probe (`resolveReconcilerMode`,
 `cmd/gc/reconcile_mode.go`, with `v2DefaultFallbacks` in
 `cmd/gc/reconcile_default.go`), so the latch, `gc start` and doctor agree.
 It is v2 unless `v2DefaultFallbacks` names a reason, and then legacy, with
@@ -353,7 +394,7 @@ Every other field is cumulative or current.
 
 | Fields | What |
 |---|---|
-| `boot` | What boot still waits on: `capabilities` (C0.7's read of the class stores has not passed), `census` (the boot census has not passed), `gate` (no pass has completed with the boot gate open), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
+| `boot` | What boot still waits on: `capabilities` (C0.7's read of the class stores has not passed), `runtime` (C0.8's read of the exec runtimes' handshakes has not passed), `census` (the boot census has not passed), `gate` (no pass has completed with the boot gate open), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
 | `keys`, `depth_hot`, `depth_resync`, `processing`, `dirty`, `deferred`, `timers` | Queue state |
 | `oldest_hot_ms`, `oldest_resync_ms`, `longest_in_flight_ms` | The oldest queued key per lane, and the longest reconcile in flight |
 | `adds`, `dropped_adds` | Accepted adds by reason kind since the last record; adds refused after shutdown |
