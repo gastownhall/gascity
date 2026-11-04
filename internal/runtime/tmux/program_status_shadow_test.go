@@ -495,12 +495,13 @@ func TestShadowGoDropsWhenFull(t *testing.T) {
 // pendingPaneExecutor resolves the agent pane like fakeAgentPaneRow, shows
 // screen() to every capture ("❯ ", a ready prompt, when nil), answers the
 // state cache's listing with fetch and a fresh program read with record()'s
-// armed agent pane, and every other command with "". It counts both kinds of
-// read.
+// agent pane armed under tap() (readNonce when nil), and every other command
+// with "". It counts both kinds of read.
 type pendingPaneExecutor struct {
 	mu      sync.Mutex
 	fetch   string
 	record  func() string
+	tap     func() string
 	screen  func() string
 	fetches int
 	fresh   int
@@ -523,7 +524,11 @@ func (e *pendingPaneExecutor) execute(args []string) (string, error) {
 		if e.record == nil {
 			return "", errors.New("unscripted fresh read")
 		}
-		return freshRows(armedPane(e.record())), nil
+		pane := armedPane(e.record())
+		if e.tap != nil {
+			pane.tap = e.tap()
+		}
+		return freshRows(pane), nil
 	case tmuxSubcommand(args) == "list-panes":
 		e.fetches++
 		return e.fetch, nil

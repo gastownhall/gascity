@@ -41,7 +41,7 @@ func rawStep(text string) string { return "raw " + hex.EncodeToString([]byte(tex
 // TTL, the cache primed with that blocked reading. The fresh pending read
 // pairs the capture with the record and, once the parsers have seen the
 // close, judges none; the shadow comparison says the same; a newer blocked
-// report after the close stands.
+// report for another dialog, which keeps the root's Since, stands.
 func TestPendingFreshReadSupersedesBlockedAfterParserClose(t *testing.T) {
 	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusShadow,
 		runtime.ProgramStatusArm{Capture: true}, []string{"report state=blocked:kind=permission"})
@@ -116,11 +116,14 @@ func TestPendingFreshReadSupersedesBlockedAfterParserClose(t *testing.T) {
 		t.Fatalf("comparison %+v, want pending none/none on the blocked reading", c)
 	}
 
-	// A newer report: the program leaves blocked and enters it again after
-	// the close. That record stands.
-	s.emit(t, "report state=working", "report state=blocked:kind=question")
+	// A newer report for another dialog the parsers cannot see: the program
+	// reports blocked again without leaving it, so the root keeps its Since
+	// while the record's Seq moves. That record stands.
+	before := r.Status
+	s.emit(t, "report state=blocked:kind=question")
 	r, _ = verdict("newer report")
-	if !r.Status.Blocked() || r.CloseSupersedes() || runtime.ProgramFreshPendingVerdict(r, time.Time{}, time.Now()) != runtime.ProgramVerdictPending {
-		t.Fatalf("newer blocked report: reading %+v, want it judged pending", r)
+	if !r.Status.Blocked() || !r.Status.Since.Equal(before.Since) || r.Status.Seq == before.Seq ||
+		r.CloseSupersedes() || runtime.ProgramFreshPendingVerdict(r, time.Time{}, time.Now()) != runtime.ProgramVerdictPending {
+		t.Fatalf("newer blocked report: reading %+v after %+v, want Since kept, Seq moved and the record judged pending", r, before)
 	}
 }

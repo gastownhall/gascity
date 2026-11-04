@@ -13,9 +13,9 @@ import (
 // record taken right after it (programRead, past the state cache, whose
 // snapshot can lag a dialog's close by its whole TTL), and keeps each
 // session's dialog watch (runtime.ProgramDialogWatch) from the captures the
-// parsers judged, so a dialog close they observed supersedes a blocked
-// record from before it. While the switch is off nothing here reads or
-// keeps anything.
+// parsers judged and the records read with them, so a dialog close they
+// observed supersedes the blocked record they saw the dialog with until it
+// changes. While the switch is off nothing here reads or keeps anything.
 
 // programDialogWatchLimit bounds how many sessions' dialog watches one Tmux
 // keeps; past it the watches start over.
@@ -28,9 +28,9 @@ type programDialogs struct {
 }
 
 // observeDialog records one parser capture of session taken at at (open when
-// the parsers found a dialog in it) and returns the session's watch with it
-// observed.
-func (t *Tmux) observeDialog(session string, at time.Time, open bool) runtime.ProgramDialogWatch {
+// the parsers found a dialog in it), with s the record read with it (zero
+// when none was read), and returns the session's watch with it observed.
+func (t *Tmux) observeDialog(session string, at time.Time, open bool, s runtime.ProgramStatus) runtime.ProgramDialogWatch {
 	d := &t.dialogs
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -38,7 +38,7 @@ func (t *Tmux) observeDialog(session string, at time.Time, open bool) runtime.Pr
 	if d.watch == nil || (!known && len(d.watch) >= programDialogWatchLimit) {
 		d.watch = make(map[string]runtime.ProgramDialogWatch)
 	}
-	w = w.Observe(at, open)
+	w = w.Observe(at, open, s)
 	d.watch[session] = w
 	return w
 }
@@ -52,12 +52,11 @@ func (t *Tmux) dialogWatch(session string) runtime.ProgramDialogWatch {
 }
 
 // pendingReading is the record's side of one parser look at session: the
-// capture's verdict observed into the session's dialog watch, at capturedAt
-// (a clock read before the capture), beside s, the record read fresh with
-// it.
+// capture's verdict and s, the record read fresh with it, observed into the
+// session's dialog watch at capturedAt (a clock read before the capture).
 func (t *Tmux) pendingReading(session string, capturedAt time.Time, parserPending bool, s runtime.ProgramStatus) runtime.ProgramPendingReading {
-	w := t.observeDialog(session, capturedAt, parserPending)
-	return runtime.ProgramPendingReading{Status: s, ParserPending: parserPending, ParserClosedAt: w.ClosedAt}
+	w := t.observeDialog(session, capturedAt, parserPending, s)
+	return runtime.ProgramPendingReading{Status: s, ParserPending: parserPending, Dialogs: w}
 }
 
 // pendingWithRecord is Pending with the record's side of the read: the
@@ -77,7 +76,7 @@ func (p *Provider) pendingWithRecord(name string) (*runtime.PendingInteraction, 
 	}
 	s, ok := p.tm.programRead(name)
 	if !ok {
-		p.tm.observeDialog(name, capturedAt, pending != nil)
+		p.tm.observeDialog(name, capturedAt, pending != nil, runtime.ProgramStatus{})
 		return pending, runtime.ProgramPendingReading{}, false, nil
 	}
 	return pending, p.tm.pendingReading(name, capturedAt, pending != nil, s), true, nil

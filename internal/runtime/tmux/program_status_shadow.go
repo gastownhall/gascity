@@ -583,8 +583,11 @@ func (t *Tmux) shadowSettleFrom(session string, mark shadowInterrupt, decidedAt 
 // verdict (lookErr, nil when it let the keys through), taken at lookAt (a
 // clock read before the look), beside the record's fresh pending verdict
 // (runtime.ProgramFreshPendingVerdict) on s, read fresh with the look. A
-// look that read the pane is observed into the session's dialog watch, so a
-// dialog close it saw supersedes a blocked record from before it.
+// look that read the pane is observed, with s, into the session's dialog
+// watch, so a dialog close it saw supersedes the blocked record the dialog
+// was seen with. A look that could not read the pane observes nothing and is
+// judged on the watch as it stands, which supersedes nothing while its
+// latest capture showed a dialog.
 func (t *Tmux) shadowTypingGate(session string, lookErr error, lookAt time.Time, s runtime.ProgramStatus) {
 	scrape := runtime.ProgramVerdictNone
 	switch {
@@ -593,11 +596,11 @@ func (t *Tmux) shadowTypingGate(session string, lookErr error, lookAt time.Time,
 	case lookErr != nil:
 		scrape = runtime.ProgramVerdictIndeterminate
 	}
-	reading := runtime.ProgramPendingReading{Status: s, ParserPending: scrape == runtime.ProgramVerdictPending}
-	if scrape != runtime.ProgramVerdictIndeterminate {
-		reading = t.pendingReading(session, lookAt, reading.ParserPending, s)
+	var reading runtime.ProgramPendingReading
+	if scrape == runtime.ProgramVerdictIndeterminate {
+		reading = runtime.ProgramPendingReading{Status: s, Dialogs: t.dialogWatch(session)}
 	} else {
-		reading.ParserClosedAt = t.dialogWatch(session).ClosedAt
+		reading = t.pendingReading(session, lookAt, scrape == runtime.ProgramVerdictPending, s)
 	}
 	now := time.Now()
 	t.shadowGo(func() {
