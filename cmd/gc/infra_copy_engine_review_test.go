@@ -438,7 +438,8 @@ func TestTheClearRemovesAChunksEdgesInOneBatch(t *testing.T) {
 // TestInfraEngineDropsAStampedRowTheSourceDeletedSincePausing (review S8,
 // mutant N): a row an earlier, interrupted run copied that the work store has
 // deleted since is not kept by the resume. The binding ends holding exactly
-// the work store's infrastructure rows, and nothing is copied again.
+// the work store's infrastructure rows, and nothing else is copied again, no
+// row and no edge.
 func TestInfraEngineDropsAStampedRowTheSourceDeletedSincePausing(t *testing.T) {
 	smallEngineBatches(t)
 	city := newEngineCity(t, 300, "sqlite")
@@ -494,9 +495,19 @@ func TestInfraEngineDropsAStampedRowTheSourceDeletedSincePausing(t *testing.T) {
 	}
 	city.rows = rows
 
+	var points []string
+	infraEngineCrashPoint = func(p string) error { points = append(points, p); return nil }
 	report, said := city.migrate(t)
+	infraEngineCrashPoint = prev
 	if report.Outcome != infraMigrationConverged {
 		t.Fatalf("the run after the source deleted %s = %v: %s", gone, report.Outcome, said)
+	}
+	// Every edge between two kept rows already carries its type and payload,
+	// so the resume writes none of them again.
+	for _, p := range points {
+		if strings.HasPrefix(p, "copying edges") {
+			t.Fatalf("the resume wrote edges again (%s), though every edge between kept rows was already right", p)
+		}
 	}
 	if m := infraCopiedCount.FindStringSubmatch(said); m == nil || m[1] != "0" {
 		t.Fatalf("the run copied %v rows, want none: every row it kept still equals the work store: %s", m, said)
@@ -539,5 +550,56 @@ func TestThePlanRefusesAnUnaskableSourceBeforeReadingItsEdges(t *testing.T) {
 	}
 	if reads != 0 {
 		t.Fatalf("the plan read edges %d time(s) before refusing a source it cannot ask", reads)
+	}
+}
+
+// TestTheClearDetachesAnEdgeFromALaterChunkBeforeTheDelete (review S3): an
+// edge onto a moved row from a moved row in a later chunk is recorded in the
+// later row's own entry, not in the first's, so the first chunk finds it live
+// and removes it before its delete. A delete that followed it would rewrite
+// the later row's text, which a paused or killed clear leaves in the work
+// store until the next run.
+func TestTheClearDetachesAnEdgeFromALaterChunkBeforeTheDelete(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	prevChunk := infraClearChunk
+	infraClearChunk = 1
+	t.Cleanup(func() { infraClearChunk = prevChunk })
+	source := setRewritingStore{beads.NewMemStore()}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	first := mustCreateInfraBead(t, source, beads.Bead{Title: "graft root", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	text := "follows " + first.ID
+	later := mustCreateInfraBead(t, source, beads.Bead{Title: "graft step", Type: "task", Description: text, Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	if err := source.DepAdd(later.ID, first.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	prevBefore := infraClearBeforeDelete
+	infraClearBeforeDelete = func(id string) error {
+		if id == later.ID {
+			return errors.New("killed between chunks")
+		}
+		return nil
+	}
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
+	infraClearBeforeDelete = prevBefore
+	if report.Outcome != infraMigrationRetained {
+		t.Fatalf("migrate = %s, want the kill to leave the clear pending: %s", report.Outcome, log.String())
+	}
+	if _, err := source.Get(first.ID); err == nil {
+		t.Fatalf("precondition: %s should go in the first chunk", first.ID)
+	}
+	got, err := source.Get(later.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Description != text {
+		t.Fatalf("the first chunk's delete rewrote %s, still in the work store:\n got %q\nwant %q", later.ID, got.Description, text)
+	}
+	log.Reset()
+	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("resume = %s: %s", report.Outcome, log.String())
 	}
 }
