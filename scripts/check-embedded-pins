@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Check that the versions gc embeds or writes on init are the latest released.
+
+Checks:
+
+  bundled   BundledPackImportVersion (internal/config/public_packs.go) names an
+            ancestor of HEAD whose core/bd/dolt pack trees match this
+            checkout, so a gc that does not know the pin and fetches it gets
+            the bytes the binary embeds. Release-time check: on main the
+            bundled content moves ahead of the pin between releases by design.
+  stale     No example or doc carries a superseded bundled, gastown or
+            gascity pin (internal/config/public_packs.go Superseded* lists).
+  releases  deps.env BD_VERSION is the latest published (non-prerelease)
+            gastownhall/beads release, and DOLT_VERSION is the Dolt version
+            that beads release qualifies (scripts/ci/install-dolt.sh at the
+            tag). --bd-advisory (RC Gate) turns a newer beads release into a
+            warning and checks Dolt against the pinned bd instead. beads measures each Dolt release before raising its pin
+            (Dolt 2.3.x regressed DOLT_RESET('--hard')), so the qualified pin,
+            not upstream "latest", is the newest safe Dolt.
+
+The public gastown/gascity pack pins are checked against the registry by
+scripts/update-bundled-gastown-pack --check.
+
+--latest-bd and --bd-qualified-dolt replace the GitHub lookups (offline tests).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.request
+
+BEADS_REPO = "gastownhall/beads"
+DOLT_REPO = "dolthub/dolt"
+PUBLIC_PACKS_GO = Path("internal/config/public_packs.go")
+DEPS_ENV = Path("deps.env")
+# gascity.git subpaths of the bundled core, bd and dolt packs
+# (internal/builtinpacks.All); dolt lives under examples/bd.
+BUNDLED_PACK_PATHS = ("internal/bootstrap/packs/core", "examples/bd")
+STALE_SCAN_DIRS = (Path("examples"), Path("docs"))
+SUPERSEDED_LISTS = (
+    "SupersededBundledPackImportVersions",
+    "SupersededPublicGastownPackVersions",
+    "SupersededPublicGascityPackVersions",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--skip-bundled", action="store_true", help="skip the bundled pack pin check")
+    parser.add_argument("--skip-releases", action="store_true", help="skip the bd/dolt release checks")
+    parser.add_argument("--skip-stale", action="store_true", help="skip the superseded-pin scan of examples and docs")
+    parser.add_argument("--latest-bd", help="latest beads release tag (skips the GitHub lookup)")
+    parser.add_argument("--bd-qualified-dolt", help="Dolt version the beads release qualifies (skips the lookup)")
+    parser.add_argument(
+        "--bd-advisory",
+        action="store_true",
+        help="report a newer beads release than BD_VERSION as a warning, and check DOLT_VERSION "
+        "against the Dolt the pinned BD_VERSION qualifies (release gates: a beads patch shipped "
+        "after the pin must not block a release)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    root = Path(args.repo_root).resolve()
+    errors: list[str] = []
+    if not args.skip_bundled:
+        errors += check_bundled(root)
+    if not args.skip_stale:
+        errors += check_stale(root)
+    if not args.skip_releases:
+        errors += check_releases(root, args.latest_bd, args.bd_qualified_dolt, args.bd_advisory)
+    for error in errors:
+        print(f"error: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    print("embedded pins are at the latest released versions")
+    return 0
+
+
+def go_string_const(text: str, name: str) -> str:
+    match = re.search(rf'\b{name}\s*=\s*"([^"]*)"', text)
+    if not match:
+        raise SystemExit(f"{PUBLIC_PACKS_GO}: {name} not found")
+    return match.group(1)
+
+
+def go_string_list(text: str, name: str) -> list[str]:
+    match = re.search(rf"var {name} = \[\]string\{{(.*?)\n\}}", text, re.S)
+    if not match:
+        raise SystemExit(f"{PUBLIC_PACKS_GO}: {name} not found")
+    return re.findall(r'^\s*"([^"]+)",', match.group(1), re.M)
+
+
+def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True, check=check)
+
+
+def check_bundled(root: Path) -> list[str]:
+    text = (root / PUBLIC_PACKS_GO).read_text(encoding="utf-8")
+    pin = go_string_const(text, "BundledPackImportVersion")
+    superseded = go_string_list(text, "SupersededBundledPackImportVersions")
+    errors: list[str] = []
+    if not pin.startswith("sha:") or not re.fullmatch(r"[0-9a-f]{40}", pin[4:]):
+        return [f"BundledPackImportVersion {pin!r} must be sha:<40-hex gascity.git commit>"]
+    commit = pin[4:]
+    if pin in superseded:
+        errors.append(f"BundledPackImportVersion {pin} is also listed as superseded")
+    if git(root, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        # Ancestry needs the history between the pin and HEAD.
+        deepened = git(root, "fetch", "--quiet", "--unshallow", "origin", check=False)
+        if deepened.returncode != 0:
+            return errors + [f"cannot deepen the shallow checkout to check BundledPackImportVersion ancestry: {deepened.stderr.strip()}"]
+    if git(root, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode != 0:
+        return errors + [f"BundledPackImportVersion commit {commit} is not in this ref's history"]
+    if git(root, "merge-base", "--is-ancestor", commit, "HEAD", check=False).returncode != 0:
+        # A content-equal commit from another branch (a PR head, main for a
+        # release branch) is not part of what this ref ships.
+        errors.append(
+            f"BundledPackImportVersion commit {commit[:12]} is not an ancestor of HEAD; "
+            "pin a commit on this branch"
+        )
+    diff = git(root, "diff", "--name-only", commit, "HEAD", "--", *BUNDLED_PACK_PATHS)
+    changed = [line for line in diff.stdout.splitlines() if line]
+    if changed:
+        errors.append(
+            f"bundled core/bd/dolt content changed since BundledPackImportVersion {commit[:12]} "
+            f"({len(changed)} file(s), e.g. {changed[0]}); bump the pin to a commit with this "
+            "content and append the old pin to SupersededBundledPackImportVersions"
+        )
+    return errors
+
+
+def check_stale(root: Path) -> list[str]:
+    text = (root / PUBLIC_PACKS_GO).read_text(encoding="utf-8")
+    superseded = [
+        pin
+        for name in SUPERSEDED_LISTS
+        for pin in go_string_list(text, name)
+        if pin.startswith("sha:")
+    ]
+    stale = []
+    for directory in STALE_SCAN_DIRS:
+        for path in sorted((root / directory).rglob("*")):
+            if not path.is_file() or path.suffix not in {".toml", ".lock", ".md", ".mdx"}:
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace")
+            hits = sorted({pin[4:16] for pin in superseded if pin in content})
+            if hits:
+                stale.append(f"{path.relative_to(root)} ({', '.join(hits)})")
+    if stale:
+        return [f"superseded pins still written in: {'; '.join(stale)}"]
+    return []
+
+
+def deps_env(root: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in (root / DEPS_ENV).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+
+def fetch(url: str) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "gascity-check-embedded-pins"})
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and url.startswith("https://api.github.com/"):
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read()
+
+
+def latest_release_tag(repo: str) -> str:
+    # releases/latest is the newest non-prerelease, non-draft release by
+    # creation date; dolt has published older-numbered releases after newer
+    # ones, so it is only reported, never compared, for dolt.
+    return json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest"))["tag_name"]
+
+
+def beads_qualified_dolt(tag: str) -> str:
+    script = fetch(f"https://raw.githubusercontent.com/{BEADS_REPO}/{tag}/scripts/ci/install-dolt.sh").decode()
+    match = re.search(r'^readonly version="([^"]+)"', script, re.M)
+    if not match:
+        raise SystemExit(f"{BEADS_REPO}@{tag} scripts/ci/install-dolt.sh: no readonly version= pin")
+    return match.group(1)
+
+
+def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None, bd_advisory: bool) -> list[str]:
+    env = deps_env(root)
+    bd = env.get("BD_VERSION", "")
+    dolt = env.get("DOLT_VERSION", "")
+    errors: list[str] = []
+    online = qualified_dolt is None
+    latest_bd = latest_bd or latest_release_tag(BEADS_REPO)
+    qualifying_bd = latest_bd
+    if bd != latest_bd:
+        message = f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}"
+        if bd_advisory:
+            print(f"::warning title=bd pin behind latest beads release::{message}")
+            qualifying_bd = bd
+        else:
+            errors.append(message)
+    qualified_dolt = qualified_dolt or beads_qualified_dolt(qualifying_bd)
+    if dolt != qualified_dolt:
+        errors.append(f"deps.env DOLT_VERSION={dolt}, beads {qualifying_bd} qualifies Dolt {qualified_dolt}")
+    if online:
+        upstream = latest_release_tag(DOLT_REPO).lstrip("v")
+        print(f"bd {bd} (latest {latest_bd}); dolt {dolt} (beads {qualifying_bd} qualifies {qualified_dolt}; upstream latest {upstream})")
+    return errors
+
+
+if __name__ == "__main__":
+    sys.exit(main())

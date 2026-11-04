@@ -113,11 +113,26 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening pooled dolt connection to %s:%s/%s: %w", host, port, database, err)
 	}
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-	db.SetConnMaxIdleTime(connMaxIdleTime)
+	configurePool(db)
 	registry.dbs[k] = db
+	return db, nil
+}
+
+// OpenPrivate returns a fresh single-connection *sql.DB for the given Dolt
+// endpoint, outside the registry, which the caller closes. It is the
+// explicit fresh-dial path for a caller that must not share a pooled session:
+// cmd/gc's storage maintenance window lists a server's sessions and counts
+// every session but its own, so its own must not sit in a pool other reads
+// leave idle connections in. One-shot use only, never per operation: a fresh
+// dial per call is the churn the registry exists to prevent.
+func OpenPrivate(host, port, user, password, database string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
+	if err != nil {
+		return nil, fmt.Errorf("opening private dolt connection to %s:%s/%s: %w", host, port, database, err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 	return db, nil
 }
 
@@ -138,15 +153,29 @@ func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening pooled dolt socket connection %s/%s: %w", socket, database, err)
 	}
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
+	configurePool(db)
 	registry.dbs[k] = db
 	return db, nil
 }
 
-// Shutdown closes all pooled connections and empties the registry. Call
-// once on process exit; subsequent Open calls recreate pools on demand.
+// configurePool applies the per-endpoint caps to a new pooled handle. TCP and
+// Unix-socket pools share it so neither can drift from the other: the socket
+// path once skipped the idle bound, so its idle connections lived until
+// connMaxLifetime and the server reaped them first, and every reuse logged
+// "closing bad idle connection: EOF" from the driver.
+func configurePool(db *sql.DB) {
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+}
+
+// Shutdown closes all pooled connections and empties the registry. Call it on
+// process exit; subsequent Open calls recreate pools on demand. A one-shot
+// process may also call it mid-run to close its own idle sessions before it
+// judges a server's sessions (cmd/gc's storage maintenance window), provided
+// no caller still holds a handle Open returned: a held handle is closed under
+// it.
 func Shutdown() {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()

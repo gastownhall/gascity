@@ -23,10 +23,18 @@ import (
 )
 
 const (
-	proxyProcessReadyTimeout   = 5 * time.Second
 	proxyProcessRestartBackoff = 1 * time.Second
 	proxyProcessShutdownWait   = 2 * time.Second
 )
+
+// proxyProcessReadyTimeout is how long a freshly spawned helper has to accept
+// connections and pass its health check, measured from the spawn. Manager.Tick
+// runs inline on the controller tick and start blocks for this long per service
+// that never becomes ready, so raising it in production stalls the controller
+// instead of fixing a slow start. Tests raise it once, from init, so a starved
+// host cannot turn a slow helper start into a failure; production never
+// assigns it, and tests are serial, so no locking is needed.
+var proxyProcessReadyTimeout = 5 * time.Second
 
 var errProxyProcessExitedEarly = errors.New("process exited before listener became ready")
 
@@ -228,6 +236,11 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)
 	}
+	// The readiness window opens at the spawn. now was captured before the
+	// orphan sweep above, which scans every process on the host, and
+	// Manager.Tick hands the same now to every service it starts in turn, so a
+	// deadline anchored on it loses however long those took.
+	readyBy := time.Now().Add(proxyProcessReadyTimeout)
 
 	p.mu.Lock()
 	p.cmd = cmd
@@ -261,7 +274,7 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		p.nextRestart = time.Now().UTC().Add(proxyProcessRestartBackoff)
 	}(cmd, logFile, doneCh)
 
-	if err := p.waitReady(now.Add(proxyProcessReadyTimeout)); err != nil {
+	if err := p.waitReady(readyBy); err != nil {
 		if !errors.Is(err, errProxyProcessExitedEarly) {
 			_ = stopProcessGroup(cmd)
 		}

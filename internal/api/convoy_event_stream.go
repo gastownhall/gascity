@@ -443,11 +443,17 @@ func workflowEventBeadFromSubject(state State, subjectID string) (beads.Bead, bo
 	}
 
 	matches := make([]beads.Bead, 0, 2)
-	for _, info := range workflowStores(state) {
+	// Every rig leg, retired or not: the subject may be rig WORK, which a
+	// relic-free rig still holds (S4b retires its leg only for graph rows).
+	for _, info := range workflowStoresIncludingRetiredRigs(state) {
 		if info.store == nil {
 			continue
 		}
-		bead, err := info.store.Get(subjectID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// A residence probe over every workflowStores leg; only the owner hits.
+		bead, err := beads.RelicGet(info.store, subjectID)
 		if err == nil {
 			matches = append(matches, bead)
 		}
@@ -467,7 +473,20 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 		return workflowStoreInfo{}, beads.Bead{}, false
 	}
 
-	if info, ok := workflowStoreByRef(state, bead.Metadata[beadmeta.RootStoreRefMetadataKey]); ok && info.store != nil {
+	// gc.root_store_ref is the run's SCOPE, never its location (S4 §2.1). On a
+	// split city every new root lives in the graph binding whatever its scope,
+	// so the binding is probed FIRST: a rig-scoped root there must not be
+	// shadowed by the rig store the metadata names, and an id held by both (an
+	// import's copy before its clear) resolves to the binding's row, as every
+	// by-id read does. The store the metadata names is then probed as the
+	// relic leg — a pre-S4 rig tree — unless that rig is proven relic-free.
+	if info, ok := workflowGraphStoreInfo(state); ok {
+		if root, ok := workflowRootInStore(info.store, rootID); ok {
+			return info, root, true
+		}
+	}
+	if info, ok := workflowStoreByRef(state, bead.Metadata[beadmeta.RootStoreRefMetadataKey]); ok && info.store != nil &&
+		!workflowRigLegRetired(state, info) {
 		root, ok := workflowRootInStore(info.store, rootID)
 		if ok {
 			return info, root, true
@@ -476,10 +495,20 @@ func workflowEventRoot(state State, bead beads.Bead) (workflowStoreInfo, beads.B
 
 	matches := make([]workflowRootMatch, 0, 2)
 	for _, info := range workflowStores(state) {
-		if info.store == nil {
+		if info.store == nil || workflowRigLegRetired(state, info) {
 			continue
 		}
-		root, ok := workflowRootInStore(info.store, rootID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// A residence probe over every workflowStores leg; only the owner
+		// hits. (The root_store_ref hint above names one store and is not.)
+		var root beads.Bead
+		var ok bool
+		_ = beads.RelicRead(func() error {
+			root, ok = workflowRootInStore(info.store, rootID)
+			return nil
+		})
 		if ok {
 			matches = append(matches, workflowRootMatch{info: info, root: root})
 		}

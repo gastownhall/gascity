@@ -54,7 +54,8 @@ func (e *drainPendingClaimEnv) ops() hookClaimOps {
 			e.queries++
 			return `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
 		},
-		DrainPending: e.probe.probe,
+		DrainPending:    e.probe.probe,
+		ReadWorkStarted: noStartedClaims,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			e.claimed = append(e.claimed, beadID)
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
@@ -379,5 +380,55 @@ func TestHookClaimDrainPendingSkipsWhenNoSessionIDIsKeyed(t *testing.T) {
 	}
 	if got := strings.Join(e.claimed, ","); got != "work-1" {
 		t.Fatalf("claim mutations = %q, want work-1", got)
+	}
+}
+
+// F-D post-claim. The pre-claim fence read the row awake, and the controller
+// marked it draining before the claim CAS landed (its own post-mark re-read of
+// the seat's work ran before the CAS too). Re-reading the row after the CAS
+// must give the claim back and drain, before anything is stamped, so a claim
+// never stays on a session its drain is about to stop.
+func TestHookClaimReleasesAClaimThatLandedAfterTheDrainMark(t *testing.T) {
+	e := newDrainPendingClaimEnv()
+	verdicts := []bool{false, true}
+	var asked int
+	var released []hookClaimReleaseRecord
+	var releaseCalls []string
+	var stepStarted int
+	ops := e.ops()
+	ops.DrainPending = func(_ string) (bool, error) {
+		v := verdicts[min(asked, len(verdicts)-1)]
+		asked++
+		return v, nil
+	}
+	ops.Release = func(_ context.Context, _ string, _ []string, beadID, _ string) (bool, error) {
+		releaseCalls = append(releaseCalls, beadID)
+		return true, nil
+	}
+	ops.EmitClaimReleased = func(r hookClaimReleaseRecord) { released = append(released, r) }
+	ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) { stepStarted++ }
+
+	code := doHookClaim("query", "/rig", e.opts(true), ops, &e.stdout, &e.stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (drain acknowledged); stderr=%s", code, e.stderr.String())
+	}
+	if len(e.claimed) != 1 {
+		t.Fatalf("claim mutations = %v, want the one CAS that raced the mark", e.claimed)
+	}
+	if strings.Join(releaseCalls, ",") != "work-1" {
+		t.Errorf("released = %v, want the claim given back", releaseCalls)
+	}
+	if len(released) != 1 || released[0].Reason != hookClaimReleaseReasonDraining {
+		t.Errorf("claim_released records = %+v, want one with reason %s", released, hookClaimReleaseReasonDraining)
+	}
+	if stepStarted != 0 {
+		t.Errorf("execution.step_started emitted %d times for a claim given back before its stamp", stepStarted)
+	}
+	if !e.drainAcked {
+		t.Error("drain not acknowledged after the post-claim refusal")
+	}
+	if result := e.result(t); result.Action != "drain" || result.Reason != hookClaimReasonDrainPending {
+		t.Errorf("result = %+v, want action=drain reason=%s", result, hookClaimReasonDrainPending)
 	}
 }

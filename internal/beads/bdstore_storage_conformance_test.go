@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -358,10 +359,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var callsMu sync.Mutex
 			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
 				cmd := name + " " + strings.Join(args, " ")
+				callsMu.Lock()
 				calls = append(calls, cmd)
+				callsMu.Unlock()
 				switch {
 				case strings.HasPrefix(cmd, "bd list "):
 					return []byte(listRows), nil
@@ -396,10 +400,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 }
 
 func TestBdStoreListBothTiersUnionsEphemeralQueryConformance(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, cmd)
+		callsMu.Unlock()
 		if strings.Contains(cmd, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", cmd)
 		}

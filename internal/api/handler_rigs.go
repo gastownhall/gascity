@@ -13,18 +13,24 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type rigResponse struct {
-	Name          string     `json:"name"`
-	Path          string     `json:"path"`
-	Suspended     bool       `json:"suspended"`
-	Prefix        string     `json:"prefix,omitempty"`
-	DefaultBranch string     `json:"default_branch,omitempty"`
-	AgentCount    int        `json:"agent_count"`
-	RunningCount  int        `json:"running_count"`
-	LastActivity  *time.Time `json:"last_activity,omitempty"`
-	Git           *gitStatus `json:"git,omitempty"`
+	Name          string `json:"name"`
+	Path          string `json:"path"`
+	Suspended     bool   `json:"suspended"`
+	Prefix        string `json:"prefix,omitempty" doc:"Effective bead ID prefix: the configured prefix, or the one derived from the rig name."`
+	DefaultBranch string `json:"default_branch,omitempty" doc:"Mainline branch (e.g. main, master)."`
+	// DefaultSlingTarget and DefaultSlingTargets mirror the rig config that
+	// decides where a targetless `gc sling` routes work, so API clients can
+	// read it without shelling out to `gc rig list --json`.
+	DefaultSlingTarget  string     `json:"default_sling_target,omitempty" doc:"Agent qualified name that targetless gc sling routes this rig's work to."`
+	DefaultSlingTargets []string   `json:"default_sling_targets,omitempty" doc:"Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set."`
+	AgentCount          int        `json:"agent_count"`
+	RunningCount        int        `json:"running_count"`
+	LastActivity        *time.Time `json:"last_activity,omitempty"`
+	Git                 *gitStatus `json:"git,omitempty"`
 }
 
 type gitStatus struct {
@@ -36,7 +42,10 @@ type gitStatus struct {
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
-func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
+// Each agent row is observed on the runtime session it runs under, as
+// sessions resolves it. pools answers unlimited-pool expansion for the whole
+// request (newRequestSessionListing).
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, sessions *agentSessionResolver, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -46,11 +55,14 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
+		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
-			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, processNames)
+			var obs worker.LiveObservation
+			sessions.resolve(a, ea.qualifiedName, func(sessionName string) bool {
+				obs = observeProviderSession(sp, sessionName, processNames)
+				return obs.Running
+			})
 			if obs.Running {
 				runningCount++
 			}
@@ -61,13 +73,15 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	}
 
 	resp := rigResponse{
-		Name:          rig.Name,
-		Path:          rig.Path,
-		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
-		Prefix:        rig.Prefix,
-		DefaultBranch: rig.DefaultBranch,
-		AgentCount:    agentCount,
-		RunningCount:  runningCount,
+		Name:                rig.Name,
+		Path:                rig.Path,
+		Suspended:           s.rigSuspended(cfg, rig, sp, pools, cityName, cityPath),
+		Prefix:              rig.EffectivePrefix(),
+		DefaultBranch:       rig.EffectiveDefaultBranch(),
+		DefaultSlingTarget:  rig.DefaultSlingTarget,
+		DefaultSlingTargets: rig.DefaultSlingTargets,
+		AgentCount:          agentCount,
+		RunningCount:        runningCount,
 	}
 	if !maxActivity.IsZero() {
 		resp.LastActivity = &maxActivity
@@ -82,7 +96,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // metadata. The deprecated `[[rig]] suspended` field in city.toml is
 // intentionally NOT consulted — `gc doctor` surfaces it as a migration
 // target.
-func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
+func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) bool {
 	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
 		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
@@ -94,7 +108,7 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provi
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
-		expanded := expandAgent(a, cityName, tmpl, sp)
+		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)

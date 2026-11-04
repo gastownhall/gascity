@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -91,6 +92,12 @@ type SessionReconcilerTraceCycle struct {
 	reasonCounts       map[string]int
 	outcomeCounts      map[string]int
 	autoArmsTriggered  int
+	// durationClock measures demand-pass sub-phase and store-read durations
+	// (see recordDemandSubPhase). Nil means the real clock; tests inject a
+	// fake so the durations those records carry are exact. The demand pass
+	// reads it from its per-leg goroutines, so it must be safe for concurrent
+	// use.
+	durationClock clock.Clock
 }
 
 func newSessionReconcilerTracer(cityPath, cityName string, stderr io.Writer) *SessionReconcilerTracer {

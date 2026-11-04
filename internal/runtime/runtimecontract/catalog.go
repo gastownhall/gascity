@@ -28,6 +28,11 @@
 //     agent, so the controller can relaunch the agent in a warm box over exec
 //     instead of re-provisioning. In-repo Provision is still the welded Start,
 //     so there is no distinct RunProviderTests case to mirror yet.
+//   - observe (observe.v1, PAR-EXEC), but for the requirements a provider
+//     method backs (see wireOnlyCodes): the `observe`, `inventory` and
+//     `kill-object` wire shapes, the attach answer, the fault and city-scope
+//     tokens and the probe latency have no runtime.Provider method of their
+//     own to contract-test.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -54,6 +59,7 @@ const (
 	GroupLifecycle  Group = "lifecycle"
 	GroupConnection Group = "connection"
 	GroupProvision  Group = "provision"
+	GroupObserve    Group = "observe"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -105,6 +111,30 @@ const (
 	// (absent = SKIP): a welded `start` pack that launches the agent in one shot
 	// need not implement it. See REQUIREMENTS.md (RUNTIME-RPP-014).
 	ReqProvisionBoxWithoutAgent Code = "RPP-PROVISION-001"
+
+	// The observe group is the observe.v1 profile (PAR-EXEC): what a script
+	// declaring the observe.v1 capability promises reconciler v2. Every
+	// requirement is Optional (SKIP when observe.v1 is not declared); a
+	// script that declares it must pass every one, except the
+	// token-gated ones it does not declare (conformance-faults,
+	// city-scoped, report-attachment, report-activity). See
+	// REQUIREMENTS.md (RUNTIME-RPP-018..025).
+	ReqObserveDeclaredOpsRespond   Code = "RPP-OBSERVE-001"
+	ReqObserveAbsentNeverStarted   Code = "RPP-OBSERVE-002"
+	ReqObserveRunningWithIdentity  Code = "RPP-OBSERVE-003"
+	ReqObserveAbsentAfterStop      Code = "RPP-OBSERVE-004"
+	ReqObserveObjectStable         Code = "RPP-OBSERVE-005"
+	ReqObserveAgentLiveness        Code = "RPP-OBSERVE-006"
+	ReqObserveInventoryComplete    Code = "RPP-OBSERVE-007"
+	ReqObserveMetaIsIdentity       Code = "RPP-OBSERVE-008"
+	ReqObserveFreshOnlyRefuses     Code = "RPP-OBSERVE-009"
+	ReqObserveKillObjectExact      Code = "RPP-OBSERVE-010"
+	ReqObserveAttachedIsStrict     Code = "RPP-OBSERVE-011"
+	ReqObserveFaultsReadUnknown    Code = "RPP-OBSERVE-012"
+	ReqObserveWithinBound          Code = "RPP-OBSERVE-013"
+	ReqObserveCityScoped           Code = "RPP-OBSERVE-014"
+	ReqObserveInventoryHasActivity Code = "RPP-OBSERVE-015"
+	ReqObservePeekNoScreen         Code = "RPP-OBSERVE-016"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -122,6 +152,23 @@ var catalog = []Requirement{
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
 
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
+
+	{ReqObserveDeclaredOpsRespond, GroupObserve, "observe, inventory and kill-object answer (never exit 2) when observe.v1 is declared", true},
+	{ReqObserveAbsentNeverStarted, GroupObserve, "observe on a never-started name answers absent", true},
+	{ReqObserveRunningWithIdentity, GroupObserve, "after start, the first observe answers running with its object and the identity the start env carried (identity seeded before the box is visible)", true},
+	{ReqObserveAbsentAfterStop, GroupObserve, "after stop, observe answers absent and is-running false", true},
+	{ReqObserveObjectStable, GroupObserve, "a box's object is the same across observes, and new for a new box under the name", true},
+	{ReqObserveAgentLiveness, GroupObserve, "observe answers agent alive for the box's real process name, and dead or unknown for one that is not running", true},
+	{ReqObserveInventoryComplete, GroupObserve, "inventory is complete: it lists every started name with observe's object and identity, and omits stopped ones", true},
+	{ReqObserveMetaIsIdentity, GroupObserve, "get-meta answers observe's identity, and a set-meta of an identity key is reflected by the next observe", true},
+	{ReqObserveFreshOnlyRefuses, GroupObserve, "a fresh_only start over a held name exits 73 (or the collision phrase) and leaves the box untouched", true},
+	{ReqObserveKillObjectExact, GroupObserve, "kill-object kills only the exact object, after its re-check: a stale object is gone, corpse on a live box is live, zombie on a live agent is changed, a dead agent's box is killed", true},
+	{ReqObserveAttachedIsStrict, GroupObserve, "is-attached answers exactly true or false (required with report-attachment)", true},
+	{ReqObserveFaultsReadUnknown, GroupObserve, "under GC_RPP_FAULT=unavailable, observe, inventory and is-attached answer unknown or fail, never absent or false (declared conformance-faults only)", true},
+	{ReqObserveWithinBound, GroupObserve, "observe answers within 4s, v2's probe bound", true},
+	{ReqObserveCityScoped, GroupObserve, "a name started under one GC_EXEC_CITY_PATH is not listed under another (declared city-scoped only)", true},
+	{ReqObserveInventoryHasActivity, GroupObserve, "inventory carries last_activity for every running session when report-activity is declared", true},
+	{ReqObservePeekNoScreen, GroupObserve, "peek reads a running box's screen (exit 0), and answers a name no box holds with exit 66, no screen: never an empty success", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

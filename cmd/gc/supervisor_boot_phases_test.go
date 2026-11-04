@@ -82,7 +82,8 @@ shutdown_timeout = "100ms"
 	}
 
 	cr := newCityRegistry()
-	var stdout, stderr bytes.Buffer
+	// The started city keeps logging startup phases while this test reads.
+	var stdout, stderr lockedBuffer
 	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 	t.Cleanup(func() {
 		if done := cr.CancelCity(canonicalTestPath(cityPath)); done != nil {

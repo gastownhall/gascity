@@ -11,3 +11,9 @@ func KillByPID(pid int) error {
 	}
 	return fmt.Errorf("proctable: KillByPID is unsupported on this platform")
 }
+
+// KillByPIDIdentity is unavailable on platforms without process signaling
+// support.
+func KillByPIDIdentity(pid int, _ string) error {
+	return KillByPID(pid)
+}

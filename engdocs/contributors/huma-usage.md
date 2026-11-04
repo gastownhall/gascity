@@ -353,6 +353,32 @@ doc §3.8). Two gotchas fall out of this:
   them; pass only the 4xx/503 the handler actually returns and let Huma add the
   rest.
 
+## 13. Repeatable query parameters and refusing unknown ones
+
+GET `/v0/city/{cityName}/work/ready` is the reference for both: `WorkReadyInput`
+in `internal/api/huma_types_work.go`, registered in
+`internal/api/supervisor_city_routes.go`.
+
+- **A repeatable query parameter is a `[]string` tagged `,explode`.** Huma
+  turns explode off for query parameters, against the OpenAPI default. An
+  untagged `[]string` reads only the first occurrence of its key and splits
+  that value on commas. So `?exclude_type=epic&exclude_type=molecule` silently
+  becomes `[epic]`, and a value that holds a comma (a metadata filter `key=a,b`)
+  is cut in two. With `query:"exclude_type,explode"`, each repetition is one
+  value and a comma stays inside its value. The generated spec declares
+  `explode: true`, so `internal/api/genclient` sends one key per value.
+  `TestReadyWorkSendsEveryQueryFieldToTheController` pins this through the
+  wire, including a value that holds a comma.
+
+- **Set `RejectUnknownQueryParameters` on an operation whose query parameters
+  narrow the answer.** By default Huma ignores a query key the input does not
+  declare. A misspelled filter (`?exclude_lable=x`) then widens the answer to
+  everything and still returns 200. Set it in an operation handler,
+  `func(o *huma.Operation) { o.RejectUnknownQueryParameters = true }`, and any
+  undeclared key becomes Huma's 422 validation error, `unknown query parameter`
+  (pinned by `TestWorkReadyStatuses`). Leave it off where an ignored key cannot
+  change what the operation returns.
+
 ## What we don't use from Huma
 
 - **`huma.Group`** — we have a single API per supervisor and a

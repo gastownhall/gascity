@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	ep := s.state.EventProvider()
 	if ep == nil {
@@ -62,13 +64,11 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		return nil, err
 	}
 
-	index := s.latestIndex()
-
 	// Fetch limit+1 matching events at (first page) or strictly below (cursor
 	// page) the boundary, ascending; the extra row is the has-more signal.
 	scanFilter := filter
 	scanFilter.BeforeSeq = beforeSeq
-	evts, scanned, err := fetchEventPageAscending(ep, scanFilter, limit)
+	evts, scanned, err := fetchEventPageAscending(ctx, ep, scanFilter, limit, !filterIsEmpty(filter))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -160,7 +160,15 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 // (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
 // is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
 // the one battle-tested sequential reader instead of a bespoke reverse reader.
-func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
+//
+// That full scan holds EVERY matching event below the boundary only to keep
+// the last limit+1, and it ignores ctx: right after a rotation, every request
+// holds the whole retained history, also after its client has gone. A
+// provider that implements [events.HistoryTailProvider] (the file-backed log)
+// gives the same rows while holding at most limit+1 events, and stops when ctx
+// is done. countMatches asks it for the full scan's match count too, which is
+// the Total of a filtered read.
+func fetchEventPageAscending(ctx context.Context, ep events.Provider, filter events.Filter, limit int, countMatches bool) ([]events.Event, int, error) {
 	fetch := limit + 1
 	if tp, ok := ep.(events.TailProvider); ok {
 		tail, err := tp.ListTail(filter, fetch)
@@ -170,6 +178,9 @@ func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int
 		if len(tail) == fetch {
 			return tail, limit, nil
 		}
+	}
+	if hp, ok := ep.(events.HistoryTailProvider); ok {
+		return hp.ListHistoryTail(ctx, filter, fetch, countMatches)
 	}
 	all, err := listWithInFlight(ep, filter)
 	if err != nil {
@@ -196,9 +207,11 @@ func listWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event,
 	return ep.List(filter)
 }
 
+// filterIsEmpty reports whether every Filter field is at its zero value, so
+// the city and supervisor event lists may take their unfiltered paths. Filter
+// holds a slice, so it is not comparable with ==.
 func filterIsEmpty(f events.Filter) bool {
-	return f.Type == "" && f.Actor == "" && f.Subject == "" &&
-		f.Since.IsZero() && f.Until.IsZero() && f.AfterSeq == 0
+	return reflect.ValueOf(f).IsZero()
 }
 
 func parseEventSince(value string) (time.Duration, bool, error) {
@@ -217,6 +230,9 @@ func parseEventSince(value string) (time.Duration, bool, error) {
 // Body validation (Type and Actor required) is enforced by struct tags
 // on EventEmitInput.
 func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (*EventEmitOutput, error) {
+	if events.IsJournalDerived(input.Body.Type) {
+		return nil, apierr.ValidationFailed.Msgf("journal_derived: %s is derived by the controller from an operation-journal row and cannot be emitted", input.Body.Type)
+	}
 	// Idempotency: append at most once per Idempotency-Key — the log is
 	// append-only, so a timed-out retry would otherwise double-emit (and
 	// double any projection built over the log). The cached value is just the

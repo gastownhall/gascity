@@ -1,17 +1,13 @@
 package beads
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // The guard tick is the only thing watching a LONG-LIVED proxied handle between
@@ -293,6 +289,9 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 	if err := ctx.Err(); err != nil {
 		return proxiedGuardStopped
 	}
+	// Every tick that runs refreshes the events-journal activation, whichever
+	// step it ends at; see step 3.
+	g.store.forgetJournalActivation()
 	pin, native, terminal := g.store.guardState()
 	if native == nil {
 		if terminal {
@@ -331,11 +330,13 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 		return step
 	}
 
-	// Step 3 — the events-journal slot. Deliberately a no-op: a grep for
-	// BD_EVENTS_JOURNAL / EventsJournal over non-test internal/beads and cmd/gc
-	// returns nothing, so there is no journal gate in gc for a tick to keep
-	// consistent. The slot is named here rather than dropped so the next reader
-	// finds the answer instead of the question.
+	// Step 3 — the events journal. Activation gates the journal read, and bd's
+	// CLI re-resolves it on every write, so a scope that turns the journal off
+	// stops journaling at once. The tick forgets the cached answer before step
+	// 1, so a tick that ends early (an undecided record or cursors, a
+	// stand-down, a recovery) refreshes it too; the next journal question
+	// re-resolves it. Forgetting costs no I/O, so a scope nobody tails reads no
+	// config here.
 
 	// Step 4 — the socket-owner join, every ownerEvery-th tick.
 	if g.opts.ownerEvery > 0 && n%g.opts.ownerEvery == 0 {
@@ -732,70 +733,22 @@ func proxiedGuardSocketOwner(_ context.Context, pin Pin) proxiedOwner {
 	if pin.Port() <= 0 || pin.PoolKey().PID <= 0 {
 		return proxiedOwnerUndetermined
 	}
-	inodes, read := proxiedListeningSocketInodes(pin.Port())
+	inodes, read := pidutil.ListeningSocketInodes(pin.Port())
 	if !read || len(inodes) == 0 {
 		// Nothing readable, or nothing listening. "Nothing listening" is the
 		// probe's business, not the owner join's.
 		return proxiedOwnerUndetermined
 	}
-	fdDir := filepath.Join("/proc", strconv.Itoa(pin.PoolKey().PID), "fd")
-	entries, err := os.ReadDir(fdDir)
+	holds, err := pidutil.ProcessHoldsSocket(pin.PoolKey().PID, inodes)
 	if err != nil {
 		return proxiedOwnerUndetermined
 	}
-	for _, entry := range entries {
-		target, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		if !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-			continue
-		}
-		inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-		if _, ok := inodes[inode]; ok {
-			return proxiedOwnerMatches
-		}
+	if holds {
+		return proxiedOwnerMatches
 	}
 	// The port has a listener, the pinned process's descriptors are readable, and
 	// none of them is it.
 	return proxiedOwnerForeign
-}
-
-// proxiedListeningSocketInodes returns the socket inodes listening on port,
-// and whether any of the kernel's tables could be read at all.
-func proxiedListeningSocketInodes(port int) (map[string]struct{}, bool) {
-	const (
-		tcpStateListen = "0A"
-		// The inode column in /proc/net/tcp{,6}.
-		inodeField = 9
-	)
-	inodes := map[string]struct{}{}
-	read := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		file, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		read = true
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			fields := strings.Fields(scanner.Text())
-			if len(fields) <= inodeField || fields[3] != tcpStateListen {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			listening, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || int(listening) != port {
-				continue
-			}
-			inodes[fields[inodeField]] = struct{}{}
-		}
-		_ = file.Close()
-	}
-	return inodes, read
 }
 
 // ---------------------------------------------------------------------------
@@ -856,5 +809,6 @@ func (s *ProxiedStore) adoptPin(pin Pin) bool {
 	s.root = pin.Root()
 	s.database = pin.Database()
 	s.verdict = nil
+	s.journal.forget()
 	return true
 }

@@ -28,6 +28,61 @@ func OrderSuppressedPayloadJSON(p OrderSuppressedPayload) json.RawMessage {
 	return b
 }
 
+// OrderSkippedPayload is the typed payload for order.skipped events: which
+// order declared it, whether nothing ("skipped") or only some ("partial") of
+// its work ran, and the scopes or steps that did not run.
+type OrderSkippedPayload struct {
+	OrderName string              `json:"order_name"`
+	Outcome   string              `json:"outcome"`
+	Reason    string              `json:"reason"`
+	Scopes    []OrderSkippedScope `json:"scopes"`
+}
+
+// OrderSkippedScope is one scope or step an exec order reports as not run.
+type OrderSkippedScope struct {
+	Scope  string `json:"scope"`
+	Reason string `json:"reason"`
+}
+
+// IsEventPayload marks OrderSkippedPayload as an events.Payload variant.
+func (OrderSkippedPayload) IsEventPayload() {}
+
+// OrderSkippedPayloadJSON builds the JSON wire form for attachment to an
+// Event.Payload field.
+func OrderSkippedPayloadJSON(p OrderSkippedPayload) json.RawMessage {
+	if p.Scopes == nil {
+		p.Scopes = []OrderSkippedScope{}
+	}
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of strings and string slices cannot fail to marshal
+	return b
+}
+
+// OrderInapplicablePayload is the typed payload for order.inapplicable
+// events: which order the dispatcher will not run, for which bead scope
+// ("city" or "rig:<name>"), the backend that scope uses, and the backends the
+// order requires.
+type OrderInapplicablePayload struct {
+	OrderName       string   `json:"order_name"`
+	Scope           string   `json:"scope"`
+	Backend         string   `json:"backend"`
+	RequiresBackend []string `json:"requires_backend"`
+}
+
+// IsEventPayload marks OrderInapplicablePayload as an events.Payload variant.
+func (OrderInapplicablePayload) IsEventPayload() {}
+
+// OrderInapplicablePayloadJSON builds the JSON wire form for attachment to an
+// Event.Payload field.
+func OrderInapplicablePayloadJSON(p OrderInapplicablePayload) json.RawMessage {
+	if p.RequiresBackend == nil {
+		p.RequiresBackend = []string{}
+	}
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of strings and a string slice cannot fail to marshal
+	return b
+}
+
 func init() {
 	RegisterPayload(OrderSuppressed, OrderSuppressedPayload{})
+	RegisterPayload(OrderSkipped, OrderSkippedPayload{})
+	RegisterPayload(OrderInapplicable, OrderInapplicablePayload{})
 }

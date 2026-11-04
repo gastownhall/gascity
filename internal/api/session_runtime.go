@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"strings"
@@ -120,7 +121,33 @@ func (s *Server) sessionLogPaths() []string {
 	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
-func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig) runtime.Config {
+// configuredProgramStatusMode is the city's [session] program_status switch;
+// a nil config reads as off.
+func configuredProgramStatusMode(cfg *config.City) runtime.ProgramStatusMode {
+	if cfg == nil {
+		return runtime.ProgramStatusOff
+	}
+	return cfg.Session.ProgramStatusMode()
+}
+
+// sessionProgramStatus derives a session's program-status capture arm and its
+// provider-authored env layer: the resolved provider env followed, when armed,
+// by the binding's forced env. The city anchors cityAnchoredSessionEnv writes
+// after this layer cannot collide with it, because config rejects binding env
+// keys in gc's own namespaces (GC_*, BEADS_*, BD_*, GT_ROOT). The resolved
+// provider is never mutated.
+func sessionProgramStatus(mode runtime.ProgramStatusMode, resolved *config.ResolvedProvider, transport string) (runtime.ProgramStatusArm, map[string]string) {
+	arm, env := resolved.ProgramStatus.Arm(mode, transport == config.SessionTransportACP)
+	if len(env) == 0 {
+		return arm, resolved.Env
+	}
+	merged := make(map[string]string, len(resolved.Env)+len(env))
+	maps.Copy(merged, resolved.Env)
+	maps.Copy(merged, env)
+	return arm, merged
+}
+
+func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, programStatus runtime.ProgramStatusArm) runtime.Config {
 	return runtime.Config{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
@@ -136,9 +163,10 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		// but they are CreateModeDeferred and re-resolved mouse-off by the
 		// reconciler, so this unconditional default never enables mouse on a
 		// polled agent (ga-c4w).
-		MouseOn:    true,
-		Env:        sessionEnv,
-		MCPServers: mcpServers,
+		MouseOn:       true,
+		Env:           sessionEnv,
+		MCPServers:    mcpServers,
+		ProgramStatus: programStatus,
 	}
 }
 
@@ -163,7 +191,7 @@ func legacySessionKind(metadata map[string]string) string {
 // never routes through template_resolve.go), so an unconditional MouseOn=true
 // leaked mouse-on onto resumed pool agents and broke ga-c4w's controller-poll
 // -safety invariant (regression ga-g7go).
-func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool) runtime.Config {
+func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool, programStatus runtime.ProgramStatusArm) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
@@ -175,6 +203,7 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		MouseOn:                interactive,
 		Env:                    sessionEnv,
 		MCPServers:             mcpServers,
+		ProgramStatus:          programStatus,
 	}
 }
 
@@ -405,8 +434,9 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
-	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
+	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm), nil
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
@@ -523,13 +553,23 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 			resumeCommand = command
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	// This resolver builds the launch hints for every API resume, so the startup
+	// prompt must be delivered through them: without a payload and the delivered
+	// marker, the SessionStart hook is the only carrier and the provider
+	// truncates a large prompt (ga-4k4zfk).
+	hints, err := s.state.ApplyStartupPrompt(info, resolved, transport,
+		sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm))
+	if err != nil {
+		return nil, err
+	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
+		Hints:      hints,
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),

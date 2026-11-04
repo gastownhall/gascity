@@ -12,6 +12,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
+	_ "time/tzdata"
 )
 
 // Compile-time interface checks.
