@@ -253,7 +253,7 @@ func compiledRalphWorker(store beads.Store, rootID string, policy ralphWorkerPol
 			if closeMetadata == nil {
 				continue
 			}
-			if err := updateMetadataAndClose(store, b.ID, closeMetadata); err != nil {
+			if err := updateMetadataAndClose(beadstest.Graph(store), b.ID, closeMetadata); err != nil {
 				t.Fatalf("worker close %s: %v", b.ID, err)
 			}
 			return true
