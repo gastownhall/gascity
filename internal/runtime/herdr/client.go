@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -1064,10 +1065,17 @@ func (c *client) startServer() error {
 	// stranded ephemeral pool spawns in $HOME (unprimed, re-prompted for trust).
 	// Empty cityRoot (city-less construction) leaves cwd inherited, as before.
 	cmd.Dir = c.cityRoot
+	// The server is shared by every agent in the city and must outlive whichever
+	// gc process launched it. Without a group of its own it inherits the
+	// launcher's, and a signal to that group (a suite run SIGTERMed mid-test,
+	// a session replacement) kills it as collateral damage (ga-mo0i1j).
+	processgroup.StartCommandInNewGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
-	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
+	// Release only stops Go's bookkeeping for the child; the new process group
+	// above is what detaches it. herdr owns the daemon lifetime from here.
+	_ = cmd.Process.Release()
 	for i := 0; i < 40; i++ {
 		if c.serverAlive() {
 			return nil
