@@ -531,6 +531,14 @@ type Tmux struct {
 	// failed process-table snapshots (see readProcessSnapshot).
 	snapshotFailures processSnapshotFailureLog
 
+	// subtreeWalks bounds the pane-subtree walks of this Tmux's probes. Nil
+	// selects paneSubtrees, the process's; tests inject one.
+	subtreeWalks *paneSubtreeWalks
+
+	// subtreeFailures rate-limits the log of the one-shot pane probes'
+	// failed pane-subtree walks (see paneSubtree).
+	subtreeFailures processSnapshotFailureLog
+
 	// programArms stamps each capture arm this Tmux runs, so a tap armed
 	// after the state cache's process table was scanned reads unknown
 	// liveness rather than reader_lost (see programArmStamps).
@@ -4375,7 +4383,7 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 		if _, direct := names[r.cmd]; direct {
 			return r.target, nil
 		}
-		processes, err := readPaneSubtreeBounded(r.pid, paneSubtreeTimeout)
+		processes, err := t.paneSubtree(r.pid)
 		if err != nil {
 			if !fullRead {
 				full, _ = t.readProcessSnapshot()
@@ -4886,17 +4894,19 @@ func (t *Tmux) readProcessSnapshot() (processSnapshot, error) {
 	defer cancel()
 	processes, err := fetchProcessSnapshot(ctx)
 	if err != nil {
-		t.snapshotFailures.note(err)
+		t.snapshotFailures.note("process snapshot failed; until one succeeds, pane probes cannot verify an agent that is not its pane's own command", err)
 	}
 	return processes, err
 }
 
-// processSnapshotFailureLogEvery bounds readProcessSnapshot's failure log to
-// one line per interval: a start's command wait looks every pollInterval, and
-// on a saturated host every look fails.
+// processSnapshotFailureLogEvery bounds a processSnapshotFailureLog to one
+// line per interval: a start's command wait looks every pollInterval, and on
+// a saturated host every look fails.
 const processSnapshotFailureLogEvery = time.Minute
 
-// processSnapshotFailureLog rate-limits readProcessSnapshot's failure log.
+// processSnapshotFailureLog rate-limits the failure log of one process read
+// the pane probes take: the full snapshot (readProcessSnapshot) or the pane's
+// subtree (paneSubtree).
 type processSnapshotFailureLog struct {
 	mu         sync.Mutex
 	at         time.Time // last failure logged
@@ -4905,9 +4915,10 @@ type processSnapshotFailureLog struct {
 	logf func(format string, args ...any)
 }
 
-// note logs a failed snapshot at most once per processSnapshotFailureLogEvery,
-// counting the failures it skips toward the next line.
-func (l *processSnapshotFailureLog) note(err error) {
+// note logs a failed read, what saying which and what it costs, at most once
+// per processSnapshotFailureLogEvery, counting the failures it skips toward
+// the next line.
+func (l *processSnapshotFailureLog) note(what string, err error) {
 	l.mu.Lock()
 	now, since, suppressed := time.Now(), l.at, l.suppressed
 	if !since.IsZero() && now.Sub(since) < processSnapshotFailureLogEvery {
@@ -4926,7 +4937,7 @@ func (l *processSnapshotFailureLog) note(err error) {
 	if suppressed > 0 {
 		unlogged = fmt.Sprintf(" (%d more failures since %s)", suppressed, since.Format(time.RFC3339))
 	}
-	logf("tmux: process snapshot failed; until one succeeds, pane probes cannot verify an agent that is not its pane's own command: %v%s", err, unlogged)
+	logf("tmux: %s: %v%s", what, err, unlogged)
 }
 
 // FindSessionByWorkDir finds tmux sessions where the pane's current working directory
