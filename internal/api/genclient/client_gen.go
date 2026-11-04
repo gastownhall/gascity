@@ -931,6 +931,7 @@ const (
 	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
 	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
 	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	StarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
 	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
 	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
 	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
@@ -962,6 +963,8 @@ func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	case Readiness:
 		return true
 	case StartupLadder:
+		return true
+	case StarvedBypass:
 		return true
 	case SubmitConfirm:
 		return true

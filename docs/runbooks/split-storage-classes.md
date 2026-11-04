@@ -451,9 +451,9 @@ How a command gets through:
   tag's. Instead gc walks the binary's `--help` for every visible command and
   compares the commands, aliases and flags (shorthand, type, default,
   no-value default, usage) with the visible projection of each pinned
-  inventory: bd 1.3.2, bd 1.3.3, and the bd 1.3.0 Enterprise build at commit
-  `77612097cec0`. A binary that matches one is judged against that
-  inventory; any other is refused, with a `gc_bd.refused` event and a
+  inventory: bd 1.3.2, bd 1.3.4 (bd 1.3.3 has the same tree), and the
+  bd 1.3.0 Enterprise build at commit `77612097cec0`. A binary that
+  matches one is judged against that inventory; any other is refused, with a `gc_bd.refused` event and a
   `gc doctor` error (check `bd-command-inventory`, which `gc start` also
   warns about). The inventory is bd's own command tree, hidden flags
   included, dumped from source by `internal/bdflags/inventorygen/generate.sh`

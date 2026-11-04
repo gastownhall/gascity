@@ -440,6 +440,7 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // both: the price of never typing into a running turn.
 func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
 	running, known, err := e.turnOnScreen(e.target)
+	e.shadowPreread(running, known, err)
 	switch {
 	case !known:
 		return opjournal.TriYes
@@ -450,6 +451,28 @@ func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjourn
 		return opjournal.TriYes
 	}
 	return e.staleTurnBoundary(obs)
+}
+
+// shadowPreread records, under the program-status shadow switch, the
+// screen reading quietBoundary decides with (wait_idle_preread): the op
+// lane's wait-idle pre-read, the leaf's busy-trust reading of whether a turn
+// runs (laneTurnOnScreen), which stands where the worker's and the session's
+// wait-idle deliveries take runtime.IdleBoundaryNow before they wait. A
+// reading the leaf does not take, or does not trust, is indeterminate; a
+// read that failed decided nothing and records nothing. It never feeds the
+// boundary.
+func (e *conversationLaneExec) shadowPreread(running, known bool, err error) {
+	if err != nil {
+		return
+	}
+	scrape := runtime.ProgramVerdictIdle
+	switch {
+	case !known:
+		scrape = runtime.ProgramVerdictIndeterminate
+	case running:
+		scrape = runtime.ProgramVerdictBusy
+	}
+	runtime.ShadowCompareIdle(e.deps.sp, e.target.sessionName, e.info.ID, e.target.providerFamily(), runtime.ProgramPointWaitIdlePreread, scrape)
 }
 
 // staleTurnBoundary is the boundary of a keystroke runtime whose screen shows
@@ -677,6 +700,12 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		delivery = worker.NudgeDeliveryImmediate
 	}
 	at := e.deps.clk.Now()
+	if delivery == worker.NudgeDeliveryDefault && !d.Replacement {
+		// A delivery at the boundary the lane waited for is the op lane's
+		// idle wait returning: under the shadow switch it is recorded beside
+		// the record (wait_for_idle), on a reading taken before it types.
+		runtime.ShadowWaitForIdle(e.deps.sp, e.target.sessionName, laneWaitStarted(d.Ops, at), at, runtime.ProgramVerdictIdle)
+	}
 	res, err := h.Nudge(ctx, sessionActor(session.ActorController, e.deps.cityPath), worker.NudgeRequest{
 		Text:          d.Text,
 		Delivery:      delivery,
@@ -700,6 +729,18 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		out = dv
 	}
 	return out
+}
+
+// laneWaitStarted is when a delivery's wait for its boundary began: its
+// earliest op's proposal, but never later than at.
+func laneWaitStarted(ops []opjournal.Op, at time.Time) time.Time {
+	started := at
+	for _, op := range ops {
+		if !op.CreatedAt.IsZero() && op.CreatedAt.Before(started) {
+			started = op.CreatedAt
+		}
+	}
+	return started
 }
 
 // laneDeliveryResult maps one nudge's answer to the lane's result (DES-O1

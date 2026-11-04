@@ -363,7 +363,8 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 // (Actor.consumesHold). It reports whether the message was queued: the
 // replacement runtime's refusal to type into a prompt it came up showing
 // queues the message for after the prompt is answered, as the outgoing turn
-// is already gone.
+// is already gone, and so does its deferral of a turn already running that
+// the keys would interrupt (runtime.ErrSessionBusy), as sendLocked queues it.
 func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return false, err
@@ -380,6 +381,9 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string,
 	// pending-interaction state is irrelevant, and probing tmux immediately after
 	// the restart is race-prone for Claude-backed sessions.
 	err := m.nudgeSession(ctx, sessName, message, true)
+	if errors.Is(err, runtime.ErrSessionBusy) {
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
+	}
 	return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, false, err)
 }
 

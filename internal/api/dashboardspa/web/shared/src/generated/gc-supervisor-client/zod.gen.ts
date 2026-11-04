@@ -2204,7 +2204,8 @@ export const zSessionProgramStatusShadowPayload = z.object({
         'proved_idle',
         'queued_delivery',
         'drain_reminder',
-        'observation'
+        'observation',
+        'starved_bypass'
     ]),
     program: z.enum([
         'idle',
