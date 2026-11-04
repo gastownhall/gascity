@@ -9,6 +9,20 @@ import (
 
 var runtimeHelpersLogf = log.Printf
 
+// eventFallbackLookback bounds how far back LastRunFuncWithEventFallback asks
+// the event bus for an order.fired event. The fallback runs on every cooldown
+// check whose tracking beads are gone, so an unbounded List made each such
+// check walk the live log and every rotated archive; Since lets the file
+// recorder skip archives that rotated out before the window.
+//
+// The tradeoff: a cooldown interval longer than this window, with its tracking
+// bead pruned, reads as "never ran" once its last order.fired ages out, and the
+// order fires again early. That is the fail-open direction the fallback already
+// takes on an event bus error. The bound is a time window, not a Limit or a
+// tail read: a tail read does not look inside rotated archives, which is where
+// the order.fired of a long-cooldown order lives.
+const eventFallbackLookback = 30 * 24 * time.Hour
+
 // LastRunAcross returns a LastRunFunc reporting the most recent run time for a
 // named order across a federation of order front doors (the dispatcher/CLI
 // city + rig scopes). Each *Store performs its own MIXED orders+graph LastRun
@@ -36,8 +50,8 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 // LastRunFuncWithEventFallback wraps fn with an events.Provider fallback.
 // When fn returns a zero time (no tracking beads found — e.g. after the
 // tracking beads were purged), it queries the event bus for the most recent
-// order.fired event whose Subject matches the order's scoped name and
-// returns its timestamp. A nil ep disables the fallback and the wrapped
+// order.fired event whose Subject matches the order's scoped name, no older
+// than eventFallbackLookback, and returns its timestamp. A nil ep disables the fallback and the wrapped
 // fn's result is returned unchanged. Event bus errors are non-fatal:
 // when the provider fails the zero time is returned so the order appears
 // unrun rather than permanently blocked.
@@ -56,6 +70,7 @@ func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFun
 		evts, listErr := ep.List(events.Filter{
 			Type:    events.OrderFired,
 			Subject: name,
+			Since:   time.Now().Add(-eventFallbackLookback),
 		})
 		if listErr != nil {
 			return time.Time{}, nil
