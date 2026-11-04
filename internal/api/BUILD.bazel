@@ -391,6 +391,7 @@ go_test(
         "handler_provider_crud_test.go",
         "handler_provider_readiness_test.go",
         "handler_rig_crud_test.go",
+        "handler_rigs_latency_test.go",
         "handler_rigs_test.go",
         "handler_services_test.go",
         "handler_session_agents_test.go",
