@@ -225,6 +225,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -401,6 +402,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -953,10 +955,27 @@ func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
 	}
 }
 
+// registerSessionResetTestRuntime registers a single-store runtime for cityDir
+// over a store opened at the city, as a real controller registers its runtime:
+// the controller socket's session commands answer from that registration.
+func registerSessionResetTestRuntime(t *testing.T, cityDir string) {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%s): %v", cityDir, err)
+	}
+	registerResidencyRoutes(cityDir, nil, func() beads.Store { return store })
+	t.Cleanup(func() {
+		unregisterResidencyRoutes(cityDir, nil)
+		_ = closeBeadStoreHandle(store)
+	})
+}
+
 // startSessionResetTestController serves the real controller socket for
-// cityDir until the test ends.
+// cityDir until the test ends, behind a registered runtime.
 func startSessionResetTestController(t *testing.T, cityDir string) {
 	t.Helper()
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,

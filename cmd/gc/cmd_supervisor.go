@@ -2361,6 +2361,11 @@ func startOneCity(
 			lock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 		}
 	}()
+	// This process may have resolved the city through the one-shot funnel on
+	// an earlier boot, or while it was stopped and before a `gc storage
+	// migrate`. The pre-registration reads below (the provider snapshot, the
+	// v2 boot census) must not answer from that memo.
+	retireCityFunnelForBoot(path)
 
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
