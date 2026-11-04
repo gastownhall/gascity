@@ -26,6 +26,9 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//:schemas/wisps-composite-index/common.sh",
+        "//:schemas/wisps-composite-index/migrate.sh",
+        "//:schemas/wisps-composite-index/rollback.sh",
         "//examples:all_examples",
         "//examples/bd:pack_files",
         "//examples/bd/dolt:pack_files",
