@@ -112,7 +112,7 @@ Some commands show the artifacts after the builtin packs are loaded:
 | Command | What it reveals |
 |---|---|
 | `gc skill list` | Skills contributed by loaded packs, including `core.gc-*` skills. |
-| `gc formula list` | Available formulas, including formulas from builtin packs. See the [Formula Specification](/reference/specs/formula-spec-v2#11-file-naming-and-layers). |
+| `gc formula list` | Available formulas, including formulas from builtin packs. See the [Formula Specification](/reference/specs/formula-spec-v2#1-1-file-naming-and-layers). |
 | `gc order list` | Available orders, including orders from builtin packs. See [Tutorial 07 - Orders](/tutorials/07-orders). |
 
 `gc pack registry ...` commands discover public registry entries. They do not
