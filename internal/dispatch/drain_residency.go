@@ -23,11 +23,8 @@ import (
 func drainResidency(store beads.GraphStore, opts ProcessOptions) (storeref.Topology, error) {
 	// storeref's legs hold raw stores: the plan executors ask them for their
 	// own capabilities. T7's typed legs remove these unwraps.
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: store.Store}}, nil
-	}
-	if len(opts.MemberStores) > 1 {
-		return storeref.Topology{}, fmt.Errorf("drain residency: %d member stores, want at most 1", len(opts.MemberStores))
 	}
 	if opts.Work == (beads.WorkStore{}) {
 		// The tail's work leg is Work: a zero one would be a nil leg.

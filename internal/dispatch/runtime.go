@@ -68,15 +68,16 @@ type ProcessOptions struct {
 	// roots. When set, workflow-finalize uses it to avoid closing a source bead
 	// while any live root in another store still references that source.
 	SourceWorkflowStores func() ([]SourceWorkflowStore, error)
-	// MemberStores is the work-class store tail probed (after the primary
-	// graph store) when a drain reads convoy membership. A control bead and
-	// its drain item-root molecules live in the graph store, but the convoy
-	// members a drain expands over are work beads that may live in a different
-	// per-class store; MemberStores supplies those additional stores to
-	// convoycore.MembersIn so member Gets resolve across the class boundary.
-	// Empty (the default for single-store callers) collapses the probe set to
-	// Work, which is then the same store as the graph store.
-	MemberStores []beads.WorkStore
+	// MemberTail makes Work the work-class tail probed (after the primary
+	// graph store) when a drain or a retry lane reads beads it did not create.
+	// A control bead and its drain item-root molecules live in the graph
+	// store, but the convoy members a drain expands over, and the source a
+	// required artifact resolves through, are work beads that may live in a
+	// different per-class store; the tail lets member Gets resolve across the
+	// class boundary. Off (the default for single-store callers), each of
+	// those reads stays on the single store the control runs in, which Work
+	// then is.
+	MemberTail bool
 	// Work is the work-class store a control kind reads and writes work beads
 	// in: the scope store the control was dispatched from, which owns every
 	// convoy (the synthetic drain-unit ones included) and the work members a
@@ -84,11 +85,14 @@ type ProcessOptions struct {
 	// store as the graph store ProcessControl is handed.
 	Work beads.WorkStore
 	// Sessions is the sessions-class store attempt routing resolves a session
-	// target through. A zero Sessions is no session store: a named-session
-	// target then routes by its configured name (metadata only), exactly as
-	// it does when the store holds no canonical bead for it. The control
-	// dispatcher always sets it; tests that route no named session may leave
-	// it zero.
+	// target through. A zero Sessions is no session store, and every target
+	// only a session bead can resolve loses its resolution. A named-session
+	// target routes by its configured name (metadata only), as it does when
+	// the store holds no canonical bead for it. A raw session name or alias
+	// that names no configured agent is not resolved to its session at all:
+	// the step is routed to the name as written (gc.routed_to) instead of
+	// being assigned to the session. The control dispatcher always sets it;
+	// tests that route no session target may leave it zero.
 	Sessions beads.SessionStore
 	Tracef   func(format string, args ...any)
 

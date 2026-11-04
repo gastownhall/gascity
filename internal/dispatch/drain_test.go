@@ -232,7 +232,7 @@ func TestProcessDrainSeparateTopologicallyOrdersMembersBeforeCreation(t *testing
 
 // TestOrderDrainMembersByDependenciesRoutesMemberDepsToOwningStore proves the
 // two-store shape: when a drain's convoy members live in a separate per-class
-// store (supplied via ProcessOptions.MemberStores), member dependency ordering
+// store (supplied via ProcessOptions.MemberTail), member dependency ordering
 // reads each member's edges from the member's OWNING store, not the ambient
 // graph store the drain control runs in. A dependency edge is co-resident with
 // its source bead, so reverting orderDrainMembersByDependencies to a bare
@@ -256,7 +256,7 @@ func TestOrderDrainMembersByDependenciesRoutesMemberDepsToOwningStore(t *testing
 
 	// Pass members in reverse (dependency) order so a no-op ordering would leave
 	// them unchanged; correct ordering must move the blocker ahead of the dependent.
-	ordered, err := orderDrainMembersByDependencies(beadstest.Graph(ambient), []beads.Bead{dependent, blocker}, ProcessOptions{Work: beadstest.Work(memberStore), MemberStores: []beads.WorkStore{beadstest.Work(memberStore)}})
+	ordered, err := orderDrainMembersByDependencies(beadstest.Graph(ambient), []beads.Bead{dependent, blocker}, ProcessOptions{Work: beadstest.Work(memberStore), MemberTail: true})
 	if err != nil {
 		t.Fatalf("orderDrainMembersByDependencies: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestDrainProjectedBlockerIDsRoutesMemberDepsToOwningStore(t *testing.T) {
 		},
 	}
 
-	projection, err := drainProjectedBlockerIDs(beadstest.Graph(ambient), beads.Bead{ID: "drain"}, dependent.ID, manifest, ProcessOptions{Work: beadstest.Work(memberStore), MemberStores: []beads.WorkStore{beadstest.Work(memberStore)}})
+	projection, err := drainProjectedBlockerIDs(beadstest.Graph(ambient), beads.Bead{ID: "drain"}, dependent.ID, manifest, ProcessOptions{Work: beadstest.Work(memberStore), MemberTail: true})
 	if err != nil {
 		t.Fatalf("drainProjectedBlockerIDs: %v", err)
 	}
@@ -2363,27 +2363,20 @@ func seedSplitClassDrainWorkflowIn(t *testing.T, work beads.Store, carryConvoyCo
 func TestProcessDrainRefusesAWorkLegTheTailDisagreesWith(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		opts func(work, graph beads.Store) ProcessOptions
+		opts func(work beads.Store) ProcessOptions
 		want error
 	}{
 		{
 			name: "no work store",
-			opts: func(work, _ beads.Store) ProcessOptions {
-				return ProcessOptions{MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+			opts: func(beads.Store) ProcessOptions {
+				return ProcessOptions{MemberTail: true}
 			},
 			want: errDispatchNoWorkStore,
 		},
 		{
 			name: "no tail and a work store that is not the graph store",
-			opts: func(work, _ beads.Store) ProcessOptions {
+			opts: func(work beads.Store) ProcessOptions {
 				return ProcessOptions{Work: beadstest.Work(work)}
-			},
-			want: errDrainWorkLegMismatch,
-		},
-		{
-			name: "a tail that is not the work store",
-			opts: func(work, graph beads.Store) ProcessOptions {
-				return ProcessOptions{Work: beadstest.Work(graph), MemberStores: []beads.WorkStore{beadstest.Work(work)}}
 			},
 			want: errDrainWorkLegMismatch,
 		},
@@ -2393,7 +2386,7 @@ func TestProcessDrainRefusesAWorkLegTheTailDisagreesWith(t *testing.T) {
 			dir := t.TempDir()
 			writeDrainItemFormula(t, dir)
 			work, graph, drain, _ := seedSplitClassDrainWorkflow(t, false)
-			opts := tc.opts(work, graph)
+			opts := tc.opts(work)
 			opts.FormulaSearchPaths = []string{dir}
 
 			_, err := ProcessControl(beadstest.Graph(graph), drain, opts)
@@ -2410,29 +2403,35 @@ func TestProcessDrainRefusesAWorkLegTheTailDisagreesWith(t *testing.T) {
 // TestRequiredArtifactSourceReadRefusesATailWithNoWorkStore pins the retry
 // lanes' half of errDispatchNoWorkStore: with a member tail the required
 // artifact source resolves over the drain's residency frame, whose work leg is
-// Work, so a zero Work fails loudly instead of probing a nil leg.
+// Work, so a zero Work fails loudly, as a hard error, instead of probing a nil
+// leg.
 func TestRequiredArtifactSourceReadRefusesATailWithNoWorkStore(t *testing.T) {
 	work, graph, _, memberIDs := seedSplitClassDrainWorkflow(t, false)
 	root := beads.Bead{ID: "gc-root", Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: memberIDs[0]}}
 
 	_, _, err := resolveRequiredArtifactSourceBead(beadstest.Graph(graph), root, memberIDs[0], true, ProcessOptions{
-		MemberStores: []beads.WorkStore{beadstest.Work(work)},
+		MemberTail: true,
 	})
 	if !errors.Is(err, errDispatchNoWorkStore) {
 		t.Fatalf("resolveRequiredArtifactSourceBead = %v, want %v", err, errDispatchNoWorkStore)
 	}
+	// A wiring fault never clears on its own: it must fail the control, not
+	// retry it forever as a store blip.
+	if errors.Is(err, errTransientControllerBoundary) || IsTransientControllerError(err) {
+		t.Fatalf("resolveRequiredArtifactSourceBead = %v, classified transient; want a hard failure", err)
+	}
 	if _, found, err := resolveRequiredArtifactSourceBead(beadstest.Graph(graph), root, memberIDs[0], true, ProcessOptions{
-		Work:         beadstest.Work(work),
-		MemberStores: []beads.WorkStore{beadstest.Work(work)},
+		Work:       beadstest.Work(work),
+		MemberTail: true,
 	}); err != nil || !found {
 		t.Fatalf("resolveRequiredArtifactSourceBead with Work = found %v, %v; want the work-store source", found, err)
 	}
 }
 
 // TestDrainReadsConvoyMembershipAcrossTheClassBoundary pins the head of the
-// membership lookup, which opts.MemberStores does not reach.
+// membership lookup, which the member tail does not reach.
 //
-// MemberStores resolves member BEADS. The convoy's own membership — its legacy
+// The member tail resolves member BEADS. The convoy's own membership — its legacy
 // children and its tracks edges — is read from one store, and reading it from
 // the store the drain runs in is what loses the convoy: a store that never saw
 // the convoy answers both reads empty instead of erroring, which is
@@ -2454,7 +2453,7 @@ func TestDrainReadsConvoyMembershipAcrossTheClassBoundary(t *testing.T) {
 			root := mustGetBead(t, graph, drain.Metadata["gc.root_bead_id"])
 			convoyID := root.Metadata["gc.input_convoy_id"]
 
-			members, err := drainConvoyMembers(beadstest.Graph(graph), convoyID, ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}})
+			members, err := drainConvoyMembers(beadstest.Graph(graph), convoyID, ProcessOptions{Work: beadstest.Work(work), MemberTail: true})
 			if err != nil {
 				t.Fatalf("drainConvoyMembers: %v", err)
 			}
@@ -2524,7 +2523,7 @@ func TestProcessDrainNeverPassesAConvoyItCouldNotRead(t *testing.T) {
 			result, _ := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{
 				Work:               beadstest.Work(work),
 				FormulaSearchPaths: []string{dir},
-				MemberStores:       []beads.WorkStore{beadstest.Work(work)},
+				MemberTail:         true,
 			})
 			got := mustGetBead(t, graph, drain.ID)
 			manifest := mustDrainManifest(t, got)
@@ -2577,7 +2576,7 @@ func TestProcessDrainSplitCityExpandsAndCompletes(t *testing.T) {
 			result, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{
 				Work:               beadstest.Work(work),
 				FormulaSearchPaths: []string{dir},
-				MemberStores:       []beads.WorkStore{beadstest.Work(work)},
+				MemberTail:         true,
 			})
 			if err != nil {
 				t.Fatalf("ProcessControl(split-city drain): %v; a control dispatch that returns a non-transient error is QUARANTINED by the caller, which is the state this ruling exists to remove", err)
@@ -2685,7 +2684,7 @@ func TestDrainUnitConvoyStoreFollowsTheMemberAcrossTheClassBoundary(t *testing.T
 		t.Fatalf("create member: %v", err)
 	}
 
-	got, err := drainUnitConvoyStore(beadstest.Graph(graph), member, ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}})
+	got, err := drainUnitConvoyStore(beadstest.Graph(graph), member, ProcessOptions{Work: beadstest.Work(work), MemberTail: true})
 	if err != nil {
 		t.Fatalf("drainUnitConvoyStore: %v", err)
 	}
@@ -2763,7 +2762,7 @@ func TestProcessDrainSplitCityResumeCompletesAfterAMemberVanishes(t *testing.T) 
 	dir := t.TempDir()
 	writeDrainItemFormula(t, dir)
 	work, graph, drain, memberIDs := seedSplitClassDrainWorkflow(t, false)
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 
 	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil {
 		t.Fatalf("ProcessControl(first pass): %v", err)
@@ -2850,7 +2849,7 @@ func TestProcessDrainSplitCityUnitConvoyForAVanishedMember(t *testing.T) {
 			if tc.premint {
 				// The mint the crashed pass completed, while the member was
 				// still resolvable. Its id never reached the manifest.
-				unit, created, err := ensureDrainUnitConvoy(beadstest.Graph(graph), drain, parentConvoyID, len(members), manifest.Rows[0], members[0], ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}})
+				unit, created, err := ensureDrainUnitConvoy(beadstest.Graph(graph), drain, parentConvoyID, len(members), manifest.Rows[0], members[0], ProcessOptions{Work: beadstest.Work(work), MemberTail: true})
 				if err != nil {
 					t.Fatalf("pre-mint unit convoy: %v", err)
 				}
@@ -2870,7 +2869,7 @@ func TestProcessDrainSplitCityUnitConvoyForAVanishedMember(t *testing.T) {
 			if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), ProcessOptions{
 				Work:               beadstest.Work(work),
 				FormulaSearchPaths: []string{dir},
-				MemberStores:       []beads.WorkStore{beadstest.Work(work)},
+				MemberTail:         true,
 			}); err != nil {
 				t.Fatalf("ProcessControl(replay with a vanished member): %v", err)
 			}
@@ -2951,7 +2950,7 @@ func TestEnsureDrainUnitConvoyPrefersTheWorkStoreOverAnEdgelessBindingCopy(t *te
 	// What `gc storage migrate` left in the binding: the row, none of its edges.
 	graph := beads.NewMemStoreFrom(1000, []beads.Bead{minted}, nil)
 
-	reused, createdAgain, err := ensureDrainUnitConvoy(beadstest.Graph(graph), control, parent.ID, 1, row, member, ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}})
+	reused, createdAgain, err := ensureDrainUnitConvoy(beadstest.Graph(graph), control, parent.ID, 1, row, member, ProcessOptions{Work: beadstest.Work(work), MemberTail: true})
 	if err != nil {
 		t.Fatalf("ensureDrainUnitConvoy(split city): %v; the lookup answered with the binding's edgeless copy and then tried to repair its missing track across the class boundary", err)
 	}
@@ -3046,7 +3045,7 @@ func TestProcessDrainSplitCityDoesNotWriteACrossStoreBlockerEdge(t *testing.T) {
 				result, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{
 					Work:               beadstest.Work(work),
 					FormulaSearchPaths: []string{dir},
-					MemberStores:       []beads.WorkStore{beadstest.Work(work)},
+					MemberTail:         true,
 				})
 				if err != nil {
 					t.Fatalf("ProcessControl(member with an out-of-convoy blocker): %v", err)
@@ -3105,7 +3104,7 @@ func TestProcessDrainSplitCityDoesNotWriteACrossStoreBlockerEdge(t *testing.T) {
 					t.Fatalf("release with the blocker open = %+v, %v (row 0 runnable=%v); want the gate kept", report, err, runnable(0))
 				}
 				// A second pass over the drain mints no second gate.
-				if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}); err != nil && !errors.Is(err, ErrControlPending) {
+				if _, err := ProcessControl(beadstest.Graph(graph), mustGetBead(t, graph, drain.ID), ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}); err != nil && !errors.Is(err, ErrControlPending) {
 					t.Fatalf("ProcessControl(second pass): %v", err)
 				}
 				if again := crossStoreGatesIn(t, graph); len(again) != 1 {
@@ -3237,7 +3236,7 @@ func TestDrainProjectedBlockerIDsIsProbeFreeOnASingleStoreCity(t *testing.T) {
 func TestEnsureDrainUnitConvoyFindsAConvoyMintedBeforeItsMemberVanished(t *testing.T) {
 	work := beads.NewMemStore()
 	graph := beads.NewMemStoreFrom(1000, nil, nil)
-	opts := ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
 
 	control, err := graph.Create(beads.Bead{Title: "drain", Type: "task"})
 	if err != nil {
@@ -3347,7 +3346,7 @@ func seedCoResidentDrainMember(t *testing.T) (work, graph prefixDeclaringStore, 
 func TestClassifyDrainBlockerFaultIsAnErrorNeverAnOmittedEdge(t *testing.T) {
 	work, graph, _, _ := seedCoResidentDrainMember(t)
 	hardErr := errors.New("work store unavailable")
-	opts := ProcessOptions{Work: beadstest.Work(drainGetErrorStore{Store: work, prefix: "wrk", err: hardErr}), MemberStores: []beads.WorkStore{beadstest.Work(drainGetErrorStore{Store: work, prefix: "wrk", err: hardErr})}}
+	opts := ProcessOptions{Work: beadstest.Work(drainGetErrorStore{Store: work, prefix: "wrk", err: hardErr}), MemberTail: true}
 
 	residence, err := classifyDrainBlocker(beadstest.Graph(graph), "wrk-blocker-1", opts)
 	if !errors.Is(err, hardErr) {
@@ -3387,7 +3386,7 @@ func coResidentDrainManifest(memberID string) drainManifest {
 // exclusive reservation nothing reads is not a lock.
 func TestManifestLoadAndReservationAgreeOnACoResidentMember(t *testing.T) {
 	work, graph, control, member := seedCoResidentDrainMember(t)
-	opts := ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
 
 	if err := reserveDrainMember(beadstest.Graph(graph), control, member, opts); err != nil {
 		t.Fatalf("reserveDrainMember: %v", err)
@@ -3415,7 +3414,7 @@ func TestManifestLoadAndReservationAgreeOnACoResidentMember(t *testing.T) {
 // converged them on work-first would pass the row above and fail this one.
 func TestCoResidentDrainMemberAnswersFromTheBinding(t *testing.T) {
 	work, graph, control, member := seedCoResidentDrainMember(t)
-	opts := ProcessOptions{Work: beadstest.Work(work), MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), MemberTail: true}
 
 	if err := reserveDrainMember(beadstest.Graph(graph), control, member, opts); err != nil {
 		t.Fatalf("reserveDrainMember: %v", err)
@@ -3486,7 +3485,7 @@ func TestProcessDrainGatesAnExternalRefOnTheRealBead(t *testing.T) {
 	}
 	mustDepAdd(t, work, memberIDs[0], "external:"+blocker.ID, "blocks")
 	mustDepAdd(t, work, memberIDs[1], "external:rig:some-capability", "blocks")
-	if _, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}); err != nil && !errors.Is(err, ErrControlPending) {
+	if _, err := ProcessControl(beadstest.Graph(graph), drain, ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl: %v", err)
 	}
 	gates := crossStoreGatesIn(t, graph)
@@ -3526,7 +3525,7 @@ func TestProcessDrainHoldsItsItemAgainWhenAReleasedBlockerReopens(t *testing.T) 
 		t.Fatal(err)
 	}
 	mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
@@ -3600,7 +3599,7 @@ func TestProcessDrainDoesNotFlapAClosedCrossRigBlocker(t *testing.T) {
 				return store
 			})
 			mustDepAdd(t, work, memberIDs[0], target, "blocks")
-			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 			if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 				t.Fatal(err)
 			}
@@ -3701,7 +3700,7 @@ func TestProcessDrainHonorsAnOperatorCloseWithAReason(t *testing.T) {
 				t.Fatal(err)
 			}
 			mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
-			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 			if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 				t.Fatal(err)
 			}
@@ -3752,7 +3751,7 @@ func TestProcessDrainReHoldsAReopenedControlsItemBehindARetiredGate(t *testing.T
 	}
 	graph, drain, memberIDs, dir := splitSQLiteDrain(t, work)
 	mustDepAdd(t, work, memberIDs[0], "rg-77", "blocks")
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
@@ -3808,7 +3807,7 @@ func TestProcessDrainGatesABlockerClosedBlocked(t *testing.T) {
 				t.Fatal(err)
 			}
 			mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
-			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+			opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 			if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 				t.Fatal(err)
 			}
@@ -3855,7 +3854,7 @@ func TestProcessDrainReHoldsItsItemWhenAReleasedBlockerClosesBlocked(t *testing.
 		t.Fatal(err)
 	}
 	mustDepAdd(t, work, memberIDs[0], blocker.ID, "blocks")
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}

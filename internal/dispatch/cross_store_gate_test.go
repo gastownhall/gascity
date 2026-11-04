@@ -1762,7 +1762,7 @@ func TestARevivedCanceledRunHoldsItsItemBehindAnOpenCrossRigBlocker(t *testing.T
 	}
 	graph, drain, memberIDs, dir := splitSQLiteDrain(t, work)
 	mustDepAdd(t, work, memberIDs[0], "rg-77", "blocks")
-	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberStores: []beads.WorkStore{beadstest.Work(work)}}
+	opts := ProcessOptions{Work: beadstest.Work(work), FormulaSearchPaths: []string{dir}, MemberTail: true}
 	if _, err := ProcessControl(beadstest.Graph(graph), drain, opts); err != nil && !errors.Is(err, ErrControlPending) {
 		t.Fatal(err)
 	}
@@ -1946,4 +1946,73 @@ func TestCrossStoreGateFencesReadPastACache(t *testing.T) {
 	if got := mustGetBead(t, backing, held.ID); got.Metadata[beadmeta.CrossStoreGateStateMetadataKey] != "" {
 		t.Fatalf("gate state = %q, want the operator's close left as it was", got.Metadata[beadmeta.CrossStoreGateStateMetadataKey])
 	}
+}
+
+// TestCrossStoreGateRereadsPastACache covers the gate's other two live reads
+// under a graph handle over a cache: the re-read clearLeftoverGateMarker
+// answers with when its write was refused, and the read of a pinned gate
+// ensureCrossStoreGate settles. In both an operator's close lands behind the
+// cache, and the gate must be judged as the closed gate it is, never as the
+// cache's open row.
+func TestCrossStoreGateRereadsPastACache(t *testing.T) {
+	t.Run("a refused marker clear answers with the live row", func(t *testing.T) {
+		backing := beads.NewMemStore()
+		held, err := backing.Create(beads.Bead{
+			Title:    "cross-store gate",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.CrossStoreGateStateMetadataKey: CrossStoreGateStateReleased},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache := beads.NewCachingStoreForTest(backing, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := backing.Close(held.ID); err != nil {
+			t.Fatal(err)
+		}
+		stale, err := cache.Get(held.ID)
+		if err != nil || stale.Status != "open" {
+			t.Fatalf("fixture: cache.Get = %q (%v), want the stale open row", stale.Status, err)
+		}
+
+		got, err := clearLeftoverGateMarker(beadstest.Graph(cache), stale)
+		if err != nil {
+			t.Fatalf("clearLeftoverGateMarker: %v", err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("clearLeftoverGateMarker answered a gate with status %q, want the live closed row: its re-read went to the cache", got.Status)
+		}
+	})
+
+	t.Run("a pinned gate is settled from its live row", func(t *testing.T) {
+		// The pinned id needs a backing that keeps the id it is handed.
+		backing := sqliteGraphStore(t)
+		cache := beads.NewCachingStoreForTestWithPrefix(backing, "gcg", nil)
+		store := beadstest.Graph(cache)
+		control := beads.Bead{ID: "gcg-drain", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-root"}}
+		gateBead := NewCrossStoreGate(store, control, "wrk-blocker")
+		if gateBead.ID == "" {
+			t.Fatal("fixture: the cache declares no mint prefix to pin the gate under")
+		}
+		if created, err := backing.Create(gateBead); err != nil || created.ID != gateBead.ID {
+			t.Fatalf("fixture: created gate %q (%v), want the pinned id %q", created.ID, err, gateBead.ID)
+		}
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		// An operator's close, with no controller marker: final.
+		if err := backing.Close(gateBead.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		answer, err := ensureCrossStoreGate(store, control, "wrk-blocker", true)
+		if err != nil {
+			t.Fatalf("ensureCrossStoreGate: %v", err)
+		}
+		if answer != "" {
+			t.Fatalf("ensureCrossStoreGate = %q, want \"\": an operator closed the gate, and the cache's open row must not hold the item", answer)
+		}
+	})
 }

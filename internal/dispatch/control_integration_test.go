@@ -1251,14 +1251,23 @@ max_active_sessions = 1
 	}
 }
 
-// namedWorkerSessionCity writes a city whose "worker" target is a named
-// session and returns the city path and a sessions store holding that named
-// session's canonical bead. The sessions store is its own store, apart from
-// the graph store a test dispatches over, so a step that routes to the bead's
-// id can only have resolved it through ProcessOptions.Sessions.
+// namedWorkerSessionCity writes a city that imports a pack binding "gs" whose
+// "worker" target is a named session, so the session's qualified identity is
+// gs.worker while a formula addresses it by its bare name. It returns the city
+// path and a sessions store holding that named session's canonical bead. The
+// sessions store is its own store, apart from the graph store a test
+// dispatches over, so a step that routes to the bead can only have resolved
+// it through ProcessOptions.Sessions.
 func namedWorkerSessionCity(t *testing.T) (cityPath string, sessions *beads.MemStore, sessionID string) {
 	t.Helper()
-	cityPath = t.TempDir()
+	dir := t.TempDir()
+	cityPath = filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "pk")
+	for _, d := range []string{cityPath, packDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
 [workspace]
 name = "test-city"
@@ -1266,19 +1275,39 @@ name = "test-city"
 [daemon]
 formula_v2 = true
 
-[[agent]]
-name = "worker"
-max_active_sessions = 1
+[imports.gs]
+source = "../pk"
 
 [[agent]]
 name = "control-dispatcher"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`
+[pack]
+name = "pk"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
 max_active_sessions = 1
 
 [[named_session]]
 template = "worker"
 mode = "on_demand"
+scope = "city"
 `), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	cfg, err := loadAttemptRouteConfigE(cityPath)
+	if err != nil {
+		t.Fatalf("load city: %v", err)
+	}
+	spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), "gs.worker")
+	if !ok {
+		t.Fatal("fixture: no gs.worker named session spec")
 	}
 	sessions = beads.NewMemStoreFrom(5000, nil, nil)
 	named, err := sessions.Create(beads.Bead{
@@ -1286,10 +1315,10 @@ mode = "on_demand"
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"session_name":              "test-city--worker",
-			"template":                  "worker",
+			"session_name":              spec.SessionName,
+			"template":                  spec.Agent.QualifiedName(),
 			"configured_named_session":  "true",
-			"configured_named_identity": "worker",
+			"configured_named_identity": spec.Identity,
 			"configured_named_mode":     "on_demand",
 			"state":                     "asleep",
 			"continuity_eligible":       "true",
@@ -1302,20 +1331,25 @@ mode = "on_demand"
 }
 
 // TestProcessControlRetryRoutesAttemptThroughSessions pins that a retry's
-// next attempt resolves a named-session target through ProcessOptions.Sessions:
-// the attempt is assigned the canonical session bead's id, which only the
-// sessions store holds.
+// next attempt resolves a named-session target through ProcessOptions.Sessions,
+// on both routing paths. A work step is assigned the canonical session bead's
+// id, which only the sessions store holds. A control step (a nested retry) is
+// stamped with the target as written: without the session it would resolve
+// to the binding-qualified gs.worker instead (applyAttemptControlStepRoute).
 func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
 	t.Parallel()
 
 	cityPath, sessions, sessionID := namedWorkerSessionCity(t)
 	store := beads.NewMemStore()
 	spec := &formula.Step{
-		ID:       "run",
-		Title:    "Run",
-		Type:     "task",
-		Retry:    &formula.RetrySpec{MaxAttempts: 3},
-		Metadata: map[string]string{"gc.run_target": "worker"},
+		ID:    "run",
+		Title: "Run",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{ID: "review", Title: "Review", Type: "task", Retry: &formula.RetrySpec{MaxAttempts: 2}, Metadata: map[string]string{"gc.run_target": "worker"}},
+			{ID: "summarize", Title: "Summarize", Type: "task", Metadata: map[string]string{"gc.run_target": "worker"}},
+		},
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
@@ -1352,22 +1386,29 @@ func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
 		t.Fatalf("ProcessControl(retry): %v", err)
 	}
 
-	attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2")
-	if attempt2.ID == "" {
-		t.Fatal("attempt 2 not created")
+	work := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2.summarize")
+	if work.ID == "" {
+		t.Fatal("attempt 2 work step not created")
 	}
-	if attempt2.Assignee != sessionID {
-		t.Fatalf("attempt 2 assignee = %q, want the named session's id %q from ProcessOptions.Sessions", attempt2.Assignee, sessionID)
+	if work.Assignee != sessionID {
+		t.Fatalf("attempt 2 work step assignee = %q, want the named session's id %q from ProcessOptions.Sessions", work.Assignee, sessionID)
 	}
-	if got := attempt2.Metadata["gc.routed_to"]; got != "" {
-		t.Fatalf("attempt 2 gc.routed_to = %q, want none for a direct session route", got)
+	if got := work.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("attempt 2 work step gc.routed_to = %q, want none for a direct session route", got)
+	}
+	nested := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2.review")
+	if nested.ID == "" {
+		t.Fatal("attempt 2 nested retry control not created")
+	}
+	if got := nested.Metadata["gc.execution_routed_to"]; got != "worker" {
+		t.Fatalf("attempt 2 nested retry gc.execution_routed_to = %q, want the target as written (worker) for a session resolved through ProcessOptions.Sessions", got)
 	}
 }
 
 // TestProcessControlFanoutRoutesFragmentThroughSessions is the fanout half of
-// TestProcessControlRetryRoutesAttemptThroughSessions: a fragment member step
-// whose target is a named session is assigned the canonical session bead's id
-// from ProcessOptions.Sessions.
+// TestProcessControlRetryRoutesAttemptThroughSessions: a fragment's work step
+// is assigned the canonical session bead's id, and its control step is
+// stamped with the target as written, both from ProcessOptions.Sessions.
 func TestProcessControlFanoutRoutesFragmentThroughSessions(t *testing.T) {
 	t.Parallel()
 
@@ -1382,6 +1423,12 @@ contract = "graph.v2"
 id = "{target}.review"
 title = "Review {reviewer}"
 metadata = { "gc.run_target" = "{reviewer}" }
+
+[[template]]
+id = "{target}.recheck"
+title = "Recheck {reviewer}"
+metadata = { "gc.run_target" = "{reviewer}" }
+retry = { max_attempts = 2 }
 `
 	if err := os.WriteFile(filepath.Join(cityPath, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
@@ -1441,6 +1488,13 @@ metadata = { "gc.run_target" = "{reviewer}" }
 	}
 	if member.Assignee != sessionID {
 		t.Fatalf("member assignee = %q, want the named session's id %q from ProcessOptions.Sessions", member.Assignee, sessionID)
+	}
+	retry := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.recheck")
+	if retry.ID == "" {
+		t.Fatal("member retry control not created")
+	}
+	if got := retry.Metadata["gc.execution_routed_to"]; got != "worker" {
+		t.Fatalf("member retry gc.execution_routed_to = %q, want the target as written (worker) for a session resolved through ProcessOptions.Sessions", got)
 	}
 }
 

@@ -43,7 +43,7 @@ import (
 //
 // Gates exist only on a split city, and only in the store the drain's item
 // workflow lives in — the class binding (a SQLite or workspace engine). A drain
-// on a city with no binding names no member stores, never classifies a blocker
+// on a city with no binding names no member tail, never classifies a blocker
 // as unprojectable, and so never mints one. A gate must never land in a bd
 // work store: bd would read the gate's own edges by its prefix rules, not ours.
 //

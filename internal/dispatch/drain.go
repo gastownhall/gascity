@@ -60,14 +60,12 @@ type drainManifestRow struct {
 // dispatched without the work-class store that owns them.
 var errDispatchNoWorkStore = errors.New("control dispatch: ProcessOptions.Work names no work store")
 
-// errDrainWorkLegMismatch reports a drain whose member tail disagrees with
-// ProcessOptions.Work. The drain reads its membership, member reservations and
-// unit convoys partly through Work and partly through the tail (or, with no
-// tail, through the graph store), so the two must name one store: with no tail
-// Work must be the graph store, and a one-store tail must be Work itself.
-// Anything else mints unit convoys in one store and reloads them from another,
-// which a resume pass reports as a missing convoy and quarantines.
-var errDrainWorkLegMismatch = errors.New("drain dispatch: member tail does not agree with ProcessOptions.Work")
+// errDrainWorkLegMismatch reports a drain with no member tail whose Work is
+// not the graph store. Without a tail the drain reads its unit convoys back
+// through the graph store but mints them through Work, so the two must be one
+// store: anything else mints unit convoys in one store and reloads them from
+// another, which a resume pass reports as a missing convoy and quarantines.
+var errDrainWorkLegMismatch = errors.New("drain dispatch: no member tail, but ProcessOptions.Work is not the graph store")
 
 func processDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	if err := checkDrainWorkLeg(store, opts); err != nil {
@@ -86,21 +84,13 @@ func processDrain(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) 
 }
 
 // checkDrainWorkLeg refuses the drain options errDispatchNoWorkStore and
-// errDrainWorkLegMismatch describe. A tail of more than one store is
-// drainResidency's to refuse.
+// errDrainWorkLegMismatch describe.
 func checkDrainWorkLeg(store beads.GraphStore, opts ProcessOptions) error {
 	if opts.Work == (beads.WorkStore{}) {
 		return errDispatchNoWorkStore
 	}
-	switch len(opts.MemberStores) {
-	case 0:
-		if !beads.SameStore(opts.Work, store) {
-			return fmt.Errorf("%w: no member tail, but Work is not the graph store", errDrainWorkLegMismatch)
-		}
-	case 1:
-		if !beads.SameStore(opts.MemberStores[0], opts.Work) {
-			return fmt.Errorf("%w: the member tail names a store other than Work", errDrainWorkLegMismatch)
-		}
+	if !opts.MemberTail && !beads.SameStore(opts.Work, store) {
+		return errDrainWorkLegMismatch
 	}
 	return nil
 }
@@ -402,8 +392,8 @@ func drainMemberOwningStore(store beads.GraphStore, memberID string, opts Proces
 // drainMemberDepStore returns the store to read a drain member's dependency
 // edges from. A member work bead — and the dependency edges co-resident with it
 // — may live in a different per-class store than the ambient graph store the
-// drain control runs in. When per-class member stores are configured it resolves
-// the member's owning store (drainMemberOwningStore); with none configured
+// drain control runs in. When the member tail is configured it resolves
+// the member's owning store (drainMemberOwningStore); without it
 // (single-store callers) it returns the ambient store WITHOUT the owning-store
 // probe read, so today's behavior — including the pre-seam DepList error path —
 // is byte-identical and the per-tick drain projection sweep adds no extra
@@ -412,7 +402,7 @@ func drainMemberOwningStore(store beads.GraphStore, memberID string, opts Proces
 // only the member's edges, so the probe would be pure overhead in the common
 // single-store case.
 func drainMemberDepStore(store beads.GraphStore, memberID string, opts ProcessOptions) (beads.Store, error) {
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		// The work store, raw because the owning-store probe below answers with
 		// a raw by-id owner until T7's ResidentStore.
 		return opts.Work.Store, nil
@@ -423,8 +413,8 @@ func drainMemberDepStore(store beads.GraphStore, memberID string, opts ProcessOp
 // drainConvoyMembers reads a drain's input-convoy membership across every
 // candidate store rather than from the one store the drain itself runs in.
 //
-// opts.MemberStores resolves member beads, and that is only the TAIL of the
-// lookup. The head — the convoy's own legacy children (List by ParentID) and its
+// The member tail (opts.MemberTail) resolves member beads, and that is only the
+// TAIL of the lookup. The head — the convoy's own legacy children (List by ParentID) and its
 // tracks edges (DepList) — is read from a single handle, and reading it from the
 // ambient graph store is what silently loses a whole convoy: a store that has
 // never seen the convoy answers both reads EMPTY rather than erroring, and an
@@ -456,10 +446,10 @@ func drainMemberDepStore(store beads.GraphStore, memberID string, opts ProcessOp
 // seen as an unresolved placeholder in one store and as a real bead in another
 // keeps the real bead.
 //
-// With no member stores configured — every single-store caller — this collapses
+// With no member tail configured — every single-store caller — this collapses
 // to the single convoycore.Members call it replaces, byte for byte.
 func drainConvoyMembers(store beads.GraphStore, convoyID string, opts ProcessOptions) ([]beads.Bead, error) {
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		return convoycore.MembersIn(convoycore.MemberClasses{Convoy: opts.Work}, convoyID, false)
 	}
 	topo, err := drainResidency(store, opts)
@@ -478,7 +468,7 @@ func drainConvoyMembers(store beads.GraphStore, convoyID string, opts ProcessOpt
 		func(leg storeref.Leg) ([]beads.Bead, error) {
 			// leg.Store is a raw plan leg, work class by the RoutedWork plan;
 			// T7's typed legs replace this relabel.
-			return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: leg.Store}, Work: opts.MemberStores}, convoyID, false)
+			return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: leg.Store}, Work: []beads.WorkStore{opts.Work}}, convoyID, false)
 		})
 	if err != nil {
 		return nil, err
@@ -893,7 +883,7 @@ const (
 // first, above, and that read is the co-residency question — a different one
 // from residency, and the only reason it stays hand-written here.
 func classifyDrainBlocker(store beads.GraphStore, blockerID string, opts ProcessOptions) (drainBlockerResidence, error) {
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		return drainBlockerProjectable, nil
 	}
 	if _, err := store.Get(blockerID); err == nil {
@@ -946,7 +936,7 @@ func drainProjectedBlockerIDs(store beads.GraphStore, control beads.Bead, member
 			continue
 		}
 		dependsOnID := strings.TrimSpace(dep.DependsOnID)
-		if len(opts.MemberStores) > 0 {
+		if opts.MemberTail {
 			// A split city judges what an edge names (owner decision):
 			// "external:<id>" is the bead <id>, and an external capability
 			// names no bead and never blocks, as in bd. A single-store city
@@ -1298,7 +1288,7 @@ func orderDrainMembersByDependencies(store beads.GraphStore, members []beads.Bea
 // edge and cannot grow one. A drain MEMBER is the opposite case — foreign, class
 // unknown — which is why that one plans ByID and leads with the binding.
 //
-// With no member stores configured — every single-store caller — the plan is the
+// With no member tail configured — every single-store caller — the plan is the
 // one ambient store, so every read through it is the single read it is today.
 func walkDrainUnitConvoyLegs(store beads.GraphStore, opts ProcessOptions, visit func(beads.Store) (bool, error)) error {
 	topo, err := drainResidency(store, opts)
@@ -1339,11 +1329,11 @@ func walkDrainUnitConvoyLegs(store beads.GraphStore, opts ProcessOptions, visit 
 // resolvability can change between drain passes while the convoy it already
 // minted does not move.
 //
-// With no member stores configured — every single-store caller — it returns the
+// With no member tail configured — every single-store caller — it returns the
 // work store without any probe (on such a city the drain's own store), so the
 // create is the same single-store write it is today, with no extra round-trip.
 func drainUnitConvoyStore(store beads.GraphStore, member beads.Bead, opts ProcessOptions) (beads.WorkStore, error) {
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		return opts.Work, nil
 	}
 	memberID := strings.TrimSpace(member.ID)
@@ -1468,10 +1458,10 @@ func ensureDrainUnitConvoy(store beads.GraphStore, control beads.Bead, parentCon
 // missing, and a not-found is not a transient controller error, so the caller
 // quarantines the control instead of retrying it.
 //
-// With no member stores configured this is the same single store.Get it has
+// With no member tail configured this is the same single store.Get it has
 // always been, including its error text.
 func reloadDrainUnitConvoy(store beads.GraphStore, unitConvoyID string, opts ProcessOptions) (beads.Bead, error) {
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		return store.Get(unitConvoyID)
 	}
 	var reloaded beads.Bead

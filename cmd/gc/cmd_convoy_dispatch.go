@@ -194,7 +194,7 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
 	// The whole dispatch below is synchronous — ProcessControl consumes its
-	// store-bearing options (RecycleSession, MemberStores) before it returns, the
+	// store-bearing options (RecycleSession, Work) before it returns, the
 	// caller's own EmitCurrent step runs inline after it, and nothing retains
 	// store past this call — so releasing the scope handle we just opened at
 	// return is safe and stops leaking one bd/Dolt store (and its connections)
@@ -268,13 +268,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
-	// A control kind that reads beads it did not create gets the scope store
-	// as its work-class member tail, but only when the graph class relocated:
-	// on any other city graphStore IS store and an empty tail keeps each of
-	// those reads on the single store the control runs in.
-	kind := bead.Metadata[beadmeta.KindMetadataKey]
-	relocated := graphStore != store // residency:allow route-gated work-leg tail: the drain's membership and the retry lane's cross-store required-artifact source read
-	memberTail := relocated && (kind == "drain" || kind == "retry-eval" || kind == "retry" || kind == "ralph")
+	memberTail := controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graphStore, store)
 	graph := beads.GraphStore{Store: graphStore}
 	opts := controlDispatchOptions(cityPath, storePath, graph, beads.WorkStore{Store: store}, memberTail)
 	opts.Tracef = workflowTracef
@@ -356,7 +350,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 
 	result, err := dispatch.ProcessControl(graph, bead, opts)
 	if err != nil {
-		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
+		return handleControlDispatchError(cityPath, storePath, graph, bead, beadID, err, stderr)
 	}
 	if !result.Processed {
 		return errControlNotProcessed
@@ -387,6 +381,27 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	return nil
 }
 
+// controlMemberTail reports whether a control of kind, held in graphStore and
+// dispatched from the scope store, reads its work beads through the scope
+// store as a member tail. The kinds that read beads they did not create — a
+// drain's convoy members, a retry lane's required-artifact source — need it,
+// but only when the graph class relocated: on any other city graphStore IS
+// store, and no tail keeps each of those reads on the single store the control
+// runs in.
+//
+// TODO(T2/S7): under strict per-class views the two stores are distinct
+// handles over what may be one physical store; compute relocation then as
+// !beads.SameStore over the minted graph and work handles, not as interface
+// inequality on the raw stores.
+func controlMemberTail(kind string, graphStore, store beads.Store) bool {
+	relocated := graphStore != store // residency:allow route-gated work-leg tail: the drain's membership and the retry lane's cross-store required-artifact source read
+	switch kind {
+	case beadmeta.KindDrain, beadmeta.KindRetryEval, beadmeta.KindRetry, beadmeta.KindRalph:
+		return relocated
+	}
+	return false
+}
+
 // controlDispatchOptions is the store half of a control dispatch's options.
 // work is the scope store the control was dispatched from and graph the
 // ledger that holds the control.
@@ -402,19 +417,16 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 // typed-store T9 hands dispatch the city's sessions handle.
 //
 // With memberTail the scope store is also the work-class member tail, so
-// membership and member reads cross the class boundary. The caller asks for it
-// only when the graph class relocated.
+// membership and member reads cross the class boundary (controlMemberTail
+// decides it).
 func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, work beads.WorkStore, memberTail bool) dispatch.ProcessOptions {
-	opts := dispatch.ProcessOptions{
-		CityPath:  cityPath,
-		StorePath: storePath,
-		Work:      work,
-		Sessions:  beads.SessionStore(graph),
+	return dispatch.ProcessOptions{
+		CityPath:   cityPath,
+		StorePath:  storePath,
+		Work:       work,
+		MemberTail: memberTail,
+		Sessions:   beads.SessionStore(graph),
 	}
-	if memberTail {
-		opts.MemberStores = []beads.WorkStore{work}
-	}
-	return opts
 }
 
 // validateDispatchSessionProviderConfig checks, once when a control
@@ -471,9 +483,9 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 // quarantined; any other classification quarantines on the first refusal. It
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
 // cause when the bead should be retried.
-func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+func handleControlDispatchError(cityPath, storePath string, graph beads.GraphStore, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
 	if errors.Is(cause, dispatch.ErrControlDriftPending) {
-		return handleControlDriftRefusal(cityPath, storePath, graphStore, bead, beadID, cause, stderr)
+		return handleControlDriftRefusal(cityPath, storePath, graph, bead, beadID, cause, stderr)
 	}
 	if errors.Is(cause, dispatch.ErrControlPending) {
 		// Routine "not yet" — a retry waiting for its subject, a drain waiting
@@ -489,7 +501,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 		return cause
 	case dispatch.TierSemantic:
 		retry, recordErr := dispatch.RecordSemanticControlRetry(
-			beads.GraphStore{Store: graphStore}, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+			graph, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 		if recordErr != nil {
 			// Losing the budget write is itself a store problem: keep the
 			// pre-tier behavior (retry) rather than escalating on it.
@@ -513,7 +525,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	settleFailure, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause)
+	settleFailure, quarantineErr := quarantineControlFailureBead(graph, bead, cause)
 	if quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
 	}
@@ -524,7 +536,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 			settleFailure.RootBeadID, settleFailure.FinalizerBeadID, cause)
 	}
 	if stalled != nil {
-		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, quarantineControlStall, stderr)
+		emitControlStalled(cityPath, storePath, graph, bead, cause, *stalled, quarantineControlStall, stderr)
 		_, _ = fmt.Fprintf(stderr,
 			"control dispatch: stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
 			beadID, stalled.Attempts, stalled.FirstSeen.UTC().Format(time.RFC3339),
@@ -553,7 +565,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 // A verbatim repeat is additionally marked quiet so a permanently-pending bead
 // stops resetting the serve loop's idle backoff, mirroring the Tier-B repeat
 // arm in handleControlDispatchError above.
-func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+func handleControlDriftRefusal(cityPath, storePath string, graph beads.GraphStore, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
 	if strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) == "true" &&
 		dispatch.PendingControlRefusalRecorded(bead, cause) {
 		// Past the horizon, repeating verbatim: the escalation already fired
@@ -570,7 +582,7 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 		return dispatch.MarkQuietControllerRetry(cause)
 	}
 	pending, recordErr := dispatch.RecordPendingControlRetry(
-		beads.GraphStore{Store: graphStore}, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+		graph, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 	if recordErr != nil {
 		// Losing the budget write must not change the disposition: pending is
 		// still pending, and escalating on a failed bookkeeping write would
@@ -586,10 +598,10 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 		// between the two drops one event, which the persisted
 		// gc.control_pending_* keys still explain, whereas emitting first would
 		// re-announce on every sweep if the latch write failed.
-		if latchErr := graphStore.SetMetadata(beadID, beadmeta.ControlPendingStalledMetadataKey, "true"); latchErr != nil {
+		if latchErr := graph.SetMetadata(beadID, beadmeta.ControlPendingStalledMetadataKey, "true"); latchErr != nil {
 			workflowTracef("control-pending-budget bead=%s latching stalled escalation failed err=%v", beadID, latchErr)
 		} else {
-			emitControlStalled(cityPath, storePath, graphStore, bead, cause, pending, pendingControlStall, stderr)
+			emitControlStalled(cityPath, storePath, graph, bead, cause, pending, pendingControlStall, stderr)
 			_, _ = fmt.Fprintf(stderr,
 				"control dispatch: pending stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
 				beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339),
@@ -767,7 +779,7 @@ type rootSettleFailure struct {
 // make progress. When the bead is a workflow-finalize control whose workflow
 // root fails to settle behind it, the returned *rootSettleFailure is non-nil
 // so the caller can surface the stranded root instead of it going silent.
-func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) (*rootSettleFailure, error) {
+func quarantineControlFailureBead(store beads.GraphStore, bead beads.Bead, cause error) (*rootSettleFailure, error) {
 	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
@@ -793,7 +805,7 @@ func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause erro
 	}); err != nil {
 		return nil, err
 	}
-	_, _ = dispatch.ReconcileClosedScopeMember(beads.GraphStore{Store: store}, beadID)
+	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
 
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
 		// Best-effort, like the ReconcileClosedScopeMember call above: the
@@ -864,7 +876,7 @@ func recordRootSettleFailure(store beads.Store, rootID, finalizerBeadID string, 
 // this the root never reaches Status=="closed" and survives every
 // rootSettled-gated check forever even though its finalizer is dead. See
 // ga-japz50 / ga-xn8ml8.
-func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) error {
+func settleRootForQuarantinedFinalizer(store beads.GraphStore, finalizer beads.Bead) error {
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == finalizer.ID {
 		return nil
@@ -892,7 +904,7 @@ func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) 
 	}); err != nil {
 		return err
 	}
-	_, _ = dispatch.ReconcileClosedScopeMember(beads.GraphStore{Store: store}, rootID)
+	_, _ = dispatch.ReconcileClosedScopeMember(store, rootID)
 	return nil
 }
 

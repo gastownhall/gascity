@@ -2679,12 +2679,12 @@ func TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFa
 	}
 }
 
-// TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores:
+// TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberTail:
 // the gc.input_convoy_id hop carries no store ref on the root — a convoy is a
 // work bead, so on a split city it lives in the work store while the root and
 // the retry control run in the graph store. The read must federate through
-// opts.MemberStores (the work-store tail), exactly like the drain lane.
-func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores(t *testing.T) {
+// opts.MemberTail (the work-store tail), exactly like the drain lane.
+func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberTail(t *testing.T) {
 	t.Parallel()
 
 	workStore := &beads.MemStore{IDPrefix: "hq"}
@@ -2712,11 +2712,11 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStore
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": artifact,
 		},
-	}, ProcessOptions{Work: beadstest.Work(workStore), MemberStores: []beads.WorkStore{beadstest.Work(workStore)}})
+	}, ProcessOptions{Work: beadstest.Work(workStore), MemberTail: true})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
 	}
 	if want := (retryEvalResult{Outcome: "pass"}); got != want {
-		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via MemberStores?)", got, want)
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via the member tail?)", got, want)
 	}
 }

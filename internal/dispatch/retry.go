@@ -678,7 +678,7 @@ func resolveRequiredArtifactWorktree(store beads.GraphStore, rootID string, opts
 //     via opts.ResolveStoreRef and read there. A ref with no resolver wired
 //     fails LOUD rather than silently narrowing to the ambient store.
 //   - With no ref, resolve over the same residency frame the drain uses
-//     (opts.MemberStores as the work leg). With no member stores — every
+//     (Work as the work leg, with opts.MemberTail). With no member tail — every
 //     single-store caller — this is byte-identical to the ambient store.Get
 //     it replaces.
 //
@@ -707,7 +707,7 @@ func resolveRequiredArtifactSourceBead(store beads.GraphStore, root beads.Bead, 
 			return source, true, nil
 		}
 	}
-	if len(opts.MemberStores) == 0 {
+	if !opts.MemberTail {
 		source, err := store.Get(sourceID)
 		if errors.Is(err, beads.ErrNotFound) {
 			return beads.Bead{}, false, nil
@@ -718,6 +718,11 @@ func resolveRequiredArtifactSourceBead(store beads.GraphStore, root beads.Bead, 
 		return source, true, nil
 	}
 	owner, found, err := resolveDrainMember(store, sourceID, opts)
+	if errors.Is(err, errDispatchNoWorkStore) {
+		// A wiring fault, not a store blip: fail loudly, as the drain does,
+		// rather than retry it forever.
+		return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, err)
+	}
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
 	}
