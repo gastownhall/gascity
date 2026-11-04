@@ -347,15 +347,18 @@ func TestRigListReportsSlingTargetsAndEffectiveConfig(t *testing.T) {
 // every row checked, or a stopped row's metadata read as suspended.
 func TestRigSuspendedWhenEveryRunningRowIsMarkedSuspended(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		started []string
-		want    bool
+		name       string
+		started    []string
+		unattested bool
+		want       bool
 	}{
 		{name: "every row running and marked", started: []string{"myrig--worker", "myrig--coder"}, want: true},
 		{name: "one row stopped", started: []string{"myrig--worker"}, want: false},
+		{name: "one row stopped, probed under an unattested listing", started: []string{"myrig--worker"}, unattested: true, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := newFakeState(t)
+			state.sp.ListingUnattested = tc.unattested
 			state.cfg.Agents = []config.Agent{
 				{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 				{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
