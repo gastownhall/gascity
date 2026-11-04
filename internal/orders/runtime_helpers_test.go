@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +120,9 @@ func TestLastRunFuncWithEventFallback_UsesStoreResult(t *testing.T) {
 func TestLastRunFuncWithEventFallback_FallsBackToEvents(t *testing.T) {
 	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
 	ep := events.NewFake()
-	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	// Relative to now, not a fixed date: the fallback only looks back a bounded
+	// window, so a calendar date would age out of it and fail on its own.
+	want := time.Now().Add(-36 * time.Hour)
 	ep.Record(events.Event{
 		Type:    events.OrderFired,
 		Subject: "digest-generate",
@@ -137,8 +141,8 @@ func TestLastRunFuncWithEventFallback_FallsBackToEvents(t *testing.T) {
 func TestLastRunFuncWithEventFallback_FallsBackToLatestEvent(t *testing.T) {
 	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
 	ep := events.NewFake()
-	older := time.Date(2026, 6, 8, 0, 23, 0, 0, time.UTC)
-	newer := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	older := time.Now().Add(-60 * time.Hour)
+	newer := time.Now().Add(-36 * time.Hour)
 	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: older})
 	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: newer})
 
@@ -157,7 +161,8 @@ func TestLastRunFuncWithEventFallback_IgnoresOtherOrderEvents(t *testing.T) {
 	ep.Record(events.Event{
 		Type:    events.OrderFired,
 		Subject: "other-order",
-		Ts:      time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC),
+		// Recent, so only the subject mismatch can explain a zero result.
+		Ts: time.Now().Add(-36 * time.Hour),
 	})
 
 	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
@@ -166,6 +171,92 @@ func TestLastRunFuncWithEventFallback_IgnoresOtherOrderEvents(t *testing.T) {
 	}
 	if !got.IsZero() {
 		t.Fatalf("got %s, want zero (event is for a different order)", got)
+	}
+}
+
+// The fallback's query must be bounded in time: an unbounded List makes every
+// index miss walk every rotated archive. Bounded does not mean tail-limited —
+// the lookback has to be wide enough to reach an order.fired that rotated into
+// an archive, which is the long-cooldown case the fallback exists for. These
+// tests bracket the window: 10 days back must be found, 400 days back must not.
+// They hold for any lookback between those two.
+const (
+	withinEventFallbackLookback  = 10 * 24 * time.Hour
+	beyondEventFallbackLookback  = 400 * 24 * time.Hour
+	eventFallbackLookbackSubject = "digest-generate"
+)
+
+func TestLastRunFuncWithEventFallback_IgnoresEventsBeyondLookback(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: eventFallbackLookbackSubject,
+		Ts:      time.Now().Add(-beyondEventFallbackLookback),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)(eventFallbackLookbackSubject)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (event is %s old, past the bounded lookback)", got, beyondEventFallbackLookback)
+	}
+}
+
+// rotatedEventLog records one order.fired at ts, rotates it into a gzip
+// archive, and returns the live recorder (whose active log now holds only the
+// rotation anchor). The event is readable only through the archive walk.
+func rotatedEventLog(t *testing.T, subject string, ts time.Time) *events.FileRecorder {
+	t.Helper()
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	rec.Record(events.Event{Type: events.OrderFired, Actor: "controller", Subject: subject, Ts: ts})
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	if !res.Rotated {
+		t.Fatalf("expected the event to rotate into an archive, got %+v", res)
+	}
+	select {
+	case <-res.Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("archive compression did not finish within 5s")
+	}
+	return rec
+}
+
+// Guards the TRAP in the bead: a tail read would miss this event, because it
+// lives in a rotated .gz, and every Fake-backed test would stay green.
+func TestLastRunFuncWithEventFallback_FindsEventInRotatedArchiveWithinLookback(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	want := time.Now().Add(-withinEventFallbackLookback)
+	rec := rotatedEventLog(t, eventFallbackLookbackSubject, want)
+
+	got, err := LastRunFuncWithEventFallback(storeFn, rec)(eventFallbackLookbackSubject)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s (the order.fired sits in a rotated archive, inside the lookback)", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_IgnoresArchivedEventBeyondLookback(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	rec := rotatedEventLog(t, eventFallbackLookbackSubject, time.Now().Add(-beyondEventFallbackLookback))
+
+	got, err := LastRunFuncWithEventFallback(storeFn, rec)(eventFallbackLookbackSubject)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (archived event is %s old, past the bounded lookback)", got, beyondEventFallbackLookback)
 	}
 }
 

@@ -1671,6 +1671,81 @@ func TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale(t *testing.T) {
 	}
 }
 
+// rigCooldownEventFallbackOrders is the rig-scoped sibling of
+// cooldownEventFallbackOrders: ScopedName() is "db-health:rig:demo-repo", not
+// Name, so the event fallback only works if the dispatcher asks the event bus
+// for the scoped subject it recorded.
+func rigCooldownEventFallbackOrders() []orders.Order {
+	return []orders.Order{{
+		Name:         "db-health",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		Formula:      "mol-db-health",
+		Pool:         "polecat",
+		Rig:          "demo-repo",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+}
+
+// TestOrderDispatchRigCooldownHonoursEventFallbackAfterBeadPrune is the
+// rig-scoped half of the city-level fallback test above: the order.fired the
+// dispatcher records carries Subject: ScopedName(), and the fallback's exact
+// Subject match must hold the rig order's cooldown closed on it.
+func TestOrderDispatchRigCooldownHonoursEventFallbackAfterBeadPrune(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:db-health:rig:demo-repo bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "db-health:rig:demo-repo",
+		Ts:      time.Now().Add(-10 * time.Minute),
+	})
+
+	ad := buildOrderDispatcherFromList(rigCooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:db-health:rig:demo-repo"); len(all) != 0 {
+		t.Fatalf("expected no dispatch (event fallback should hold the rig order's cooldown), got %d bead(s)", len(all))
+	}
+}
+
+// TestOrderDispatchRigCooldownIgnoresOtherScopesEventFallback is the negative
+// half: a recent order.fired for the same order Name under a different scope —
+// the city-level "db-health" and another rig's "db-health:rig:other-repo" —
+// must not hold demo-repo's cooldown. Subject is an exact match, so only the
+// order's own scoped name can. It also keeps the held case above from passing
+// vacuously: the same pruned store and order dispatch when no matching event
+// exists.
+func TestOrderDispatchRigCooldownIgnoresOtherScopesEventFallback(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:db-health:rig:demo-repo bead — pruned
+
+	ep := events.NewFake()
+	for _, subject := range []string{"db-health", "db-health:rig:other-repo"} {
+		ep.Record(events.Event{
+			Type:    events.OrderFired,
+			Subject: subject,
+			Ts:      time.Now().Add(-10 * time.Minute),
+		})
+	}
+
+	ad := buildOrderDispatcherFromList(rigCooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:db-health:rig:demo-repo"); len(all) == 0 {
+		t.Fatal("expected dispatch (the recent order.fired events belong to other scopes), got no beads")
+	}
+}
+
 type strictOpenWorkListCountingStore struct {
 	beads.Store
 
@@ -6935,7 +7010,7 @@ func successfulExec(context.Context, string, string, []string) ([]byte, error) {
 
 // buildOrderDispatcherFromList builds a dispatcher from pre-scanned orders,
 // bypassing the filesystem scan. Returns nil if no auto-dispatchable orders.
-func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep events.Provider) orderDispatcher { //nolint:unparam // ep is nil in current tests but needed for event-gate tests
+func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep events.Provider) orderDispatcher { //nolint:unparam // ep is nil in most tests; the event-gate and event-fallback tests pass a provider
 	return buildOrderDispatcherFromListExec(aa, store, ep, nil, nil)
 }
 
