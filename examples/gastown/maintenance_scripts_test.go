@@ -14101,7 +14101,7 @@ case "$1 $2" in
       exit 1
     fi
     if [ -n "${GUARD_RIG_LIST_FAIL:-}" ]; then exit 1; fi
-    echo "{\"rigs\":[{\"name\":\"city-b\",\"hq\":true,\"prefix\":\"gcx\"},{\"name\":\"alpha\",\"hq\":false,\"prefix\":\"al\"},{\"name\":\"beta\",\"hq\":false,\"prefix\":\"bt\",\"federation\":\"${GUARD_FEDERATION:-rig}\",\"namespace\":\"exclusive\"},{\"name\":\"gamma\",\"hq\":false,\"prefix\":\"my-rig\",\"federation\":\"rig\"}]}"
+    echo "{\"rigs\":[{\"name\":\"city-b\",\"hq\":true,\"prefix\":\"gcx\"},{\"name\":\"alpha\",\"hq\":false,\"prefix\":\"al\"},{\"name\":\"beta\",\"hq\":false,\"prefix\":\"${GUARD_BETA_PREFIX:-bt}\",\"federation\":\"${GUARD_FEDERATION:-rig}\",\"namespace\":\"exclusive\"},{\"name\":\"gamma\",\"hq\":false,\"prefix\":\"my-rig\",\"federation\":\"rig\"}]}"
     exit 0
     ;;
   "agent is-foreign")
@@ -14790,6 +14790,131 @@ func TestCrossRigDepsLeavesColonFormGuardedDependentsAlone(t *testing.T) {
 // TestCrossRigDepsChecksTheRigNameOfADependent: a dependent named under a
 // guarded rig ("external:beta/<id>") is left alone even when its id carries
 // no guarded prefix.
+// TestCrossRigDepsTwoCitiesSamePrefix: another city attaches the guarded
+// rig's store under a rig of its own with the same bead prefix, so its rows
+// carry this city's guarded prefix whatever rig name a dependent is filed
+// under. A dependent with that prefix is left alone under a bare id, under the
+// guarded rig's name and under a rig name this city does not know; the
+// unguarded rig's dependent is converted as before (the positive control).
+func TestCrossRigDepsTwoCitiesSamePrefix(t *testing.T) {
+	out, log := runGuardedRigOrder(t, "cross-rig-deps.sh", map[string]string{
+		"GUARD_BETA_PREFIX": "sh",
+		"GUARD_CLOSED":      `[{"id":"gcx-1"}]`,
+		"GUARD_DEPS":        `[{"id":"external:sh-2"},{"id":"external:beta/sh-3"},{"id":"external:delta/sh-4"},{"id":"external:alpha/al-5"}]`,
+	})
+	for _, dep := range []string{"external:sh-2", "external:beta/sh-3", "external:delta/sh-4"} {
+		if strings.Contains(log, "bd dep remove "+dep+" ") || strings.Contains(log, "bd dep add "+dep+" ") {
+			t.Fatalf("a dependent with the shared store's prefix (%s) was rewritten\n%s", dep, log)
+		}
+	}
+	if !strings.Contains(log, "bd dep remove external:alpha/al-5 external:gcx-1") {
+		t.Fatalf("the unguarded rig's dependent was not converted\n%s", log)
+	}
+	for _, want := range []string{"resolved 1 cross-rig dependencies", "left 3 dependencies in guarded rigs"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestOrphanSweepTwoCitiesOneStoreSamePrefix is one sweep of city B over its
+// guarded rig "shared", whose store city A attaches under a rig of its own
+// with the same bead prefix. Both cities import the same pack and their HQs
+// mint the same short session ids, so A's claims arrive in every colliding
+// shape: A's 128-bit pool session, the short id gcx-17 (B holds a closed
+// record of its own under that id), A's rig-qualified pool alias, a person's
+// claim, and a row whose assignee forges another claim row naming B's own
+// dead pool session. Only B's own dead pool claim is released; every other
+// claim is kept, the namespace ones counted rather than named.
+//
+// The same rows on the same rig without federation = "rig" pin today's
+// leak: the colliding short id resolves against B's own closed record, and
+// B releases A's live claim.
+func TestOrphanSweepTwoCitiesOneStoreSamePrefix(t *testing.T) {
+	const (
+		ownDeadPool = "gcx-session-bbbbbbbbbbbbbbbb0000000000000002"
+		otherPool   = "gcx-session-aaaaaaaaaaaaaaaa0000000000000001"
+		shortID     = "gcx-17"
+	)
+	shared := []orphanSweepGateRow{
+		inProgress("sh-own-dead", ownDeadPool),
+		inProgress("sh-other-pool", otherPool),
+		inProgress("sh-short", shortID),
+		inProgress("sh-other-alias", "alpha/gastown.polecat-1"),
+		inProgress("sh-person", "alice"),
+		inProgress("sh-forged", "x\nsh-other-pool\trig:shared\t"+ownDeadPool),
+	}
+	sessions := []orphanSweepGateRow{
+		{ID: ownDeadPool, Status: "closed", IssueType: "session"},
+		{ID: shortID, Status: "closed", IssueType: "session"},
+	}
+
+	t.Run("federation=rig", func(t *testing.T) {
+		run := runOrphanSweepGateFixture(t, nil, shared, sessions, nil, map[string]string{
+			"ORPHAN_SWEEP_GUARDED_RIGS": "shared",
+			"ORPHAN_SWEEP_OWN_POOL_IDS": ownDeadPool,
+		})
+		if run.err != nil {
+			t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+		}
+		if !run.released("sh-own-dead") {
+			t.Fatalf("city B's own dead pool claim was not released\n%s", run.context())
+		}
+		for _, row := range shared[1:] {
+			if run.released(row.ID) {
+				t.Fatalf("%s (held by %q) was released from the shared store\n%s", row.ID, row.Assignee, run.context())
+			}
+		}
+		if strings.Contains(run.log, "release-if-current sh-other-pool "+ownDeadPool) {
+			t.Fatalf("the forged row reached a release\n%s", run.context())
+		}
+		for _, line := range nonEmptyLogLines(run.log) {
+			if strings.HasPrefix(line, "agent is-foreign ") && !strings.HasPrefix(line, "agent is-foreign --rig-namespace shared --json -- ") {
+				t.Fatalf("a claim in the shared store was asked about without --rig-namespace: %q\n%s", line, run.context())
+			}
+		}
+		for _, want := range []string{
+			// The forged row is the one claim named: it can never be asked
+			// about, so it is protected as untrusted.
+			"reset 1 orphaned beads, protected 1 foreign/unknown claims, kept 4 claims outside guarded rig namespaces (shared: 4)",
+			`"x sh-other-pool rig:shared ` + ownDeadPool + `" (1: sh-forged)`,
+		} {
+			if !strings.Contains(run.out, want) {
+				t.Fatalf("output missing %q:\n%s", want, run.out)
+			}
+		}
+		if outcome, ok := run.outcome(t); !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 1 {
+			t.Fatalf("outcome = %+v (written %v); want partial, naming the forged row only", outcome, ok)
+		}
+		for _, name := range []string{otherPool, shortID, "alice", "alpha/gastown.polecat-1"} {
+			if strings.Contains(run.out, strconv.Quote(name)+" (") {
+				t.Fatalf("namespace-kept claimant %q was named:\n%s", name, run.out)
+			}
+		}
+	})
+
+	t.Run("federation=city", func(t *testing.T) {
+		// Today's gate answers from this city's roster and records alone:
+		// the other city's pool session and a person are foreign, the short
+		// id is "this city's" (B's closed record answers to it).
+		run := runOrphanSweepGateFixture(t, nil, shared, sessions, []string{otherPool, "alice", "alpha/gastown.polecat-1"}, nil)
+		if run.err != nil {
+			t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+		}
+		if !run.released("sh-own-dead") {
+			t.Fatalf("city B's own dead pool claim was not released\n%s", run.context())
+		}
+		if !run.released("sh-short") {
+			t.Fatalf("the colliding short id was not released; the leak this characterizes has changed\n%s", run.context())
+		}
+		for _, id := range []string{"sh-other-pool", "sh-other-alias", "sh-person", "sh-forged"} {
+			if run.released(id) {
+				t.Fatalf("%s was released\n%s", id, run.context())
+			}
+		}
+	})
+}
+
 func TestCrossRigDepsChecksTheRigNameOfADependent(t *testing.T) {
 	out, log := runGuardedRigOrder(t, "cross-rig-deps.sh", map[string]string{
 		"GUARD_CLOSED": `[{"id":"al-1"}]`,

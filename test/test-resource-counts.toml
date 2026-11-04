@@ -3090,6 +3090,18 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "test/acceptance/rig_federation_two_city_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
+path = "test/acceptance/rig_federation_two_city_test.go"
+resource = "subprocess"
+calls = 6
+tagged = true
+
+[[count]]
 path = "test/acceptance/rig_test.go"
 resource = "subprocess"
 calls = 2
