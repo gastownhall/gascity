@@ -10,6 +10,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
 
 // slingInheritEnv returns a getenv over vars, the env seam inheritSlingInitiator
@@ -72,6 +74,43 @@ func inheritRootWithInitiator(t *testing.T, store beads.Store, initiator string)
 	return mustCreateInheritBead(t, store, beads.Bead{Title: "run root", Type: "molecule", Metadata: meta})
 }
 
+// inheritClosedRootWithInitiator creates a run root carrying initiator and
+// closes it: the earlier run a re-slung bead's stale workflow_id or
+// molecule_id still names.
+func inheritClosedRootWithInitiator(t *testing.T, store beads.Store, initiator string) beads.Bead {
+	t.Helper()
+	root := inheritRootWithInitiator(t, store, initiator)
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("Close(%s): %v", root.ID, err)
+	}
+	return root
+}
+
+// inheritInputRun creates, in rootStore, a run root carrying initiator ("" for
+// none) whose input convoy is created in workStore: the gc.input_convoy_id a
+// graph.v2 --on launch or a drain item records.
+func inheritInputRun(t *testing.T, rootStore, workStore beads.Store, initiator string) (root, convoy beads.Bead) {
+	t.Helper()
+	convoy = mustCreateInheritBead(t, workStore, beads.Bead{Title: "input convoy", Type: "convoy"})
+	meta := map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID}
+	if initiator != "" {
+		meta[beadmeta.InitiatorMetadataKey] = initiator
+	}
+	root = mustCreateInheritBead(t, rootStore, beads.Bead{Title: "run root", Type: "molecule", Metadata: meta})
+	return root, convoy
+}
+
+// inheritTrackedClaim creates, in the store of convoyID, a claim assigned to
+// assignee that the convoy tracks: an input bead the worker claimed, as core
+// mol-do-work tells it to.
+func inheritTrackedClaim(t *testing.T, store beads.Store, assignee, convoyID string, meta map[string]string) {
+	t.Helper()
+	c := claimInheritBead(t, store, assignee, beads.Bead{Title: "claimed input bead", Type: "task", Metadata: meta})
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoyID, c.ID); err != nil {
+		t.Fatalf("tracking %s in %s: %v", c.ID, convoyID, err)
+	}
+}
+
 func TestResolveInheritedInitiator(t *testing.T) {
 	const session = "gc-sess-1"
 	for _, tc := range []struct {
@@ -101,6 +140,160 @@ func TestResolveInheritedInitiator(t *testing.T) {
 			},
 			want:         "alice",
 			wantNoStderr: true,
+		},
+		{
+			name: "a re-slung claim's own stamp outranks the closed run its stale workflow_id names",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				old := inheritClosedRootWithInitiator(t, graph, "alice")
+				inheritClaimFor(t, work, session, "workflow_id", old.ID, map[string]string{beadmeta.InitiatorMetadataKey: "bob"})
+				return ""
+			},
+			want:         "bob",
+			wantNoStderr: true,
+		},
+		{
+			name: "an unstamped claim whose stale workflow_id names a closed run inherits nothing",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				old := inheritClosedRootWithInitiator(t, graph, "alice")
+				inheritClaimFor(t, work, session, "workflow_id", old.ID, nil)
+				return ""
+			},
+			want:         "",
+			wantNoStderr: true,
+		},
+		{
+			name: "an unstamped claim whose stale molecule_id names a closed molecule inherits nothing",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				old := inheritClosedRootWithInitiator(t, work, "dave")
+				inheritClaimFor(t, work, session, beadmeta.MoleculeIDMetadataKey, old.ID, nil)
+				return ""
+			},
+			want:         "",
+			wantNoStderr: true,
+		},
+		{
+			name: "an unstamped claim of a closed run conflicts with an attributed live claim",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				live := inheritRootWithInitiator(t, work, "carol")
+				inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, live.ID, nil)
+				old := inheritClosedRootWithInitiator(t, graph, "alice")
+				inheritClaimFor(t, work, session, "workflow_id", old.ID, nil)
+				return ""
+			},
+			want:       "",
+			wantStderr: []string{"gc.initiator", "carol", "=(none)"},
+		},
+		{
+			name: "a claim's own stamp outranks a dangling molecule_id",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				inheritClaimFor(t, work, session, beadmeta.MoleculeIDMetadataKey, "gc-purged-molecule", map[string]string{beadmeta.InitiatorMetadataKey: "bob"})
+				return ""
+			},
+			want:         "bob",
+			wantNoStderr: true,
+		},
+		{
+			name: "a claim's own stamp agrees with another claim's run root",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				root := inheritRootWithInitiator(t, work, "alice")
+				inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				inheritClaimFor(t, work, session, "", "", map[string]string{beadmeta.InitiatorMetadataKey: "alice"})
+				return ""
+			},
+			want:         "alice",
+			wantNoStderr: true,
+		},
+		{
+			name: "a claim's own stamp conflicts with another claim's run root on another initiator",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				root := inheritRootWithInitiator(t, work, "alice")
+				inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				inheritClaimFor(t, work, session, "", "", map[string]string{beadmeta.InitiatorMetadataKey: "bob"})
+				return ""
+			},
+			want:       "",
+			wantStderr: []string{"gc.initiator", "alice", "bob"},
+		},
+		{
+			name: "a claimed input bead counts as the run whose input convoy tracks it",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				root, convoy := inheritInputRun(t, graph, work, "alice")
+				inheritClaimFor(t, graph, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				inheritTrackedClaim(t, work, session, convoy.ID, nil)
+				return ""
+			},
+			want:         "alice",
+			wantNoStderr: true,
+		},
+		{
+			name: "a run's initiator outranks the own stamp of its claimed input bead",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				root, convoy := inheritInputRun(t, graph, work, "alice")
+				inheritClaimFor(t, graph, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				inheritTrackedClaim(t, work, session, convoy.ID, map[string]string{beadmeta.InitiatorMetadataKey: "bob"})
+				return ""
+			},
+			want:         "alice",
+			wantNoStderr: true,
+		},
+		{
+			name: "an input bead whose stale workflow_id names a closed run counts as the live run it is the input of",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				root, convoy := inheritInputRun(t, graph, work, "alice")
+				inheritClaimFor(t, graph, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				old := inheritClosedRootWithInitiator(t, graph, "carol")
+				inheritTrackedClaim(t, work, session, convoy.ID, map[string]string{"workflow_id": old.ID})
+				return ""
+			},
+			want:         "alice",
+			wantNoStderr: true,
+		},
+		{
+			name: "an unattributed run's claimed input bead inherits nothing, not its own stamp",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				root, convoy := inheritInputRun(t, graph, work, "")
+				inheritClaimFor(t, graph, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				inheritTrackedClaim(t, work, session, convoy.ID, map[string]string{beadmeta.InitiatorMetadataKey: "bob"})
+				return ""
+			},
+			want:         "",
+			wantNoStderr: true,
+		},
+		{
+			name: "an input bead of a run the session holds no other claim in keeps its own stamp",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				_, convoy := inheritInputRun(t, graph, work, "alice")
+				inheritTrackedClaim(t, work, session, convoy.ID, map[string]string{beadmeta.InitiatorMetadataKey: "bob"})
+				return ""
+			},
+			want:         "bob",
+			wantNoStderr: true,
+		},
+		{
+			name: "a claim only another convoy tracks is not the run's input",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				root, _ := inheritInputRun(t, graph, work, "alice")
+				inheritClaimFor(t, graph, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				other := mustCreateInheritBead(t, work, beads.Bead{Title: "unrelated convoy", Type: "convoy"})
+				inheritTrackedClaim(t, work, session, other.ID, nil)
+				return ""
+			},
+			want:       "",
+			wantStderr: []string{"gc.initiator", "alice", "=(none)"},
+		},
+		{
+			name: "a claim the run's input convoy only blocks is not the run's input",
+			build: func(t *testing.T, work, graph beads.Store) string {
+				root, convoy := inheritInputRun(t, graph, work, "alice")
+				inheritClaimFor(t, graph, session, beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+				blocked := inheritClaimFor(t, work, session, "", "", nil)
+				if err := work.DepAdd(convoy.ID, blocked.ID, "blocks"); err != nil {
+					t.Fatalf("DepAdd: %v", err)
+				}
+				return ""
+			},
+			want:       "",
+			wantStderr: []string{"gc.initiator", "alice", "=(none)"},
 		},
 		{
 			name: "graph workflow root relocated to the graph store resolves",
@@ -242,6 +435,41 @@ func TestResolveInheritedInitiator(t *testing.T) {
 			wantNoStderr: true,
 		},
 		{
+			name: "a current claim another session reclaimed is not consulted",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				root := inheritRootWithInitiator(t, work, "alice")
+				return inheritClaimFor(t, work, "other-seat", beadmeta.RootBeadIDMetadataKey, root.ID,
+					map[string]string{beadmeta.SessionIDMetadataKey: "gc-sess-2"}).ID
+			},
+			want:         "",
+			wantNoStderr: true,
+		},
+		{
+			name: "a current claim released to the queue is not consulted",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				root := inheritRootWithInitiator(t, work, "alice")
+				return mustCreateInheritBead(t, work, beads.Bead{
+					Title: "released step", Type: "task",
+					Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+				}).ID
+			},
+			want:         "",
+			wantNoStderr: true,
+		},
+		{
+			name: "a reclaimed current claim does not conflict with the session's live claim",
+			build: func(t *testing.T, work, _ beads.Store) string {
+				a := inheritRootWithInitiator(t, work, "alice")
+				stale := inheritClaimFor(t, work, "other-seat", beadmeta.RootBeadIDMetadataKey, a.ID,
+					map[string]string{beadmeta.SessionIDMetadataKey: "gc-sess-2"})
+				b := inheritRootWithInitiator(t, work, "bob")
+				inheritClaimFor(t, work, session, beadmeta.RootBeadIDMetadataKey, b.ID, nil)
+				return stale.ID
+			},
+			want:         "bob",
+			wantNoStderr: true,
+		},
+		{
 			name: "a dangling current claim id is ignored",
 			build: func(*testing.T, beads.Store, beads.Store) string {
 				return "gc-does-not-exist"
@@ -276,6 +504,7 @@ func TestResolveInheritedInitiator(t *testing.T) {
 			}
 			var stderr bytes.Buffer
 			got := resolveInheritedInitiator(slingInheritSources{
+				sessionID:  session,
 				identities: ids,
 				currentClaim: func() (string, error) {
 					return current, tc.currentClaimE
@@ -324,6 +553,34 @@ type inheritListFailStore struct{ beads.Store }
 
 func (inheritListFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("list exploded")
+}
+
+// TestResolveInheritedInitiator_TrackingReadFailureStampsNothing proves a
+// failed read of the convoys tracking a claim disables inheritance with a
+// warning: unread, the claim could be the input of the session's run or a run
+// of its own.
+func TestResolveInheritedInitiator_TrackingReadFailureStampsNothing(t *testing.T) {
+	work := beads.NewMemStore()
+	root, convoy := inheritInputRun(t, work, work, "alice")
+	inheritClaimFor(t, work, "s1", beadmeta.RootBeadIDMetadataKey, root.ID, nil)
+	inheritTrackedClaim(t, work, "s1", convoy.ID, nil)
+	var stderr bytes.Buffer
+	got := resolveInheritedInitiator(slingInheritSources{
+		identities: []string{"s1"},
+		stores:     []slingInheritReader{inheritDepListFailStore{Store: work}},
+	}, &stderr)
+	if got != "" {
+		t.Fatalf("initiator = %q, want none", got)
+	}
+	if !strings.Contains(stderr.String(), "dep list exploded") {
+		t.Fatalf("stderr = %q, want the tracking read failure named", stderr.String())
+	}
+}
+
+type inheritDepListFailStore struct{ beads.Store }
+
+func (inheritDepListFailStore) DepList(string, string) ([]beads.Dep, error) {
+	return nil, errors.New("dep list exploded")
 }
 
 func TestInheritSlingInitiator_Gates(t *testing.T) {
