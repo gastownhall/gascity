@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -45,6 +46,9 @@ type opsTestStore struct {
 	mu sync.Mutex
 	// createErr fails op-row creates, writing nothing.
 	createErr error
+	// failCreate, when set, fails each op-row create it reports true for,
+	// writing nothing.
+	failCreate func(beads.Bead) bool
 	// ambiguous commits an op-row create, then answers an error.
 	ambiguous bool
 	// panicAfterCreate commits the next op-row create, then panics (a crash
@@ -69,11 +73,14 @@ func (s *opsTestStore) Create(b beads.Bead) (beads.Bead, error) {
 		return s.MemStore.Create(b)
 	}
 	s.mu.Lock()
-	createErr, ambiguous, panicAfter, onCreate := s.createErr, s.ambiguous, s.panicAfterCreate, s.onOpCreate
+	createErr, failCreate, ambiguous, panicAfter, onCreate := s.createErr, s.failCreate, s.ambiguous, s.panicAfterCreate, s.onOpCreate
 	s.panicAfterCreate, s.onOpCreate = false, nil
 	s.mu.Unlock()
 	if createErr != nil {
 		return beads.Bead{}, createErr
+	}
+	if failCreate != nil && failCreate(b) {
+		return beads.Bead{}, errors.New("transport: create failed")
 	}
 	created, err := s.MemStore.Create(b)
 	if err != nil {
@@ -357,7 +364,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 			setup: func(t *testing.T, e *opsEnv) session.Info {
 				e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 				e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-				info, err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
+				info, err := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
 					Template: "helper", Title: "Off interrupt", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"},
 				})
 				if err != nil {
@@ -560,7 +567,7 @@ func TestSessionContentOpsAutoOneKeyIsOneOpAcrossPathsAndSpellings(t *testing.T)
 func TestSessionContentOpsAutoReplayDoesNotApplyResume(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Resume")
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sp, session.WithCityPath(e.fs.cityPath))
 	if err := mgr.Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -1881,7 +1888,7 @@ func TestSessionSubmitInterruptNowReportsTheTurnFence(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Fenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -3189,7 +3196,7 @@ func TestSessionContentOpsUnfencedInterruptReachesTheOp(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Unfenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -3228,7 +3235,7 @@ func TestSessionContentOpsMessagesOutcomes(t *testing.T) {
 	t.Run("queued", func(t *testing.T) {
 		e := newOpsEnv(t, "auto")
 		info := e.session(t, "Held")
-		if err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
 			t.Fatal(err)
 		}
 		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "", `{"message":"later"}`).Body)
@@ -3383,7 +3390,7 @@ func newT3OpsEnv(t *testing.T, mode string) (*opsEnv, session.Info) {
 	t.Helper()
 	e := newOpsEnv(t, mode)
 	e.fs.sessionProvider = runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: e.fs.sp})
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "T3", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)

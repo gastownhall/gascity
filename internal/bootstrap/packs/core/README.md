@@ -13,18 +13,19 @@ none requires per-city configuration.
 
 | Order | Trigger | What it does |
 | ----- | ------- | ------------ |
-| `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) |
+| `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) in the city store and every non-suspended rig store |
 | `orphan-sweep` | cooldown 5m | Reset beads assigned to dead agents back to the work pool |
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
 | `convoy-autoclose-backstop` | cooldown 1h | Close open, un-owned convoys whose members are all terminal (reconciles a missed autoclose) |
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
-| `wisp-compact` | cooldown | TTL-based cleanup of expired ephemeral beads (wisps) |
 | **`nudge-on-route`** | **event `bead.updated`** | **Nudge the target session when a bead is routed to it** |
 | **`cascade-nudge-on-blocker-close`** | **event `bead.closed`** | **Nudge dependents' assignees or routed targets when a blocker bead closes** |
 | **`notify-on-human-gate-creation`** | **event `bead.created`** | **Mail + nudge the addressee when a human gate bead is created** |
 | **`renudge-stale-human-gates`** | **cooldown 5m** | **Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold** |
+| **`notify-on-claims-stalled`** | **event `agent.claims_stalled`** | **Mail the escalation recipient when an agent's seats stop claiming their work (once per stall episode)** |
+| **`notify-on-claims-resumed`** | **event `agent.claims_resumed`** | **Resolve that incident and mail a short note when the agent claims its work again** |
 
 The **event-driven nudge orders** are documented in detail below.
 
@@ -114,6 +115,29 @@ resolution `nudge-on-route` applies at route time. A dependent with both an
 assignee and a route is nudged at its assignee only: a claimed bead belongs
 to its session.
 
+Either way, it skips a dependent that a `blocks` blocker still holds as gc's
+readiness rule judges it
+(`gc bd dep list <dep> --direction=down --type=blocks --json`): a blocker
+other than the one that closed whose status is not `closed`, or any blocker,
+the closing one included, that closed blocked (`gc.work_outcome=blocked`),
+unless it is a formula step (`gc.step_ref` set) whose `gc.outcome` is
+`pass`. Its assignee or routed target has nothing to do yet, and a nudge to
+an asleep seat parked on the dependent would wake that seat for nothing; the
+seat wakes on its own once the dependent is ready. A `pinned` blocker holds
+too, whether the read reports it `pinned` (the bd passthrough) or `open` (the
+in-process class-binding read, which folds it). bd's own readiness counts it
+satisfied, so a dependent only a pinned blocker holds is not nudged, but a
+seat parked on it still wakes: the park reads the store's ready query. gc
+itself never pins a bead.
+A pair the closing blocker's own blocked close holds is not recorded, whether
+or not another blocker holds the dependent too, so that blocker's later close
+that passes still nudges. A pair only another blocker holds is recorded like
+a nudged one, so later runs in the lookback do not read its blockers again;
+the close of the dependent's last blocker is a pair of its own, and nudges. A
+row the read cannot judge (an external row, for a blocker outside the
+dependent's store, or a row with no status) holds nothing, and a blocker read
+that fails proves nothing: the nudge goes out.
+
 **Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
 dependency lookup and the assignee nudge to the rig that owns each bead, so
 cross-rig blocker chains within a city resolve correctly. The routed nudge
@@ -133,6 +157,46 @@ Entries older than the retention window are pruned on each run.
 | -------- | ------- | ------- |
 | `GC_CASCADE_NUDGE_LOOKBACK` | `5m` | Event lookback window |
 | `GC_CASCADE_NUDGE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
+
+## `notify-on-claims-stalled` and `notify-on-claims-resumed`
+
+**Why.** The controller's claims-stall guard notices when an agent
+template's seats stop claiming the routed work they were spawned for: a
+provider out of usage, an expired account, a CLI that never reads its prompt.
+It holds the template's spawns back and records `agent.claims_stalled`; a seat
+that claims again records `agent.claims_resumed`. Events alone reach only the
+event log. On 2026-10-31 a review lane stood dead for ten hours while ~1,400
+seats came and went, and nobody was told.
+
+**Event contract.** Both orders run `assets/scripts/notify-claims-stall.sh`,
+which reads both event types over a lookback window and mails through
+`escalate.sh` to `$GC_ESCALATION_RECIPIENT` (default `human`):
+
+- a stall mails once per episode: the incident key and fingerprint are the
+  episode the guard names, so its probe alerts are not mailed again
+  (`escalate.sh` reminds once a day while the stall stands);
+- a resumption resolves that incident and mails one short note; an episode
+  that is already over is reported by its resumption alone.
+
+**Loud-fail.** An undeliverable mail exits non-zero, so the controller logs
+the order's output. It is sent again by the next run that still finds the
+event inside the lookback: the next matching event (a probe alert, the
+resumption) runs the order. An event read that fails, or `gc events` output
+that does not decode, also exits non-zero and mails nothing; a window with no
+event is a clean run.
+
+**Overrides.** An `escalate.sh` override written before incident keys, which
+rejects `--incident-key` as a usage error, still alerts: the script sends
+each alert again without the incident flags, so such a city is mailed on
+every run that finds the event instead of once per episode, and the order's
+output names the override.
+
+**Configuration** (all optional):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `GC_NOTIFY_CLAIMS_STALL_LOOKBACK` | `15m` | Event lookback window |
+| `GC_ESCALATION_RECIPIENT` | `human` | Who is mailed |
 
 ## Dependencies
 

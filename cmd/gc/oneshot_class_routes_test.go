@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -189,7 +190,7 @@ func assertNoGraphBeads(t *testing.T, store beads.Store, storeName string) {
 func TestOrderRunWispRootLandsInGraphStoreOnSplitCity(t *testing.T) {
 	cityPath, a := oneShotGraphOrderCity(t, "cooldown")
 	scope := splittest.NewWorkStore(t, "mc")
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graph))
 
 	wispID := runOneShotOrder(t, cityPath, a, scope, nil)
@@ -221,7 +222,7 @@ func TestOrderRunWispRootLandsInGraphStoreOnSplitCity(t *testing.T) {
 //	wisp root gc-1 is not resident in the single store: bead not found
 func TestOrderRunWispStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 	cityPath, a := oneShotGraphOrderCity(t, "cooldown")
-	store := splittest.NewWorkStore(t, "gc")
+	store := splittest.NewSingleStore(t, "gc")
 	seedCLIStorageRoutes(t, cityPath, nil)
 
 	wispID := runOneShotOrder(t, cityPath, a, store, nil)
@@ -258,7 +259,7 @@ func TestOrderRunWispStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 func TestOrderRunGraphResidentRunIsVisibleToTheOrderReaders(t *testing.T) {
 	cityPath, a := oneShotGraphOrderCity(t, "event")
 	scope := splittest.NewWorkStore(t, "mc")
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graph))
 
 	ep := events.NewFake()
@@ -378,7 +379,7 @@ func cookFormula(t *testing.T, name string, extraArgs ...string) formulaCookJSON
 // command opened for the formula's scope.
 func TestFormulaCookGraphV2RootLandsInGraphStoreOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "graph-work")
@@ -411,7 +412,7 @@ func TestFormulaCookGraphV2RootLandsInGraphStoreOnSplitCity(t *testing.T) {
 // relocate a class the split does not relocate.
 func TestFormulaCookLegacyMoleculeStaysOnTheWorkStore(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "legacy-work")
@@ -505,7 +506,7 @@ func closeEveryBeadExcept(t *testing.T, store beads.Store, keep string) {
 // TestFormulaCookAttachOnAWorkResidentBeadIsRefusedOnSplitCity).
 func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	work, err := openStoreAtForCity(cityDir, cityDir)
@@ -556,7 +557,7 @@ func TestFormulaCookAttachLeavesTheSourceBeadUnblockableOnSplitCity(t *testing.T
 // on it.
 func TestFormulaCookRootOnlyLegacyWispLandsInGraphStoreOnSplitCity(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "vapor-work")
@@ -601,7 +602,7 @@ func TestFormulaCookRootOnlyLegacyWispStaysOnTheOneStoreOnSingleStoreCity(t *tes
 // already materialized.
 func TestFormulaCookMetaStampLandsOnTheGraphResidentRoot(t *testing.T) {
 	cityDir := oneShotCookCity(t)
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 
 	res := cookFormula(t, "graph-work", "--meta", "gc.trace=abc123")
@@ -680,7 +681,7 @@ func TestFormulaCookAttachIsIdempotent(t *testing.T) {
 
 	t.Run("split refuses repeatedly and accumulates nothing", func(t *testing.T) {
 		cityDir := oneShotCookCity(t)
-		graph := splittest.NewClassStore(t, config.BeadClassGraph)
+		graph := splittest.NewBindingStore(t)
 		seedCLIStorageRoutes(t, cityDir, messagingSplitRoutes(graph))
 		work, err := openStoreAtForCity(cityDir, cityDir)
 		if err != nil {
@@ -737,7 +738,7 @@ func blockingDepCount(t *testing.T, store beads.Store, beadID string) int {
 func TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity(t *testing.T) {
 	cityPath, a := oneShotPouredOrderCity(t)
 	scope := splittest.NewWorkStore(t, "mc")
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graph))
 
 	rootID := runOneShotOrder(t, cityPath, a, scope, nil)
@@ -809,7 +810,7 @@ func TestOrderRunPouredV1MoleculeStaysOnTheWorkStoreOnSplitCity(t *testing.T) {
 // the split fixture and both are the ones that have to answer for it.
 func TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg(t *testing.T) {
 	cityPath := t.TempDir()
-	graph := splittest.NewClassStore(t, config.BeadClassGraph)
+	graph := splittest.NewBindingStore(t)
 	work := splittest.NewWorkStore(t, "mc")
 
 	convoy, err := work.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
@@ -847,7 +848,7 @@ func TestEmitFormulaCookExecutionFactsReadsTheConvoyFromTheWorkLeg(t *testing.T)
 	}
 
 	var stderr bytes.Buffer
-	emitFormulaCookExecutionFacts(graph, work, cityPath, &molecule.Result{RootID: root.ID, GraphWorkflow: true}, &stderr)
+	emitFormulaCookExecutionFacts(beadstest.Work(graph), beadstest.Work(work), cityPath, &molecule.Result{RootID: root.ID, GraphWorkflow: true}, &stderr)
 
 	recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
 	if err != nil {

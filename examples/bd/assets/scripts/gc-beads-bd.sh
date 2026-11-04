@@ -2695,10 +2695,19 @@ find_dolt_pid() {
     if [ -f "$PID_FILE" ]; then
         local file_pid
         file_pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$file_pid" ] && kill -0 "$file_pid" 2>/dev/null; then
-            echo "$file_pid"
-            return
-        fi
+        # Only a positive decimal is a PID, so check that before kill -0. In
+        # POSIX mode bash 5.3 (/bin/sh on Fedora 44) kill -0 exits 0 for an
+        # operand that is not a PID, and kill -0 0 or -1 signals a whole
+        # process group in every shell: either would read as a live Dolt.
+        case "$file_pid" in
+            ''|0*|*[!0-9]*) ;;
+            *)
+                if kill -0 "$file_pid" 2>/dev/null; then
+                    echo "$file_pid"
+                    return
+                fi
+                ;;
+        esac
         # Stale PID file — clean up.
         rm -f "$PID_FILE"
     fi
@@ -2727,7 +2736,8 @@ find_dolt_pid() {
 # Resolution order:
 #   1. State file has a reachable port + PID is alive → reuse it
 #   2. GC_DOLT_PORT env var (initial/operator override) → use it
-#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+#   3. State file has a port nothing listens on (its server died) → reuse it
+#   4. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     local gc_bin helper_port
     gc_bin=$(resolve_gc_helper_bin)
@@ -2758,7 +2768,23 @@ allocate_port() {
         return
     fi
 
-    # 3. Deterministic hash of city path, probe until free.
+    # 3. The port a dead server recorded, when it is a valid TCP port (a
+    # decimal integer from 1 to 65535) and free. Running sessions pin the port
+    # they were spawned with, so a restart must come back on it.
+    if [ -f "$STATE_FILE" ]; then
+        local recorded_port
+        recorded_port=$(load_state_field port)
+        case "$recorded_port" in
+            ''|*[!0-9]*|0*) recorded_port="" ;;
+        esac
+        if [ -n "$recorded_port" ] && [ "$recorded_port" -le 65535 ] &&
+            ! run_lsof -nP -iTCP:"$recorded_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$recorded_port"
+            return
+        fi
+    fi
+
+    # 4. Deterministic hash of city path, probe until free.
     local hash_val
     hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
     local port="$hash_val"
@@ -3234,6 +3260,91 @@ finish_interrupted_journal_recovery() {
     return "$missing"
 }
 
+# jsonl_archive_dir prints the git repository the core jsonl-export order
+# archives each bead scope into, resolved the way that order resolves it:
+# GC_JSONL_ARCHIVE_REPO (relative to the city, where the order runs); else
+# the core pack's archive when it is a git repository; else the archive a
+# city migrated from the gastown maintenance pack, or from before packs,
+# kept; else the core pack's path.
+jsonl_archive_dir() {
+    local archive_runtime archive_dir
+    if [ -n "${GC_JSONL_ARCHIVE_REPO:-}" ]; then
+        case "$GC_JSONL_ARCHIVE_REPO" in
+            /*) printf '%s\n' "$GC_JSONL_ARCHIVE_REPO" ;;
+            *) printf '%s\n' "$GC_CITY_PATH/$GC_JSONL_ARCHIVE_REPO" ;;
+        esac
+        return 0
+    fi
+    archive_runtime="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+    for archive_dir in "$archive_runtime/packs/core/jsonl-archive" \
+        "$archive_runtime/packs/maintenance/jsonl-archive" \
+        "$GC_CITY_PATH/.gc/jsonl-archive"; do
+        if [ -d "$archive_dir/.git" ]; then
+            printf '%s\n' "$archive_dir"
+            return 0
+        fi
+    done
+    printf '%s\n' "$archive_runtime/packs/core/jsonl-archive"
+}
+
+# print_manual_journal_recovery_steps tells the operator how to recover
+# database $1 alone after start-time recovery failed closed: $2 is the
+# recovery timestamp for the staging and aside names and $3 the URL to
+# restore from, the one the manual restore command names, or <url>. The data
+# dir is shared by every database the managed server hosts, so the steps
+# never act on $DATA_DIR itself and name each sibling database to leave in
+# place. Like the runbook's Step 4 block, they restore into a staging
+# directory next to $DATA_DIR and register the store's backups again on the
+# restored copy there, since a restored copy has none; only then do they move
+# the store aside and the copy in. An operator pastes them as one block, which
+# runs on past a failed command, so each command checks for itself that the
+# ones before it worked: a failed restore removes the staging directory and
+# the partial copy dolt leaves in it; the swap runs only when the restored
+# copy is there and the aside path is free; the store moves back when the
+# copy cannot move in; and `gc start` runs only with the database in place,
+# so it never finds the database missing and initializes it empty.
+# The JSONL fallback names the export the core jsonl-export order keeps of a
+# bead store, which it files under the database's SQL name (Dolt serves
+# directory my-db as my_db).
+print_manual_journal_recovery_steps() {
+    local manual_db="$1" manual_ts="$2" manual_url="$3" manual_state manual_dir manual_name manual_backup manual_siblings="" manual_jsonl
+    local manual_staging="$DATA_DIR.restore.$manual_ts" manual_aside="$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts" manual_store="$DATA_DIR/$manual_db"
+    for manual_dir in "$DATA_DIR"/*/; do
+        [ -d "$manual_dir/.dolt" ] || continue
+        manual_name=$(basename "$manual_dir")
+        [ "$manual_name" = "$manual_db" ] && continue
+        manual_siblings="$manual_siblings $manual_name"
+    done
+    manual_state="$manual_store/.dolt/repo_state.json"
+    manual_jsonl="$(jsonl_archive_dir)/$(printf '%s' "$manual_db" | tr '-' '_')/issues.jsonl"
+    if [ -n "$manual_siblings" ]; then
+        journal_recovery_note "$DATA_DIR is shared; leave these databases in place:$manual_siblings"
+    fi
+    journal_recovery_note "do not move, delete or re-create $DATA_DIR itself"
+    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db': restore it into a staging directory, register its backups again there (a restored copy has none), then swap it in for the store"
+    journal_recovery_note "each command checks that the ones before it worked, so $manual_store stays in place until the swap: a failed restore removes $manual_staging (then try another backup), the swap runs only when the restored copy is there, and the store moves back from $manual_aside when the copy cannot move in"
+    journal_recovery_note "\"gc start\" runs only with $manual_store in place; if it does not run, move $manual_aside or the restored copy $manual_staging/$manual_db to $manual_store first"
+    journal_recovery_note "  gc stop"
+    journal_recovery_note "  mkdir \"$manual_staging\""
+    journal_recovery_note "  (cd \"$manual_staging\" && dolt backup restore '$manual_url' $manual_db) || rm -rf \"$manual_staging\""
+    for manual_name in default "${manual_db}-backup"; do
+        [ -f "$manual_state" ] && backup_registry_has_backup "$manual_state" "$manual_name" || continue
+        manual_backup=$(backup_registry_backup_url "$manual_state" "$manual_name")
+        [ -n "$manual_backup" ] || continue
+        journal_recovery_note "  (cd \"$manual_staging/$manual_db\" && dolt backup add $manual_name '$manual_backup')"
+    done
+    journal_recovery_note "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
+    journal_recovery_note "  [ -d \"$manual_staging/$manual_db\" ] && [ ! -e \"$manual_aside\" ] && mv \"$manual_store\" \"$manual_aside\" && mv \"$manual_staging/$manual_db\" \"$manual_store\" && rmdir \"$manual_staging\""
+    journal_recovery_note "  [ -e \"$manual_store\" ] || mv \"$manual_aside\" \"$manual_store\""
+    journal_recovery_note "  [ -d \"$manual_store\" ] && gc start"
+    if [ -f "$manual_jsonl" ]; then
+        journal_recovery_note "with no backup, rebuild '$manual_db' from its last JSONL export, $manual_jsonl (the dolt pack's docs/journal-corruption-recovery.md, Step 4b)"
+    else
+        journal_recovery_note "'$manual_db' has no JSONL export at $manual_jsonl"
+    fi
+    journal_recovery_note "a database that is not a bead store has no JSONL archive; restore it from a backup only"
+}
+
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load and restores each from its registered
 # local backup (#3176): bd's canonical `default` backup when present, else
@@ -3254,11 +3365,12 @@ finish_interrupted_journal_recovery() {
 # existing path, which mv would move the source into.
 # Fail-closed: when the selected backup is unusable or the restore does not
 # succeed, the function returns 1 so the server cannot come up silently
-# missing a database. Returns 0 only when at least one database was
-# restored and none were left unrecoverable. Every step is reported through
-# journal_recovery_note, so it reaches $LOG_FILE as well as stderr: restored
-# copies are missing all writes since the last backup sync, and operators
-# must know that.
+# missing a database, and a refusal or a failed restore prints the steps that
+# recover that database alone (print_manual_journal_recovery_steps). Returns
+# 0 only when at least one database was restored and none were left
+# unrecoverable. Every step is reported through journal_recovery_note, so it
+# reaches $LOG_FILE as well as stderr: restored copies are missing all writes
+# since the last backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
     local aside_root="${PACK_STATE_DIR:?}/corrupt-aside" staging="${PACK_STATE_DIR:?}/restore-staging" ready="${PACK_STATE_DIR:?}/restore-ready"
     local ts db_dir db aside sel backup_name url refusal manual_url manual_hint limit began recovered=0
@@ -3303,7 +3415,8 @@ attempt_journal_corruption_recovery() {
         if [ -n "$refusal" ]; then
             journal_recovery_note "NOT auto-recovering '$db': $refusal"
             journal_recovery_note "candidate backups checked: default, ${db}-backup; registered backups: $(backup_registry_summary "$db_dir")"
-            journal_recovery_note "manual recovery required: move $DATA_DIR/$db aside, then run \"dolt backup restore '$manual_url' $db\" from $DATA_DIR$manual_hint"
+            journal_recovery_note "manual recovery required: restore '$db' with \"dolt backup restore '$manual_url' $db\" in a staging directory and swap the copy in for $DATA_DIR/$db, as the steps below do$manual_hint"
+            print_manual_journal_recovery_steps "$db" "$ts" "$manual_url"
             return 1
         fi
         if [ "$limit" -gt 0 ]; then
@@ -3319,6 +3432,10 @@ attempt_journal_corruption_recovery() {
                 journal_recovery_note "backup restore of '$db' did not finish within ${limit}s and was stopped; $DATA_DIR/$db is untouched. Run \"gc dolt start\", which lets the restore run to completion, then \"gc start\""
             else
                 journal_recovery_note "backup restore failed for '$db' (see $LOG_FILE); $DATA_DIR/$db is untouched; not retrying"
+                # Every registered backup is listed, so another one can be
+                # tried by hand.
+                journal_recovery_note "registered backups: $(backup_registry_summary "$db_dir")"
+                print_manual_journal_recovery_steps "$db" "$ts" '<url>'
             fi
             return 1
         fi
@@ -4728,6 +4845,19 @@ else
     }
 fi
 
+fsync_stall_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-fsync-stall.sh"
+if [ -r "$fsync_stall_helper" ]; then
+    . "$fsync_stall_helper"
+else
+    # Focused shell harnesses can run gc-beads-bd without sibling assets. The
+    # production helper is the only copy of the detector, so say that the
+    # guard is missing rather than silently dropping it.
+    recovery_should_skip_due_to_fsync_stall() {
+        echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside gc-beads-bd" >&2
+        return 1
+    }
+fi
+
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
     local read_only_status
@@ -4746,6 +4876,19 @@ op_recover() {
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2
         die "dolt recovery skipped: ENOSPC detected"
+    fi
+
+    # Skip recovery while the data directory's fsync is stalled. One stalled
+    # commit fsync freezes the whole Dolt server, so a live but unresponsive
+    # Dolt is waiting on storage; restarting it cannot fix that and adds
+    # recovery fsync load. A managed Dolt that is running but not yet
+    # listening (a stall-slowed relaunch) is exposed the same way, so the gate
+    # is "a Dolt is running", not "the port answers". Nothing to protect when
+    # neither holds.
+    if { tcp_check || [ -n "$(find_dolt_pid)" ]; } && recovery_should_skip_due_to_fsync_stall; then
+        echo "skipping dolt recovery: the data directory's fsync is stalled; Dolt is waiting on storage, a restart cannot fix that" >&2
+        echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
+        die "dolt recovery skipped: storage stall"
     fi
 
     if load_recover_managed_from_gc; then
@@ -5230,6 +5373,39 @@ provider_owned_scope_shares_city_proxy_root() {
     [ "$scope_root" = "$city_root" ]
 }
 
+# provider_owned_data_root prints the directory whose filesystem a retire of
+# this scope's local Dolt would stall on, for the transport the caller exported:
+# a proxied scope's physical proxy root (its own .beads before a sidecar names
+# one), a direct scope's .beads/dolt (else its .beads).
+provider_owned_data_root() {
+    local dir="$1" root=""
+    if [ "${GC_BEADS_TRANSPORT:-}" = proxied ]; then
+        root=$(provider_owned_proxy_root "$dir")
+        [ -n "$root" ] || root="$dir/.beads"
+    else
+        root="$dir/.beads/dolt"
+        [ -d "$root" ] || root="$dir/.beads"
+    fi
+    (cd "$root" 2>/dev/null && pwd -P) || printf '%s\n' "$root"
+}
+
+# provider_owned_recover_retire is the retire step of a provider-owned recover.
+# While the scope's data root has a stalled fsync it retires nothing: a restart
+# cannot fix a storage stall and adds recovery load to it (rule D4(iii) of
+# ga-8ws1ne). It returns 0 either way so the ping that follows still runs and
+# the op reports the store's real state. Intentional stop/shutdown never come
+# through here.
+provider_owned_recover_retire() {
+    local dir="$1" data_root
+    data_root=$(provider_owned_data_root "$dir")
+    if (DATA_DIR="$data_root"; recovery_should_skip_due_to_fsync_stall); then
+        echo "skipping dolt retire for $dir: storage stall; the data directory's fsync is stalled and a restart cannot fix that" >&2
+        echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
+        return 0
+    fi
+    provider_owned_retire_local_dolt "$dir"
+}
+
 op_provider_owned_lifecycle() {
     local op="$1" dir transport local_scope=false
     dir=$(provider_owned_scope_dir)
@@ -5268,7 +5444,7 @@ op_provider_owned_lifecycle() {
             case "$op" in
                 start|ensure-ready) run_provider_owned_bd "$dir" ping ;;
                 health|probe) run_provider_owned_bd "$dir" ping ;;
-                recover) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                recover) [ "$local_scope" != true ] || provider_owned_recover_retire "$dir"; run_provider_owned_bd "$dir" ping ;;
                 stop|shutdown) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir" ;;
                 *) exit 2 ;;
             esac
@@ -5298,7 +5474,7 @@ op_provider_owned_lifecycle() {
                     if provider_owned_scope_shares_city_proxy_root "$dir"; then
                         printf 'scope %s shares the city proxy root; recovering by ping only\n' "$dir" >&2
                     else
-                        provider_owned_retire_local_dolt "$dir"
+                        provider_owned_recover_retire "$dir"
                     fi
                     run_provider_owned_bd "$dir" ping
                     ;;

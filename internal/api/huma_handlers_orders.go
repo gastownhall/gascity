@@ -264,8 +264,9 @@ type OrderHistoryListBody struct {
 
 // OrderHistoryListOutput is the response envelope for GET /v0/orders/history.
 type OrderHistoryListOutput struct {
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      OrderHistoryListBody
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body OrderHistoryListBody
 }
 
 // humaHandleOrderHistory is the Huma-typed handler for GET /v0/orders/history.
@@ -342,7 +343,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			Name:          name,
 			ScopedName:    scopedName,
 			Rig:           rig,
-			CreatedAt:     b.CreatedAt.Format(time.RFC3339),
+			CreatedAt:     b.CreatedAt.Format(time.RFC3339Nano),
 			Labels:        b.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
@@ -364,8 +365,10 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 	}
 
+	freshness := cacheAgeSeconds(store)
 	out := &OrderHistoryListOutput{
-		CacheAgeS: cacheAgeSeconds(store),
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 	}
 	out.Body.Entries = entries
 	return out, nil
@@ -426,7 +429,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	}{Body: orderHistoryDetailResponse{
 		BeadID:    b.ID,
 		StoreRef:  result.storeRef,
-		CreatedAt: b.CreatedAt.Format(time.RFC3339),
+		CreatedAt: b.CreatedAt.Format(time.RFC3339Nano),
 		Labels:    b.Labels,
 		Output:    output,
 	}}, nil
@@ -449,7 +452,10 @@ type orderHistoryStoreBead struct {
 func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
 	cityName := workflowCityScopeRef(state.CityName())
 	infos := make([]workflowStoreInfo, 0, 2)
-	if strings.TrimSpace(a.Rig) != "" {
+	// A rig order's tracking beads are born in the orders binding on a split
+	// city; the rig store holds only pre-split history, and none once the rig
+	// is imported or proven clean (the S4 relic-free predicate).
+	if strings.TrimSpace(a.Rig) != "" && !rigGraphLegRetired(state, a.Rig) {
 		if rigStore := state.BeadStore(a.Rig); rigStore != nil {
 			infos = append(infos, workflowStoreInfo{
 				ref:       "rig:" + a.Rig,
@@ -561,15 +567,25 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows []beads.Bead
 			err  error
 		)
-		if cached, ok := info.store.(cachedListStore); ok {
-			var cacheOK bool
-			rows, cacheOK = cached.CachedList(query)
-			if !cacheOK {
-				rows, err = info.store.List(query)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the order-history federation (rig and city scopes for
+		// pre-cutover history, the orders binding): each leg holds only its
+		// own rows.
+		err = beads.RelicRead(func() error {
+			var listErr error
+			if cached, ok := info.store.(cachedListStore); ok {
+				var cacheOK bool
+				rows, cacheOK = cached.CachedList(query)
+				if !cacheOK {
+					rows, listErr = info.store.List(query)
+				}
+			} else {
+				rows, listErr = info.store.List(query)
 			}
-		} else {
-			rows, err = info.store.List(query)
-		}
+			return listErr
+		})
 		if err != nil {
 			if i == 0 && len(rows) == 0 {
 				return nil, err
@@ -613,13 +629,23 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 		if info.store == nil {
 			continue
 		}
-		rows, err := info.store.List(beads.ListQuery{
-			Label:         label,
-			CreatedBefore: beforeTime,
-			Limit:         limit,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the order-history federation; each leg holds only its
+		// own rows.
+		var rows []beads.Bead
+		err := beads.RelicRead(func() error {
+			var listErr error
+			rows, listErr = info.store.List(beads.ListQuery{
+				Label:         label,
+				CreatedBefore: beforeTime,
+				Limit:         limit,
+				IncludeClosed: true,
+				Sort:          beads.SortCreatedDesc,
+				TierMode:      beads.TierBoth,
+			})
+			return listErr
 		})
 		if err != nil {
 			if i == 0 && len(rows) == 0 {
@@ -662,7 +688,11 @@ func orderHistoryBeadAcrossStoreInfos(infos []workflowStoreInfo, beadID string) 
 		if info.store == nil {
 			continue
 		}
-		bead, err := info.store.Get(beadID)
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// A residence probe over the order-history legs.
+		bead, err := beads.RelicGet(info.store, beadID)
 		if err == nil {
 			return orderHistoryStoreBead{storeRef: info.ref, bead: bead}, nil
 		}

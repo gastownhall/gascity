@@ -15,6 +15,8 @@ import (
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
+
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const nativeDoltStoreActor = "gascity"
@@ -26,7 +28,12 @@ const nativeDoltStoreActor = "gascity"
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
-	nativeDoltOpenEnvMu         sync.Mutex
+	// nativeDoltOpenEnvMu is the process-wide execenv.ProcessEnvLock, not a
+	// lock of this package's own: every open window projects BEADS_* variables
+	// into the process env under it, and the session runtimes build child
+	// environments through execenv.Environ under the same lock, so a session
+	// spawned during an open never inherits the open's projection.
+	nativeDoltOpenEnvMu         = &execenv.ProcessEnvLock
 	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
@@ -76,9 +83,7 @@ func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 // ProcessEnvSnapshotExcludingNativeDoltOpen returns a process environment
 // snapshot after any in-flight native Dolt open has restored scoped BEADS_* env.
 func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
-	nativeDoltOpenEnvMu.Lock()
-	defer nativeDoltOpenEnvMu.Unlock()
-	return os.Environ()
+	return execenv.Environ()
 }
 
 // AmbientNativeDoltOpenEnv returns the ambient process-env value for key, read
@@ -3398,7 +3403,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status), issue.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status))
 	b := Bead{
 		ID:                   issue.ID,
 		Title:                issue.Title,

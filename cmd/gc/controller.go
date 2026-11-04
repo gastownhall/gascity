@@ -1017,9 +1017,19 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
 		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
 	}
+	// Refuse, not warn: a running city must not adopt a rig layout that
+	// start and the supervisor would refuse on the next restart.
+	if err := config.ValidateRigFederationLayout(cityRoot, newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating rigs: %w", err))
+	}
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
+	}
+	// Every reload, changed or not, repeats that a guarded rig is not
+	// protected by this build.
+	for _, w := range config.RigFederationWarnings(newCfg.Rigs) {
+		reloadWarnings = append(reloadWarnings, "config reload: "+w)
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
@@ -1482,6 +1492,7 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
+	markProgramShadowLongLived()
 	if heldLock == nil {
 		lock, err := acquireControllerLock(cityPath)
 		if err != nil {
@@ -1504,7 +1515,7 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	wiring, wiringErr := newStandaloneControllerWiring(cityPath, cfg, rec, stderr)
 	if wiringErr != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1539,11 +1550,6 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
-	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-	telemetry.RecordControllerLifecycle(context.Background(), "started")
-	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
-	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
-
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
@@ -1568,6 +1574,13 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Recorded only once the runtime exists, as the supervisor does: building it
+	// built the order dispatcher, which read the event head its never-run event
+	// orders start from, so an order on controller.started sees this one.
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for
@@ -1598,12 +1611,10 @@ func runController(
 	// Best-effort — a sweep failure must never block startup, and the lazy
 	// reclaim path still releases such claims when the configured identity
 	// reclaims its name.
-	if cs.cityBeadStore != nil {
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
-			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else if released > 0 {
-			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
-		}
+	if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
+		fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else if released > 0 {
+		fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
 	}
 
 	cs.startBeadEventWatcher(ctx)
@@ -1730,4 +1741,24 @@ func (r *singleCityStateResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+// releaseStaleNameClaimsAtStartup is the one-time startup sweep that releases
+// the runtime name claims closed configured named-session beads still hold
+// (ga-n2d Gap C), run by both the standalone controller and the supervisor.
+//
+// It sweeps the SESSIONS store. Session beads are session class, so on a split
+// city they live only in the class binding; the sweep used to read the work
+// store and was a silent no-op there, leaving only the lazy reclaim (write-audit
+// B8). On a single-store city the sessions store is the work store, so nothing
+// changes.
+func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, cityName string) (int, error) {
+	if cs == nil {
+		return 0, nil
+	}
+	sessions := cs.SessionsBeadStore()
+	if sessions == (beads.SessionStore{}) {
+		return 0, nil
+	}
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(sessions, cfg, cityName)
 }

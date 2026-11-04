@@ -132,6 +132,12 @@ func op(file, fn string) Site     { return Site{Mode: ModeOperator, File: file, 
 
 func (s Site) pending(bead, note string) Site { s.Pending, s.Note = bead, note; return s }
 
+// workLadderFreshRestart is the work ladder's fresh restart of a seat its
+// provider refuses with a rate limit: gc session reset's request
+// (Manager.RequestFreshRestart's two keys), written with the ladder's cell in
+// the same CAS.
+var workLadderFreshRestart = v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit")
+
 func sites(s ...Site) []Site { return s }
 
 // same is one entry per key for keys that share a class and their writers.
@@ -169,7 +175,8 @@ var (
 	v2PreWake = v2("cmd/gc/reconcile_effect_launch.go", "preWakeStep")
 	// opMint is every Manager start's incarnation mint (I-MINT, E1), and the
 	// legacy PreWake's CAS: generation g+1, a fresh token, last_woke_at and the
-	// continuation epoch, a fresh context consuming the reset.
+	// continuation epoch, a fresh context consuming the reset (a Manager
+	// start's, its reset_committed_at with it).
 	opMint = op("internal/session/incarnation.go", "Store.MintIncarnation")
 	// opUnmint withdraws a start's mint no process ran under: it writes back
 	// what opMint replaced while the row still records the mint.
@@ -346,8 +353,8 @@ var registry = slices.Concat([]Field{
 	// Requests (D7 for the wake request).
 	{Key: "wake_request", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy("internal/session/lifecycle_projection.go", "projectWakeCauses"), v2("internal/session/lifecycle_projection.go", "projectWakeCauses")), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
 	{Key: "wake_requested_at", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy(srcReconciler, "explicitWakePendingInfo"), v2(srcReconciler, "explicitWakePendingInfo"), v2SatisfiedWake), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
-	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart"), op("internal/session/restart_request.go", "Manager.RequestFreshRestartFenced")), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), v2("cmd/gc/reconcile_arms_lifecycle.go", "restartHandoff"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
-	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart"), op("internal/session/restart_request.go", "Manager.RequestFreshRestartFenced"), opUnmint), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake, opMint)},
+	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart"), op("internal/session/restart_request.go", "Manager.RequestFreshRestartFenced"), workLadderFreshRestart), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), v2("cmd/gc/reconcile_arms_lifecycle.go", "restartHandoff"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
+	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart"), op("internal/session/restart_request.go", "Manager.RequestFreshRestartFenced"), opUnmint, workLadderFreshRestart), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake, opMint)},
 
 	// The stop request: the controller half, then the CLI's ack (E3), which
 	// writes only in a v2 city.
@@ -389,7 +396,7 @@ var registry = slices.Concat([]Field{
 		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
 	{Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
 		v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit"), v2("cmd/gc/work_ladder_lane.go", "ladderPass.settle"),
-		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "externalReadsLane.clearLadderReleases"))},
+		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "externalReadsLane.standDownLadder"))},
 
 	// The conversation cells (DES-O1 D21): an operator's content intent the
 	// conversation lane reads, live, at each pass, and the planner's reminders
@@ -403,7 +410,7 @@ var registry = slices.Concat([]Field{
 			legacy("cmd/gc/drain_reminder.go", "drainReminderContentHeld")),
 		Clears: sites(op("internal/session/content_hold.go", "Store.ClearContentHold")),
 	},
-	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},
+	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"), opUnmint), Clears: sites(opMint)},
 	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},
 	{Key: "unknown_state_first_seen", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
@@ -419,7 +426,9 @@ var registry = slices.Concat([]Field{
 	// Launch configuration.
 	{Key: "session_key", Class: ClassLaunchConfig, Premise: true, Writers: sites(op(srcManager, "Manager.PersistSessionKey"))},
 	{Key: "alias", Class: ClassAssignmentIdentity, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers"), v2("cmd/gc/allocator_create_named.go", "createEffects.writeNamed"))},
-	{Key: aliasHistoryMetadataKey, Class: ClassLaunchConfig, Writers: sites(legacy("internal/session/alias.go", "UpdatedAliasMetadata"))},
+	// A requalified named session's prior bare identity is read from its alias
+	// history into the narrow release scope (gastownhall/gascity#5957).
+	{Key: aliasHistoryMetadataKey, Class: ClassAssignmentIdentity, Writers: sites(legacy("internal/session/alias.go", "UpdatedAliasMetadata"))},
 	{Key: "common_name", Class: ClassLaunchConfig, NoWriter: "retired: no production writer; name lookups still query it"},
 	{Key: "work_dir", Class: ClassLaunchConfig, Writers: sites(legacyCreate, v2("cmd/gc/allocator_create.go", "createEffects.verifiedMetadata"))},
 	{Key: beadmeta.WorkDirMetadataKey, Class: ClassLaunchConfig, Writers: sites(legacy("cmd/gc/build_desired_state.go", "computePoolTriggerBindingPatch"), v2("cmd/gc/allocator_create.go", "createEffects.verifiedMetadata"))},
@@ -517,9 +526,14 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacyCreate), "synced_at", "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts"),
 	same(ClassAdvisory, false, sites(legacy(srcBeads, "startupKickoffReopenMetadata")), "startup_kickoff_last_nudge_at"),
 	same(ClassAdvisory, false, sites(op("cmd/gc/cmd_nudge.go", "stampLastNudgeDeliveredAt")), MetadataLastNudgeDeliveredAt),
-	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead")), "usage_compute_emitted_at"),
-	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts")), "usage_model_swept_at"),
+	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")), "usage_compute_emitted_at"),
+	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")), "usage_model_swept_at"),
 	same(ClassAdvisory, false, sites(op(srcManager, "Manager.PersistInvocationUsageCursor")), "invocation_usage_cursor"),
+	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")),
+		MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt),
+	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed"), legacy(srcBeads, "reopenNamedSessionBatch"),
+		legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")),
+		MetadataKeyUsageClosedAwakeStartedAt, MetadataKeyUsageClosedSessionKey),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt")), "config_drift_deferred_at", "config_drift_deferred_key"),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordSessionAttachedConfigDriftDeferral")), "attached_config_drift_deferred_at",
 		"attached_config_drift_deferred_key"),

@@ -320,7 +320,19 @@ const (
 	// bumps) merged without it running. requiredFilterPaths pins the three
 	// paths. Reviewed delta: three filter paths; no new job, step command or
 	// permission.
-	expectedCIExecutionHash     = "97af365879b1ea3c6a86cfdb6e9cc662a2cef31bc50463f833f57eef7067d6a9"
+	//
+	// Bumped again (eMudhra CA follow-up): the mcp-mail job's setup-python
+	// python-version moves from '3.12' to the patched '3.12.16'. Reviewed
+	// delta: one `with` input; no new job, step command or permission.
+	//
+	// Bumped again (ga-ylpbsy.55, advisory probes in their own workflow): the
+	// contract-radar-bd-head and mcp-mail jobs move, steps unchanged, to
+	// advisory-probes.yml, with the changes job's beads and mail filters and
+	// outputs that only they read. Neither was in the needs of Check or
+	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
+	// filters and two outputs removed; no new job, trigger, step command or
+	// permission.
+	expectedCIExecutionHash     = "8d71c559b60d2715b518faf498209843132276ed3e448929e1841f082136e6cf"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -372,22 +384,9 @@ const (
 	expectedSetupActionHash = "2894a52d9e9e5fc4ae62402076003c6e7ee8f6ad74f53c14126ceda00b3dae70"
 )
 
+// requiredFilterPaths pins the paths each of ci.yml's changes filters must
+// keep. scripts/advisory_probes_workflow_test.go pins advisory-probes.yml's.
 var requiredFilterPaths = map[string][]string{
-	"mail": {
-		"internal/mail/**",
-		"contrib/mail-scripts/**",
-		".github/requirements/mcp-agent-mail.in",
-		".github/requirements/mcp-agent-mail.overrides.txt",
-		".github/requirements/mcp-agent-mail.txt",
-	},
-	"beads": {
-		"go.mod",
-		"internal/beads/**",
-		"test/acceptance/beads_cli_contract_test.go",
-		"deps.env",
-		".github/scripts/install-bd-archive.sh",
-		"cmd/gc/init_provider_readiness.go",
-	},
 	"packs": {
 		"examples/gastown/**",
 		"internal/config/pack.go",

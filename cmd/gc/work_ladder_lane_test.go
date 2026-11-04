@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,7 +50,12 @@ const ladderSeatName = "seat-a"
 // newLadderCity is a running, quiet pool seat at generation 7.
 func newLadderCity(t *testing.T) *ladderCity {
 	t.Helper()
-	sessions := beads.NewMemStore()
+	return newLadderCityOver(t, beads.NewMemStore())
+}
+
+// newLadderCityOver is newLadderCity with its session rows on sessions.
+func newLadderCityOver(t *testing.T, sessions *beads.MemStore) *ladderCity {
+	t.Helper()
 	stampedMemStore(t, sessions)
 	work := beads.NewMemStore()
 	m := map[string]string{
@@ -528,7 +534,7 @@ func TestWorkLadderPausesWhileTheProviderIsDegraded(t *testing.T) {
 // L7 (WL5). A held gate gets no nudge however long the seat is quiet: a
 // stop request at the row's generation, a kill in progress, an agent's
 // heartbeat hold, a wait hold, a start in flight, an operator's content
-// hold on the conversation (SESSION-RUNTIME-027).
+// hold on the conversation (SESSION-RUNTIME-027), an idle stop pending.
 func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 	for name, meta := range map[string]func(now time.Time) map[string]string{
 		"draining": func(now time.Time) map[string]string {
@@ -548,8 +554,9 @@ func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 		"quarantined": func(now time.Time) map[string]string {
 			return map[string]string{"quarantined_until": now.Add(6 * time.Hour).Format(time.RFC3339)}
 		},
-		"starting":  func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
-		"suspended": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"starting":          func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
+		"suspended":         func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
+		"idle stop pending": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "idle-stop-pending"} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newLadderCity(t)
@@ -700,6 +707,15 @@ func TestWorkLadderRecyclesAnUnclaimedTrigger(t *testing.T) {
 		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
 			t.Fatalf("trigger nudge %q, want the configured one", call.Message)
 		}
+	}
+	// The never-claimed trigger is escalated once, with the second nudge
+	// (4m30s), long before the recycle and before a seat idle-drains.
+	if got := escalations(c); !reflect.DeepEqual(got, []string{workladder.AlertTriggerUnanswered}) {
+		t.Fatalf("escalations %v, want one %s", got, workladder.AlertTriggerUnanswered)
+	}
+	esc := c.events(events.WorkEscalated)[0]
+	if esc.Subject != b.ID || len(c.nudgedAt) < 2 || c.nudgedAt[1] != halfPast(4) {
+		t.Fatalf("escalation about %s, nudges %v; want it about the trigger %s, beside the second nudge at %v", esc.Subject, c.nudgedAt, b.ID, halfPast(4))
 	}
 }
 
@@ -1045,7 +1061,7 @@ type busySnapshot struct{ *runtime.Fake }
 
 func (busySnapshot) SnapshotIdle(string) (bool, error) { return false, nil }
 
-// A busy-readable provider's busy indicator vetoes a stale activity clock.
+// A busy snapshot reading vetoes a stale activity clock.
 func TestWorkLadderHonorsTheBusySnapshot(t *testing.T) {
 	c := newLadderCity(t)
 	c.claim("a long turn")
@@ -1354,8 +1370,9 @@ func TestWorkLadderRereadsTheHold(t *testing.T) {
 }
 
 // A seat stuck at a permission prompt refuses every nudge: it is retried no
-// more often than every 10 minutes, its count does not move, and one
-// nudge_refused alert is raised.
+// more often than every 10 minutes, its count does not move, and it is
+// alerted nudge_refused at the third refusal, then about hourly while the
+// refusals go on.
 func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("waiting on a permission prompt")
@@ -1366,8 +1383,8 @@ func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
 	if calls > 6*6+2 {
 		t.Fatalf("%d delivery attempts in 6h", calls)
 	}
-	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertNudgeRefused}) {
-		t.Fatalf("escalations %v, want one nudge_refused", got)
+	if got, want := escalations(c), refusalAlertsUpTo(calls); len(want) < 4 || fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("escalations %v, want %d nudge_refused for %d refusals", got, len(want), calls)
 	}
 	if e := c.entry(id); e.Attempts != 0 || len(c.posted) != 0 {
 		t.Fatalf("entry %+v, recycles %+v: refusals moved it toward a recycle", e, c.posted)
@@ -1500,5 +1517,414 @@ func TestWorkLadderPausedRefusalRecordsNothing(t *testing.T) {
 	}
 	if e := c.entry(id); e.Refused != 0 || e.Attempts != 0 || len(escalations(c)) != 0 {
 		t.Fatalf("entry %+v, escalations %v: a paused nudge's refusal was recorded", e, escalations(c))
+	}
+}
+
+// Rule 2 (audit 4, lever 2; user-approved 2026-10-19). A claimed step whose
+// seat asked a person and waits for the answer says so: gc.awaiting_human
+// names the seat (the adopt-pr human-approval step, once its approval mail
+// is out). While the key names the seat, the ladder never recycles or
+// releases the step and raises no alert about it. It nudges the step hourly
+// unless the seat's own turns show the newest turn completed, and then
+// daily (ga-ylpbsy.65): here the seat's turns cannot be read (no turn
+// source, as for a family that records no turn outcomes), so it cannot
+// tell, and nudges an hour after the ask and hourly after that, however
+// long the person takes. Once the seat clears the key (the answer came, and
+// it works the step again), the ladder takes the step up on a fresh grace.
+// Without the rule, the step is nudged at +90s, +3 ... +48 minutes,
+// recycled at about 154 minutes, then nudged hourly for as long as the
+// person takes.
+func TestWorkLadderNudgesAHumanWaitHourlyWhenItsTurnsCannotBeRead(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.run(time.Minute, 30*time.Second, nil) // the step runs, then asks
+	if c.entry(id).Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim paced before it asks", c.entry(id))
+	}
+	c.awaitHuman(id, c.seat)
+	asked := c.now.Sub(c.start)
+	c.run(3*24*time.Hour, 5*time.Minute, nil)
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.nudgedAt) == 0 || c.nudgedAt[0] != asked+workladder.DefaultCap {
+		t.Fatalf("nudges %v, want the first a cap after the ask at %v", c.nudgedAt, asked)
+	}
+	for i := 1; i < len(c.nudgedAt); i++ {
+		if gap := c.nudgedAt[i] - c.nudgedAt[i-1]; gap != workladder.DefaultCap {
+			t.Fatalf("nudges %d and %d are %v apart, want %v: %v", i-1, i, gap, workladder.DefaultCap, c.nudgedAt)
+		}
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("three days waiting on a person: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
+	}
+	if v := c.row().Metadata["restart_requested"]; v != "" {
+		t.Fatalf("restart_requested %q on a seat waiting on a person", v)
+	}
+	c.awaitHuman(id, "")
+	answered, before := c.now, len(c.nudgedAt)
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if after := c.nudgedAt[before:]; len(after) == 0 || after[0] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
+		t.Fatalf("after the answer at %v: nudges %v, want the first a grace later", answered.Sub(c.start), after)
+	}
+}
+
+// The wait ends in a turn of the seat: the one the person's answer starts,
+// which clears gc.awaiting_human (or closes the step). If that turn dies
+// first (a provider error, a usage limit), nothing outside the seat ends
+// the wait. The seat's turns say so (its newest turn failed), and that is
+// what takes the answered step up again: at once when the wait began a Cap
+// or more ago, then a Cap apart while the turns still show the failure, with
+// no recycle, release or alert meanwhile. Before the answer, while the
+// seat's newest turn is the one that asked, completed, the wait gets no
+// nudge for a day (WaitCap).
+func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: c.now.Add(-2 * time.Hour), EndedAt: c.now.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	hist := runtime.TurnHistory{ObservedAt: c.now, Recent: []runtime.EndedTurn{asked}}
+	c.turnsRead(func() runtime.TurnHistory { return hist })
+	c.awaitHuman(id, c.seat) // the step ran and asked
+	c.run(90*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat's newest turn, the ask, completed: want none", c.nudgedAt)
+	}
+	// The answer came, and its turn died on a provider error leaving the key set.
+	died := c.now
+	hist = runtime.TurnHistory{ObservedAt: died, Recent: []runtime.EndedTurn{
+		{TurnID: "answer", StartedAt: died.Add(-time.Minute), EndedAt: died, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{Code: "server_error", HTTPStatus: 529, Message: "API Error: overloaded"}},
+		asked,
+	}}
+	c.sp.SetActivity(ladderSeatName, died)
+	c.run(2*time.Hour+2*time.Minute, 30*time.Second, nil)
+	answered := died.Sub(c.start) + idleClaimNudgeGrace // the first pass that finds the seat quiet again
+	if want := []time.Duration{answered, answered + workladder.DefaultCap, answered + 2*workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: the answered step taken up once the seat is quiet, then a cap apart", c.nudgedAt, want)
+	}
+	var last runtime.Call
+	for _, call := range c.sp.Calls {
+		if call.Method == "Nudge" {
+			last = call
+		}
+	}
+	if want := fmt.Sprintf(ladderStartedNudge, id); last.Message != want {
+		t.Fatalf("nudge text %q, want the started text %q", last.Message, want)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("an answered wait: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+}
+
+// A seat that waits on a person, whose turn source reports its newest turn
+// completed (the turn that asked), is nudged a day after the ask and a day
+// apart after that, however long the person takes: no recycle, release or
+// alert, and the claim stays with its seat, which is never restarted. The
+// wait costs a turn a day, not one an hour. That nudge is what takes up an
+// answer that started no turn of the seat (a mail reply that asks for no
+// turn, as the dashboard's Reply does, or one whose wake failed): the ask
+// stays the newest turn, completed, so no reading can show the answer came.
+// When the seat clears the key, the ladder takes the step up on a fresh
+// grace.
+func TestWorkLadderNudgesAHumanWaitDailyWhileItsNewestTurnCompleted(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	reads := 0
+	c.turnsRead(func() runtime.TurnHistory {
+		reads++
+		return runtime.TurnHistory{ObservedAt: c.now, Recent: []runtime.EndedTurn{
+			{TurnID: "asked", StartedAt: c.start.Add(-2 * time.Hour), EndedAt: c.start.Add(-time.Hour), Status: runtime.TurnStatusCompleted},
+		}}
+	})
+	c.run(time.Minute, 30*time.Second, nil) // the step runs, then asks
+	c.awaitHuman(id, c.seat)
+	asked := c.now.Sub(c.start)
+	c.run(3*24*time.Hour, 5*time.Minute, nil)
+	if reads == 0 {
+		t.Fatal("the lane never read the waiting seat's turns")
+	}
+	if want := []time.Duration{asked + workladder.DefaultWaitCap, asked + 2*workladder.DefaultWaitCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: a day after the ask and a day apart while the seat's newest turn completed", c.nudgedAt, want)
+	}
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("three days waiting on a person: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
+	}
+	if v := c.row().Metadata["restart_requested"]; v != "" {
+		t.Fatalf("restart_requested %q on a seat waiting on a person", v)
+	}
+	c.awaitHuman(id, "")
+	answered, waited := c.now, len(c.nudgedAt)
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) == waited || c.nudgedAt[waited] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
+		t.Fatalf("after the answer at %v: nudges %v, want the next a grace later", answered.Sub(c.start), c.nudgedAt[waited:])
+	}
+}
+
+// A wait is left alone past the hourly nudge (to a daily one) only on
+// positive evidence that its seat is fine: its newest ended turn completed.
+// Any other reading keeps the hourly nudge, since the answer's turn may have
+// died and a resumed seat's startup nudge is best effort: the newest turn
+// canceled, or ended with no status as the idle overlay infers the end of a
+// turn whose CLI died; no turn at all; and a turn open. The ladder reads
+// only a quiet seat's turns, so a turn open there is one no read saw end: a
+// turn whose CLI died before its rollout recorded the end (a family that
+// records its ends gets no idle overlay), or a Claude turn stopped at a
+// dialog the idle scan cannot read, which the overlay leaves open.
+func TestWorkLadderNudgesAHumanWaitHourlyUnlessItsNewestTurnCompleted(t *testing.T) {
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: stepsTestNow.Add(-2 * time.Hour), EndedAt: stepsTestNow.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	answer := runtime.EndedTurn{TurnID: "answer", StartedAt: stepsTestNow.Add(-10 * time.Minute), EndedAt: stepsTestNow.Add(-5 * time.Minute)}
+	canceled, inferred := answer, answer
+	canceled.Status = runtime.TurnStatusCancelled
+	inferred.Inferred = true
+	for name, hist := range map[string]runtime.TurnHistory{
+		"the answer's turn canceled":             {Recent: []runtime.EndedTurn{canceled, asked}},
+		"the answer's turn ended with no status": {Recent: []runtime.EndedTurn{inferred, asked}},
+		"the answer's turn open":                 {Current: runtime.TurnState{TurnID: answer.TurnID}, CurrentStart: answer.StartedAt, Recent: []runtime.EndedTurn{asked}},
+		"no turn":                                {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("Human review before merge")
+			if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+				t.Fatal(err)
+			}
+			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+			reads := 0
+			c.turnsRead(func() runtime.TurnHistory { reads++; h := hist; h.ObservedAt = c.now; return h })
+			c.awaitHuman(id, c.seat)
+			c.run(3*time.Hour+time.Minute, 30*time.Second, nil)
+			if reads == 0 {
+				t.Fatal("the lane never read the waiting seat's turns")
+			}
+			if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap, 3 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+				t.Fatalf("nudges %v, want %v: hourly from the ask", c.nudgedAt, want)
+			}
+			if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+				t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+			}
+		})
+	}
+}
+
+// A family that records its turns' ends (Codex) gets no idle overlay, so a
+// rollout whose newest record is a turn's start reads as that turn open
+// however long it has been quiet. Here the answer's turn dies with its CLI
+// before the rollout records its end, and the seat is resumed in place: a
+// new generation in the same conversation, whose rollout the resumed CLI
+// appends to. Its startup nudge is best effort and never lands, so the
+// seat's turns show the answer's turn open for good. Once the resumed seat
+// is quiet, the ladder takes the step up at once (the wait began more than a
+// Cap ago), then a Cap apart, with no recycle, release or alert.
+func TestWorkLadderRedrivesAWaitWhoseAnswerTurnStaysOpenAcrossAResumedRestart(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "provider": "codex"})
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: c.now.Add(-2 * time.Hour), EndedAt: c.now.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	hist := runtime.TurnHistory{Recent: []runtime.EndedTurn{asked}}
+	c.turnsRead(func() runtime.TurnHistory { h := hist; h.ObservedAt = c.now; return h })
+	c.awaitHuman(id, c.seat) // the step ran and asked
+	c.run(3*time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat's newest turn, the ask, completed: want none", c.nudgedAt)
+	}
+	// The answer came: its turn runs for ten minutes, the seat at work, then
+	// dies with its CLI.
+	hist = runtime.TurnHistory{Current: runtime.TurnState{TurnID: "answer"}, CurrentStart: c.now, Recent: []runtime.EndedTurn{asked}}
+	c.sp.SetActivity(ladderSeatName, c.now)
+	c.run(10*time.Minute, 30*time.Second, func() { c.sp.SetActivity(ladderSeatName, c.now) })
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat works the answer: want none", c.nudgedAt)
+	}
+	c.setRow(map[string]string{"generation": "8", "instance_token": "tok-8"})
+	resumed := c.now
+	c.sp.SetActivity(ladderSeatName, resumed) // its startup output
+	c.run(2*time.Hour+2*time.Minute, 30*time.Second, nil)
+	quiet := resumed.Sub(c.start) + idleClaimNudgeGrace // the first pass that finds the resumed seat quiet
+	if want := []time.Duration{quiet, quiet + workladder.DefaultCap, quiet + 2*workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: the step taken up once the resumed seat is quiet, then a cap apart", c.nudgedAt, want)
+	}
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+}
+
+// turnsRead makes the lane's turn source report hist() for the seat.
+func (c *ladderCity) turnsRead(hist func() runtime.TurnHistory) {
+	c.lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {
+		return func(context.Context, beads.Bead) (runtime.TurnHistory, error) { return hist(), nil }
+	}
+}
+
+// awaitHuman writes claim id's gc.awaiting_human: seat, the seat that asked
+// a person and waits on the answer, or "" once the wait is over.
+func (c *ladderCity) awaitHuman(id, seat string) {
+	c.t.Helper()
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.AwaitingHumanMetadataKey: seat}}); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// The wait is the asking seat's, read live wherever the ladder re-reads a
+// claim before it acts. Written after the planner's snapshot, it holds the
+// step as it was (no nudge, no release, no carried pacing) until a snapshot
+// shows it; a wait the ladder already knows is carried as one under an
+// incomplete snapshot, and nudged hourly. And it is only that seat's: a step
+// whose asker is gone, released and claimed by another seat, is the new
+// seat's work, paced as ever (it asks again itself).
+func TestWorkLadderRereadsAHumanWait(t *testing.T) {
+	t.Run("nudge", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("asked after the snapshot")
+		snapshot := c.summary
+		c.lane.summary = func() *allocSummary { // the snapshot predates the ask
+			s := snapshot()
+			for i := range s.AssignedWork {
+				delete(s.AssignedWork[i].Metadata, beadmeta.AwaitingHumanMetadataKey)
+			}
+			return s
+		}
+		c.run(time.Minute, 30*time.Second, nil)
+		c.awaitHuman(id, c.seat)
+		c.run(time.Hour, 30*time.Second, nil)
+		if e := c.entry(id); len(c.nudgedAt) != 0 || e.AwaitsHuman || e.Attempts != 0 {
+			t.Fatalf("nudges %v, entry %+v: want a step asked about since the snapshot held as it was", c.nudgedAt, e)
+		}
+	})
+	t.Run("release", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("asked as the release decided")
+		snap := c.summary()
+		c.lane.summary = func() *allocSummary { snap.At = c.now; return snap }
+		c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
+			Key: workladder.ClaimKey{Store: "city", Bead: id}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
+			Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
+		}}})})
+		c.awaitHuman(id, c.seat)
+		c.pass()
+		if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+			t.Fatalf("a step waiting on a person is %q %q: released", b.Status, b.Assignee)
+		}
+		if n := len(c.events(events.WorkReleaseUnfinished)) + len(c.events(events.WorkReleased)); n != 0 || c.cell().Release != nil {
+			t.Fatalf("release events %d, cell %s: want a silent settle", n, c.row().Metadata[session.WorkLadderKey])
+		}
+	})
+	t.Run("carried", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("carried, then asked")
+		c.run(2*time.Minute, 30*time.Second, nil)
+		c.awaitHuman(id, c.seat)
+		c.partial, c.claims = true, nil
+		before := len(c.nudgedAt)
+		c.run(2*time.Hour, 30*time.Second, nil)
+		if e := c.entry(id); len(c.nudgedAt) != before || e.AwaitsHuman || e.Attempts != 1 {
+			t.Fatalf("carried human wait: nudges %v, entry %+v: want it held as the ladder last saw it", c.nudgedAt[before:], e)
+		}
+	})
+	t.Run("carried while waiting", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("asked, then carried")
+		c.awaitHuman(id, c.seat)
+		c.run(time.Minute, 30*time.Second, nil) // the ladder sees the wait
+		c.partial, c.claims = true, nil
+		c.run(2*time.Hour, 30*time.Second, nil)
+		if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) || !c.entry(id).AwaitsHuman {
+			t.Fatalf("nudges %v, entry %+v: want the wait carried and nudged hourly, %v", c.nudgedAt, c.entry(id), want)
+		}
+	})
+	t.Run("another seat asked", func(t *testing.T) {
+		c := newLadderCity(t)
+		id := c.claim("re-claimed after its asker died")
+		c.awaitHuman(id, "gcg-session-gone") // the seat that asked was closed; its claim was released and taken here
+		c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+		c.run(5*time.Minute, 30*time.Second, nil)
+		if want := []time.Duration{workladder.DefaultGrace, halfPast(4)}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+			t.Fatalf("nudges %v, want the new seat paced as ever %v", c.nudgedAt, want)
+		}
+	})
+}
+
+// The wait is read off the seat's own claim. The same bead ID can exist in
+// independent stores (a claim is its store and its ID,
+// newExecutionClaimSnapshot), so a bead of another store with the claim's
+// ID, later in the planner's snapshot, neither hides the claim's wait nor
+// lends it one: a waiting claim is still nudged a cap after the ask, and an
+// ordinary claim is still paced as ever beside a namesake whose key names
+// the seat.
+func TestWorkLadderReadsAHumanWaitOffItsOwnStore(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		waiting bool // the seat's claim waits on a person; else its namesake's key names the seat
+		watch   time.Duration
+		want    []time.Duration
+	}{
+		{"waiting beside a namesake that is not", true, 90 * time.Minute, []time.Duration{workladder.DefaultCap}},
+		{"ordinary beside a waiting namesake", false, 5 * time.Minute, []time.Duration{workladder.DefaultGrace, halfPast(4)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("the seat's step")
+			meta := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+			if tc.waiting {
+				c.awaitHuman(id, c.seat)
+			} else {
+				meta[beadmeta.AwaitingHumanMetadataKey] = c.seat
+			}
+			c.namesake(id, meta)
+			c.run(tc.watch, 30*time.Second, nil)
+			if e := c.entry(id); fmt.Sprint(c.nudgedAt) != fmt.Sprint(tc.want) || e.AwaitsHuman != tc.waiting || e.Key.Store != "city" {
+				t.Fatalf("nudges %v, entry %+v: want %v, the city claim waiting %v", c.nudgedAt, e, tc.want, tc.waiting)
+			}
+		})
+	}
+}
+
+// namesake adds to the planner's snapshot, after the seat's claims, a bead
+// of another rig's store with id and meta: in_progress, another seat's claim.
+func (c *ladderCity) namesake(id string, meta map[string]string) {
+	c.t.Helper()
+	other := beads.NewMemStore()
+	other.HonorExplicitIDs = true
+	if _, err := other.Create(beads.Bead{ID: id, Title: "another rig's step", Type: "task", Metadata: meta}); err != nil {
+		c.t.Fatal(err)
+	}
+	inProgress, assignee := "in_progress", "gcg-session-other"
+	if err := other.Update(id, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		c.t.Fatal(err)
+	}
+	b, err := other.Get(id)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	snapshot := c.lane.summary
+	c.lane.summary = func() *allocSummary {
+		s := snapshot()
+		s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs = append(s.AssignedWork, b), append(s.AssignedStores, other), append(s.AssignedStoreRefs, "other")
+		return s
 	}
 }

@@ -192,8 +192,13 @@ func TestCityRuntimeV2StartupSkipsLegacyBootReconcile(t *testing.T) {
 		return DesiredStateResult{}
 	}
 
-	if !cr.startupReconcile(context.Background()) {
-		t.Fatal("the v2 startup step did not complete")
+	// The boot waits for the planner's first pass; bound it, so a pass that
+	// never completes fails here with its record instead of hanging the
+	// package.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !cr.startupReconcile(ctx) {
+		t.Fatalf("the v2 startup step did not complete (boot %s, last pass %+v)", rt.bootState(), rt.planner.out.record.Load())
 	}
 	if n := cr.legacySessionEntries.Load(); n != 0 {
 		t.Errorf("legacySessionEntries = %d, want 0: the v2 startup step entered a legacy session phase", n)

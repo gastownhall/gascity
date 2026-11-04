@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "readywork",
     srcs = [
+        "crossstore.go",
         "doc.go",
         "pushdown.go",
         "query.go",
@@ -21,6 +22,7 @@ go_library(
 go_test(
     name = "readywork_test",
     srcs = [
+        "crossstore_test.go",
         "enrich_test.go",
         "federate_test.go",
         "pushdown_test.go",

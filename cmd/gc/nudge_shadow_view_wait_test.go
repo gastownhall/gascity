@@ -95,7 +95,7 @@ func TestNudgeShadowViewDrivesTheWaitHelpers(t *testing.T) {
 				t.Fatalf("waitNudgeAttemptQueuedOrResolved = %v, want %v", resolved, tc.resolved)
 			}
 			wait := sessionpkg.WaitInfo{ID: "gc-wait-1", State: waitStateClosed, DeliveryAttempt: "1", NudgeID: tc.id}
-			next, err := nextWaitDeliveryAttempt(fronts.Shadows, wait)
+			next, err := nextWaitDeliveryAttempt(sessionFrontDoor(store.Store), fronts.Shadows, wait)
 			if err != nil {
 				t.Fatalf("nextWaitDeliveryAttempt: %v", err)
 			}

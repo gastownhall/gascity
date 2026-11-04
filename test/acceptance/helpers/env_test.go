@@ -84,6 +84,25 @@ func TestNewEnvSeedsDoltAuthorIdentity(t *testing.T) {
 	if !strings.Contains(string(body), `"metrics.disabled":"true"`) {
 		t.Errorf("seeded dolt config does not disable dolt usage metrics: %s", body)
 	}
+	// Without versioncheck.disabled `dolt version` fetches the latest release
+	// over HTTPS before it prints, and gc's and bd's version probes time out on
+	// a slow network.
+	if !strings.Contains(string(body), `"versioncheck.disabled":"true"`) {
+		t.Errorf("seeded dolt config does not disable dolt's release version check: %s", body)
+	}
+}
+
+// NewEnv hands a child only the variables it lists, so the process-wide
+// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets never reaches it. Without
+// its own entry every dolt a tier A, B or C test forks leaves a detached
+// `dolt send-metrics` behind, even though the seeded config sets
+// metrics.disabled.
+func TestNewEnvDisablesDoltEventFlush(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("NewEnv() DOLT_DISABLE_EVENT_FLUSH = %q, want %q", got, "1")
+	}
 }
 
 // With no seed from the caller — a bare `go test -tags acceptance_a`, which is
@@ -321,5 +340,72 @@ func TestVerifyPathGCRefusesAPathWhoseGCIsNotTheBinaryUnderTest(t *testing.T) {
 				t.Fatalf("VerifyPathGC() = %v, want it to name the binary under test %s", err, vars["GC_ACCEPTANCE_GC_BIN"])
 			}
 		})
+	}
+}
+
+// A split city's gc bd forwards only to bd's own Go binary, so WithRealBD must
+// put that binary ahead of the tool-home wrapper both as BD_BIN and on PATH.
+func TestWithRealBDLeadsPathAndPinsBDBin(t *testing.T) {
+	bd := filepath.Join(t.TempDir(), "bd-real")
+	if err := os.WriteFile(bd, []byte("binary"), 0o755); err != nil { //nolint:gosec // stands in for an executable
+		t.Fatal(err)
+	}
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithRealBD(bd)
+
+	if got := env.Get("BD_BIN"); got != bd {
+		t.Fatalf("BD_BIN = %q, want %q", got, bd)
+	}
+	first := filepath.SplitList(env.Get("PATH"))[0]
+	target, err := filepath.EvalSymlinks(filepath.Join(first, "bd"))
+	if err != nil {
+		t.Fatalf("PATH's first entry %s holds no bd: %v", first, err)
+	}
+	want, err := filepath.EvalSymlinks(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != want {
+		t.Fatalf("the first bd on PATH resolves to %s, want %s", target, want)
+	}
+	entries, err := os.ReadDir(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("PATH's first entry %s holds %d entries, want only the bd link (anything else would shadow host tools)", first, len(entries))
+	}
+}
+
+// An unwrapped bd resolves user-level state under gc's HOME, so WithRealBD
+// refuses an Env whose gc HOME is anything but NewEnv's isolated one — the
+// operator's own (WithHostHome) above all.
+func TestWithRealBDRefusesAHomeThatIsNotTheIsolatedOne(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", t.TempDir())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithRealBD accepted an Env whose gc HOME is not NewEnv's isolated home")
+		}
+	}()
+	env.WithRealBD(filepath.Join(t.TempDir(), "bd"))
+}
+
+func TestWithRealBDRefusesARelativePath(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithRealBD accepted a relative bd path, which gc ignores as BD_BIN")
+		}
+	}()
+	env.WithRealBD("bin/bd")
+}
+
+// gc carries its environment into a bd the tool-home wrapper does not re-home
+// (WithRealBD, a raw BD_BIN), so NewEnv pins both of the wrapper's bd switches.
+func TestNewEnvPinsTheWrapperBdSwitches(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	for key, want := range map[string]string{bdSharedServerConfigEnv: "false", bdDisableMetricsEnv: "1"} {
+		if got := env.Get(key); got != want {
+			t.Errorf("NewEnv() %s = %q, want %q", key, got, want)
+		}
 	}
 }

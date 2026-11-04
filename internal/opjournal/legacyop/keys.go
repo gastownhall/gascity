@@ -31,9 +31,10 @@ var restartKeyNamespaces = []struct{ namespace, command string }{
 }
 
 // ErrReservedKey reports a client key that starts with a namespace another
-// command keeps its keys in. It wraps opjournal.ErrInvalidRequest: Admit runs
-// such a request unrecorded in auto and refuses it in require, as it does
-// any invalid key.
+// command keeps its keys in, or a respond's key in respond:, the namespace a
+// lane respond op is keyed in by the raising it answers. It wraps
+// opjournal.ErrInvalidRequest: Admit runs such a request unrecorded in auto
+// and refuses it in require, as it does any invalid key.
 var ErrReservedKey = fmt.Errorf("%w: client key in a reserved namespace", opjournal.ErrInvalidRequest)
 
 // NamespacedKey is the client key key is stored under in namespace:
@@ -47,9 +48,12 @@ func NamespacedKey(namespace, key string) string {
 
 // ValidateKey refuses a client key Admit refuses for a request of kind that
 // keeps its keys in namespace ("" for none): one opjournal.ValidateClientKey
-// refuses, one too long once in its namespace, or a restart request's key
-// kept as given that starts with a restart request's namespace
-// (ErrReservedKey). Its errors name key as the client gave it.
+// refuses, one too long once in its namespace, a restart request's key kept
+// as given that starts with a restart request's namespace, or a respond's
+// key in respond: (opjournal.IsRespondKey) (ErrReservedKey). A respond: key
+// derives the id of the operator's lane respond op answering the raising it
+// names, so a legacy respond recorded under it would refuse every answer to
+// that raising as key reuse. Its errors name key as the client gave it.
 func ValidateKey(kind opjournal.Kind, namespace, key string) error {
 	if err := opjournal.ValidateClientKey(key); err != nil {
 		return err
@@ -57,12 +61,19 @@ func ValidateKey(kind opjournal.Kind, namespace, key string) error {
 	if limit := opjournal.MaxClientKeyLen - len(namespace); len(key) > limit {
 		return fmt.Errorf("%w: client key is %d bytes, max %d in the %q key namespace", opjournal.ErrInvalidRequest, len(key), limit, namespace)
 	}
-	if kind != opjournal.KindRestart || namespace != "" {
+	if namespace != "" {
 		return nil
 	}
-	for _, ns := range restartKeyNamespaces {
-		if strings.HasPrefix(key, ns.namespace) {
-			return fmt.Errorf("%w: %q starts with %q, which keeps %s's keys", ErrReservedKey, key, ns.namespace, ns.command)
+	switch kind {
+	case opjournal.KindRespond:
+		if opjournal.IsRespondKey(key) {
+			return fmt.Errorf(`%w: %q starts with "respond:", which keys a lane respond op by the raising it answers`, ErrReservedKey, key)
+		}
+	case opjournal.KindRestart:
+		for _, ns := range restartKeyNamespaces {
+			if strings.HasPrefix(key, ns.namespace) {
+				return fmt.Errorf("%w: %q starts with %q, which keeps %s's keys", ErrReservedKey, key, ns.namespace, ns.command)
+			}
 		}
 	}
 	return nil

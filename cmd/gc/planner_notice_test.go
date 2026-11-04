@@ -157,10 +157,10 @@ func TestPlannerNoticeLaneForFollowsTheSwitch(t *testing.T) {
 // controller starts over controllerState.
 func TestPlannerNoticeLaneForFindsTheHostFromBothReconcilers(t *testing.T) {
 	f := newLaneFixture(t)
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Ops: config.OpsConfig{Authoritative: []string{"message"}}}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Ops: config.OpsConfig{Authoritative: config.OpsKinds("message")}}
 	cs := &controllerState{cfg: cfg, cityPath: f.dir, cityName: "test-city", cityBeadStore: beads.NewCachingStore(f.store, nil)}
 	cr := &CityRuntime{cityName: "test-city", cityPath: f.dir, cfg: cfg, cs: cs}
-	h := newConversationLaneHost(cs, cfg.Ops.Authoritative, sessionpkg.StopRequestsLive)
+	h := newConversationLaneHost(cs, cfg.Ops.AuthoritativeKinds(), sessionpkg.StopRequestsLive)
 	h.state = laneHostStateRunning
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -572,7 +572,7 @@ func backstopRows(t *testing.T, f *laneFixture, attempts int, last time.Time) []
 // tick's work.
 func runNoticeBackstop(f *laneFixture, rows []beads.Bead, pred noticeTestBackstop, out *bytes.Buffer) {
 	work := []beads.Bead{{ID: pred.target.ID, Status: "open"}}
-	runNudgeBackstop(f.sp, f.store, rows, work, f.clk.Now(), out, "idle-claim-nudge", pred)
+	runNudgeBackstop(f.runtime(), f.store, rows, work, f.clk.Now(), out, "idle-claim-nudge", pred)
 }
 
 // episode is the Episode a backstop attempt paced from last carries.
@@ -1040,7 +1040,7 @@ func TestRunNudgeBackstopNudgesDirectlyWithTheLaneOff(t *testing.T) {
 func TestRunNudgeBackstopLeavesNoticesDirectUnderTheContentGates(t *testing.T) {
 	f := newLaneFixture(t)
 	f.cfg.Ops = config.OpsConfig{ContentMode: "require", ControlMode: "require", LifecycleMode: "require"}
-	newNoticeLaneHost(t, f, f.cfg.Ops.Authoritative...)
+	newNoticeLaneHost(t, f, f.cfg.Ops.AuthoritativeKinds()...)
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1"}
 	var out bytes.Buffer
 	runNoticeBackstop(f, backstopRows(t, f, 0, f.clk.Now().Add(-time.Hour)), pred, &out)
@@ -1052,11 +1052,13 @@ func TestRunNudgeBackstopLeavesNoticesDirectUnderTheContentGates(t *testing.T) {
 	}
 }
 
-// TestRunNudgeBackstopNudgesAProtocolModeSessionDirectly: no lane can type
-// into a protocol-mode runtime (t3bridge) that no other host serves, so its
+// TestRunNudgeBackstopNudgesAnUnservedProtocolSessionDirectly: no lane can
+// type into a protocol-mode runtime whose turn starts are not recorded and
+// that no other host serves (a t3bridge session is served:
+// TestPlannerNoticeProtocolSessionGoesToTheLane), so its
 // reminder is typed directly as before; a host stamped as serving message
 // for the row's generation gets the notice instead.
-func TestRunNudgeBackstopNudgesAProtocolModeSessionDirectly(t *testing.T) {
+func TestRunNudgeBackstopNudgesAnUnservedProtocolSessionDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1175,7 +1177,7 @@ func TestDeliverWarmBindClaimNudgeRetriesAFailingNoticeThenGivesUp(t *testing.T)
 	}
 }
 
-func TestDeliverWarmBindClaimNudgeNudgesAProtocolModeSlotDirectly(t *testing.T) {
+func TestDeliverWarmBindClaimNudgeNudgesAnUnservedProtocolSlotDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1269,10 +1271,11 @@ func TestDrainReminderNudgesDirectlyWithTheLaneOff(t *testing.T) {
 	}
 }
 
-// TestDrainReminderNudgesAProtocolModeSessionDirectly: no lane can type
-// into a protocol-mode runtime no other host serves, so the reminder is
+// TestDrainReminderNudgesAnUnservedProtocolSessionDirectly: no lane can
+// type into a protocol-mode runtime whose turn starts are not recorded and
+// that no other host serves, so the reminder is
 // typed directly as before.
-func TestDrainReminderNudgesAProtocolModeSessionDirectly(t *testing.T) {
+func TestDrainReminderNudgesAnUnservedProtocolSessionDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1521,8 +1524,9 @@ func TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue(t *test
 }
 
 // TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction: a journal
-// that cannot be read while the last notice may still be due logs once and
-// lets the terminal action run, so an outage never parks the backstop.
+// that cannot be read while the last notice may still be in delivery (its
+// backoff has passed, its lease has not) logs once and lets the terminal
+// action run, so an outage never parks the backstop.
 func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T) {
 	store := &failingOpListStore{laneTestStore: newLaneTestStore()}
 	f := newLaneFixtureOver(t, store)
@@ -1531,7 +1535,7 @@ func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T
 	calls := 0
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
 	var out bytes.Buffer
-	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-30*time.Second))
+	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-idleClaimNudgeBackoff-30*time.Second))
 	runNoticeBackstop(f, rows, pred, &out)
 	runNoticeBackstop(f, rows, pred, &out)
 	if calls != 2 {

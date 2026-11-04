@@ -103,6 +103,25 @@ jobs:
           # RBE_FORK_WARM_EVERY=N warms one run in N. Rollback: unset it.
           RBE_WARM_URL: ${{ vars.RBE_FORK_WARM_URL || '' }}
           RBE_WARM_EVERY: ${{ vars.RBE_FORK_WARM_EVERY || '1' }}
+          # Hot tier (infra README "Hot blobs on R2"): big compressed reads from
+          # the read-only R2 hot tier through the worker's rbe-hotread sidecar,
+          # every blob re-hashed; any miss or failure reads the zread host.
+          # Needs RBE_FORK_WIRE_ZSTD=1. Off until RBE_FORK_HOT_URL is set, to
+          # https://HOST/h/fork (this tier's prefix alone: anything else, the
+          # worker warns and runs without it). RBE_FORK_HOT_EVERY=N takes the
+          # runs whose run id is a multiple of N, as RBE_FORK_WARM_EVERY does;
+          # keep RBE_FORK_WARM_EVERY at 1 during a hot canary. Rollback: unset
+          # RBE_FORK_HOT_URL, and new VMs read the zread host alone; for an
+          # emergency also cancel the running fork pool runs.
+          RBE_HOT_URL: ${{ vars.RBE_FORK_HOT_URL || '' }}
+          RBE_HOT_EVERY: ${{ vars.RBE_FORK_HOT_EVERY || '1' }}
+          # Local CAS cap, as rbe-worker-pool.yml's RBE_CAS_MAX_BYTES (empty:
+          # 150 GB). Plain decimal bytes matching ^[1-9][0-9]{9,12}$: 400 GB is
+          # 400000000000. 400e9 or 400G makes every fork worker exit 2. Each VM
+          # fixes the value when it starts. Rollback: unset
+          # RBE_FORK_CAS_MAX_BYTES, and new VMs take 150 GB. For an emergency,
+          # also cancel the running fork pool runs.
+          CAS_MAX_BYTES: ${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # As in rbe-worker-pool.yml: drift is reported while the worker serves.

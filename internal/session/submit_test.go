@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -2259,13 +2260,15 @@ func TestPendingInteractionErrorNamesThePrompt(t *testing.T) {
 		Prompt:    "Bash: rm -rf build",
 	})
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
+	// An immediate send refuses; a default one queues behind the prompt
+	// (TestSendQueuesBehindPendingInteraction).
+	_, err = mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
 	if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrPendingInteraction) {
-		t.Fatalf("Send error = %v, want session and runtime ErrPendingInteraction", err)
+		t.Fatalf("SendImmediate error = %v, want session and runtime ErrPendingInteraction", err)
 	}
 	for _, want := range []string{"tmux-abc", "Bash: rm -rf build"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("Send error = %q, want it to mention %q", err, want)
+			t.Fatalf("SendImmediate error = %q, want it to mention %q", err, want)
 		}
 	}
 }
@@ -2309,7 +2312,7 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2369,7 +2372,7 @@ func TestSendQueuesWhenTheRuntimeDefersABusySession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &busyNudgeProvider{Fake: runtime.NewFake()}
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2406,7 +2409,7 @@ func TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2465,7 +2468,7 @@ func TestSendPathsQueueOverACrashedAgent(t *testing.T) {
 		store := beads.NewMemStore()
 		sp := runtime.NewFake()
 		cityPath := t.TempDir()
-		mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -2567,7 +2570,7 @@ func (f emptyNamesDeadFake) ProcessAlive(name string, processNames []string) boo
 func TestSendWithoutProcessNamesReadsAlive(t *testing.T) {
 	store := beads.NewMemStore()
 	fake := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2611,7 +2614,7 @@ func crashedBehindStaleCache(t *testing.T, provider string, freshErr error) (*Ma
 	fake := runtime.NewFake()
 	cityPath := t.TempDir()
 	sp := &staleCacheFake{Fake: fake}
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

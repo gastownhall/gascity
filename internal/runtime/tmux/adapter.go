@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -45,8 +46,11 @@ type Provider struct {
 	// inventoryMalformedLog rate-limits the malformed-inventory log.
 	inventoryMalformedLog malformedInventoryLog
 	// unixListening reports whether a listener is bound to a unix socket
-	// path, for ServerConfirmedDead. Nil selects unixPathListening.
+	// path, for ServerConfirmedDead. Nil selects runtime.UnixPathListening.
 	unixListening func(path string) (bool, error)
+	// heal is program-capture heal's per-pane backoff
+	// (program_capture_heal.go).
+	heal captureHealBackoff
 }
 
 var instanceTokenReader = rand.Reader
@@ -73,6 +77,7 @@ var (
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
 	_ runtime.TurnRunningProvider           = (*Provider)(nil)
+	_ runtime.FreshActivityProvider         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -85,12 +90,16 @@ func NewProvider() *Provider {
 func NewProviderWithConfig(cfg Config) *Provider {
 	tm := NewTmuxWithConfig(cfg)
 	ttl := cacheTTLFromEnv()
-	return &Provider{
+	p := &Provider{
 		tm:       tm,
 		cfg:      cfg,
 		cache:    NewStateCache(&tmuxFetcher{tm: tm}, ttl),
 		workDirs: make(map[string]string),
 	}
+	// Shadow reads take tap liveness from the cache's last process table,
+	// never refreshing it.
+	tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+	return p
 }
 
 // Start creates a new detached tmux session and performs a multi-step
@@ -337,6 +346,9 @@ func (p *Provider) Interrupt(name string) error {
 // interrupt is Interrupt under ctx. Inside a fenced operation a missing
 // session or server is reported (paneGuard.gone), never absorbed.
 func (p *Provider) interrupt(ctx context.Context, name string) error {
+	if p.tm.shadowing() {
+		p.tm.shadowNoteInterrupt(name)
+	}
 	if p.tm.isClaudeTarget(name) {
 		handled, err := p.tm.cancelClaudeApproval(ctx, name)
 		if handled {
@@ -452,30 +464,15 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
-		// scanned roots are gc-tracked. Marking them all tracked (the previous
-		// behavior) told killExistingOrphans to skip every one, so an escaped
-		// old process for this exact session survived alongside its
-		// replacement. Leave IsTracked=false instead: the caller then targets
-		// the same-session, same-city roots the /proc scan surfaced, and only
-		// starts once they are confirmed dead.
-		//
-		// TRADE-OFF (gascity D1 / MEDIUM-2): when listErr is a *transient*
-		// tmux-list hiccup rather than a truly-gone server, a still-live
-		// session's root can land here untracked and be targeted for kill —
-		// the same tmux machinery backs ensureRunning's !IsRunning gate, so a
-		// blip flips both. We accept this over the alternative (a survivor
-		// racing the replacement for the same work bead, causing duplicate bd
-		// closes), because the survivor bug is silent and corrupts work state
-		// while a wrongful kill is loud and self-heals on the next reconcile.
-		// Two mitigations bound the blast radius: (1) KillByPID confirms death
-		// by PID + /proc start-time identity (pidutil.AliveWithStartTime), so a
-		// genuinely-live root is never misreported as dead — if it resists the
-		// kill it surfaces a real "not confirmed dead" error; and (2) that
-		// error propagates through killExistingOrphans to every gated Start,
-		// which then refuses rather than racing. Independently re-deriving
-		// "is this the current live session" here would require the very
-		// ListRunning that just failed, so it is intentionally not attempted.
-		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
+		// scanned roots are gc-tracked, so none is marked tracked. Marking
+		// them all tracked would tell killExistingOrphans to skip every one,
+		// and an escaped old process for this exact session would survive
+		// alongside its replacement. A pane of this provider's socket that
+		// the failed listing cannot show is still marked LiveUnlisted
+		// (markLiveUnlisted), so killExistingOrphans refuses the start on it
+		// rather than killing it; the other roots are terminated, and
+		// KillByPID confirms their death by PID and start-time identity.
+		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr), p.markLiveUnlisted(found))
 	}
 
 	// A session whose GC_SESSION_ID cannot be read may track any root, so the
@@ -499,7 +496,62 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 			found[i].ProviderName = name
 		}
 	}
-	return found, errors.Join(append([]error{scanErr}, metaErrs...)...)
+	return found, errors.Join(append([]error{scanErr, p.markLiveUnlisted(found)}, metaErrs...)...)
+}
+
+// markLiveUnlisted sets LiveUnlisted on each untracked root whose parent is
+// tmux, unless the root's TMUX variable proves that parent is a server bound
+// to another socket. tmux sets TMUX to "<socket path>,<server pid>,<session
+// index>" in every pane it spawns, so a pane names its own server. A pane of
+// this provider's socket name, in any socket directory (one under another
+// TMUX_TMPDIR, which this process cannot reach), is set, and so is a root
+// whose TMUX is absent, malformed, names another server pid or cannot be
+// read: nothing then proves it is not this provider's. A pane of a server an
+// agent started on a socket of its own is not set, so a start terminates it
+// as an orphan. It returns the errors of the reads, each one root's own
+// (proctable.EntryError): a root it cannot read leaves the scan's tracking
+// standing.
+func (p *Provider) markLiveUnlisted(found []runtime.LiveRuntime) error {
+	socketName := p.tm.socketLabel()
+	var errs []error
+	for i := range found {
+		root := &found[i]
+		if root.IsTracked || !root.ParentIsProviderInfrastructure {
+			continue
+		}
+		value, err := proctable.ProcessEnvValue(root.PID, "TMUX")
+		if err != nil {
+			errs = append(errs, &proctable.EntryError{PID: root.PID, Err: fmt.Errorf("tmux: reading TMUX for PID %d: %w", root.PID, err)})
+		}
+		root.LiveUnlisted = err != nil || !paneOfOtherSocket(value, root.PPID, socketName)
+	}
+	return errors.Join(errs...)
+}
+
+// paneOfOtherSocket reports whether tmuxEnv, a pane's TMUX variable, proves
+// the pane's parent ppid is a tmux server bound to a socket other than the
+// -L socket socketName: it names ppid as its server, and an absolute socket
+// path that is not socketName in a tmux-<uid> directory.
+func paneOfOtherSocket(tmuxEnv string, ppid int, socketName string) bool {
+	// The socket path may hold a comma itself, so the fields are cut from
+	// the right.
+	end := strings.LastIndexByte(tmuxEnv, ',')
+	if end < 0 {
+		return false
+	}
+	sep := strings.LastIndexByte(tmuxEnv[:end], ',')
+	if sep < 0 {
+		return false
+	}
+	path, serverPID := tmuxEnv[:sep], tmuxEnv[sep+1:end]
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	if pid, err := strconv.Atoi(serverPID); err != nil || pid != ppid {
+		return false
+	}
+	tail := string(filepath.Separator) + filepath.Join(fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+	return !strings.HasSuffix(filepath.Clean(path), tail)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].
@@ -1171,11 +1223,19 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 // RuntimeInventory implements [runtime.InventoryProvider] with one
 // batched pane read. Delegates to [Tmux.listRuntimeInventory], and logs
-// malformed lines (see noteInventoryFaults).
+// malformed lines (see noteInventoryFaults). While the program-status switch
+// is not off, each entry's Program is its agent pane's reading, the tap's
+// liveness taken from the state cache's process table. The switch is read
+// once per pass: rows listed without capture fields are never judged under a
+// switch published while they were read.
 func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
-	entries, faults, err := p.tm.listRuntimeInventory(ctx)
+	mode := p.tm.programStatusMode()
+	entries, panes, faults, err := p.tm.listRuntimeInventory(ctx, mode != runtime.ProgramStatusOff)
 	if len(faults.lines) > 0 || err == nil {
 		p.noteInventoryFaults(faults)
+	}
+	if err == nil && mode != runtime.ProgramStatusOff && len(entries) > 0 {
+		p.judgeInventoryPrograms(mode, entries, panes)
 	}
 	return entries, err
 }
@@ -1245,6 +1305,15 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	if activity, ok := p.cache.SessionActivity(name); ok {
 		return p.tm.discountedActivity(name, activity), nil
 	}
+	return p.tm.GetSessionActivity(name)
+}
+
+// FreshActivity returns the time of the last I/O activity in the named
+// session, read from its own windows now ([Tmux.GetSessionActivity]: one
+// `list-windows`, poke discount applied), never from the fleet snapshot
+// GetLastActivity serves for the snapshot's TTL. It implements
+// [runtime.FreshActivityProvider].
+func (p *Provider) FreshActivity(name string) (time.Time, error) {
 	return p.tm.GetSessionActivity(name)
 }
 
@@ -1432,7 +1501,7 @@ type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
-	isRuntimeRunning(name string, processNames []string) bool
+	isRuntimeRunning(name string, processNames []string) (bool, error)
 	killSession(name string) error
 	waitForCommand(ctx context.Context, name string, timeout time.Duration) error
 	acceptStartupDialogs(ctx context.Context, name string) error
@@ -1469,6 +1538,14 @@ type tmuxStartOps struct {
 	// and RunLive drive an already-warm box and must leave it standing on
 	// failure (see Provider.Relaunch), so they set this false.
 	freshStart bool
+	// monitorClock is the time source of runSetupCommand's activity-aware
+	// budget. Nil means the real clock; tests inject a fake so the idle
+	// window is decided by what the command printed, not by host speed.
+	monitorClock execgrace.Clock
+	// programStatus is the session's program-status capture declaration
+	// (runtime.Config.ProgramStatus), armed on the agent pane at create and
+	// respawn. The zero value arms nothing.
+	programStatus runtime.ProgramStatusArm
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -1502,6 +1579,7 @@ func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
 		freshStart:      freshStart,
+		programStatus:   cfg.ProgramStatus,
 	}
 }
 
@@ -1521,7 +1599,7 @@ const (
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
-		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
+		return o.tm.newSessionWithCommandAndEnv(name, workDir, command, env, o.programStatus)
 	}
 	return o.tm.NewSession(name, workDir)
 }
@@ -1533,13 +1611,14 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 //
 // respawn-pane takes no env argument: the new process inherits the tmux server's
 // global environment as filtered by the SESSION environment, so a withheld
-// credential has to already be marked removed there. NewSessionWithCommandAndEnv
-// does that at provision time, and this re-asserts it because a warm box is
-// explicitly long-lived — one provisioned by an older gc, whose create path only
-// built the one-shot `env -u` prefix, would otherwise hand the respawned agent
-// the controller's real value for the rest of the box's life. Re-marking a key
-// already marked is a no-op, and only controller-scope keys are marked, so a
-// relaunch that withholds no credential costs no extra tmux call at all.
+// credential or trigger id has to already be marked removed there.
+// NewSessionWithCommandAndEnv does that at provision time, and this re-asserts it
+// because a warm box is explicitly long-lived — one provisioned by an older gc,
+// whose create path only built the one-shot `env -u` prefix (or exported the
+// seat's own trigger ids with -e), would otherwise hand the respawned agent that
+// value for the rest of the box's life. Re-marking a key already marked is a
+// no-op, and only the keys durableWithholdKeys names are marked, so a relaunch
+// that withholds none of them costs no extra tmux call at all.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
@@ -1547,7 +1626,7 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	if err := o.tm.RespawnPaneWithWorkDir(name, workDir, command); err != nil {
+	if err := o.tm.respawnPaneWithWorkDir(name, workDir, command, o.programStatus); err != nil {
 		return err
 	}
 	// The respawned process inherits the session environment's identity;
@@ -1560,8 +1639,10 @@ func (o *tmuxStartOps) isSessionRunning(name string) bool {
 	return o.tm.IsSessionRunning(name)
 }
 
-func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) bool {
-	return o.tm.IsRuntimeRunning(name, processNames)
+// isRuntimeRunning reports a process table it cannot read as an error
+// wrapping runtime.ErrRuntimeUnavailable, never as a dead agent.
+func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
+	return o.tm.runtimeRunning(name, processNames)
 }
 
 func (o *tmuxStartOps) killSession(name string) error {
@@ -1583,7 +1664,30 @@ func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *Runtim
 	if err != nil {
 		return err
 	}
-	return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	if !o.tm.shadowing() || rc == nil || rc.Tmux == nil || (rc.Tmux.ReadyPromptPrefix == "" && rc.Tmux.ReadyDelayMs <= 0) {
+		return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	}
+	err = o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
+	o.tm.shadowReadiness(name, time.Now(), err)
+	return err
+}
+
+// startupLadderShadower is the start ops' shadow seam for the startup
+// ladder's busy look (startup_ladder); ops that do not implement it record
+// nothing.
+type startupLadderShadower interface {
+	shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error)
+}
+
+// shadowStartupBusy wraps busy to record each look beside the program's
+// record, against a baseline read now, before the ladder's first send. Off
+// shadow, busy is returned as is.
+func (o *tmuxStartOps) shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error) {
+	s, ok := o.tm.shadowRead(name)
+	if !ok {
+		return busy
+	}
+	return o.tm.shadowStartupBusy(name, s.Baseline(), busy)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -1778,6 +1882,9 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
+	// Read the base env before arming the deadline: execenv.Environ waits out
+	// an in-flight native store open, and that wait is not the command's.
+	baseEnv := execenv.Environ()
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget
 	// is activity-aware instead — timeout bounds output SILENCE and
@@ -1788,7 +1895,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if o.setupMaxTimeout > 0 {
 		idle, grace = timeout, setupCancelGrace
 	}
-	mon := execgrace.NewMonitor(ctx, idle, o.setupMaxTimeout)
+	mon := execgrace.NewMonitorWithClock(ctx, idle, o.setupMaxTimeout, o.monitorClock)
 	defer mon.Stop()
 	runCtx := mon.Context()
 	if !mon.Enabled() {
@@ -1800,7 +1907,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
 		c.Dir = workDir
 	}
-	c.Env = os.Environ()
+	c.Env = baseEnv
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}
@@ -2194,10 +2301,14 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		busy := func() (bool, error) { return ops.paneBusy(name) }
+		if sh, ok := ops.(startupLadderShadower); ok {
+			busy = sh.shadowStartupBusy(name, busy)
+		}
 		if err := sendStartupNudgeWithRetry(ctx,
 			func() error { return ops.sendKeys(name, cfg.Nudge) },
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
-			func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+			busy); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the
 			// TUI's own boot: readiness detection and the TUI actually being
 			// able to accept input are not the same moment, so a submit
@@ -2444,7 +2555,8 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // Exceptions:
 //   - dead panes (remain-on-exit corpses) are recycled even without ProcessNames
 //   - if ProcessNames are configured and the agent is dead (zombie), the
-//     zombie session is killed and recreated
+//     zombie session is killed and recreated; an agent whose process table
+//     cannot be read is not dead, and its session is refused like a live one
 //
 // With cfg.FreshOnly there are no exceptions.
 //
@@ -2547,8 +2659,15 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 
-	// We have process names — check if the agent is alive.
-	if ops.isRuntimeRunning(name, cfg.ProcessNames) {
+	// We have process names — check if the agent is alive. A liveness read
+	// that fails proves nothing about the agent: the name is refused as for
+	// a live one, carrying the runtime.ErrRuntimeUnavailable cause, and
+	// nothing is killed, as refuseHeldName fails closed.
+	running, liveErr := ops.isRuntimeRunning(name, cfg.ProcessNames)
+	if liveErr != nil {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q (agent liveness unknown): %w", runtime.ErrSessionExists, name, liveErr))
+	}
+	if running {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 

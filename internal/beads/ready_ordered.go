@@ -49,5 +49,5 @@ func ReadyOrdered(store Store, query ReadyQuery, order ReadyOrder) ([]Bead, bool
 // ReadyOrdered reads the backing store, live: a bounded read is an authoritative
 // read, and this cache's ready projection is not one.
 func (c *CachingStore) ReadyOrdered(query ReadyQuery, order ReadyOrder) ([]Bead, bool, error) {
-	return ReadyOrdered(c.backing, query, order)
+	return ReadyOrdered(c.backing, c.readyTier(query), order)
 }

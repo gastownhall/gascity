@@ -2125,7 +2125,7 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	}
 
 	// Core pack housekeeping orders (explicit core include).
-	for _, want := range []string{"gate-sweep", "wisp-compact"} {
+	for _, want := range []string{"gate-sweep", "orphan-sweep"} {
 		if !names[want] {
 			t.Errorf("missing core order %q; got %v", want, names)
 		}
@@ -2138,6 +2138,9 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 	}
 	if names["dolt-gc-nudge"] {
 		t.Errorf("dolt-gc-nudge should not be registered as a recurring order; got %v", names)
+	}
+	if names["wisp-compact"] {
+		t.Errorf("wisp-compact is retired and should not be registered; got %v", names)
 	}
 }
 
@@ -2284,4 +2287,54 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 			t.Errorf("stderr = %q, want the C0.7 boot refusal", s.stderr.String())
 		}
 	})
+}
+
+// TestRunControllerFiresAnEventOrderOnTheControllerStartedItRecords pins the
+// standalone start order: runController builds its order dispatcher, which
+// reads the head its never-run event orders start from, before it records
+// controller.started. An order on that event therefore fires on the boot that
+// recorded it instead of starting past it.
+func TestRunControllerFiresAnEventOrderOnTheControllerStartedItRecords(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-started-order-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	if err := os.MkdirAll(filepath.Join(dir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orders", "on-start.toml"), []byte(`
+[order]
+trigger = "event"
+on = "controller.started"
+exec = "true"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s", PatrolInterval: "50ms"},
+	}
+	buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
+	rec := events.NewFake()
+	var stdout, stderr lockedBuffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, runtime.NewFake(), nil, nil, nil, nil, 0, rec, nil, &stdout, &stderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopController(dir, &bytes.Buffer{})
+		awaitClose(t, done, "runController exit after stop")
+		if t.Failed() {
+			t.Logf("controller stderr:\n%s", stderr.String())
+		}
+	})
+	waitForController(t, dir)
+
+	awaitCond(t, func() bool {
+		fired, err := rec.List(events.Filter{Type: events.OrderFired, Subject: "on-start"})
+		return err == nil && len(fired) > 0
+	}, "the order on controller.started to fire")
 }

@@ -61,6 +61,10 @@ func managedCityHostRequiresLocalPID(host string) bool {
 	return DoltHostIsLocal(host)
 }
 
+// DefaultDoltDatabase is the database a scope's Dolt target names when its
+// .beads/metadata.json pins none: bd's own default.
+const DefaultDoltDatabase = "beads"
+
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
 	Host string
@@ -161,7 +165,7 @@ func resolveDoltConnectionTarget(
 	target := DoltConnectionTarget{
 		EndpointOrigin: cfg.EndpointOrigin,
 		EndpointStatus: cfg.EndpointStatus,
-		Database:       "beads",
+		Database:       DefaultDoltDatabase,
 		User:           strings.TrimSpace(cfg.DoltUser),
 	}
 	if db, ok, err := ReadDoltDatabase(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {

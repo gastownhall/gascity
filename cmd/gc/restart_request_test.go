@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -50,7 +51,7 @@ func testRowFirstRestart(verb, sessionName string, hint drainOps, stderr io.Writ
 // on store over sp, the write the worker boundary makes.
 func fencedRecorder(t *testing.T, store beads.Store, sp runtime.Provider, id string) func(string) error {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	return func(token string) error { return mgr.RequestFreshRestartFenced(id, token, nil) }
 }
 
@@ -648,7 +649,7 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 	hint := newFakeDrainOps()
 	var stderr bytes.Buffer
 	restart := testRowFirstRestart("gc runtime request-restart", "worker", hint, &stderr)
-	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), session.WithCityPath(t.TempDir()))
 	var recordErr error
 	restart.record = func(token string) error {
 		// casOnly is nil, as on a legacy city: only the require refusal can

@@ -188,15 +188,14 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	}
 	opts.view = &rootView{}
 	if bead.Status != "open" {
-		// A control bead that is not open — typically stuck at in_progress
-		// after a rogue `bd update --status in_progress` from a worker —
-		// can silently strand an entire workflow because the serve loop
-		// treats the no-op return as a successful processed cycle. Emit a
-		// specific trace line so the skip is visible in the dispatcher
-		// trace log instead of looking identical to a processed cycle.
-		// See bug investigation on workflow ga-ttn5z where 20+ minutes of
-		// processing cycles silently no-op'd because ga-fw2fm had been
-		// moved to in_progress by its implement-change worker.
+		// A control bead that is not open — typically closed while a stale
+		// row still offers it, or stuck at in_progress after a rogue
+		// `bd update --status in_progress` from a worker — is a no-op:
+		// Processed stays false, and the serve loop counts the dispatch as
+		// a skip rather than progress. The trace line names the skip in the
+		// dispatcher trace log, where a stranded workflow (ga-ttn5z, whose
+		// ga-fw2fm had been moved to in_progress by its implement-change
+		// worker) would otherwise look like an idle one.
 		opts.tracef("process-control bead=%s kind=%s skip reason=bead_not_open status=%s",
 			bead.ID, bead.Metadata[beadmeta.KindMetadataKey], bead.Status)
 		return ControlResult{}, nil
@@ -261,6 +260,8 @@ const scopeAbortSkippedCloseReason = "scope member skipped: an earlier member of
 // settled-root closes because it runs after the root reaches a terminal state
 // by contract — cancellation is one such terminal state, not an exception to it.
 func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, beads.Bead, error) {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 		return ControlResult{}, false, beads.Bead{}, nil
 	}
@@ -279,7 +280,7 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		// the dispatcher, and is the consumer that gives gc.cancel_requested
 		// teeth.
 		if rootCanceled(root) {
-			teardown, err := isTeardownTailControl(store, bead, rootID)
+			teardown, err := isTeardownTailControl(storeMolecule, bead, rootID)
 			if err != nil {
 				return ControlResult{}, false, beads.Bead{}, fmt.Errorf("%s: resolving teardown tail under canceled root %s: %w", bead.ID, rootID, err)
 			}
@@ -302,7 +303,7 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		// Gating per control makes settlement converge incrementally instead
 		// of depending on one bulk write succeeding.
 		if rootSettled(root) {
-			teardown, err := isTeardownTailControl(store, bead, rootID)
+			teardown, err := isTeardownTailControl(storeMolecule, bead, rootID)
 			if err != nil {
 				return ControlResult{}, false, beads.Bead{}, fmt.Errorf("%s: resolving teardown tail under settled root %s: %w", bead.ID, rootID, err)
 			}
@@ -368,7 +369,7 @@ func rootSettled(root beads.Bead) bool {
 // as their link back to a teardown step, so they need the subtree read. That
 // read happens only under an already-terminal root, at most once per control
 // before the gate closes it, never on the live dispatch path.
-func isTeardownTailControl(store beads.Store, bead beads.Bead, rootID string) (bool, error) {
+func isTeardownTailControl(store beads.MoleculeTarget, bead beads.Bead, rootID string) (bool, error) {
 	if bead.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return true, nil
 	}
@@ -1122,6 +1123,8 @@ func isRetryAttemptSubject(subject beads.Bead) bool {
 }
 
 func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
@@ -1147,7 +1150,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: loading workflow root: %w", rootID, err))
 	}
 	if rootFound {
-		canceled, err := workflowCanceled(store, root)
+		canceled, err := workflowCanceled(storeMolecule, root)
 		if err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: reading workflow cancellation: %w", rootID, err))
 		}
@@ -1204,7 +1207,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// Generated spec sidecars are topology records rather than executable
 	// members; preserve their established successful cleanup outcome before the
 	// remaining subtree is skipped.
-	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
+	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(storeMolecule, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
 	// A terminal root makes every still-open generated member non-executable —
@@ -1214,7 +1217,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// workflows whose unused steps were never reached by ordinary dependency
 	// progression.
 	// One subtree read serves both the teardown-tail policy and the sweep.
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(storeMolecule, rootID)
 	if err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
 	}
@@ -1236,7 +1239,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 			"close_reason":              workflowCanceledMemberCloseReason,
 		}
 	}
-	if _, err := molecule.CloseMembersWithMetadataExcept(store, members, sweep, excludeFromSweep); err != nil {
+	if _, err := molecule.CloseMembersWithMetadataExcept(storeMolecule, members, sweep, excludeFromSweep); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
@@ -1324,7 +1327,7 @@ func finalizeRoot(store beads.Store, rootID string, opts ProcessOptions) (beads.
 // the cancel itself (rootCanceled), or it is a drain item workflow nested
 // under a run that does (molecule.StoppedWorkflowAncestor). A root that is not
 // a drain item costs no read.
-func workflowCanceled(store beads.Store, root beads.Bead) (bool, error) {
+func workflowCanceled(store beads.MoleculeTarget, root beads.Bead) (bool, error) {
 	if rootCanceled(root) {
 		return true, nil
 	}
@@ -1342,7 +1345,10 @@ func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts Process
 // closeSourceBeadChain walks gc.source_bead_id / gc.source_store_ref upward
 // from the just-finalized workflow root and closes every parent source bead
 // in its native store. A missing resolver for a cross-store ref, a deleted
-// parent, or a cycle stops the walk as a traced no-op.
+// parent, or a cycle stops the walk as a traced no-op. The walk also stops
+// after the first source whose closed work outcome withholds dependents
+// (gc.work_outcome=blocked): that source is closed or left closed, and its
+// parents stay open, because blocked work did not complete them.
 // Resolver, store read, and close failures are returned so the finalizer stays
 // open for retry. This is what makes "Adopt PR" city-scope source beads
 // disappear from the human-visible queue once the rig-scope workflow merges.
@@ -1476,20 +1482,23 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
-			if !mutate {
-				return nil
+			if mutate {
+				if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
+					return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+				}
+				if loaded.Status == "closed" {
+					opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				} else {
+					if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
+						return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+					}
+					opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
+				}
 			}
-			if err := propagateSourceBeadTerminalMetadata(nextStore, loaded, current.Metadata); err != nil {
-				return fmt.Errorf("propagating source bead metadata %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
+			if sourceHoldsChain(loaded) {
+				opts.tracef("close-source-chain root=%s stop reason=blocked_source source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
+				stopWalk = true
 			}
-			if loaded.Status == "closed" {
-				opts.tracef("close-source-chain root=%s skip reason=already_closed source=%s ref=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef))
-				return nil
-			}
-			if err := closeSourceBeadPreservingOutcome(nextStore, loaded); err != nil {
-				return fmt.Errorf("closing source bead %s in %s: %w", nextID, sourceChainStoreLabel(effectiveRef), err)
-			}
-			opts.tracef("close-source-chain root=%s closed source=%s ref=%s preserved_outcome=%t", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.TrimSpace(loaded.Metadata[beadmeta.OutcomeMetadataKey]) != "")
 			return nil
 		}
 		if mutate && opts.SourceWorkflowLock != nil {
@@ -1535,7 +1544,8 @@ func listLiveSourceWorkflowRoots(fallbackStore beads.Store, sourceBeadID, source
 				continue
 			}
 			visitedSources[sourceVisitKey] = struct{}{}
-			matches, err := sourceworkflow.ListLiveRoots(info.Store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+			// info.Store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			matches, err := sourceworkflow.ListLiveRoots(beads.GraphMolecule(beads.GraphStore{Store: info.Store}), currentSourceID, currentSourceStoreRef, rootStoreRef)
 			if err != nil {
 				return fmt.Errorf("listing live workflows in %s: %w", sourceChainStoreLabel(rootStoreRef), err)
 			}
@@ -1677,6 +1687,14 @@ func sourceChainRootIDs(roots []beads.Bead) string {
 	}
 	sort.Strings(ids)
 	return strings.Join(ids, ",")
+}
+
+// sourceHoldsChain reports whether a source bead, once closed, keeps the
+// source chain above it open: the readiness rule that withholds a closed
+// blocked bead's dependents (beads.DependencySatisfied) withholds its
+// parents too.
+func sourceHoldsChain(source beads.Bead) bool {
+	return !beads.DependencySatisfied("closed", beads.ReadinessWorkOutcome(source.Metadata))
 }
 
 func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error {

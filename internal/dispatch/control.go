@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -729,6 +730,13 @@ var transientNeedles = []transientNeedle{
 	// processWorkflowFinalize's outcome read, whose wrapper is "resolving
 	// workflow outcome" (gastownhall/gascity#5729).
 	{needle: "timed out after", tier: TierAvailability},
+	// bd cancels its root context only on SIGINT/SIGTERM/SIGHUP, so this text
+	// means a stop cut a bd command short — typically a drain signaling the
+	// dispatcher's children before the dispatcher itself. A command that never
+	// finished never answered, which is Tier A wherever it is raised (the same
+	// reasoning as "timed out after"); the control kinds are level-triggered,
+	// so a canceled write re-enters like any other ambiguous write here.
+	{needle: "context canceled", tier: TierAvailability},
 }
 
 // ClassifyControllerError is the dispatch/store transient classifier for
@@ -743,6 +751,11 @@ func ClassifyControllerError(err error) ControllerErrorTier {
 		return TierNone
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return TierAvailability
+	}
+	// The typed twin of the "context canceled" needle: a source-workflow lock
+	// wait cut short by the dispatcher's stop signal returns ctx.Err() itself.
+	if errors.Is(err, context.Canceled) {
 		return TierAvailability
 	}
 	if errors.Is(err, errTransientControllerBoundary) {
@@ -926,7 +939,14 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		epoch, _ = strconv.Atoi(raw)
 	}
 
-	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
+	// The attempt molecule lives in store, labeled with the recipe's class
+	// (molecule.RecipeClass); T5b gives the dispatcher its graph and work
+	// handles.
+	target := beads.WorkMolecule(beads.WorkStore{Store: store})
+	if molecule.RecipeClass(recipe) == coordclass.ClassGraph {
+		target = beads.GraphMolecule(beads.GraphStore{Store: store})
+	}
+	result, err := molecule.Attach(ctx, target, recipe, control.ID, molecule.AttachOptions{
 		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 		ExpectedEpoch:  epoch,
 	})
@@ -1676,6 +1696,8 @@ type attemptRouteBinding struct {
 }
 
 func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
+	// store is the graph/scope store, not the sessions class: the relabel keeps its reads (typed-store T5b).
+	sessions := beads.SessionStore{Store: store}
 	if strings.TrimSpace(target) == "" {
 		return attemptRouteBinding{}, false
 	}
@@ -1683,7 +1705,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 		if named := config.FindNamedSession(cfg, target); named != nil {
 			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
 				if store != nil {
-					if candidates, err := session.NamedSessionResolutionCandidates(store, spec); err == nil {
+					if candidates, err := session.NamedSessionResolutionCandidates(sessions, spec); err == nil {
 						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
@@ -1714,7 +1736,7 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 		}
 	}
 	if store != nil {
-		if id, err := session.ResolveSessionID(store, target); err == nil {
+		if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return attemptRouteBinding{directSessionID: id}, true
 		}
 	}

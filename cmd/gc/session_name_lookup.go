@@ -475,7 +475,7 @@ func ensurePoolIdentityNotHeldByOpenRow(store beads.Store, cfg *config.City, sna
 	if store == nil {
 		return nil
 	}
-	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(store, false,
+	infos, err := sessionpkg.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false,
 		map[string]string{"agent_name": agentName},
 		map[string]string{"agent_name": want})
 	if err != nil {
@@ -623,7 +623,7 @@ func ensurePoolSessionNameAvailable(store beads.Store, cfg *config.City, snapsho
 	if openSessionNameTaken(snapshot, name) {
 		return fmt.Errorf("%w: %q conflicts with live pool snapshot", sessionpkg.ErrSessionNameExists, name)
 	}
-	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, name, "", selfOwner)
+	return sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beads.SessionStore{Store: store}, cfg, name, "", selfOwner)
 }
 
 // poolRuntimeSessionName is the identity-derived name for a pool instance with
@@ -975,7 +975,7 @@ func findSessionNameByAgentLabel(store beads.Store, template string) string {
 }
 
 func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
-	items, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{key: value})
+	items, err := sessionpkg.ExactMetadataSessionCandidates(beads.SessionStore{Store: store}, false, map[string]string{key: value})
 	if err != nil {
 		return ""
 	}
@@ -989,7 +989,7 @@ func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNa
 		if !sessionpkg.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue
 		}
-		sessionpkg.RepairEmptyType(store, &b)
+		sessionpkg.RepairEmptyType(beads.SessionStore{Store: store}, &b)
 		if key != "" && strings.TrimSpace(b.Metadata[key]) != value {
 			continue
 		}

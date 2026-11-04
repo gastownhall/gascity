@@ -29,10 +29,13 @@ type sessionResponse struct {
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
+	AgentName   string `json:"agent_name" required:"false" doc:"The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it."`
 	Provider    string `json:"provider"`
+	Transport   string `json:"transport,omitempty" doc:"How gc drives the session runtime, for example tmux or acp. Empty when unknown."`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
 	WorkDir     string `json:"work_dir,omitempty"`
+	WorkerDir   string `json:"worker_dir,omitempty" doc:"The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be."`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
 	// LastNudgeDeliveredAt is the most recent successful nudge delivery
@@ -69,6 +72,16 @@ type sessionResponse struct {
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
+	// ActivitySource names where Activity came from. Set only while
+	// ProgramStatus is shown.
+	ActivitySource string `json:"activity_source,omitempty" enum:"program,transcript" doc:"Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report."`
+	// ProgramStatus is the session program's own status report; absent
+	// means unknown, never idle.
+	ProgramStatus *SessionProgramStatus `json:"program_status,omitempty" doc:"The session program's own status report (OSC 7501), present while the city's program_status switch is shadow or on and the reading is valid. Absent means the status is unknown, never idle."`
+
+	// WakeReasons are the reasons the controller keeps an open session awake,
+	// set only when the list request asks for them (they cost runtime probes).
+	WakeReasons []string `json:"wake_reasons,omitempty" doc:"Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them."`
 
 	// SubmissionCapabilities describes which semantic submit intents the
 	// session runtime can honor.
@@ -146,10 +159,13 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
+		AgentName:   info.AgentName,
 		Provider:    provider,
+		Transport:   info.Transport,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
 		WorkDir:     info.WorkDir,
+		WorkerDir:   strings.TrimSpace(info.WorkerDir),
 		CreatedAt:   info.CreatedAt.Format(time.RFC3339),
 		Attached:    info.Attached,
 		Rig:         rig,
@@ -294,7 +310,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -391,7 +407,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -624,7 +640,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -700,6 +716,11 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	}
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
+	if resp.Running {
+		ps := programStatusUnder(configuredProgramStatusMode(cfg), s.state.SessionProvider(), info.SessionName)
+		obs := observeProgram(ps, resp.Activity)
+		resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
+	}
 }
 
 // sessionPeekHandle resolves the peek handle for an active session from its
@@ -879,7 +900,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
 				return err
 			}
 			return updateFn()
@@ -893,7 +914,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

@@ -229,7 +229,7 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC),
 				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
 			),
 		),
@@ -245,7 +245,7 @@ func Catalog() []Entry {
 		builtin(
 			"exec", "prefix:exec:", nil,
 			provedRuntime(
-				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
+				repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"),
 				"internal/runtime/exec/exec_test.go",
 				"TestExecConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},

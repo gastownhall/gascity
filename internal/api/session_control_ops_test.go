@@ -194,7 +194,7 @@ func TestSessionControlOpsConcurrentSameKeyStopIsBusy(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/stop", "stop-1", "") }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	e.rebuild(t)
 	busy := e.post(t, "/session/"+info.ID+"/stop", "stop-1", "")
@@ -1752,7 +1752,7 @@ func TestSessionControlOpsConcurrentRespondsAnswerOnlyTheirInteraction(t *testin
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/respond", "click-1", `{"action":"approve"}`) }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 	recorded := make(chan struct{})
 	e.store.set(func(s *opsTestStore) { s.onOpCreate = func() { close(recorded) } })
 	secondDone := make(chan *httptest.ResponseRecorder, 1)

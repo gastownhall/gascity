@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -745,6 +746,33 @@ func (p *primeSessionStart) liveInfo() *sessionpkg.Info {
 	return &p.info
 }
 
+// hookInlinePromptLimit is the size beyond which Claude Code stops inlining
+// SessionStart hook output into the first turn and spills the rest to a file
+// (about 10,000 characters on 2.1.283; ga-4k4zfk).
+const hookInlinePromptLimit = 10_000
+
+// logHookSoleCarrierPrompt records that a SessionStart hook is about to be the
+// only carrier of a startup prompt too large for the provider to inline in full:
+// no launch payload delivered it (GC_STARTUP_PROMPT_DELIVERED is unset), so the
+// agent will see a truncated prompt. Sizes compare in bytes, which never
+// under-reports characters. log is *slog.Logger's Warn method, passed as a value
+// so a test can capture the record; sessionFallback names the record when the
+// session name is not in the environment. The record never carries prompt content.
+func logHookSoleCarrierPrompt(log func(msg string, args ...any), sessionFallback, prompt string) {
+	if len(prompt) <= hookInlinePromptLimit || strings.TrimSpace(os.Getenv(startupPromptDeliveredEnv)) == "1" {
+		return
+	}
+	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if sessionName == "" {
+		sessionName = sessionFallback
+	}
+	log("startup prompt reaches the session only through the SessionStart hook and exceeds the provider's inline limit; it will be truncated",
+		slog.String("session", sessionName),
+		slog.Int("bytes", len(prompt)),
+		slog.Int("limit", hookInlinePromptLimit),
+	)
+}
+
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {
 	if hookMode && suppressPrompt {
 		// Managed sessions receive the rendered startup prompt through the
@@ -752,6 +780,7 @@ func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt st
 		prompt = ""
 	}
 	if hookMode {
+		logHookSoleCarrierPrompt(slog.Default().Warn, agentName, prompt)
 		prompt = prependHookBeacon(cityName, agentName, prompt)
 		// The step reminder is hook-only context, not the startup prompt, so it
 		// survives suppression — managed SessionStart hooks still carry it. Folded
@@ -1123,34 +1152,64 @@ func renderPrimeAgentPrompt(cityPath, cityName string, cfg *config.City, a *conf
 }
 
 func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
+	return buildPrimeContextWithIdentity(cityPath, cityName, a, rigs, topo, primeSessionIdentityFromEnv(), stderr)
+}
+
+// primeSessionIdentity names the session a prompt context is built for. gc prime
+// runs inside that session and reads it from the environment; a caller that is
+// not running inside the session supplies the session's own values instead of its
+// process environment.
+type primeSessionIdentity struct {
+	Alias   string // GC_ALIAS
+	Agent   string // GC_AGENT
+	Dir     string // GC_DIR
+	Rig     string // GC_RIG
+	RigRoot string // GC_RIG_ROOT
+	Branch  string // GC_BRANCH
+}
+
+// primeSessionIdentityFromEnv returns the identity of the session this process
+// runs inside.
+func primeSessionIdentityFromEnv() primeSessionIdentity {
+	return primeSessionIdentity{
+		Alias:   os.Getenv("GC_ALIAS"),
+		Agent:   os.Getenv("GC_AGENT"),
+		Dir:     os.Getenv("GC_DIR"),
+		Rig:     os.Getenv("GC_RIG"),
+		RigRoot: os.Getenv("GC_RIG_ROOT"),
+		Branch:  os.Getenv("GC_BRANCH"),
+	}
+}
+
+// buildPrimeContextWithIdentity is buildPrimeContextFor for an explicit session
+// identity.
+func buildPrimeContextWithIdentity(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, id primeSessionIdentity, stderr io.Writer) PromptContext {
 	ctx := buildAgentPromptContext(cityPath, cityName, a, rigs, topo, stderr)
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
-	if gcAlias := os.Getenv("GC_ALIAS"); gcAlias != "" {
-		ctx.AgentName = gcAlias
-	} else if gcAgent := os.Getenv("GC_AGENT"); gcAgent != "" {
-		ctx.AgentName = gcAgent
+	if id.Alias != "" {
+		ctx.AgentName = id.Alias
+	} else if id.Agent != "" {
+		ctx.AgentName = id.Agent
 	}
 
 	// Working directory.
-	gcDir := os.Getenv("GC_DIR")
-	if gcDir != "" {
-		ctx.WorkDir = gcDir
+	if id.Dir != "" {
+		ctx.WorkDir = id.Dir
 	}
 
 	// Rig context.
-	gcRig := os.Getenv("GC_RIG")
-	if gcRig != "" {
-		ctx.RigName = gcRig
-		ctx.RigRoot = os.Getenv("GC_RIG_ROOT")
+	if id.Rig != "" {
+		ctx.RigName = id.Rig
+		ctx.RigRoot = id.RigRoot
 		if ctx.RigRoot == "" {
-			ctx.RigRoot = rigRootForName(gcRig, rigs)
+			ctx.RigRoot = rigRootForName(id.Rig, rigs)
 		}
-		ctx.IssuePrefix = findRigPrefix(gcRig, rigs)
+		ctx.IssuePrefix = findRigPrefix(id.Rig, rigs)
 	}
 
-	ctx.Branch = os.Getenv("GC_BRANCH")
-	if gcDir != "" || gcRig != "" {
+	ctx.Branch = id.Branch
+	if id.Dir != "" || id.Rig != "" {
 		ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
 	}
 	return ctx

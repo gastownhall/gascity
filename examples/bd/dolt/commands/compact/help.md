@@ -4,7 +4,8 @@ Flatten Dolt commit history on managed databases to reduce storage, then run a
 full garbage collection to reclaim the orphaned chunks. Without flags, compact
 runs in scheduled mode: it skips any database with fewer new commits than the
 threshold (default 2000, `GC_DOLT_COMPACT_THRESHOLD_COMMITS`), flattens the
-rest, verifies row preservation, and runs `CALL DOLT_GC('--full')`.
+rest, verifies row preservation, and runs
+`CALL DOLT_GC('--full', '--archive-level=0')`.
 
 ## Which databases compact touches
 
@@ -64,10 +65,12 @@ author: every commit after the watermark is squashed, whichever city wrote it.
 - **Databases with a remote are never flattened.** Any configured Dolt remote
   (a team remote, bd's `refs/dolt/data`, a federated city) means other clones
   may share the history, and a flatten would have to be force-pushed over it.
-  Compact skips the flatten and the push, and runs a bare `CALL DOLT_GC()`
-  instead. `.no-sync`, `--skip-fetch`, and `--dry-run` do not bypass this.
+  Compact skips the flatten and the push, and runs a bare
+  `CALL DOLT_GC('--archive-level=0')` instead. `.no-sync`, `--skip-fetch`, and
+  `--dry-run` do not bypass this.
   - A pending-GC marker left by an earlier flatten still gets its local
-    `DOLT_GC('--full')`. The deferred push is dropped, and the log says so.
+    `DOLT_GC('--full', '--archive-level=0')`. The deferred push is dropped, and
+    the log says so.
     The log also records the marker's `compacted_from_head` (the pre-flatten
     HEAD) before the GC runs.
   - A pending-push marker is held untouched. It is not force-pushed. Compact
@@ -101,7 +104,8 @@ author: every commit after the watermark is squashed, whichever city wrote it.
 
 ## Flags
 
-- `--gc-only` — Reclaim orphaned chunks via `CALL DOLT_GC('--full')` on each
+- `--gc-only` — Reclaim orphaned chunks via
+  `CALL DOLT_GC('--full', '--archive-level=0')` on each
   database **regardless of commit count**, skipping the flatten path entirely.
   This is the sanctioned reclaim path for a database stranded *below* the
   flatten threshold with orphaned `oldgen` archives — for example after a prior
@@ -138,20 +142,32 @@ gc dolt compact --gc-only --only-db hq
 gc dolt compact --gc-only --dry-run
 ```
 
+## Archive level
+
+Every GC the compactor issues passes `--archive-level=0`, which writes classic
+table files. Dolt 2.3.3 through 2.5.1 default to a SimpleArchive that
+duplicates its zstd dictionaries once an archive holds more than 256 of them,
+and each duplicate pins about 137 KB of C memory for the whole GC, so a large
+store runs out of memory mid-reclaim. To check a store, run
+`dolt admin storage` in its directory: it prints a "Dictionary Count" per
+archive, and a count past 256 is the bad state.
+
 ## The full GC and the listener read timeout
 
-`CALL DOLT_GC('--full')` runs as one statement over the sql-server, and the
+`CALL DOLT_GC('--full', '--archive-level=0')` runs as one statement over the
+sql-server, and the
 listener's `read_timeout_millis` caps any statement that produces no rows for
 that long. The GC produces none until it finishes, so a reclaim that needs
 longer than the ceiling fails with `context canceled`, `connection was closed`,
 or `row read wait bigger than connection timeout` however healthy the store is.
 The compactor names the setting and the live value when the GC ran as long as
 the ceiling, and says the timeout did not end it when the GC was canceled
-sooner. Only the full GC gets that line; a failed bare `CALL DOLT_GC()` prints
-the server error without it.
+sooner. Only the full GC gets that line; a failed bare
+`CALL DOLT_GC('--archive-level=0')` prints the server error without it.
 
 A GC that fails after a flatten leaves a pending-GC marker that retries
-`DOLT_GC('--full')` on every later run; `--gc-only` leaves no marker. When the
+`DOLT_GC('--full', '--archive-level=0')` on every later run; `--gc-only` leaves
+no marker. When the
 compactor blamed the ceiling, every retry hits the same ceiling until it moves;
 when it said the timeout did not end the GC, raising `read_timeout_millis` is
 not the remedy.
@@ -164,7 +180,7 @@ each call at `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`); a GC that
 outruns that fails with `rc=124` and no server error. A reclaim that needs
 longer belongs offline: follow the Recovery Procedure in
 `docs/troubleshooting/dolt-bloat-recovery.md` with
-`dolt gc --full --archive-level=1` as step 3.
+`dolt gc --full --archive-level=0` as step 3.
 
 See `docs/troubleshooting/dolt-bloat-recovery.md` for the full bloat-recovery
 runbook, including quarantine marker evidence, the safe marker-clear procedure,

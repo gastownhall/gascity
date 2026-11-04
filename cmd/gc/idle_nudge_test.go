@@ -401,6 +401,37 @@ func TestNudgeStalledPoolClaims_DrainsAWedgedSlotAtCap(t *testing.T) {
 	}
 }
 
+// Kills a wedged-slot drain inside the last nudge's backoff (ga-uns4sw): a
+// quiet slot at the cap whose trigger is still open and unassigned gets the
+// full backoff after its last nudge to claim it, as every earlier nudge did,
+// and is drained once on the first pass after it.
+func TestNudgeStalledPoolClaims_WaitsOutTheLastBackoffBeforeDraining(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := atCapSession(base, "tok-1")
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	open := []beads.Bead{{ID: "work-a", Status: "open"}}
+	drains := &drainRecorder{}
+	var out bytes.Buffer
+	sp := quietClaimFake(t, base)
+	run := func(at time.Time) {
+		sp.SetActivity("session-a", at.Add(-time.Hour))
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, open, nil, at, liveClaimDrain(store, drains.request), &out)
+	}
+	for _, after := range []time.Duration{10 * time.Second, idleClaimNudgeBackoff - time.Second} {
+		run(base.Add(after))
+		got := mustGetTestBead(t, store, s.ID)
+		if len(drains.ids) != 0 || sp.CountCalls("Nudge", "session-a") != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+			t.Fatalf("%s after the last nudge: drains %v nudges %d latch %q, want none inside its backoff; log %q",
+				after, drains.ids, sp.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeStalledKey], out.String())
+		}
+	}
+	run(base.Add(idleClaimNudgeBackoff))
+	if len(drains.ids) != 1 || drains.ids[0] != s.ID || sp.CountCalls("Nudge", "session-a") != 0 {
+		t.Fatalf("once the last backoff passed: drains %v nudges %d, want exactly one drain and no nudge; log %q",
+			drains.ids, sp.CountCalls("Nudge", "session-a"), out.String())
+	}
+}
+
 // Kills a re-woken incarnation drained on sight (#7752 review, probe P1): a
 // slot restarted at a new incarnation for the same trigger, its marker at the
 // cap and the old latch on it, gets its own grace and nudges before its own
@@ -878,8 +909,8 @@ func TestNudgeStalledPoolClaims_UnconfirmedTriggerHoldsTheNudge(t *testing.T) {
 // only on bead state and never asked the runtime whether the slot was busy;
 // delivery then fell to the provider, whose wait-for-idle sends anyway once
 // its own timeout passes and whose Codex submit sequence leads with Escape.
-// A slot whose runtime shows output within the grace, or whose busy-readable
-// pane still shows the busy indicator, or whose pane cannot be read, is held
+// A slot whose runtime shows output within the grace, or whose pane still
+// reads busy, or whose pane cannot be read, is held
 // without spending an attempt; once it is quiet the still-unclaimed trigger
 // is nudged.
 func TestNudgeStalledPoolClaims_BusySlotIsNotNudged(t *testing.T) {
@@ -1001,13 +1032,25 @@ type liveTurnProvider struct {
 	*runtime.Fake
 	running bool
 	err     error
+	// turnLooks counts TurnRunning reads, so a test can assert a pass took
+	// exactly one look, or none.
+	turnLooks int
+	// script, when set, answers the looks in order in place of running, its
+	// last answer repeating: a turn that starts or ends between two looks.
+	script []bool
 }
 
 // SnapshotIdle is the capture scan's reading: busy.
 func (p *liveTurnProvider) SnapshotIdle(string) (bool, error) { return false, nil }
 
 // TurnRunning is the live screen's reading.
-func (p *liveTurnProvider) TurnRunning(string) (bool, error) { return p.running, p.err }
+func (p *liveTurnProvider) TurnRunning(string) (bool, error) {
+	p.turnLooks++
+	if len(p.script) > 0 {
+		return p.script[min(p.turnLooks, len(p.script))-1], p.err
+	}
+	return p.running, p.err
+}
 
 // Kills the claim backstop holding a stalled slot for good on an earlier
 // turn's busy row (PR #7944 review): its busy hold read the idle snapshot,
@@ -1055,6 +1098,50 @@ func TestNudgeStalledPoolClaims_HoldsOnlyALiveTurn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The runtime leaf, not cmd/gc, decides whose turn reading it trusts: a family
+// whose turn it cannot read answers runtime.ErrIdleIndeterminate, and that
+// holds nothing, the way an indeterminate idle snapshot holds nothing
+// (snapshotHoldFor). Every other failed look still holds. With the gate
+// opened to every non-ACP family, an untrusted family's claim nudge is
+// delivered on the activity clock alone, as before.
+func TestTurnHoldForIndeterminateHoldsNothing(t *testing.T) {
+	indeterminate := fmt.Errorf("turn of gemini pane: %w", runtime.ErrIdleIndeterminate)
+	for _, tc := range []struct {
+		name    string
+		running bool
+		err     error
+		hold    string
+	}{
+		{name: "indeterminate", err: indeterminate},
+		{name: "look failed", err: errors.New("capture failed"), hold: executionHoldSnapshotError},
+		{name: "running", running: true, hold: claimHoldTurnRunning},
+		{name: "not running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &liveTurnProvider{Fake: runtime.NewFake(), running: tc.running, err: tc.err}
+			if got := turnHoldFor(sp, "session-a"); got != tc.hold {
+				t.Fatalf("turnHoldFor = %q, want %q", got, tc.hold)
+			}
+		})
+	}
+
+	t.Run("untrusted family is nudged", func(t *testing.T) {
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		now := base.Add(idleClaimNudgeGrace + time.Second)
+		s := staleSnapshotClaimSession(base)
+		s.Metadata["provider"] = "gemini"
+		store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+		fake := quietClaimFake(t, now)
+		sp := &liveTurnProvider{Fake: fake, err: indeterminate}
+		var out bytes.Buffer
+		nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, []beads.Bead{{ID: "work-a", Status: "open"}}, nil, now, liveClaimDrain(store, nil), &out)
+		got := mustGetTestBead(t, store, s.ID)
+		if fake.CountCalls("Nudge", "session-a") != 1 || got.Metadata[idleClaimNudgeHoldKey] != "" {
+			t.Fatalf("nudges %d hold %q, want the quiet gemini slot nudged (log %q)", fake.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeHoldKey], out.String())
+		}
+	})
 }
 
 // Kills a busy hold that never ends (PR #7944 review): a hold spends no

@@ -31,9 +31,10 @@ config, run one command, start the city.
   schedule the window, not inside it — but after Step 1, since it resolves its
   destination from `[storage.classes]` and has nothing to check until that
   section names a binding.
-- **Stop the city.** The migration refuses while a controller is live, and it
-  asks you to attest that nothing else is writing either. `gc stop` handles
-  the controller; the attestation is yours.
+- **Stop the city.** The migration refuses while a controller is live, while
+  the city is registered with the supervisor, and while any of its sessions
+  runs, and it asks you to attest that nothing else is writing either.
+  `gc stop` handles the city; the attestation is yours.
 - **Cities on an out-of-tree provider do not take this path.** A city born on
   a provider a downstream fork compiled in creates its binding at first boot
   and moves nothing. This command's one source is the work store.
@@ -93,20 +94,39 @@ gc storage preflight
 ```
 
 Runs every check the migration runs against a **live** city — and copies
-nothing, creates nothing, takes no migration guard, and publishes no event. It
-exists because the migration's refusals are all correct and all arrive at the
-worst possible moment: with the fleet stopped and a window running. The
-rig-scope census is the one that most justifies it, because its remedy is moving
-beads by hand and no command here does that for you.
+nothing, creates nothing, takes no migration guard or controller lock, and
+publishes no event. It exists because the migration's refusals are all correct
+and all arrive at the worst possible moment: with the fleet stopped and a window
+running. It also reports, per rig, what `gc storage migrate --from-rigs` would
+do there (see "Step 4b: import each rig").
+
+Pass it the `--force` attestations you will pass to the migration (see "Step 4:
+run the migration"). What they lift there is lifted here, and the command
+preflight prints for the window carries them:
+
+```
+gc storage preflight --force=shared-store:<identity>
+```
 
 The checks that most often stop a real cutover, and what each wants from you:
 
 | Block | What it means | What to do |
 | --- | --- | --- |
-| `rig scopes` | An infrastructure bead lives in a rig's store, and the copy reads only the city work store. | Move the named beads into the city work store by hand. On a city that already converged this row is a `[note]`: the migration copies nothing there, so it does not stop for them. |
+| `remote stage` | This directory is a remote stage of another city (a K8S pod or an SSH host). Its infrastructure classes are served by that city's controller host. | Run the migration on the controller host's city. |
+| `runtime` | The city runs its sessions on a remote runtime (`k8s`, `hybrid`, `ssh:`, `exec:`), or this host cannot list every session, so the migration cannot prove none is running. | Fix the listing, or accept that remote sessions refuse infrastructure-class commands (mail, nudges, session lookups) until worker-site transport exists, and attest it with `--force=remote-runtime`. |
+| `shared store` | Another registered city uses this city's work store. Under `--force=shared-store:<identity>` it still blocks on rows that name another city's scope, and on an attestation that finds no registered city on the store. | If this city is the only writer of what it migrates, attest the identity the block prints. Move rows that name another city's scope first: no attestation covers them. Register an unregistered co-tenant again (`gc register <path>`). |
+| `rig scopes` | A rig's graph rows have a shape the rig import cannot move without a cross-store edge (an open `tracks`/`parent-child` edge between a graph row and rig work, open work blocked by an open graph row), or a rig store cannot be read. | Do what the named fix says (close the workflow or convoy, finish the work, or remove the edge), or restore access to the rig. Rig history, closed or suspended, no longer blocks: each rig is a `[note]` with what its import would move. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
-| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing in your data: this city's work store runs on an engine that cannot report edge payloads, so this binary cannot split it. The block is permanent until the work store is on an engine that can (SQLite or native Dolt). |
+| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Rehearse on the running city: preflight opens the work store as it finds it, and a stopped managed or proxied city has no server to read. The migration itself starts the provider for its run (Step 4). A store that stays on the bd CLI lane is refused there by the reason it stayed: executable bd hooks (remove or disable them for the window, or wait for ga-qcpgy), schema skew (`bd migrate`), or `GC_BEADS_FORCE_FALLBACK=1` (unset it). The migration probes every edge it and its clear read, cross-store edges included, before writing anything. A generic exec store (one not backed by bd: not `gc-beads-bd`, not `gc-beads-k8s`) is not refused: its protocol carries no payload, so its edges are copied carrying none and the manifest records `#gc:source-payload-blind exec`. A `gc-beads-k8s` store with an edge to read is refused: bd holds payloads the exec protocol cannot report, and no native lane serves it yet, so keep that city unsplit. |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
+
+The `shared store` row judges the city as the migration will, with the city
+stopped. A store on the Dolt server gc manages for the city is named by the
+data directory that server serves (`<city>/.beads/dolt`), not by its port,
+which can change at every boot and is gone once the city stops. The identity
+preflight prints on the live city is the one the migration checks inside the
+window, and another city's managed server is never the same store, whatever its
+database is called.
 
 It exits non-zero when the migration would refuse for something you have to go
 and fix. **That is a different question from `gc storage status`**, which exits
@@ -114,13 +134,16 @@ non-zero whenever the city is not yet serving from its binding — the ordinary
 state of every city with a cutover still ahead of it. A city that preflight
 clears will still fail a `status` gate until it has actually migrated.
 
-Two things it reports rather than refuses. A **live controller** is named by PID
-and does not affect the exit code — stopping it is the next thing you were going
-to do anyway, and blocking would mean the command for planning a window could
-only be run from inside one. And `--fleet-stopped` is **never checked**, here or
-anywhere: it is an operator attestation precisely because no process can verify
-it, and preflight says so rather than letting a clean report read as broader
-than it is.
+It reports rather than refuses what stopping the city ends: a **live
+controller**, named by PID; the city's registration with the supervisor; its
+running sessions; and, under `--force=shared-store:`, the other cities on the
+store, whose controller locks the migration takes. None of them affects the
+exit code. Stopping them is the next thing you were going to do anyway, and
+blocking would mean the command for planning a window could only be run from
+inside one. And `--fleet-stopped` is **never checked**, here or anywhere: it is
+an operator attestation precisely because no process can verify it, and
+preflight says so rather than letting a clean report read as broader than it
+is.
 
 ## Step 4: run the migration
 
@@ -137,25 +160,83 @@ later cannot inherit this one's behavior by silence.
 controller is live on the city; it cannot prove anything about a stray `bd`,
 a rig-side script, or a second gc process, so it asks you to state it.
 
+`--force` attests a named hazard the command otherwise refuses over. It is
+repeatable, and a bare `--force` refuses:
+
+- **`--force=remote-runtime`**: the city runs sessions on a remote runtime, or
+  this host cannot list every session. After the split those sessions refuse
+  infrastructure-class commands until worker-site transport exists, and you
+  attest that no remote host writes infrastructure beads to the work store.
+- **`--force=shared-store:<identity>`**: another registered city uses this
+  city's work store, and this city is the only writer of what the migration
+  moves. The refusal prints the identity. Every other city on the store must be
+  stopped and **stay registered**: `gc supervisor stop --wait` stops every
+  supervisor-hosted city and keeps its registration. `gc stop` unregisters a
+  city, which hides it from this check, and an attestation that finds no
+  registered city on the store refuses. The migration holds each co-tenant's
+  `.gc/controller.lock` until it exits, so none of them restarts mid-copy, and
+  rows that name another city's scope refuse even under the attestation.
+
+The migration appends the attestations it runs under to
+`.gc/storage-attestations.log`.
+
+```
+gc storage migrate --from-work --fleet-stopped --force=shared-store:<identity>
+```
+
 What the command does, in order:
 
 1. Resolves the same plan boot resolves, so a layout boot would refuse is
    refused here first rather than migrated toward.
-2. Refuses if a controller answers the city's socket.
-3. Takes a migration guard over the city, so a second migrator cannot run.
-4. Censuses every rig's bead scope for infrastructure beads and **refuses by
-   id and rig** if it finds any. The copy reads the city work store only, so a
-   bead sitting in a rig scope would be left unreachable. Move those into the
-   city work store first. A city that already converged copies nothing on a
-   re-run, so the census is skipped there: the run only clears the retained
-   copies, rig beads stay as unreachable as they already were, and `gc storage
-   preflight` still names them.
-5. Copies every infrastructure bead with its id and within-class dependency
+2. Takes the city's `.gc/controller.lock` and holds it until it exits. It
+   refuses while something else holds the lock, while the city is registered
+   with the supervisor, while any of its sessions runs, on a remote stage,
+   and, without the matching `--force`, on a remote runtime or a shared work
+   store (under `--force=shared-store`, it takes every co-tenant's lock). It
+   refuses if a controller answers the city's socket, and without
+   `--fleet-stopped`. None of these reads the work store, and a run they
+   refuse never touches the bead-store provider.
+3. Takes a migration guard over the city, so a second migrator cannot run. It
+   reads no store either, and a run it refuses never touches the provider: a
+   dry run or a `--purge-type` run of `gc storage recover-stranded` holds the
+   guard without the lock above, and the provider is not started or stopped
+   under it.
+4. Opens the maintenance window, once those checks have passed:
+   - `gc stop` stopped the city's bead-store provider, and a managed bd/Dolt,
+     proxied or bd-contract exec city has no server to read without it. The
+     window starts the provider the way `gc start` does (no agents, no nudge
+     pollers), recording that it did in `.gc/storage-window.json` first, and
+     stops it again before the guard and the lock are released. If that stop
+     fails, the run exits non-zero, keeps the record, and does not tell you to
+     start the city: stop the bead store with `gc stop` first. A provider that
+     was already up is left as it was, except a bd-owned proxy: bd restarts it
+     on any read, so the window always starts the city's proxied scope (and,
+     for `--from-rigs`, the proxied scope of each rig it reads) and stops every
+     provider-owned scope at the end, as `gc stop` does. A provider a killed
+     run started is stopped by the next run, whoever has started it since: the
+     city is stopped and locked.
+   - Inside the window the migration's own opens of the work store take the
+     native lane: the proxied-native lane is forced on and
+     `beads.native_transport = "off"` is overridden, for those opens only, with
+     the configuration the command loaded.
+   - On a gc-managed Dolt the window started, it lists the server's client
+     sessions over its published port and refuses while any other client holds
+     one, naming each, or when they cannot be listed. Such a refusal stops the
+     provider only if this run started it; one a killed run started stays
+     running and recorded. A bd-owned proxy or an exec provider cannot be
+     judged that way: the run names it, and `--fleet-stopped` covers it.
+
+   Under `--force=shared-store`, it then refuses rows that name another city's
+   scope, the one check here that reads the work store.
+5. Does not census rig scopes. A rig's graph rows stay readable through its
+   relic legs and move with `gc storage migrate --from-rigs` once the binding
+   has converged; the success message names every rig still awaiting that.
+6. Copies every infrastructure bead with its id and within-class dependency
    topology preserved.
-6. Closes the destination, reopens it, and proves field-level equality against
+7. Closes the destination, reopens it, and proves field-level equality against
    the bytes on disk — not against the connection that wrote them.
-7. Records a proven-copy manifest, and only then the convergence marker.
-8. Clears the work store's copies of the beads it moved. Each row, with every
+8. Records a proven-copy manifest, and only then the convergence marker.
+9. Clears the work store's copies of the beads it moved. Each row, with every
    dependency edge touching it and that edge's payload, is first written to
    `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
    and proven equal to the rows it records; only then is a row removed.
@@ -172,19 +253,27 @@ into the binding either. On a native-Dolt work store each removal is a Dolt
 commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
 before the clear) is the full-fidelity backstop for them.
 
-Nothing in the work store changes before the marker: until step 7 the source is
+Nothing in the work store changes before the marker: until step 8 the source is
 exactly as you left it, and the cutover can still be abandoned by a config
 edit. Past the marker the binding is the only authoritative copy, which is why
-step 8 exists — a copy left behind in the work store is served to every reader
+step 9 exists — a copy left behind in the work store is served to every reader
 that reaches the work store first (`bd`, `gc hook`, the demand and claim
 surfaces), and a workflow step closed in the binding stays open there and is
 dispatched again and again.
 
-Step 8 changes only what it has to. A work bead whose blocking dependency
+Step 9 changes only what it has to. A work bead whose blocking dependency
 points at a moved bead keeps that dependency, unless the binding has already
 closed the bead it waits on, in which case the dependency is released. Every
 other dependency from a work bead into a moved bead is kept by re-adding it
 after its target row is removed.
+
+Step 8 never changes a work bead's text. `bd delete --force` (and the native
+Dolt delete) rewrites every mention of a deleted id in the text of each bead
+still linked to it, to `[deleted:<id>]`. The beads step 8 removes were moved,
+not deleted, so every edge touching a moved row is removed from the work store
+(and recorded in the backup) before the row is, and the delete finds no
+neighbor to rewrite. No pre-removal of work-to-infrastructure edges is needed
+before the migration.
 
 **On a `bd` or native-Dolt work store those kept edges are lost.** Removing a
 row there drops every edge touching it, and the store refuses to re-add an edge
@@ -211,6 +300,77 @@ cross-store edges of rows an interrupted run already removed, which the note
 names until the clear finishes; that is also how a
 city migrated by gc 1.5.0, which kept the work store's copies, is repaired (see
 below).
+
+## Step 4b: import each rig
+
+Before S4 a rig's convergence loops, `cook --attach` grafts and their control
+trees were written to the rig's own store. On a split city graph beads live in
+the city binding at every scope, so those rows move too, rig by rig, with the
+fleet stopped:
+
+```
+gc storage migrate --from-rigs --fleet-stopped            # every rig
+gc storage migrate --from-rigs --rig <rig> --fleet-stopped # one rig
+```
+
+Each row keeps its id and is stamped `gc.root_store_ref = rig:<rig>` (wisps and
+steps included). Edges inside the moved set are copied; an open `blocks` edge
+onto rig work becomes a cross-store gate in the binding; every other boundary
+edge is dropped and recorded on the row (`gc.migrated_cross_edges`) and in the
+rig's backup. Shapes that would need a cross-store edge are refused by bead,
+with the fix. Per rig it writes `infra.rig.<rig>.migrated.beads` (the manifest)
+and `infra.rig.<rig>.migrated` beside `infra.migrated`, backs the rows up to
+`infra.rig.<rig>.retained-source.jsonl`, raises the rig's `min_hash_length` so a
+later short id cannot re-mint an imported one, then clears the rig's copies and
+marks `.gc/storage-infra-cleared.rig.<rig>.json` complete. A rig with no graph
+row is recorded `infra.rig.<rig>.clean`. Suspended rigs are imported without
+being resumed; a rig that cannot be read blocks only itself. Every step resumes:
+run the command again after any failure. A pending clear makes boot refuse
+until the re-run finishes it.
+
+`gc storage status` exits non-zero while any rig awaits import, holds a pending
+clear, or holds rows written after its import.
+
+A rig whose store holds no infrastructure bead never needs this step: `gc rig
+add` (a new rig, `--adopt`, or a re-add) and the rig census the city runs at
+each boot record it `infra.rig.<rig>.clean` once the city binding has
+converged, so a rig added before a born-split city's first start, or an adopted
+store holding only work, does not wait for an import. A rig suspended at boot
+is not opened then: the controller censuses it when it resumes. Neither records
+a store the import refuses as shared (see below): that rig stays awaiting
+import, and `gc rig add` and the census's `storage.rig_residue` event say why.
+
+The import refuses, before writing anything, a rig store another registered
+city also uses or that it cannot rule out as one (a shared or company store
+imports under `--force=shared-store:<identity>`, with every other city on it
+stopped and registered as in Step 4; a Dolt rig whose endpoint does not resolve
+and that pins no database name cannot be compared), rows scoped to another rig
+or city, open rows another city's agent claims, rows its manifest says it
+carried that the binding no longer holds, and a rig whose store cannot read the
+payload of an edge the import copies or backs up. A bd CLI rig with an edge on
+a row it moves is such a rig, and so is a generic exec rig with one: the city
+migration copies a generic exec store's edges carrying no payload, as its
+protocol declares, but the rig import does not take that declaration yet. The
+import runs in the same maintenance window as the city migration (Step 4), so
+a managed rig is read natively. A proxied-server rig is read on the
+proxied-native lane, which the window forces on. When the window starts the
+city's provider it also starts the proxied scope of every rig the import
+reads, and a rig scope that will not start refuses the run; at the end it
+stops every provider-owned scope, as `gc stop` does. A rig whose proxy is
+down anyway (the window found the provider up and started nothing) is read
+through the bd CLI instead, silently: a rig with no edge on the rows the
+import moves imports as before, and one with such an edge is refused by the
+payload-read refusal above. Bring that rig's proxy up (any `bd` read in the
+rig does) and run the import again. While an
+import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
+every gc command refuse; re-run the import to finish it. If a rig store is
+gone for good after its import wrote its marker, `gc storage migrate
+--from-rigs --rig <rig> --abandon-rig-store --fleet-stopped` proves the binding
+holds every row the manifest records and then records the clear complete. It
+refuses while the rig store is still reachable, while an import is in flight,
+and while the binding holds rows of that rig its manifest does not record. Rig
+records name the store they speak for: a new store under a reused rig name is
+not taken for the old one.
 
 ## Step 5: start, and verify
 
@@ -331,9 +491,18 @@ gc serves its own `release-if-current` itself.
   including a `--metadata @file`, which gc reads, and the labels bd copies
   from a `--parent` (unless `--no-inherit-labels`). bd copies the labels of
   the parent its own store holds, so a parent that store's read does not find
-  exactly is refused. An `--id` inside a class
-  binding's reserved namespace is refused. `create --graph` is refused: a
-  graph plan mints a bead per node and no shipped workflow uses it.
+  exactly is refused. An `--id` inside a class binding's reserved namespace
+  is refused, and so is an `--id` the class binding holds: `gc storage
+  migrate` keeps a moved bead's id and clears the work store's copy, so bd
+  would mint that id again while every by-id `gc` command answers from the
+  binding's bead. `create --graph`: gc reads the
+  plan (relative to the directory bd runs in) and judges it node by node, a
+  dry run exactly like the live call. Each node's type, labels and metadata
+  are classified as bd writes them (bd never copies a parent's labels onto a
+  graph node, and writes over each `metadata_refs` key the id of the node it
+  names: that node's `id`, or the id bd mints for it); a node `id` refused for
+  `--id` above, a field outside bd's graph-plan schema, and a plan gc cannot
+  read are refused.
 - `delete` (positionals and `--from-file`): every id must name exactly one
   bead of the work store (bd would delete whatever bead a short id
   prefixes). Refused when a class-binding bead depends on one of the beads,
@@ -347,13 +516,29 @@ gc serves its own `release-if-current` itself.
   judged against the bead its id resolves to. If the id resolves to no bead,
   to a different bead (a short or partial id), or cannot be read, a write that
   touches type, labels or metadata is refused.
+- Metadata (`create` and `update --metadata`, `update --set-metadata`, the
+  nodes of a `create --graph` plan, the rows of an `import`) is classified as
+  each of the city's stores reads it back once bd has stored it. They agree on
+  a string value, but a JSON null reads as empty to the bd CLI and as the text
+  `null` to a native Dolt store, and `gc.root_bead_id` set to `null` is a
+  graph marker. A write is refused when either reading moves the bead out of
+  the classes its store holds. An import row is kept when its store holds the
+  row's class under both readings, and is handled like any row of a class the
+  store does not hold (refused, or left out with `--skip-infra`) when it holds
+  neither; a row its store holds under one reading only is refused, even with
+  `--skip-infra`. Write such a key as a string, leave it out, or clear it with
+  `update --unset-metadata`.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
   with `--skip-infra`. gc reads the file the way bd's import does: a line
   with a `_schema` key is the export header, a line whose `_type` key is
   exactly `"memory"` is a memory record, and a row whose status is
   `tombstone` is skipped. bd imports every other line as an issue, whatever
-  else its `_type` says, so gc classifies every other line.
+  else its `_type` says, so gc classifies every other line. A row the store
+  keeps is refused when a class binding holds a bead with its id, as
+  `create --id` is: `gc storage migrate` keeps a moved bead's id, so every
+  by-id gc command would answer from the binding's bead. A dry run writes
+  nothing and is not checked.
 - `mol burn` (the gastown patrols): every id must name exactly one bead of
   the work store, as for `delete`. The burn is refused when a class-binding
   bead depends on, or an open cross-store drain gate waits on, the molecule
@@ -393,9 +578,26 @@ gc serves its own `release-if-current` itself.
   such edges into the binding): `purge` and `prune` can delete that work bead
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
+- A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
+  a `create --graph` plan, the `import` source) is copied, under its own file
+  name, into a private directory under `TMPDIR` (or `/tmp`) once judged, and bd
+  is pointed at the copy, which is removed when `gc bd` returns. bd writes
+  exactly what gc judged: a file rewritten after gc read it changes nothing.
+  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`,
+  `delete --from-file`, `create --graph` or `import` is drained by gc's read,
+  and bd gets the drained bytes. bd prints the copy's path; where it records
+  only a file name (an `import`'s history entry), that is your file's name. A
+  write gc cannot copy (`TMPDIR` missing, unwritable or full) is refused.
+  Every spelling of the `import` source bd accepts (a short-flag run such as
+  `-qia.jsonl`, a name after `--`) is pointed at the copy. On every city,
+  single-store or split, a `--metadata @file` of `create`, `new` or `update`
+  is read once, before any check, so every check and bd read the same bytes
+  and a pipe works there too.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
-- `config set`: only `types.custom` and `types.infra`.
+- `config set` and `config unset`: only `types.custom`, `types.infra`,
+  `types.retained`, and keys under `custom.` (bd's namespace for
+  user-defined integration keys, which no class route and no create reads).
 - `mol wisp` and `mol wisp create`: only with `--root-only` (the gastown
   patrols' shape). That creates a single bead, and gc judges every bead bd
   could clone for it before bd runs.
@@ -403,7 +605,12 @@ gc serves its own `release-if-current` itself.
 - **No edge ever crosses stores.** `dep add` (positionals, `--blocked-by`,
   `--depends-on`), `dep relate`, `link`, `duplicate` (`--of`), `supersede`
   (`--with`), `gate create` (`--blocks`), `create`/`q`/`update --parent`, `create --deps` and
-  `--waits-for`, the `dep add` lines of a `batch`, and the dependencies of an
+  `--waits-for`, the id-named endpoints of a `create --graph` plan (a node's
+  `parent_id` when it names no parent key, a `deps` target that is not a plan
+  key, and an edge's `from_id`, `to_id`, `spawner_id` and `thread_id`; an id
+  that is a node's own `id` names that node of the plan, and bd writes the
+  others exactly as spelled, so one with leading or trailing whitespace is
+  refused), the `dep add` lines of a `batch`, and the dependencies of an
   `import` must each name beads of the city's work stores that no class
   binding holds. Each endpoint is read in the work store its id prefix names,
   so a dependency between a rig's bead and the city's (or another rig's) is
@@ -466,7 +673,7 @@ gc start
 gc storage status
 ```
 
-The command re-proves convergence, then runs step 8 above. Copies the binding's
+The command re-proves convergence, then runs step 9 above. Copies the binding's
 own garbage collection has since removed from the binding are cleared too:
 they are the frozen rows the demand surface would otherwise serve forever.
 
@@ -517,6 +724,231 @@ the fault.
 On a city that already converged, the `migrate` step copies nothing: it
 clears the retained copies, and infrastructure beads that rig scopes still
 hold from before the split do not stop it.
+
+### Stranded mail nobody will read: purge it instead
+
+When the stranded beads are mail that must never be delivered, such as
+weeks of unread auto-handoff mail, purge them instead of recovering them.
+`--purge-type message` backs up, then deletes, every row the storage check
+calls stranded whose type is `message`. It selects rows by that check, never
+by manifest id, because bd reuses short wisp ids.
+
+The purge never deletes:
+
+- a row the binding holds as the same bead (the same id and creation time);
+- a stranded row of another type, which you must still recover;
+- a stranded `message` row that the classifier puts in another class, which
+  is not mail and which you must still recover too.
+
+The run names the stranded rows it leaves. Recover them with
+`gc storage recover-stranded --from-work` once the mail is purged: run before
+the purge, that copy would carry the stranded mail into the binding too.
+
+It also refuses, dry run included, a work store that cannot list relations,
+such as bd's Postgres backend: the restore reads every edge back through that
+listing, so a purge there could not be undone.
+
+#### 1. Rehearse
+
+The dry run is read-only and safe on a running city:
+
+```
+gc storage recover-stranded --from-work --purge-type message --dry-run
+```
+
+It prints the count, a digest of the selection, the id range, the creation
+dates, the title histogram, the number of edges, and one line per row. Its
+last line is the confirmation the delete needs, for example
+`--fleet-stopped --confirm-purge --expect-count 791 --expect-digest 3f2a...`.
+The delete needs both the count and the digest, and refuses when the
+selection it computes is not the one you reviewed. The count alone does not
+pin the selection: one stranded row leaving and another arriving keeps it.
+
+#### 2. Take a full export of the work store first
+
+The purge writes its own backup, but take an independent one with the bd the
+city pins, from the city directory, with the city stopped:
+
+```
+bd export --all -o /var/backups/<city>-work-$(date -u +%Y%m%dT%H%M%SZ).jsonl
+```
+
+`--all` includes the wisp tier and the infrastructure rows. Check the line
+count before you go on.
+
+#### 3. Purge, with the city stopped
+
+```
+gc storage recover-stranded --from-work --fleet-stopped --purge-type message \
+  --confirm-purge --expect-count <n> --expect-digest <digest>
+gc storage status        # converged, and it names the purge and its backup
+```
+
+Every row is first written to `infra.purged-stranded-<time>.jsonl` at the
+binding root, with its metadata, labels and every edge touching it. For an
+edge to a row outside the purge, the backup also records which bead that row
+is (its id and creation time). The dry run and the run name every edge whose
+other end the work store does not hold, such as an `external:` reference: no
+restore could put it back. The file is synced and read back before anything
+is deleted. The edges are removed before the rows, because
+`bd delete --force` rewrites every mention of a deleted id in the text of
+rows still linked to it. The run is recorded in
+`infra.purged-stranded.jsonl`.
+
+If a run stops partway, `gc storage status` reports `purge: INTERRUPTED`,
+names only the purge's remedies, and exits non-zero. Until the run is
+finished, restored or closed, `gc storage recover-stranded` refuses to copy,
+and refuses its per-id answers too: the run may have removed the edges of
+rows a copy would carry, and its backup is their only copy. Rehearse the
+purge again with `--dry-run`, which refuses
+wherever the run would and prints what is left and the flags that finish it,
+then run the same purge again. It finishes the interrupted run over that
+run's own rows:
+
+- if rows of the run are left, it resumes from the same backup;
+- if every row of the run is already gone, it records them and exits 0;
+- a row stranded since the backup, or a new bead under an id the run deleted
+  (bd minted it again), is not part of the run: it is named and left in
+  place, and the next purge selects it;
+- it refuses when a row of the run changed since the backup, or is still in
+  the work store but no longer selected, for example because it was carried
+  into the binding. Restore the run, or close it (below), and start again.
+
+#### Restoring purged mail
+
+```
+gc storage recover-stranded --from-work --fleet-stopped --restore-purge <backup>
+```
+
+This puts every row of the backup back into the work store as it was, with
+its id, creation time, tier, labels and metadata, and adds back the edges in
+both directions. It refuses, before writing anything:
+
+- an id the work store now holds for a different row (bd minted it again).
+  The refusal names the id. While the run is interrupted, finish it by
+  running the purge again, which leaves the new row in place; otherwise move
+  the new row out of the work store first;
+- a row the binding now holds as the same bead. It was carried into the
+  binding after the purge, by an older build's `recover-stranded` or by hand,
+  so the binding serves it, and this command writes only the work store.
+
+An edge comes back only when its other end is a row of the backup or the bead
+the backup recorded there. An edge whose other end no longer exists, or is a
+different bead under the same id now (bd minted it again), is left out and
+named, and the rest of the backup is restored. The backup keeps that edge.
+When the edge left out is a row's parent-child edge, the row comes back
+without that parent, and the line naming the edge says so.
+
+While a purge run is interrupted, it restores only that run's backup. The rows
+are stranded again afterwards, and `gc storage status` names them. `--dry-run`
+shows what it would do, and refuses wherever the restore would. Running it
+again skips what is already back.
+
+If a restore stops partway, `gc storage status` reports `purge: INTERRUPTED`,
+and `recover-stranded` refuses until the run is settled: the restored rows may
+lack edges the restore had not added yet. Run the same restore again to finish
+it.
+
+If the work store cannot import rows verbatim, or cannot list relations, the
+command says so, in the dry run too. Restore with the city's own bd instead,
+from the city directory:
+
+```
+jq -c '.entry.bead | del(.dependencies)' <backup> > /tmp/restore.jsonl
+bd import /tmp/restore.jsonl
+jq -r '(.entry.deps // [])[], (.entry.dependents // [])[] | [.issue_id, .depends_on_id, .type] | @tsv' <backup> \
+  | sort -u | while IFS=$'\t' read -r from to type; do bd dep add "$from" "$to" --type "$type"; done
+```
+
+First check that no id in the backup is now held by a different row:
+`bd import` overwrites an existing id. When the restore refused a row the
+binding holds as the same bead, leave that row out of the import (start the
+first `jq` with `select(.entry.bead.id != "<id>") |`), and add the backup's
+edges of that row to the binding's copy where it lacks them. Also leave out
+an edge whose other end is outside the backup and is gone, or is now a bead
+with a creation time other than the one its record lists under
+`.entry.endpoints`: `bd dep add` would attach it to whatever holds the id now.
+If the run is interrupted, close it after a raw restore with
+`gc storage recover-stranded --from-work --fleet-stopped --purge-type message --abandon-purge`.
+That command refuses while any row of the run, or any edge the restore would
+put back, is still missing, or is back without the payload it carried.
+
+#### Example: maintainer-city
+
+Read-only rehearsal, with the fleet running and the new `gc` at a path no
+agent runs:
+
+```
+/opt/gascity/releases/<sha>/gc storage status
+#   expect: converged: yes, stranded: 791, exit 1
+/opt/gascity/releases/<sha>/gc storage recover-stranded --from-work --purge-type message --dry-run
+#   expect: selected: 791, one title "context cycle",
+#   created 2026-08-12T17:54Z .. 2026-08-30T04:42Z.
+#   Note the digest, and note any rows flagged as a reused id.
+```
+
+The window. Stop the city with the deployed `gc`, then check that nothing
+can write the work store:
+
+```
+gc stop
+gc unregister                     # the supervisor no longer holds the city
+gc status                         # the controller is stopped
+gc session list                   # no session of this city
+tmux ls                           # no tmux session of this city
+# no gc or bd process of this city is left (read-only check, e.g. ps)
+# no old gc on any agent's PATH (for example ~/go/bin/gc): replace or remove it
+```
+
+Export the work store with MC's pinned bd, and check the message rows:
+
+```
+BD=/opt/beads/releases/mc-enterprise-d4c35678ec5e/bd
+EXPORT=/var/backups/mc-work-$(date -u +%Y%m%dT%H%M%SZ).jsonl
+$BD export --all -o "$EXPORT"
+jq -r 'select(.issue_type == "message") | .id' "$EXPORT" | wc -l     # expect 791
+```
+
+Install the new `gc`. With it:
+
+```
+gc storage recover-stranded --from-work --purge-type message --dry-run
+#   the same 791 rows, and the same digest as the rehearsal; stop if not
+gc storage recover-stranded --from-work --fleet-stopped --purge-type message \
+  --confirm-purge --expect-count 791 --expect-digest <digest>
+#   note the backup path it prints
+gc storage status
+#   expect: converged: yes, stranded: 0, purged stranded: 791, exit 0
+gc storage recover-stranded --from-work --restore-purge <backup> --dry-run
+#   the rollback is ready: 791 to restore, no collision; nothing is written.
+#   If it says the work store cannot import verbatim, the rollback is the
+#   raw bd fallback.
+```
+
+Copy the backup and the ledger off the host before you start the city:
+
+```
+scp <backup> .gc/store/infra.purged-stranded.jsonl <backup-host>:<dir>/
+```
+
+If `gc storage status` still reports retained or unrecorded rows, resolve
+them as described in the following sections before `gc start`.
+
+Rollback, with the city stopped:
+
+```
+gc storage recover-stranded --from-work --fleet-stopped --restore-purge <backup>
+```
+
+If the restore cannot run, use the raw bd fallback above with MC's pinned bd.
+First check that no id in the backup is now held by another row. This must
+print nothing:
+
+```
+jq -r '.entry.bead.id' <backup> | sort -u > /tmp/purged-ids
+$BD export --all | jq -r '.id' | sort -u > /tmp/work-ids
+comm -12 /tmp/purged-ids /tmp/work-ids
+```
 
 ### A reused id the binding still holds
 
@@ -653,7 +1085,8 @@ just as the controller skips it: what its own store holds comes back on
 `gc rig resume`, and routed graph work in the binding stays visible throughout
 (see [`gc ready`](/reference/cli#gc-ready)). Every worker's generated work query
 is already swapped onto it, so this affects operators and ad-hoc scripts, not
-the work loop.
+the work loop. The core orphan-sweep order also reads in-progress claims
+through it.
 
 `gc ready` is flag-compatible with the `bd ready` invocation that generated work
 query builds — **not** with all of `bd ready`. It takes `--assignee`,

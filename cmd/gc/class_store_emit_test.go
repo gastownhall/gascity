@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1407,7 +1408,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		if err != nil {
 			t.Fatalf("creating the session row: %v", err)
 		}
-		if _, err := sessionpkg.WriteKillFence(sessions, row.ID, time.Now().UTC()); err != nil {
+		if _, err := sessionpkg.WriteKillFence(beadstest.Sessions(sessions), row.ID, time.Now().UTC()); err != nil {
 			t.Fatalf("writing the kill fence: %v", err)
 		}
 		if got := beadEventCount(t, cityPath, events.BeadUpdated, row.ID); got != 1 {
@@ -1418,7 +1419,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		// the revision and be re-decided, never overwritten blind.
 		leaf := writer.(*emittingClassStore).Store
 		decisions := 0
-		err = sessionpkg.ApplyKillFencePatch(sessions, row.ID, func(beads.Bead) (map[string]string, bool) {
+		err = sessionpkg.ApplyKillFencePatch(beadstest.Sessions(sessions), row.ID, func(beads.Bead) (map[string]string, bool) {
 			decisions++
 			if decisions == 1 {
 				if err := leaf.SetMetadata(row.ID, "test_racer", "won"); err != nil {
@@ -1435,7 +1436,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("control dispatcher graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "require")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		writer, _, err := beads.ResolveConditionalWriter(graph)
 		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
@@ -1482,7 +1483,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
 		captureCLIStorageStderr(t)
-		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+		graph := controlGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
 
 		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
 			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
@@ -1506,7 +1507,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 			},
 			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
 		}
-		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+		result, err := molecule.Attach(context.Background(), beadstest.GraphMolecule(graph), recipe, control.ID, molecule.AttachOptions{
 			IdempotencyKey: control.ID + ":attempt:2",
 			ExpectedEpoch:  1,
 		})
@@ -1742,12 +1743,26 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
-			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
+			// DepMetadataAbsentByProtocol forwards the engine's declaration, and
+			// neither engine declares one: ("", false), as its absence answers.
+			"DepMetadataAbsentByProtocol",
+			"HasResidentOutside", "NamespaceCensusHandle",
+			// ReadyBlockedByAbsent over native Dolt reports no rows, and
+			// StrandsAbsentTargets answers false, so ReadyBlockedByAbsentFor
+			// finds no listing, as over the bare engine: bd never strands a
+			// dependent behind an absent blocker (it reads it as external).
+			"ReadyBlockedByAbsent", "ReadyContext",
 			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
+			"StrandsAbsentTargets",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ConditionalWritesModeSource", "Count", "DepListBatch",
+			"DepMetadataAbsentByProtocol",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
+			// GetExactBatch over a SQLite binding reports
+			// beads.ErrExactBatchGetUnsupported, and the caller reads per id:
+			// the path it takes when the wrapper lacks the method.
+			"GetExactBatch",
 			// ReadyOrdered over a SQLite binding delegates to beads.ReadyOrdered,
 			// which reads a store without the capability whole and reports
 			// ordered=false: the path a caller takes when the wrapper lacks it.

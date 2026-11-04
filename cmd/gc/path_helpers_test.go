@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"github.com/rogpeppe/go-internal/testscript"
 )
 
 // doltLeakGuardGraceInitialInterval and doltLeakGuardGraceMaxElapsedTime
@@ -135,7 +136,7 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 }
 
 type doltLeakGuardedTestingM struct {
-	m        *testing.M
+	m        testscript.TestingM
 	tempRoot string
 	// sourceRoot is the package directory the test binary runs in. A managed
 	// dolt provider handed a city root of "" or "." resolves it to this
@@ -167,7 +168,7 @@ func (g *doltLeakGuardedTestingM) diagWriter() io.Writer {
 	return os.Stderr
 }
 
-func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+func newDoltLeakGuardedTestingM(m testscript.TestingM, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
 	// A failure here must not be fatal: os.Getwd only fails in exotic cases
 	// (an unlinked cwd), and losing the second root degrades the guard to its
 	// previous tempRoot-only behavior rather than breaking every test run.

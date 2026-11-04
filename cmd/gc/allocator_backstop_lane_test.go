@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1189,9 +1190,11 @@ type panickingListStore struct{ beads.Store }
 
 func (panickingListStore) List(beads.ListQuery) ([]beads.Bead, error) { panic("list exploded") }
 
-// Kills: an exact leg recorded, which would put live reads of the sessions
-// binding back on the lane. A pass over an exact leg records no demand and
-// never reads its backing; the same leg not exact is the control.
+// Kills: an exact leg recorded on a city that relocates nothing, which would
+// put live reads of the sessions binding back on the lane. A pass over an
+// exact leg records no demand and never reads its backing; the same leg not
+// exact is the control. (A split city records its exact gate legs' Ready,
+// gated: TestSplitCityV2DemandIsGatedOffThePass.)
 func TestBackstopLaneNeverRecordsExactLeg(t *testing.T) {
 	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	for _, exact := range []bool{true, false} {
@@ -1324,7 +1327,7 @@ func TestBackstopLaneWakesOnReadyOnlyChange(t *testing.T) {
 // content.
 func TestBackstopRecordingSameContentComparesRowsErrorsAndIndexes(t *testing.T) {
 	store := beads.NewMemStore()
-	idx, _ := session.BuildClosedNamedSessionBeadIndex(beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-c", "mayor")}, nil))
+	idx, _ := session.BuildClosedNamedSessionBeadIndex(beadstest.Sessions(beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-c", "mayor")}, nil)))
 	demand, closed, scale := keyOf(sourceDemand, store), keyOf(sourceClosedNamed, store), sourceKey{kind: sourceScaleCheck}
 	base := func() *externalReadsRecording {
 		return &externalReadsRecording{Sources: map[sourceKey]sourceResult{

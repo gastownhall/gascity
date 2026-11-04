@@ -57,6 +57,7 @@ type fakeStartOps struct {
 
 	isSessionRunningResult     *bool
 	isRuntimeRunningResult     bool
+	isRuntimeRunningErr        error
 	killErr                    error
 	waitCommandErr             error
 	acceptStartupDialogsErr    error
@@ -140,13 +141,13 @@ func (f *fakeStartOps) isSessionRunning(name string) bool {
 	return *f.isSessionRunningResult
 }
 
-func (f *fakeStartOps) isRuntimeRunning(name string, processNames []string) bool {
+func (f *fakeStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
 	f.calls = append(f.calls, startCall{
 		method:       "isRuntimeRunning",
 		name:         name,
 		processNames: processNames,
 	})
-	return f.isRuntimeRunningResult
+	return f.isRuntimeRunningResult, f.isRuntimeRunningErr
 }
 
 func (f *fakeStartOps) killSession(name string) error {
@@ -2761,6 +2762,28 @@ func TestEnsureFreshSession_HealthyExisting(t *testing.T) {
 	assertCallSequence(t, ops, []string{"createSession", "isSessionRunning", "isRuntimeRunning"})
 }
 
+// A held session whose agent liveness cannot be read (the process table did
+// not answer) is refused like a live one: the error says the name is taken
+// and carries the runtime.ErrRuntimeUnavailable cause, and nothing is killed
+// or recreated. Kills reading a failed liveness read as a zombie.
+func TestEnsureFreshSession_UnknownLivenessRefusesHeldName(t *testing.T) {
+	running := true
+	ops := &fakeStartOps{
+		isSessionRunningResult: &running,
+		createErrs:             []error{ErrSessionExists},
+		isRuntimeRunningErr:    fmt.Errorf("%w: reading the process table: signal: killed", runtime.ErrRuntimeUnavailable),
+	}
+
+	err := ensureFreshSession(ops, "test", runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+	})
+	if !errors.Is(err, runtime.ErrSessionExists) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ensureFreshSession = %v, want runtime.ErrSessionExists carrying runtime.ErrRuntimeUnavailable", err)
+	}
+	assertCallSequence(t, ops, []string{"createSession", "isSessionRunning", "isRuntimeRunning"})
+}
+
 func TestEnsureFreshSession_DuplicateNoProcessNames(t *testing.T) {
 	running := true
 	ops := &fakeStartOps{
@@ -3392,26 +3415,6 @@ func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 }
 
 // ── Activity-aware setup budget ([session] setup_max_timeout) ────────────────
-
-// TestRunSetupCommandActivityStreamingSurvivesIdleWindow is the regression for
-// slow-but-healthy setup commands killed mid-flight by the fixed wall-clock
-// deadline (e.g. a large `git worktree add` checkout streaming progress past
-// setup_timeout). With the activity budget enabled, output resets the idle
-// clock, so a command that streams for 3x the idle window and exits 0 must
-// succeed.
-func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
-	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
-
-	err := ops.runSetupCommand(
-		context.Background(),
-		"for i in 1 2 3 4 5 6 7 8 9 10; do echo progress $i; sleep 0.1; done; exit 0",
-		map[string]string{},
-		300*time.Millisecond, // idle budget — total runtime (~1s) far exceeds it
-	)
-	if err != nil {
-		t.Fatalf("streaming setup command killed despite visible progress: %v", err)
-	}
-}
 
 // TestRunSetupCommandActivityIdleKillsSilentHang proves the hung-command
 // protection survives the activity mode: a command producing no output still

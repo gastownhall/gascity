@@ -45,16 +45,19 @@ package main
 // signal HOLDS rather than proceeds — the #312 rule that "we cannot tell" is
 // never "idle".
 //
-// Known bounded exposure: the k8s and ssh providers' GetLastActivity shell
-// `tmux display-message -p '#{session_activity}'` inside the pod, and
-// session-level activity does not advance on pane I/O for a detached session
-// (see Tmux.rawSessionActivity, which queries per-window activity for exactly
-// this reason). A busy k8s agent therefore reads as idle-since-attach and can
-// be nudged mid-turn. The ssh provider has the same exposure for the same
-// reason (internal/runtime/ssh/provider.go reads #{session_activity} and
-// reports CanReportActivity: true). Every other provider is fail-closed. The
-// exposure is capped at drainReminderMaxAttempts informational nudges per drain
-// and is tracked as its own fix rather than papered over here.
+// Known bounded exposure: the maintained exec session scripts for k8s and
+// Docker boxes (contrib/session-scripts/gc-session-k8s,
+// scripts/gc-session-docker) answer get-last-activity from
+// `tmux display-message -p '#{session_activity}'`, and session-level activity
+// does not advance on pane I/O for a detached session (see
+// Tmux.rawSessionActivity, which queries per-window activity for exactly this
+// reason). A busy agent in such a box therefore reads as idle-since-attach and
+// can be nudged mid-turn. (The native k8s and ssh providers read the
+// per-window clock less gc's own keystroke echo, as the local tmux provider
+// does; see runtime.PokeLedger.) The exposure is capped at
+// drainReminderMaxAttempts informational nudges per drain. Fixing it needs the
+// scripts to read the per-window clock and the exec provider to discount its
+// own nudges, not a workaround here.
 
 import (
 	"errors"
@@ -131,6 +134,7 @@ const (
 	drainReminderHoldExhausted     = "attempts_exhausted"
 	drainReminderHoldAckUnknown    = "ack_unreadable"
 	drainReminderHoldContentHeld   = "content_held"
+	drainReminderHoldPending       = "pending_interaction"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -208,7 +212,7 @@ func maybeRemindDrainingSession(
 		return drainReminderHeld
 	}
 
-	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now); !proceed {
+	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now, stdout); !proceed {
 		return outcome
 	}
 
@@ -487,7 +491,7 @@ func drainReminderContentHeld(due drainReminderDue) bool {
 // a turn is answering its own drain; an unreadable signal is not evidence it is
 // not). proceed is false when one of those holds, carrying the outcome to return.
 // An attachment probe that cannot tell holds under its own reason.
-func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time) (drainReminderOutcome, bool) {
+func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time, stdout io.Writer) (drainReminderOutcome, bool) {
 	if !sp.IsRunning(name) {
 		return drainReminderSkipped, false // the stop took after all; the finalizer owns it
 	}
@@ -505,6 +509,20 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 	}
 	if now.Sub(activity) < drainReminderGrace {
 		noteDrainReminderHold(store, info, drainReminderHoldBusy)
+		return drainReminderHeld, false
+	}
+	// A reminder typed into an open dialog (a permission prompt or an
+	// AskUserQuestion question) would answer it, and a refused attempt still
+	// spends budget, so hold before the marker is written.
+	blocked := pendingInteractionBlocked(sp, name)
+	shadowHold(sp, name, info.ID, sessions.ProviderFamilyFromInfo(info, ""),
+		runtime.ProgramPointDrainReminder, blocked, now, runtime.ProgramBlockedHoldVerdict)
+	if blocked {
+		if noteDrainReminderHold(store, info, drainReminderHoldPending) {
+			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+				"%s: holding the drain reminder for %s: it is waiting on a dialog that is answered in the terminal\n",
+				drainReminderLabel, name)
+		}
 		return drainReminderHeld, false
 	}
 	return drainReminderDelivered, true
@@ -527,11 +545,12 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // never replay an unbounded stream. A nudge error still spends the attempt
 // (the write-ahead is what bounds the loop, and unwinding it would let a
 // permanently input-dead pane re-send forever) and records that nothing
-// ARRIVED, so the escalation reports what actually happened. The one
-// exception is a deferral (runtime.ErrSessionBusy): the runtime typed nothing
+// ARRIVED, so the escalation reports what actually happened. The exception
+// is a deferral (drainReminderDeferralHold): the runtime submitted nothing
 // because the session was running a turn its submit keys would have
-// interrupted, so nothing was attempted and the marker is restored to what it
-// held, under the busy hold.
+// interrupted, or was waiting on a pending interaction its text would have
+// answered, so nothing was attempted and the marker is restored to what it
+// held, under the busy or pending hold.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
 	failed := due.failed
 	journalPrior := func() {}
@@ -556,9 +575,9 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 		return drainReminderSkipped
 	}
 	err := nudgeDrainReminder(sp, name, info)
-	if errors.Is(err, runtime.ErrSessionBusy) {
+	if hold := drainReminderDeferralHold(err); hold != "" {
 		writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts, due.failed, due.settled, due.last, stdout)
-		noteDrainReminderHold(store, info, drainReminderHoldBusy)
+		noteDrainReminderHold(store, info, hold)
 		return drainReminderHeld
 	}
 	journalPrior()
@@ -578,6 +597,21 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 		"%s: drain reminder %d/%d delivered to %s (stop-pending, unacked)\n",
 		drainReminderLabel, due.attempts+1, drainReminderMaxAttempts, name)
 	return drainReminderDelivered
+}
+
+// drainReminderDeferralHold is the hold a reminder delivery's err puts the
+// row under when the runtime submitted nothing and the attempt is not
+// spent, or "": a session running a turn its submit keys would interrupt
+// (runtime.ErrSessionBusy), or one waiting on a pending interaction its
+// text would answer, which opened after the hold's own look.
+func drainReminderDeferralHold(err error) string {
+	switch {
+	case errors.Is(err, runtime.ErrSessionBusy):
+		return drainReminderHoldBusy
+	case nudgeRefusedBehindPendingInteraction(err):
+		return drainReminderHoldPending
+	}
+	return ""
 }
 
 // nudgeDrainReminder types the reminder into the session directly: with

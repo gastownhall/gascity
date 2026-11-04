@@ -72,6 +72,20 @@ const (
 	// demand again when it changes, when the city config changes, or for one
 	// probe seat each time the hold's backoff runs out.
 	BeadClaimLoopHeld = "bead.claim_loop_held"
+	// AgentClaimsStalled fires when the controller's claims-stall guard
+	// (cmd/gc/claim_stall_guard.go) finds an agent template's seats no longer
+	// claiming the work routed to them on the provider they run: several seats
+	// in a row failed to start, were escalated by the work ladder for an
+	// unanswered trigger, or stayed unclaimed past the claim deadline while
+	// their trigger waited. It is an operator alert (the core pack's
+	// notify-on-claims-stalled order mails it); the payload says what the
+	// guard did about it and until when, and it is raised again, in the same
+	// episode, each time a probe seat fails.
+	AgentClaimsStalled = "agent.claims_stalled"
+	// AgentClaimsResumed fires when a stall the guard found ends: a seat on
+	// the stalled provider claimed its work, or a config change moved the
+	// template off it. Any hold on the template's demand is lifted.
+	AgentClaimsResumed = "agent.claims_resumed"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -132,6 +146,13 @@ const (
 	WorkReleased          = "work.released"
 	WorkReleaseUnfinished = "work.release_unfinished"
 	WorkEscalated         = "work.escalated"
+	// WorkRateLimited is one move of a seat's rate-limit episode
+	// (internal/workladder): its provider refusing its turns with a rate
+	// limit, as the agent's own transcript classifies them. Subject carries
+	// the session ID, SessionID the seat; the payload is
+	// WorkRateLimitedPayload. It reports facts for a pack's provider policy
+	// and for people; the SDK draws no conclusion about the provider from it.
+	WorkRateLimited = "work.rate_limited"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -207,7 +228,10 @@ const (
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
-	// whether to clear-assignee-and-respawn or escalate.
+	// whether to clear-assignee-and-respawn or escalate. A pool seat parked
+	// on pre-assigned blocked work (cmd/gc/seat_parked.go) does not fire it;
+	// one that stops parking (past its bound, or crowded out of a full
+	// slot-bounded pool) fires it though its work is an open, unstarted pin.
 	SessionStranded = "session.stranded"
 	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
 	// retires a pool-managed session bead that entered drain and never
@@ -289,6 +313,13 @@ const (
 	// first, which is correct pull, not a defect) and divergence (the row is
 	// still open, unassigned and route-matching, so the readers disagreed).
 	SessionDemandClaimDivergence = "session.demand_claim_divergence"
+	// SessionProgramStatusShadow fires, only while the city's [session]
+	// program_status switch is shadow, at a decision point that reads the
+	// screen today: it records today's reading beside what the program's own
+	// OSC 7501 record would decide. It is a diagnostics comparison and never
+	// influences the decision it reports on. Continuously evaluated points
+	// record only when their reading changes. Closed tokens only.
+	SessionProgramStatusShadow = "session.program_status_shadow"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -592,6 +623,17 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+
+	// StorageRigImport is published once per rig by `gc storage migrate
+	// --from-rigs`: what the import did for that rig (imported, clean,
+	// nothing to import, refused, failed).
+	StorageRigImport = "storage.rig_import"
+	// StorageRigResidue is published by the controller's asynchronous rig
+	// census (at boot, or when a rig suspended at boot resumes) for each rig
+	// that holds infrastructure rows the city binding should hold: a rig
+	// awaiting import, a clear left pending, or rows written to the rig after
+	// its import.
+	StorageRigResidue = "storage.rig_residue"
 )
 
 // IsJournalDerived reports whether eventType is one the controller derives
@@ -622,6 +664,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
+	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
 	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
@@ -629,12 +672,13 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
 	BeadClaimFailed, BeadClaimLoopHeld,
+	AgentClaimsStalled, AgentClaimsResumed,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
-	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated, WorkRateLimited,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -668,6 +712,7 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
+	StorageRigImport, StorageRigResidue,
 	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
 	// from KnownEventTypes. Each is emitted by the reconciler but its typed
 	// SSE payload is not yet registered in internal/api (the payload registration lives in a

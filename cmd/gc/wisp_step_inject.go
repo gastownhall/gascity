@@ -344,13 +344,19 @@ func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activ
 		var sample []beads.Bead
 		owner := map[string]activeStepReader{}
 		for _, reader := range readers {
-			results, err := reader.List(beads.ListQuery{
-				Status:    "in_progress",
-				Type:      molType,
-				Assignees: assignees,
-				TierMode:  beads.TierBoth,
-				Limit:     activeMoleculeSample,
-				Sort:      beads.SortCreatedDesc,
+			// One leg of the molecule union (S3a): graph roots in the graph
+			// store, v1 poured molecules (work class) on the work legs.
+			var results []beads.Bead
+			err := beads.FederatedRead(func() (err error) {
+				results, err = reader.List(beads.ListQuery{
+					Status:    "in_progress",
+					Type:      molType,
+					Assignees: assignees,
+					TierMode:  beads.TierBoth,
+					Limit:     activeMoleculeSample,
+					Sort:      beads.SortCreatedDesc,
+				})
+				return err
 			})
 			if err != nil {
 				return nil, nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)

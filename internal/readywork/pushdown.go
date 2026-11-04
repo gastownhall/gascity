@@ -151,13 +151,13 @@ func readyRead(q beads.ReadyQuery) legRead {
 
 // readReadyCandidates reads the ready arm: each leg asked with the pushed
 // predicates and, where it is exact, a pushed limit.
-func readReadyCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+func readReadyCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
 	plain := readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	q := readyReadQuery(c)
 	order, bounded := boundedOrder(c)
 	switch {
 	case bounded:
-		return readNarrowed(ctx, legs, c, boundedRead(c, q, order), plain)
+		return readNarrowed(ctx, legs, c, boundedRead(c, q, order, cs), plain)
 	case predicatesPushed(q):
 		return readNarrowed(ctx, legs, c, readyRead(q), plain)
 	default:
@@ -206,7 +206,12 @@ func readNarrowed(ctx context.Context, legs []Leg, c compiled, narrowed, plain l
 // not a row in hand, and counting it could end a binding's read before rows of
 // its own the answer needs. A store that cannot cut in order returns its whole
 // set.
-func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead {
+//
+// On a split city a row a cross-store blocker holds is not a row in hand either
+// (crossstore.go), so it does not count toward the limit: a leg whose top rows
+// are held widens its own cut, step by step, until enough of its rows can be
+// served, and no leg's whole ready set is re-read for it.
+func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder, cs *crossStore) legRead {
 	limit := c.query.Limit
 	return func(ctx context.Context, leg Leg) legResult {
 		want := limit + boundedSlack
@@ -220,10 +225,22 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead
 			if !ordered || len(rows) < want {
 				return legResult{rows: rows}
 			}
-			kept := 0
+			var usable []beads.Bead
 			for _, b := range rows {
 				if mergeKeeps(leg, b.ID) && c.matches(b) {
-					kept++
+					usable = append(usable, b)
+				}
+			}
+			kept := len(usable)
+			if cs != nil && kept >= limit {
+				blocked, err := cs.blockedRows(ctx, cs.legIndex(leg.Store), usable)
+				if err != nil {
+					return legResult{err: err}
+				}
+				for _, b := range usable {
+					if blocked[b.ID] {
+						kept--
+					}
 				}
 			}
 			if kept >= limit {

@@ -4,7 +4,13 @@
 // protocol handshake, so gc sees no activity capability, timed-only sleep,
 // no input fence and no delivery-key deduplication.
 //
-//	fakeruntime --state <dir> <op> [<name> [args...]]
+//	fakeruntime --state <dir> [--profile observe.v1] <op> [<name> [args...]]
+//
+// With --profile observe.v1 it declares observe.v1 and report-attachment
+// (v2-ready, locality "local") and serves observe, inventory and kill-object
+// over the same files, so a conversation-lane journey can run on reconciler
+// v2: identity is the start env's identity keys, stored before the box, and
+// the agent lives iff a process name is the start command's first word.
 //
 // Every invocation is appended to <dir>/ops.jsonl. Each nudge is appended,
 // under a flock, to <dir>/deliveries.jsonl as one JSON line holding the
@@ -51,11 +57,23 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) < 3 || args[0] != "--state" {
-		fmt.Fprintln(stderr, "usage: fakeruntime --state <dir> <op> [<name> [args...]]") //nolint:errcheck // usage
+		fmt.Fprintln(stderr, "usage: fakeruntime --state <dir> [--profile observe.v1] <op> [<name> [args...]]") //nolint:errcheck // usage
 		return 1
 	}
 	s := state{dir: args[1]}
-	op, rest := args[2], args[3:]
+	args = args[2:]
+	if len(args) >= 2 && args[0] == "--profile" {
+		if args[1] != profileObserveV1 {
+			fmt.Fprintf(stderr, "fakeruntime: unknown profile %q\n", args[1]) //nolint:errcheck // usage
+			return 1
+		}
+		s.observe, args = true, args[2:]
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "fakeruntime: missing op") //nolint:errcheck // usage
+		return 1
+	}
+	op, rest := args[0], args[1:]
 	if err := s.record(op, rest); err != nil {
 		fmt.Fprintf(stderr, "fakeruntime: recording %s: %v\n", op, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -67,6 +85,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	out, code, err := s.do(op, name, rest, stdin)
 	if err != nil {
 		fmt.Fprintf(stderr, "fakeruntime: %s %s: %v\n", op, name, err) //nolint:errcheck // best-effort stderr
+		if code != 0 {
+			return code // a contract exit code (73: a fresh_only start over a held name)
+		}
 		return 1
 	}
 	if out != "" {
@@ -75,7 +96,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return code
 }
 
-type state struct{ dir string }
+// profileObserveV1 is the --profile value that serves observe.v1.
+const profileObserveV1 = "observe.v1"
+
+// exitFreshCollision is a fresh_only start refusing a held name.
+const exitFreshCollision = 73
+
+type state struct {
+	dir     string
+	observe bool // serves the observe.v1 profile
+}
 
 func (s state) path(parts ...string) string { return filepath.Join(s.dir, strings.Join(parts, ".")) }
 
@@ -135,6 +165,11 @@ func boolText(b bool) string {
 
 // do carries out op and returns its stdout and exit code.
 func (s state) do(op, name string, rest []string, stdin io.Reader) (string, int, error) {
+	if s.observe {
+		if out, code, ok, err := s.doObserve(op, name, stdin); ok {
+			return out, code, err
+		}
+	}
 	switch op {
 	case "start":
 		return "", 0, s.start(name, stdin)
