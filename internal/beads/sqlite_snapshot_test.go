@@ -46,10 +46,9 @@ func TestVacuumSQLiteIntoCopiesALiveWALDatabase(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for !stop.Load() {
-			b, err := store.Create(Bead{Title: "during"})
-			if err == nil {
-				err = store.DepAdd(b.ID, anchor.ID, "blocks")
-			}
+			// The row and its edge in one transaction, so a consistent copy
+			// holds both or neither.
+			_, err := store.Create(Bead{Title: "during", Needs: []string{"blocks:" + anchor.ID}})
 			if err != nil {
 				writeErr.Store(err)
 				return

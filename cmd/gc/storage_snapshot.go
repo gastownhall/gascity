@@ -65,7 +65,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 const (
@@ -85,8 +84,6 @@ const (
 	// storageSnapshotDiskMargin is the free space a snapshot leaves beyond
 	// its estimate.
 	storageSnapshotDiskMargin = 64 << 20
-	// storageSnapshotBatch is the anchors per batched edge read.
-	storageSnapshotBatch = 500
 )
 
 // The exact-copy methods a manifest records.
@@ -520,9 +517,10 @@ func snapshotBinding(ctx context.Context, target infraBindingTarget, dir string)
 		return rec, fmt.Errorf("listing the copy: %w", err)
 	}
 	batch, _ := beads.As[beads.DependencyBatchLister](store)
+	payloadBatch, _ := beads.As[beads.DepMetadataBatchReader](store)
 	payloads, _ := beads.As[beads.DepMetadataReader](store)
 	_, absent := beads.DepMetadataAbsent(store)
-	entries, edges, verdict, err := readSnapshotEntries(rows, store, batch, payloads, absent)
+	entries, edges, verdict, err := readSnapshotEntries(rows, store, batch, payloadBatch, payloads, absent)
 	if err != nil {
 		return rec, err
 	}
@@ -600,9 +598,10 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, id, d
 		return rec, fmt.Errorf("listing the store: %w", err)
 	}
 	batch, _ := beads.As[beads.DependencyBatchLister](under)
+	payloadBatch, _ := beads.As[beads.DepMetadataBatchReader](under)
 	payloads, _ := beads.As[beads.DepMetadataReader](under)
 	_, absent := beads.DepMetadataAbsent(under)
-	entries, edges, verdict, err := readSnapshotEntries(rows, store, batch, payloads, absent)
+	entries, edges, verdict, err := readSnapshotEntries(rows, store, batch, payloadBatch, payloads, absent)
 	if err != nil {
 		return rec, err
 	}
@@ -630,70 +629,40 @@ func snapshotTagFallsBack(err error) bool {
 	return errors.Is(err, beads.ErrProxiedNativeReadOnly) || errors.Is(err, beads.ErrDoltTagUnsupported)
 }
 
-// snapshotDepLister is the per-row edge read every store answers.
-type snapshotDepLister interface {
-	DepList(id, direction string) ([]beads.Dep, error)
-}
-
-// readSnapshotEntries reads every row's down edges, in batches when batch is
-// non-nil, and each edge's payload when payloads can be asked. absent says
-// the store's protocol carries none. Edges are recorded once, on the row they
-// leave, so a whole store needs no Dependents.
-func readSnapshotEntries(rows []beads.Bead, one snapshotDepLister, batch beads.DependencyBatchLister, payloads beads.DepMetadataReader, absent bool) ([]infraBackupEntry, int, string, error) {
+// readSnapshotEntries builds the JSONL entries of a whole store with the copy
+// engine's readers (infra_copy_engine.go): every row's down edges, in batches
+// where the store lists them so, and their payloads, in batches where it
+// reads them so, unless its protocol carries none (absent) or it cannot be
+// asked (payloads == nil and payloadBatch == nil). Every row is recorded, so
+// each edge is recorded once, on the row it leaves.
+func readSnapshotEntries(rows []beads.Bead, one infraEdgeLister, batch beads.DependencyBatchLister, payloadBatch beads.DepMetadataBatchReader, payloads beads.DepMetadataReader, absent bool) ([]infraBackupEntry, int, string, error) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-	down := make(map[string][]beads.Dep, len(rows))
-	batched := batch != nil
-	for start := 0; batched && start < len(rows); start += storageSnapshotBatch {
-		ids := make([]string, 0, storageSnapshotBatch)
-		for _, b := range rows[start:min(start+storageSnapshotBatch, len(rows))] {
-			ids = append(ids, b.ID)
-		}
-		got, err := batch.DepListBatch(ids)
-		if errors.Is(err, beads.ErrDepListBatchUnsupported) {
-			batched = false
-			break
-		}
-		if err != nil {
-			return nil, 0, "", fmt.Errorf("reading edges: %w", err)
-		}
-		for _, id := range ids {
-			down[id] = got[id]
-		}
+	ids := make([]string, 0, len(rows))
+	all := make(map[string]bool, len(rows))
+	for _, b := range rows {
+		ids = append(ids, b.ID)
+		all[b.ID] = true
 	}
-	if !batched {
-		for _, b := range rows {
-			deps, err := one.DepList(b.ID, "down")
-			if err != nil {
-				return nil, 0, "", fmt.Errorf("reading the edges of %s: %w", b.ID, err)
-			}
-			down[b.ID] = deps
-		}
+	down, err := readInfraDownEdges(batch, one, ids)
+	if err != nil {
+		return nil, 0, "", err
 	}
-	verdict := snapshotPayloadsRead
+	verdict, carried := snapshotPayloadsRead, map[beads.DepPair]string{}
 	switch {
 	case absent:
 		verdict = snapshotPayloadsNone
-	case payloads == nil:
+	case payloads == nil && payloadBatch == nil:
 		verdict = snapshotPayloadsUnanswered
-	}
-	entries := make([]infraBackupEntry, 0, len(rows))
-	edges := 0
-	for _, b := range rows {
-		entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String()}
-		for _, d := range down[b.ID] {
-			edge := infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type}
-			if verdict == snapshotPayloadsRead {
-				payload, err := infraReadEdgePayloadFrom(payloads, d.IssueID, d.DependsOnID)
-				if err != nil {
-					return nil, 0, "", err
-				}
-				edge.Payload, edge.Carried = payload.Payload, payload.Carried
-			}
-			entry.Deps = append(entry.Deps, edge)
+	default:
+		every := func(beads.Dep) bool { return true }
+		if carried, err = readInfraPayloads(payloadBatch, payloads, down, every); err != nil {
+			return nil, 0, "", err
 		}
-		sortInfraBackupEdges(entry.Deps)
-		edges += len(entry.Deps)
-		entries = append(entries, entry)
+	}
+	entries := infraBackupEntriesFrom(rows, down, carried, all)
+	edges := 0
+	for _, e := range entries {
+		edges += len(e.Deps)
 	}
 	return entries, edges, verdict, nil
 }

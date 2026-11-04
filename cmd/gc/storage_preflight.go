@@ -62,6 +62,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // storagePreflightVerb is the read-only rehearsal of the migrate verb.
@@ -211,7 +212,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return 0
 	}
 	if state == infraConvergenceStale {
-		preflightPass(stdout, "cutover", "a convergence marker exists with no database under it, so the copy would run again and re-converge")
+		preflightPass(stdout, "cutover", fmt.Sprintf("a convergence marker exists and %s, so the copy would run again and re-converge", infraStaleCause(target)))
 	} else {
 		preflightPass(stdout, "cutover", "not converged yet, which is what the migration is for")
 	}
@@ -219,8 +220,10 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	// 6. What the copy would carry, and whether it could read it. A read that
 	// failed leaves the whole clearance unfounded, so it blocks rather than
 	// reporting zero — the same positive-looking absence this path refuses
-	// everywhere else. The edge-payload refusal runs on the same open source and
-	// the same snapshot the migration hands it, because a payload the copy cannot
+	// everywhere else. The edge-payload refusal runs on the same open source,
+	// the same snapshot, and the same id set the migration hands it, so it reads
+	// the edges the way the copy will (in batches, over every row the work store
+	// holds, when the store lists them in batches): a payload the copy cannot
 	// READ is refused by edge id at exactly this point in the window. Whether it
 	// could WRITE one is not asked here: that answer lives on the destination,
 	// and opening the destination is the one thing this rehearsal will not do.
@@ -228,12 +231,12 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	if err != nil {
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
-	rows, listErr := readInfraSnapshot(source)
+	rows, allIDs, listErr := readInfraSnapshotWithIDs(source, coordclass.CurrentGeneration)
 	var edgeErr error
 	if listErr == nil {
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
-		_, _, edgeErr = infraSourceEdgePayloadRefusal(source, rows)
+		_, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
 		fmt.Fprintf(stderr, "%s: closing the work store: %v\n", storagePreflightLogPrefix, closeErr) //nolint:errcheck // best-effort stderr
