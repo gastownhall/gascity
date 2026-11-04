@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -378,7 +377,7 @@ func (f rnsFakeResolver) lookupOwnSession(string) (ownSessionRecord, bool, error
 	return f.rec, f.ok, f.err
 }
 
-func (f rnsFakeResolver) lookupOwnSessionsByName(string) ([]ownSessionRecord, error) {
+func (f rnsFakeResolver) lookupOwnSessionsByName(string, func(ownSessionRecord) bool) ([]ownSessionRecord, error) {
 	if !f.ok {
 		return nil, f.err
 	}
@@ -665,17 +664,30 @@ func TestCitySessionResolverNegativeMemoExpires(t *testing.T) {
 
 func TestCitySessionResolverMissThenCreated(t *testing.T) {
 	// A pool id is pinned before its record exists. A miss cached then must
-	// not outlive the record's appearance in the controller's snapshot.
+	// not outlive the record's appearance in the controller's snapshot, nor
+	// come back once the session closes and leaves the snapshot.
 	var snap *sessionBeadSnapshot
-	store := rnsNewCountingStore()
+	mem := beads.NewMemStoreFrom(100, nil, nil)
+	mem.HonorExplicitIDs = true
+	store := &rnsCountingStore{Store: mem, prefix: "gcx"}
 	res := newControllerSessionResolver(cityPathB, func() sessionRecordIndex { return snap }, rnsStoreOpener(store))
 	ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
 	if ns.admits(poolIDB) {
 		t.Fatal("admitted before the record exists")
 	}
+	if _, err := store.Create(rnsSessionBead(poolIDB, templateB, "")); err != nil {
+		t.Fatal(err)
+	}
 	snap = newSessionBeadSnapshotFromInfos([]sessionpkg.Info{{ID: poolIDB, Type: sessionpkg.BeadType, Template: templateB}})
 	if !ns.admits(poolIDB) {
 		t.Fatal("snapshot record refused behind a cached miss")
+	}
+	if err := store.Close(poolIDB); err != nil {
+		t.Fatal(err)
+	}
+	snap = newSessionBeadSnapshotFromInfos(nil)
+	if !ns.admits(poolIDB) {
+		t.Fatal("own closed pool session refused behind the miss cached before it existed")
 	}
 }
 
@@ -689,6 +701,31 @@ func TestCitySessionResolverSessionNameLookup(t *testing.T) {
 	}
 	if ns.admits("crew-other-" + poolIDB) {
 		t.Fatal("a name the record does not carry was admitted")
+	}
+}
+
+// TestCitySessionResolverPoolNameBaseStartsWithIDPrefix: a rig agent whose
+// template base starts with the city's own "<prefix>-session-" runs pool
+// sessions whose names start with it too. Such a name is admitted through its
+// trailing id, and the whole name is never read as an id.
+func TestCitySessionResolverPoolNameBaseStartsWithIDPrefix(t *testing.T) {
+	template := "beta/gcx-session-worker"
+	name := PoolSessionName(template, poolIDB)
+	if name != "gcx-session-worker-"+poolIDB {
+		t.Fatalf("PoolSessionName = %q", name)
+	}
+	store := rnsNewCountingStore(rnsSessionBead(poolIDB, template, name))
+	ns, _ := newRigNamespace(rnsGuardedRig("beta"), newControllerSessionResolver(cityPathB, nil, rnsStoreOpener(store)))
+	if a := ns.admission(name); a.Via != admitSessionRecord || a.Err != nil {
+		t.Fatalf("admission(%q) = %+v, want session_record", name, a)
+	}
+	for _, b := range []beads.Bead{rnsRow(name, nil), rnsRow("", rnsMD(beadmeta.SessionNameMetadataKey, name))} {
+		if got := ns.classifyRow(b); got.Class != rowOwned {
+			t.Errorf("own row %+v classifies %+v, want owned", b, got)
+		}
+	}
+	if got := store.gets.Load(); got != 1 {
+		t.Fatalf("store read %d times, want 1 (the trailing id only)", got)
 	}
 }
 
@@ -848,6 +885,11 @@ func TestOwnPoolSessionIDCandidates(t *testing.T) {
 		{"a-b-c-d-e-f-" + poolIDB, []string{poolIDB}},
 		{"hq-session-" + tokenB, []string{"hq-session-" + tokenB}},
 		{"crew-hq-session-" + tokenB, []string{"hq-session-" + tokenB}},
+		// A template base may start with an own "<prefix>-session-": only the
+		// trailing id is a candidate, though the whole name has the pool shape.
+		{"gcx-session-worker-" + poolIDB, []string{poolIDB}},
+		{"hq-session-worker-" + poolIDB, []string{poolIDB}},
+		{"gcx-session-" + tokenA + "-" + poolIDB, []string{poolIDB}},
 		// Another prefix is never a candidate, as an id or inside a name.
 		{"gcs-session-" + tokenB, nil},
 		{"crew-gcs-session-" + tokenB, nil},
@@ -936,74 +978,6 @@ func TestRigNamespaceKeyHelpers(t *testing.T) {
 			t.Errorf("rigRouteQualified(%q) = %v, want %v", v, got, want)
 		}
 	}
-}
-
-func TestRigNamespaceForScopeRoot(t *testing.T) {
-	city := t.TempDir()
-	betaDir := filepath.Join(city, "rigs", "beta")
-	alphaDir := filepath.Join(city, "rigs", "alpha")
-	cfg := &config.City{Rigs: []config.Rig{
-		{Name: "alpha", Path: "rigs/alpha"},
-		{Name: "beta", Path: betaDir, Federation: config.RigFederationRig},
-		{Name: "nopath", Federation: config.RigFederationRig},
-	}}
-	res := newControllerSessionResolver(city, nil, nil)
-	cases := []struct {
-		name   string
-		scope  string
-		wantNS string
-		wantOK bool
-	}{
-		{"guarded rig root", betaDir, ownerStampB, true},
-		{"guarded rig root relative", "rigs/beta", ownerStampB, true},
-		{"guarded rig root unclean", betaDir + "/./", ownerStampB, true},
-		{"unguarded rig", alphaDir, "", false},
-		{"city root", city, "", false},
-		{"inside the rig is not its root", filepath.Join(betaDir, "sub"), "", false},
-		{"empty", "", "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ns, ok := rigNamespaceFor(cfg, city, tc.scope, res)
-			if ok != tc.wantOK || ns.namespace() != tc.wantNS {
-				t.Fatalf("rigNamespaceFor(%q) = %q %v, want %q %v", tc.scope, ns.namespace(), ok, tc.wantNS, tc.wantOK)
-			}
-			if ok && ns.sessions != res {
-				t.Fatal("namespace does not carry the caller's resolver")
-			}
-		})
-	}
-	if _, ok := rigNamespaceFor(nil, city, betaDir, res); ok {
-		t.Fatal("nil config returned a namespace")
-	}
-}
-
-func TestRigNamespaceForAmbiguousScope(t *testing.T) {
-	city := t.TempDir()
-	shared := filepath.Join(city, "rigs", "shared")
-	t.Run("guarded wins over unguarded", func(t *testing.T) {
-		cfg := &config.City{Rigs: []config.Rig{
-			{Name: "alpha", Path: shared},
-			{Name: "beta", Path: shared, Federation: config.RigFederationRig},
-		}}
-		ns, ok := rigNamespaceFor(cfg, city, shared, nil)
-		if !ok || ns.namespace() != ownerStampB {
-			t.Fatalf("got %q %v, want beta/", ns.namespace(), ok)
-		}
-	})
-	t.Run("two guarded admit nothing", func(t *testing.T) {
-		cfg := &config.City{Rigs: []config.Rig{
-			{Name: "alpha", Path: shared, Federation: config.RigFederationRig},
-			{Name: "beta", Path: shared, Federation: config.RigFederationRig},
-		}}
-		ns, ok := rigNamespaceFor(cfg, city, shared, nil)
-		if !ok || ns == nil {
-			t.Fatal("ambiguous guarded scope returned no namespace")
-		}
-		if ns.admits("alpha/x") || ns.admits("beta/x") || ns.classify(rnsRow("", rnsMD(beadmeta.OwnerNamespaceMetadataKey, ownerStampB))) != rowForeign {
-			t.Fatal("ambiguous guarded scope admitted something")
-		}
-	})
 }
 
 func TestRigNamespaceForRigNameAndBeadID(t *testing.T) {
@@ -1798,7 +1772,7 @@ func TestCitySessionResolverNameLookupExact(t *testing.T) {
 		rnsSessionBead("gcx-22", "beta/other", "beta--other"),
 	)}
 	res := newControllerSessionResolver(cityPathB, nil, rnsStoreOpener(store))
-	recs, err := res.lookupOwnSessionsByName("beta--lead")
+	recs, err := res.lookupOwnSessionsByName("beta--lead", nil)
 	if err != nil || len(recs) != 1 || recs[0].ID != "gcx-21" {
 		t.Fatalf("lookupOwnSessionsByName = %+v, %v; want only gcx-21", recs, err)
 	}
@@ -1817,6 +1791,258 @@ func TestCitySessionResolverNameLookupReadsPastFirstRecord(t *testing.T) {
 	}
 }
 
+// TestCitySessionResolverNameFastPathsDoNotHideStoreRecords: a record the
+// controller's snapshot or the caller's own session holds under a name, but
+// that is not one of the rig's agents, does not hide the rig's record of that
+// name in the session store, here a closed one.
+func TestCitySessionResolverNameFastPathsDoNotHideStoreRecords(t *testing.T) {
+	newStore := func(t *testing.T) *rnsCountingStore {
+		t.Helper()
+		store := rnsNewCountingStore(
+			rnsSessionBead("gcx-21", "lead", "beta--lead"),
+			rnsSessionBead("gcx-22", "beta/lead", "beta--lead"),
+		)
+		if err := store.Close("gcx-22"); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	row := rnsRow("", rnsMD(beadmeta.SessionNameMetadataKey, "beta--lead"))
+	t.Run("snapshot", func(t *testing.T) {
+		snap := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{{
+			ID: "gcx-21", Type: sessionpkg.BeadType, Template: "lead",
+			SessionName: "beta--lead", SessionNameMetadata: "beta--lead",
+		}})
+		res := newControllerSessionResolver(cityPathB, func() sessionRecordIndex { return snap }, rnsStoreOpener(newStore(t)))
+		ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+		if got := ns.classifyRow(row); got.Class != rowOwned {
+			t.Fatalf("rig record behind a city-scoped snapshot record = %+v, want owned", got)
+		}
+	})
+	t.Run("own session", func(t *testing.T) {
+		city := t.TempDir()
+		env := map[string]string{"GC_CITY_PATH": city, "GC_SESSION_ID": "gcx-21", "GC_SESSION_NAME": "beta--lead", "GC_TEMPLATE": "lead"}
+		res := newCitySessionResolver(citySessionResolverOptions{
+			CityPath:  city,
+			Getenv:    func(k string) string { return env[k] },
+			OpenStore: rnsStoreOpener(newStore(t)),
+		})
+		ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+		if got := ns.classifyRow(row); got.Class != rowOwned {
+			t.Fatalf("rig record behind the caller's city-scoped session = %+v, want owned", got)
+		}
+	})
+}
+
+// TestCitySessionResolverNameMemoYieldsToSnapshot is the name twin of
+// TestCitySessionResolverMissThenCreated: a store answer remembered for a name
+// before the rig's record of it existed (a miss, or another record of the
+// name) does not hide that record once its session closes and leaves the
+// snapshot.
+func TestCitySessionResolverNameMemoYieldsToSnapshot(t *testing.T) {
+	info := func(b beads.Bead) sessionpkg.Info {
+		name := b.Metadata["session_name"]
+		return sessionpkg.Info{ID: b.ID, Type: sessionpkg.BeadType, Template: b.Metadata["template"], SessionName: name, SessionNameMetadata: name}
+	}
+	row := rnsRow("", rnsMD(beadmeta.SessionNameMetadataKey, "beta--lead"))
+	for _, tc := range []struct {
+		name string
+		// before are open under the name before the rig's record exists.
+		before []beads.Bead
+	}{
+		{"miss", nil},
+		{"another record", []beads.Bead{rnsSessionBead("gcx-21", "lead", "beta--lead")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStoreFrom(100, nil, nil)
+			mem.HonorExplicitIDs = true
+			store := &rnsCountingStore{Store: mem, prefix: "gcx"}
+			var open []sessionpkg.Info
+			for _, b := range tc.before {
+				if _, err := store.Create(b); err != nil {
+					t.Fatal(err)
+				}
+				open = append(open, info(b))
+			}
+			snap := newSessionBeadSnapshotFromInfos(open)
+			res := newControllerSessionResolver(cityPathB, func() sessionRecordIndex { return snap }, rnsStoreOpener(store))
+			ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+			if got := ns.classifyRow(row); got.Class != rowForeign {
+				t.Fatalf("before the rig's record exists = %+v, want foreign", got)
+			}
+			for _, b := range tc.before {
+				if err := store.Close(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rigLead := rnsSessionBead("gcx-22", "beta/lead", "beta--lead")
+			if _, err := store.Create(rigLead); err != nil {
+				t.Fatal(err)
+			}
+			snap = newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info(rigLead)})
+			if got := ns.classifyRow(row); got.Class != rowOwned {
+				t.Fatalf("rig record open in the snapshot = %+v, want owned", got)
+			}
+			if err := store.Close(rigLead.ID); err != nil {
+				t.Fatal(err)
+			}
+			snap = newSessionBeadSnapshotFromInfos(nil)
+			fresh, _ := newRigNamespace(rnsGuardedRig("beta"), newControllerSessionResolver(cityPathB, nil, rnsStoreOpener(store)))
+			if got := fresh.classifyRow(row); got.Class != rowOwned {
+				t.Fatalf("fresh resolver after the close = %+v, want owned", got)
+			}
+			res.beginPass()
+			if got := ns.classifyRow(row); got.Class != rowOwned {
+				t.Fatalf("after the close = %+v, want owned, as a fresh resolver reads it", got)
+			}
+		})
+	}
+}
+
+// rnsHeldListStore reads the store when List is called but holds the first
+// answer until releaseFirst: a slow read that saw the store before a later
+// write.
+type rnsHeldListStore struct {
+	*rnsCountingStore
+	first   sync.Once
+	read    chan struct{} // closed once the first List has read the store
+	release chan struct{}
+	unblock sync.Once
+}
+
+func (s *rnsHeldListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.rnsCountingStore.List(q)
+	held := false
+	s.first.Do(func() {
+		held = true
+		close(s.read)
+	})
+	if held {
+		<-s.release
+	}
+	return rows, err
+}
+
+// releaseFirst lets the first List return.
+func (s *rnsHeldListStore) releaseFirst() { s.unblock.Do(func() { close(s.release) }) }
+
+// TestCitySessionResolverNameReadOlderThanSnapshotForgotten: a store read of a
+// name that saw the store before the rig's record existed, and still runs when
+// the snapshot answers with that record, is forgotten. Its answer is not
+// remembered, and a later lookup does not wait on it, so neither hides the
+// record once its session closes.
+func TestCitySessionResolverNameReadOlderThanSnapshotForgotten(t *testing.T) {
+	row := rnsRow("", rnsMD(beadmeta.SessionNameMetadataKey, "beta--lead"))
+	// start holds a lookup's store read that saw no record, then opens the
+	// rig's record in the snapshot, where another lookup accepts it, and
+	// closes it again. The held read still runs when start returns.
+	start := func(t *testing.T) (*rigNamespace, *citySessionResolver, *rnsHeldListStore, <-chan struct{}) {
+		t.Helper()
+		mem := beads.NewMemStoreFrom(100, nil, nil)
+		mem.HonorExplicitIDs = true
+		store := &rnsHeldListStore{
+			rnsCountingStore: &rnsCountingStore{Store: mem, prefix: "gcx"},
+			read:             make(chan struct{}),
+			release:          make(chan struct{}),
+		}
+		var snap atomic.Pointer[sessionBeadSnapshot]
+		snap.Store(newSessionBeadSnapshotFromInfos(nil))
+		res := newControllerSessionResolver(cityPathB, func() sessionRecordIndex { return snap.Load() }, rnsStoreOpener(store))
+		ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+		heldDone := make(chan struct{})
+		go func() {
+			defer close(heldDone)
+			ns.classifyRow(row)
+		}()
+		t.Cleanup(func() {
+			store.releaseFirst()
+			<-heldDone
+		})
+		awaitClose(t, store.read, "the first store read")
+		if _, err := store.Create(rnsSessionBead("gcx-22", "beta/lead", "beta--lead")); err != nil {
+			t.Fatal(err)
+		}
+		snap.Store(newSessionBeadSnapshotFromInfos([]sessionpkg.Info{{
+			ID: "gcx-22", Type: sessionpkg.BeadType, Template: "beta/lead",
+			SessionName: "beta--lead", SessionNameMetadata: "beta--lead",
+		}}))
+		if got := ns.classifyRow(row); got.Class != rowOwned {
+			t.Fatalf("rig record open in the snapshot = %+v, want owned", got)
+		}
+		if err := store.Close("gcx-22"); err != nil {
+			t.Fatal(err)
+		}
+		snap.Store(newSessionBeadSnapshotFromInfos(nil))
+		return ns, res, store, heldDone
+	}
+	t.Run("answer not remembered", func(t *testing.T) {
+		ns, res, store, heldDone := start(t)
+		store.releaseFirst()
+		awaitClose(t, heldDone, "the held lookup")
+		res.beginPass()
+		if got := ns.classifyRow(row); got.Class != rowOwned {
+			t.Fatalf("after the close = %+v, want owned: the read that saw no record was remembered", got)
+		}
+	})
+	t.Run("not waited on", func(t *testing.T) {
+		ns, _, _, _ := start(t)
+		var got rowClassification
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			got = ns.classifyRow(row)
+		}()
+		awaitClose(t, done, "a lookup after the close, while the read that saw no record is held")
+		if got.Class != rowOwned {
+			t.Fatalf("after the close = %+v, want owned", got)
+		}
+	})
+}
+
+// TestCitySessionResolverIDFastPathsDoNotHidePoolRecord: a record the
+// snapshot or the caller's own session holds under a pool session's runtime
+// name, but whose short id cannot be that session's record (the bead the
+// adoption barrier makes for a runtime that outlived its record), does not
+// hide the pool record in the session store, here a closed one.
+func TestCitySessionResolverIDFastPathsDoNotHidePoolRecord(t *testing.T) {
+	newStore := func(t *testing.T) *rnsCountingStore {
+		t.Helper()
+		store := rnsNewCountingStore(
+			rnsSessionBead(poolIDB, templateB, poolNameB),
+			rnsSessionBead("gcx-101", "", poolNameB),
+		)
+		if err := store.Close(poolIDB); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	row := rnsRow(poolNameB, nil)
+	t.Run("snapshot", func(t *testing.T) {
+		snap := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{{
+			ID: "gcx-101", Type: sessionpkg.BeadType,
+			SessionName: poolNameB, SessionNameMetadata: poolNameB,
+		}})
+		res := newControllerSessionResolver(cityPathB, func() sessionRecordIndex { return snap }, rnsStoreOpener(newStore(t)))
+		ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+		if got := ns.classifyRow(row); got.Class != rowOwned {
+			t.Fatalf("pool record behind an adopted snapshot record = %+v, want owned", got)
+		}
+	})
+	t.Run("own session", func(t *testing.T) {
+		city := t.TempDir()
+		env := map[string]string{"GC_CITY_PATH": city, "GC_SESSION_ID": "gcx-101", "GC_SESSION_NAME": poolNameB, "GC_TEMPLATE": templateB}
+		res := newCitySessionResolver(citySessionResolverOptions{
+			CityPath:  city,
+			Getenv:    func(k string) string { return env[k] },
+			OpenStore: rnsStoreOpener(newStore(t)),
+		})
+		ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+		if got := ns.classifyRow(row); got.Class != rowOwned {
+			t.Fatalf("pool record behind the caller's adopted session = %+v, want owned", got)
+		}
+	})
+}
+
 func TestCitySessionResolverConfiguredPrefixTrimmed(t *testing.T) {
 	store := rnsNewCountingStore(rnsSessionBead(poolIDB, templateB, poolNameB))
 	store.prefix = ""
@@ -1827,7 +2053,8 @@ func TestCitySessionResolverConfiguredPrefixTrimmed(t *testing.T) {
 }
 
 // TestCitySessionResolverSelfAnswersOnlyItsName: the caller's own session
-// answers only to its own name; other names still reach the store.
+// answers to its own name without a store read; other names still reach the
+// store.
 func TestCitySessionResolverSelfAnswersOnlyItsName(t *testing.T) {
 	city := t.TempDir()
 	env := map[string]string{"GC_CITY_PATH": city, "GC_SESSION_ID": "gcx-51", "GC_SESSION_NAME": "beta--lead", "GC_TEMPLATE": "beta/lead"}
@@ -1838,6 +2065,9 @@ func TestCitySessionResolverSelfAnswersOnlyItsName(t *testing.T) {
 		OpenStore: rnsStoreOpener(store),
 	})
 	ns, _ := newRigNamespace(rnsGuardedRig("beta"), res)
+	if got := ns.classify(rnsRow("", rnsMD(beadmeta.SessionNameMetadataKey, "beta--lead"))); got != rowOwned || store.lists.Load() != 0 {
+		t.Fatalf("own session's name classifies %s after %d store lists, want owned after none", got, store.lists.Load())
+	}
 	for v, want := range map[string]rowClass{"beta--lead": rowOwned, "beta--old": rowOwned, "beta--ghost": rowForeign} {
 		if got := ns.classify(rnsRow("", rnsMD(beadmeta.SessionNameMetadataKey, v))); got != want {
 			t.Errorf("session_name=%q classifies %s, want %s", v, got, want)
@@ -1948,7 +2178,7 @@ func TestCitySessionResolverOverlongValueSkipsStore(t *testing.T) {
 	if ns.admits(long) {
 		t.Fatal("overlong value admitted")
 	}
-	if recs, err := res.lookupOwnSessionsByName("beta/" + strings.Repeat("x", 600)); recs != nil || err != nil {
+	if recs, err := res.lookupOwnSessionsByName("beta/"+strings.Repeat("x", 600), nil); recs != nil || err != nil {
 		t.Fatalf("overlong name lookup = %v, %v", recs, err)
 	}
 	res.mu.Lock()

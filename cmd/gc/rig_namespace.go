@@ -96,10 +96,10 @@ type rowClassification struct {
 	Rule  rowRule
 	// Key and Value name the deciding entry: for a Foreign row under the owner
 	// keys, the first owner value that is not admitted; for an Owned row under
-	// the claim stamps, the admitted stamp; for the creation stamp, the stamp.
-	// Both are empty for an Unattributed row, for an Owned row under the
-	// owner keys, and for a Foreign row under the claim stamps (none of them
-	// is admitted; Key is the first stamp present).
+	// the claim stamps, the admitted stamp, and for a Foreign one, the first
+	// stamp present (none is admitted); for the creation stamp, the stamp.
+	// Both are empty for an Unattributed row and for an Owned row under the
+	// owner keys.
 	Key   string
 	Value string
 	// Err is a session lookup failure that kept a value from being admitted.
@@ -285,30 +285,6 @@ func denyAllRigNamespace(sessions ownSessionResolver) *rigNamespace {
 	return &rigNamespace{sessions: sessions}
 }
 
-// rigNamespaceFor returns the namespace guarding the store whose scope root is
-// scopeRoot, or (nil, false) when no guarded rig owns that directory. cityPath
-// resolves relative rig paths. sessions must be this city's own resolver; the
-// supervisor runs several cities in one process, so the caller passes the
-// resolver of the city whose config cfg is.
-//
-// It fails closed on a configuration that validation refuses: when a guarded
-// rig shares the directory with an unguarded one, the guarded rig wins; when
-// two guarded rigs share it, the namespace admits nothing. A rig with no path
-// has no store of its own and is skipped (opening such a rig is refused
-// where stores are opened).
-func rigNamespaceFor(cfg *config.City, cityPath, scopeRoot string, sessions ownSessionResolver) (*rigNamespace, bool) {
-	if cfg == nil || strings.TrimSpace(scopeRoot) == "" {
-		return nil, false
-	}
-	want := normalizePathForCompare(resolveStoreScopeRoot(cityPath, scopeRoot))
-	return pickGuardedRig(cfg.Rigs, sessions, func(r *config.Rig) bool {
-		if strings.TrimSpace(r.Path) == "" {
-			return false
-		}
-		return normalizePathForCompare(resolveStoreScopeRoot(cityPath, r.Path)) == want
-	})
-}
-
 // rigNamespaceForRigName looks up the configured rig called name (exact,
 // case-sensitive match). known reports whether such a rig exists; guarded
 // whether it is guarded, in which case ns is its namespace. Callers must
@@ -485,12 +461,15 @@ func (n *rigNamespace) nameStampAdmission(v string) rigAdmission {
 	if !n.admitsLexically(key) {
 		return rigAdmission{}
 	}
-	recs, err := n.sessions.lookupOwnSessionsByName(key)
+	admits := func(rec ownSessionRecord) bool {
+		return ownSessionNameIs(rec, key) && n.templateInRig(rec.Template)
+	}
+	recs, err := n.sessions.lookupOwnSessionsByName(key, admits)
 	if err != nil {
 		return rigAdmission{Err: err}
 	}
 	for _, rec := range recs {
-		if ownSessionNameIs(rec, key) && n.templateInRig(rec.Template) {
+		if admits(rec) {
 			return rigAdmission{Via: admitSessionRecord, Record: rec}
 		}
 	}

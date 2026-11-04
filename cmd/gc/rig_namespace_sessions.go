@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -55,34 +56,21 @@ func embedsPoolSessionID(v string) bool {
 }
 
 // ownPoolSessionIDCandidates returns the bead ids v could name in this
-// city's session store: for each of the city's session id prefixes p, v
-// itself when it is a pool id "<p>-session-<token>", or the last such id v
-// ends with after a "-" (a pool session name). The candidates are lookup keys
+// city's session store: for each of the city's session id prefixes p, the
+// pool id "<p>-session-<token>" whose token is v's last "-" segment, when v
+// is that id or ends with it after a "-" (a pool session name, whose template
+// base may itself start with "<p>-session-"). The candidates are lookup keys
 // only; the record found must still answer to v.
 func ownPoolSessionIDCandidates(v string, prefixes []string) []string {
 	if v == "" || len(v) > maxOwnSessionIdentityLen {
 		return nil
 	}
+	token := v[strings.LastIndex(v, "-")+1:]
 	var out []string
-	add := func(id string) {
-		if !isPoolSessionBeadID(id) {
-			return
-		}
-		for _, have := range out {
-			if have == id {
-				return
-			}
-		}
-		out = append(out, id)
-	}
 	for _, p := range prefixes {
-		marker := p + "-session-"
-		if strings.HasPrefix(v, marker) {
-			add(v)
-			continue
-		}
-		if i := strings.LastIndex(v, "-"+marker); i >= 0 {
-			add(v[i+1:])
+		id := p + "-session-" + token
+		if (v == id || strings.HasSuffix(v, "-"+id)) && isPoolSessionBeadID(id) && !slices.Contains(out, id) {
+			out = append(out, id)
 		}
 	}
 	return out
@@ -131,8 +119,14 @@ type ownSessionResolver interface {
 	// only ids carrying the city's own session id prefixes.
 	lookupOwnSession(v string) (ownSessionRecord, bool, error)
 	// lookupOwnSessionsByName finds the session records whose recorded
-	// session_name is name, whatever the shape of their ids.
-	lookupOwnSessionsByName(name string) ([]ownSessionRecord, error)
+	// session_name is name, whatever the shape of their ids. A record held
+	// in memory (the caller's own session, the controller's snapshot of open
+	// records) is the whole answer only when accept takes it (a nil accept
+	// takes none); otherwise the answer is the session store's records of the
+	// name, open or closed, as read now or remembered from an earlier read.
+	// A remembered answer never outlives an accepted record held in memory:
+	// once that record leaves memory, the store is read again.
+	lookupOwnSessionsByName(name string, accept func(ownSessionRecord) bool) ([]ownSessionRecord, error)
 }
 
 // sessionRecordIndex is the in-memory view of the city's open session
@@ -145,9 +139,12 @@ type sessionRecordIndex interface {
 var _ sessionRecordIndex = (*sessionBeadSnapshot)(nil)
 
 const (
-	// ownSessionNegativeTTL is how long a "no such record" answer is reused.
-	// This city's own sessions reach its snapshot, which is consulted first,
-	// so a long-lived miss cannot hide one of its open sessions.
+	// ownSessionNegativeTTL is how long a "no such record" answer, or the
+	// store's answer to a name, is reused. The snapshot of this city's open
+	// sessions is consulted first, so a long-lived answer cannot hide a
+	// session it answers for. Once that session closes, a pool session
+	// record the snapshot answered with stays remembered, and a name it
+	// answered for is read from the store again.
 	ownSessionNegativeTTL = time.Hour
 	// ownSessionNegativeLimit bounds the remembered misses. Hits are this
 	// city's own records and are never evicted.
@@ -176,15 +173,24 @@ const (
 //     GC_SESSION_NAME and GC_TEMPLATE, used only when GC_CITY_PATH (or
 //     GC_CITY) names this city;
 //  2. the controller's snapshot of the city's open session records;
-//  3. a memo of earlier store answers: pool session records are kept by
-//     their bead ids (bounded by ownSessionHitLimit) and answer every
-//     spelling of their id and name; name answers and misses are kept for
+//  3. a memo of earlier answers: pool session records the snapshot or the
+//     store answered with are kept by their bead ids (bounded by
+//     ownSessionHitLimit) and answer every spelling of their id and name;
+//     the store's name answers and misses are kept for
 //     ownSessionNegativeTTL; errors are never kept;
 //  4. the city's session store: a read by id for each candidate id that
 //     carries the city's own session id prefix, or a session_name query.
 //
-// Concurrent lookups of one key share one store read; a read that fails or
-// panics is an error to every caller waiting on it. After a store error,
+// An id lookup stops at 1 or 2 only with a pool session record: an id of the
+// pool shape that answers to the value. Any other record found there leaves
+// it to 3 and 4. A name lookup stops at 1 or 2 only when its caller accepts
+// the record found there, and then drops the name's memo (forgetName), so
+// the store is read again once the record leaves memory; otherwise it goes
+// on to 3 and 4.
+//
+// Concurrent lookups of one key share one store read, except that a name
+// read forgetName dropped is shared no further; a read that fails or panics
+// is an error to every caller waiting on it. After a store error,
 // lookups that need the store fail fast until ownSessionErrorBackoff passes
 // or beginPass is called, and the store handle is reopened on the next
 // attempt. It is safe for concurrent use.
@@ -220,6 +226,9 @@ type ownSessionCall struct {
 	done chan struct{}
 	recs []ownSessionRecord
 	err  error
+	// forgotten (guarded by mu) marks a read whose answer newer evidence
+	// replaced while it ran (forgetName): it is not remembered.
+	forgotten bool
 }
 
 // citySessionResolverOptions configures newCitySessionResolver. Every source
@@ -350,15 +359,24 @@ func (r *citySessionResolver) lookupOwnSession(v string) (ownSessionRecord, bool
 	if v == "" || len(v) > maxOwnSessionIdentityLen || !embedsPoolSessionID(v) {
 		return ownSessionRecord{}, false, nil
 	}
-	if r.self != nil && ownSessionAnswersTo(*r.self, v) {
+	// The caller's own session and the snapshot answer only with v's pool
+	// session record. Another record they hold under v, such as the bead the
+	// adoption barrier makes for a pool session's runtime that outlived its
+	// record, leaves the lookup to the memo and the store, which find the
+	// pool record by its id.
+	if r.self != nil && isPoolRecordOf(*r.self, v) {
 		return *r.self, true, nil
 	}
 	if idx := r.index(); idx != nil {
-		if info, ok := idx.FindInfoByID(v); ok {
-			return ownSessionRecordFromInfo(info), true, nil
+		info, ok := idx.FindInfoByID(v)
+		if !ok {
+			info, ok = idx.FindInfoBySessionName(v)
 		}
-		if info, ok := idx.FindInfoBySessionName(v); ok {
-			return ownSessionRecordFromInfo(info), true, nil
+		if ok {
+			if rec := ownSessionRecordFromInfo(info); isPoolRecordOf(rec, v) {
+				r.rememberSnapshotRecord(rec)
+				return rec, true, nil
+			}
 		}
 	}
 	if rec, ok := r.poolHit(v); ok {
@@ -366,18 +384,38 @@ func (r *citySessionResolver) lookupOwnSession(v string) (ownSessionRecord, bool
 	}
 	recs, err := r.cached("id\x00"+v, func(store beads.SessionStore, prefixes []string) ([]ownSessionRecord, error) {
 		return readPoolSessionRecord(store, v, prefixes)
-	}, func(recs []ownSessionRecord) {
-		if len(r.hits) >= ownSessionHitLimit {
-			r.hits = make(map[string]ownSessionRecord)
-		}
-		for _, rec := range recs {
-			r.hits[rec.ID] = rec
-		}
-	})
+	}, r.rememberHitsLocked)
 	if err != nil || len(recs) == 0 {
 		return ownSessionRecord{}, false, err
 	}
 	return recs[0], true, nil
+}
+
+// isPoolRecordOf reports whether rec can be the pool session record v names:
+// its id has the pool shape, and it answers to v.
+func isPoolRecordOf(rec ownSessionRecord, v string) bool {
+	return isPoolSessionBeadID(rec.ID) && ownSessionAnswersTo(rec, v)
+}
+
+// rememberSnapshotRecord keeps a pool session record the snapshot answered
+// with, as a store read would keep it, so it still answers after the session
+// closes and leaves the snapshot, ahead of a miss remembered before the
+// record existed.
+func (r *citySessionResolver) rememberSnapshotRecord(rec ownSessionRecord) {
+	r.mu.Lock()
+	r.rememberHitsLocked([]ownSessionRecord{rec})
+	r.mu.Unlock()
+}
+
+// rememberHitsLocked keeps pool session records by their bead ids, dropping
+// all of them first when the bound is reached; callers hold mu.
+func (r *citySessionResolver) rememberHitsLocked(recs []ownSessionRecord) {
+	if len(r.hits) >= ownSessionHitLimit {
+		r.hits = make(map[string]ownSessionRecord)
+	}
+	for _, rec := range recs {
+		r.hits[rec.ID] = rec
+	}
 }
 
 // poolHit answers v from the remembered pool session records: a record
@@ -403,7 +441,7 @@ func (r *citySessionResolver) prefixesLocked() []string {
 }
 
 // lookupOwnSessionsByName implements ownSessionResolver.
-func (r *citySessionResolver) lookupOwnSessionsByName(name string) ([]ownSessionRecord, error) {
+func (r *citySessionResolver) lookupOwnSessionsByName(name string, accept func(ownSessionRecord) bool) ([]ownSessionRecord, error) {
 	if r == nil {
 		return nil, nil
 	}
@@ -411,12 +449,21 @@ func (r *citySessionResolver) lookupOwnSessionsByName(name string) ([]ownSession
 	if name == "" || len(name) > maxOwnSessionIdentityLen {
 		return nil, nil
 	}
-	if r.self != nil && r.self.SessionName != "" && ownSessionNameIs(*r.self, name) {
+	// The caller's own session and the snapshot each answer with one record
+	// of the name at most; its other records, open or closed, are found only
+	// in the store. A record accepted there drops the name's memo: a store
+	// answer read before the record existed would hide it once it leaves
+	// memory.
+	if r.self != nil && r.self.SessionName != "" && ownSessionNameIs(*r.self, name) && accept != nil && accept(*r.self) {
+		r.forgetName(name)
 		return []ownSessionRecord{*r.self}, nil
 	}
 	if idx := r.index(); idx != nil {
 		if info, ok := idx.FindInfoBySessionName(name); ok {
-			return []ownSessionRecord{ownSessionRecordFromInfo(info)}, nil
+			if rec := ownSessionRecordFromInfo(info); accept != nil && accept(rec) {
+				r.forgetName(name)
+				return []ownSessionRecord{rec}, nil
+			}
 		}
 	}
 	r.mu.Lock()
@@ -428,7 +475,7 @@ func (r *citySessionResolver) lookupOwnSessionsByName(name string) ([]ownSession
 		delete(r.nameHits, name)
 	}
 	r.mu.Unlock()
-	return r.cached("name\x00"+name, func(store beads.SessionStore, _ []string) ([]ownSessionRecord, error) {
+	return r.cached(ownSessionNameKey(name), func(store beads.SessionStore, _ []string) ([]ownSessionRecord, error) {
 		return readSessionRecordsByName(store, name)
 	}, func(recs []ownSessionRecord) {
 		if len(r.nameHits) >= ownSessionNameHitLimit {
@@ -436,6 +483,27 @@ func (r *citySessionResolver) lookupOwnSessionsByName(name string) ([]ownSession
 		}
 		r.nameHits[name] = ownSessionNameHit{recs: recs, at: r.now()}
 	})
+}
+
+// ownSessionNameKey is the key of a name lookup in the miss memo and among
+// the reads in flight.
+func ownSessionNameKey(name string) string { return "name\x00" + name }
+
+// forgetName drops what the memo holds for name, its store answer and its
+// miss, after a caller accepted a record of name held in memory. A store read
+// of name still running may predate that record: it still answers the
+// callers already waiting on it, but it is not remembered, and later lookups
+// do not wait on it.
+func (r *citySessionResolver) forgetName(name string) {
+	key := ownSessionNameKey(name)
+	r.mu.Lock()
+	delete(r.nameHits, name)
+	delete(r.misses, key)
+	if c, ok := r.inflight[key]; ok {
+		c.forgotten = true
+		delete(r.inflight, key)
+	}
+	r.mu.Unlock()
 }
 
 func (r *citySessionResolver) index() sessionRecordIndex {
@@ -453,7 +521,8 @@ func ownSessionRecordFromInfo(info sessionpkg.Info) ownSessionRecord {
 // cached answers key from the miss memo, or runs read against the session
 // store once for all concurrent callers. A non-empty answer is handed to
 // rememberHit (under mu), an empty one remembered as a miss, and an error
-// (or a panic in read, which is re-raised) starts the backoff.
+// (or a panic in read, which is re-raised) starts the backoff. An answer
+// forgotten while the read ran (forgetName) is returned but not remembered.
 func (r *citySessionResolver) cached(key string, read func(beads.SessionStore, []string) ([]ownSessionRecord, error), rememberHit func([]ownSessionRecord)) ([]ownSessionRecord, error) {
 	if r.openStore == nil {
 		return nil, nil
@@ -488,11 +557,15 @@ func (r *citySessionResolver) cached(key string, read func(beads.SessionStore, [
 			r.invalidateStore()
 		}
 		r.mu.Lock()
-		delete(r.inflight, key)
+		if r.inflight[key] == c {
+			delete(r.inflight, key)
+		}
 		switch {
 		case c.err != nil:
 			r.failErr = c.err
 			r.failUntil = r.now().Add(ownSessionErrorBackoff)
+		case c.forgotten:
+			// A caller accepted a record of the key while the read ran.
 		case len(c.recs) > 0:
 			rememberHit(c.recs)
 		default:
