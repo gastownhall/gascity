@@ -1,0 +1,23 @@
+▐▛███▛█   Claude Code v2.1.308
+▝▜██████▀  Opus 5.5 with max effort · Claude Ultra
+ ▝▝   ▝▝   ~/…/claude/default-public-claude-qualified
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                        ✔ Update installed · Restart to update
+────────────────────────────────────────────────────────────────────────────────
+❯ Try "how does <filepath> work?"
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

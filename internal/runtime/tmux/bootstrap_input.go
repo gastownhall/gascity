@@ -370,7 +370,7 @@ func pristineBootstrapScreen(screen, family string) bool {
 			}
 		}
 	case "claude":
-		if !strings.Contains(text, "Claude Code v") || !strings.Contains(text, "Welcome") {
+		if (!strings.Contains(text, "Claude Code v") || !strings.Contains(text, "Welcome")) && !compactClaudeBootstrapScreen(screen) {
 			return false
 		}
 	default:
@@ -387,6 +387,32 @@ func pristineBootstrapScreen(screen, family string) bool {
 		}
 	}
 	return prompts == 1 && paneShowsDrainedComposer(plain)
+}
+
+// Compact Claude 2.1.308 omits Welcome. Match its complete branded frame,
+// leaving composer text intact: the final dim-aware drain must still prove
+// emptiness. A literal Try suggestion typed as a draft never becomes empty.
+var compactClaudeBootstrapFrame = regexp.MustCompile(
+	`^▐▛███▛█ Claude Code v2\.1\.308\n` +
+		`▝▜██████▀ (?:Opus|Sonnet|Haiku) [0-9]+(?:\.[0-9]+)*(?: with (?:low|medium|high|max) effort)? · Claude Ultra\n` +
+		`▝▝ ▝▝ (?:~/|/)[^\n]+\n` +
+		`(?:✔ Update installed · Restart to update\n)?` +
+		`─+\n❯(?: [^\n]{0,512})?\n─+\n` +
+		`⏵⏵ (?:bypass permissions|don't ask|auto mode|accept edits) on \(shift\+tab to cycle\)(?: · ← for agents)?$`)
+
+func compactClaudeBootstrapScreen(screen string) bool {
+	// Unknown controls remain unknown. Never erase arbitrary OSC/CSI content.
+	structure := compactCodexBootstrapSGR.ReplaceAllString(screen, "")
+	if strings.ContainsRune(structure, '\x1b') {
+		return false
+	}
+	var rows []string
+	for _, row := range strings.Split(strings.ReplaceAll(structure, "\r", ""), "\n") {
+		if row = strings.Join(strings.Fields(row), " "); row != "" {
+			rows = append(rows, row)
+		}
+	}
+	return compactClaudeBootstrapFrame.MatchString(strings.Join(rows, "\n"))
 }
 
 // Compact 0.162.1 renders no command menu. Recognize its complete initial UI,

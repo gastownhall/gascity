@@ -36,6 +36,35 @@ var capturedCodexCompactPristine string
 //go:embed testdata/codex-f4-suggest-pristine-screen.txt
 var capturedCodexSuggestPristine string
 
+// Actual unstyled GC API compact frame; only the private cwd token changes.
+// Its literal Try text alone does not prove that the native composer is empty.
+//
+//go:embed testdata/claude-f5-compact-update-screen.txt
+var capturedClaudeCompactAPI string
+
+// Exact current -e capture from a fresh root-owned F5 Claude2.1.308 runtime.
+// Only its private cwd token changes. SGR bytes and real dim placeholder remain.
+// This frame proves presentation, not availability of a native READY credit.
+//
+//go:embed testdata/claude-f5-compact-styled-screen.txt
+var capturedClaudeCompactStyled string
+
+func claudeCompactWithComposer(t *testing.T, content string) string {
+	t.Helper()
+	lines := strings.Split(capturedClaudeCompactStyled, "\n")
+	found := 0
+	for i, line := range lines {
+		if strings.ContainsRune(line, '❯') {
+			lines[i] = "❯ " + content
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatal("actual styled Claude fixture has no single composer")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func TestBootstrapCompactNativeCapturedReadyRequiresIssuedAuthority(t *testing.T) {
 	for mode, frame := range map[string]string{"unrestricted": capturedCodexCompactPristine, "suggest": capturedCodexSuggestPristine} {
 		t.Run(mode, func(t *testing.T) {
@@ -124,10 +153,18 @@ var bootstrapFence = runtime.InputFence{Generation: 1, Epoch: 1, Token: "bootstr
 
 func bootstrapModel(t *testing.T) (*Provider, *fenceModel) {
 	t.Helper()
+	return bootstrapFamilyModel(t, "codex", capturedCodexPristine)
+}
+
+func bootstrapFamilyModel(t *testing.T, family, frame string) (*Provider, *fenceModel) {
+	t.Helper()
 	m := newFenceModel(nil, fenceEnv(bootstrapFence)).ownFenced(bootstrapFence)
-	m.screen = func(*fenceModel) string { return capturedCodexPristine }
+	m.screen = func(*fenceModel) string { return frame }
+	if family == "claude" {
+		m.env["GC_PROVIDER"] = family
+	}
 	p := fenceModelProvider(m)
-	cfg := runtime.Config{Command: "codex", ProviderName: "codex", Env: fenceEnv(bootstrapFence), BootstrapInputOrigin: runtime.BootstrapInputFreshBuiltin}
+	cfg := runtime.Config{Command: family, ProviderName: family, Env: fenceEnv(bootstrapFence), BootstrapInputOrigin: runtime.BootstrapInputFreshBuiltin}
 	if err := p.tm.prepareBootstrapInput(fenceModelSession, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -1117,6 +1154,21 @@ func TestBootstrapGenericDialogStillConsumesPromotedCredit(t *testing.T) {
 var capturedF567StyledPristine string
 
 func TestBootstrapActualStyledNativeFrameIsPristine(t *testing.T) {
+	claude := capturedClaudeCompactStyled
+	for name, frame := range map[string]string{
+		"Claude actual compact styled frame":   claude,
+		"Claude compact without update notice": strings.Replace(claude, "✔ Update installed · Restart to update", "", 1),
+		"Claude compact dim version":           strings.Replace(claude, "v2.1.308", "\x1b[2mv2.1.308\x1b[22m", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !pristineBootstrapScreen(frame, "claude") {
+				t.Fatal("actual styled compact Claude layout rejected")
+			}
+		})
+	}
+	if pristineBootstrapScreen(capturedClaudeCompactAPI, "claude") {
+		t.Fatal("unstyled API Try text alone proved an empty native composer")
+	}
 	if !compactCodexBootstrapScreen(capturedF567StyledPristine) {
 		t.Fatal("exact styled native compact frame rejected structurally")
 	}
@@ -1126,6 +1178,28 @@ func TestBootstrapActualStyledNativeFrameIsPristine(t *testing.T) {
 }
 
 func TestBootstrapActualStyledFrameRecoversOnlyIssuedReady(t *testing.T) {
+	t.Run("Claude actual styled compact layout", func(t *testing.T) {
+		creator, m := bootstrapFamilyModel(t, "claude", capturedClaudeCompactStyled)
+		req := runtime.BootstrapInputRequest{Family: "claude", Fence: bootstrapFence}
+		if got, err := creator.ObserveBootstrapInput(t.Context(), fenceModelSession, req); err != nil || got != nil {
+			t.Fatal("compact Claude frame minted pre-start authority")
+		}
+		if err := creator.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+			t.Fatal(err)
+		}
+		issued, ok := creator.tm.bootstrapCredit(fenceModelSession)
+		if !ok {
+			t.Fatal("Claude issuer has no credit")
+		}
+		proof, err := fenceModelProvider(m).ObserveBootstrapInput(t.Context(), fenceModelSession, req)
+		if err != nil || proof == nil || proof.Token != issued.token || proof.Fence != bootstrapFence {
+			t.Fatal("compact Claude recovery lost exact issued authority")
+		}
+		m.pid = "9999"
+		if other, err := fenceModelProvider(m).ObserveBootstrapInput(t.Context(), fenceModelSession, req); err != nil || other != nil {
+			t.Fatal("compact Claude frame recovered another native process")
+		}
+	})
 	creator, m := bootstrapModel(t)
 	m.screen = func(*fenceModel) string { return capturedF567StyledPristine }
 	if err := creator.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
@@ -1151,6 +1225,27 @@ func TestBootstrapActualStyledFrameRecoversOnlyIssuedReady(t *testing.T) {
 }
 
 func TestBootstrapActualStyledFrameKeepsContentAndControlVetoes(t *testing.T) {
+	claude := capturedClaudeCompactStyled
+	for name, frame := range map[string]string{
+		"Claude prior history":             "Previous assistant answer\n" + claude,
+		"Claude draft":                     claudeCompactWithComposer(t, "user draft"),
+		"Claude typed placeholder":         capturedClaudeCompactAPI,
+		"Claude typed actual placeholder":  claudeCompactWithComposer(t, `Try "fix typecheck errors"`),
+		"Claude staged paste":              claudeCompactWithComposer(t, "[Pasted text #1 +2 lines]"),
+		"Claude native busy":               strings.Replace(claude, "✔ Update installed · Restart to update", "✻ Thinking… (1s · 2 tokens)", 1),
+		"Claude question":                  strings.Replace(claude, "✔ Update installed · Restart to update", "Which animal?\n1. Otter\n2. Owl", 1),
+		"Claude changed update":            strings.Replace(claude, "✔ Update installed · Restart to update", "Update unknown · Press Enter", 1),
+		"Claude changed brand":             strings.Replace(claude, "Claude Code", "Other Tool", 1),
+		"Claude unknown permission footer": strings.Replace(claude, "bypass permissions on", "unknown permissions on", 1),
+		"Claude duplicate prompt":          claude + "\n❯ ",
+		"Claude unknown control":           claude + "\x1b[999z",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pristineBootstrapScreen(frame, "claude") {
+				t.Fatal("unsafe compact Claude frame granted pristine input")
+			}
+		})
+	}
 	const link = "https://github.com/openai/codex/releases/latest"
 	frame := capturedF567StyledPristine
 	at := strings.LastIndex(frame, link)

@@ -211,6 +211,8 @@ go_test(
     embed = [":tmux"],
     embedsrcs = [
         "testdata/codex-c75-pristine-screen.txt",
+        "testdata/claude-f5-compact-styled-screen.txt",
+        "testdata/claude-f5-compact-update-screen.txt",
         "testdata/codex-95-compact-pristine-screen.txt",
         "testdata/codex-f4-suggest-pristine-screen.txt",
         "testdata/codex-f567-styled-pristine-screen.txt",
