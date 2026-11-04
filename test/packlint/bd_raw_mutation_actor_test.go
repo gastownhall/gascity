@@ -11,23 +11,23 @@ import (
 	"testing"
 )
 
-// TestRawBdMutationRequiresActorOrForce is the FR-4 guard for ga-b15hwm,
-// re-based after #6324 (ga-u3g2r3).
+// TestRawBdMutationRequiresActorOrForce is the FR-4 guard for ga-b15hwm
+// (rule maintained under ga-u3g2r3).
 //
-// The original failure: a `bd close` / `bd unclaim` / `bd heartbeat` /
+// The failure it prevents: a `bd close` / `bd unclaim` / `bd heartbeat` /
 // `bd update --status closed` in a formula or pack script ran under an actor
 // that differed from the identity `gc hook --claim` recorded in the bead's
 // assignee, so bd's ownership guard (validation.AssigneeMatches on close, the
 // actorMatches check in HeartbeatIssueInTx / UnclaimIssueInTx) rejected it.
 // mol-dog-stale-db.toml:320 hit exactly that.
 //
-// #6324 changed the premise. A session's runtime environment now exports
-// BEADS_ACTOR from session.AssigneeIdentifier, the same string the claim is
-// recorded under (hookClaimAssigneeIdentity), so an ACTOR-LESS mutation is
-// correct by construction: bd resolves its actor through $BEADS_ACTOR. The
-// guard therefore no longer demands an --actor. What it still catches is an
-// EXPLICIT --actor that can disagree with the recorded claim, which is the way
-// the original bug is reintroduced by hand:
+// A session's runtime environment exports BEADS_ACTOR from
+// session.AssigneeIdentifier, the same string the claim is recorded under
+// (hookClaimAssigneeIdentity), so an ACTOR-LESS mutation is correct by
+// construction: bd resolves its actor through $BEADS_ACTOR. The guard
+// therefore does not demand an --actor. It catches an EXPLICIT --actor that can
+// disagree with the recorded claim, which is how the failure above is
+// reintroduced by hand:
 //
 //   - `--actor "$BEADS_ACTOR"` is always valid.
 //   - A GC_* fallback chain is valid when its variables appear in a claim-writer
@@ -41,7 +41,7 @@ import (
 // `gc bd ...` is scanned like raw `bd ...`: the wrapper only forces cmd.Dir, it
 // does not change which actor is used, so it earns no exemption.
 //
-// Exemptions, unchanged: `--force` among the invocation's OWN arguments, and a
+// Exemptions: `--force` among the invocation's OWN arguments, and a
 // `# guard-ack:<slug>` comment on the command (a reviewed exception).
 //
 // Parsing is per shell command, not per physical line: backslash continuations
@@ -390,7 +390,7 @@ func bdCommandViolations(cmd string) []string {
 }
 
 // TestBdMutationGuardRules pins the guard's rule set on synthetic commands
-// (ga-u3g2r3, FR-4 re-based after #6324). The whole-repo walk above proves the
+// (FR-4, ga-u3g2r3). The whole-repo walk above proves the
 // shipped formulas pass; these cases prove the rules would catch a bad one.
 //
 // The rule: an actor-less mutation is fine (bd resolves it through
@@ -440,8 +440,9 @@ func TestBdMutationGuardRules(t *testing.T) {
 	}
 }
 
-// TestBdInvocationsParsing pins the tokenizer on the shapes that used to hide a
-// mutation from the line-level scan.
+// TestBdInvocationsParsing pins the tokenizer on the shapes a line-level scan
+// would miss: global flags between bd and the verb, chained commands, and
+// per-invocation --actor/--force.
 func TestBdInvocationsParsing(t *testing.T) {
 	tests := []struct {
 		name  string
