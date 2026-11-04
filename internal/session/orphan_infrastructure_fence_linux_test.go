@@ -112,6 +112,48 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	}
 }
 
+// TestSameSessionRestartDoesNotReachHerdrServer pins the ga-mo0i1j shape: the
+// city's shared herdr server, launched in a process group of its own by an
+// earlier life of this session, inherited that session's GC_SESSION_ID and was
+// reparented to init, so the scanner reports it as the session's root. The
+// restart must reap the genuine leftover agent runtime and leave the server
+// alone, or every other herdr-backed agent in the city dies with it.
+func TestSameSessionRestartDoesNotReachHerdrServer(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
+	city := t.TempDir()
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.terminated = nil
+	sp.started = nil
+
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper", "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	const (
+		serverPID = 4100
+		agentPID  = 4300
+	)
+	writeFakeProcess(t, root, serverPID, 1, []string{"/usr/local/bin/herdr", "--session", "gc-city", "server"}, env)
+	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
+	proctable.SetScanRootForTesting(t, root)
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(sp.terminated) != 1 || sp.terminated[0] != agentPID {
+		t.Fatalf("pre-start orphan kill terminated %v, want only the leftover agent pid %d (never the herdr server %d)", sp.terminated, agentPID, serverPID)
+	}
+	if len(sp.started) != 1 || sp.started[0] != info.ID {
+		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+	}
+}
+
 // AC-7: a root whose parent is a tmux server is an orphan when its provider
 // does not claim it as a live runtime of its own (LiveUnlisted). An agent
 // that started a tmux server on a socket of its own leaves such a root

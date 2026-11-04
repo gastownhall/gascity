@@ -45,6 +45,28 @@ func TestIsInfrastructureCommandMatchesExactNamesOnly(t *testing.T) {
 	}
 }
 
+// herdr's session server is shared, long-lived infrastructure exactly as the
+// tmux server is: it is launched in a process group of its own and outlives the
+// session whose GC_SESSION_ID it inherited, so the orphan sweeps must never
+// treat it as an agent root. The match stays exact on the path-stripped name.
+func TestIsInfrastructureCommandMatchesHerdrServerExactlyOnly(t *testing.T) {
+	for _, command := range []string{"herdr", "/usr/local/bin/herdr", "/home/u/.local/bin/herdr", "herdr\n"} {
+		if !isInfrastructureCommand(command) {
+			t.Errorf("isInfrastructureCommand(%q) = false, want true", command)
+		}
+	}
+	for _, command := range []string{"herdr-wrapper", "/usr/local/bin/herdr-wrapper", "herdrctl", "my-herdr", "herd"} {
+		if isInfrastructureCommand(command) {
+			t.Errorf("isInfrastructureCommand(%q) = true, want false: only the exact herdr name is infrastructure", command)
+		}
+	}
+	// ps reports the launched server as its argv[0] followed by its arguments.
+	fields := strings.Fields("  100     1 herdr --session gc-city server GC_SESSION_ID=ga-123")
+	if !isInfrastructureCommand(darwinPSCommand(fields)) {
+		t.Error("a herdr server ps line was not classified as infrastructure")
+	}
+}
+
 // The exact-name match must hold for values the real parser produces, not just
 // for pre-split fixtures: psRecords tokenizes the ps line with strings.Fields,
 // so a proctitle'd "tmux: server" reaches isInfrastructureCommand as "tmux:".

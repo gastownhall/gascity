@@ -64,6 +64,7 @@ go_test(
         "seedmeta_test.go",
         "staleserver_test.go",
         "start_test.go",
+        "startserver_pgid_test.go",
         "startup_delivery_confirm_test.go",
         "startup_delivery_test.go",
         "startup_dialogs_test.go",

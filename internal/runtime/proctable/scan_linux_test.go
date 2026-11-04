@@ -752,6 +752,43 @@ func TestIsScanRootNeverReportsInfrastructureAsRoot(t *testing.T) {
 	}
 }
 
+// The herdr session server is the same shape as the tmux server: it inherits
+// the GC_SESSION_ID of the session that first launched it, is started in a
+// process group of its own, and outlives that session by design. The scan must
+// not report it as an agent root, or both orphan sweeps kill the one server
+// every herdr-backed agent in the city shares (ga-mo0i1j). The agent beneath it
+// is still reported.
+func TestScanWithRootNeverReportsHerdrServerAsRoot(t *testing.T) {
+	root := t.TempDir()
+	env := map[string]string{"GC_SESSION_ID": "hq-session"}
+	buildFakeProcUnder(t, root, 100, 1, "herdr", env)
+	buildFakeProcUnder(t, root, 101, 100, "claude", env)
+
+	got, err := scanWithRoot(root, "hq-session")
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+	if len(got) != 1 || got[0].PID != 101 {
+		t.Fatalf("scanWithRoot = %+v, want only the agent pid 101", got)
+	}
+}
+
+// IsScanRoot is the single-pid form of the same decision.
+func TestIsScanRootNeverReportsHerdrServerAsRoot(t *testing.T) {
+	root := t.TempDir()
+	SetScanRootForTesting(t, root)
+	env := map[string]string{"GC_SESSION_ID": "hq-session"}
+	buildFakeProcUnder(t, root, 100, 1, "herdr", env)
+	buildFakeProcUnder(t, root, 101, 100, "claude", env)
+
+	if IsScanRoot(100) {
+		t.Fatal("IsScanRoot classified the herdr server as an agent root")
+	}
+	if !IsScanRoot(101) {
+		t.Fatal("IsScanRoot must keep the agent under an infrastructure parent as a root")
+	}
+}
+
 // Infrastructure is matched by exact name. A substring test on "tmux" would
 // also hide a tmux-* wrapper running as an agent root, and a root the scan
 // hides is a runtime the orphan sweep can never reap.
