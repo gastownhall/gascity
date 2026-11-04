@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -6757,6 +6758,9 @@ func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T)
 	if err := os.WriteFile(filepath.Join(staleRigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"removed"}`), 0o644); err != nil {
 		t.Fatalf("write stale rig metadata: %v", err)
 	}
+	// An existing removed rig still needs independent old binding authority.
+	writeCanonicalScopeConfig(t, staleRigDir, contract.ConfigState{IssuePrefix: "removed", DoltHost: "old-db.example.com", DoltPort: "3307"})
+	assertCompleteLegacyEndpointAuthority(t, cityDir, staleRigDir, "removed")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "active", Path: "rigs/active"}},

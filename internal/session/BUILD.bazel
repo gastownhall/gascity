@@ -294,6 +294,7 @@ go_test(
         "//internal/runtime/proctable",
         "//internal/runtime/tmux",
         "//internal/sessionlog",
+        "//internal/worker/builtin",
         "//internal/storebinding/sqlite",
         "//internal/telemetry",
         "//internal/testenv",

@@ -930,17 +930,17 @@ func TestE1LoneDashIsTransparentToEagerLazyDiscovery(t *testing.T) {
 		{
 			name:      "before binding with city",
 			args:      []string{"-", "--city", cityB, "backstage", "hello", "payload"},
-			wantExact: "selected-hello args:<-><--city><" + cityB + "><payload>\n",
+			wantExact: "selected-hello args:<-><payload>\n",
 		},
 		{
 			name:      "between binding and leaf with city",
 			args:      []string{"backstage", "-", "--city", cityB, "hello", "payload"},
-			wantExact: "selected-hello args:<-><--city><" + cityB + "><payload>\n",
+			wantExact: "selected-hello args:<-><payload>\n",
 		},
 		{
 			name:      "between intermediate and leaf with rig",
 			args:      []string{"backstage", "repo", "-", "--rig", targetRig, "sync", "payload"},
-			wantExact: "selected-sync args:<-><--rig><" + targetRig + "><payload>\n",
+			wantExact: "selected-sync args:<-><payload>\n",
 		},
 		{
 			name:         "before binding group help",

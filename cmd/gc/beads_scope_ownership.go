@@ -393,10 +393,10 @@ func scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot string) (bool, e
 		return false, err
 	}
 	if strings.TrimSpace(metadata.ProjectID) == "" {
-		return false, fmt.Errorf("native bd scope %q has no proven project identity; refusing city fallback or initialization", scopeRoot)
+		return false, fmt.Errorf("native bd scope %q has no proven project identity; refusing city fallback or initialization; keep .beads intact and run bd --readonly doctor --agent --json from that repository; see docs/getting-started/troubleshooting.md#unproven-native-beads-binding", scopeRoot)
 	}
 	if metadata.Host != "" || metadata.Port != nil || metadata.Socket != "" {
-		return false, fmt.Errorf("native bd scope %q has an unproven local or incomplete server endpoint; refusing city fallback or initialization", scopeRoot)
+		return false, fmt.Errorf("native bd scope %q has an unproven local or incomplete server endpoint; refusing city fallback or initialization; keep .beads intact and run bd --readonly doctor --agent --json from that repository; see docs/getting-started/troubleshooting.md#unproven-native-beads-binding", scopeRoot)
 	}
 	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
 	if info, statErr := os.Lstat(configPath); statErr == nil && !info.Mode().IsRegular() {
@@ -417,7 +417,7 @@ func scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot string) (bool, e
 			return false, fmt.Errorf("read native bd config at %s: %w", configPath, err)
 		}
 		if (ownConfig.Shared != nil && *ownConfig.Shared) || (ownConfig.Dolt.Shared != nil && *ownConfig.Dolt.Shared) || ownConfig.DataDir != "" || ownConfig.Dolt.DataDir != "" {
-			return false, fmt.Errorf("native bd scope %q has shared or custom local storage whose binding is not proven; refusing city fallback or initialization", scopeRoot)
+			return false, fmt.Errorf("native bd scope %q has shared or custom local storage whose binding is not proven; refusing city fallback or initialization; keep .beads intact and run bd --readonly doctor --agent --json from that repository; see docs/getting-started/troubleshooting.md#unproven-native-beads-binding", scopeRoot)
 		}
 	} else if !os.IsNotExist(readErr) {
 		return false, readErr
@@ -436,7 +436,7 @@ func scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot string) (bool, e
 	} {
 		info, statErr := os.Lstat(directory)
 		if os.IsNotExist(statErr) {
-			return false, fmt.Errorf("native bd scope %q has no proven local database storage at %q; refusing city fallback or initialization", scopeRoot, directory)
+			return false, fmt.Errorf("native bd scope %q has no proven local database storage at %q; refusing city fallback or initialization; keep .beads intact and run bd --readonly doctor --agent --json from that repository; see docs/getting-started/troubleshooting.md#unproven-native-beads-binding", scopeRoot, directory)
 		}
 		if statErr != nil {
 			return false, statErr

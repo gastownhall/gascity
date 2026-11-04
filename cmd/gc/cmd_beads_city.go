@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ type cityRigEndpointPlan struct {
 	Current contract.ConfigState
 	Target  contract.ConfigState
 	Update  bool
+	Files   []fileSnapshot
 }
 
 var verifyCityExternalEndpoint = verifyExternalDoltEndpoint
@@ -161,7 +163,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		return 1
 	}
 	targetState := requestedCityEndpointState(cfg, currentState, opts)
-	plans, err := planCityRigEndpointUpdates(cityPath, cfg.Rigs, currentState, targetState)
+	plans, err := planCityRigEndpointUpdates(fs, cityPath, cfg.Rigs, currentState, targetState, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", name, err) //nolint:errcheck
 		return 1
@@ -215,14 +217,47 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		}
 	}
 
+	if err := validateCityRigEndpointPlanFiles(fs, plans); err != nil {
+		fmt.Fprintf(stderr, "%s: checking planned rig files: %v\n", name, err) //nolint:errcheck
+		return 1
+	}
+
 	snapshots, err := snapshotCityTopologyFiles(fs, cityPath, plans)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: snapshot canonical files: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	if err := requireCanonicalizedScopeMetadata(fs, cityPath, cityPath); err != nil {
-		writeCityEndpointRollbackError(fs, stderr, snapshots, name, "canonicalizing metadata", err)
+	cityMetadata, err := snapshotResolvedFile(fs, scopeMetadataPath(cityPath))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: snapshot canonical city metadata: %v\n", name, err) //nolint:errcheck
 		return 1
+	}
+	// Before publishing config, only metadata can have changed. Roll back only
+	// the metadata already visited if a later scope drifts; never restore an
+	// untouched scope over the concurrent update that made it refuse.
+	metadataSnapshots := []fileSnapshot{cityMetadata}
+	if err := requireCanonicalizedScopeMetadata(fs, cityPath, cityPath); err != nil {
+		writeCityEndpointRollbackError(fs, stderr, metadataSnapshots, name, "canonicalizing metadata", err)
+		return 1
+	}
+	// Metadata canonicalization rechecks ownership. Complete those guarded
+	// rewrites while every endpoint config still describes the validated OLD
+	// topology, before publishing the target city or inherited rig mirrors.
+	for _, plan := range plans {
+		if !plan.Update {
+			continue
+		}
+		if err := validateCityRigEndpointPlanFiles(fs, []cityRigEndpointPlan{plan}); err != nil {
+			writeCityEndpointRollbackError(fs, stderr, metadataSnapshots, name, "checking inherited rig files", err)
+			return 1
+		}
+		// snapshotRigCanonicalFiles records metadata before config. The latter
+		// is still untouched throughout this phase.
+		metadataSnapshots = append(metadataSnapshots, plan.Files[0])
+		if err := canonicalizeScopeMetadataIfPresent(fs, cityPath, plan.Rig.Path); err != nil {
+			writeCityEndpointRollbackError(fs, stderr, metadataSnapshots, name, "canonicalizing inherited rig metadata", err)
+			return 1
+		}
 	}
 	if err := ensureCanonicalScopeConfig(fs, cityPath, targetState); err != nil {
 		writeCityEndpointRollbackError(fs, stderr, snapshots, name, "writing canonical config", err)
@@ -231,23 +266,6 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 	for _, plan := range plans {
 		if !plan.Update {
 			continue
-		}
-		// A bd-owned rig does not inherit the city's endpoint: bd resolves its
-		// store from its own binding. Sweeping it along would write gc endpoint
-		// keys into a config.yaml bd owns, so the sweep skips it and says so
-		// rather than refusing the whole city.
-		owned, err := scopeProviderOwned(cityPath, plan.Rig.Path)
-		if err != nil {
-			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "classifying inherited rig ownership", err)
-			return 1
-		}
-		if owned {
-			fmt.Fprintf(stderr, "%s: skipping rig %q: %v\n", name, plan.Rig.Name, providerOwnedEndpointScopeError(plan.Rig.Path)) //nolint:errcheck
-			continue
-		}
-		if err := canonicalizeScopeMetadataIfPresent(fs, cityPath, plan.Rig.Path); err != nil {
-			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "canonicalizing inherited rig metadata", err)
-			return 1
 		}
 		if err := ensureCanonicalScopeConfig(fs, plan.Rig.Path, plan.Target); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "writing inherited rig config", err)
@@ -351,7 +369,10 @@ func requestedCityEndpointState(cfg *config.City, currentState contract.ConfigSt
 	return state
 }
 
-func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityState, targetCityState contract.ConfigState) ([]cityRigEndpointPlan, error) {
+// planCityRigEndpointUpdates classifies every rig against the unchanged city
+// topology. Provider-owned scopes are absent from the entire plan, including
+// compatibility edits and port-file synchronization, not just canonical writes.
+func planCityRigEndpointUpdates(fs fsys.FS, cityPath string, rigs []config.Rig, currentCityState, targetCityState contract.ConfigState, stderr io.Writer) ([]cityRigEndpointPlan, error) {
 	plans := make([]cityRigEndpointPlan, 0, len(rigs))
 	for i := range rigs {
 		// An embedded rig is outside the city endpoint altogether: it has no
@@ -368,11 +389,29 @@ func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityS
 		if embedded {
 			continue
 		}
+		files, err := snapshotRigCanonicalFiles(fs, rigs[i].Path)
+		if err != nil {
+			return nil, fmt.Errorf("snapshotting rig %q original files: %w", rigs[i].Name, err)
+		}
+		// An inherited mirror is validated against the city's CURRENT endpoint.
+		// Classifying after writing the target city state rejects that valid old
+		// mirror before it can be rewritten. Unknown ownership still fails closed.
+		owned, err := scopeProviderOwned(cityPath, rigs[i].Path)
+		if err != nil {
+			return nil, fmt.Errorf("classifying rig %q ownership: %w", rigs[i].Name, err)
+		}
+		if owned {
+			fmt.Fprintf(stderr, "gc beads city: skipping rig %q: %v\n", rigs[i].Name, providerOwnedEndpointScopeError(rigs[i].Path)) //nolint:errcheck
+			continue
+		}
 		current, err := resolveOwnerRigConfigState(cityPath, rigs[i], currentCityState)
 		if err != nil {
 			return nil, err
 		}
-		plan := cityRigEndpointPlan{Rig: rigs[i], Current: current, Target: current}
+		plan := cityRigEndpointPlan{Rig: rigs[i], Current: current, Target: current, Files: files}
+		if err := validateCityRigEndpointPlanFiles(fs, []cityRigEndpointPlan{plan}); err != nil {
+			return nil, err
+		}
 		if current.EndpointOrigin == contract.EndpointOriginExplicit {
 			plans = append(plans, plan)
 			continue
@@ -384,6 +423,28 @@ func planCityRigEndpointUpdates(cityPath string, rigs []config.Rig, currentCityS
 		plans = append(plans, plan)
 	}
 	return plans, nil
+}
+
+// validateCityRigEndpointPlanFiles refuses changed metadata, config or symlink
+// targets between old-topology classification and the first topology write.
+// It is a fail-closed observation check, not a cross-file transaction lock.
+func validateCityRigEndpointPlanFiles(fs fsys.FS, plans []cityRigEndpointPlan) error {
+	for _, plan := range plans {
+		current, err := snapshotRigCanonicalFiles(fs, plan.Rig.Path)
+		if err != nil {
+			return fmt.Errorf("checking rig %q original files: %w", plan.Rig.Name, err)
+		}
+		if len(current) != len(plan.Files) {
+			return fmt.Errorf("rig %q files changed after ownership classification", plan.Rig.Name)
+		}
+		for i, before := range plan.Files {
+			after := current[i]
+			if before.Path != after.Path || before.Exists != after.Exists || before.Mode != after.Mode || !bytes.Equal(before.Data, after.Data) {
+				return fmt.Errorf("rig %q files changed after ownership classification: %s", plan.Rig.Name, before.Path)
+			}
+		}
+	}
+	return nil
 }
 
 func validateCityExternalEndpointChange(cityPath string, targetState contract.ConfigState, plans []cityRigEndpointPlan) error {

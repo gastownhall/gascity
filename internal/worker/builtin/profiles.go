@@ -329,6 +329,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"codex": {
 		DisplayName: "Codex CLI",
 		Command:     "codex",
+		// GC tool identity is per runtime. A user-global shared app server keeps
+		// its creator's process environment; never reuse it for another worker.
+		Args: []string{"--no-daemon"},
 		// OpenAI serving-env binding (Codex reads these for a custom endpoint +
 		// API key). Codex auth is the API key; no separate auth-token var.
 		UpstreamBaseURLEnv: "OPENAI_BASE_URL",

@@ -51,7 +51,11 @@ func StageIdleProviderBinary(binDir, name string) error {
 fi
 `
 	case "codex":
-		script += `if [ "$*" = "login status" ]; then
+		script += `if [ "$*" = "--version" ]; then
+ printf '%s\n' 'codex-cli 0.162.1'
+ exit 0
+fi
+if [ "$*" = "login status" ]; then
  printf '%s\n' 'Logged in using acceptance lifecycle fixture'
  exit 0
 fi

@@ -115,7 +115,7 @@ func TestRuntimeReadinessUsesCodexConfiguredHome(t *testing.T) {
 	credentialHome := t.TempDir()
 	marker := filepath.Join(city, "codex-probed")
 	script := filepath.Join(t.TempDir(), "selected-codex")
-	body := fmt.Sprintf("#!/bin/sh\n[ \"$*\" = \"login status\" ] || exit 79\n[ \"$CODEX_HOME\" = %s ] || exit 78\nprintf seen > %s\nprintf 'Logged in using an API key\\n' >&2\n", shellQuotePath(credentialHome), shellQuotePath(marker))
+	body := fmt.Sprintf("#!/bin/sh\n[ \"$CODEX_HOME\" = %s ] || exit 78\nif [ \"$*\" = \"--version\" ]; then printf 'codex-cli 0.162.1\\n'; exit 0; fi\n[ \"$*\" = \"login status\" ] || exit 79\nprintf seen > %s\nprintf 'Logged in using an API key\\n' >&2\n", shellQuotePath(credentialHome), shellQuotePath(marker))
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -263,5 +263,95 @@ func TestRuntimeReadinessStatusWarningsDoNotOverrideNativeVerdict(t *testing.T) 
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("configured executable not checked: %v", err)
+	}
+}
+
+// The selected native executable, not a caller-side version declaration, gates
+// the actual init command before it creates a city or sends a launch-only flag.
+func TestInitRejectsOldSelectedCodexBeforeScaffolding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	stubInitDependencyChecks(t)
+	old := initProbeProvidersReadiness
+	t.Cleanup(func() { initProbeProvidersReadiness = old })
+	initProbeProvidersReadiness = probeResolvedProviderReadiness
+	bin := t.TempDir()
+	calls := filepath.Join(t.TempDir(), "codex-calls")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuotePath(calls) + "\ncase \"$*\" in\n --version) printf 'codex-cli 0.162.0\\n' ;;\n 'login status') printf 'Logged in using ChatGPT\\n' >&2 ;;\n *) exit 79 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	city := filepath.Join(t.TempDir(), "not-scaffolded")
+	var stdout, stderr bytes.Buffer
+	code := cmdInitWithPreparedWizardInternal([]string{city}, wizardConfig{configName: "gascity", provider: "codex"}, true, "", &stdout, &stderr, false, false, false, true)
+	if code == 0 || !strings.Contains(stderr.String(), "0.162.1") || !strings.Contains(stderr.String(), "--no-daemon") {
+		t.Fatalf("old selected CLI was not clearly refused: code=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(city); !os.IsNotExist(err) {
+		t.Fatalf("unsupported selected CLI reached scaffold: %v", err)
+	}
+	got, err := os.ReadFile(calls)
+	if err != nil || string(got) != "--version\n" {
+		t.Fatalf("old CLI received auth/unsupported launch flags: calls=%q err=%v", got, err)
+	}
+}
+
+func TestInitClaudeSelectionDoesNotProbeUnselectedOldCodex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	old := initProbeProvidersReadiness
+	t.Cleanup(func() { initProbeProvidersReadiness = old })
+	initProbeProvidersReadiness = probeResolvedProviderReadiness
+	bin := t.TempDir()
+	calls := filepath.Join(t.TempDir(), "codex-calls")
+	codex := "#!/bin/sh\nprintf called >> " + shellQuotePath(calls) + "\nprintf 'codex-cli 0.149.0\\n'\n"
+	claude := "#!/bin/sh\n[ \"$*\" = \"auth status --json\" ] || exit 79\nprintf '%s\\n' '{\"loggedIn\":true}'\n"
+	for name, body := range map[string]string{"codex": codex, "claude": claude} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := preflightInitSelectedProviders(wizardConfig{provider: "claude"}, false); err != nil {
+		t.Fatalf("unselected old Codex blocked Claude: %v", err)
+	}
+	if _, err := os.Stat(calls); !os.IsNotExist(err) {
+		t.Fatalf("unselected old Codex was invoked: %v", err)
+	}
+	if err := preflightInitSelectedProviders(wizardConfig{provider: "codex"}, true); err != nil {
+		t.Fatalf("explicit skip-provider-readiness contract changed: %v", err)
+	}
+	if _, err := os.Stat(calls); !os.IsNotExist(err) {
+		t.Fatalf("explicit skipped readiness invoked Codex: %v", err)
+	}
+}
+
+func TestCodexPrintUsesExplicitEmbeddedModeBeforeExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	bin := t.TempDir()
+	// Echoing the actual argv exercises the maintained one-shot subprocess
+	// runner without starting a provider or relying on ambient credentials.
+	script := "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	base := "builtin:codex"
+	cfg := &config.City{Workspace: config.Workspace{Provider: "selected"}, Providers: map[string]config.ProviderSpec{"selected": {Base: &base}}}
+	if err := config.BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := config.ResolveProvider(&config.Agent{Provider: "selected"}, &cfg.Workspace, cfg.Providers, func(name string) (string, error) { return filepath.Join(bin, name), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := defaultPromptSynthRunner(context.Background(), provider, "local fixture prompt", bin)
+	if err != nil || got != "<--no-daemon>\n<exec>\n<local fixture prompt>\n" {
+		t.Fatalf("print runner lost embedded mode/argument boundary: got=%q err=%v", got, err)
 	}
 }

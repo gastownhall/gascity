@@ -789,7 +789,11 @@ if [ "$op" = init ]; then
   printf 'init|%s|%s|%s|%s\n' "${GC_BEADS_TRANSPORT:-}" "${GC_BEADS_TARGET:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${GC_BEADS_PROXY_EXTERNAL_HOST:-}" >> "$GC_TEST_PROVIDER_LOG"
   mkdir -p "$scope/.beads"
   if [ "${GC_BEADS_TRANSPORT:-}" = proxied ]; then mode=proxied-server; else mode=server; fi
-  printf '{"backend":"dolt","dolt_mode":"%s","dolt_database":"%s"}\n' "$mode" "${GC_DOLT_DATABASE:-hq}" > "$scope/.beads/metadata.json"
+  database="$4"
+  printf '{"database":"dolt","backend":"dolt","dolt_mode":"%s","dolt_database":"%s","project_id":"%s"}\n' "$mode" "$database" "${GC_BEADS_PROJECT_ID:-native-selector-project}" > "$scope/.beads/metadata.json"
+  if [ "${GC_BEADS_TRANSPORT:-}" = direct ] && [ "${GC_BEADS_TARGET:-}" = local ]; then
+    mkdir -p "$scope/.beads/dolt/$database/.dolt/noms"
+  fi
   if [ "${GC_BEADS_TARGET:-}" = external ] && [ "${GC_BEADS_TRANSPORT:-}" = direct ]; then
     printf 'issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\ndolt.host: %s\ndolt.port: %s\ndolt.auto-start: false\ndolt.mode: server\n' "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" > "$scope/.beads/config.yaml"
   else
@@ -820,7 +824,8 @@ printf '%s\n' "$op" >> "$GC_TEST_PROVIDER_LOG"
 				cmd.SilenceUsage = true
 				cmd.SilenceErrors = true
 				cmd.SetArgs(args)
-				return stdout.String(), stderr.String(), cmd.Execute()
+				err := cmd.Execute()
+				return stdout.String(), stderr.String(), err
 			}
 			if stdout, stderr, err := run(); err != nil {
 				data, _ := os.ReadFile(providerLog)

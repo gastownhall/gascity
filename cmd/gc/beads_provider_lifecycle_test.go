@@ -1032,7 +1032,7 @@ func TestNormalizeCanonicalBdScopeFilesPreservesExistingManagedProbeDatabase(t *
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\nissue-prefix: hq\ndolt.auto-start: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\nissue-prefix: hq\ndolt.auto-start: true\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1109,7 +1109,7 @@ func TestNormalizeCanonicalBdScopeFilesRejectsExistingManagedSystemDatabase(t *t
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\nissue-prefix: hq\ndolt.auto-start: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\nissue-prefix: hq\ndolt.auto-start: true\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1137,7 +1137,7 @@ func TestNormalizeCanonicalBdScopeFilesForInitPreservesExistingManagedProbeDatab
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\nissue-prefix: gc\ndolt.auto-start: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\nissue-prefix: gc\ndolt.auto-start: true\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1579,6 +1579,7 @@ prefix = "fe"
 	}); err != nil {
 		t.Fatal(err)
 	}
+	writeCanonicalScopeConfig(t, rigPath, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
 	ln := listenOnRandomPort(t)
 	defer func() { _ = ln.Close() }()
 	port := ln.Addr().(*net.TCPAddr).Port
@@ -2271,6 +2272,7 @@ func TestSyncConfiguredDoltPortFilesWarnsOnRigPortFileRewrite(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	writeCanonicalScopeConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	// Seed the rig with a stale port file pointing at a different port.
 	const stalePort = "29999"
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte(stalePort+"\n"), 0o644); err != nil {
@@ -2440,7 +2442,7 @@ func TestSyncConfiguredDoltPortFilesSilentOnNoChange(t *testing.T) {
 	}
 }
 
-func TestSyncConfiguredDoltPortFilesReconcilesMalformedManagedConfigs(t *testing.T) {
+func TestSyncConfiguredDoltPortFilesRefusesMalformedUnprovenConfigs(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "frontend")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
@@ -2474,39 +2476,15 @@ func TestSyncConfiguredDoltPortFilesReconcilesMalformedManagedConfigs(t *testing
 		t.Fatal(err)
 	}
 
-	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
-
-	assertManagedScope := func(dir, prefix, origin string) {
-		t.Helper()
-		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
-		if err != nil {
-			t.Fatalf("read config for %s: %v", dir, err)
-		}
-		cfg := string(cfgData)
-		for _, needle := range []string{
-			"issue_prefix: " + prefix,
-			"issue-prefix: " + prefix,
-			"dolt.auto-start: false",
-			"gc.endpoint_origin: " + origin,
-			"gc.endpoint_status: verified",
-			": not yaml",
-		} {
-			if !strings.Contains(cfg, needle) {
-				t.Fatalf("%s config missing %q after malformed reconciliation:\n%s", dir, needle, cfg)
-			}
-		}
-		for _, forbidden := range []string{"dolt_server_port", "dolt.port:", "dolt.host:", "dolt.user:"} {
-			if strings.Contains(cfg, forbidden) {
-				t.Fatalf("%s config should scrub %q after malformed reconciliation:\n%s", dir, forbidden, cfg)
-			}
-		}
+	before := snapshotLifecycleFixtureArtifacts(t, cityDir, rigDir)
+	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "no proven project identity") {
+		t.Fatalf("unproven native metadata must refuse synchronization: %v", err)
 	}
-
-	assertManagedScope(cityDir, "gc", "managed_city")
-	assertManagedScope(rigDir, "fe", "inherited_city")
+	assertLifecycleFixtureArtifactsPreserved(t, before, cityDir, rigDir)
 }
 
-func TestSyncConfiguredDoltPortFilesCreatesMissingManagedConfigs(t *testing.T) {
+func TestSyncConfiguredDoltPortFilesRefusesMissingUnprovenConfigs(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "frontend")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
@@ -2531,34 +2509,12 @@ func TestSyncConfiguredDoltPortFilesCreatesMissingManagedConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
-
-	for _, tc := range []struct {
-		dir    string
-		prefix string
-		origin string
-	}{
-		{dir: cityDir, prefix: "gc", origin: "managed_city"},
-		{dir: rigDir, prefix: "fe", origin: "inherited_city"},
-	} {
-		cfgPath := filepath.Join(tc.dir, ".beads", "config.yaml")
-		cfgData, err := os.ReadFile(cfgPath)
-		if err != nil {
-			t.Fatalf("read config for %s: %v", tc.dir, err)
-		}
-		cfg := string(cfgData)
-		for _, needle := range []string{
-			"issue_prefix: " + tc.prefix,
-			"issue-prefix: " + tc.prefix,
-			"gc.endpoint_origin: " + tc.origin,
-			"gc.endpoint_status: verified",
-			"dolt.auto-start: false",
-		} {
-			if !strings.Contains(cfg, needle) {
-				t.Fatalf("%s config missing %q:%c%s", tc.dir, needle, 10, cfg)
-			}
-		}
+	before := snapshotLifecycleFixtureArtifacts(t, cityDir, rigDir)
+	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "no proven project identity") {
+		t.Fatalf("unproven native metadata must refuse synchronization: %v", err)
 	}
+	assertLifecycleFixtureArtifactsPreserved(t, before, cityDir, rigDir)
 }
 
 func TestSyncConfiguredDoltPortFilesCanonicalizesExternalAndExplicitScopes(t *testing.T) {
@@ -3157,6 +3113,8 @@ prefix = "fe"
 	}); err != nil {
 		t.Fatal(err)
 	}
+	writeCanonicalScopeConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{IssuePrefix: "fe", EndpointOrigin: contract.EndpointOriginInheritedCity, EndpointStatus: contract.EndpointStatusVerified})
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 
 	requireSyncConfiguredDoltPortFiles(t, cityDir, "file", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
@@ -3187,8 +3145,8 @@ func TestSyncConfiguredDoltPortFilesIgnoresEnvOnlyExternalOverridesForCanonicalF
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Keep this a direct managed-server fixture; the env vars below are the
-	// ambient values whose canonical projection must be ignored.
+	// Complete legacy endpoint YAML is independent old authority. The ambient
+	// overrides below must not replace it, even when the endpoint is loopback.
 	writeScopeMetadata(t, cityDir, map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
@@ -3204,6 +3162,8 @@ func TestSyncConfiguredDoltPortFilesIgnoresEnvOnlyExternalOverridesForCanonicalF
 		}
 		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(`issue_prefix: stale
 dolt.auto-start: true
+dolt.host: 127.0.0.1
+dolt.port: 3307
 `), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -3218,11 +3178,13 @@ dolt.auto-start: true
 		t.Fatal(err)
 	}
 
+	assertLifecycleCompleteLegacyAuthority(t, cityDir, cityDir, "gc")
+	assertLifecycleCompleteLegacyAuthority(t, cityDir, rigDir, "fe")
 	t.Setenv("GC_DOLT_HOST", "env-db.example.com")
-	t.Setenv("GC_DOLT_PORT", "3307")
+	t.Setenv("GC_DOLT_PORT", "5511")
 	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
 
-	assertManagedScope := func(dir, prefix, origin string) {
+	assertLegacyScope := func(dir, prefix, origin string) {
 		t.Helper()
 		cfgData, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
 		if err != nil {
@@ -3233,21 +3195,23 @@ dolt.auto-start: true
 			"issue_prefix: " + prefix,
 			"issue-prefix: " + prefix,
 			"gc.endpoint_origin: " + origin,
-			"gc.endpoint_status: verified",
+			"gc.endpoint_status: unverified",
 		} {
 			if !strings.Contains(cfg, needle) {
 				t.Fatalf("%s config missing %q:%c%s", dir, needle, 10, cfg)
 			}
 		}
-		for _, forbidden := range []string{"dolt.host:", "dolt.port:"} {
+		for _, forbidden := range []string{"env-db.example.com", "5511"} {
 			if strings.Contains(cfg, forbidden) {
 				t.Fatalf("%s config should ignore env-only external override %q:%c%s", dir, forbidden, 10, cfg)
 			}
 		}
 	}
 
-	assertManagedScope(cityDir, "gc", "managed_city")
-	assertManagedScope(rigDir, "fe", "inherited_city")
+	assertLegacyScope(cityDir, "gc", "city_canonical")
+	assertLegacyScope(rigDir, "fe", "inherited_city")
+	assertLifecycleExternalEndpoint(t, cityDir, cityDir, contract.ConfigState{DoltHost: "127.0.0.1", DoltPort: "3307"})
+	assertLifecycleExternalEndpoint(t, cityDir, rigDir, contract.ConfigState{DoltHost: "127.0.0.1", DoltPort: "3307"})
 }
 
 func TestSyncConfiguredDoltPortFilesPreservesVerifiedStatusForUnchangedExternalEndpoints(t *testing.T) {
@@ -3496,11 +3460,13 @@ func TestSyncConfiguredDoltPortFilesReconcilesMirroredPrefixesFromCityConfig(t *
 		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: stale\nissue-prefix: stale\ndolt.auto-start: true\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: stale\nissue-prefix: stale\ndolt.auto-start: true\ndolt.host: legacy-db.example.com\ndolt.port: 3307\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
+	assertLifecycleCompleteLegacyAuthority(t, cityDir, cityDir, "gc")
+	assertLifecycleCompleteLegacyAuthority(t, cityDir, rigDir, "fe")
 	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir, Prefix: "fe"}})
 
 	assertPrefix := func(dir, want string) {
@@ -3519,6 +3485,8 @@ func TestSyncConfiguredDoltPortFilesReconcilesMirroredPrefixesFromCityConfig(t *
 
 	assertPrefix(cityDir, "gc")
 	assertPrefix(rigDir, "fe")
+	assertLifecycleExternalEndpoint(t, cityDir, cityDir, contract.ConfigState{DoltHost: "legacy-db.example.com", DoltPort: "3307"})
+	assertLifecycleExternalEndpoint(t, cityDir, rigDir, contract.ConfigState{DoltHost: "legacy-db.example.com", DoltPort: "3307"})
 }
 
 func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.T) {
@@ -3589,6 +3557,7 @@ func TestCurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped(t *tes
 
 func TestCurrentOwnedManagedDoltPortMirrorPreservesMatchingOwnedProviderState(t *testing.T) {
 	cityDir := setupBdContractCityForTest(t)
+	writeCanonicalScopeConfig(t, cityDir, contract.ConfigState{IssuePrefix: "tc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	beadsDir := filepath.Join(cityDir, ".beads")
 	dataDir := filepath.Join(beadsDir, "dolt")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -3711,6 +3680,7 @@ func TestCurrentOwnedManagedDoltPortMirrorRejectsUnverifiedState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cityDir := setupBdContractCityForTest(t)
+			writeCanonicalScopeConfig(t, cityDir, contract.ConfigState{IssuePrefix: "tc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 			beadsDir := filepath.Join(cityDir, ".beads")
 			dataDir := filepath.Join(beadsDir, "dolt")
 			if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -6313,6 +6283,8 @@ func TestInitAndHookDirAdoptsAlreadyInitializedDefaultRigBdStorePinsCanonicalGCB
 		t.Fatal(err)
 	}
 
+	writeCanonicalScopeConfig(t, rigPath, contract.ConfigState{IssuePrefix: "tc", DoltHost: "legacy-db.example.com", DoltPort: "3307"})
+	assertLifecycleCompleteLegacyAuthority(t, cityPath, rigPath, "tc")
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -6390,6 +6362,8 @@ func TestInitAndHookDirAdoptsAlreadyInitializedCanonicalExecBdStore(t *testing.T
 		t.Fatal(err)
 	}
 
+	writeCanonicalScopeConfig(t, rigPath, contract.ConfigState{IssuePrefix: "tc", DoltHost: "legacy-db.example.com", DoltPort: "3307"})
+	assertLifecycleCompleteLegacyAuthority(t, cityPath, rigPath, "tc")
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -12874,6 +12848,8 @@ port = 3307
 		t.Fatal(err)
 	}
 
+	writeCanonicalScopeConfig(t, cityPath, contract.ConfigState{IssuePrefix: "gc", DoltHost: "mini2.hippo-tilapia.ts.net", DoltPort: "3307"})
+	assertLifecycleCompleteLegacyAuthority(t, cityPath, cityPath, "gc")
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 	t.Setenv("GC_DOLT_HOST", "operator-override.example.com")
@@ -13017,13 +12993,15 @@ func TestNormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles(t *testing.T)
 	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fr","dolt_server_host":"127.0.0.1","dolt_user":"root"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: dgdb\nissue-prefix: dgdb\ndolt.auto-start: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: dgdb\nissue-prefix: dgdb\ndolt.auto-start: true\ndolt.host: legacy-db.example.com\ndolt.port: 3307\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: fr\nissue-prefix: fr\ndolt.auto-start: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: fr\nissue-prefix: fr\ndolt.auto-start: true\ndolt.host: legacy-db.example.com\ndolt.port: 3307\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
+	assertLifecycleCompleteLegacyAuthority(t, cityPath, cityPath, "gc")
+	assertLifecycleCompleteLegacyAuthority(t, cityPath, rigPath, "fr")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "dogfood-city"},
 		Rigs:      []config.Rig{{Name: "frontend", Path: rigPath, Prefix: "fr"}},
@@ -13037,28 +13015,24 @@ func TestNormalizeCanonicalBdScopeFilesRepairsCityAndRigScopeFiles(t *testing.T)
 		t.Fatal(err)
 	}
 	cityText := string(cityCfg)
-	for _, want := range []string{"gc.endpoint_origin: managed_city", "gc.endpoint_status: verified", "dolt.auto-start: false"} {
+	for _, want := range []string{"gc.endpoint_origin: city_canonical", "gc.endpoint_status: unverified", "dolt.auto-start: false"} {
 		if !strings.Contains(cityText, want) {
 			t.Fatalf("city config missing %q:\n%s", want, cityText)
 		}
 	}
-	if strings.Contains(cityText, "dolt.host:") || strings.Contains(cityText, "dolt.port:") {
-		t.Fatalf("city config should not track endpoint defaults for managed city:\n%s", cityText)
-	}
+	assertLifecycleExternalEndpoint(t, cityPath, cityPath, contract.ConfigState{DoltHost: "legacy-db.example.com", DoltPort: "3307"})
 
 	rigCfg, err := os.ReadFile(filepath.Join(rigPath, ".beads", "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	rigText := string(rigCfg)
-	for _, want := range []string{"gc.endpoint_origin: inherited_city", "gc.endpoint_status: verified", "dolt.auto-start: false"} {
+	for _, want := range []string{"gc.endpoint_origin: inherited_city", "gc.endpoint_status: unverified", "dolt.auto-start: false"} {
 		if !strings.Contains(rigText, want) {
 			t.Fatalf("rig config missing %q:\n%s", want, rigText)
 		}
 	}
-	if strings.Contains(rigText, "dolt.host:") || strings.Contains(rigText, "dolt.port:") {
-		t.Fatalf("inherited managed rig should not track endpoint defaults:\n%s", rigText)
-	}
+	assertLifecycleExternalEndpoint(t, cityPath, rigPath, contract.ConfigState{DoltHost: "legacy-db.example.com", DoltPort: "3307"})
 
 	for _, metaPath := range []string{
 		filepath.Join(cityPath, ".beads", "metadata.json"),
@@ -13689,6 +13663,7 @@ func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMatch(t *testing.T) {
 	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
 
 	cityPath := setupBdContractCityForTest(t)
+	writeCanonicalScopeConfig(t, cityPath, contract.ConfigState{IssuePrefix: "tc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
 	defer stop()
 
@@ -13743,6 +13718,7 @@ func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMiss(t *testing.T) {
 	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
 
 	cityPath := setupBdContractCityForTest(t)
+	writeCanonicalScopeConfig(t, cityPath, contract.ConfigState{IssuePrefix: "tc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
 	defer stop()
 
@@ -14121,6 +14097,13 @@ provider = "bd"
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gsp"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	writeCanonicalScopeConfig(t, cityDir, contract.ConfigState{IssuePrefix: "gc", DoltHost: "legacy-db.example.com", DoltPort: "3307"})
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{IssuePrefix: "gsp", DoltHost: "legacy-db.example.com", DoltPort: "3307"})
+	assertLifecycleCompleteLegacyAuthority(t, cityDir, cityDir, "gc")
+	assertLifecycleCompleteLegacyAuthority(t, cityDir, rigDir, "gsp")
+	// Keep the generic owned-resource cleanup registered above. The declared
+	// legacy external endpoint does not authorize a new city-managed server.
 
 	var commits int
 	stubCommitDirtyScopeTables(t, func(string, string) (bool, error) {
@@ -14768,4 +14751,174 @@ func TestStartBeadsLifecycleKeepsNoJournalCityOnLegacyDirectPath(t *testing.T) {
 	if startAt < 0 || initAt < 0 || startAt > initAt {
 		t.Fatalf("provider operations = %v, want legacy direct start before init", operations)
 	}
+}
+
+// snapshotLifecycleFixtureArtifacts covers the complete task-owned fixture
+// trees, including missing roots, directory entries and native ownership files.
+// It is a filesystem preservation assertion, not an OS-wide write monitor.
+func snapshotLifecycleFixtureArtifacts(t *testing.T, roots ...string) map[string]string {
+	t.Helper()
+	out := make(map[string]string)
+	for _, root := range roots {
+		if _, err := os.Lstat(root); os.IsNotExist(err) {
+			out[root] = "absent"
+			continue
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				target, err := os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				out[path] = "symlink:" + target
+				return nil
+			}
+			if info.IsDir() {
+				out[path] = "directory:" + info.Mode().String()
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out[path] = info.Mode().String() + ":" + string(data)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return out
+}
+
+func assertLifecycleFixtureArtifactsPreserved(t *testing.T, before map[string]string, roots ...string) {
+	t.Helper()
+	if after := snapshotLifecycleFixtureArtifacts(t, roots...); !reflect.DeepEqual(before, after) {
+		t.Fatalf("ownership refusal changed task-owned fixture artifacts: before=%v after=%v", before, after)
+	}
+}
+
+func assertLifecycleCompleteLegacyAuthority(t *testing.T, city, scope, prefix string) {
+	t.Helper()
+	raw, exists, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scope, ".beads", "config.yaml"))
+	if err != nil || !exists || raw.EndpointOrigin != "" || raw.DoltHost == "" || raw.DoltPort == "" {
+		t.Fatalf("fixture must independently declare complete legacy endpoint without GC origin: state=%+v exists=%v err=%v", raw, exists, err)
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, city, scope, prefix)
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative || resolved.State.EndpointOrigin == contract.EndpointOriginManagedCity {
+		t.Fatalf("complete legacy endpoint must remain external authority: state=%+v err=%v", resolved, err)
+	}
+}
+
+func assertLifecycleExternalEndpoint(t *testing.T, city, scope string, expected contract.ConfigState) {
+	t.Helper()
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, city, scope, "")
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative || resolved.State.EndpointOrigin == contract.EndpointOriginManagedCity || resolved.State.DoltHost != expected.DoltHost || resolved.State.DoltPort != expected.DoltPort {
+		t.Fatalf("legacy endpoint changed or was inferred managed: state=%+v err=%v want=%s:%s", resolved, err, expected.DoltHost, expected.DoltPort)
+	}
+}
+
+// The original prefix-only/native-metadata repair and already-initialized
+// shapes cannot authorize taking over a store. Retain those inputs separately
+// from the proven legacy endpoint and fresh/owned positive controls above.
+func TestBeadsLifecycleRefusesUnprovenNativeMetadataBeforeMutation(t *testing.T) {
+	for _, shape := range []struct{ name, config, metadata string }{
+		{name: "missing config"},
+		{name: "prefix only", config: "issue_prefix: stale\nissue-prefix: stale\ndolt.auto-start: true\n"},
+		{name: "autostart only", config: "dolt.auto-start: true\n"},
+		{name: "malformed config", config: "issue_prefix: stale\ndolt.auto-start: true\ndolt_server_port: 3307\n: not yaml\n"},
+		{name: "deprecated partial endpoint", config: "issue_prefix: stale\ndolt.auto-start: true\n", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fe","dolt_server_host":"127.0.0.1"}`},
+	} {
+		for _, operation := range []string{"sync", "normalize", "init and hook", "injected init"} {
+			t.Run(shape.name+"/"+operation, func(t *testing.T) {
+				city := t.TempDir()
+				rig := filepath.Join(city, "rigs", "existing")
+				setScopedBeadsProviderForTest(t, city, "bd")
+				for _, scope := range []string{city, rig} {
+					if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"fe"}`
+					if shape.metadata != "" {
+						metadata = shape.metadata
+					}
+					if err := os.WriteFile(scopeMetadataJSONPath(scope), []byte(metadata), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if shape.config != "" {
+						if err := os.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(shape.config), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := os.WriteFile(filepath.Join(scope, ".beads", "dolt-server.port"), []byte("63467\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := snapshotLifecycleFixtureArtifacts(t, city)
+				cfg := &config.City{Workspace: config.Workspace{Name: "unproven"}, Rigs: []config.Rig{{Name: "existing", Path: rig, Prefix: "fe"}}}
+				var err error
+				executions := 0
+				switch operation {
+				case "sync":
+					err = syncConfiguredDoltPortFiles(city, config.DoltConfig{}, "gc", cfg.Rigs, io.Discard)
+				case "normalize":
+					err = normalizeCanonicalBdScopeFiles(city, cfg, io.Discard)
+				case "init and hook":
+					err = initAndHookDir(city, rig, "fe")
+				case "injected init":
+					err = initBeadsForDirWithExecutor(city, rig, "fe", "fe", func(string, []string, ...string) error {
+						executions++
+						return errors.New("unexpected initializer execution")
+					})
+				}
+				if err == nil || !strings.Contains(err.Error(), "no proven project identity") || executions != 0 {
+					t.Fatalf("unknown native scope must refuse before init: err=%v executions=%d", err, executions)
+				}
+				assertLifecycleFixtureArtifactsPreserved(t, before, city)
+			})
+		}
+	}
+}
+
+// This is the matching existing-native contract, not the GC-owned dirty-init
+// recovery contract: a qualified local native database is started/checked in
+// place, with no init and no rewrite of its original identity/ownership files.
+func TestInitAndHookDirExistingNativeDirectLocalDoesNotReinitialize(t *testing.T) {
+	city, rig, original := nativeDirectAdoptFixture(t)
+	callLog := filepath.Join(t.TempDir(), "provider-calls")
+	script := gcBeadsBdScriptPath(city)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$1\" >> %q\ncase \"$1\" in start|health) exit 0 ;; *) exit 99 ;; esac\n", callLog)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bd := filepath.Join(t.TempDir(), "bd")
+	bdLog := filepath.Join(t.TempDir(), "bd-calls")
+	bdBody := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\ncase \" $* \" in *\" init \"*) exit 99 ;; *) exit 0 ;; esac\n", bdLog)
+	if err := os.WriteFile(bd, []byte(bdBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", bd)
+	t.Setenv("PATH", filepath.Dir(bd)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := initAndHookDir(city, rig, "kept3d575b64"); err != nil {
+		t.Fatal(err)
+	}
+	calls := providerCalls(t, callLog)
+	if !reflect.DeepEqual(calls, []string{"start", "health"}) {
+		t.Fatalf("existing native scope operations=%v, want start+health and no init", calls)
+	}
+	for _, call := range providerCalls(t, bdLog) {
+		for _, argument := range strings.Fields(call) {
+			if argument == "init" {
+				t.Fatalf("existing native scope invoked bd init: %q", call)
+			}
+		}
+	}
+	assertNativeDirectPreserved(t, rig, original)
 }

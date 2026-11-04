@@ -853,7 +853,8 @@ var nonSessionKeys = func() map[string]string {
 		// it does not identify a human or a session.
 		"infrastructure readiness event": "gc.init_owner",
 		"rig-imported graph bead":        "gc.migrated_cross_edges",
-		"rig idempotency bead":           "gc.idem.created_dir gc.idem.dolt_db gc.idem.event_cursor gc.idem.kind gc.idem.result.branch gc.idem.result.prefix gc.idem.result.rig gc.idem.state",
+		// Clone cleanup ownership describes the request-created directory, not a session.
+		"rig idempotency bead": "gc.idem.created_dir gc.idem.created_dir_identity gc.idem.created_dir_identity_required gc.idem.dolt_db gc.idem.event_cursor gc.idem.kind gc.idem.result.branch gc.idem.result.prefix gc.idem.result.rig gc.idem.state",
 	} {
 		for _, k := range strings.Fields(keys) {
 			out[k] = class

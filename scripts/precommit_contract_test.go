@@ -290,7 +290,7 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
 
 	tmpRepo := t.TempDir()
-	runGit := func(args ...string) {
+	runGit := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = tmpRepo
@@ -298,9 +298,11 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
 		)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
+		return out
 	}
 
 	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
@@ -371,11 +373,9 @@ exit 0
 		t.Fatalf("pre-commit hook exited early and never invoked npm when only internal/api/openapi.json was "+
 			"staged -- the go/web/docs early guard must not skip a spec-only commit (hook output: %s)", out)
 	}
-	indexed := exec.Command("git", "show", ":"+embeddedRelative)
-	indexed.Dir = tmpRepo
-	indexedBytes, indexedErr := indexed.Output()
-	if indexedErr != nil || string(indexedBytes) != "updated-bundle\n" {
-		t.Fatalf("generated embedded dashboard must be staged with raw assets: indexed=%q err=%v", indexedBytes, indexedErr)
+	indexedBytes := runGit("show", ":"+embeddedRelative)
+	if string(indexedBytes) != "updated-bundle\n" {
+		t.Fatalf("generated embedded dashboard must be staged with raw assets: indexed=%q", indexedBytes)
 	}
 	if !strings.Contains(string(logContent), "generate:client") {
 		t.Fatalf("pre-commit hook must run 'npm run generate:client' when only internal/api/openapi.json is "+

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,8 +201,12 @@ func TestBootstrapInputOriginConfiguredWorkerBeaconRefusesCreditWithExactOptions
 			if _, err := config.ResolveExplicitOptions(rp.OptionsSchema, options); err != nil {
 				t.Fatalf("real options were not accepted: %v", err)
 			}
-			if len(rp.Args) != 0 {
-				t.Fatalf("recognized options became opaque argv: %v", rp.Args)
+			var canonicalArgs []string
+			if tc.family == "codex" {
+				canonicalArgs = []string{"--no-daemon"}
+			}
+			if !slices.Equal(rp.Args, canonicalArgs) {
+				t.Fatalf("recognized options changed canonical builtin argv: got %v, want %v", rp.Args, canonicalArgs)
 			}
 			declaredCommand := rp.Command
 			launch, err := config.BuildProviderTemplateLaunchCommand(cityPath, rp, config.SessionTransportTmux, config.ResolveInstallHooks(&cfgAgent, &cfg.Workspace), cfg.Providers)
@@ -241,7 +246,7 @@ func TestBootstrapInputOriginConfiguredWorkerBeaconRefusesCreditWithExactOptions
 			if prepared.cfg.BootstrapInputOrigin != "" || (prepared.cfg.PromptSuffix == "" && prepared.cfg.Nudge == "") {
 				t.Fatalf("configured %s worker beacon must remain startup input without fresh credit: origin=%q prompt=%t nudge=%t", tc.family, prepared.cfg.BootstrapInputOrigin, prepared.cfg.PromptSuffix != "", prepared.cfg.Nudge != "")
 			}
-			if tp.ResolvedProvider.Command != declaredCommand || len(tp.ResolvedProvider.Args) != 0 {
+			if tp.ResolvedProvider.Command != declaredCommand || !slices.Equal(tp.ResolvedProvider.Args, canonicalArgs) {
 				t.Fatalf("schema options changed underlying command provenance: %+v", tp.ResolvedProvider)
 			}
 			for _, required := range []string{tc.model, "medium", tc.permissionFlag, tc.effortFlag} {

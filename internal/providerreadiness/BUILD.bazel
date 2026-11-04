@@ -5,7 +5,10 @@ go_library(
     srcs = ["readiness.go"],
     importpath = "github.com/gastownhall/gascity/internal/providerreadiness",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/execgrace"],
+    deps = [
+        "//internal/deps",
+        "//internal/execgrace",
+    ],
 )
 
 go_test(

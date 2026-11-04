@@ -484,6 +484,9 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return countControlBdCalls(bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
+		if err != nil {
+			return nil, err
+		}
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		applyControllerBdEnv(env)
 		return env, err
@@ -493,6 +496,9 @@ func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
 	return countControlBdCalls(bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+		if err != nil {
+			return nil, err
+		}
 		applyControllerBdEnv(env)
 		return env, err
 	}))
@@ -2214,6 +2220,18 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 		mirrorBeadsDoltEnv(env)
 		return env, err
 	} else if bound {
+		return env, nil
+	}
+	// A native local city has the same ownership boundary as a native rig.
+	// Unknown identity must not fall through optional managed recovery into a
+	// bare bd invocation; proven local storage keeps its own binding instead.
+	if err := ctx.Err(); err != nil {
+		return env, err
+	}
+	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, cityPath); err != nil {
+		return env, err
+	} else if local {
+		applyProviderOwnedDirectLocalEnv(env)
 		return env, nil
 	}
 	if err := applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery); err != nil {

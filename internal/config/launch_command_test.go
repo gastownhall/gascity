@@ -396,3 +396,43 @@ func TestBuildProviderTemplateLaunchCommandIgnoresDeprecatedKindForSettings(t *t
 		t.Fatalf("unexpected settings source from deprecated Kind fallback: %#v", got)
 	}
 }
+
+func TestCodexLaunchIsolatesRuntimeEnvironmentWithDefaultAndExplicitOptions(t *testing.T) {
+	base := "builtin:codex"
+	cfg := &City{Workspace: Workspace{Provider: "native-codex"}, Providers: map[string]ProviderSpec{"native-codex": {Base: &base}}}
+	if err := BuildResolvedProviderCache(cfg); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveProvider(&Agent{Provider: "native-codex"}, &cfg.Workspace, cfg.Providers, func(name string) (string, error) { return name, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		options map[string]string
+	}{
+		{name: "permission only"},
+		{name: "explicit model and effort", options: map[string]string{"model": "gpt-6.1-sol", "effort": "medium", "permission_mode": "unrestricted"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			launch, err := BuildProviderLaunchCommand("", resolved, test.options, SessionTransportTmux)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(launch.Command, "--no-daemon") != 1 || !strings.Contains(launch.Command, "--dangerously-bypass-approvals-and-sandbox") {
+				t.Fatalf("Codex per-runtime identity is not independent of options: %s", launch.Command)
+			}
+			if test.options == nil {
+				if strings.Contains(launch.Command, "--model") || strings.Contains(launch.Command, "model_reasoning_effort") {
+					t.Fatalf("default isolation must not pin user model/effort: %s", launch.Command)
+				}
+				template, err := BuildProviderTemplateLaunchCommand("", resolved, SessionTransportTmux, []string{"codex"}, cfg.Providers)
+				if err != nil || template.Command != launch.Command {
+					t.Fatalf("template/API launch parity lost: template=%+v err=%v launch=%+v", template, err, launch)
+				}
+			} else if !strings.Contains(launch.Command, "--model gpt-6.1-sol") || !strings.Contains(launch.Command, "model_reasoning_effort=medium") {
+				t.Fatalf("explicit options were not preserved: %s", launch.Command)
+			}
+		})
+	}
+}

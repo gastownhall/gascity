@@ -1156,7 +1156,7 @@ func TestBuildResumeCommandAppliesTemplateOverrides(t *testing.T) {
 	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
 		"template_overrides": `{"permission_mode":"plan"}`,
 	}, io.Discard)
-	want := "codex --resume abc-123 --ask-for-approval never"
+	want := "codex --resume abc-123 --no-daemon --ask-for-approval never"
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}

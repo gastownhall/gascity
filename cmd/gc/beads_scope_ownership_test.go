@@ -241,12 +241,22 @@ func testProviderScopeOwnershipRemoveAndAdoptReadd(t *testing.T, readdName strin
 	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"provider_rig","project_id":"native-provider-rig"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("issue_prefix: provider_rig\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A ready native direct scope retains its actual project/database binding
+	// and physical storage when its configured name is detached/re-added.
+	nativeSentinel := filepath.Join(rig, ".beads", "dolt", "provider_rig", ".dolt", "noms", "preserved")
+	if err := os.MkdirAll(filepath.Dir(nativeSentinel), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nativeSentinel, []byte("original native store"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeMetadata := mustReadFile(t, scopeMetadataJSONPath(rig))
 	providerLog := filepath.Join(city, "provider.log")
 	provider := filepath.Join(city, "gc-beads-bd.sh")
 	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$GC_TEST_PROVIDER_LOG\"\n"), 0o755); err != nil {
@@ -285,6 +295,12 @@ func testProviderScopeOwnershipRemoveAndAdoptReadd(t *testing.T, readdName strin
 	key, entry, owned, err := providerScopeOwnershipRecord(city, rig)
 	if err != nil || !owned || key != "rig:"+readdName || entry.State != providerScopeReady {
 		t.Fatalf("adopted re-add ownership = (%q, %+v, %t, %v)", key, entry, owned, err)
+	}
+	if got := mustReadFile(t, scopeMetadataJSONPath(rig)); !bytes.Equal(got, beforeMetadata) {
+		t.Fatalf("adopted re-add changed native metadata: %q", got)
+	}
+	if got := string(mustReadFile(t, nativeSentinel)); got != "original native store" {
+		t.Fatalf("adopted re-add changed original store: %q", got)
 	}
 }
 
@@ -354,9 +370,10 @@ func TestInitDirIfReadySkipRecordsFreshRigIntentForProviderOwnedCity(t *testing.
 	script := `#!/bin/sh
 printf '%s\n' "$1" >> "$GC_TEST_PROVIDER_LOG"
 if [ "$1" = init ]; then
-  mkdir -p "$2/.beads"
-  printf '{"backend":"dolt","dolt_mode":"server"}\n' > "$2/.beads/metadata.json"
-  printf 'dolt.mode: server\n' > "$2/.beads/config.yaml"
+  database="$4"
+  mkdir -p "$2/.beads/dolt/$database/.dolt/noms"
+  printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"%s","project_id":"fresh-provider-project"}\n' "$database" > "$2/.beads/metadata.json"
+  printf 'issue_prefix: %s\ndolt.mode: server\n' "$3" > "$2/.beads/config.yaml"
 fi
 exit 0
 `
@@ -366,13 +383,16 @@ exit 0
 	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(city, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"city-provider-project"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("dolt.mode: server\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[beads]\nprovider = \"exec:"+provider+"\"\n[[rigs]]\nname = \"fresh\"\npath = \"rigs/fresh\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(city, ".beads", "dolt", "hq", ".dolt", "noms"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {

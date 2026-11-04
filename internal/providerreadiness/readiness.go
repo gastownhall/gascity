@@ -6,15 +6,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/execgrace"
 )
+
+// CodexMinimumVersion is the first qualified native CLI for explicit embedded
+// TUI startup (--no-daemon), which keeps each GC runtime's tool environment local.
+const CodexMinimumVersion = "0.162.1"
+
+var codexVersionLine = regexp.MustCompile(`^codex-cli ([0-9]+\.[0-9]+\.[0-9]+(?:\+[0-9A-Za-z.-]+)?)$`)
 
 const (
 	// Configured means the native CLI reports local credentials configured.
@@ -123,6 +132,11 @@ func Probe(parent context.Context, target Target) Result {
 	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
+	if target.Family == "codex" {
+		if failure := probeCodexMinimum(ctx, target); failure.Status != "" {
+			return failure
+		}
+	}
 	output, err := runStatus(ctx, target.Command, args, target.Env)
 	if ctx.Err() != nil {
 		return Result{ProbeError, "provider status check canceled or timed out"}
@@ -165,4 +179,36 @@ func Probe(parent context.Context, target Target) Result {
 	}
 
 	return Result{ProbeError, "configured Codex executable did not return a valid login-status verdict"}
+}
+
+// probeCodexMinimum returns only a failure; an empty result permits the native
+// login-status check, never a configured/remote-inference claim. Probe --version
+// without launch flags so an old executable can report a clear upgrade remedy.
+func probeCodexMinimum(ctx context.Context, target Target) Result {
+	output, err := runStatus(ctx, target.Command, []string{"--version"}, target.Env)
+	if ctx.Err() != nil {
+		return Result{ProbeError, "provider version check canceled or timed out"}
+	}
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		return Result{NotInstalled, "configured provider executable is unavailable"}
+	}
+	if err != nil {
+		return Result{ProbeError, "configured Codex executable did not return a valid version verdict; requires final Codex " + CodexMinimumVersion + " or newer for --no-daemon"}
+	}
+	version := ""
+	for _, line := range strings.Split(string(output.stdout)+"\n"+string(output.stderr), "\n") {
+		if match := codexVersionLine.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
+			if version != "" {
+				return Result{ProbeError, "configured Codex executable returned conflicting version verdicts"}
+			}
+			version = match[1]
+		}
+	}
+	if version == "" || !deps.ValidVersion(version) {
+		return Result{ProbeError, "configured Codex executable did not return a final version verdict; requires Codex " + CodexMinimumVersion + " or newer for --no-daemon"}
+	}
+	if deps.CompareVersions(version, CodexMinimumVersion) < 0 {
+		return Result{ProbeError, fmt.Sprintf("configured Codex %s is too old; requires %s or newer for per-session --no-daemon; upgrade this configured executable", version, CodexMinimumVersion)}
+	}
+	return Result{}
 }

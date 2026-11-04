@@ -187,6 +187,11 @@ its database. You do not need to add the prefix to a YAML file. If the queue's
 database is stopped, run `bd ping` in that repository before previewing;
 the preview itself does not start it.
 
+If Gas City refuses an unproven native binding, keep the original `.beads`
+directory and database. Follow [Unproven Native Beads Binding](/getting-started/troubleshooting#unproven-native-beads-binding)
+to inspect and recover the existing binding before retrying adoption. A proposed
+city endpoint does not prove ownership of the old database.
+
 Read the plan, then apply the same command without `--dry-run`:
 
 ```bash

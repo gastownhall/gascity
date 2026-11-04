@@ -115,7 +115,7 @@ repository root, prefer the same `/tree/<ref>/<path>` URL a browser can open:
 ```toml
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:5f4a74aff57487e764ad2509d25c004c837b44d3"
+version = "sha:483f21f3efd83f992c3d1ae0b695370d4bc5a072"
 ```
 
 Do not write registry handles such as `main:gastown` into `pack.toml`. Registry
@@ -160,7 +160,7 @@ schema = 2
 
 [imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:5f4a74aff57487e764ad2509d25c004c837b44d3"
+version = "sha:483f21f3efd83f992c3d1ae0b695370d4bc5a072"
 
 [imports.review]
 source = "./assets/code-review"
@@ -178,7 +178,7 @@ default_sling_target = "backend/gastown.polecat"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:5f4a74aff57487e764ad2509d25c004c837b44d3"
+version = "sha:483f21f3efd83f992c3d1ae0b695370d4bc5a072"
 ```
 
 Machine-local rig paths are site bindings managed by `gc`:
@@ -198,7 +198,7 @@ name = "backend"
 
 [rigs.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:5f4a74aff57487e764ad2509d25c004c837b44d3"
+version = "sha:483f21f3efd83f992c3d1ae0b695370d4bc5a072"
 
 [rigs.imports.review]
 source = "./assets/code-review"

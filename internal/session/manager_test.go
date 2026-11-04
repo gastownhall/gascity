@@ -19,6 +19,7 @@ import (
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 func immediateStaleKeyDetectionWaiter(context.Context, string) error { return nil }
@@ -6466,5 +6467,16 @@ func TestManagerCloseStampsUsageCloseMarker(t *testing.T) {
 	}
 	if got := closed.Metadata["usage_closed_at"]; got != closeAt.Format(time.RFC3339Nano) {
 		t.Errorf("usage_closed_at = %q, want %q", got, closeAt.Format(time.RFC3339Nano))
+	}
+}
+
+func TestCodexBuiltinResumePreservesEmbeddedModeAndNativeContext(t *testing.T) {
+	provider := builtin.BuiltinProviders()["codex"]
+	for _, tail := range []string{"", " --model gpt-6.1-sol -c model_reasoning_effort=medium"} {
+		command := provider.Command + " " + strings.Join(provider.Args, " ") + tail
+		got := BuildResumeCommand(Info{ID: "gcg-fixture", Provider: "codex", Command: command, SessionKey: "native-context", ResumeFlag: provider.ResumeFlag, ResumeStyle: provider.ResumeStyle})
+		if !strings.HasPrefix(got, "codex resume native-context --no-daemon") || strings.Count(got, "--no-daemon") != 1 || !strings.HasSuffix(got, tail) {
+			t.Fatalf("resume lost native context/isolation/options: command=%q got=%q", command, got)
+		}
 	}
 }

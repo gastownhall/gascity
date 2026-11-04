@@ -168,9 +168,10 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	if rp.Name != "codex" {
 		t.Errorf("Name = %q, want %q", rp.Name, "codex")
 	}
-	// After migration, CommandString() is just "codex" -- schema flags come from ResolveDefaultArgs.
-	if rp.CommandString() != "codex" {
-		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex")
+	// Non-schema isolation is always present; selectable schema flags still
+	// come from ResolveDefaultArgs without pinning a model or effort.
+	if rp.CommandString() != "codex --no-daemon" {
+		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex --no-daemon")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
 	// No model or effort flags: codex uses the user's own config for both.

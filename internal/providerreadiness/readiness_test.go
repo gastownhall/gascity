@@ -45,8 +45,14 @@ func TestProbeCodexUsesNativeLoginStatusAndConfiguredHome(t *testing.T) {
 	t.Cleanup(func() { runStatus = old })
 	for _, output := range []string{"Logged in using ChatGPT", "Logged in using an API key - test", "Warning: optional PATH update failed\nLogged in using ChatGPT"} {
 		runStatus = func(_ context.Context, command string, args []string, env map[string]string) (statusOutput, error) {
-			if command != "/selected/codex" || !reflect.DeepEqual(args, []string{"login", "status"}) || env["CODEX_HOME"] != "/selected/home" {
+			if command != "/selected/codex" || env["CODEX_HOME"] != "/selected/home" {
 				t.Fatalf("wrong Codex context: %s %v", command, args)
+			}
+			if reflect.DeepEqual(args, []string{"--version"}) {
+				return statusOutput{stdout: []byte("codex-cli 0.162.1\n")}, nil
+			}
+			if !reflect.DeepEqual(args, []string{"login", "status"}) {
+				t.Fatalf("wrong Codex status arguments: %v", args)
 			}
 			return statusOutput{stderr: []byte(output)}, nil
 		}
@@ -72,7 +78,10 @@ func TestProbeNeverTurnsMissingOrMalformedStateIntoReady(t *testing.T) {
 		{name: "Codex conflicting verdicts", family: "codex", output: "Logged in using ChatGPT\nNot logged in", want: ProbeError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runStatus = func(context.Context, string, []string, map[string]string) (statusOutput, error) {
+			runStatus = func(_ context.Context, _ string, args []string, _ map[string]string) (statusOutput, error) {
+				if tc.family == "codex" && reflect.DeepEqual(args, []string{"--version"}) {
+					return statusOutput{stdout: []byte("codex-cli 0.162.1\n")}, nil
+				}
 				return statusOutput{stdout: []byte(tc.output)}, tc.err
 			}
 			result := Probe(context.Background(), Target{Family: tc.family, Command: "/selected/runtime"})
@@ -131,5 +140,77 @@ func TestProbeUsesConfiguredExecutableSearchPath(t *testing.T) {
 	target.Env["PATH"] = ""
 	if result := Probe(context.Background(), target); result.Status != NotInstalled {
 		t.Fatalf("empty configured PATH must not use the supervisor PATH: %+v", result)
+	}
+}
+
+func TestProbeCodexMinimumVersionBeforeAuthWithOriginalDeadline(t *testing.T) {
+	old := runStatus
+	t.Cleanup(func() { runStatus = old })
+	for _, test := range []struct {
+		name, version string
+		wantAuth      bool
+	}{
+		{name: "qualified", version: "codex-cli 0.162.1", wantAuth: true},
+		{name: "newer", version: "codex-cli 0.166.0", wantAuth: true},
+		{name: "older patch", version: "codex-cli 0.162.0"},
+		{name: "old CLI", version: "codex-cli 0.149.0"},
+		{name: "prerelease", version: "codex-cli 0.162.1-alpha.1"},
+		{name: "wrong program", version: "node 0.166.0"},
+		{name: "conflicting", version: "codex-cli 0.162.1\ncodex-cli 0.149.0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var commands [][]string
+			var originalDeadline time.Time
+			runStatus = func(ctx context.Context, command string, args []string, env map[string]string) (statusOutput, error) {
+				if command != "/selected/codex" || env["CODEX_HOME"] != "/selected/home" {
+					t.Fatalf("selected runtime context lost: %s %v", command, env)
+				}
+				deadline, bounded := ctx.Deadline()
+				if !bounded || time.Until(deadline) > 5*time.Second {
+					t.Fatal("version/auth probes need one existing five-second budget")
+				}
+				if originalDeadline.IsZero() {
+					originalDeadline = deadline
+				} else if deadline != originalDeadline {
+					t.Fatal("auth reset the version-check deadline")
+				}
+				commands = append(commands, append([]string(nil), args...))
+				if reflect.DeepEqual(args, []string{"--version"}) {
+					return statusOutput{stdout: []byte(test.version)}, nil
+				}
+				if !test.wantAuth || !reflect.DeepEqual(args, []string{"login", "status"}) {
+					t.Fatalf("unexpected post-version command: %v", args)
+				}
+				return statusOutput{stderr: []byte("Logged in using ChatGPT")}, nil
+			}
+			result := Probe(context.Background(), Target{Family: "codex", Command: "/selected/codex", Args: []string{"--no-daemon"}, Env: map[string]string{"CODEX_HOME": "/selected/home"}})
+			if len(commands) == 0 || !reflect.DeepEqual(commands[0], []string{"--version"}) {
+				t.Fatalf("version must precede unsupported launch flags/auth: %v", commands)
+			}
+			if test.wantAuth {
+				if result.Status != Configured || len(commands) != 2 {
+					t.Fatalf("qualified result=%+v calls=%v", result, commands)
+				}
+			} else if result.Status != ProbeError || len(commands) != 1 {
+				t.Fatalf("unsupported version result=%+v calls=%v", result, commands)
+			}
+		})
+	}
+}
+
+func TestProbeCodexVersionFailureNeverLeaksOutputOrCallsAuth(t *testing.T) {
+	old := runStatus
+	t.Cleanup(func() { runStatus = old })
+	calls := 0
+	runStatus = func(_ context.Context, _ string, args []string, _ map[string]string) (statusOutput, error) {
+		calls++
+		if !reflect.DeepEqual(args, []string{"--version"}) {
+			t.Fatalf("auth ran after failed version check: %v", args)
+		}
+		return statusOutput{stdout: []byte("test-secret")}, errors.New("test-secret native failure")
+	}
+	result := Probe(context.Background(), Target{Family: "codex", Command: "/selected/codex"})
+	if calls != 1 || result.Status != ProbeError || strings.Contains(result.Detail, "test-secret") || !strings.Contains(result.Detail, "0.162.1") {
+		t.Fatalf("version failure lost privacy/upgrade detail: calls=%d result=%+v", calls, result)
 	}
 }

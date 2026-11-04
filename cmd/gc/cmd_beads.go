@@ -197,27 +197,7 @@ func cmdBeadsListFresh(format string, filters beadFilters, strict bool, stdout, 
 // doBeadsListStrict emits rows only after every configured work scope, the
 // relocated class binding and the unbounded store merge have succeeded.
 func doBeadsListStrict(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads list: incomplete strict read", true)
-	if stores == nil {
-		return code
-	}
-	stores, err := convoyStoreViewsWithBinding(cityPath, stores)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc beads list: incomplete strict read: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	all, err := collectBeadsAcrossStores(stores, filters)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc beads list: incomplete strict read: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	sortBeadsForList(all)
-	if format == "json" {
-		writeBeadsJSON(all, stdout)
-	} else {
-		writeBeadTable(all, stdout, true)
-	}
-	return 0
+	return doBeadsListFallback(cityPath, format, filters, stdout, stderr, true)
 }
 
 // validateStrictBeadsWorkScope establishes the selected work scope before the
@@ -380,22 +360,37 @@ func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, refresh api.Cach
 // This lane is UNBOUNDED: the store list uses Limit 0 (unlimited), so every
 // matching bead is returned. api.Client.ListBeads follows next_cursor to match
 // this coverage on the API/remote lanes (previously it truncated to page 1).
-//
-// A city or rig store that cannot be opened or read fails the listing, naming
-// the store: the supervisor reports the same store as a partial answer, which
-// the API route refuses, so both routes fail rather than print part of the
-// city. An unreadable relocated class binding only warns
-// (convoyStoreViewsForRead), so reads keep working while a city's storage
-// configuration is mid-repair.
-func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	stores, code := openEveryStoreAt(cityPath, stderr, "gc beads list", "bead", false)
+// Strict callers refuse any missing work scope or class binding before printing
+// rows. Ordinary fallback retains its documented all-work-store failure behavior.
+func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer, strict ...bool) int {
+	strictRead := len(strict) > 0 && strict[0]
+	cmdName := "gc beads list"
+	if strictRead {
+		cmdName += ": incomplete strict read"
+	}
+	var stores []convoyStoreView
+	var code int
+	if strictRead {
+		stores, code = openAllConvoyStoresAt(cityPath, stderr, cmdName, true)
+	} else {
+		stores, code = openEveryStoreAt(cityPath, stderr, cmdName, "bead", false)
+	}
 	if stores == nil {
 		return code
 	}
-	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc beads list")
+	if strictRead {
+		var err error
+		stores, err = convoyStoreViewsWithBinding(cityPath, stores)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else {
+		stores = convoyStoreViewsForRead(cityPath, stores, stderr, cmdName)
+	}
 	all, err := collectBeadsAcrossStores(stores, filters)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	sortBeadsForList(all)

@@ -77,3 +77,17 @@ func TestStageIdleProviderAnswersNativeStatus(t *testing.T) {
 		})
 	}
 }
+
+// This version belongs to a local lifecycle double, not an installed native
+// provider or any inference qualification.
+func TestStageIdleCodexAnswersQualifiedNativeVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := StageIdleProviderBinary(dir, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := boundedToolCommand(t, time.Second, filepath.Join(dir, "codex"), "--version")
+	output, err := cmd.CombinedOutput()
+	if err != nil || string(output) != "codex-cli 0.162.1\n" {
+		t.Fatalf("local version protocol: err=%v output=%q", err, output)
+	}
+}

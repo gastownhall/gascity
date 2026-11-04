@@ -69,3 +69,59 @@ func TestFreshBuiltinCommandFamilyRefusesOpaqueAndUnprovenCommands(t *testing.T)
 		})
 	}
 }
+
+// The default native Codex now has fixed isolation argv. It is not a startup
+// prompt and must retain authority through the actual catalog resolver, while
+// arbitrary or inconsistent argument shapes remain unsupported.
+func TestFreshBuiltinCommandFamilyAcceptsOnlyExactBuiltinIsolationArgs(t *testing.T) {
+	base := BasePrefixBuiltin + "codex"
+	for _, test := range []struct {
+		name string
+		spec ProviderSpec
+		want string
+	}{
+		{name: "inherited isolation", spec: ProviderSpec{Base: &base}, want: "codex"},
+		{name: "typed options", spec: ProviderSpec{Base: &base, OptionDefaults: map[string]string{"model": "gpt-6.1-sol", "effort": "medium", "permission_mode": "unrestricted"}}, want: "codex"},
+		{name: "extra input", spec: ProviderSpec{Base: &base, ArgsAppend: []string{"initial user task"}}},
+		{name: "duplicated isolation", spec: ProviderSpec{Base: &base, ArgsAppend: []string{"--no-daemon"}}},
+		{name: "cleared arguments", spec: ProviderSpec{Base: &base, Args: []string{}}},
+		{name: "replacement input", spec: ProviderSpec{Base: &base, Args: []string{"initial user task"}}},
+		{name: "explicit same command", spec: ProviderSpec{Base: &base, Command: "codex"}},
+		{name: "wrapper", spec: ProviderSpec{Base: &base, Command: "opaque-launcher", ResumeCommand: "opaque-launcher resume {{.SessionKey}}"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			city := &City{Providers: map[string]ProviderSpec{"alias": test.spec}}
+			resolved, err := ResolveProvider(&Agent{Provider: "alias"}, &city.Workspace, city.Providers, func(name string) (string, error) { return "/qualified/bin/" + name, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := FreshBuiltinCommandFamily(city, resolved); got != test.want {
+				t.Fatalf("family = %q, want %q; actual catalog args=%v", got, test.want, resolved.Args)
+			}
+		})
+	}
+}
+
+func TestFreshBuiltinCommandFamilyRefusesResolvedAndDeclaredArgvDrift(t *testing.T) {
+	base := BasePrefixBuiltin + "codex"
+	city := &City{Providers: map[string]ProviderSpec{"alias": {Base: &base}}}
+	resolved, err := ResolveProvider(&Agent{Provider: "alias"}, &city.Workspace, city.Providers, func(name string) (string, error) { return "/qualified/bin/" + name, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--no-daemon", "initial user task"}, {"--no-daemon", "--no-daemon"}} {
+		copyProvider := *resolved
+		copyProvider.Args = args
+		if got := FreshBuiltinCommandFamily(city, &copyProvider); got != "" {
+			t.Fatalf("mutated effective argv granted authority: args=%v family=%q", args, got)
+		}
+	}
+	// A plausible resolved argv cannot override an independently declared
+	// startup prompt or a cleared isolation policy in the owned city catalog.
+	for _, args := range [][]string{{}, {"initial user task"}} {
+		otherCity := &City{Providers: map[string]ProviderSpec{"alias": {Base: &base, Args: args}}}
+		if got := FreshBuiltinCommandFamily(otherCity, resolved); got != "" {
+			t.Fatalf("resolved/declared argv mismatch granted authority: declared=%v family=%q", args, got)
+		}
+	}
+}

@@ -171,7 +171,12 @@ case "$1" in
         echo x >> `+guards+`
         if [ "$(wc -l < `+guards+`)" -gt 1 ]; then echo 'gc-fence-miss:`+ownRead(other)+`'; fi ;;
       *display-message*) echo '`+ownRead(execFence)+`' ;;
-      *capture-pane*) printf '%s\n' 'Resume from summary' 'Resume full session as-is' 'Enter to confirm' ;;
+      *capture-pane*)
+        if [ -f `+guards+` ]; then
+          printf '%s\n' 'This session is 1h old' '  1. Resume from summary (recommended)' '❯ 2. Resume full session as-is' "  3. Don't ask me again" 'Enter to confirm · Esc to cancel'
+        else
+          printf '%s\n' 'This session is 1h old' '❯ 1. Resume from summary (recommended)' '  2. Resume full session as-is' "  3. Don't ask me again" 'Enter to confirm · Esc to cancel'
+        fi ;;
     esac
     ;;
   *) exit 2 ;;
