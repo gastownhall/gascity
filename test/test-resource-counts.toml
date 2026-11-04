@@ -202,6 +202,11 @@ resource = "http_test_server"
 calls = 11
 
 [[count]]
+path = "cmd/gc/cmd_citystatus_fresh_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
 path = "cmd/gc/cmd_citystatus_test.go"
 resource = "http_test_server"
 calls = 4
@@ -1633,6 +1638,11 @@ resource = "http_test_server"
 calls = 6
 
 [[count]]
+path = "internal/api/client_status_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
 calls = 74
@@ -2457,6 +2467,11 @@ calls = 1
 [[count]]
 path = "internal/runtime/runtimecapability/runner_test.go"
 resource = "listener_helper"
+calls = 1
+
+[[count]]
+path = "internal/runtime/runtimecontract/screen_reference_test.go"
+resource = "subprocess"
 calls = 1
 
 [[count]]

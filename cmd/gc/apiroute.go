@@ -59,8 +59,9 @@ func apiClient(cityPath string) *api.Client {
 // expensive: maintenance commands have no local fallback at all, and
 // `gc status`'s local fallback re-opens the full local bead/dolt store and
 // rescans event archives to rebuild store health — far more expensive than
-// the supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
-// ~0.35s warm API). Where apiClient returns nil for its caller's local
+// the supervisor's answer from its warm caches (ra-r9hm6v: ~9.5s local CPU
+// vs ~0.35s for a saved response, and ~3.65s for the build `gc status`
+// waits for, #5028). Where apiClient returns nil for its caller's local
 // fallback, it routes to the supervisor-managed client instead in two shapes:
 // a supervisor-hosted city whose supervisor requires grants (these callers
 // handle a refusal as they handle any other API error), and a live controller

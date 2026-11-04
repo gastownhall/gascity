@@ -117,6 +117,10 @@ export SCREENDIR=$STATE_ROOT/$CITY_KEY
 # counts from boot, so a record from another boot names no process that runs
 # now.
 PROC=/proc
+# PROCFS is set where procfs is mounted: there a pid with no $PROC/<pid> is
+# no process, read with no fork; ps answers only where there is none.
+PROCFS=""
+if [ -d "$PROC/self" ]; then PROCFS=y; fi
 BOOT=-
 if [ -r "$PROC/sys/kernel/random/boot_id" ]; then
   IFS= read -r BOOT < "$PROC/sys/kernel/random/boot_id" || BOOT=-
@@ -231,7 +235,7 @@ start_of() {
     read -r -a fields <<< "$rest"
     case "${fields[0]:-}" in Z | X) return 0 ;; esac
     START=${fields[19]:-}
-  else
+  elif [ -z "$PROCFS" ]; then
     START=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//') || START=""
   fi
 }
@@ -299,8 +303,13 @@ kill_wait() {
 # binary is called (SCREEN, a path, a wrapped binary's name).
 is_stray() {
   local -a argv=()
+  local arg
   [ -r "$PROC/$1/cmdline" ] || return 1
-  { mapfile -d '' -t argv < "$PROC/$1/cmdline"; } 2>/dev/null || return 1
+  # read -d '', not mapfile -d (bash 4.4): macOS ships bash 3.2. arg is
+  # cleared before each read: a read error leaves it holding the last one.
+  { while arg=; IFS= read -r -d '' arg || [ -n "$arg" ]; do
+      argv[${#argv[@]}]=$arg
+    done < "$PROC/$1/cmdline"; } 2>/dev/null || return 1
   [ "${#argv[@]}" -eq 4 ] && [ "${argv[1]}" = -dmS ] &&
     [ "${argv[2]}" = "$2" ] && [ "${argv[3]}" = "$META/$2.wrapper.sh" ]
 }
@@ -424,6 +433,33 @@ procs_of() {
 # forget removes a box's metadata (not its lock).
 forget() {
   rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window" "$META/$1".meta.*
+}
+
+# forget_stale forgets name $1's start record (its window and box records,
+# identity, wrapper and seeded metadata) once the window process it
+# recorded is gone and no box holds the name. Under the name's lock, taken
+# without waiting (a busy name is left for a later call): the record $2, as
+# inventory read it, must be unchanged, so no start has run since (a start
+# rewrites it); and a fresh listing must show no row of the name, since
+# inventory's own predates the lock (a box started since may be dead and
+# still hold it). Records otherwise pile up, one per pool session name, each
+# costing every inventory a read, and each wrapper keeping a session's env.
+# The lock and the keys gc set (set-meta) stay until a start or stop clears
+# them: gc reads a drain ack after its box is gone.
+forget_stale() {
+  (
+    exec 9>"$META/$1.lock"
+    flock -n 9 || exit 0
+    read_into "$META/$1.window"
+    # An empty record proves nothing: a start may have removed the one
+    # inventory read.
+    [ -n "$2" ] && [ "$REPLY" = "$2" ] || exit 0
+    if window_alive "$1"; then exit 0; fi
+    load_rows || exit 0
+    [ -z "$(rows_of "$1")" ] || exit 0
+    rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window"
+    for k in $META_KEYS; do rm -f "$META/$1.meta.$k"; done
+  ) || true
 }
 
 # gone_after waits (up to 2s) for name $1 to hold no row.
@@ -674,8 +710,9 @@ case "$op" in
     if [ -n "$ROWS" ] && [ -n "$(printf '%s\n' "$ROWS" | cut -f2 | sort | uniq -d)" ]; then
       die "inventory: a session name is held by more than one box"
     fi
-    declare -A agent_of=()
-    specs=""
+    # No associative arrays: macOS ships bash 3.2. A pid is an integer, so
+    # agent states are kept in an indexed array by pid.
+    specs=""; agent_of=()
     while IFS=$'\t' read -r pid sname status; do
       [ -n "$pid" ] || continue
       classify "$status"
@@ -684,7 +721,7 @@ case "$op" in
       [ -n "$PROCS" ] && specs+="$pid $PROCS $GCBIN"$'\n'
     done <<< "$ROWS"
     if [ -n "$specs" ] && states=$(printf '%s' "$specs" | agent_states); then
-      while read -r pid state; do agent_of[$pid]=$state; done <<< "$states"
+      while read -r pid state; do agent_of[pid]=$state; done <<< "$states"
     fi
     out='{"complete":true,"sessions":['; sep=""
     while IFS=$'\t' read -r pid sname status; do
@@ -705,20 +742,26 @@ case "$op" in
     done <<< "$ROWS"
     # A name no box lists is still held while the window process its last
     # start recorded runs (its agent outlived the box): it is listed
-    # unknown, never left out of a complete answer.
-    declare -A listed=()
-    while IFS=$'\t' read -r pid sname _; do
-      [ -n "$pid" ] || continue
-      listed[$sname]=y
-    done <<< "$ROWS"
-    for rec in "$META"/*.window; do
-      [ -f "$rec" ] || continue
-      sname=${rec##*/}
-      sname=${sname%.window}
-      [ -z "${listed[$sname]:-}" ] || continue
-      window_alive "$sname" || continue
+    # unknown, never left out of a complete answer. Once that process is
+    # gone, the name's start record is forgotten (forget_stale), so no later
+    # inventory reads it again. The names no box lists are found in one awk
+    # pass over the records' names and the listing, not a scan per record.
+    unlisted=$(
+      for rec in "$META"/*.window; do
+        [ -f "$rec" ] || continue
+        rec=${rec##*/}
+        printf '%s\n' "${rec%.window}"
+      done | awk -F'\t' 'FILENAME == ARGV[1] { listed[$2]; next } !($0 in listed)' <(printf '%s\n' "$ROWS") -
+    )
+    while IFS= read -r sname; do
+      [ -n "$sname" ] || continue
+      if ! window_alive "$sname"; then
+        read_into "$META/$sname.window"
+        forget_stale "$sname" "$REPLY"
+        continue
+      fi
       out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
-    done
+    done <<< "$unlisted"
     printf '%s]}\n' "$out"
     ;;
 
@@ -839,10 +882,36 @@ case "$op" in
     lines="${3:-0}"
     if [ -z "$name" ]; then exit 0; fi
     valid_name "$name"
-    target "$name" || exit 0
-    # Use hardcopy to capture the exact session's content.
+    # No box, or a dead one (screen cannot read a dead session's screen):
+    # exit 66, no screen. A screen that cannot be read is a failure, never
+    # an empty screen.
+    load_rows || exit 1
+    rc=0; one_row "$name" || rc=$?
+    if [ "$rc" -eq 1 ]; then exit 66; fi
+    [ "$rc" -eq 0 ] || die "peek: $name is held by more than one box"
+    classify "$STATUS"
+    case "$STATE" in
+      dead) exit 66 ;;
+      unknown) die "peek: cannot read $name" ;;
+    esac
+    # Use hardcopy to capture the exact session's content. screen -X exits
+    # 0 once the command is sent, whether or not SCREEN writes the file (it
+    # cannot write the path, or it is stopped), and SCREEN may still be
+    # writing it (a long scrollback); a blank screen still writes its empty
+    # lines. So the capture counts once it is non-empty and its size holds
+    # across 50ms; one that stays empty, or never settles within about 1s,
+    # is a failure, never an empty or partial screen.
     tmp=$(mktemp)
-    screen -S "$TARGET" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+    screen -S "$PID.$name" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; die "peek: cannot read the screen of $name"; }
+    size="" settled=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      sleep 0.05
+      [ -s "$tmp" ] || continue
+      now=$(wc -c < "$tmp")
+      if [ "$now" = "$size" ]; then settled=y; break; fi
+      size=$now
+    done
+    [ -n "$settled" ] || { rm -f "$tmp"; die "peek: screen wrote no settled capture of $name"; }
     if [ "$lines" -gt 0 ] 2>/dev/null; then
       tail -n "$lines" "$tmp"
     else

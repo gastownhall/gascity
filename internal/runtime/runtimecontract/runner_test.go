@@ -161,6 +161,10 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqObserveCityScoped, edit("inventory", `for box in "$B"/*;`, `for box in "$S"/city*/*;`), "inventory ignores the city"},
 		{ReqObserveCityScoped, edit("inventory", `for box in "$B"/*;`, `for box in "$B"/none*;`), "inventory omits its own city's box"},
 		{ReqObserveInventoryHasActivity, edit("inventory", `"last_activity":"2026-01-01T00:00:00Z"`, `"last_activity":null`), "inventory reports no activity"},
+		{ReqObservePeekNoScreen, edit("peek", `exit 66;`, `exit 0;`), "peek answers no box with an empty success"},
+		{ReqObservePeekNoScreen, edit("peek", `exit 66;`, `exit 1;`), "peek fails for no box instead of answering no screen"},
+		{ReqObservePeekNoScreen, set("peek", `exit 66`), "peek answers no screen for a running box"},
+		{ReqObservePeekNoScreen, set("peek", `exit 2`), "peek is not implemented"},
 	}
 	// Every catalog requirement must have a mutant — otherwise a new
 	// requirement could ship ungated.

@@ -111,6 +111,7 @@ var wireOnlyCodes = map[Code]bool{
 	ReqObserveWithinBound:          true,
 	ReqObserveCityScoped:           true,
 	ReqObserveInventoryHasActivity: true,
+	ReqObservePeekNoScreen:         true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this

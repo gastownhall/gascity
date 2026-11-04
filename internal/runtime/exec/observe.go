@@ -217,6 +217,28 @@ func (p *Provider) ObserveIdentity(name string) (map[string]string, error) {
 	return o.identity, nil
 }
 
+// peekBox is a v2-ready script's Peek of whatever box holds name. A fresh
+// `observe` picks the read: a running box's screen as Peek reads it (over
+// the carrier, or the `peek` op); a dead box's from the `peek` op itself,
+// whose exit 66 ([runtime.ExitCodeNoScreen]) answers "no screen", an empty
+// screen with no error, as peekOp answers it for every caller (v2's
+// dead-box classification reads an empty screen as nothing to classify); no
+// box, nothing, as the seams answer a name no box runs. Any other failure,
+// the observe's included, is an error: never an empty screen.
+func (p *Provider) peekBox(name string, lines int) (string, error) {
+	o, err := p.observe(context.Background(), name, nil)
+	if err != nil {
+		return "", err
+	}
+	switch o.state {
+	case stateRunning:
+		return p.Peek(name, lines)
+	case stateAbsent:
+		return "", nil
+	}
+	return p.peekOp(name, lines)
+}
+
 // killObjectRequest is `kill-object`'s stdin.
 type killObjectRequest struct {
 	Object   observeObject `json:"object"`
