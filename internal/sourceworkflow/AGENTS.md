@@ -33,3 +33,10 @@ Finalizers, teardown and existing terminal/cancel cleanup must remain able to
 settle workflows. Releasing a claim whose input changed is limited to a new,
 undelivered claim through the existing conditional unwind protocol. Existing
 obligations retain their owners; admission does not abort running work.
+
+Recorded terminal drains (`succeeded`/`failed`) and spawned fanouts only settle
+existing graph state. Their shared admission keeps active root/control parks,
+but never opens input Work scopes or traverses input relations. Expanded or
+completing drains can advance shared rows and must still validate live inputs.
+Keep this operation/state distinction in the shared predicate so discovery and
+execution agree; never exempt every drain or fanout from input admission.

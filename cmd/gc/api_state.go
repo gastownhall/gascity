@@ -2190,6 +2190,19 @@ func (cs *controllerState) BeadStores() map[string]beads.Store {
 	return splitStrictWorkViews(m)
 }
 
+// WorkScopeStores returns the work scope and its co-resident graph handle.
+// Relocated graph rows are served separately through GraphBeadStore.
+func (cs *controllerState) WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	store := cs.cityBeadStore
+	if rig != "" {
+		store = cs.beadStores[rig]
+	}
+	classes := scopeStores(cs.cityPath, nil, store)
+	return classes.Work(), classes.Graph()
+}
+
 // MailProvider returns the city-level mail provider.
 // The rig parameter is accepted for interface compatibility but ignored —
 // all mail is city-scoped.

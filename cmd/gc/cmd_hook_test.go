@@ -1699,6 +1699,9 @@ name = "worker"
 	script := fmt.Sprintf(`#!/bin/sh
 printf 'actor=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$*" >> %q
 case "$*" in
+  *"show --json root-1"*)
+    printf '[{"id":"root-1","status":"open","type":"molecule","metadata":{"gc.kind":"workflow"}}]'
+    ;;
   *"update hw-claim --claim --json"*)
     printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
     ;;

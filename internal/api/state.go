@@ -177,6 +177,11 @@ type State interface {
 	// store is available.
 	GraphBeadStore() beads.GraphStore
 
+	// WorkScopeStores returns named handles for a work leg and its co-resident
+	// legacy workflow graphs. Empty rig selects the city scope. Relocated graph
+	// rows use GraphBeadStore instead; input relations use every work scope.
+	WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore)
+
 	// OrdersBeadStore returns the store backing orders-class beads — the
 	// order-tracking / order-run records that gate repeat order firing. At the
 	// default backend this is the same store as CityBeadStore; when

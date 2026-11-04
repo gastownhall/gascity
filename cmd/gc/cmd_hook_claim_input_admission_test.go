@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -162,5 +164,130 @@ func TestInputAdmissionWorkFrame(t *testing.T) {
 	fail = true
 	if _, err := inputWorkStoresForScope(context.Background(), cityPath, cityPath, cfg, beadstest.Work(cityWork)); err == nil {
 		t.Fatal("unread work frame admitted")
+	}
+}
+
+// Exercise the production hookCity wrapper, including the window after CAS.
+// A standalone native root has no foreign ancestor, but still has input gates.
+func TestHookCityStandaloneInputAdmission(t *testing.T) {
+	for _, selfRoot := range []bool{false, true} {
+		for _, phase := range []string{"ready", "held", "hold during claim", "adopt held", "transferred during claim"} {
+			t.Run(fmt.Sprintf("self=%v/%s", selfRoot, phase), func(t *testing.T) {
+				f := newHookWorkflowStopFixture(t)
+				input := f.create(beads.Bead{Title: "input"})
+				conv := f.create(beads.Bead{Title: "inputs", Type: "convoy"})
+				if err := f.store.DepAdd(conv.ID, input.ID, "tracks"); err != nil {
+					t.Fatal(err)
+				}
+				root := f.root("standalone", "")
+				meta := map[string]string{"gc.input_convoy_id": conv.ID, "gc.routed_to": "worker"}
+				if selfRoot {
+					meta["gc.root_bead_id"] = root.ID
+				}
+				if err := f.store.SetMetadataBatch(root.ID, meta); err != nil {
+					t.Fatal(err)
+				}
+				f.served = []string{root.ID}
+				park := func() {
+					t.Helper()
+					if err := f.store.Update(input.ID, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if phase == "held" || phase == "adopt held" {
+					park()
+				}
+				if phase == "adopt held" {
+					status, owner := "in_progress", "worker-1"
+					if err := f.store.Update(root.ID, beads.UpdateOpts{Status: &status, Assignee: &owner}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if phase == "hold during claim" || phase == "transferred during claim" {
+					f.afterClaim = func(id string) {
+						park()
+						if phase == "transferred during claim" {
+							owner := "other-worker"
+							if err := f.store.Update(id, beads.UpdateOpts{Assignee: &owner}); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				}
+				old := hookClaimCommandRunnerWithEnvContext
+				t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = old })
+				hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
+					return func(_ string, _ string, args ...string) ([]byte, error) {
+						switch args[0] {
+						case "show":
+							b, err := f.store.Get(args[len(args)-1])
+							if err != nil {
+								return nil, err
+							}
+							return json.Marshal([]beads.Bead{b})
+						case "dep":
+							deps, err := f.store.DepList(args[2], "down")
+							if err != nil {
+								return nil, err
+							}
+							rows := make([]struct {
+								ID   string `json:"id"`
+								Type string `json:"dependency_type"`
+							}, 0, len(deps))
+							for _, dep := range deps {
+								rows = append(rows, struct {
+									ID   string `json:"id"`
+									Type string `json:"dependency_type"`
+								}{dep.DependsOnID, dep.Type})
+							}
+							return json.Marshal(rows)
+						default:
+							t.Fatalf("unexpected bd args: %v", args)
+							return nil, nil
+						}
+					}
+				}
+				city := newHookCity(t.TempDir(), &config.City{})
+				ops := f.ops()
+				ops.InputAdmission = city.claimOps().InputAdmission
+				ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+					return "", false, nil
+				}
+				stamps, starts := 0, 0
+				ops.StampWorkMeta = func(context.Context, string, []string, string, string, map[string]string) error { stamps++; return nil }
+				ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) { starts++ }
+				var stdout, stderr bytes.Buffer
+				code := doHookClaim("query", city.path, hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}, JSON: true}, ops, &stdout, &stderr)
+				delivered := strings.Contains(stdout.String(), `"action":"work"`)
+				if delivered != (phase == "ready") {
+					t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+				}
+				if phase != "ready" && (stamps != 0 || starts != 0) {
+					t.Fatalf("withheld root stamped=%d started=%d", stamps, starts)
+				}
+				after := f.get(root.ID)
+				switch phase {
+				case "held":
+					if len(f.claims) != 0 {
+						t.Fatal("held root claimed")
+					}
+				case "hold during claim":
+					if len(f.claims) != 1 {
+						t.Fatalf("claim transition not exercised: %v", f.claims)
+					}
+					if after.Status != "open" || after.Assignee != "" {
+						t.Fatalf("fresh claim not unwound: %+v", after)
+					}
+				case "adopt held":
+					if after.Status != "in_progress" || after.Assignee != "worker-1" {
+						t.Fatalf("adopted claim changed: %+v", after)
+					}
+				case "transferred during claim":
+					if after.Assignee != "other-worker" {
+						t.Fatalf("foreign claim changed: %+v", after)
+					}
+				}
+			})
+		}
 	}
 }

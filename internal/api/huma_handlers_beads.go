@@ -580,11 +580,12 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// Each leg's rows are kept by leg so a split city can pass them through the
 	// cross-store rule before they merge (below).
 	type readyLeg struct {
-		leg  readywork.Leg
-		rows []beads.Bead
+		leg         readywork.Leg
+		rows        []beads.Bead
+		unavailable bool
 	}
 	var legs []readyLeg
-	federate := func(label string, store beads.Store) {
+	federate := func(label string, store beads.Store, work beads.WorkStore, graph beads.GraphStore) {
 		if store == nil {
 			return
 		}
@@ -596,26 +597,31 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 				pa.success()
 			} else {
 				pa.record(label, err)
+				// Keep failed scopes in the input frame: they cannot prove
+				// absence or unique residence for another leg's relations.
+				legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store, Work: work, Graph: graph}, unavailable: true})
 				return
 			}
 		} else {
 			pa.success()
 		}
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store, Work: work, Graph: graph}, rows: ready})
 	}
 	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
 	// beads) lives in the city store, so federate it explicitly first or HTTP
 	// `bd ready` would never surface it. In production BeadStores() also returns
 	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
 	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
+	cityWork, cityGraph := s.state.WorkScopeStores("")
+	federate("city", s.state.CityBeadStore(), cityWork, cityGraph)
 	cityName := s.state.CityName()
 	for _, rigName := range rigNames {
 		if rigName == cityName {
 			continue // city store already federated explicitly above; production
 			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
 		}
-		federate("rig "+rigName, stores[rigName])
+		work, graph := s.state.WorkScopeStores(rigName)
+		federate("rig "+rigName, stores[rigName], work, graph)
 	}
 	// Split city: graph-class ready work (gcg- steps, control beads, molecule
 	// roots) lives in the relocated graph store, which BeadStores() does not
@@ -630,7 +636,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, Graph: s.state.GraphBeadStore(), ClassBinding: true, ReservedPrefixes: s.bindingReservedPrefixes(graph)}, rows: ready})
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
@@ -640,25 +646,26 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// held in another store still holds is not served, and a row a store
 	// strands behind a blocker that has closed elsewhere is. One gate judges
 	// every leg, so a blocker several legs' rows wait on is read once. A city
-	// with no binding keeps every store's own answer.
+	// with no binding still applies input admission to each store's ready rows.
 	federated := make([]readywork.Leg, len(legs))
 	for i, l := range legs {
 		federated[i] = l.leg
 	}
-	if readywork.IsSplit(federated) {
-		gate := readywork.NewLegGate(federated, readyFederationQuery())
-		for i := range legs {
-			gated, err := gate.Gate(ctx, i, legs[i].rows)
-			if err != nil {
-				// A leg whose blockers could not be judged serves nothing: an
-				// ungated row may be one a blocker still holds. The response
-				// says it is short, as it does for a leg that failed to read.
-				pa.record(legs[i].leg.Label, fmt.Errorf("cross-store blockers: %w", err))
-				legs[i].rows = nil
-				continue
-			}
-			legs[i].rows = gated
+	gate := readywork.NewLegGate(federated, readyFederationQuery())
+	for i := range legs {
+		if legs[i].unavailable {
+			continue
 		}
+		gated, err := gate.Gate(ctx, i, legs[i].rows)
+		if err != nil {
+			// A leg whose blockers could not be judged serves nothing: an
+			// ungated row may be one a blocker still holds. The response
+			// says it is short, as it does for a leg that failed to read.
+			pa.record(legs[i].leg.Label, fmt.Errorf("cross-store blockers: %w", err))
+			legs[i].rows = nil
+			continue
+		}
+		legs[i].rows = gated
 	}
 	var all []beads.Bead
 	seen := make(map[string]bool)

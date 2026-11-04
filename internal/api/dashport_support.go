@@ -233,6 +233,12 @@ func (s *seededState) BeadStores() map[string]beads.Store {
 	return m
 }
 
+// WorkScopeStores returns named handles over the requested work scope.
+func (s *seededState) WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore) {
+	classes := s.classStores(rig)
+	return classes.Work(), classes.Graph()
+}
+
 func (s *seededState) MailProvider(_ string) mail.Provider { return s.mailProv }
 
 func (s *seededState) MailProviders() map[string]mail.Provider {
@@ -263,8 +269,12 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 // NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
 // wrap the city store, exactly as they do on a default (non-relocated)
 // controller city.
-func (s *seededState) classStores() storeref.Stores {
-	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}}, storeref.StoresOptions{})
+func (s *seededState) classStores(rig ...string) storeref.Stores {
+	store := s.cityStore
+	if len(rig) > 0 && rig[0] != "" {
+		store = s.rigStores[rig[0]]
+	}
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: store}}, storeref.StoresOptions{})
 }
 
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {

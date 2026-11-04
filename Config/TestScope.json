@@ -1,0 +1,260 @@
+{
+  "specs": [
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherReadsNoBackingStore",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherReadsNoBackingStore",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherSessionsLegErrorReturnsError",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherSessionsLegErrorReturnsError",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherDrainsSettlementsFirst",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherDrainsSettlementsFirst",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherMemoizesPerGeneration",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherMemoizesPerGeneration",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherBootStateComputed",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherBootStateComputed",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherBuildsOnlyTheSessionsLegsWriter",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherBuildsOnlyTheSessionsLegsWriter",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherK1EnvFromCachedCensus",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherK1EnvFromCachedCensus",
+      "tier": "qualification",
+      "reason": "Existing census contract; run explicitly in the bounded qualification check."
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestTemplateMemoImmutableUnderConcurrentReaders",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestTemplateMemoImmutableUnderConcurrentReaders",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherProjectsNoLease",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherProjectsNoLease",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestCensusReadsWispTier",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestCensusReadsWispTier",
+      "tier": "qualification",
+      "reason": "Existing census contract; run explicitly in the bounded qualification check."
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestBootCensusReadsWispTier",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestBootCensusReadsWispTier",
+      "tier": "qualification",
+      "reason": "Existing census contract; run explicitly in the bounded qualification check."
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestMislabelledRowFlagged",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestMislabelledRowFlagged",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherK1EnvMintsTheWorkLegs",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherK1EnvMintsTheWorkLegs",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherCarriesTheSuspensionState",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherCarriesTheSuspensionState",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_gather_test.go::TestGatherReusesTheDemandProbeStores",
+      "paths": [
+        "cmd/gc/reconcile_gather_test.go"
+      ],
+      "go_test": "TestGatherReusesTheDemandProbeStores",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_replay_test.go::TestReplay",
+      "paths": [
+        "cmd/gc/reconcile_replay_test.go"
+      ],
+      "go_test": "TestReplay",
+      "tier": "qualification",
+      "reason": "Operator export replay requires GC_V2_REPLAY_DIR; the bounded sample-replay contract exercises this driver in the landing suite."
+    },
+    {
+      "name": "cmd/gc/reconcile_replay_test.go::TestReplaySampleMatchesExpectedDivergences",
+      "paths": [
+        "cmd/gc/reconcile_replay_test.go"
+      ],
+      "go_test": "TestReplaySampleMatchesExpectedDivergences",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_replay_test.go::TestReplayFamilies",
+      "paths": [
+        "cmd/gc/reconcile_replay_test.go"
+      ],
+      "go_test": "TestReplayFamilies",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_replay_test.go::TestV2ClassOfTheFloorCancel",
+      "paths": [
+        "cmd/gc/reconcile_replay_test.go"
+      ],
+      "go_test": "TestV2ClassOfTheFloorCancel",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimCorpusShiftedRNG",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimCorpusShiftedRNG",
+      "tier": "qualification",
+      "reason": "Existing generated-city or 500-step seed-sweep proof; run separately as qualification, preserving its Bazel/CI registration and seed count."
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimCorpus",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimCorpus",
+      "tier": "qualification",
+      "reason": "Existing generated-city or 500-step seed-sweep proof; run separately as qualification, preserving its Bazel/CI registration and seed count."
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimCorpusFloored",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimCorpusFloored",
+      "tier": "qualification",
+      "reason": "Existing generated-city or 500-step seed-sweep proof; run separately as qualification, preserving its Bazel/CI registration and seed count."
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimCorpusPinnedSeeds",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimCorpusPinnedSeeds",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimCorpusFlooredPinnedSeeds",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimCorpusFlooredPinnedSeeds",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimInvariantsCatchSeededMutants",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimInvariantsCatchSeededMutants",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestQuietBoundFollowsRowTimersArmedInQuiescence",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestQuietBoundFollowsRowTimersArmedInQuiescence",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/reconcile_sim_test.go::TestSimAttachModelsEnsureRunning",
+      "paths": [
+        "cmd/gc/reconcile_sim_test.go"
+      ],
+      "go_test": "TestSimAttachModelsEnsureRunning",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/allocator_differential_test.go::TestAllocationDifferentialFixtures",
+      "paths": [
+        "cmd/gc/allocator_differential_test.go"
+      ],
+      "go_test": "TestAllocationDifferentialFixtures",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/allocator_differential_test.go::TestAllocationDifferentialGenerated",
+      "paths": [
+        "cmd/gc/allocator_differential_test.go"
+      ],
+      "go_test": "TestAllocationDifferentialGenerated",
+      "tier": "qualification",
+      "reason": "Existing generated-city or 500-step seed-sweep proof; run separately as qualification, preserving its Bazel/CI registration and seed count."
+    },
+    {
+      "name": "cmd/gc/allocator_differential_test.go::TestAllocationDifferentialEntriesHaveFixtures",
+      "paths": [
+        "cmd/gc/allocator_differential_test.go"
+      ],
+      "go_test": "TestAllocationDifferentialEntriesHaveFixtures",
+      "tier": "landing"
+    },
+    {
+      "name": "cmd/gc/allocator_differential_test.go::TestLegacyScaleCheckTimeoutIsAFailedCheck",
+      "paths": [
+        "cmd/gc/allocator_differential_test.go"
+      ],
+      "go_test": "TestLegacyScaleCheckTimeoutIsAFailedCheck",
+      "tier": "landing"
+    }
+  ]
+}

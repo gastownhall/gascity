@@ -3,11 +3,11 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -77,7 +77,6 @@ func processNativeControl(graph beads.Store, control beads.Bead, opts ProcessOpt
 }
 
 func TestNativeDrainMaterializesBeforeInputExecutionAdmission(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	writeDrainItemFormula(t, dir)
 	work, graph, control, members := seedSplitClassDrainWorkflow(t, false)
@@ -160,4 +159,73 @@ func nativeFixtureInputs(graph beads.Store, work ...beads.Store) *sourceworkflow
 		inputs.Work = append(inputs.Work, beadstest.Work(store))
 	}
 	return inputs
+}
+
+// Recorded drain outcomes and spawned fanouts only settle graph state. Neither
+// discovery nor execution may reopen unavailable input scopes to finish them.
+func TestNativeControlSettlementWithoutInputs(t *testing.T) {
+	for _, tc := range []struct{ kind, stateKey, state, outcome string }{
+		{"drain", "gc.drain_state", "succeeded", "pass"},
+		{"drain", "gc.drain_state", "failed", "fail"},
+		{"fanout", "gc.fanout_state", "spawned", "pass"},
+	} {
+		t.Run(tc.kind+"/"+tc.state, func(t *testing.T) {
+			graph := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "root", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "unavailable"}},
+				{ID: "control", Status: "open", Metadata: map[string]string{"gc.kind": tc.kind, "gc.root_bead_id": "root", tc.stateKey: tc.state, "gc.outcome": tc.outcome}},
+				{ID: "child", Status: "closed", Metadata: map[string]string{"gc.root_bead_id": "root", "gc.outcome": tc.outcome}},
+			}, []beads.Dep{{IssueID: "control", DependsOnID: "child", Type: "blocks"}})
+			control := mustGet(t, graph, "control")
+			inputs := sourceworkflow.InputStores{Graph: beadstest.Graph(graph), OpenWork: func(context.Context) ([]beads.WorkStore, error) {
+				t.Error("settlement opened work scopes")
+				return nil, errors.New("input scope unavailable")
+			}}
+			legs := []readywork.Leg{{Label: "graph", Store: graph, Graph: inputs.Graph}}
+			rows, err := readywork.Read(legs, readywork.Query{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.ContainsFunc(rows, func(b readywork.ReadyBead) bool { return b.ID == control.ID }) {
+				t.Fatal("settlement missing from ready")
+			}
+			demand, err := readywork.NewLegGate(legs, beads.ReadyQuery{}).Gate(context.Background(), 0, []beads.Bead{control})
+			if err != nil || len(demand) != 1 {
+				t.Fatalf("settlement demand: %v, %v", demand, err)
+			}
+			before, err := graph.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := ProcessControl(graph, control, ProcessOptions{InputStores: &inputs})
+			if err != nil || !result.Processed {
+				t.Fatalf("settle: %+v, %v", result, err)
+			}
+			after := mustGet(t, graph, control.ID)
+			if after.Status != "closed" || after.Metadata["gc.outcome"] != tc.outcome {
+				t.Fatalf("settlement = %+v", after)
+			}
+			all, err := graph.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil || len(all) != len(before) {
+				t.Fatalf("settlement created beads: before=%d after=%d err=%v", len(before), len(all), err)
+			}
+		})
+	}
+}
+
+func TestNativeExpandedSharedDrainStillRequiresInputs(t *testing.T) {
+	graph := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "root", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "convoy"}},
+		{ID: "control", Status: "open", Metadata: map[string]string{"gc.kind": "drain", "gc.root_bead_id": "root", "gc.drain_state": "expanded", "gc.drain_context": "shared"}},
+	}, nil)
+	opens := 0
+	unavailable := errors.New("work scope unavailable")
+	inputs := sourceworkflow.InputStores{Graph: beadstest.Graph(graph), OpenWork: func(context.Context) ([]beads.WorkStore, error) { opens++; return nil, unavailable }}
+	result, err := ProcessControl(graph, mustGet(t, graph, "control"), ProcessOptions{InputStores: &inputs})
+	if !errors.Is(err, unavailable) || result.Processed || opens != 1 {
+		t.Fatalf("result=%+v err=%v opens=%d", result, err, opens)
+	}
+	rows, err := graph.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil || len(rows) != 2 || mustGet(t, graph, "control").Status != "open" {
+		t.Fatalf("refused drain mutated graph: %v, %v", rows, err)
+	}
 }

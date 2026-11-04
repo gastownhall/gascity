@@ -113,7 +113,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -199,12 +198,10 @@ func readyLegsForTopology(topo storeref.Topology) ([]readywork.Leg, error) {
 func readyLegsWithClassHandles(legs []readywork.Leg) []readywork.Leg {
 	for i := range legs {
 		leg := &legs[i]
-		if leg.ClassBinding {
-			routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: leg.Store}}
-			leg.Graph = scopeStores("", routes, nil).Graph()
-		} else {
-			classes := scopeStores("", nil, leg.Store)
-			leg.Work, leg.Graph = classes.Work(), classes.Graph()
+		classes := scopeStores("", nil, leg.Store)
+		leg.Graph = classes.Graph()
+		if !leg.ClassBinding {
+			leg.Work = classes.Work()
 		}
 	}
 	return legs

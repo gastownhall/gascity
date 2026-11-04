@@ -203,7 +203,7 @@ func TestGatherDemandNoLiveReadOnLaneLegs(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	open := routedDemandBead("gc-open")
 	rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
-		keyOf(sourceDemand, cache): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}}}},
+		keyOf(sourceDemand, cache): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{ReadyGated: true, RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}}}},
 	}}
 
 	v, err := gatherDemand(demandGatherEnv{Cfg: gatherLaneTestConfig(), CityStore: cache}, newV2DemandReads(now, rec))
@@ -237,7 +237,7 @@ func TestGatherDemandPartialPropagates(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	r1 := routedDemandBead("gc-r1")
 	fresh := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
-		keyOf(sourceDemand, cache): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{r1}, ReadyAll: []beads.Bead{r1}}}},
+		keyOf(sourceDemand, cache): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{ReadyGated: true, RawOpen: []beads.Bead{r1}, ReadyAll: []beads.Bead{r1}}}},
 	}}
 	for _, tc := range []struct {
 		name    string

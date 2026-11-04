@@ -87,6 +87,17 @@ func (s InputStores) Admission(ctx context.Context, candidate beads.Bead) (Input
 	if tail {
 		return ready, nil
 	}
+	// These operation states can only settle existing graph state. Keep the
+	// active root/control parks, but do not open or traverse input work scopes.
+	if inputIndependentSettlement(candidate) {
+		walk := inputAdmissionWalk{now: time.Now()}
+		walk.park(root)
+		walk.park(candidate)
+		if walk.reason != "" {
+			return InputAdmission{BlockerID: walk.blocker, Reason: walk.reason}, nil
+		}
+		return ready, nil
+	}
 	if s.OpenWork != nil {
 		s.Work, err = s.OpenWork(ctx)
 		if err != nil {
@@ -109,6 +120,22 @@ func (s InputStores) Admission(ctx context.Context, candidate beads.Bead) (Input
 		return InputAdmission{BlockerID: walk.blocker, Reason: walk.reason}, nil
 	}
 	return ready, nil
+}
+
+// inputIndependentSettlement follows the dispatch operation's persisted
+// state, not its kind alone. Expanded/completing drains may advance a shared
+// row and still require strict input admission. Terminal drain recovery also
+// validates its recorded outcome in dispatch; a malformed record never expands.
+func inputIndependentSettlement(candidate beads.Bead) bool {
+	switch candidate.Metadata[beadmeta.KindMetadataKey] {
+	case beadmeta.KindDrain:
+		state := strings.TrimSpace(candidate.Metadata[beadmeta.DrainStateMetadataKey])
+		return state == beadmeta.DrainStateSucceeded || state == beadmeta.DrainStateFailed
+	case beadmeta.KindFanout:
+		return candidate.Metadata[beadmeta.FanoutStateMetadataKey] == beadmeta.SpawnStateSpawned
+	default:
+		return false
+	}
 }
 
 // The bound limits malformed/cyclic relation walks independently of store size.

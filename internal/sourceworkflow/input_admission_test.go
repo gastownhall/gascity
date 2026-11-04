@@ -296,3 +296,51 @@ func TestInputAdmissionStructuralExpansion(t *testing.T) {
 		})
 	}
 }
+
+// Only operation states that cannot expand or advance work bypass input reads.
+// Root/control parks still fence graph-only settlement under an active root.
+func TestInputAdmissionSettlementBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		kind, key, state string
+		settlement       bool
+	}{
+		{"drain", "gc.drain_state", "succeeded", true},
+		{"drain", "gc.drain_state", "failed", true},
+		{"fanout", "gc.fanout_state", "spawned", true},
+		{"drain", "gc.drain_state", "expanded", false},
+		{"drain", "gc.drain_state", "completing", false},
+		{"drain", "gc.drain_state", "expanding", false},
+		{"fanout", "gc.fanout_state", "spawning", false},
+	} {
+		t.Run(tc.kind+"/"+tc.state, func(t *testing.T) {
+			graph := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "root", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "absent"}},
+				{ID: "control", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "root", "gc.kind": tc.kind, tc.key: tc.state, "gc.outcome": "pass", "gc.drain_context": "shared"}},
+			}, nil)
+			opens := 0
+			stores := InputStores{Graph: beadstest.Graph(graph), OpenWork: func(context.Context) ([]beads.WorkStore, error) { opens++; return nil, errors.New("work unavailable") }}
+			control, _ := graph.Get("control")
+			got, err := stores.Admission(context.Background(), control)
+			if tc.settlement {
+				if err != nil || !got.Ready || opens != 0 {
+					t.Fatalf("settlement: %+v, %v, opens=%d", got, err, opens)
+				}
+				for _, id := range []string{"root", "control"} {
+					if err := graph.Update(id, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+						t.Fatal(err)
+					}
+					control, _ = graph.Get("control")
+					got, err = stores.Admission(context.Background(), control)
+					if err != nil || got.Ready || opens != 0 {
+						t.Fatalf("held %s: %+v, %v, opens=%d", id, got, err, opens)
+					}
+					if err := graph.Update(id, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if err == nil || got.Ready || opens != 1 {
+				t.Fatalf("expansion bypassed input read: %+v, %v, opens=%d", got, err, opens)
+			}
+		})
+	}
+}

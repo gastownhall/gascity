@@ -536,11 +536,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.envNow = &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.leaf}
 	s.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
-		Env:          func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
-		Sessions:     func() beads.Store { return s.legs[0].cache },
-		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
-		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
-		Recording:    func() *externalReadsRecording { return nil },
+		Env:       func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
+		Sessions:  func() beads.Store { return s.legs[0].cache },
+		WorkStore: func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
+		RigStores: func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
+		Recording: func() *externalReadsRecording {
+			return fixtureDemandRecording(s.clk.Now(), externalReadsEnv{CityPath: s.env.CityPath, CityName: s.env.CityName, Cfg: s.envNow.Cfg, CityStore: s.legs[0].cache, RigStores: s.env.RigStores()})
+		},
 		Observations: func() *ObservationCache { return s.lane.cache },
 		Episodes: func() (map[string]session.StartupHealthEpisode, error) {
 			return readStartupHealthEpisodes(s.legs[0].cache)
