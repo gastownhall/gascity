@@ -131,6 +131,9 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// routes stop the cache and close the engine once (storageRoutes.close).
 	"CloseStore":          nil,
 	"CreateWithForeignID": nil,
+	// Engine-only like the rest: the scope-ready wait opens the engine itself
+	// and asks it beads.CheckSchemaAtTarget; a cache is not a scope to wait on.
+	"SchemaCursor": nil,
 	// The batch copy capabilities (S5-C), engine-only like the single-row
 	// forms above: the migration's copy opens the binding engine itself.
 	"CreateWithForeignIDBatch": nil,

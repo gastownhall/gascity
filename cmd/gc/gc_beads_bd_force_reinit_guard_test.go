@@ -737,6 +737,35 @@ esac
 	}
 }
 
+// writeFakeBdSchemaTarget puts a bd on binDir that answers the throwaway
+// `migrate schema --db` probe wait_for_bd_runtime_schema makes to learn the
+// schema version this bd migrates to ("ready" means the cursor reached it).
+func writeFakeBdSchemaTarget(t *testing.T, binDir string, target int) {
+	t.Helper()
+	body := fmt.Sprintf("#!/bin/sh\necho \"Schema migrated to v%d\"\n", target)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+}
+
+// writeFakeDoltSchemaCursor installs a dolt stub that reports a
+// schema_migrations table whose cursor sits at cursor and succeeds silently for
+// every other query. It is for fixtures whose dolt needs no behavior of its
+// own beyond letting the schema wait see a migrated store.
+func writeFakeDoltSchemaCursor(t *testing.T, binDir string, cursor int) {
+	t.Helper()
+	body := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *"information_schema.tables"*"schema_migrations"*) printf 'cnt\n1\n' ;;
+  *"schema_migrations"*) printf 'cur\n%d\n' ;;
+esac
+exit 0
+`, cursor)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
 // TestForceReinitGuardWaitOutlastsCursorAdvancing pins the other half of the
 // same bug: even once bd_runtime_store_holds_bd_tables correctly answers
 // "present" for a mid-migration store, op_init only avoids the destructive
@@ -805,6 +834,8 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	writeFakeBdSchemaTarget(t, binDir, readyAtCursor)
 
 	script := "connect_host() { printf '127.0.0.1'; }\n" +
 		validSQLName + "\n" +
@@ -882,6 +913,8 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	writeFakeBdSchemaTarget(t, binDir, 66)
 
 	script := "connect_host() { printf '127.0.0.1'; }\n" +
 		validSQLName + "\n" +
@@ -992,6 +1025,8 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	writeFakeBdSchemaTarget(t, binDir, readyAtCursor)
 
 	script := "connect_host() { printf '127.0.0.1'; }\n" +
 		"GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS=0\n" +
@@ -1369,6 +1404,12 @@ case "${1:-}" in
     touch %q
     exit 0
     ;;
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
   *)
     exit 0
     ;;
@@ -1402,11 +1443,11 @@ case "$query" in
     exit 0
     ;;
   *"information_schema.tables"*"schema_migrations"*)
-    printf 'cnt\n0\n'
+    if [ -f %q ]; then printf 'cnt\n1\n'; else printf 'cnt\n0\n'; fi
     exit 0
     ;;
   *"schema_migrations"*)
-    printf 'cur\n0\n'
+    if [ -f %q ]; then printf 'cur\n62\n'; else printf 'cur\n0\n'; fi
     exit 0
     ;;
   *"FROM config"*)
@@ -1421,7 +1462,7 @@ case "$query" in
     exit 0
     ;;
 esac
-`, readyMarker)
+`, readyMarker, readyMarker, readyMarker)
 	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
 		t.Fatal(err)
 	}

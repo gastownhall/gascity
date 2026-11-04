@@ -1368,12 +1368,44 @@ server_reachable() {
 # read that fails outright (bd_runtime_schema_cursor returns
 # non-numeric/empty) is treated as a stalled attempt rather than progress
 # -- there is no evidence of advancement to reset the counters on.
+#
+# Ready means the cursor has reached the schema version this bd migrates to,
+# not that the config table exists: the config table comes from migration 28
+# of 66, so a store stalled anywhere after it (a #5920 refusal, a SIGKILL, a
+# host crash) has one and bd then refuses writes. The target is learned once
+# per call by migrating a throwaway database (the technique
+# test/acceptance/helpers/bd_schema_parity.go uses), never by asking the real
+# store, and never by running `bd migrate schema` against it: promoting a
+# shared database's schema is the operator's consent to give (beads#5920), so a
+# store that stays behind is reported, not completed. A cursor ahead of the
+# target is schema skew, which bd's own open reports; it passes through here.
 wait_for_bd_runtime_schema() {
     local db="$1"
     local backoff_ms stalls last_cursor cursor cap_ms now deadline
     local stall_budget=8
+    local target probe_dir probe_out
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
+
+    # HOME is re-homed so a user-level bd config naming a shared Dolt server
+    # cannot turn the throwaway probe into a dial of that server; the database
+    # sits one level below probe_dir so bd's workspace gate file lands inside
+    # the directory removed below.
+    probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/gc-bd-schema-target.XXXXXX") || {
+        echo "error: cannot learn the target bd schema version for '$db' (mktemp failed)" >&2
+        return 1
+    }
+    mkdir -p "$probe_dir/home" "$probe_dir/db"
+    trace_bd_argv migrate schema --db "$probe_dir/db/probe.db"
+    probe_out=$(cd "$probe_dir" && HOME="$probe_dir/home" BEADS_TEST_MODE=1 "${BD_BIN:-bd}" migrate schema --db "$probe_dir/db/probe.db" 2>&1 </dev/null) || probe_out=""
+    rm -rf "$probe_dir"
+    target=$(printf '%s\n' "$probe_out" | grep -Eo '(^|[^[:alnum:]_])v[0-9]+' | grep -Eo '[0-9]+' | sort -n | tail -n 1)
+    case "$target" in
+        ''|*[!0-9]*)
+            echo "error: cannot learn the target bd schema version for '$db' (throwaway 'bd migrate schema --db' gave no version); not treating the config table as proof the schema is ready" >&2
+            return 1
+            ;;
+    esac
 
     cap_ms="${GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS:-120000}"
     case "$cap_ms" in
@@ -1386,14 +1418,14 @@ wait_for_bd_runtime_schema() {
     stalls=0
     last_cursor=""
     while :; do
-        if bd_runtime_schema_ready "$db"; then
-            return 0
-        fi
-
         cursor=$(bd_runtime_schema_cursor "$db") || cursor=""
         case "$cursor" in
             ''|*[!0-9]*) cursor="" ;;
         esac
+        if [ -n "$cursor" ] && [ "$cursor" -ge "$target" ] && bd_runtime_schema_ready "$db"; then
+            return 0
+        fi
+
         if [ -n "$cursor" ] && [ "$cursor" != "$last_cursor" ]; then
             stalls=0
             last_cursor="$cursor"
@@ -1402,12 +1434,12 @@ wait_for_bd_runtime_schema() {
         else
             stalls=$((stalls + 1))
             if [ "$stalls" -ge "$stall_budget" ]; then
-                return 1
+                break
             fi
 
             now=$(date +%s 2>/dev/null) || now=0
             if [ "$now" -ge "$deadline" ]; then
-                return 1
+                break
             fi
         fi
 
@@ -1419,6 +1451,8 @@ wait_for_bd_runtime_schema() {
             fi
         fi
     done
+    echo "error: bd schema migration for '$db' is not at its target: cursor ${last_cursor:-unknown} of $target. A store stalled mid-migration (an interrupted migration, a refusal under beads#5920) is not ready, and gc does not complete it. Once every bd client of this server is upgraded, run 'bd migrate schema' once, from one designated migrator." >&2
+    return 1
 }
 
 # bd_runtime_bd_table_count prints how many of bd's own tables exist in the

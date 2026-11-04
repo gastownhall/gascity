@@ -65,8 +65,15 @@ func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T
 			if strings.Contains(sql, "DOLT_RESET") {
 				t.Fatalf("reset a database while another initializer held its lock:\n%s", sql)
 			}
-			if strings.Contains(bdArgs, "migrate") || strings.Contains(bdArgs, "init ") {
-				t.Fatalf("ran bd against a database while another initializer held its lock:\n%s", bdArgs)
+			// The schema wait's `migrate schema --db <throwaway>` target probe
+			// touches a temp database, never hq, so it is not bd against hq.
+			for _, line := range strings.Split(bdArgs, "\n") {
+				if strings.HasPrefix(line, "migrate schema --db ") {
+					continue
+				}
+				if strings.Contains(line, "migrate") || strings.Contains(line, "init ") {
+					t.Fatalf("ran bd against a database while another initializer held its lock:\n%s", bdArgs)
+				}
 			}
 		})
 	}
