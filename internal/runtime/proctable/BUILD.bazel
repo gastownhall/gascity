@@ -78,25 +78,22 @@ go_test(
     deps = [
         "//internal/beads/proxyendpoint",
         "//internal/nudgepoller",
+        "//internal/pidutil",
         "//internal/runtime/programstatus",
         "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:android": [
-            "//internal/pidutil",
             "//internal/testutil",
         ],
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
             "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
             "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
             "//internal/testutil",
         ],
         "//conditions:default": [],
