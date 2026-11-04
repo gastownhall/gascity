@@ -702,9 +702,9 @@ func holdRead(s ProgramStatusSession) (runtime.ProgramHoldReading, bool, error) 
 
 // PS-015: a hold reading is taken only under the switch on and only for a
 // pane armed declaring the hold; it carries the record as the program last
-// reported it, so a live working or blocked record holds input and an input
-// boundary releases it, and its hold ends at the bound past the later of the
-// record's Since and the pane's activity.
+// reported it, so a live working root holds typing, and a blocked root or
+// an input boundary does not, and its hold ends at the bound past the later
+// of the record's Since and the pane's activity.
 func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Held == nil || f.Armed == nil {
 		return skip("needs held- and armed-session fixtures")
@@ -720,7 +720,7 @@ func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 	}{
 		{"", runtime.ProgramWorking, true},
 		{"report state=idle", runtime.ProgramIdle, false},
-		{"report state=blocked:kind=question", runtime.ProgramBlocked, true},
+		{"report state=blocked:kind=question", runtime.ProgramBlocked, false},
 		{"report state=done", runtime.ProgramDone, false},
 		{"report state=working", runtime.ProgramWorking, true},
 	} {
@@ -736,8 +736,8 @@ func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 			return fmt.Errorf("%s: hold read ok=%v %+v, want a deciding %s reading", label, ok, r.Status, c.state)
 		}
 		now := time.Now()
-		if got := runtime.ProgramHolds(r, now); got != c.holds {
-			return fmt.Errorf("%s: ProgramHolds = %v, want %v (reading %+v)", label, got, c.holds, r.Status)
+		if got := runtime.ProgramTypingHolds(r, now); got != c.holds {
+			return fmt.Errorf("%s: ProgramTypingHolds = %v, want %v (reading %+v)", label, got, c.holds, r.Status)
 		}
 		if !c.holds {
 			continue
@@ -749,7 +749,7 @@ func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 		if r.Activity.After(now.Add(captureClockSkew)) {
 			return fmt.Errorf("%s: activity %v is after the read", label, r.Activity)
 		}
-		if runtime.ProgramHolds(r, from.Add(runtime.ProgramStatusHoldLimit)) {
+		if runtime.ProgramTypingHolds(r, from.Add(runtime.ProgramStatusHoldLimit)) {
 			return fmt.Errorf("%s: the hold outlives its bound past %v", label, from)
 		}
 	}

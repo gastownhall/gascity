@@ -571,9 +571,6 @@ func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 		if executionSnapshotVetoApplies(row.Metadata) {
 			hold = snapshotHoldFor(sp, name)
 		}
-		if hold == "" {
-			hold = programRecordHold(sp, name, p.now)
-		}
 	}
 	if hold == "" {
 		rt.quiet = workladder.Quiet{State: workladder.Quiescent}

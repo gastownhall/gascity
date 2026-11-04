@@ -18,7 +18,8 @@ import (
 // them.
 type ProgramStatusPoint string
 
-// The sixteen decision points.
+// The decision points: the design's sixteen, and the starved-queue
+// bypass.
 const (
 	ProgramPointWaitForIdle       ProgramStatusPoint = "wait_for_idle"
 	ProgramPointTypingGate        ProgramStatusPoint = "typing_gate"
@@ -36,9 +37,15 @@ const (
 	ProgramPointQueuedDelivery    ProgramStatusPoint = "queued_delivery"
 	ProgramPointDrainReminder     ProgramStatusPoint = "drain_reminder"
 	ProgramPointObservation       ProgramStatusPoint = "observation"
+	// ProgramPointStarvedBypass is a starved queue's bypass of the
+	// quiescence gate: the screen's turn look that lets an immediate
+	// delivery type into a session its activity clock calls busy, beside
+	// the record's turn hold ([ProgramTurnHoldVerdict]).
+	ProgramPointStarvedBypass ProgramStatusPoint = "starved_bypass"
 )
 
-// ProgramStatusPoints returns every decision point, in design §9.1 order.
+// ProgramStatusPoints returns every decision point, in design §9.1 order,
+// then the starved-queue bypass.
 func ProgramStatusPoints() []ProgramStatusPoint {
 	return []ProgramStatusPoint{
 		ProgramPointWaitForIdle, ProgramPointTypingGate, ProgramPointSubmitConfirm,
@@ -46,7 +53,7 @@ func ProgramStatusPoints() []ProgramStatusPoint {
 		ProgramPointInterruptSettle, ProgramPointPending, ProgramPointWaitIdlePreread,
 		ProgramPointExecutionBackstop, ProgramPointClaimNudgeHold, ProgramPointWorkLadder,
 		ProgramPointProvedIdle, ProgramPointQueuedDelivery, ProgramPointDrainReminder,
-		ProgramPointObservation,
+		ProgramPointObservation, ProgramPointStarvedBypass,
 	}
 }
 
@@ -141,6 +148,18 @@ func ProgramPendingVerdict(s ProgramStatus, lastActivity, now time.Time) Program
 func ProgramHoldVerdict(s ProgramStatus, lastActivity, now time.Time) ProgramVerdict {
 	busy := s.Running() || s.Blocked() || (s.Valid() && s.WorkingChildren > 0)
 	if busy && s.HoldLive(lastActivity, now) {
+		return ProgramVerdictHold
+	}
+	return ProgramVerdictNoHold
+}
+
+// ProgramTurnHoldVerdict is the record's veto on typing into a running
+// turn (starved_bypass, and the mid-turn hold's typing decision): a live
+// working root, the turn [ProgramIdleVerdict] reads busy, holds. A blocked
+// root, a working child at a boundary, a reading past the hold bound, and
+// a reading that is not valid hold nothing.
+func ProgramTurnHoldVerdict(s ProgramStatus, lastActivity, now time.Time) ProgramVerdict {
+	if ProgramIdleVerdict(s, lastActivity, now) == ProgramVerdictBusy {
 		return ProgramVerdictHold
 	}
 	return ProgramVerdictNoHold
@@ -372,6 +391,28 @@ func ShadowCompareHold(p Provider, name, sessionID, family string, point Program
 		return
 	}
 	s, sink, ok := ProgramStatusShadowFor(p, name)
+	if !ok {
+		return
+	}
+	last, err := p.GetLastActivity(name)
+	if err != nil {
+		last = time.Time{}
+	}
+	judged := laterTime(now, time.Now())
+	sink(ProgramStatusComparison{
+		Session: name, SessionID: sessionID, Family: family, Point: point,
+		Scrape: scrape, Program: rule(s, last, judged), Status: s,
+		HoldActivity: last, JudgedAt: judged,
+	})
+}
+
+// ShadowCompareFresh is [ShadowCompareHold] with the reading taken fresh
+// from the runtime, past the snapshot [ProgramStatusProvider] answers from
+// ([ProgramStatusShadowProvider.ProgramStatusShadowRead]), for a rare point
+// whose decision the snapshot can lag (starved_bypass). It reads nothing
+// unless the leaf is shadowing, and never feeds the decision.
+func ShadowCompareFresh(p Provider, name, sessionID, family string, point ProgramStatusPoint, scrape ProgramVerdict, now time.Time, rule func(s ProgramStatus, lastActivity, now time.Time) ProgramVerdict) {
+	s, sink, ok := programStatusShadowFresh(p, name)
 	if !ok {
 		return
 	}

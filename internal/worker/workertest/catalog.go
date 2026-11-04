@@ -189,7 +189,7 @@ func ProgramStatusCatalog() []Requirement {
 		{
 			Code:        RequirementProgramStatusHoldMidTurn,
 			Group:       "program_status",
-			Description: "A profile declaring the mid-turn hold takes no nudge under on while a fresh, live record says a turn is running: every wait-idle, default or immediate delivery the switch off makes is held back (queued, or refused as busy), never delivered, and the same nudge after the record reaches an input boundary is delivered. A blocked record, and the switch at shadow, leave every delivery the one off makes.",
+			Description: "A profile declaring the mid-turn hold takes every wait-idle, default and immediate nudge exactly as the switch off does, whatever its record says, under shadow and on alike; under on, a fresh read of its record reports a live working record as a typing hold (the one a starved queue's bypass is vetoed on), and a blocked or boundary record as none.",
 		},
 	}
 }

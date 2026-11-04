@@ -2704,10 +2704,6 @@ func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) 
 	if text == "" {
 		return true, nil
 	}
-	// The mid-turn hold refuses here as it does in NudgeSession.
-	if err := t.refuseHeldInput(target, ""); err != nil {
-		return true, err
-	}
 	look := t.pendingPromptRecheck(target)
 	if err := look(target); err != nil {
 		return true, err
@@ -3554,18 +3550,6 @@ func (t *Tmux) nudgeSession(
 	target, err := t.agentInputTarget(session)
 	if err != nil {
 		return err
-	}
-
-	// Under the program-status switch on, a pane whose provider declares
-	// that input typed mid-turn aborts the turn (hold_mid_turn) takes
-	// nothing while a fresh read of its program's record says working or
-	// blocked: the nudge defers, before any key, as one whose turn guard
-	// holds it does (refuseHeldInput). The startup nudge's own ladder
-	// decides for it.
-	if guardTurn {
-		if err := t.refuseHeldInput(session, target); err != nil {
-			return err
-		}
 	}
 
 	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel

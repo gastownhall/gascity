@@ -511,13 +511,6 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 		noteDrainReminderHold(store, info, drainReminderHoldBusy)
 		return drainReminderHeld, false
 	}
-	// The program's own record, read fresh, may still say a turn is
-	// running (programRecordHold): a reminder typed into it would be refused
-	// as busy after its marker spent budget, so hold before the marker.
-	if programRecordHold(sp, name, now) != "" {
-		noteDrainReminderHold(store, info, drainReminderHoldBusy)
-		return drainReminderHeld, false
-	}
 	// A reminder typed into an open dialog (a permission prompt or an
 	// AskUserQuestion question) would answer it, and a refused attempt still
 	// spends budget, so hold before the marker is written.

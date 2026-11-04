@@ -3,7 +3,6 @@ package runtime
 import (
 	"fmt"
 	"strings"
-	"time"
 )
 
 var (
@@ -128,17 +127,6 @@ func (f *Fake) programHoldReadLocked(name string) (ProgramHoldReading, bool) {
 		return ProgramHoldReading{}, false
 	}
 	return ProgramHoldReading{Status: s, Activity: f.Activity[name]}, true
-}
-
-// programHoldRefusalLocked is the typing refusal of a nudge to name whose
-// fresh record holds typing ([ProgramTypingHolds]), as the tmux leaf
-// refuses, nil otherwise. The caller holds f.mu.
-func (f *Fake) programHoldRefusalLocked(name string) error {
-	r, ok := f.programHoldReadLocked(name)
-	if !ok || !ProgramTypingHolds(r, time.Now()) {
-		return nil
-	}
-	return ProgramHoldRefusal(name)
 }
 
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane

@@ -563,9 +563,7 @@ func (f *Fake) ProcessAlive(name string, processNames []string) bool {
 	return !f.Zombies[name]
 }
 
-// Nudge records the call and returns nil, or an error: the fake is broken,
-// NudgeErrors names one, or, under the switch on, a pane declaring the
-// mid-turn hold reads a live working record ([ProgramTypingHolds]).
+// Nudge records the call and returns nil (or an error if broken).
 func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -581,10 +579,10 @@ func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	if err, ok := f.NudgeErrors[name]; ok {
 		return err
 	}
-	return f.programHoldRefusalLocked(name)
+	return nil
 }
 
-// NudgeNow records the call and answers as [Fake.Nudge] does.
+// NudgeNow records the call and returns nil (or an error if broken).
 func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -600,7 +598,7 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	if err, ok := f.NudgeErrors[name]; ok {
 		return err
 	}
-	return f.programHoldRefusalLocked(name)
+	return nil
 }
 
 // SetPendingInteraction configures a structured pending interaction for the
@@ -1160,7 +1158,7 @@ func (f *Fake) NudgeFenced(_ context.Context, name string, content []ContentBloc
 	if err, ok := f.NudgeErrors[name]; ok {
 		return err
 	}
-	return f.programHoldRefusalLocked(name)
+	return nil
 }
 
 // SendKeysFenced implements [FencedInputProvider]: SendKeys under fence.

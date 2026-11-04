@@ -1,34 +1,39 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
-
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/worker"
 )
 
-// holdLeaf is a running fake session "s", quiet for an hour, whose agent
-// pane reads a record in st entered at since under mode, and declares the
-// mid-turn hold when declared.
-func holdLeaf(t *testing.T, mode runtime.ProgramStatusMode, st runtime.ProgramState, since time.Time, declared bool) (*runtime.Fake, runtime.FullFake) {
-	t.Helper()
-	f := runtime.NewFake()
-	if err := f.Start(context.Background(), "s", runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
-	f.Activity = map[string]time.Time{"s": time.Now().Add(-time.Hour)}
-	f.WaitForIdleErrors = map[string]error{"s": nil}
-	row := holdPaneRow(mode, st, since)
-	row.HoldDeclared = declared
-	f.SetProgramPane("s", row)
-	return f, runtime.FullFake{Fake: f}
+// heldTurnProvider is a liveTurnProvider (its screen's turn look scripted)
+// whose agent pane also answers the program-status reads a FullFake
+// answers: the cached reading, the shadow's fresh read and sink, and the
+// mid-turn hold's fresh read.
+type heldTurnProvider struct {
+	*liveTurnProvider
+}
+
+func (p heldTurnProvider) full() runtime.FullFake { return runtime.FullFake{Fake: p.Fake} }
+
+func (p heldTurnProvider) ProgramStatus(name string) (runtime.ProgramStatus, error) {
+	return p.full().ProgramStatus(name)
+}
+
+func (p heldTurnProvider) ProgramStatusShadowSink() runtime.ProgramStatusComparisonSink {
+	return p.full().ProgramStatusShadowSink()
+}
+
+func (p heldTurnProvider) ProgramStatusShadowRead(name string) (runtime.ProgramStatus, bool) {
+	return p.full().ProgramStatusShadowRead(name)
+}
+
+func (p heldTurnProvider) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReading, bool) {
+	return p.full().ProgramStatusHoldRead(name)
 }
 
 // holdPaneRow is an armed agent-pane row under mode, declaring the mid-turn
@@ -41,91 +46,136 @@ func holdPaneRow(mode runtime.ProgramStatusMode, st runtime.ProgramState, since 
 	}
 }
 
-// holdTarget is a nudge target for session "s" under the city switch mode,
-// on a provider whose program_status declares capture and, when hold is
-// set, the mid-turn hold.
-func holdTarget(mode string, hold bool) nudgeTarget {
-	binding := config.ProgramStatusBinding{Protocol: config.ProgramStatusProtocolOSC7501, App: "agent"}
+// holdBinding is a program_status binding declaring capture and, when hold
+// is set, the mid-turn hold.
+func holdBinding(hold bool) config.ProgramStatusBinding {
+	b := config.ProgramStatusBinding{Protocol: config.ProgramStatusProtocolOSC7501, App: "agent"}
 	if hold {
-		binding.HoldMidTurn = &hold
+		b.HoldMidTurn = &hold
 	}
-	return nudgeTarget{
-		sessionName: "s",
-		sessionID:   "gc-1",
-		cfg:         &config.City{Session: config.SessionConfig{ProgramStatus: mode}},
-		resolved:    &config.ResolvedProvider{Name: "agent", ProgramStatus: binding},
-	}
+	return b
 }
 
-// quietObs is an observation an hour quiet, which the quiescence rule
-// delivers to.
-func quietObs() worker.LiveObservation {
-	stale := time.Now().Add(-time.Hour)
-	return worker.LiveObservation{LastActivity: &stale}
+// heldQueue is a busy session (its activity clock never quiet) holding one
+// starved queued item, its screen showing no turn, its pane's record under
+// mode in st, on a city switch city whose provider declares the hold when
+// hold is set.
+type heldQueue struct {
+	busyQueuedNudgeFixture
+	sp heldTurnProvider
 }
 
-// holdReads counts the fresh hold reads f took.
-func holdReads(f *runtime.Fake) int {
-	n := 0
-	for _, c := range f.Calls {
-		if c.Method == "ProgramStatusHoldRead" {
-			n++
+func newHeldQueue(t *testing.T, mode runtime.ProgramStatusMode, st runtime.ProgramState, city string, hold bool) heldQueue {
+	t.Helper()
+	f := newBusyQueuedNudgeFixture(t)
+	f.target.cfg = &config.City{Session: config.SessionConfig{ProgramStatus: city}}
+	f.target.resolved = &config.ResolvedProvider{Name: "codex", ProgramStatus: holdBinding(hold)}
+	f.fake.SetProgramPane(f.target.sessionName, holdPaneRow(mode, st, time.Now()))
+	f.enqueue(t, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-10*time.Minute)))
+	return heldQueue{busyQueuedNudgeFixture: f, sp: heldTurnProvider{liveTurnProvider: f.sp}}
+}
+
+// pass runs one poller pass, the quiescence gate closed.
+func (q heldQueue) pass(t *testing.T) bool {
+	t.Helper()
+	delivered, err := tryDeliverQueuedNudgesByPoller(q.target, q.store, q.store, q.sp, time.Hour, q.obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	return delivered
+}
+
+// queue is the item's queue state: pending and in-flight counts and the
+// attempts the pending items carry.
+func (q heldQueue) queue(t *testing.T) (pending, inFlight, attempts int) {
+	t.Helper()
+	state, err := nudgequeue.LoadState(q.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range state.Pending {
+		attempts += it.Attempts
+	}
+	return len(state.Pending), len(state.InFlight), attempts
+}
+
+// Kills a starved-queue bypass that types into a running turn of a program
+// that aborts on mid-turn input (the Tier-4 cohort's 9 of 16 aborted long
+// Codex turns): while the record says working, the screen's no-turn look
+// is vetoed, nothing is claimed, sent or charged; once the record says the
+// turn is done the next pass delivers it once, and no later pass sends it
+// again.
+func TestStarvedBypassVetoedWhileTheRecordSaysWorking(t *testing.T) {
+	q := newHeldQueue(t, runtime.ProgramStatusOn, runtime.ProgramWorking, "on", true)
+	for range 2 {
+		if q.pass(t) || len(q.sends()) != 0 {
+			t.Fatalf("a starved pass under a working record delivered: sends %+v", q.sends())
+		}
+		if p, f, a := q.queue(t); p != 1 || f != 0 || a != 0 {
+			t.Fatalf("queue: pending %d in-flight %d attempts %d, want the item pending, unclaimed and uncharged", p, f, a)
 		}
 	}
-	return n
-}
+	if n := q.fake.CountCalls("ProgramStatusHoldRead", q.target.sessionName); n != 2 {
+		t.Fatalf("%d hold reads, want one per vetoed pass", n)
+	}
 
-// Kills a queued delivery that is claimed into a running turn of a program
-// that aborts on mid-turn input: under on, a fresh live working or blocked
-// record closes the gate a quiet session would open, before any starvation
-// bypass, and holds the conversation lane's idle reading too.
-func TestQueuedDeliveryHeldWhileTheRecordSaysWorking(t *testing.T) {
-	for _, st := range []runtime.ProgramState{runtime.ProgramWorking, runtime.ProgramBlocked} {
-		t.Run(string(st), func(t *testing.T) {
-			f, sp := holdLeaf(t, runtime.ProgramStatusOn, st, time.Now(), true)
-			target := holdTarget("on", true)
-			gate, err := queuedNudgeGateFor(target, sp, time.Second, quietObs(), time.Now())
-			if err != nil || gate.open {
-				t.Fatalf("gate = %+v, %v; want closed with no error", gate, err)
-			}
-			if pollerSessionIdleEnough(target, sp, time.Second, quietObs()) {
-				t.Fatal("pollerSessionIdleEnough read a held session idle enough")
-			}
-			if holdReads(f) != 2 {
-				t.Fatalf("%d hold reads, want one per decision", holdReads(f))
-			}
-		})
+	q.fake.SetProgramPane(q.target.sessionName, holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramDone, time.Now()))
+	if !q.pass(t) {
+		t.Fatal("the pass after the turn ended did not deliver")
+	}
+	if sent := q.sends(); len(sent) != 1 || sent[0].Method != "NudgeNow" {
+		t.Fatalf("sends %+v, want one immediate delivery", sent)
+	}
+	if p, f, _ := q.queue(t); p != 0 || f != 0 {
+		t.Fatalf("queue after delivery: pending %d in-flight %d, want the item acked", p, f)
+	}
+	if q.pass(t) || len(q.sends()) != 1 {
+		t.Fatalf("a later pass sent again: %+v", q.sends())
 	}
 }
 
-// Kills a hold that trusts the state cache's snapshot: the snapshot still
-// says working, the pane's record already says idle, and the delivery goes.
-func TestQueuedDeliveryReleasedByAFreshIdleRecord(t *testing.T) {
-	f, sp := holdLeaf(t, runtime.ProgramStatusOn, runtime.ProgramIdle, time.Now(), true)
-	f.SetProgramCachedPane("s", holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramWorking, time.Now()))
-	gate, err := queuedNudgeGateFor(holdTarget("on", true), sp, time.Second, quietObs(), time.Now())
-	if err != nil || !gate.open {
-		t.Fatalf("gate = %+v, %v; want open on the fresh idle record", gate, err)
+// Kills a veto that also holds the bypass's own send look: the gate's
+// record read passes, and a turn the record reports by the look right
+// before the send holds the claimed delivery, handed back uncharged.
+func TestStarvedBypassVetoedAtTheSendLook(t *testing.T) {
+	q := newHeldQueue(t, runtime.ProgramStatusOn, runtime.ProgramIdle, "on", true)
+	// The gate reads idle; by the read before the send a turn runs.
+	reads := 0
+	working := holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramWorking, time.Now())
+	hook := heldTurnHook{heldTurnProvider: q.sp, before: func() {
+		reads++
+		if reads == 2 {
+			q.fake.SetProgramPane(q.target.sessionName, working)
+		}
+	}}
+	delivered, err := tryDeliverQueuedNudgesByPoller(q.target, q.store, q.store, hook, time.Hour, q.obs)
+	if err != nil || delivered {
+		t.Fatalf("delivered %t err %v, want the starved send held", delivered, err)
 	}
-	if holdReads(f) != 1 {
-		t.Fatalf("%d hold reads, want one", holdReads(f))
+	if len(q.sends()) != 0 || reads != 2 {
+		t.Fatalf("sends %+v after %d hold reads, want none after two", q.sends(), reads)
+	}
+	if p, f, a := q.queue(t); p != 1 || f != 0 || a != 0 {
+		t.Fatalf("queue: pending %d in-flight %d attempts %d, want the claim handed back uncharged", p, f, a)
 	}
 }
 
-// Kills a hold that outlives its bound: a working record no activity
-// refreshed for longer than the hold limit holds nothing.
-func TestQueuedDeliveryHoldIsBounded(t *testing.T) {
-	_, sp := holdLeaf(t, runtime.ProgramStatusOn, runtime.ProgramWorking, time.Now().Add(-runtime.ProgramStatusHoldLimit-time.Minute), true)
-	gate, err := queuedNudgeGateFor(holdTarget("on", true), sp, time.Second, quietObs(), time.Now())
-	if err != nil || !gate.open {
-		t.Fatalf("gate = %+v, %v; want open past the hold bound", gate, err)
-	}
+// heldTurnHook runs before ahead of each hold read.
+type heldTurnHook struct {
+	heldTurnProvider
+	before func()
 }
 
-// Kills a hold that reaches a provider that does not declare it, a pane
-// that does not, or a switch that is not on: each delivers as today and,
-// but for a declared pane under on, takes no hold read at all.
-func TestQueuedDeliveryUnheldWithoutTheDeclarationOrSwitch(t *testing.T) {
+func (h heldTurnHook) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReading, bool) {
+	h.before()
+	return h.heldTurnProvider.ProgramStatusHoldRead(name)
+}
+
+// Kills a veto that reaches past its scope: a provider that does not
+// declare the hold, a pane that does not, and the switch at shadow or off
+// each bypass as today, typing at once; a turn on the screen holds as
+// today, with no record read; and only shadow records starved_bypass.
+func TestStarvedBypassUnvetoedOutsideItsScope(t *testing.T) {
 	for _, c := range []struct {
 		name         string
 		mode         runtime.ProgramStatusMode
@@ -135,90 +185,78 @@ func TestQueuedDeliveryUnheldWithoutTheDeclarationOrSwitch(t *testing.T) {
 		reads        int
 	}{
 		{"provider undeclared", runtime.ProgramStatusOn, "on", false, true, 0},
-		{"pane undeclared", runtime.ProgramStatusOn, "on", true, false, 1},
+		{"pane undeclared", runtime.ProgramStatusOn, "on", true, false, 2}, // the gate's read and the send look's
 		{"switch shadow", runtime.ProgramStatusShadow, "shadow", true, true, 0},
 		{"switch off", runtime.ProgramStatusOff, "off", true, true, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f, sp := holdLeaf(t, c.mode, runtime.ProgramWorking, time.Now(), c.paneHold)
-			gate, err := queuedNudgeGateFor(holdTarget(c.city, c.providerHold), sp, time.Second, quietObs(), time.Now())
-			if err != nil || !gate.open {
-				t.Fatalf("gate = %+v, %v; want open as today", gate, err)
+			q := newHeldQueue(t, c.mode, runtime.ProgramWorking, c.city, c.providerHold)
+			q.fake.SetProgramHold(q.target.sessionName, c.paneHold)
+			var got []runtime.ProgramStatusComparison
+			if c.mode == runtime.ProgramStatusShadow {
+				q.fake.ProgramShadowSink = func(cmp runtime.ProgramStatusComparison) { got = append(got, cmp) }
 			}
-			if holdReads(f) != c.reads {
-				t.Fatalf("%d hold reads, want %d", holdReads(f), c.reads)
+			if !q.pass(t) {
+				t.Fatal("the starved pass did not deliver as today")
+			}
+			if sent := q.sends(); len(sent) != 1 || sent[0].Method != "NudgeNow" {
+				t.Fatalf("sends %+v, want one immediate delivery as today", sent)
+			}
+			if n := q.fake.CountCalls("ProgramStatusHoldRead", q.target.sessionName); n != c.reads {
+				t.Fatalf("%d hold reads, want %d", n, c.reads)
+			}
+			var bypass []runtime.ProgramStatusComparison
+			for _, cmp := range got {
+				if cmp.Point == runtime.ProgramPointStarvedBypass {
+					bypass = append(bypass, cmp)
+				}
+			}
+			if c.mode == runtime.ProgramStatusShadow {
+				if len(bypass) == 0 || bypass[0].Scrape != runtime.ProgramVerdictNoHold || bypass[0].Program != runtime.ProgramVerdictHold {
+					t.Fatalf("shadow comparisons %+v, want starved_bypass no_hold/hold", got)
+				}
+			} else if len(bypass) != 0 {
+				t.Fatalf("starved_bypass recorded under %s: %+v", c.mode, bypass)
 			}
 		})
 	}
+
+	q := newHeldQueue(t, runtime.ProgramStatusOn, runtime.ProgramWorking, "on", true)
+	q.sp.running = true
+	if q.pass(t) || len(q.sends()) != 0 {
+		t.Fatalf("a turn on screen: sends %+v, want held as today", q.sends())
+	}
+	if n := q.fake.CountCalls("ProgramStatusHoldRead", q.target.sessionName); n != 0 {
+		t.Fatalf("a turn on screen took %d hold reads, want none", n)
+	}
 }
 
-// heldRecordRow is holdPaneRow under on, working since now: a live hold.
-func heldRecordRow() runtime.ProgramPaneRow {
-	return holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramWorking, time.Now())
-}
-
-// Kills an execution backstop that reserves an attempt (and in time drains
-// the seat) for a seat every other gate reads quiet while its program's own
-// record says a turn is running: it holds under the record's own reason,
-// writing no pacing state.
-func TestExecutionBackstopHoldsOnAFreshProgramRecord(t *testing.T) {
-	f := newExecutionBackstopFixture(t)
-	f.provider = runtime.FullFake{Fake: f.sp}
-
-	// As f.tickStale, with the turn still drawing: its record entered
-	// working a minute before each tick's clock, so the hold stays live.
-	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
-		f.idleFor(t, 10*time.Minute)
-		judged := f.now
-		if now := time.Now(); now.After(judged) {
-			judged = now
+// Kills a hold on the normal path: a record that says working while the
+// pane is quiet (Codex reports working while a background terminal runs,
+// with no turn) delivers through the quiescence gate exactly as the switch
+// off does, with no record read.
+func TestNormalPathDeliversAsOffWhateverTheRecord(t *testing.T) {
+	run := func(mode runtime.ProgramStatusMode, city string) ([]runtime.Call, int) {
+		q := newHeldQueue(t, mode, runtime.ProgramWorking, city, true)
+		quiet := time.Now().Add(-time.Hour)
+		q.fake.Activity = map[string]time.Time{q.target.sessionName: quiet}
+		q.obs.LastActivity = &quiet
+		delivered, err := tryDeliverQueuedNudgesByPoller(q.target, q.store, q.store, q.sp, time.Second, q.obs)
+		if err != nil || !delivered {
+			t.Fatalf("%s: delivered %t err %v, want the quiet session delivered", mode, delivered, err)
 		}
-		f.sp.SetProgramPane(f.sessName, holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramWorking, judged.Add(-time.Minute)))
-		f.tick(t)
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		var methods []runtime.Call
+		for _, c := range q.sends() {
+			methods = append(methods, runtime.Call{Method: c.Method, Message: c.Message})
+		}
+		return methods, q.fake.CountCalls("ProgramStatusHoldRead", q.target.sessionName)
 	}
-
-	if got := f.nudgeCount(); got != 0 {
-		t.Fatalf("nudges to a seat its record holds = %d, want 0; stdout=%s", got, f.stdout.String())
-	}
-	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
-		t.Fatalf("persisted work marker = %q, want no attempt reserved", got)
-	}
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests = %v, want none", f.drained)
-	}
-	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldProgramRecord+" ") {
-		t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldProgramRecord)
-	}
-}
-
-// Kills a claim-nudge hold that lets a seat its record holds be nudged.
-func TestClaimNudgeHoldsOnAFreshProgramRecord(t *testing.T) {
-	_, sp := holdLeaf(t, runtime.ProgramStatusOn, runtime.ProgramWorking, time.Now(), true)
-	row := beads.Bead{ID: "gc-1", Metadata: map[string]string{"provider": "codex", "session_name": "s"}}
-	if got := claimNudgeBusyHold(sp, row, "s", time.Now()); got != executionHoldProgramRecord {
-		t.Fatalf("claimNudgeBusyHold = %q, want %s", got, executionHoldProgramRecord)
-	}
-	_, idle := holdLeaf(t, runtime.ProgramStatusOn, runtime.ProgramIdle, time.Now(), true)
-	if got := claimNudgeBusyHold(idle, row, "s", time.Now()); got != "" {
-		t.Fatalf("claimNudgeBusyHold at an idle record = %q, want quiet", got)
-	}
-}
-
-// Kills a work ladder whose direct path counts an attempt for a seat whose
-// program's record says a turn is running: no nudge is sent, and none is
-// counted.
-func TestWorkLadderHoldsOnAFreshProgramRecord(t *testing.T) {
-	c := newLadderCity(t)
-	id := c.claim("a long turn")
-	c.sp.SetProgramPane(ladderSeatName, heldRecordRow())
-	c.env.SP = runtime.FullFake{Fake: c.sp}
-	c.run(30*time.Minute, 30*time.Second, nil)
-	if len(c.nudgedAt) != 0 || c.sp.CountCalls("Nudge", ladderSeatName) != 0 {
-		t.Fatalf("nudges %v while the record holds the seat", c.nudgedAt)
-	}
-	if e := c.entry(id); e.Attempts != 0 {
-		t.Fatalf("entry %+v, want no attempt counted", e)
+	off, _ := run(runtime.ProgramStatusOff, "off")
+	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusShadow, runtime.ProgramStatusOn} {
+		got, reads := run(mode, string(mode))
+		if fmt.Sprint(got) != fmt.Sprint(off) || reads != 0 {
+			t.Fatalf("%s: sends %+v after %d hold reads, want off's %+v and none", mode, got, reads, off)
+		}
 	}
 }
 
@@ -243,112 +281,5 @@ func TestWorkLadderBusyDeferralIsUncounted(t *testing.T) {
 	}
 	if e := c.entry(id); e.Attempts != 0 || e.Refused != 0 || len(c.posted) != 0 {
 		t.Fatalf("entry %+v, recycles %+v: deferrals moved it toward a recycle", e, c.posted)
-	}
-}
-
-// Kills a drain reminder that writes its budget marker for a session whose
-// program's record says a turn is running: it holds as busy, nothing
-// typed, nothing spent, and delivers once the record is idle.
-func TestDrainReminderHoldsOnAFreshProgramRecord(t *testing.T) {
-	e := newDrainReminderEnv(t)
-	e.sp.SetProgramPane(e.name, heldRecordRow())
-	sp := runtime.FullFake{Fake: e.sp}
-	if got := e.remindWith(sp); got != drainReminderHeld {
-		t.Fatalf("outcome = %v, want held", got)
-	}
-	if n := len(e.nudges()); n != 0 {
-		t.Errorf("nudge count = %d, want 0", n)
-	}
-	if got := e.meta(drainReminderHoldKey); got != drainReminderHoldBusy {
-		t.Errorf("%s = %q, want %q", drainReminderHoldKey, got, drainReminderHoldBusy)
-	}
-	if got := e.meta(drainReminderCountKey); got != "" {
-		t.Errorf("%s = %q, want unset: a held reminder spends nothing", drainReminderCountKey, got)
-	}
-	e.sp.SetProgramPane(e.name, holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramIdle, time.Now()))
-	if got := e.remindWith(sp); got != drainReminderDelivered {
-		t.Fatalf("outcome at an idle record = %v, want delivered", got)
-	}
-}
-
-// Kills a queue that spends an attempt on, or delivers into, a running turn
-// of a program that aborts on mid-turn input, or delivers its nudge twice:
-// the poller's gate holds the queued item unclaimed while the record says
-// working; a pass whose target does not resolve the hold claims it, the
-// leaf refuses it as busy, and the claim is released uncharged; once the
-// record says idle the next pass delivers it, acks it, and no later pass
-// sends it again.
-func TestQueuedNudgeHeldThenDeliveredOnceAfterTheTurnEnds(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	dir := t.TempDir()
-	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "check hook output", time.Now().Add(-time.Minute))); err != nil {
-		t.Fatalf("enqueueQueuedNudge: %v", err)
-	}
-	fake := runtime.NewFake()
-	sp := runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: fake})
-	if err := sp.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	idleSince := time.Now().Add(-10 * time.Second)
-	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
-	fake.SetProgramPane("sess-worker", holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramWorking, time.Now()))
-	target := holdTarget("on", true)
-	target.cityPath, target.sessionName, target.agent = dir, "sess-worker", config.Agent{Name: "worker"}
-	undeclared := target
-	undeclared.resolved = &config.ResolvedProvider{Name: "agent"}
-	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
-
-	pass := func(target nudgeTarget) bool {
-		t.Helper()
-		store := openNudgeBeadStore(dir).Store
-		delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, 3*time.Second, obs)
-		if err != nil {
-			t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
-		}
-		return delivered
-	}
-	queue := func() (pending, inFlight, attempts int) {
-		t.Helper()
-		if err := withNudgeQueueState(dir, "test", func(state *nudgeQueueState) error {
-			pending, inFlight = len(state.Pending), len(state.InFlight)
-			for _, it := range state.Pending {
-				attempts += it.Attempts
-			}
-			for i := range state.Pending {
-				state.Pending[i].DeliverAfter = time.Now().Add(-time.Second)
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("withNudgeQueueState: %v", err)
-		}
-		return pending, inFlight, attempts
-	}
-	nudges := func() int {
-		return fake.CountCalls("Nudge", "sess-worker") + fake.CountCalls("NudgeNow", "sess-worker")
-	}
-
-	if pass(target) || nudges() != 0 {
-		t.Fatalf("a pass under a working record delivered (nudges %d)", nudges())
-	}
-	if p, f, a := queue(); p != 1 || f != 0 || a != 0 {
-		t.Fatalf("queue after the held pass: pending %d in-flight %d attempts %d, want the item pending, unclaimed and uncharged", p, f, a)
-	}
-
-	if pass(undeclared) || nudges() != 1 {
-		t.Fatalf("a pass claiming past the gate: nudges %d, want one refused delivery", nudges())
-	}
-	if p, f, a := queue(); p != 1 || f != 0 || a != 0 {
-		t.Fatalf("queue after the leaf's refusal: pending %d in-flight %d attempts %d, want the claim released uncharged", p, f, a)
-	}
-
-	fake.SetProgramPane("sess-worker", holdPaneRow(runtime.ProgramStatusOn, runtime.ProgramDone, time.Now()))
-	if !pass(target) || nudges() != 2 {
-		t.Fatalf("the pass after the turn ended did not deliver (nudges %d)", nudges())
-	}
-	if p, f, _ := queue(); p != 0 || f != 0 {
-		t.Fatalf("queue after delivery: pending %d in-flight %d, want the item acked", p, f)
-	}
-	if pass(target) || nudges() != 2 {
-		t.Fatalf("a later pass delivered again (nudges %d), want exactly once", nudges())
 	}
 }

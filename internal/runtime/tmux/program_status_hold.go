@@ -15,11 +15,11 @@ import (
 // its value bound to the pane's own id as the tap nonce is, so a value set
 // at window, session or global scope declares nothing for this pane; heal
 // converges it on a live capture whose declaration changed. Under the
-// switch on, a typing path and the controller's quiet decisions read the
-// pane fresh, its capture fields (the hold option among them) and its
-// window's activity (#{window_activity}: tmux keeps no per-pane activity)
-// in one tmux command. A typing path refuses while the record says a turn is
-// running (runtime.ProgramTypingHolds). Under off or shadow nothing is read.
+// switch on, a starved queue's bypass reads the pane fresh
+// (runtime.ProgramStatusHoldProvider): its capture fields (the hold option
+// among them) and its window's activity (#{window_activity}: tmux keeps no
+// per-pane activity) in one tmux command. Under off or shadow nothing is
+// read.
 
 // programHoldOption is the pane option a hold-declaring arm sets to the
 // pane's id (set-option -F "#{pane_id}").
@@ -54,7 +54,7 @@ func parseProgramHoldRow(line string) (programHoldRow, bool) {
 }
 
 // holdRead takes one fresh hold reading of session's agent pane: a
-// display-message of target, the agent pane a nudge already resolved, or,
+// display-message of target, an agent pane the caller already resolved, or,
 // with no target, a list-panes of the session folded to its agent pane. It
 // is bounded by shadowReadTimeout. ok is false, and nothing is read, unless
 // the switch is on; it is false as well when the read failed, the agent
@@ -112,19 +112,6 @@ func (t *Tmux) holdRead(session, target string) (runtime.ProgramHoldReading, boo
 		reading.Activity = t.discountedActivity(session, time.Unix(secs, 0))
 	}
 	return reading, true
-}
-
-// refuseHeldInput returns the typing refusal (runtime.ProgramHoldRefusal)
-// when session's agent pane, target when the caller resolved it, declares
-// the hold and its fresh record says a turn is running now
-// (runtime.ProgramTypingHolds); nil otherwise, having read nothing unless
-// the switch is on.
-func (t *Tmux) refuseHeldInput(session, target string) error {
-	r, ok := t.holdRead(session, target)
-	if !ok || !runtime.ProgramTypingHolds(r, time.Now()) {
-		return nil
-	}
-	return runtime.ProgramHoldRefusal(session)
 }
 
 // ProgramStatusHoldRead implements [runtime.ProgramStatusHoldProvider]: one

@@ -408,43 +408,28 @@ func TestDisarmWhileProcessTableUnreadKeepsTheTapRecoverable(t *testing.T) {
 	}
 }
 
-// A queued nudge to a pane whose provider declares the mid-turn hold is held
-// while the program reports working, on the real tmux with the built
-// companion and emitter, on a scratch server (osc7501x-hold-<rand>): every
-// delivery attempt, as the queue's poller makes them, is refused as busy
-// with nothing typed into the pane, and once the program reports its turn
-// done the next attempt delivers it, exactly once.
-func TestHeldNudgeDeliveredOnceAfterTheTurnEnds(t *testing.T) {
+// The starved-queue veto's fresh read on the real tmux with the built
+// companion and emitter, on a scratch server (osc7501x-hold-<rand>): a pane
+// whose provider declares the mid-turn hold holds typing while its program
+// reports working, even with the state cache primed with that reading, and
+// releases at the first read after the program reports its turn done, the
+// cache not yet refreshed. A nudge is typed either way: the leaf itself
+// holds nothing.
+func TestHeldReadFollowsTheTurnPastTheStateCache(t *testing.T) {
 	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusOn,
 		runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}, []string{"report state=working"})
 	if got, pane := paneOption(t, s.p, s.name, programHoldOption), s.paneFormat(t, "#{pane_id}"); got != pane {
 		t.Fatalf("hold option %q, want it bound to the agent pane %s", got, pane)
 	}
-	// The emitter reads each typed line as a step; a comment is skipped, so
-	// the marker reaches the pane's screen and nothing else.
-	const marker = "# gc-held-nudge-7501"
-	attempt := func() error {
-		return s.p.NudgeNow(s.name, []runtime.ContentBlock{{Type: "text", Text: marker}})
+	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Running() || !r.HoldDeclared {
+		t.Fatalf("reading before the turn ends = %+v, %v; want a valid working record declaring the hold", r, err)
 	}
-	delivered := func() int {
-		return strings.Count(s.tmux(t, "capture-pane", "-p", "-J", "-S", "-", "-t", s.target(t)), marker)
-	}
-	// Prime the state cache with the working reading, so a later attempt
-	// that trusted it instead of its own fresh read would still hold.
-	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Running() {
-		t.Fatalf("reading before the attempts = %+v, %v; want a valid working record", r, err)
-	}
-	for i := range 3 {
-		if err := attempt(); !errors.Is(err, runtime.ErrSessionBusy) {
-			t.Fatalf("attempt %d while working = %v, want a busy refusal", i, err)
-		}
-	}
-	if n := delivered(); n != 0 {
-		t.Fatalf("the held nudge reached the pane %d times while the program reported working", n)
+	if r, held := runtime.ProgramRecordTypingHold(s.p, s.name, time.Now()); !held {
+		t.Fatalf("hold read while working = %+v, want held", r.Status)
 	}
 
 	// The turn ends; the state cache is not refreshed here, so only the
-	// attempt's own read can see it.
+	// fresh read can see it.
 	target := s.target(t)
 	s.tmux(t, "send-keys", "-t", target, "-l", "report state=done")
 	s.tmux(t, "send-keys", "-t", target, "Enter")
@@ -452,25 +437,23 @@ func TestHeldNudgeDeliveredOnceAfterTheTurnEnds(t *testing.T) {
 		rec, err := programstatus.Decode(paneOption(t, s.p, s.name, programStatusOption))
 		return err == nil && rec.Nonce == s.nonce && rec.State == runtime.ProgramDone
 	})
-	if cached, err := s.p.ProgramStatus(s.name); err != nil || !cached.Running() {
-		t.Logf("the state cache refreshed before the attempt (%+v, %v); the attempt still reads fresh", cached, err)
+	if r, held := runtime.ProgramRecordTypingHold(s.p, s.name, time.Now()); held || r.Status.State != runtime.ProgramDone {
+		t.Fatalf("hold read after done = %+v held=%v, want the done record and no hold", r.Status, held)
 	}
-	attempts := 0
-	eventually(t, "an attempt after the turn ended to deliver", func() bool {
-		attempts++
-		err := attempt()
-		if err != nil && !errors.Is(err, runtime.ErrSessionBusy) {
-			t.Fatalf("attempt after the turn ended = %v", err)
-		}
-		return err == nil
+
+	// The emitter reads each typed line as a step; a comment is skipped, so
+	// the marker reaches the pane's screen and nothing else.
+	const marker = "# gc-held-nudge-7501"
+	s.tmux(t, "send-keys", "-t", target, "-l", "report state=working")
+	s.tmux(t, "send-keys", "-t", target, "Enter")
+	eventually(t, "the program to report working again", func() bool {
+		rec, err := programstatus.Decode(paneOption(t, s.p, s.name, programStatusOption))
+		return err == nil && rec.Nonce == s.nonce && rec.State == runtime.ProgramWorking
 	})
-	if attempts != 1 {
-		t.Fatalf("%d attempts after the turn ended, want the first to deliver: its read is fresh", attempts)
+	if err := s.p.NudgeNow(s.name, []runtime.ContentBlock{{Type: "text", Text: marker}}); err != nil {
+		t.Fatalf("NudgeNow to a working pane = %v, want it typed: the leaf holds nothing", err)
 	}
-	// The attempts stop at the delivery, as the queue acks it: the marker
-	// reaches the pane once, and once only.
-	eventually(t, "the nudge to reach the pane", func() bool { return delivered() >= 1 })
-	if n := delivered(); n != 1 {
-		t.Fatalf("the nudge reached the pane %d times, want exactly once", n)
-	}
+	eventually(t, "the nudge to reach the pane", func() bool {
+		return strings.Count(s.tmux(t, "capture-pane", "-p", "-J", "-S", "-", "-t", target), marker) == 1
+	})
 }

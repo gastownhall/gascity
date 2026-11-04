@@ -485,9 +485,6 @@ func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) (D
 	if err, ok := f.NudgeErrors[name]; ok && err != nil {
 		return DeliveryReceipt{}, err
 	}
-	if err := f.programHoldRefusalLocked(name); err != nil {
-		return DeliveryReceipt{}, err
-	}
 	return f.holdLocked(name, key), nil
 }
 

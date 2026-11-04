@@ -2772,56 +2772,13 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 	_ = sessFront.SetMarker(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
 }
 
-// Under the program-status switch on, a session whose program's own record,
-// read fresh, holds its input (queuedDeliveryHeldByProgram) is not idle
-// enough, whatever its quiescence. Under the shadow switch the verdict is
-// recorded beside the record's hold (queued_delivery); the verdict returned
-// is today's alone.
+// Under the program-status shadow switch the verdict is recorded beside the
+// record's hold (queued_delivery); the verdict returned is today's alone.
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
-	if queuedDeliveryHeldByProgram(target, sp, time.Now()) {
-		return false
-	}
-	return pollerSessionIdleEnoughUnheld(target, sp, quiescence, obs)
-}
-
-// pollerSessionIdleEnoughUnheld is pollerSessionIdleEnough past the
-// program's hold: today's quiescence verdict, recorded beside the record's
-// hold under the shadow switch.
-func pollerSessionIdleEnoughUnheld(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	deliver := pollerSessionQuietEnough(target, sp, quiescence, obs)
 	shadowHold(sp, target.sessionName, target.sessionID, target.providerFamily(),
 		runtime.ProgramPointQueuedDelivery, !deliver, time.Now(), runtime.ProgramHoldVerdict)
 	return deliver
-}
-
-// queuedDeliveryHeldByProgram reports whether a queued delivery to target
-// waits on its program's own record: the city switch is on, target's
-// provider declares hold_mid_turn (its program aborts a turn input is typed
-// into), and a fresh read of the record on the leaf serving the session
-// says working or blocked within its hold bound (runtime.ProgramRecordHold,
-// the queued_delivery shadow rule, judged with the pane's own activity at
-// the later of now and the clock after the read). Nothing is read for any
-// other target. A delivery held here is neither claimed nor charged; one
-// the hold did not see (a provider the target does not resolve) is still
-// refused at the leaf, which declines to type into the held pane
-// (runtime.ProgramHoldRefusal), and released without charge.
-func queuedDeliveryHeldByProgram(target nudgeTarget, sp runtime.Provider, now time.Time) bool {
-	if sp == nil || target.sessionName == "" || !target.programHoldDeclared() {
-		return false
-	}
-	_, held := runtime.ProgramRecordHold(sp, target.sessionName, now)
-	return held
-}
-
-// programHoldDeclared reports whether target's resolved provider declares
-// hold_mid_turn under the city switch on and its transport (the arm every
-// start derives, config.ProgramStatusArmFor).
-func (t nudgeTarget) programHoldDeclared() bool {
-	if t.cfg == nil || t.resolved == nil || t.cfg.Session.ProgramStatusMode() != runtime.ProgramStatusOn {
-		return false
-	}
-	arm, _ := config.ProgramStatusArmFor(t.cfg, t.resolved, t.sessionTransport())
-	return arm.HoldMidTurn
 }
 
 // pollerSessionQuietEnough is pollerSessionIdleEnough's verdict.
@@ -2865,7 +2822,7 @@ type queuedNudgeGate struct {
 // quiet opened sends any delivery on the default path. A gate a starvation
 // opened sends only a delivery that has starved itself, so a younger delivery
 // never goes on an older one's starvation, and looks at the leaf's turn again
-// first (starvedQueuedNudgeDelivery): its own look came before the claim and
+// first (starvedQueuedNudgeBypass): its own look came before the claim and
 // its bookkeeping, and a turn that started since holds the delivery, as one
 // running then held the pass. A look that fails holds it too, and err says
 // why.
@@ -2876,7 +2833,7 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 	if !queuedNudgeDeliveryStarved(delivery, g.starvedAsOf) {
 		return "", false, nil
 	}
-	how, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	how, hold, err := starvedQueuedNudgeBypass(target, sp, time.Now())
 	if err != nil {
 		return "", false, fmt.Errorf("holding the claimed starved delivery for %s: %w", target.agentKey(), err)
 	}
@@ -2890,22 +2847,19 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 // any quiescence window, so the gate never clears. Once the delivery the pass
 // would make has starved as of now (queuedNudgeStarvedForTarget), the gate
 // stops waiting on that clock and asks the leaf's turn instead
-// (starvedQueuedNudgeDelivery): a turn running holds the pass before it
-// claims, and admit asks again before it sends. A program record holding the
-// session's input (queuedDeliveryHeldByProgram) closes the gate before
-// either: a held delivery waits for the record, not for a starvation clock.
+// (starvedQueuedNudgeBypass): a turn running, on the screen or, for a
+// provider declaring hold_mid_turn under the switch on, in the program's
+// own record, holds the pass before it claims, and admit asks again before
+// it sends.
 func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, now time.Time) (queuedNudgeGate, error) {
-	if queuedDeliveryHeldByProgram(target, sp, now) {
-		return queuedNudgeGate{}, nil
-	}
-	if pollerSessionIdleEnoughUnheld(target, sp, quiescence, obs) {
+	if pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return queuedNudgeGate{open: true}, nil
 	}
 	starved, err := queuedNudgeStarvedForTarget(target, now)
 	if err != nil || !starved {
 		return queuedNudgeGate{}, err
 	}
-	_, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	_, hold, err := starvedQueuedNudgeBypass(target, sp, now)
 	if err != nil {
 		return queuedNudgeGate{}, fmt.Errorf("holding the starved queue for %s: %w", target.agentKey(), err)
 	}
@@ -2971,6 +2925,9 @@ func queuedNudgeDeliveryStarved(delivery []queuedNudge, now time.Time) bool {
 //     turn.
 //   - A leaf with neither reading takes the default path unread, as the open
 //     gate would send it: holding it would leave the starvation in place.
+//
+// The gate and admit ask through starvedQueuedNudgeBypass, which adds the
+// program record's veto on the screen's bypass.
 func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery worker.NudgeDelivery, hold bool, err error) {
 	if tr, ok := runtime.TurnRunningFor(sp, name); ok {
 		running, err := tr.TurnRunning(name)
@@ -2991,6 +2948,53 @@ func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery work
 		return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
 	}
 	return worker.NudgeDeliveryDefault, turn.Active(), nil
+}
+
+// starvedQueuedNudgeBypass is starvedQueuedNudgeDelivery for target, the
+// one path that types a queued delivery into a session its activity clock
+// calls busy: a starved queue bypassing the quiescence gate on the screen's
+// turn look (an immediate delivery). Under the program-status switch on, a
+// target whose provider declares hold_mid_turn (its program aborts a turn
+// input is typed into) has that bypass vetoed while a fresh read of its
+// program's record says a turn is running (runtime.ProgramRecordTypingHold):
+// the screen can show no turn while one runs (the 2026-11-04 Tier-4 cohort:
+// 9 of 16 long Codex turns aborted by this bypass). A vetoed bypass holds,
+// as a turn on screen does: nothing is claimed or charged, and the next pass
+// asks again. Every other delivery, the quiescence gate's own included,
+// decides as without the record. Under the shadow switch the bypass's
+// verdict is recorded beside the record's (starved_bypass), read fresh.
+func starvedQueuedNudgeBypass(target nudgeTarget, sp runtime.Provider, now time.Time) (worker.NudgeDelivery, bool, error) {
+	how, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	if err != nil {
+		return how, hold, err
+	}
+	if how != worker.NudgeDeliveryImmediate {
+		return how, hold, nil
+	}
+	scrape := runtime.ProgramVerdictNoHold
+	if hold {
+		scrape = runtime.ProgramVerdictHold
+	}
+	runtime.ShadowCompareFresh(sp, target.sessionName, target.sessionID, target.providerFamily(),
+		runtime.ProgramPointStarvedBypass, scrape, now, runtime.ProgramTurnHoldVerdict)
+	if hold || !target.programHoldDeclared() {
+		return how, hold, nil
+	}
+	if _, held := runtime.ProgramRecordTypingHold(sp, target.sessionName, now); held {
+		return how, true, nil
+	}
+	return how, false, nil
+}
+
+// programHoldDeclared reports whether target's resolved provider declares
+// hold_mid_turn under the city switch on and its transport (the arm every
+// start derives, config.ProgramStatusArmFor).
+func (t nudgeTarget) programHoldDeclared() bool {
+	if t.cfg == nil || t.resolved == nil || t.cfg.Session.ProgramStatusMode() != runtime.ProgramStatusOn {
+		return false
+	}
+	arm, _ := config.ProgramStatusArmFor(t.cfg, t.resolved, t.sessionTransport())
+	return arm.HoldMidTurn
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {
