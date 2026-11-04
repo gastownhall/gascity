@@ -1422,8 +1422,12 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return false, nil
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	stopReason := molecule.WorkflowStopReason
+	if opts.RootBeadID != "" {
+		stopReason = molecule.WorkflowStopReasonStrict
+	}
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
+	stop, err := stopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
 		if opts.RootBeadID != "" {
 			return false, fmt.Errorf("checking workflow ancestry for %s: %w", candidate.ID, err)
@@ -2400,7 +2404,11 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			ancestorRead = true
 			// ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "") may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 			workflowStore = beads.GraphMolecule(beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")})
-			stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead)
+			readAncestor := molecule.StoppedWorkflowAncestor
+			if opts.RootBeadID != "" {
+				readAncestor = molecule.StoppedWorkflowAncestorStrict
+			}
+			stop, err := readAncestor(workflowStore, bead)
 			if err != nil && opts.RootBeadID != "" {
 				return false, fmt.Errorf("reading continuation ancestry for %s: %w", bead.ID, err)
 			}
@@ -2409,7 +2417,11 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		if !ancestorStop.Stopped() {
 			return false, nil
 		}
-		teardown, err := molecule.IsTeardownTailMember(workflowStore, sibling)
+		readTeardown := molecule.IsTeardownTailMember
+		if opts.RootBeadID != "" {
+			readTeardown = molecule.IsTeardownTailMemberStrict
+		}
+		teardown, err := readTeardown(workflowStore, sibling)
 		if err != nil && opts.RootBeadID != "" {
 			return false, fmt.Errorf("reading continuation teardown for %s: %w", sibling.ID, err)
 		}

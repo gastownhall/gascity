@@ -14,3 +14,9 @@ after claiming, and sibling ancestry/teardown checks must succeed before
 reservation. Complete scoped domain and reservation checks before publishing
 execution stamps, started records or work results. Unscoped v1 retains its
 existing read-error behavior.
+
+Scoped ancestry uses the strict domain helpers: every named root, drain-control
+and parent-root link must resolve, including after CAS and at final delivery.
+Wrapped `ErrNotFound` on an ancestry or teardown read is a failure, even after
+the initial explicit-root lookup succeeded. Root lookup and candidate residence
+may advance to another work leg on proven absence; ancestry failures must not.

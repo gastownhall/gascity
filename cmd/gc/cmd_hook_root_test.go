@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -400,6 +401,185 @@ func TestHookUnscopedDomainReadFailuresKeepV1(t *testing.T) {
 			}
 			if code != 0 || got.SchemaVersion != "1" || got.Action != "work" || got.BeadID != step.ID || len(*claims) != 1 {
 				t.Fatalf("v1 changed: code=%d result=%+v err=%s claims=%v", code, got, &errOut, *claims)
+			}
+			validateJSONAgainstBuiltinSchema(t, []string{"hook"}, out.Bytes())
+		})
+	}
+}
+
+// Preserve ConditionalWriter so an unresolved reservation cannot pass merely
+// because the fault wrapper hid the store's write capability.
+type hookMissingAncestorStore struct {
+	*beads.MemStore
+	missingID    string
+	fail         bool
+	failedReads  *int
+	reservations *[]string
+}
+
+var _ beads.ConditionalWriter = (*hookMissingAncestorStore)(nil)
+
+func (s *hookMissingAncestorStore) Get(id string) (beads.Bead, error) {
+	if s.fail && id == s.missingID {
+		(*s.failedReads)++
+		return beads.Bead{}, fmt.Errorf("injected missing ancestor %s: %w", id, beads.ErrNotFound)
+	}
+	return s.MemStore.Get(id)
+}
+
+func (s *hookMissingAncestorStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	*s.reservations = append(*s.reservations, id)
+	return s.MemStore.UpdateIfMatch(id, revision, opts)
+}
+
+func seedHookNestedAncestry(t *testing.T, store *beads.MemStore) {
+	t.Helper()
+	store.HonorExplicitIDs = true
+	if err := store.SetMetadata("root-a", beadmeta.DrainControlIDMetadataKey, "drain-a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []beads.Bead{
+		{ID: "drain-a", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "parent-a", "gc.kind": "drain"}},
+		{ID: "parent-a", Status: "open", Metadata: map[string]string{"gc.kind": "workflow"}},
+	} {
+		if _, err := store.Create(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestHookRootMissingAncestry(t *testing.T) {
+	for _, tier := range []string{"fresh", "ready", "existing"} {
+		for _, phase := range []string{"before claim", "after CAS", "final writer", "reservation", "live reservation"} {
+			if tier == "existing" && phase == "after CAS" {
+				continue // Adoption does not mint a CAS.
+			}
+			for _, missingID := range []string{"root-a", "drain-a", "parent-a"} {
+				t.Run(tier+"/"+phase+"/"+missingID, func(t *testing.T) {
+					step := scopedHookBead("step-a", "root-a", "open", "")
+					if tier != "fresh" {
+						step.Assignee = "seat"
+					}
+					if tier == "existing" {
+						step.Status = "in_progress"
+					}
+					opts, ops, run, claims := scopedHookFixture(t, "open", []beads.Bead{step})
+					store := ops.WorkflowStore(context.Background(), "/rig", nil, "", "").(*beads.MemStore)
+					seedHookNestedAncestry(t, store)
+					opts.Env = []string{"GC_SESSION_ID=test-session"}
+					opts.StartedFence = hookStartedFence{Token: "test-token"}
+					ops.DrainPending = func(string) (bool, error) { return false, nil }
+					ops.ResolveSessionWorkDir = func(string) string { return "" }
+					ops.ResolveWorkBranch = func(hookClaimWorkTree) string { return "" }
+					checks, failedReads := 0, 0
+					reservations := []string{}
+					ops.WorkflowStore = func(_ context.Context, _ string, _ []string, id, actor string) beads.Store {
+						if id != step.ID {
+							return store
+						}
+						fail := phase == "reservation" && actor == ""
+						if actor != "" {
+							checks++
+							writerCheck := 3
+							if tier == "existing" {
+								writerCheck = 2
+							}
+							fail = (phase == "before claim" && checks == 1) ||
+								(phase == "after CAS" && checks == 2) ||
+								(phase == "final writer" && checks == writerCheck)
+						}
+						return &hookMissingAncestorStore{MemStore: store, missingID: missingID, fail: fail, failedReads: &failedReads, reservations: &reservations}
+					}
+					var sibling beads.Bead
+					if strings.Contains(phase, "reservation") {
+						var err error
+						sibling, err = store.Create(scopedHookBead("next-a", "root-a", "open", ""))
+						if err != nil {
+							t.Fatal(err)
+						}
+						ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+							return []beads.Bead{sibling}, nil
+						}
+					}
+					// All other phases have no siblings, isolating execution delivery
+					// from the separate reservation ancestry gate.
+					published := []string{}
+					ops.RecordWorkStarted = func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+						published = append(published, "work started")
+						return hookStartedRecorded, nil
+					}
+					ops.ForgetWorkStarted = func(string, hookStartedKey) error { return nil }
+					ops.EmitClaimReleased = func(hookClaimReleaseRecord) {}
+					ops.StampWorkMeta = func(context.Context, string, []string, string, string, map[string]string) error {
+						published = append(published, "work stamp")
+						return nil
+					}
+					ops.StampSessionClaim = func(string, string) error { published = append(published, "session stamp"); return nil }
+					ops.PublishRunMap = func(string, string, ...string) error { published = append(published, "run map"); return nil }
+					ops.EmitExecutionStepStarted = func(beads.Bead, string, []string, string) { published = append(published, "step started") }
+					ops.Release = func(_ context.Context, _ string, _ []string, id, _ string) (bool, error) {
+						status, owner := "open", ""
+						return true, store.Update(id, beads.UpdateOpts{Status: &status, Assignee: &owner})
+					}
+					var out, errOut bytes.Buffer
+					code := claimHookWorkWithRunner("unused generic query", "/rig", opts.Env, nil, opts, ops, run, nil, &out, &errOut)
+					if phase == "live reservation" {
+						got, err := store.Get(sibling.ID)
+						if code != 0 || !strings.Contains(out.String(), `"action":"work"`) || err != nil || got.Assignee != "seat" || len(reservations) != 1 || reservations[0] != sibling.ID {
+							t.Fatalf("live reservation: code=%d out=%s err=%s sibling=%+v readErr=%v writes=%v", code, &out, &errOut, got, err, reservations)
+						}
+						return
+					}
+					if code == 0 || out.Len() != 0 || !strings.Contains(errOut.String(), "injected missing ancestor "+missingID) || failedReads != 1 {
+						t.Fatalf("missing ancestry: code=%d out=%s err=%s failedReads=%d", code, &out, &errOut, failedReads)
+					}
+					if len(published) != 0 || len(reservations) != 0 {
+						t.Fatalf("unresolved ancestry published execution %v or reserved siblings %v", published, reservations)
+					}
+					wantClaims := 1
+					if tier == "existing" || phase == "before claim" {
+						wantClaims = 0
+					}
+					if len(*claims) != wantClaims {
+						t.Fatalf("claims=%v, want %d before failure", *claims, wantClaims)
+					}
+					if sibling.ID != "" {
+						got, err := store.Get(sibling.ID)
+						if err != nil || got.Assignee != "" || got.Revision != sibling.Revision {
+							t.Fatalf("unresolved ancestry changed sibling: %+v err=%v", got, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestHookUnscopedMissingAncestryKeepsV1(t *testing.T) {
+	for _, missingID := range []string{"root-a", "drain-a", "parent-a"} {
+		t.Run(missingID, func(t *testing.T) {
+			step := scopedHookBead("step-a", "root-a", "open", "")
+			opts, ops, _, claims := scopedHookFixture(t, "open", []beads.Bead{step})
+			store := ops.WorkflowStore(context.Background(), "/rig", nil, "", "").(*beads.MemStore)
+			seedHookNestedAncestry(t, store)
+			failedReads, reservations := 0, []string{}
+			ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store {
+				return &hookMissingAncestorStore{MemStore: store, missingID: missingID, fail: true, failedReads: &failedReads, reservations: &reservations}
+			}
+			opts.RootBeadID = ""
+			rows, err := json.Marshal([]beads.Bead{step})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops.Runner = func(string, string) (string, error) { return string(rows), nil }
+			var out, errOut bytes.Buffer
+			code := doHookClaim("query", "/rig", opts, ops, &out, &errOut)
+			var got hookClaimJSONResult
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err, out.String(), errOut.String())
+			}
+			if code != 0 || got.SchemaVersion != "1" || got.Action != "work" || got.BeadID != step.ID || len(*claims) != 1 || failedReads == 0 {
+				t.Fatalf("v1 changed: code=%d result=%+v err=%s claims=%v failedReads=%d", code, got, &errOut, *claims, failedReads)
 			}
 			validateJSONAgainstBuiltinSchema(t, []string{"hook"}, out.Bytes())
 		})
