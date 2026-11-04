@@ -4239,6 +4239,21 @@ dolt.auto-start: false
 	}
 }
 
+// initializedManagedBdCity returns a city directory whose bd store has been
+// initialized (a managed Dolt server-mode metadata.json), the shape of a city
+// gc recovers. Recovery never starts a city's first server, so the managed
+// retry tests need it to reach recoverManagedBDCommand.
+func initializedManagedBdCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeScopeMetadata(t, cityPath, map[string]string{
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "hq",
+	})
+	return cityPath
+}
+
 // Regression for gastownhall/gascity#1930: when bd silently falls back to the
 // on-disk store and triggers a JSONL auto-import, the managed-retry path must
 // republish the Dolt port and rerun the command.
@@ -4276,7 +4291,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 		return nil
 	}
 
-	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
+	runner := bdCommandRunnerWithManagedRetry(initializedManagedBdCity(t), func(_ string) map[string]string {
 		return map[string]string{"GC_DOLT_PORT": port}
 	})
 
@@ -4343,7 +4358,7 @@ func TestBdStoreGetWithManagedRetryReopensAfterConnectionGenerationChanges(t *te
 		return nil
 	}
 
-	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
+	runner := bdCommandRunnerWithManagedRetry(initializedManagedBdCity(t), func(_ string) map[string]string {
 		return map[string]string{
 			"GC_DOLT_PORT": strconv.Itoa(3306 + generation),
 		}
@@ -4633,7 +4648,7 @@ func TestBDCommandRunnerManagedRetry_RetryDelayApplied(t *testing.T) {
 	}
 	recoverManagedBDCommand = func(_ string) error { return nil }
 
-	cityPath := t.TempDir()
+	cityPath := initializedManagedBdCity(t)
 	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
 		return map[string]string{}
 	})

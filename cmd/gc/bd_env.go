@@ -1072,6 +1072,26 @@ func scopeMetadataJSONPath(scopeRoot string) string {
 	return filepath.Join(scopeRoot, ".beads", "metadata.json")
 }
 
+// cityOwnsInitializedBdStore reports whether the city scope has a bd store of
+// its own that gc could be asked to bring back: .beads/metadata.json is a
+// regular file and .beads/redirect does not exist. Recovery restarts a managed
+// Dolt server a city already had; it must never be a city's first start. A
+// directory that merely carries city.toml (a checkout or worktree of a city
+// repo, or a city-scope agent worktree reached through --city "$(pwd)") has no
+// metadata.json, or points elsewhere through a redirect, and starting a server
+// there leaves an orphaned dolt sql-server nothing can use: bd refuses a
+// .beads/dolt without metadata.json. A redirect whose state cannot be read is
+// answered as not owned, because gc starts no server for a scope it cannot
+// classify.
+func cityOwnsInitializedBdStore(cityPath string) bool {
+	info, err := os.Stat(scopeMetadataJSONPath(cityPath))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(cityPath, ".beads", "redirect"))
+	return os.IsNotExist(err)
+}
+
 func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot string, state contract.ConfigState) {
 	target := contract.DoltConnectionTarget{
 		Host:           strings.TrimSpace(state.DoltHost),
@@ -1477,7 +1497,9 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	if port := recoveredManagedDoltPort(); port != "" {
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
-	if allowRecovery {
+	// The provider health op creates .beads/dolt and .gc/runtime/packs/dolt and
+	// allocates a port, so it too waits for a city that owns a store.
+	if allowRecovery && cityOwnsInitializedBdStore(cityPath) {
 		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
@@ -1731,6 +1753,9 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return out, err
 		}
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
+			if !cityOwnsInitializedBdStore(cityPath) {
+				return out, err
+			}
 			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
 				return out, err
 			}

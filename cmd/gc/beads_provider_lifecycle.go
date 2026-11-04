@@ -3289,10 +3289,14 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	}
 
 	for i := range rigs {
-		rig := normalizedRigConfig(cityPath, rigs[i])
-		if strings.TrimSpace(rig.Path) == "" {
+		// An unbound rig (no path on this machine) has no scope to reconcile.
+		// Test the raw path: normalizedRigConfig maps an empty path onto the
+		// city root, which would reconcile the rig AS the city scope and
+		// overwrite the city's own prefix with the rig's.
+		if strings.TrimSpace(rigs[i].Path) == "" {
 			continue
 		}
+		rig := normalizedRigConfig(cityPath, rigs[i])
 		rigProviderOwned, err := scopeProviderOwned(cityPath, rig.Path)
 		if err != nil {
 			return fmt.Errorf("classifying rig %q provider ownership: %w", rig.Name, err)
