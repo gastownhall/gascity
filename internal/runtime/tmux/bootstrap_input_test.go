@@ -1085,3 +1085,87 @@ func TestBootstrapGenericDialogStillConsumesPromotedCredit(t *testing.T) {
 		t.Fatal("generic post-start input regranted authority")
 	}
 }
+
+// Exact owned native capture1402B SHA5120dfec5b8466b4f1a111b2072d6f3d6843f84cc6f8eb781702444ea4ab4017.
+// Only displayed cwd tokens are anonymized; dim version, all44SGR and both
+// OSC8 hyperlink wrappers are retained. No metadata nonce is in this frame.
+//
+//go:embed testdata/codex-f567-styled-pristine-screen.txt
+var capturedF567StyledPristine string
+
+func TestBootstrapActualStyledNativeFrameIsPristine(t *testing.T) {
+	if !compactCodexBootstrapScreen(capturedF567StyledPristine) {
+		t.Fatal("exact styled native compact frame rejected structurally")
+	}
+	if !pristineBootstrapScreen(capturedF567StyledPristine, "codex") {
+		t.Fatal("exact styled native frame rejected as pristine")
+	}
+}
+
+func TestBootstrapActualStyledFrameRecoversOnlyIssuedReady(t *testing.T) {
+	creator, m := bootstrapModel(t)
+	m.screen = func(*fenceModel) string { return capturedF567StyledPristine }
+	if err := creator.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+		t.Fatal(err)
+	}
+	issued, ok := creator.tm.bootstrapCredit(fenceModelSession)
+	if !ok {
+		t.Fatal("issuer has no credit")
+	}
+	recovered := fenceModelProvider(m) // Same native READY; controller memory is empty.
+	req := runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}
+	proof, err := recovered.ObserveBootstrapInput(t.Context(), fenceModelSession, req)
+	if err != nil || proof == nil {
+		t.Fatal("exact styled native READY did not recover across controller replacement")
+	}
+	if proof.Fence != bootstrapFence || proof.Token != issued.token {
+		t.Fatal("recovery changed issued authority")
+	}
+	m.pid = "9999"
+	if other, err := fenceModelProvider(m).ObserveBootstrapInput(t.Context(), fenceModelSession, req); err != nil || other != nil {
+		t.Fatal("styled frame recovered another native process")
+	}
+}
+
+func TestBootstrapActualStyledFrameKeepsContentAndControlVetoes(t *testing.T) {
+	const link = "https://github.com/openai/codex/releases/latest"
+	frame := capturedF567StyledPristine
+	at := strings.LastIndex(frame, link)
+	if at < 0 {
+		t.Fatal("captured displayed release link absent")
+	}
+	lines := strings.Split(frame, "\n")
+	composer := -1
+	for i, line := range lines {
+		if strings.Contains(line, "Ask Codex to do anything") {
+			composer = i
+		}
+	}
+	if composer < 0 {
+		t.Fatal("captured composer absent")
+	}
+	withComposer := func(line string) string {
+		changedScreen := append([]string(nil), lines...)
+		changedScreen[composer] = line
+		return strings.Join(changedScreen, "\n")
+	}
+	for name, unsafe := range map[string]string{
+		"altered displayed link":        frame[:at] + "https://example.invalid/other" + frame[at+len(link):],
+		"SGR inside hidden OSC8 target": strings.Replace(frame, "\x1b]8;;"+link, "\x1b]8;;https://git\x1b[0mhub.com/openai/codex/releases/latest", 1),
+		"altered OSC8 target":           strings.Replace(frame, "\x1b]8;;"+link, "\x1b]8;;https://example.invalid/other", 1),
+		"unknown OSC":                   strings.Replace(frame, "\x1b]8;;"+link, "\x1b]9;;"+link, 1),
+		"incomplete OSC8":               strings.Replace(frame, "\x1b]8;;\x1b\\", "\x1b]8;", 1),
+		"unknown CSI inside cwd":        strings.Replace(frame, "~/rfc8191/qualified-city", "~/rfc8191/\x1b[999zqualified-city", 1),
+		"unknown CSI":                   frame + "\x1b[999z",
+		"draft":                         withComposer("› user draft"),
+		"native busy":                   withComposer("• Working (1s • esc to interrupt)\n› Ask Codex to do anything"),
+		"startup pending":               withComposer("Connecting to MCP servers (0/1)\n› Ask Codex to do anything"),
+		"history":                       "Previous assistant response.\n" + frame,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pristineBootstrapScreen(unsafe, "codex") {
+				t.Fatal("unsafe styled native frame granted pristine input")
+			}
+		})
+	}
+}

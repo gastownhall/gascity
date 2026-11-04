@@ -24,3 +24,7 @@ First-input pristine recognition may accept either the qualified Codex0.162.1 in
 Raw Start may preserve an already issued CANDIDATE only inside the shared startup parser, with the same native pane, PID, input fence and candidate checked before each key batch. Require a fresh parser observation and exact current-screen reread; never mint, reseed or recover SPENT, READY or claimed authority through this path. Public dialog dismissal, ordinary input and nudges remain consuming.
 
 Known startup menus derive movement from complete rendered choices and confirm the selected safe row twice before Enter. Preserve existing context, time and move bounds. Unknown cursors, partial menus, replacement questions and late reads are not confirmation. Keep captured vendor frames unchanged in regressions; modeled movement must render the new selection rather than skip to a ready prompt. Rowless hotkey layouts require a separate qualified contract.
+
+## Structural terminal presentation
+
+Identify startup branding from structural text, preserving displayed text while removing only supported styling or exact known hyperlink wrappers. Dim styling must not erase a required version suffix. Keep dim-aware draft, running, pending, ownership and issued-authority checks separate; unknown or incomplete controls must refuse. Add actual current-screen styled captures, with private paths anonymized, to regressions before changing these rules.

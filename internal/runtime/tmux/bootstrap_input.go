@@ -355,7 +355,11 @@ func pristineBootstrapScreen(screen, family string) bool {
 	text := strings.Join(plain, "\n")
 	switch family {
 	case "codex":
-		if !strings.Contains(text, ">_ OpenAI Codex (v") || (!strings.Contains(text, "To get started, describe a task or try one of these commands:") && !compactCodexBootstrapScreen(screen)) {
+		// Brand/version and the complete compact layout are presentation,
+		// not draft content: native Codex draws its version faint and its
+		// update link as OSC8. Keep the dim-aware veto/drain checks separate.
+		structure, known := codexBootstrapStructure(screen)
+		if !known || !strings.Contains(structure, ">_ OpenAI Codex (v") || (!strings.Contains(structure, "To get started, describe a task or try one of these commands:") && !compactCodexBootstrapScreen(screen)) {
 			return false
 		}
 		// The initial native placeholder is an exact allowed empty composer.
@@ -387,8 +391,8 @@ func pristineBootstrapScreen(screen, family string) bool {
 
 // Compact 0.162.1 renders no command menu. Recognize its complete initial UI,
 // including only the known optional update notice, never arbitrary transcript
-// rows surrounding an empty composer. SGR styles are discarded only for this
-// structural match; draft draining and native-turn vetoes above stay separate.
+// rows surrounding an empty composer. Known SGR/OSC8 presentation is removed
+// only structurally; draft draining and native-turn vetoes stay separate.
 var (
 	compactCodexBootstrapSGR   = regexp.MustCompile(`\x1b\[[0-9;:]*m`)
 	compactCodexBootstrapFrame = regexp.MustCompile(
@@ -400,10 +404,31 @@ var (
 			`\? for shortcuts(?: ⚠ [1-9][0-9]* warnings? · f2 to view)?$`)
 )
 
+// codexBootstrapStructure removes only complete SGR styling and the exact
+// stock0.162.1 OSC8 release-link wrapper, preserving all displayed text. Unknown
+// or incomplete escapes remain unknown; do not hide them inside a cwd wildcard.
+func codexBootstrapStructure(screen string) (string, bool) {
+	const link = "https://github.com/openai/codex/releases/latest"
+	// URI bytes are not presentation. Validate raw OSC identities before
+	// styling removal, which must not repair an altered hidden target.
+	withoutOSC := strings.ReplaceAll(screen, "\x1b]8;;"+link+"\x1b\\", "")
+	withoutOSC = strings.ReplaceAll(withoutOSC, "\x1b]8;;\x1b\\", "")
+	if strings.Contains(withoutOSC, "\x1b]") {
+		return "", false
+	}
+	screen = compactCodexBootstrapSGR.ReplaceAllString(screen, "")
+	screen = strings.ReplaceAll(screen, "\x1b]8;;"+link+"\x1b\\"+link+"\x1b]8;;\x1b\\", link)
+	return screen, !strings.ContainsRune(screen, '\x1b')
+}
+
 func compactCodexBootstrapScreen(screen string) bool {
+	structure, known := codexBootstrapStructure(screen)
+	if !known {
+		return false
+	}
 	var visible []string
-	for _, line := range strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n") {
-		line = strings.Join(strings.Fields(compactCodexBootstrapSGR.ReplaceAllString(line, "")), " ")
+	for _, line := range strings.Split(strings.ReplaceAll(structure, "\r", ""), "\n") {
+		line = strings.Join(strings.Fields(line), " ")
 		if line != "" {
 			visible = append(visible, line)
 		}

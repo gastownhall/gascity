@@ -212,6 +212,7 @@ go_test(
     embedsrcs = [
         "testdata/codex-c75-pristine-screen.txt",
         "testdata/codex-95-compact-pristine-screen.txt",
+        "testdata/codex-f567-styled-pristine-screen.txt",
     ],
     # program_capture_integration_test.go and
     # program_status_integration_test.go arm capture with the built companion
