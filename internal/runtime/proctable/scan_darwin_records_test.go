@@ -1,6 +1,9 @@
 package proctable
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // A tmux server founded by a session's first new-session call inherits that
 // session's GC_SESSION_ID and reparents to launchd. The parent-envelope test
@@ -207,5 +210,14 @@ func TestDarwinOrphanCandidatesLookThroughOrphanedRelay(t *testing.T) {
 	got := orphanCandidates(scanRecordsBySessionID(records, ""), 0)
 	if len(got) != 1 || got[0].PID != 502 || got[0].PPID != 1 || got[0].ParentIsProviderInfrastructure {
 		t.Fatalf("orphan candidates %+v, want only the orphaned relay's program 502 reading as reparented to launchd", got)
+	}
+}
+
+// TestDarwinOrphanCandidatesTakesOnlyRoots pins the Darwin helper's shape: the
+// Darwin scan has no subreaper, so the helper takes the roots alone and
+// unparam stays satisfied without a suppression.
+func TestDarwinOrphanCandidatesTakesOnlyRoots(t *testing.T) {
+	if got := reflect.TypeOf(orphanCandidates).NumIn(); got != 1 {
+		t.Fatalf("orphanCandidates takes %d parameters, want 1 (roots only)", got)
 	}
 }
