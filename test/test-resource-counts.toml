@@ -2435,6 +2435,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/runtime/acp/lifecycle_lock_open_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/dialog_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2763,6 +2769,12 @@ resource = "net_listen"
 calls = 3
 
 [[count]]
+path = "internal/runtime/subprocess/subprocess_windows_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
+
+[[count]]
 path = "internal/runtime/t3bridge/provider_test.go"
 resource = "http_test_server"
 calls = 1
@@ -2933,6 +2945,12 @@ calls = 1
 path = "internal/sdnotify/sdnotify_test.go"
 resource = "net_listen_packet"
 calls = 2
+
+[[count]]
+path = "internal/session/elevation_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/session/list_all_test.go"
