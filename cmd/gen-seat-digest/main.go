@@ -45,8 +45,17 @@ const digestHeader = "# Gas City: agent seat digest of AGENTS.md\n\n" +
 	"the whole file. Read the root `AGENTS.md` itself before you change code,\n" +
 	"tests or docs in this repository.\n\n"
 
-// ruleRE matches the words that make a block a rule the digest must keep.
-var ruleRE = regexp.MustCompile(`(?i)\b(must|never|do not|don't|hard[- ]rule|hard ban)\b`)
+// ruleRE matches the words that make a block a rule the digest must keep. A
+// phrase may wrap across lines, and don't may take a typographic apostrophe.
+var ruleRE = regexp.MustCompile(`(?i)\b(must|never|do\s+not|don['’]t|hard[-\s]+rule|hard\s+ban)\b`)
+
+// emphasisRE matches a run of markdown emphasis delimiters. ruleBlocks
+// blanks each run to a space before it looks for rule words, so
+// "do **not**" and "_never_" count (RE2's \b takes "_" as a word
+// character). Unlike deleting the runs, blanking keeps every match the raw
+// text has; it also reads an identifier such as DO_NOT_TRACK as a rule,
+// which errs toward keeping the block.
+var emphasisRE = regexp.MustCompile(`[*_]+`)
 
 var (
 	headingRE  = regexp.MustCompile(`^(#{1,6}) `)
@@ -109,98 +118,127 @@ func runGenerator(options generatorOptions) error {
 
 // generate returns the seat digest of an AGENTS.md source.
 func generate(src string) (string, error) {
-	type heading struct {
-		level   int
-		text    string
-		emitted bool
-	}
-	var (
-		stack    []heading
-		chunks   []string
-		region   []string
-		inRegion bool
-		inFence  bool
-		regions  int
-	)
-	// emitAncestors adds the not yet emitted headings a region sits under.
-	// The level-1 document title is never one: the digest has its own.
-	emitAncestors := func() {
-		for j := range stack {
-			if stack[j].level > 1 && !stack[j].emitted {
-				chunks = append(chunks, stack[j].text)
-				stack[j].emitted = true
-			}
-		}
-	}
-	flush := func() error {
-		lines := trimBlankLines(region)
-		region = nil
-		if len(lines) == 0 {
-			return errors.New("empty seat region")
-		}
-		chunks = append(chunks, strings.Join(lines, "\n"))
-		return nil
-	}
+	var d digestBuilder
 	for i, line := range strings.Split(src, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !inFence && (strings.Contains(line, markerBegin) || strings.Contains(line, markerEnd)) {
-			if trimmed != markerBegin && trimmed != markerEnd {
-				return "", fmt.Errorf("line %d: a seat marker must be alone on its line", i+1)
-			}
-			if trimmed == markerBegin {
-				if inRegion {
-					return "", fmt.Errorf("line %d: %s inside an open region", i+1, markerBegin)
-				}
-				inRegion = true
-				regions++
-				continue
-			}
-			if !inRegion {
-				return "", fmt.Errorf("line %d: %s without %s", i+1, markerEnd, markerBegin)
-			}
-			inRegion = false
-			if err := flush(); err != nil {
-				return "", fmt.Errorf("line %d: %w", i+1, err)
-			}
-			continue
+		if err := d.add(line); err != nil {
+			return "", fmt.Errorf("line %d: %w", i+1, err)
 		}
-		isHeading := false
-		if strings.HasPrefix(trimmed, "```") {
-			inFence = !inFence
-		} else if m := headingRE.FindStringSubmatch(line); m != nil && !inFence {
-			isHeading = true
-			level := len(m[1])
-			for len(stack) > 0 && stack[len(stack)-1].level >= level {
-				stack = stack[:len(stack)-1]
-			}
-			if inRegion && len(trimBlankLines(region)) == 0 {
-				emitAncestors()
-			}
-			stack = append(stack, heading{level: level, text: line, emitted: inRegion})
-		}
-		if !inRegion {
-			continue
-		}
-		if !isHeading && trimmed != "" && len(trimBlankLines(region)) == 0 {
-			emitAncestors()
-		}
-		region = append(region, line)
 	}
-	if inRegion {
+	if d.inRegion {
 		return "", fmt.Errorf("%s without %s", markerBegin, markerEnd)
 	}
-	if regions == 0 {
+	if d.regions == 0 {
 		return "", fmt.Errorf("no %s regions", markerBegin)
 	}
-	return digestHeader + strings.Join(chunks, "\n\n") + "\n", nil
+	return digestHeader + strings.Join(d.chunks, "\n\n") + "\n", nil
+}
+
+// digestBuilder is generate's state between AGENTS.md lines.
+type digestBuilder struct {
+	stack    []heading // the headings the current line sits under, outermost first
+	chunks   []string  // the digest body: emitted headings and closed regions
+	region   []string  // the lines of the open region
+	inRegion bool
+	inFence  bool
+	regions  int
+}
+
+type heading struct {
+	level   int
+	text    string
+	emitted bool
+}
+
+// add takes the next AGENTS.md line. A seat marker outside a fence opens
+// or closes a region; a line inside a region joins it.
+func (d *digestBuilder) add(line string) error {
+	trimmed := strings.TrimSpace(line)
+	if !d.inFence && (strings.Contains(line, markerBegin) || strings.Contains(line, markerEnd)) {
+		return d.marker(trimmed)
+	}
+	isHeading := d.scan(line, trimmed)
+	if !d.inRegion {
+		return nil
+	}
+	if !isHeading && trimmed != "" && len(trimBlankLines(d.region)) == 0 {
+		d.emitAncestors()
+	}
+	d.region = append(d.region, line)
+	return nil
+}
+
+// marker opens or closes a region at a line that holds a seat marker.
+func (d *digestBuilder) marker(trimmed string) error {
+	switch trimmed {
+	case markerBegin:
+		if d.inRegion {
+			return fmt.Errorf("%s inside an open region", markerBegin)
+		}
+		d.inRegion = true
+		d.regions++
+		return nil
+	case markerEnd:
+		if !d.inRegion {
+			return fmt.Errorf("%s without %s", markerEnd, markerBegin)
+		}
+		d.inRegion = false
+		return d.flush()
+	default:
+		return errors.New("a seat marker must be alone on its line")
+	}
+}
+
+// scan follows code fences and headings, and reports whether line is a
+// heading. A `#` line inside a fence is no heading.
+func (d *digestBuilder) scan(line, trimmed string) bool {
+	if isFence(trimmed) {
+		d.inFence = !d.inFence
+		return false
+	}
+	m := headingRE.FindStringSubmatch(line)
+	if m == nil || d.inFence {
+		return false
+	}
+	level := len(m[1])
+	for len(d.stack) > 0 && d.stack[len(d.stack)-1].level >= level {
+		d.stack = d.stack[:len(d.stack)-1]
+	}
+	if d.inRegion && len(trimBlankLines(d.region)) == 0 {
+		d.emitAncestors()
+	}
+	d.stack = append(d.stack, heading{level: level, text: line, emitted: d.inRegion})
+	return true
+}
+
+// emitAncestors adds the not yet emitted headings a region sits under.
+// The level-1 document title is never one: the digest has its own.
+func (d *digestBuilder) emitAncestors() {
+	for j := range d.stack {
+		if d.stack[j].level > 1 && !d.stack[j].emitted {
+			d.chunks = append(d.chunks, d.stack[j].text)
+			d.stack[j].emitted = true
+		}
+	}
+}
+
+// flush closes the open region and adds its text to the digest.
+func (d *digestBuilder) flush() error {
+	lines := trimBlankLines(d.region)
+	d.region = nil
+	if len(lines) == 0 {
+		return errors.New("empty seat region")
+	}
+	d.chunks = append(d.chunks, strings.Join(lines, "\n"))
+	return nil
 }
 
 // ruleBlocks returns every paragraph, list item and table row of src that
-// states a rule, with marker lines removed.
+// states a rule, as blocks returns it. Only the rule test reads the block
+// with its emphasis blanked; the digest must hold the block as written.
 func ruleBlocks(src string) []string {
 	var out []string
 	for _, b := range blocks(src) {
-		if ruleRE.MatchString(b) {
+		if ruleRE.MatchString(emphasisRE.ReplaceAllString(b, " ")) {
 			out = append(out, b)
 		}
 	}
@@ -221,72 +259,109 @@ func missingRuleBlocks(src, digest string) []string {
 
 // blocks splits markdown into paragraphs, list items (with their indented
 // continuation), table rows and fenced code blocks. Headings and seat
-// marker lines are not blocks.
+// marker lines are not blocks. A marker line inside a fence is text, as in
+// generate, so the fence keeps it.
 func blocks(src string) []string {
 	var lines []string
+	inFence := false
 	for _, line := range strings.Split(src, "\n") {
-		if t := strings.TrimSpace(line); t == markerBegin || t == markerEnd {
+		t := strings.TrimSpace(line)
+		if isFence(t) {
+			inFence = !inFence
+		}
+		if !inFence && (t == markerBegin || t == markerEnd) {
 			continue
 		}
 		lines = append(lines, line)
 	}
-	var out []string
-	var cur []string
-	kind := ""
-	emit := func() {
-		if trimmed := trimBlankLines(cur); len(trimmed) > 0 {
-			out = append(out, strings.Join(trimmed, "\n"))
-		}
-		cur, kind = nil, ""
+	s := blockSplitter{lines: lines}
+	for i := range lines {
+		s.add(i)
 	}
-	nextIndented := func(i int) bool {
-		for j := i + 1; j < len(lines); j++ {
-			if strings.TrimSpace(lines[j]) == "" {
-				continue
-			}
-			return strings.HasPrefix(lines[j], " ")
+	s.emit()
+	return s.out
+}
+
+// blockSplitter is blocks' state between lines.
+type blockSplitter struct {
+	lines []string // the source lines, seat markers outside fences removed
+	out   []string // the closed blocks
+	cur   []string // the lines of the open block
+	kind  string   // the open block's kind: "fence", "item", "para" or ""
+}
+
+// add takes line i. It joins an open fence, or an open list item it
+// continues; start takes any other line.
+func (s *blockSplitter) add(i int) {
+	line := s.lines[i]
+	trimmed := strings.TrimSpace(line)
+	if s.kind == "fence" {
+		s.cur = append(s.cur, line)
+		if isFence(trimmed) {
+			s.emit()
 		}
-		return false
+		return
 	}
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if kind == "fence" {
-			cur = append(cur, line)
-			if strings.HasPrefix(trimmed, "```") {
-				emit()
-			}
+	if s.kind == "item" && (strings.HasPrefix(line, " ") || (trimmed == "" && s.nextIndented(i))) {
+		s.cur = append(s.cur, line)
+		return
+	}
+	s.start(line, trimmed)
+}
+
+// start takes a line outside an open fence or list item. Unless the line
+// continues a paragraph, it closes the open block; then a fence, list item
+// or paragraph line opens a block, a table row is a block of its own, and
+// a blank line or a heading is none.
+func (s *blockSplitter) start(line, trimmed string) {
+	switch {
+	case trimmed == "":
+		s.emit()
+	case isFence(trimmed):
+		s.emit()
+		s.kind = "fence"
+		s.cur = append(s.cur, line)
+	case headingRE.MatchString(line):
+		s.emit()
+	case strings.HasPrefix(trimmed, "|"):
+		s.emit()
+		s.out = append(s.out, line)
+	case listItemRE.MatchString(line):
+		s.emit()
+		s.kind = "item"
+		s.cur = append(s.cur, line)
+	default:
+		if s.kind == "item" {
+			s.emit()
+		}
+		s.kind = "para"
+		s.cur = append(s.cur, line)
+	}
+}
+
+// emit closes the open block.
+func (s *blockSplitter) emit() {
+	if trimmed := trimBlankLines(s.cur); len(trimmed) > 0 {
+		s.out = append(s.out, strings.Join(trimmed, "\n"))
+	}
+	s.cur, s.kind = nil, ""
+}
+
+// nextIndented reports whether the next non-blank line after line i is
+// indented.
+func (s *blockSplitter) nextIndented(i int) bool {
+	for j := i + 1; j < len(s.lines); j++ {
+		if strings.TrimSpace(s.lines[j]) == "" {
 			continue
 		}
-		if kind == "item" && (strings.HasPrefix(line, " ") || (trimmed == "" && nextIndented(i))) {
-			cur = append(cur, line)
-			continue
-		}
-		switch {
-		case trimmed == "":
-			emit()
-		case strings.HasPrefix(trimmed, "```"):
-			emit()
-			kind = "fence"
-			cur = append(cur, line)
-		case headingRE.MatchString(line):
-			emit()
-		case strings.HasPrefix(trimmed, "|"):
-			emit()
-			out = append(out, line)
-		case listItemRE.MatchString(line):
-			emit()
-			kind = "item"
-			cur = append(cur, line)
-		default:
-			if kind == "item" {
-				emit()
-			}
-			kind = "para"
-			cur = append(cur, line)
-		}
+		return strings.HasPrefix(s.lines[j], " ")
 	}
-	emit()
-	return out
+	return false
+}
+
+// isFence reports whether a trimmed line opens or closes a code fence.
+func isFence(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "```")
 }
 
 func trimBlankLines(lines []string) []string {
