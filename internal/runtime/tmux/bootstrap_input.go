@@ -79,7 +79,8 @@ func bootstrapInputValue(state string, credit bootstrapInputCredit) string {
 
 // seedBootstrapInputCommands runs in the same native create command list as
 // new-session, before startup code can type into the pane. Promotion is separate
-// and conditional: startup/trust input can burn this candidate, never reseed it.
+// and conditional: ordinary input burns this candidate, never reseeds it.
+// Only raw Start can preserve it through parser-confirmed startup controls.
 func (t *Tmux) seedBootstrapInputCommands(name string) [][]string {
 	credit, ok := t.bootstrapCredit(name)
 	if !ok {
@@ -124,6 +125,127 @@ func (t *Tmux) promoteBootstrapInput(ctx context.Context, name string) error {
 	t.bootstrapInputs[name] = credit
 	t.bootstrapMu.Unlock()
 	return nil
+}
+
+// bootstrapStartupInput exists only on the raw Start stack, before promotion.
+// It can preserve the issued candidate; it cannot recreate or recover credit.
+// The public dialog path and every ordinary input path continue to consume it.
+type bootstrapStartupInput struct {
+	name, target, pid string
+	credit            bootstrapInputCredit
+	lastScreen        string
+	lastLines         int
+	observed          bool
+}
+
+func (t *Tmux) acceptBootstrapStartupDialogs(ctx context.Context, name string) error {
+	credit, known := t.bootstrapCredit(name)
+	if !known || credit.ready {
+		return t.AcceptStartupDialogs(ctx, name)
+	}
+	startup := &bootstrapStartupInput{name: name, credit: credit}
+	if err := startup.verify(ctx, t, ""); err != nil {
+		return err
+	}
+	return t.dismissKnownDialogs(ctx, name, 8*time.Second, startup)
+}
+
+// verify does not adopt a missing fence or write a marker. The first check pins
+// the existing agent pane and native PID; every later check requires both.
+func (s *bootstrapStartupInput) verify(ctx context.Context, t *Tmux, target string) error {
+	cached, ok := t.bootstrapCredit(s.name)
+	if !ok || cached != s.credit || cached.ready || !bootstrapFreshFence(cached.fence) {
+		return fmt.Errorf("startup input: %w: candidate unavailable", runtime.ErrInputNotSent)
+	}
+	g := newPaneGuard(s.name, s.credit.fence.Digest(), false)
+	actual, fence, err := g.read(ctx, t)
+	if err != nil {
+		return err
+	}
+	if fence.Dead || fence.Own() != s.credit.fence.Digest() || (target != "" && actual != target) || (s.target != "" && actual != s.target) {
+		return fmt.Errorf("startup input: %w: agent incarnation changed", runtime.ErrInputNotSent)
+	}
+	out, err := t.runCtxRaw(ctx, "display-message", "-p", "-t", actual, "#{"+bootstrapInputOption+"}|#{pane_id}|#{pane_pid}|#{pane_dead}")
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) != 4 || parts[1] != fence.Pane || parts[3] != "0" {
+		return fmt.Errorf("startup input: %w: native candidate unavailable", runtime.ErrInputNotSent)
+	}
+	pid, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil || pid == 0 || strconv.FormatUint(pid, 10) != parts[2] || (s.pid != "" && s.pid != parts[2]) {
+		return fmt.Errorf("startup input: %w: native process changed", runtime.ErrInputNotSent)
+	}
+	want := strings.NewReplacer("#{pane_id}", fence.Pane, "#{pane_pid}", parts[2]).Replace(bootstrapInputValue("candidate", s.credit))
+	if parts[0] != want {
+		return fmt.Errorf("startup input: %w: candidate already consumed", runtime.ErrInputNotSent)
+	}
+	s.target, s.pid = actual, parts[2]
+	return nil
+}
+
+func (s *bootstrapStartupInput) peek(ctx context.Context, t *Tmux, target string, lines int) (string, error) {
+	if err := s.verify(ctx, t, target); err != nil {
+		return "", err
+	}
+	out, err := t.CapturePane(target, lines)
+	if err != nil {
+		return "", err
+	}
+	if err := s.verify(ctx, t, target); err != nil {
+		return "", err
+	}
+	s.lastScreen, s.lastLines, s.observed = out, lines, true
+	return out, nil
+}
+
+// send is reachable only from the shared startup parser's private callback.
+// Require its exact last screen again, then bind the whole authorized key batch
+// to the same native candidate, pane, PID and fence in one tmux command. No
+// marker is rewritten, so intervening ordinary input permanently wins the race.
+func (s *bootstrapStartupInput) send(ctx context.Context, t *Tmux, target string, keys []string) error {
+	if !s.observed || len(keys) == 0 {
+		return fmt.Errorf("startup input: %w: no parser observation", runtime.ErrInputNotSent)
+	}
+	if err := s.verify(ctx, t, target); err != nil {
+		return err
+	}
+	current, err := t.CapturePane(target, s.lastLines)
+	if err != nil {
+		return err
+	}
+	if current != s.lastScreen {
+		return fmt.Errorf("startup input: %w: dialog changed", runtime.ErrInputNotSent)
+	}
+	if err := s.verify(ctx, t, target); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if key != "Enter" && key != "Down" && key != "Up" && key != "Escape" && key != "Tab" {
+			return fmt.Errorf("startup input: %w: unsupported dialog key", runtime.ErrInputNotSent)
+		}
+	}
+	args := append([]string{"send-keys", "-t", target}, keys...)
+	command, err := tmuxCommandString(args...)
+	if err != nil {
+		return err
+	}
+	miss, err := tmuxCommandString("display-message", "-p", bootstrapInputMiss)
+	if err != nil {
+		return err
+	}
+	candidate := bootstrapInputValue("candidate", s.credit)
+	condition := "#{&&:#{==:#{" + bootstrapInputOption + "}," + candidate + "},#{&&:#{==:#{" + inputFenceOption + "}," + s.credit.fence.Digest() + ".#{pane_id}},#{&&:#{==:#{pane_id}," + guardPaneID(target) + "},#{&&:#{==:#{pane_pid}," + s.pid + "},#{==:#{pane_dead},0}}}}}"
+	s.observed = false // Another batch needs a new shared-parser observation.
+	out, err := t.runCtxRaw(ctx, "if-shell", "-F", "-t", target, condition, command, miss)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		return fmt.Errorf("startup input: %w: native candidate changed", runtime.ErrInputNotSent)
+	}
+	return s.verify(ctx, t, target)
 }
 
 var _ runtime.BootstrapInputObserver = (*Provider)(nil)

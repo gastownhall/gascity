@@ -94,6 +94,32 @@ type StatusInput struct {
 	Fresh bool `query:"fresh" required:"false" doc:"When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers."`
 }
 
+// cachedStatusResponse freezes the source-age hint with the body it describes.
+// LastFreshAt is a store-wide latest observation, not a causal watermark: a
+// later point read/write must not make this already built body younger.
+// A zero SourceAgeS retains the existing unknown/not-applicable convention;
+// elapsed body age remains a lower bound even when source age is unknown.
+type cachedStatusResponse struct {
+	indexedResponse[StatusBody]
+	ObservedAt time.Time `json:"observed_at"`
+	SourceAgeS float64   `json:"source_age_s"`
+}
+
+func (r cachedStatusResponse) cacheAgeSeconds(currentAgeS float64) float64 {
+	elapsed := max(0, livenessClock.Now().Sub(r.ObservedAt).Seconds())
+	return max(r.SourceAgeS+elapsed, currentAgeS)
+}
+
+// freshness keeps the captured body's observation age separate from the
+// current cache's refresh metadata. A body that read no stores has no source age.
+func (r cachedStatusResponse) freshness(current cacheFreshness) cacheFreshness {
+	f := statusCacheFreshness(r.Body, current)
+	if !r.Body.StoresNotRead {
+		f.ageS = r.cacheAgeSeconds(f.ageS)
+	}
+	return f
+}
+
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
 //
 // Read-path gate: cacheLiveOr503 refuses only a store that reports liveness.
@@ -143,12 +169,12 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	index := s.latestIndex()
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
-		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+		if hit, ok := cachedResponseAs[cachedStatusResponse](s, cacheKey, bucket); ok {
+			f := hit.freshness(cacheAgeSeconds(store))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
-		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+		if hit, ok := cachedResponseWithinAgeAs[cachedStatusResponse](s, cacheKey, statusResponseTTLFloor); ok {
+			f := hit.freshness(cacheAgeSeconds(store))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
@@ -170,12 +196,15 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		}
 	}
 
+	observation := cachedStatusResponse{ObservedAt: livenessClock.Now(), SourceAgeS: cacheAgeSeconds(store).ageS}
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
+		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+		s.storeResponse(cacheKey, bucket, observation)
 	}
 
-	f := statusCacheFreshness(resp, cacheAgeSeconds(store))
+	observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+	f := observation.freshness(cacheAgeSeconds(store))
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
 }
 
@@ -199,7 +228,7 @@ func (s *Server) freshStatusOutput(ctx context.Context, cacheKey string, lite bo
 			if b.built == nil {
 				return nil, apierr.Internal.Msg("building the status panicked; the server's log has the stack")
 			}
-			f := statusCacheFreshness(b.built.Body, cacheAgeSeconds(s.state.CityBeadStore()))
+			f := b.built.freshness(cacheAgeSeconds(s.state.CityBeadStore()))
 			return &IndexOutput[StatusBody]{Index: b.built.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: b.built.Body}, nil
 		case <-overrun.C:
 			if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(s.state.CityBeadStore())); ok {
@@ -225,7 +254,7 @@ func (s *Server) freshStatusOutput(ctx context.Context, cacheKey string, lite bo
 // state says so (rebuilding), so a client does not blame the cache's
 // re-scans for it.
 func (s *Server) savedStatusOutput(cacheKey string, cache cacheFreshness) (*IndexOutput[StatusBody], bool) {
-	hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey)
+	hit, age, ok := staleResponseAs[cachedStatusResponse](s, cacheKey)
 	if !ok {
 		return nil, false
 	}
@@ -233,6 +262,7 @@ func (s *Server) savedStatusOutput(cacheKey string, cache cacheFreshness) (*Inde
 	if built := age.Seconds(); built > f.ageS {
 		f.ageS, f.refresh.State = built, CacheRefreshRebuilding
 	}
+	f = hit.freshness(f)
 	return &IndexOutput[StatusBody]{
 		Index:        hit.Index,
 		CacheAgeS:    f.ageS,
@@ -258,7 +288,7 @@ func statusCacheFreshness(body StatusBody, f cacheFreshness) cacheFreshness {
 // build panicked.
 type statusBuild struct {
 	done  chan struct{}
-	built *indexedResponse[StatusBody]
+	built *cachedStatusResponse
 }
 
 // statusBuildSlot holds a /status view's builds, guarded by responseCacheMu:
@@ -343,9 +373,14 @@ func (s *Server) runStatusBuild(cacheKey string, lite bool, b *statusBuild) {
 			}
 		}()
 		index := s.latestIndex()
-		built := indexedResponse[StatusBody]{Index: index, Body: s.buildStatusBody(ctx, lite)}
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), built)
-		b.built = &built
+		observation := cachedStatusResponse{
+			ObservedAt: livenessClock.Now(),
+			SourceAgeS: cacheAgeSeconds(s.state.CityBeadStore()).ageS,
+		}
+		resp := s.buildStatusBody(ctx, lite)
+		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), observation)
+		b.built = &observation
 	})
 }
 

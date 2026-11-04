@@ -608,6 +608,175 @@ func containsPostThemeStartupDialog(content string) bool {
 		containsPostClaudeResumeStartupDialog(content)
 }
 
+// ErrStartupSelectionUnconfirmed reports a known startup menu whose safe
+// selected row could not be proved. Leave it open instead of guessing Enter.
+var ErrStartupSelectionUnconfirmed = errors.New("startup menu selection unconfirmed; left the dialog open")
+
+type startupMenuSpec struct {
+	match   func(string) bool
+	anchors []string
+	choices []string
+	target  int
+}
+
+// startupMenuWindow discards passive branding/composers before this modal,
+// but keeps everything after it so a trailing question cannot hide in history.
+func startupMenuWindow(content string, anchors []string) (string, bool) {
+	start := -1
+	for _, anchor := range anchors {
+		if at := strings.LastIndex(content, anchor); at > start {
+			start = at
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	if line := strings.LastIndexByte(content[:start], '\n'); line >= 0 {
+		start = line + 1
+	} else {
+		start = 0
+	}
+	return content[start:], true
+}
+
+// Only the source-backed native confirmation footer authorizes these menus.
+// Native question select/submit footers are not startup confirmation, even if
+// their heading and choices repeat a known menu word for word.
+func startupMenuConfirmationFooter(content string) bool {
+	last := ""
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.ToLower(stripLeadingBoxBorder(strings.TrimSpace(raw)))
+		if strings.Contains(line, "enter to select") || strings.Contains(line, "enter select") || strings.Contains(line, "enter submit") || strings.Contains(line, "enter to submit") {
+			return false
+		}
+		if line != "" {
+			last = line
+		}
+	}
+	return strings.HasPrefix(last, "enter to confirm") || strings.HasPrefix(last, "press enter to confirm") || last == "enter confirm · esc skip"
+}
+
+// startupMenuSelected accepts one complete known option list and one selected
+// row. A different native question, partial rendering, unknown cursor or stale
+// second menu is not confirmation of this menu's requested option.
+func startupMenuSelected(content string, choices []string) (int, bool) {
+	seen := make([]bool, len(choices))
+	selected, cursors := -1, 0
+	for _, raw := range strings.Split(content, "\n") {
+		row := stripLeadingBoxBorder(strings.TrimSpace(raw))
+		marked := false
+		for _, marker := range []string{"❯", "›", ">", "●"} {
+			if suffix, ok := strings.CutPrefix(row, marker); ok && (suffix == "" || strings.HasPrefix(suffix, " ") || strings.HasPrefix(suffix, "\t")) {
+				row, marked = strings.TrimSpace(suffix), true
+				cursors++
+				break
+			}
+		}
+		choiceIndex := -1
+		for i, choice := range choices {
+			if row == choice || row == fmt.Sprintf("%d. %s", i+1, choice) {
+				if seen[i] {
+					return -1, false
+				}
+				seen[i], choiceIndex = true, i
+				break
+			}
+		}
+		if choiceIndex < 0 {
+			if prefix, _, numbered := strings.Cut(row, ". "); numbered && prefix != "" && strings.Trim(prefix, "0123456789") == "" {
+				return -1, false
+			}
+		}
+		if marked {
+			if choiceIndex < 0 {
+				return -1, false
+			}
+			selected = choiceIndex
+		}
+	}
+	for _, present := range seen {
+		if !present {
+			return -1, false
+		}
+	}
+	return selected, selected >= 0 && cursors == 1
+}
+
+// confirmStartupMenu replaces only fixed move-then-Enter startup sequences.
+// Movement never carries confirmation: re-read the same complete menu and see
+// its requested row twice. The existing budget is refreshed once on the first
+// on-time recognized frame, never on repeated/dropped moves or late reads.
+func confirmStartupMenu(ctx context.Context, budget *startupDialogBudget, peek func(int) (string, error), sendKeys func(...string) error, content string, spec startupMenuSpec) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !budget.live() {
+		return ErrStartupSelectionUnconfirmed
+	}
+	budget.observe()
+	moves, selectedFrames := 0, 0
+	for budget.live() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		window, found := startupMenuWindow(content, spec.anchors)
+		if !found || !spec.match(window) || !startupMenuConfirmationFooter(window) {
+			return ErrStartupSelectionUnconfirmed
+		}
+		selected, ok := startupMenuSelected(window, spec.choices)
+		if !ok {
+			return ErrStartupSelectionUnconfirmed
+		}
+		if selected != spec.target {
+			selectedFrames = 0
+			moves++
+			if moves > maxTrustDialogMoveAttempts {
+				return ErrStartupSelectionUnconfirmed
+			}
+			key := "Down"
+			if selected > spec.target {
+				key = "Up"
+			}
+			if err := sendKeys(key); err != nil {
+				return err
+			}
+		} else {
+			selectedFrames++
+			if selectedFrames >= 2 {
+				if err := sendKeys("Enter"); err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !budget.live() {
+					return ErrStartupSelectionUnconfirmed
+				}
+				return nil
+			}
+		}
+		sleep(ctx, bypassDialogConfirmDelay)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !budget.live() {
+			return ErrStartupSelectionUnconfirmed
+		}
+		var err error
+		content, err = peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !budget.live() {
+			return ErrStartupSelectionUnconfirmed
+		}
+	}
+	return ErrStartupSelectionUnconfirmed
+}
+
 // acceptClaudeResumeDialog dismisses Claude's high-token/old-session resume
 // selector. The menu cursor uses the same ❯ prefix as the normal input prompt,
 // so this must run before generic prompt detection. Choose "Resume full session
@@ -629,12 +798,12 @@ func acceptClaudeResumeDialog(
 		}
 
 		if containsClaudeResumeDialog(content) {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
-				return err
-			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			return confirmStartupMenu(ctx, budget, peek, sendKeys, content, startupMenuSpec{
+				match:   containsClaudeResumeDialog,
+				anchors: []string{"Resume from summary"},
+				choices: []string{"Resume from summary (recommended)", "Resume full session as-is", "Don't ask me again"},
+				target:  1,
+			})
 		}
 
 		if containsPromptIndicator(content) ||
@@ -1420,12 +1589,12 @@ func acceptMCPTrustDialog(
 		}
 
 		if containsMCPTrustDialog(content) {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
-				return err
-			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			return confirmStartupMenu(ctx, budget, peek, sendKeys, content, startupMenuSpec{
+				match:   containsMCPTrustDialog,
+				anchors: []string{"New MCP server"},
+				choices: []string{"Use this MCP server", "Use this and all future MCP servers in this project", "Continue without using this MCP server"},
+				target:  1,
+			})
 		}
 
 		if containsPromptIndicator(content) ||
@@ -1489,12 +1658,12 @@ func acceptCodexHookReviewDialog(
 		}
 
 		if containsCodexHookReviewDialog(content) {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
-				return err
-			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			return confirmStartupMenu(ctx, budget, peek, sendKeys, content, startupMenuSpec{
+				match:   containsCodexHookReviewDialog,
+				anchors: []string{"Hooks need review", "hooks need review"},
+				choices: []string{"Review hooks", "Trust all and continue", "Continue without trusting (hooks won't run)"},
+				target:  1,
+			})
 		}
 
 		if containsPromptIndicator(content) ||
@@ -1560,12 +1729,12 @@ func acceptBypassPermissionsWarning(
 		}
 
 		if strings.Contains(content, "Bypass Permissions mode") {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
-				return err
-			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			return confirmStartupMenu(ctx, budget, peek, sendKeys, content, startupMenuSpec{
+				match:   func(frame string) bool { return strings.Contains(frame, "Bypass Permissions mode") },
+				anchors: []string{"Bypass Permissions mode"},
+				choices: []string{"No, exit", "Yes, I accept"},
+				target:  1,
+			})
 		}
 
 		// Hand off as soon as a later dialog is on screen, matching the stream
@@ -1622,12 +1791,12 @@ func acceptCustomAPIKeyDialog(
 		}
 
 		if containsCustomAPIKeyDialog(content) {
-			budget.observe()
-			if err := sendKeys("Up"); err != nil {
-				return err
-			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			return confirmStartupMenu(ctx, budget, peek, sendKeys, content, startupMenuSpec{
+				match:   containsCustomAPIKeyDialog,
+				anchors: []string{"Do you want to use this API key?", "Detected a custom API key in your environment"},
+				choices: []string{"Yes", "No (recommended)"},
+				target:  0,
+			})
 		}
 
 		if containsPromptIndicator(content) || ContainsRateLimitDialog(content) {
@@ -1682,14 +1851,12 @@ func dismissRateLimitDialog(
 		}
 
 		if ContainsRateLimitDialog(content) {
-			// Select "Stop" (option 2). The menu has "Keep trying" selected
-			// by default, so press Down then Enter.
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
-				return err
-			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			return confirmStartupMenu(ctx, budget, peek, sendKeys, content, startupMenuSpec{
+				match:   ContainsRateLimitDialog,
+				anchors: []string{"Usage limit reached", "You've hit your limit", "/rate-limit-options", "rate limit", "Rate limit"},
+				choices: []string{"Keep trying", "Stop"},
+				target:  1,
+			})
 		}
 
 		if containsPromptIndicator(content) {

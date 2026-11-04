@@ -741,3 +741,17 @@ claim freshness by reading only that winner. Preserve precedence/refusal
 policies and propagate indeterminate backing reads. Cache-age metadata names
 the actual owner; live reads use0/not applicable. This is a current per-row
 read, not an atomic cross-store snapshot or event-cursor/write fence.
+
+## Cached status observation age
+
+Freeze the work-store freshness hint alongside each cached status body before
+building it, for synchronous and background builds. On bucket, TTL-floor and
+stale-while-revalidate hits, add elapsed time to that frozen age; later point
+reads or writes must never make an older body appear younger. Preserve cache
+TTLs, coalescing, body/index pairing, partial metadata and uncached behavior.
+
+`X-GC-Cache-Age-S` describes a latest fresh observation, not a full-store causal
+watermark: a point read/write may advance `LastFreshAt` without synchronizing
+every row. The existing zero value means unknown or not applicable, not proven
+freshness. A cached body's elapsed age is a lower bound when its source age is
+unknown; count lag is not by itself an incomplete or failed status response.

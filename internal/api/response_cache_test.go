@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -50,6 +51,126 @@ func (s *countingStore) ListByLabel(label string, limit int, opts ...beads.Query
 func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
 	s.listByAssigneeCalls++
 	return s.Store.ListByAssignee(assignee, status, limit)
+}
+
+// A current point observation must not make a previously built status body
+// younger. Exercise each reuse path, including the unknown source-age case:
+// zero still does not prove a caching store is current, and the body ages.
+func TestHandleStatusCachedObservationAgeSurvivesStoreRefresh(t *testing.T) {
+	for _, path := range []string{"bucket", "floor", "stale"} {
+		for _, lite := range []bool{false, true} {
+			for _, known := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/lite=%t/known=%t", path, lite, known), func(t *testing.T) {
+					oldTTL, oldFloor := timeBucketResponseCacheTTL, statusResponseTTLFloor
+					timeBucketResponseCacheTTL, statusResponseTTLFloor = time.Hour, time.Hour
+					t.Cleanup(func() {
+						timeBucketResponseCacheTTL, statusResponseTTLFloor = oldTTL, oldFloor
+					})
+					now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+					fc := &clock.Fake{Time: now}
+					t.Cleanup(SetLivenessClockForTest(fc))
+					store := &stubLivenessReporter{Store: beads.NewMemStore(), live: true}
+					initialAge := 0.0
+					if known {
+						store.lastFresh = now.Add(-time.Minute)
+						initialAge = 60
+					}
+					state := newFakeState(t)
+					state.cityBeadStore = store
+					srv := New(state)
+					h := newTestCityHandlerWith(t, state, srv)
+					url, key := "/status", "status"
+					if lite {
+						url, key = "/status?lite=true", "status?lite"
+					}
+					read := func(wantAge float64) *httptest.ResponseRecorder {
+						t.Helper()
+						rec := httptest.NewRecorder()
+						h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, url), nil))
+						if rec.Code != http.StatusOK {
+							t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+						}
+						age, err := strconv.ParseFloat(rec.Header().Get("X-GC-Cache-Age-S"), 64)
+						if err != nil || age != wantAge {
+							t.Fatalf("cached observation age = %v (%v), want %v", age, err, wantAge)
+						}
+						return rec
+					}
+					first := read(initialAge)
+					firstIndex := responseIndex(t, first)
+					// Preserve the real built body while deterministically choosing
+					// a reuse path, without sleeping across a wall-clock bucket.
+					srv.responseCacheMu.Lock()
+					entry := srv.responseCacheEntries[key]
+					if path != "bucket" {
+						entry.index = ^uint64(0)
+						srv.responseCacheEntries[key] = entry
+					}
+					srv.responseCacheMu.Unlock()
+					if path == "stale" {
+						statusResponseTTLFloor = 0
+						if !srv.beginResponseRefresh(key) {
+							t.Fatal("could not hold background refresh for stale-body observation")
+						}
+						t.Cleanup(func() { srv.endResponseRefresh(key) })
+					}
+					state.eventProv.(*events.Fake).Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+					for _, elapsed := range []time.Duration{5 * time.Second, 10 * time.Second} {
+						fc.Time = now.Add(elapsed)
+						// Model an unrelated fresh point read/write. It changes the
+						// store-wide signal, not the already cached status body.
+						store.lastFresh = fc.Time
+						rec := read(initialAge + elapsed.Seconds())
+						if responseIndex(t, rec) != firstIndex || rec.Body.String() != first.Body.String() {
+							t.Fatal("cached response body/index changed without a rebuild")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// The background path must freeze its own observation too, rather than leaving
+// the fixed provenance only on synchronous builds. A new build replaces it.
+func TestHandleStatusBackgroundRefreshFreezesObservation(t *testing.T) {
+	oldTTL, oldFloor := timeBucketResponseCacheTTL, statusResponseTTLFloor
+	timeBucketResponseCacheTTL, statusResponseTTLFloor = time.Hour, time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL, statusResponseTTLFloor = oldTTL, oldFloor
+	})
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	fc := &clock.Fake{Time: now}
+	t.Cleanup(SetLivenessClockForTest(fc))
+	store := &stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-time.Minute)}
+	state := newFakeState(t)
+	state.cityBeadStore = store
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	srv.refreshStatusResponseInBackground("status", false)
+	srv.waitForBackground()
+	fc.Time = now.Add(5 * time.Second)
+	store.lastFresh = fc.Time
+	read := func(wantAge float64) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		age, err := strconv.ParseFloat(rec.Header().Get("X-GC-Cache-Age-S"), 64)
+		if err != nil || age != wantAge {
+			t.Fatalf("observation age = %v (%v), want %v", age, err, wantAge)
+		}
+	}
+	read(65)
+	// Rebuilding against the new observation legitimately replaces the older
+	// provenance; it does not change the endpoint's cold/uncached contract.
+	srv.refreshStatusResponseInBackground("status", false)
+	srv.waitForBackground()
+	fc.Time = now.Add(10 * time.Second)
+	store.lastFresh = fc.Time
+	read(5)
 }
 
 // TestHandleStatusCachesAcrossIndexChanges pins the gascity#3186 fix: /status

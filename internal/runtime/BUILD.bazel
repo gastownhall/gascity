@@ -82,6 +82,7 @@ go_test(
         "dialog_codex_late_test.go",
         "dialog_midsession_test.go",
         "dialog_model_switch_test.go",
+        "dialog_startup_selection_test.go",
         "dialog_test.go",
         "dialog_trust_closed_loop_test.go",
         "dialog_trust_selection_test.go",

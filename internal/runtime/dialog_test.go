@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -196,18 +197,14 @@ func TestAcceptStartupDialogsSelectsClaudeResumeAsIs(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[0]
 			if len(sent) == 0 {
-				return strings.Join([]string{
-					"This session is 1h 55m old and 212.7k tokens.",
-					"",
-					"❯ 1. Resume from summary (recommended)",
-					"  2. Resume full session as-is",
-					"  3. Don't ask me again",
-					"",
-					"Enter to confirm · Esc to cancel",
-				}, "\n"), nil
+				return fixture.frame(fixture.initial), nil
 			}
-			return "❯ ", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -549,10 +546,14 @@ func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[2]
 			if len(sent) == 0 {
-				return codexHookReviewDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
 			}
-			return "› Implement {feature}", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -567,7 +568,7 @@ func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
 	}
 }
 
-func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
+func TestAcceptStartupDialogsRefusesCompactHooksWithoutSelectedRows(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
 
@@ -585,11 +586,8 @@ func TestAcceptStartupDialogsTrustsCompactCodexHookReviewDialog(t *testing.T) {
 			return nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
-	}
-	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
-		t.Fatalf("sent keys = %q, want %q", got, want)
+	if !errors.Is(err, ErrStartupSelectionUnconfirmed) || len(sent) != 0 {
+		t.Fatalf("unselected compact hooks must remain unconfirmed: keys=%v err=%v", sent, err)
 	}
 }
 
@@ -616,11 +614,14 @@ func TestAcceptStartupDialogsHandlesTrustThenCodexHookReview(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[2]
 			switch len(sent) {
 			case 0:
 				return "Do you trust the contents of this directory?", nil
 			case 1:
-				return codexHookReviewDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
+			case 2:
+				return fixture.frame(fixture.target), nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -660,10 +661,14 @@ func TestAcceptStartupDialogsAcceptsMCPTrustDialog(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[1]
 			if len(sent) == 0 {
-				return mcpTrustDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
 			}
-			return "› Implement {feature}", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -686,11 +691,14 @@ func TestAcceptStartupDialogsHandlesTrustThenMCPTrust(t *testing.T) {
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
+			fixture := startupSelectionFixtures()[1]
 			switch len(sent) {
 			case 0:
 				return "Do you trust the contents of this directory?", nil
 			case 1:
-				return mcpTrustDialogFixture(), nil
+				return fixture.frame(fixture.initial), nil
+			case 2:
+				return fixture.frame(fixture.target), nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -964,6 +972,9 @@ func TestAcceptStartupDialogsHandlesTrustThenExternalImportsThenMCP(t *testing.T
 				return externalImportsDialogFixture(), nil
 			case 2:
 				return mcpTrustDialogFixture(), nil
+			case 3:
+				fixture := startupSelectionFixtures()[1]
+				return fixture.frame(fixture.target), nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -1119,16 +1130,17 @@ func TestAcceptStartupDialogsAcceptsBypassPermissionsWarning(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	call := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			call++
-			if call <= 2 {
-				// First two peeks: no trust dialog, no bypass. Then bypass appears.
-				return "normal startup output", nil
+			fixture := startupSelectionFixtures()[3]
+			if len(sent) == 0 {
+				return fixture.frame(fixture.initial), nil
 			}
-			return "Bypass Permissions mode", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -1148,15 +1160,17 @@ func TestAcceptStartupDialogsAcceptsCustomAPIKeyDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	call := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			call++
-			if call <= 2 {
-				return "normal startup output", nil
+			fixture := startupSelectionFixtures()[4]
+			if len(sent) == 0 {
+				return fixture.frame(fixture.initial), nil
 			}
-			return "Detected a custom API key in your environment\nDo you want to use this API key?\n1. Yes\n2. No (recommended)", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -1638,15 +1652,17 @@ func TestAcceptStartupDialogsDismissesRateLimitDialog(t *testing.T) {
 	dialogPollTimeout = time.Second
 
 	var sent []string
-	call := 0
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(_ int) (string, error) {
-			call++
-			if call <= 2 {
-				return "normal startup output", nil
+			fixture := startupSelectionFixtures()[5]
+			if len(sent) == 0 {
+				return fixture.frame(fixture.initial), nil
 			}
-			return "Usage limit reached for gemini-3-flash-preview.\n1. Keep trying\n2. Stop", nil
+			if sent[len(sent)-1] == "Enter" {
+				return "❯ ", nil
+			}
+			return fixture.frame(fixture.target), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -1859,7 +1875,15 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 			if time.Since(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet
 			}
-			return "Bypass Permissions mode", nil
+			if len(sent) >= 3 {
+				return "❯ ", nil
+			}
+			fixture := startupSelectionFixtures()[3]
+			selected := fixture.initial
+			if len(sent) == 2 {
+				selected = fixture.target
+			}
+			return fixture.frame(selected), nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)

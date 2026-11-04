@@ -4045,6 +4045,12 @@ func (t *Tmux) AcceptStartupDialogs(ctx context.Context, sess string) error {
 // DismissKnownDialogs dismisses known trust, permissions, and rate-limit
 // dialogs using a bounded timeout.
 func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration) error {
+	return t.dismissKnownDialogs(ctx, sess, timeout, nil)
+}
+
+// dismissKnownDialogs keeps the shared parser authoritative. Only raw Start
+// supplies the private, still-candidate startup capability.
+func (t *Tmux) dismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration, startup *bootstrapStartupInput) error {
 	// Gate external-CLAUDE.md-import auto-acceptance to imports within the
 	// pane's own repository; an import that escapes the repo is left for a
 	// human. Both lookups are best-effort: if either fails, the trust root
@@ -4058,8 +4064,16 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 		return err
 	}
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
-		func(lines int) (string, error) { return t.CapturePane(target, lines) },
+		func(lines int) (string, error) {
+			if startup != nil {
+				return startup.peek(ctx, t, target, lines)
+			}
+			return t.CapturePane(target, lines)
+		},
 		func(keys ...string) error {
+			if startup != nil {
+				return startup.send(ctx, t, target, keys)
+			}
 			for _, k := range keys {
 				if _, err := t.runCtx(ctx, "send-keys", "-t", target, k); err != nil {
 					return err

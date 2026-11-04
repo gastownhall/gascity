@@ -10,8 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/programstatus"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -784,5 +786,302 @@ func TestBootstrapRespawnInvalidationFailurePreventsReplacement(t *testing.T) {
 	recovered := bootstrapProof(t, fenceModelProvider(m))
 	if recovered.Token != original.Token {
 		t.Fatal("failed replacement minted a different first-input credit")
+	}
+}
+
+// bootstrapProviderStartExecutor adds native create/list dispatch around the
+// existing fence model. Provider.Start, its real startup-dialog parser, native
+// credit commands and the input guard remain production code. This executor
+// never launches tmux, a provider, or a model.
+type bootstrapProviderStartExecutor struct {
+	model           *fenceModel
+	created         bool
+	candidateIssued bool
+	sourceFile      bool
+	captureArmed    bool
+}
+
+func (e *bootstrapProviderStartExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return e.execute(args)
+}
+
+func (e *bootstrapProviderStartExecutor) execute(args []string) (string, error) {
+	args = slices.Clone(args)
+	for len(args) > 0 && (args[0] == "-u" || args[0] == "-N") {
+		args = args[1:]
+	}
+	if len(args) > 1 && args[0] == "-L" {
+		args = args[2:]
+	}
+	if separator := slices.Index(args, ";"); separator >= 0 {
+		first, err := e.execute(args[:separator])
+		if err != nil {
+			return "", err
+		}
+		rest, err := e.execute(args[separator+1:])
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(first + "\n" + rest), nil
+	}
+	if len(args) == 0 {
+		return "", nil
+	}
+	switch args[0] {
+	case "source-file":
+		e.sourceFile = true
+		content, err := os.ReadFile(args[len(args)-1])
+		if err != nil {
+			return "", err
+		}
+		return e.execute(shellquote.Split(string(content)))
+	case "new-session":
+		if e.created {
+			return "", ErrSessionExists
+		}
+		e.created = true
+		return e.model.paneID, nil
+	case "has-session":
+		if !e.created {
+			return "", ErrSessionNotFound
+		}
+		return "", nil
+	case "pipe-pane":
+		e.captureArmed = true
+	case "set-option":
+		if slices.Contains(args, bootstrapInputOption) && strings.Contains(args[len(args)-1], ".candidate.") {
+			e.candidateIssued = true
+		}
+	}
+	return e.model.execute(args)
+}
+
+const bootstrapTrustScreen = `› Ask Codex to do anything
+
+  Folder access
+  /Users/u/src/project
+
+  Trust this folder? Codex can read, edit, and run files here, subject to your
+  permission settings. Folder settings can run code automatically, even
+  without a model request. Continue only if you trust these files. Your trust
+  decision will be saved.
+
+› 1. Trust and continue
+  2. Quit
+
+  enter continue · esc quit`
+
+// This control exercises the real capture/relay create command list and its
+// secret-env source-file transport, as used by the supervisor's native Start.
+func TestBootstrapRawProviderStartPreservesCandidateThroughVerifiedStartupControls(t *testing.T) {
+	update := func(selected int) string {
+		first, second := "› ", "  "
+		if selected == 2 {
+			first, second = "  ", "› "
+		}
+		return "Update available · 0.162.1 → 0.166.0\n" + first +
+			"1. Update now (runs `npm install -g @openai/codex`)\n" + second +
+			"2. Skip\n  3. Skip until next version\nenter continue · esc skip"
+	}
+	hooks := func(selected int) string {
+		first, second := "› ", "  "
+		if selected == 2 {
+			first, second = "  ", "› "
+		}
+		return "  Hooks need review\n  4 hooks are new or changed.\n  Hooks can run outside the sandbox after you trust them.\n" + first +
+			"1. Review hooks\n" + second + "2. Trust all and continue\n  3. Continue without trusting (hooks won't run)\n  enter confirm · esc skip"
+	}
+	for _, dialog := range []string{"none", "trust", "update", "hooks"} {
+		t.Run(dialog, func(t *testing.T) {
+			t.Setenv("TMPDIR", t.TempDir())
+			env := fenceEnv(bootstrapFence)
+			env[testSecretKey] = testSecret
+			model := newFenceModel(nil, env)
+			waiting := dialog != "none"
+			selected := 1
+			var keys []string
+			candidateBeforeKey := true
+			model.screen = func(*fenceModel) string {
+				if waiting {
+					if dialog == "update" {
+						return update(selected)
+					}
+					if dialog == "hooks" {
+						return hooks(selected)
+					}
+					return bootstrapTrustScreen
+				}
+				return capturedCodexCompactPristine
+			}
+			model.onEvent = func(m *fenceModel, event string) {
+				if strings.HasPrefix(event, "key:") {
+					key := strings.TrimPrefix(event, "key:")
+					keys = append(keys, key)
+					candidateBeforeKey = candidateBeforeKey && strings.Contains(m.bootstrap, ".candidate.")
+					if key == "Down" {
+						selected = 2
+					}
+					if key == "Enter" {
+						waiting = false
+					}
+				}
+			}
+			provider := fenceModelProvider(model)
+			executor := &bootstrapProviderStartExecutor{model: model}
+			provider.tm.exec = executor
+			provider.tm.capture.probe = func() (captureCapability, error) {
+				return captureCapability{companion: testCompanion, relay: programstatus.RelayVersion, tmux: testTmuxBin, shell: testShell}, nil
+			}
+			cfg := runtime.Config{
+				Command: "codex", ProviderName: "codex", Env: env,
+				ReadyPromptPrefix: "› ", AcceptStartupDialogs: boolPtr(true), MouseOn: true,
+				ProgramStatus:        runtime.ProgramStatusArm{App: "codex", Capture: true, Relay: true},
+				BootstrapInputOrigin: runtime.BootstrapInputFreshBuiltin,
+			}
+			if err := provider.Start(t.Context(), fenceModelSession, cfg); err != nil {
+				t.Fatalf("actual raw Provider.Start: %v", err)
+			}
+			if !executor.created || !executor.candidateIssued || !executor.sourceFile || !executor.captureArmed {
+				t.Fatalf("raw Start coverage create=%v candidate=%v source-file=%v capture=%v", executor.created, executor.candidateIssued, executor.sourceFile, executor.captureArmed)
+			}
+			if waiting || !pristineBootstrapScreen(model.screen(model), "codex") {
+				t.Fatal("startup did not reach complete pristine compact UI")
+			}
+			proof, err := provider.ObserveBootstrapInput(t.Context(), fenceModelSession, runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence})
+			if err != nil {
+				t.Fatalf("observing post-start authority: %v", err)
+			}
+			want := []string(nil)
+			if dialog == "trust" {
+				want = []string{"Enter"}
+			}
+			if dialog == "update" || dialog == "hooks" {
+				want = []string{"Down", "Enter"}
+			}
+			if !slices.Equal(keys, want) || !candidateBeforeKey || proof == nil || proof.Fence != bootstrapFence {
+				t.Fatalf("verified startup keys=%v want=%v candidate-before-key=%v proof-present=%v", keys, want, candidateBeforeKey, proof != nil)
+			}
+		})
+	}
+}
+
+func TestBootstrapStartupCandidateRejectsChangedBookends(t *testing.T) {
+	for _, mutation := range []string{"spent", "ready", "claimed", "missing", "fence", "pid", "pane", "question", "intervening ordinary input", "canceled context", "no parser observation"} {
+		t.Run(mutation, func(t *testing.T) {
+			p, m := bootstrapModel(t)
+			m.screen = func(*fenceModel) string { return bootstrapTrustScreen }
+			credit, _ := p.tm.bootstrapCredit(fenceModelSession)
+			s := &bootstrapStartupInput{name: fenceModelSession, credit: credit}
+			if err := s.verify(t.Context(), p.tm, ""); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.peek(t.Context(), p.tm, s.target, 80); err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			switch mutation {
+			case "spent":
+				m.bootstrap = "spent"
+			case "ready":
+				m.bootstrap = strings.Replace(m.bootstrap, ".candidate.", ".ready.", 1)
+			case "claimed":
+				m.bootstrap = strings.Replace(m.bootstrap, ".candidate.", ".claimed.", 1)
+			case "missing":
+				m.bootstrap = ""
+			case "fence":
+				m.own = "foreign.%1"
+			case "pid":
+				m.pid = "9999"
+			case "pane":
+				m.paneID = "%99"
+			case "question":
+				m.screen = func(*fenceModel) string { return "Which animal?\n› Otter\n  Owl\nEnter to select" }
+			case "intervening ordinary input":
+				if _, err := p.tm.runCtx(ctx, "send-keys", "-t", s.target, "Escape"); err != nil {
+					t.Fatal(err)
+				}
+			case "canceled context":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "no parser observation":
+				s.observed = false
+			}
+			_, before, _ := m.snapshot()
+			if err := s.send(ctx, p.tm, s.target, []string{"Enter"}); err == nil {
+				t.Fatal("changed startup bookend allowed input")
+			}
+			_, after, _ := m.snapshot()
+			if !slices.Equal(before, after) {
+				t.Fatalf("changed startup bookend sent input: %v", after[len(before):])
+			}
+		})
+	}
+}
+
+func TestBootstrapStartupCandidateNativeGuardClosesFinalRace(t *testing.T) {
+	for _, mutation := range []string{"spent", "fence", "pid", "dead"} {
+		t.Run(mutation, func(t *testing.T) {
+			p, m := bootstrapModel(t)
+			m.screen = func(*fenceModel) string { return bootstrapTrustScreen }
+			credit, _ := p.tm.bootstrapCredit(fenceModelSession)
+			s := &bootstrapStartupInput{name: fenceModelSession, credit: credit}
+			if err := s.verify(t.Context(), p.tm, ""); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.peek(t.Context(), p.tm, s.target, 80); err != nil {
+				t.Fatal(err)
+			}
+			m.beforeGuard = func(m *fenceModel, _ int) {
+				switch mutation {
+				case "spent":
+					m.bootstrap = "spent"
+				case "fence":
+					m.own = "foreign.%1"
+				case "pid":
+					m.pid = "9999"
+				case "dead":
+					m.dead = true
+				}
+			}
+			if err := s.send(t.Context(), p.tm, s.target, []string{"Enter"}); err == nil {
+				t.Fatal("native race reported successful startup input")
+			}
+			bare, events, _ := m.snapshot()
+			if len(bare) != 0 || len(events) != 0 {
+				t.Fatalf("native race delivered: bare=%v events=%v", bare, events)
+			}
+		})
+	}
+}
+
+func TestBootstrapGenericDialogStillConsumesPromotedCredit(t *testing.T) {
+	p, m := bootstrapModel(t)
+	if err := p.tm.promoteBootstrapInput(t.Context(), fenceModelSession); err != nil {
+		t.Fatal(err)
+	}
+	waiting := true
+	m.screen = func(*fenceModel) string {
+		if waiting {
+			return bootstrapTrustScreen
+		}
+		return capturedCodexCompactPristine
+	}
+	m.onEvent = func(_ *fenceModel, event string) {
+		if event == "key:Enter" {
+			waiting = false
+		}
+	}
+	if err := p.tm.DismissKnownDialogs(t.Context(), fenceModelSession, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if waiting || m.bootstrap != "spent" {
+		t.Fatal("generic post-start dialog failed to consume credit")
+	}
+	if proof, err := p.ObserveBootstrapInput(t.Context(), fenceModelSession, runtime.BootstrapInputRequest{Family: "codex", Fence: bootstrapFence}); err != nil || proof != nil {
+		t.Fatal("generic post-start input regranted authority")
 	}
 }

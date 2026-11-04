@@ -1682,7 +1682,7 @@ func (o *tmuxStartOps) waitForCommand(ctx context.Context, name string, timeout 
 }
 
 func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) error {
-	return o.tm.AcceptStartupDialogs(ctx, name)
+	return o.tm.acceptBootstrapStartupDialogs(ctx, name)
 }
 
 // waitForReady polls the agent pane, not the active one: a human's split or
