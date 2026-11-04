@@ -3542,7 +3542,7 @@ tagged = true
 [[count]]
 path = "test/integration/integration_test.go"
 resource = "subprocess"
-calls = 11
+calls = 13
 tagged = true
 
 [[count]]

@@ -183,6 +183,11 @@ func TestMain(m *testing.M) {
 	// TestMain supervisor via gcBinary/testGCHome, and a `go test -timeout`
 	// panic bypasses per-test t.Cleanup for either one.
 	sweepSubprocessTestProcesses()
+	// Reap what a dead run left behind that no argv pattern describes: every
+	// process the harness spawns carries its test binary's pid, so anything
+	// tagged with a dead owner is an orphan (proxied Dolt lives under the
+	// test's TempDir, out of reach of the dolttest sweep below).
+	sweepOwnerTaggedTestProcesses(func(owner int) bool { return !integrationPIDAlive(owner) })
 	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
 	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
 	// concurrent runs are spared (issue #3640).
@@ -364,6 +369,7 @@ func TestMain(m *testing.M) {
 		tmuxtest.KillAllTestSessions(&mainTB{})
 	}
 	sweepSubprocessTestProcesses()
+	sweepOwnerTaggedTestProcesses(func(owner int) bool { return owner == os.Getpid() })
 
 	_ = os.RemoveAll(tmpDir)
 	if tmuxSocketParent != "" {
@@ -414,6 +420,7 @@ func sweepIntegrationProcesses(subprocess bool) {
 		tmuxtest.KillAllTestSessions(&mainTB{})
 	}
 	sweepSubprocessTestProcesses()
+	sweepOwnerTaggedTestProcesses(func(owner int) bool { return owner == os.Getpid() })
 }
 
 func stopIntegrationSupervisorWithTimeout(timeout time.Duration) {
@@ -722,6 +729,62 @@ func sweepSubprocessTestProcesses() {
 	waitForPIDsReaped(killSet)
 }
 
+// sweepOwnerTaggedTestProcesses reaps every process whose environment carries
+// GC_MANAGED_DOLT_TEST_PARENT_PID=<owner> with reapOwner(owner) true. The
+// harness tags every process it spawns (supervisor, sessions, bd, bd
+// db-proxy-child, dolt sql-server, control dispatcher) and they inherit the
+// tag, so this reaches orphans that no argv pattern describes. Processes are
+// signalled by pid, never by process group: harness-run gc and bd share the
+// test binary's own group. It never signals this process. The scan repeats
+// once after the first kill because a reader killed mid-call can have just
+// respawned a proxy. It reads /proc/<pid>/environ, so it does nothing where
+// /proc is absent (macOS); entries it cannot read (other users, exited
+// processes) are skipped.
+func sweepOwnerTaggedTestProcesses(reapOwner func(owner int) bool) {
+	self := os.Getpid()
+	for pass := 0; pass < 2; pass++ {
+		entries, err := os.ReadDir("/proc")
+		if err != nil {
+			return
+		}
+		killSet := make(map[int]bool)
+		for _, entry := range entries {
+			pid, err := strconv.Atoi(entry.Name())
+			if err != nil || pid == self {
+				continue
+			}
+			environ, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "environ"))
+			if err != nil {
+				continue
+			}
+			if owner, ok := integrationOwnerPIDFromEnviron(environ); ok && reapOwner(owner) {
+				killSet[pid] = true
+			}
+		}
+		if len(killSet) == 0 {
+			return
+		}
+		terminateIntegrationPIDs(killSet)
+	}
+}
+
+// integrationOwnerPIDFromEnviron parses the owning test-run pid out of a
+// NUL-separated /proc/<pid>/environ.
+func integrationOwnerPIDFromEnviron(environ []byte) (int, bool) {
+	prefix := managedDoltTestParentEnv + "="
+	for _, entry := range strings.Split(string(environ), "\x00") {
+		if !strings.HasPrefix(entry, prefix) {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimPrefix(entry, prefix))
+		if err != nil || pid <= 0 {
+			return 0, false
+		}
+		return pid, true
+	}
+	return 0, false
+}
+
 func configureIntegrationSupervisorCommand(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -744,7 +807,36 @@ func cleanupIntegrationDoltSQLServersUnderRoot(root string) {
 	if len(procs) == 0 {
 		return
 	}
-	terminateIntegrationPIDs(integrationDoltSQLServerKillSet(procs, root))
+	// The proxy goes with its Dolt: a proxy left behind keeps running with no
+	// idle timeout until someone kills it by hand.
+	killSet := integrationDoltSQLServerKillSet(procs, root)
+	for pid := range integrationBDProxyKillSet(procs, root) {
+		killSet[pid] = true
+	}
+	terminateIntegrationPIDs(killSet)
+}
+
+// integrationBDProxyKillSet selects the bd db-proxy-child processes whose
+// --root lies under root.
+func integrationBDProxyKillSet(procs map[int]procSnapshot, root string) map[int]bool {
+	killSet := make(map[int]bool)
+	for pid, info := range procs {
+		fields := strings.Fields(info.cmd)
+		if !integrationLooksLikeBDProxyChild(fields) || !pathWithinIntegrationRoot(root, integrationFlagValue(fields, "--root")) {
+			continue
+		}
+		killSet[pid] = true
+	}
+	return killSet
+}
+
+func integrationLooksLikeBDProxyChild(fields []string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if filepath.Base(fields[i]) == "bd" && fields[i+1] == "db-proxy-child" {
+			return true
+		}
+	}
+	return false
 }
 
 func integrationDoltSQLServerKillSet(procs map[int]procSnapshot, root string) map[int]bool {
@@ -764,15 +856,21 @@ func integrationDoltSQLServerConfigPath(cmd string) string {
 	if !integrationLooksLikeDoltSQLServer(fields) {
 		return ""
 	}
+	return integrationFlagValue(fields, "--config")
+}
+
+// integrationFlagValue returns the value of the first "--flag value" or
+// "--flag=value" in fields, or "" when the flag is absent or has no value.
+func integrationFlagValue(fields []string, flag string) string {
 	for i, field := range fields {
-		if field == "--config" {
+		if field == flag {
 			if i+1 < len(fields) {
 				return fields[i+1]
 			}
 			return ""
 		}
-		if strings.HasPrefix(field, "--config=") {
-			return strings.TrimPrefix(field, "--config=")
+		if strings.HasPrefix(field, flag+"=") {
+			return strings.TrimPrefix(field, flag+"=")
 		}
 	}
 	return ""
@@ -964,13 +1062,31 @@ func isSubprocessTestRoot(cmd, agentScript string) bool {
 	switch {
 	case strings.Contains(cmd, agentScript):
 		return true
-	case strings.Contains(cmd, "gc convoy control --serve --follow control-dispatcher") && strings.Contains(cmd, "gc-integration-"):
+	case isIntegrationControlDispatcherCmd(cmd):
 		return true
 	case strings.Contains(cmd, "gc supervisor run") && strings.Contains(cmd, "gc-integration-"):
 		return true
 	default:
 		return false
 	}
+}
+
+// isIntegrationControlDispatcherCmd reports whether cmd is a control
+// dispatcher started under a gc-integration-* run root. The --follow argument
+// is the agent name: bare "control-dispatcher", or qualified by its pack as
+// "core.control-dispatcher" (the core pack's agent.toml passes --follow
+// {{.Agent}}). Any other agent is not ours to sweep.
+func isIntegrationControlDispatcherCmd(cmd string) bool {
+	const prefix = "gc convoy control --serve --follow "
+	i := strings.Index(cmd, prefix)
+	if i < 0 || !strings.Contains(cmd, "gc-integration-") {
+		return false
+	}
+	fields := strings.Fields(cmd[i+len(prefix):])
+	if len(fields) == 0 {
+		return false
+	}
+	return fields[0] == "control-dispatcher" || strings.HasSuffix(fields[0], ".control-dispatcher")
 }
 
 func isSubprocessTestLeaf(cmd, agentScript string) bool {
