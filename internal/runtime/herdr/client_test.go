@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -191,5 +193,170 @@ func TestGetAgentResolvesASessionNamedLikeAKindToItsOwnPane(t *testing.T) {
 				t.Errorf("getAgent(%q) = (%+v, %v, %v); want the session's own pane w5:p1", "opencode", a, ok, err)
 			}
 		})
+	}
+}
+
+// recycleFakeHerdr is a stateful stand-in for the herdr CLI's workspace and tab
+// verbs. It keeps the workspace and tab tables in files and reproduces the one
+// herdr 0.8.0 behavior ensurePlacement's recycle depends on: closing a
+// workspace's last tab closes the workspace with it, after which
+// `tab create --workspace <id>` is rejected with a bare workspace_not_found
+// envelope on stderr and a non-zero exit (the shape herdrAnswerCode reads, and
+// herdrErrorCode does not).
+type recycleFakeHerdr struct {
+	bin   string
+	state string
+}
+
+func newRecycleFakeHerdr(t *testing.T) *recycleFakeHerdr {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("fake herdr CLI is a POSIX shell script")
+	}
+	f := &recycleFakeHerdr{state: t.TempDir()}
+	script := `#!/bin/sh
+S='` + f.state + `'
+shift 2 # drop --session <name>
+echo "$*" >> "$S/log"
+next() { n=$(cat "$S/next"); echo $((n + 1)) > "$S/next"; }
+case "$1 $2" in
+"workspace list")
+	out=""
+	while read -r id label; do
+		[ -n "$id" ] || continue
+		out="$out${out:+,}{\"workspace_id\":\"$id\",\"label\":\"$label\"}"
+	done < "$S/workspaces"
+	printf '{"result":{"workspaces":[%s]}}' "$out" ;;
+"workspace create")
+	next
+	echo "w$n $4" >> "$S/workspaces"
+	echo "t$n w$n default" >> "$S/tabs"
+	printf '{"result":{"workspace":{"workspace_id":"w%s"},"tab":{"tab_id":"t%s"},"root_pane":{"pane_id":"p%s"}}}' "$n" "$n" "$n" ;;
+"tab list")
+	out=""
+	while read -r id ws label; do
+		[ "$ws" = "$4" ] || continue
+		out="$out${out:+,}{\"tab_id\":\"$id\",\"label\":\"$label\"}"
+	done < "$S/tabs"
+	printf '{"result":{"tabs":[%s]}}' "$out" ;;
+"tab rename")
+	awk -v id="$3" -v l="$4" '$1 == id { $3 = l } 1' "$S/tabs" > "$S/tabs.new" && mv -f "$S/tabs.new" "$S/tabs"
+	printf '{"result":{}}' ;;
+"tab close")
+	ws=$(awk -v id="$3" '$1 == id { print $2 }' "$S/tabs")
+	awk -v id="$3" '$1 != id' "$S/tabs" > "$S/tabs.new" && mv -f "$S/tabs.new" "$S/tabs"
+	if [ -n "$ws" ] && ! awk -v ws="$ws" '$2 == ws { found = 1 } END { exit !found }' "$S/tabs"; then
+		awk -v ws="$ws" '$1 != ws' "$S/workspaces" > "$S/workspaces.new" && mv -f "$S/workspaces.new" "$S/workspaces"
+	fi
+	printf '{"result":{}}' ;;
+"tab create")
+	if [ -e "$S/tab_create_error" ]; then
+		printf '{"error":{"code":"%s","message":"injected"}}' "$(cat "$S/tab_create_error")" >&2
+		exit 1
+	fi
+	if ! awk -v ws="$4" '$1 == ws { found = 1 } END { exit !found }' "$S/workspaces"; then
+		printf '{"error":{"code":"workspace_not_found","message":"workspace %s not found"}}' "$4" >&2
+		exit 1
+	fi
+	next
+	echo "t$n $4 $6" >> "$S/tabs"
+	printf '{"result":{"tab":{"tab_id":"t%s"},"root_pane":{"pane_id":"p%s"}}}' "$n" "$n" ;;
+*) printf '{"result":{}}' ;;
+esac
+`
+	f.bin = writeFakeHerdr(t, script)
+	return f
+}
+
+// seed starts the fake with one workspace labeled wsLabel (id w1) holding
+// exactly one tab labeled tabLabel (id t1).
+func (f *recycleFakeHerdr) seed(t *testing.T, wsLabel, tabLabel string) {
+	t.Helper()
+	for name, body := range map[string]string{
+		"workspaces": "w1 " + wsLabel + "\n",
+		"tabs":       "t1 w1 " + tabLabel + "\n",
+		"next":       "2\n",
+	} {
+		if err := os.WriteFile(filepath.Join(f.state, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("seeding fake herdr %s: %v", name, err)
+		}
+	}
+}
+
+// failTabCreate makes every `tab create` answer with code on stderr.
+func (f *recycleFakeHerdr) failTabCreate(t *testing.T, code string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.state, "tab_create_error"), []byte(code), 0o600); err != nil {
+		t.Fatalf("writing fake herdr tab_create_error: %v", err)
+	}
+}
+
+// table returns the fields of a state table ("workspaces" or "tabs") in file
+// order: id and label per workspace, id, workspace id and label per tab.
+func (f *recycleFakeHerdr) table(t *testing.T, name string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(f.state, name))
+	if err != nil {
+		t.Fatalf("reading fake herdr %s: %v", name, err)
+	}
+	return strings.Fields(string(b))
+}
+
+// invoked reports whether the fake saw a command line starting with prefix.
+func (f *recycleFakeHerdr) invoked(t *testing.T, prefix string) bool {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(f.state, "log"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading fake herdr log: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// herdr closes a workspace together with its last tab. When the stale tab
+// ensurePlacement recycles is the workspace's only tab, the recycle therefore
+// deletes the very workspace the replacement tab was about to be created in,
+// and `tab create --workspace <id>` fails with workspace_not_found. The
+// placement must recover by recreating the workspace, not fail the Start.
+func TestEnsurePlacementRecreatesWorkspaceClosedWithItsOnlyStaleTab(t *testing.T) {
+	f := newRecycleFakeHerdr(t)
+	f.seed(t, "rig", "polecat-x")
+	c := &client{session: "gc-test", bin: f.bin}
+
+	tabID, paneID, err := c.ensurePlacement(context.Background(), "rig", "polecat-x", "/work", map[string]string{"K": "V"})
+	if err != nil {
+		t.Fatalf("ensurePlacement over a workspace whose only tab is stale = %v; want the workspace recreated", err)
+	}
+	if tabID == "" || paneID == "" || tabID == "t1" {
+		t.Errorf("ensurePlacement = (tab %q, pane %q); want a fresh tab and pane, not the recycled t1", tabID, paneID)
+	}
+
+	if got := f.table(t, "workspaces"); len(got) != 2 || got[1] != "rig" {
+		t.Fatalf("workspaces after ensurePlacement = %q; want exactly one, labeled rig", got)
+	}
+	wsID := f.table(t, "workspaces")[0]
+	if got, want := f.table(t, "tabs"), []string{tabID, wsID, "polecat-x"}; !slices.Equal(got, want) {
+		t.Errorf("tabs after ensurePlacement = %q; want only %q (the new tab, in the recreated workspace, under the agent's label)", got, want)
+	}
+}
+
+// The recovery is for workspace_not_found only: any other tab-create rejection
+// is the caller's to see, and must not be answered by minting a workspace.
+func TestEnsurePlacementReturnsOtherTabCreateErrors(t *testing.T) {
+	f := newRecycleFakeHerdr(t)
+	f.seed(t, "rig", "polecat-x")
+	f.failTabCreate(t, "internal_error")
+	c := &client{session: "gc-test", bin: f.bin}
+
+	_, _, err := c.ensurePlacement(context.Background(), "rig", "polecat-x", "/work", nil)
+	if got := herdrAnswerCode(err); got != "internal_error" {
+		t.Fatalf("ensurePlacement error = %v (code %q); want the internal_error rejection returned", err, got)
+	}
+	if f.invoked(t, "workspace create") {
+		t.Error("ensurePlacement ran `workspace create` for a rejection other than workspace_not_found")
 	}
 }

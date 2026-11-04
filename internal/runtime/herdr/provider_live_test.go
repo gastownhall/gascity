@@ -88,3 +88,41 @@ func TestProviderLive(t *testing.T) {
 		t.Error("IsRunning = true after Stop")
 	}
 }
+
+// TestProviderLiveStartsOverRestoredStaleWorkspace covers the leftover-state
+// path behind the workspace_not_found gate failures (ga-19onv3): herdr saves a
+// session's workspaces when its server goes down and restores them on the next
+// server start under the same name, so a Start can find a workspace whose only
+// tab is the stale one it is about to recycle. herdr closes a workspace with its
+// last tab, so the Start must recreate the workspace rather than fail.
+//
+// The session starts a bare shell (empty Command) on purpose: typing into a
+// fresh zsh pane is flaky under account HOMEs that have no .zshrc.
+func TestProviderLiveStartsOverRestoredStaleWorkspace(t *testing.T) {
+	requireLiveHerdr(t)
+
+	metaDir, cityRoot := t.TempDir(), t.TempDir()
+	cfg := runtime.Config{WorkDir: t.TempDir()}
+	ctx := context.Background()
+
+	first := New("gctest-restore", metaDir, cityRoot, 0, 0)
+	t.Cleanup(func() { _ = first.TeardownServer() })
+	if err := first.Start(ctx, "smoke", cfg); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	// Shutting the server down saves the workspace holding smoke's only tab.
+	if err := first.TeardownServer(); err != nil {
+		t.Fatalf("TeardownServer: %v", err)
+	}
+
+	// A fresh metaDir: no pane binding survived, so IsRunning is false and Start
+	// proceeds to placement instead of adopting the restored pane.
+	second := New("gctest-restore", t.TempDir(), cityRoot, 0, 0)
+	t.Cleanup(func() { _ = second.Stop("smoke"); _ = second.TeardownServer() })
+	if err := second.Start(ctx, "smoke", cfg); err != nil {
+		t.Fatalf("Start over the restored workspace: %v", err)
+	}
+	if !second.IsRunning("smoke") {
+		t.Error("IsRunning = false after Start over the restored workspace")
+	}
+}

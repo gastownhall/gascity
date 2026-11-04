@@ -51,6 +51,7 @@ go_test(
         "launchspec_test.go",
         "livegate_test.go",
         "liveness_test.go",
+        "main_test.go",
         "no_named_agent_test.go",
         "panebinding_live_test.go",
         "panebinding_provider_test.go",
