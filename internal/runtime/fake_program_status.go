@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -10,7 +11,31 @@ var (
 	_ ProgramCaptureHealer  = FullFake{}
 
 	_ ProgramStatusShadowProvider = FullFake{}
+	_ ProgramStatusHoldProvider   = FullFake{}
 )
+
+// SetProgramHold marks session name's capture as armed declaring the
+// mid-turn hold, or not ([Fake.ProgramHolds]), under the fake's lock.
+func (f *Fake) SetProgramHold(name string, hold bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ProgramHolds == nil {
+		f.ProgramHolds = map[string]bool{}
+	}
+	f.ProgramHolds[name] = hold
+}
+
+// SetProgramCachedPane sets the row a FullFake's ProgramStatus judges for
+// session name in place of its fresh row ([Fake.ProgramCachedPanes]), under
+// the fake's lock.
+func (f *Fake) SetProgramCachedPane(name string, row ProgramPaneRow) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ProgramCachedPanes == nil {
+		f.ProgramCachedPanes = map[string]ProgramPaneRow{}
+	}
+	f.ProgramCachedPanes[name] = row
+}
 
 // SetProgramPane sets session name's agent-pane row ([Fake.ProgramPanes])
 // under the fake's lock.
@@ -47,6 +72,9 @@ func (f FullFake) ProgramStatus(name string) (ProgramStatus, error) {
 	if err := f.ProgramStatusErrors[name]; err != nil {
 		return ProgramStatus{}, err
 	}
+	if row, cached := f.ProgramCachedPanes[name]; cached {
+		return JudgeProgramStatus(row), nil
+	}
 	return JudgeProgramStatus(f.ProgramPanes[name]), nil
 }
 
@@ -72,6 +100,39 @@ func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
 	return JudgeProgramStatus(f.ProgramPanes[name]), true
 }
 
+// ProgramStatusHoldRead implements [ProgramStatusHoldProvider]: name's
+// agent-pane row judged fresh, as ProgramStatusShadowRead judges it, with
+// the session's configured activity ([Fake.Activity]), recorded as a call of
+// its own. ok is false unless the row's switch is on, the session is marked
+// as declaring the hold ([Fake.ProgramHolds]), and the read would succeed.
+func (f FullFake) ProgramStatusHoldRead(name string) (ProgramHoldReading, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ProgramStatusHoldRead", Name: name})
+	return f.programHoldReadLocked(name)
+}
+
+// programHoldReadLocked is ProgramStatusHoldRead's reading, read under
+// f.mu.
+func (f *Fake) programHoldReadLocked(name string) (ProgramHoldReading, bool) {
+	row := f.ProgramPanes[name]
+	if row.Mode != ProgramStatusOn || !f.ProgramHolds[name] || f.programReadableLocked(name) != nil || f.ProgramStatusErrors[name] != nil {
+		return ProgramHoldReading{}, false
+	}
+	return ProgramHoldReading{Status: JudgeProgramStatus(row), Activity: f.Activity[name]}, true
+}
+
+// programHoldRefusalLocked is the typing refusal of a nudge to name whose
+// fresh record holds input ([ProgramRecordHold]'s rule), nil otherwise. The
+// caller holds f.mu.
+func (f *Fake) programHoldRefusalLocked(name string) error {
+	r, ok := f.programHoldReadLocked(name)
+	if !ok || !ProgramHolds(r, time.Now()) {
+		return nil
+	}
+	return ProgramHoldRefusal(name, r.Status)
+}
+
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane
 // row, recording what it did in the call's Value:
 //
@@ -86,7 +147,9 @@ func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
 //   - any other open pipe (a foreign reader, or a dead tap's pipe not yet
 //     closed) is deferred: heal never takes a pipe over;
 //   - otherwise the pane is armed under a new nonce naming it, with nothing
-//     published yet.
+//     published yet, declaring the hold exactly when want does.
+//
+// A disarmed pane declares no hold.
 func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (ProgramCaptureAction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -124,6 +187,10 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 	}
 	if action == ProgramCaptureArmed || action == ProgramCaptureDisarmed {
 		f.ProgramPanes[name] = row
+		if f.ProgramHolds == nil {
+			f.ProgramHolds = map[string]bool{}
+		}
+		f.ProgramHolds[name] = action == ProgramCaptureArmed && want.HoldMidTurn
 	}
 	call.Value = string(action)
 	return action, nil
@@ -131,7 +198,7 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 
 // programReadableLocked reports why name's program status cannot be read:
 // the fake is broken, or does not run name. The caller holds f.mu.
-func (f FullFake) programReadableLocked(name string) error {
+func (f *Fake) programReadableLocked(name string) error {
 	if f.broken {
 		return ErrRuntimeUnavailable
 	}

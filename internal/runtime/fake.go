@@ -123,6 +123,19 @@ type Fake struct {
 	// them. Use SetProgramPane and ProgramPane while other goroutines may
 	// read the fake.
 	ProgramPanes map[string]ProgramPaneRow
+	// ProgramCachedPanes model a state cache whose snapshot lags the pane:
+	// a FullFake's ProgramStatus judges a session's row here in place of
+	// its ProgramPanes row, while every fresh read (ProgramStatusShadowRead,
+	// ProgramStatusHoldRead) judges ProgramPanes. Absent, both agree.
+	ProgramCachedPanes map[string]ProgramPaneRow
+	// ProgramHolds marks the sessions whose capture is armed declaring the
+	// mid-turn hold ([ProgramStatusArm.HoldMidTurn]), by session name;
+	// HealProgramCapture rewrites it. Under the switch on, a live working or
+	// blocked record of such a session refuses Nudge, NudgeNow,
+	// NudgeFenced and NudgeKeyed as the tmux leaf refuses typing
+	// ([ProgramHoldRefusal]). Use SetProgramHold while other goroutines may
+	// read the fake.
+	ProgramHolds map[string]bool
 	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
 	ProgramStatusErrors map[string]error
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
@@ -558,7 +571,9 @@ func (f *Fake) ProcessAlive(name string, processNames []string) bool {
 	return !f.Zombies[name]
 }
 
-// Nudge records the call and returns nil (or an error if broken).
+// Nudge records the call and returns nil, or an error: the fake is broken,
+// NudgeErrors names one, or a fresh program record holds the input
+// ([Fake.ProgramHolds]).
 func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -574,10 +589,10 @@ func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	if err, ok := f.NudgeErrors[name]; ok {
 		return err
 	}
-	return nil
+	return f.programHoldRefusalLocked(name)
 }
 
-// NudgeNow records the call and returns nil (or an error if broken).
+// NudgeNow records the call and answers as [Fake.Nudge] does.
 func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -593,7 +608,7 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	if err, ok := f.NudgeErrors[name]; ok {
 		return err
 	}
-	return nil
+	return f.programHoldRefusalLocked(name)
 }
 
 // SetPendingInteraction configures a structured pending interaction for the
@@ -1153,7 +1168,7 @@ func (f *Fake) NudgeFenced(_ context.Context, name string, content []ContentBloc
 	if err, ok := f.NudgeErrors[name]; ok {
 		return err
 	}
-	return nil
+	return f.programHoldRefusalLocked(name)
 }
 
 // SendKeysFenced implements [FencedInputProvider]: SendKeys under fence.

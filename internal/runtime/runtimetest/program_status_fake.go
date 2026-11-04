@@ -70,6 +70,13 @@ func fakeProgramStatusFixtures(relayed fakeRelay) ProgramStatusFixtures {
 			p.emit(t, script...)
 			return p.session()
 		},
+		Held: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+			p := newFakeProgramPane(t, mode)
+			p.arm(t)
+			p.fake.SetProgramHold(fakeProgramSession, true)
+			p.emit(t, script...)
+			return p.session()
+		},
 		Unarmed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
 			p := newFakeProgramPane(t, mode)
 			p.emit(t, script...)

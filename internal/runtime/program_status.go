@@ -204,6 +204,11 @@ type ProgramStatusArm struct {
 	Capture bool   // arm the pane-output reader
 	App     string // reader drops reports naming another program
 	Relay   bool   // wrap the agent in the probe-answering relay (only with Capture)
+	// HoldMidTurn marks the pane as one whose program aborts a turn that
+	// input is typed into (only with Capture): under the switch on, a fresh
+	// live working or blocked record then holds typed input and queued
+	// delivery ([ProgramStatusHoldProvider]).
+	HoldMidTurn bool
 }
 
 // ProgramCaptureAction is what one heal call did.

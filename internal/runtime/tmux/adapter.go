@@ -853,6 +853,9 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // provider's submit keys would interrupt the turn still running there (Codex's
 // Escape-led submit): then nothing is typed and the error wraps
 // [runtime.ErrSessionBusy], so the caller defers instead of aborting the turn.
+// Under the program-status switch on, a pane whose provider declares
+// hold_mid_turn takes nothing while a fresh read of its program's record
+// holds input ([runtime.ProgramHoldRefusal]), before the idle wait.
 // Delegates to [Tmux.NudgeSession] which handles per-session locking,
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
@@ -870,6 +873,11 @@ func (p *Provider) nudge(ctx context.Context, name string, content []runtime.Con
 		// A pending permission prompt does not turn idle on its own, and
 		// NudgeNow refuses it anyway: refuse it now, not after the whole wait.
 		if err := p.tm.checkNoApprovalPrompt(name); errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
+		// So does a fresh record holding the input (hold_mid_turn under the
+		// switch on): NudgeNow would refuse it after the wait.
+		if err := p.tm.refuseHeldInput(name, ""); err != nil {
 			return err
 		}
 		// Best-effort wait — if it fails (session gone, timeout), proceed

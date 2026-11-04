@@ -1150,6 +1150,10 @@
           "type": "boolean",
           "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
         },
+        "hold_mid_turn": {
+          "type": "boolean",
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. Under the [session] program_status\nswitch on, gc then holds typed input and queued delivery while a\nfresh read of the program's own record says working or blocked,\nwithin the record's hold bound; under off or shadow it changes\nnothing. It reaches a pane when its capture is armed (create,\nrespawn, heal). Unset inherits."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"

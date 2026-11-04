@@ -1868,6 +1868,7 @@ go_test(
         "productmetrics_service_child_env_test.go",
         "productmetrics_testhook_test.go",
         "program_capture_heal_test.go",
+        "program_status_hold_test.go",
         "program_status_mode_test.go",
         "program_status_shadow_test.go",
         "program_status_wiring_test.go",

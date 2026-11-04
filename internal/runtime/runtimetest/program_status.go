@@ -12,7 +12,7 @@ import (
 )
 
 // ProgramStatusFixtures supplies the sessions the RUNTIME-CONTRACT-017 cases
-// (PS-001…PS-014) read, for a provider implementing
+// (PS-001…PS-015) read, for a provider implementing
 // [runtime.ProgramStatusProvider]. Each fixture starts a session whose agent
 // pane runs the scripted OSC 7501 emitter (package
 // runtimetest/osc7501emitter/emit) under the given city switch mode,
@@ -32,6 +32,9 @@ type ProgramStatusFixtures struct {
 	// Relayed starts an armed session whose program runs under the
 	// probe-answering relay.
 	Relayed func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession
+	// Held starts a session as Armed does, its capture armed declaring the
+	// mid-turn hold (runtime.ProgramStatusArm.HoldMidTurn).
+	Held func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession
 }
 
 // ProgramStatusSession is one session a [ProgramStatusFixtures] fixture
@@ -91,7 +94,7 @@ func skipUnchecked(unchecked []string) error {
 	return skip("unchecked: " + strings.Join(unchecked, "; "))
 }
 
-// programStatusCases are PS-001…PS-014 in order.
+// programStatusCases are PS-001…PS-015 in order.
 var programStatusCases = []programStatusCase{
 	{"PS-001_SwitchOffReadsUnread", checkPS001},
 	{"PS-002_FirstReportIsValid", checkPS002},
@@ -107,13 +110,15 @@ var programStatusCases = []programStatusCase{
 	{"PS-012_AdvancedPastCreditsOnlyBoundaryBaselines", checkPS012},
 	{"PS-013_ForeignPipeIsNeverTakenOver", checkPS013},
 	{"PS-014_HealRearmsAndDisarms", checkPS014},
+	{"PS-015_HoldReadIsDeclaredOnAndBounded", checkPS015},
 }
 
-// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-014:
+// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-015:
 // a program-status reading is the pane program's own bounded claim, valid
 // only from the pane's own armed incarnation with its reader attached,
 // Unread under the switch off, and never revalidated after a respawn. Heal
-// cases also need [runtime.ProgramCaptureHealer] and skip without it.
+// cases also need [runtime.ProgramCaptureHealer] and skip without it; the
+// hold case needs [runtime.ProgramStatusHoldProvider].
 //
 // Call it from a standalone test, never from a ledger-checked
 // TestXxxConformance proof, which must stay a bare [RunProviderTests] call.
@@ -677,4 +682,86 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 		return err
 	}
 	return skipUnchecked(unchecked)
+}
+
+// holdRead takes s's fresh hold reading through the routed leaf.
+func holdRead(s ProgramStatusSession) (runtime.ProgramHoldReading, bool, error) {
+	h, ok := runtime.ProgramStatusHoldFor(s.Provider, s.Name)
+	if !ok {
+		return runtime.ProgramHoldReading{}, false, fmt.Errorf("provider %T does not implement runtime.ProgramStatusHoldProvider for %q", s.Provider, s.Name)
+	}
+	r, ok := h.ProgramStatusHoldRead(s.Name)
+	return r, ok, nil
+}
+
+// PS-015: a hold reading is taken only under the switch on and only for a
+// pane armed declaring the hold; it carries the record as the program last
+// reported it, so a live working or blocked record holds input and an input
+// boundary releases it, and its hold ends at the bound past the later of the
+// record's Since and the pane's activity.
+func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
+	if f.Held == nil || f.Armed == nil {
+		return skip("needs held- and armed-session fixtures")
+	}
+	s := f.Held(t, runtime.ProgramStatusOn, "report state=working")
+	if _, ok := runtime.ProgramStatusHoldFor(s.Provider, s.Name); !ok {
+		return skip(fmt.Sprintf("provider %T does not implement runtime.ProgramStatusHoldProvider", s.Provider))
+	}
+	for _, c := range []struct {
+		step  string
+		state runtime.ProgramState
+		holds bool
+	}{
+		{"", runtime.ProgramWorking, true},
+		{"report state=idle", runtime.ProgramIdle, false},
+		{"report state=blocked:kind=question", runtime.ProgramBlocked, true},
+		{"report state=done", runtime.ProgramDone, false},
+		{"report state=working", runtime.ProgramWorking, true},
+	} {
+		if c.step != "" {
+			s.Emit(t, c.step)
+		}
+		label := "held " + string(c.state)
+		r, ok, err := holdRead(s)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if !ok || !r.Status.Decides() || r.Status.State != c.state {
+			return fmt.Errorf("%s: hold read ok=%v %+v, want a deciding %s reading", label, ok, r.Status, c.state)
+		}
+		now := time.Now()
+		if got := runtime.ProgramHolds(r, now); got != c.holds {
+			return fmt.Errorf("%s: ProgramHolds = %v, want %v (reading %+v)", label, got, c.holds, r.Status)
+		}
+		if !c.holds {
+			continue
+		}
+		from := r.Status.Since
+		if r.Activity.After(from) {
+			from = r.Activity
+		}
+		if r.Activity.After(now.Add(captureClockSkew)) {
+			return fmt.Errorf("%s: activity %v is after the read", label, r.Activity)
+		}
+		if runtime.ProgramHolds(r, from.Add(runtime.ProgramStatusHoldLimit)) {
+			return fmt.Errorf("%s: the hold outlives its bound past %v", label, from)
+		}
+	}
+	for _, c := range []struct {
+		label string
+		s     ProgramStatusSession
+	}{
+		{"held under shadow", f.Held(t, runtime.ProgramStatusShadow, "report state=working")},
+		{"held under off", f.Held(t, runtime.ProgramStatusOff, "report state=working")},
+		{"armed without the hold", f.Armed(t, runtime.ProgramStatusOn, "report state=working")},
+	} {
+		r, ok, err := holdRead(c.s)
+		if err != nil {
+			return fmt.Errorf("%s: %w", c.label, err)
+		}
+		if ok {
+			return fmt.Errorf("%s: a hold reading %+v was taken", c.label, r.Status)
+		}
+	}
+	return nil
 }
