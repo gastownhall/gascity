@@ -433,3 +433,72 @@ func TestTheClearRemovesAChunksEdgesInOneBatch(t *testing.T) {
 		})
 	}
 }
+
+// TestInfraEngineDropsAStampedRowTheSourceDeletedSincePausing (review S8,
+// mutant N): a row an earlier, interrupted run copied that the work store has
+// deleted since is not kept by the resume. The binding ends holding exactly
+// the work store's infrastructure rows, and nothing is copied again.
+func TestInfraEngineDropsAStampedRowTheSourceDeletedSincePausing(t *testing.T) {
+	smallEngineBatches(t)
+	city := newEngineCity(t, 300, "sqlite")
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "verify" {
+			return errors.New("killed before the manifest")
+		}
+		return nil
+	}
+	if report, _ := city.migrate(t); report.Outcome == infraMigrationConverged {
+		t.Fatal("the kill did not stop the run")
+	}
+	infraEngineCrashPoint = prev
+
+	var gone string
+	for _, b := range city.rows {
+		if !isInfra(b) {
+			continue
+		}
+		for _, d := range city.deps {
+			if d.IssueID == b.ID || d.DependsOnID == b.ID {
+				gone = b.ID
+			}
+		}
+		if gone != "" {
+			break
+		}
+	}
+	if gone == "" {
+		t.Fatal("the fixture has no infrastructure row with an edge")
+	}
+	deps := city.deps[:0]
+	for _, d := range city.deps {
+		if d.IssueID == gone || d.DependsOnID == gone {
+			if err := city.source.DepRemove(d.IssueID, d.DependsOnID); err != nil {
+				t.Fatal(err)
+			}
+			delete(city.payloads, [2]string{d.IssueID, d.DependsOnID})
+			continue
+		}
+		deps = append(deps, d)
+	}
+	city.deps = deps
+	if err := city.source.Delete(gone); err != nil {
+		t.Fatal(err)
+	}
+	rows := city.rows[:0]
+	for _, b := range city.rows {
+		if b.ID != gone {
+			rows = append(rows, b)
+		}
+	}
+	city.rows = rows
+
+	report, said := city.migrate(t)
+	if report.Outcome != infraMigrationConverged {
+		t.Fatalf("the run after the source deleted %s = %v: %s", gone, report.Outcome, said)
+	}
+	if m := infraCopiedCount.FindStringSubmatch(said); m == nil || m[1] != "0" {
+		t.Fatalf("the run copied %v rows, want none: every row it kept still equals the work store: %s", m, said)
+	}
+	city.assertNotLossy(t)
+}
