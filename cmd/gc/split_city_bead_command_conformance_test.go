@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // splitCityIDShape names which of the two ids a binding holds a row runs on.
@@ -54,6 +56,10 @@ const (
 	// work store is its truth.
 	splitCityWorkID = "demo-notinthebinding"
 )
+
+// splitCityEdgeType is the type of the edge each step waits on the other step
+// by.
+const splitCityEdgeType = "blocks"
 
 // splitCitySessionCityTOML is appended to the fixture's city.toml: the agent
 // whose template the seeded session beads run, which wake requires.
@@ -105,6 +111,13 @@ func newSplitCityConformanceFixture(t *testing.T) splitCityConformanceFixture {
 	relic.ID = splitCityRelicStepID
 	if _, err := migrationSeed(binding, relic); err != nil {
 		t.Fatalf("seeding the relic step: %v", err)
+	}
+	// Both steps wait on the other step, so the dependency reads have an
+	// edge to answer with rather than an empty list.
+	for _, id := range []string{fx.stepID, splitCityRelicStepID} {
+		if err := binding.DepAdd(id, fx.otherStepID, splitCityEdgeType); err != nil {
+			t.Fatalf("seeding the edge %s -> %s: %v", id, fx.otherStepID, err)
+		}
 	}
 	fx.sessionID = seedSplitCitySessionBead(t, binding, "", "s-riley-minted").ID
 	seedSplitCitySessionBead(t, binding, splitCityRelicSessionID, "s-riley-relic")
@@ -235,6 +248,10 @@ type splitCityBeadRow struct {
 	// with gap set, which says why no alternative exists yet. A passthrough
 	// row that is a known hole rather than bd's to answer carries the gap too.
 	refusal, instead, gap string
+	// runs is how many runnable `gc bd` commands a refused row's refusal
+	// names (one with no <placeholder> left in it). Each is run after the
+	// refusal and must succeed, so an alternative is a command that works.
+	runs int
 	// check asserts what a served row did, given its stdout and stderr.
 	check func(t *testing.T, fx splitCityConformanceFixture, id, stdout, stderr string)
 }
@@ -299,18 +316,18 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 			// cannot be scanned for subjects (--comments is not a bd flag), so
 			// it meets the split allowlist's. Both name the same command.
 			form: "show <id> --comments", argv: splitCityArgv("show", "<id>", "--comments"), want: splitCityRefused,
-			refusal: "--comments", instead: "ask for comments with `gc bd show <id> --json --include-comments`",
+			refusal: "--comments", instead: "ask for comments with `gc bd show <id> --json --include-comments`", runs: 1,
 		},
 		{
 			form: "show <id> --long", argv: splitCityArgv("show", "<id>", "--long"), want: splitCityRefused,
-			refusal: "`gc bd show` with --long is not served in process", instead: "the served spelling is `gc bd show <id> [--json] [--include-comments]`",
+			refusal: "`gc bd show` with --long is not served in process", instead: "the served spelling is `gc bd show <id> [--json] [--include-comments]`", runs: 1,
 		},
 		{
 			form: "show <id> <other-id>", argv: func(fx splitCityConformanceFixture, id string) []string { return []string{"show", id, fx.otherStepID} },
-			want: splitCityRefused, refusal: "with more than one id is not served in process", instead: "read each id on its own: `gc bd show <id>`",
+			want: splitCityRefused, refusal: "with more than one id is not served in process", instead: "read each id on its own: `gc bd show <id>`", runs: 2,
 		},
-		{form: "dep list <id> --json", argv: splitCityArgv("dep", "list", "<id>", "--json"), want: splitCityServed, check: requireJSONArray},
-		{form: "dep tree <id> --json", argv: splitCityArgv("dep", "tree", "<id>", "--json"), want: splitCityServed, check: requireJSONArray},
+		{form: "dep list <id> --json", argv: splitCityArgv("dep", "list", "<id>", "--json"), want: splitCityServed, check: requireTheSeededEdge},
+		{form: "dep tree <id> --json", argv: splitCityArgv("dep", "tree", "<id>", "--json"), want: splitCityServed, check: requireTheSeededTree},
 		{
 			form: "update <id> --set-metadata k=v --status in_progress", argv: splitCityArgv("update", "<id>", "--set-metadata", "conformance.key=value", "--status", "in_progress"),
 			want: splitCityServed,
@@ -344,7 +361,7 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 		},
 		{
 			form: "update <id> --set-metadata gc.outcome=pass --status closed --notes N", argv: splitCityArgv("update", "<id>", "--set-metadata", "gc.outcome=pass", "--status", "closed", "--notes", "a note"),
-			want: splitCityRefused, refusal: refusedFlag("--notes"),
+			want: splitCityRefused, refusal: refusedFlag("--notes"), runs: 1,
 			instead: "run it without --notes (a bead in the class store has no notes field): `gc bd update <id> --set-metadata gc.outcome=pass --status closed`",
 		},
 		{form: "close <id>", argv: splitCityArgv("close", "<id>"), want: splitCityServed, check: closedWith("")},
@@ -367,7 +384,7 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 		},
 		{
 			form: "close <id> <work-id> --reason R (mixed batch)", argv: splitCityArgv("close", "<id>", splitCityWorkID, "--reason", "drained"),
-			want: splitCityRefused, refusal: "one close never spans two stores, so nothing was closed",
+			want: splitCityRefused, refusal: "one close never spans two stores, so nothing was closed", runs: 2,
 			instead: "Close them in two commands: `gc bd close <id> --reason drained` (served in process) and `gc bd close " + splitCityWorkID + " --reason drained`",
 		},
 		{
@@ -376,31 +393,46 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 		},
 		{
 			form: "close <id> --reason-file -", argv: splitCityArgv("close", "<id>", "--reason-file", "-"), want: splitCityRefused,
-			refusal: refusedFlag("--reason-file -"), instead: "pass the reason in a file (`--reason-file <path>`) or inline (`gc bd close <id> --reason <text>`)",
+			refusal: refusedFlag("--reason-file -"), instead: "pass the reason in a file or inline: `gc bd close <id> --reason-file <path>` or `gc bd close <id> --reason <text>`",
 		},
 		{
+			form: "close <id> <work-id> --reason-file - (split)", argv: splitCityArgv("close", "<id>", splitCityWorkID, "--reason-file", "-"), want: splitCityRefused,
+			refusal: refusedFlag("--reason-file -"), runs: 1,
+			instead: "`gc bd close <id> --reason <text>`, and the rest as typed, which bd answers from the work store: `gc bd close " + splitCityWorkID + " --reason-file -`",
+		},
+		{
+			form: "close <id> <work-id> --actor A (split)", argv: splitCityArgv("close", "<id>", splitCityWorkID, "--actor", "someone"), want: splitCityRefused,
+			refusal: refusedFlag("--actor"), runs: 2,
+			instead: "run the ids the infra class binding holds without --actor (the class store records no close actor): `gc bd close <id>`, and the rest as typed, which bd answers from the work store: `gc bd close " + splitCityWorkID + " --actor someone`",
+		},
+		{form: "close <id> -r= (pflag reads =)", argv: splitCityArgv("close", "<id>", "-r="), want: splitCityServed, check: closedWith("=")},
+		{
 			form: "close <id> --actor A", argv: splitCityArgv("close", "<id>", "--actor", "someone"), want: splitCityRefused,
-			refusal: refusedFlag("--actor"), instead: "run it without --actor (the class store records no close actor): `gc bd close <id>`",
+			refusal: refusedFlag("--actor"), instead: "run it without --actor (the class store records no close actor): `gc bd close <id>`", runs: 1,
 		},
 		{
 			form: "close <id> --session S", argv: splitCityArgv("close", "<id>", "--session", "s-1"), want: splitCityRefused,
-			refusal: refusedFlag("--session"), instead: "run it without --session (the class store records no closing session): `gc bd close <id>`",
+			refusal: refusedFlag("--session"), instead: "run it without --session (the class store records no closing session): `gc bd close <id>`", runs: 1,
 		},
 		{
 			form: "close <id> --force", argv: splitCityArgv("close", "<id>", "--force"), want: splitCityRefused,
-			refusal: refusedFlag("--force"), instead: "run it without --force (the class store's close runs none of the pinned-issue or gate checks it waives): `gc bd close <id>`",
+			refusal: refusedFlag("--force"), instead: "run it without --force (the class store's close runs none of the pinned-issue or gate checks it waives): `gc bd close <id>`", runs: 1,
 		},
 		{
 			form: "close <id> --claim-next", argv: splitCityArgv("close", "<id>", "--claim-next"), want: splitCityRefused,
-			refusal: refusedFlag("--claim-next"), instead: "`gc bd close <id>`, then `gc hook --claim`",
+			refusal: refusedFlag("--claim-next"), instead: "`gc bd close <id>`, then `gc hook --claim`", runs: 1,
 		},
 		{
 			form: "close <id> --continue", argv: splitCityArgv("close", "<id>", "--continue"), want: splitCityRefused,
-			refusal: refusedFlag("--continue"), instead: "`gc bd close <id>`, then `gc hook --claim`",
+			refusal: refusedFlag("--continue"), instead: "`gc bd close <id>`, then `gc hook --claim`", runs: 1,
+		},
+		{
+			form: "close <id> --continue --no-auto", argv: splitCityArgv("close", "<id>", "--continue", "--no-auto"), want: splitCityRefused,
+			refusal: refusedFlag("--continue"), instead: "`gc bd close <id>`, then `gc ready`", runs: 1,
 		},
 		{
 			form: "close <id> --suggest-next", argv: splitCityArgv("close", "<id>", "--suggest-next"), want: splitCityRefused,
-			refusal: refusedFlag("--suggest-next"), instead: "`gc bd close <id>`, then `gc ready`",
+			refusal: refusedFlag("--suggest-next"), instead: "`gc bd close <id>`, then `gc ready`", runs: 1,
 		},
 		{
 			form: "reopen <id>", argv: splitCityArgv("reopen", "<id>"), want: splitCityServed,
@@ -425,15 +457,15 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 		},
 		{
 			form: "heartbeat <id>", argv: splitCityArgv("heartbeat", "<id>"), want: splitCityRefused,
-			refusal: "`gc bd heartbeat` is not served in process", instead: "a claim the class store holds carries no lease, so there is nothing to refresh",
+			refusal: "`gc bd heartbeat` is not served in process", instead: "a claim the class store holds carries no lease, so there is nothing to refresh", runs: 1,
 		},
 		{
 			form: "label add <id> L", argv: splitCityArgv("label", "add", "<id>", "conformance"), shapes: minted, want: splitCityRefused,
-			refusal: "`gc bd label add` is not served in process", instead: "the served update takes the same labels: `gc bd update <id> --add-label conformance`",
+			refusal: "`gc bd label add` is not served in process", instead: "the served update takes the same labels: `gc bd update <id> --add-label conformance`", runs: 1,
 		},
 		{
 			form: "comments <id>", argv: splitCityArgv("comments", "<id>"), shapes: minted, want: splitCityRefused,
-			refusal: "`gc bd comments` is not served in process", instead: "the class store contract carries no comments, so the bead has none to list",
+			refusal: "`gc bd comments` is not served in process", instead: "the class store contract carries no comments, so the bead has none to list", runs: 1,
 		},
 		{
 			form: "comment <id> T", argv: splitCityArgv("comment", "<id>", "a comment"), shapes: minted, want: splitCityRefused,
@@ -494,13 +526,68 @@ func requireShownJSON(t *testing.T, _ splitCityConformanceFixture, id, stdout, _
 	}
 }
 
-// requireJSONArray asserts stdout is a JSON array.
-func requireJSONArray(t *testing.T, _ splitCityConformanceFixture, _, stdout, _ string) {
+// requireTheSeededEdge asserts `dep list --json` rendered the edge the
+// fixture seeded: the other step, related by splitCityEdgeType.
+func requireTheSeededEdge(t *testing.T, fx splitCityConformanceFixture, id, stdout, _ string) {
 	t.Helper()
-	var rows []json.RawMessage
+	var rows []bdByIDDepRow
 	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
-		t.Errorf("rendered %q, want a JSON array: %v", stdout, err)
+		t.Fatalf("dep list rendered %q, want a JSON array: %v", stdout, err)
 	}
+	for _, row := range rows {
+		if row.ID == fx.otherStepID && row.DepType == splitCityEdgeType && !row.External {
+			return
+		}
+	}
+	t.Errorf("dep list of %s rendered %q, want the seeded %s edge to %s, read from the binding", id, stdout, splitCityEdgeType, fx.otherStepID)
+}
+
+// requireTheSeededTree asserts `dep tree --json` rendered the subject at the
+// root and the other step one level below it.
+func requireTheSeededTree(t *testing.T, fx splitCityConformanceFixture, id, stdout, _ string) {
+	t.Helper()
+	var rows []bdByIDTreeRow
+	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
+		t.Fatalf("dep tree rendered %q, want a JSON array: %v", stdout, err)
+	}
+	walked := map[string]bdByIDTreeRow{}
+	for _, row := range rows {
+		walked[row.ID] = row
+	}
+	if root, ok := walked[id]; !ok || root.Depth != 0 {
+		t.Errorf("dep tree of %s rendered %q, want the subject at depth 0", id, stdout)
+	}
+	if child, ok := walked[fx.otherStepID]; !ok || child.Depth != 1 || child.External {
+		t.Errorf("dep tree of %s rendered %q, want %s at depth 1, read from the binding", id, stdout, fx.otherStepID)
+	}
+}
+
+// splitCityAlternativeSpan is a backticked `gc bd` command in a refusal.
+var splitCityAlternativeSpan = regexp.MustCompile("`(gc bd [^`]+)`")
+
+// splitCityOptionalGroup is a usage spelling's optional group, `[--json]`.
+var splitCityOptionalGroup = regexp.MustCompile(`\s*\[[^\]]*\]`)
+
+// splitCityRunnableAlternatives returns the gc bd argv of every command a
+// refusal names that can run as it stands: a backticked `gc bd` span with its
+// optional groups dropped, left with no <placeholder>, and naming one of ids.
+// A span naming no id is the refused verb quoted (`gc bd close` is not served),
+// not a command to run.
+func splitCityRunnableAlternatives(t *testing.T, stderr string, ids []string) [][]string {
+	t.Helper()
+	var out [][]string
+	for _, match := range splitCityAlternativeSpan.FindAllStringSubmatch(stderr, -1) {
+		command := splitCityOptionalGroup.ReplaceAllString(match[1], "")
+		if strings.ContainsAny(command, "<>") {
+			continue
+		}
+		argv := shellquote.Split(command)[2:]
+		if !slices.ContainsFunc(argv, func(arg string) bool { return slices.Contains(ids, arg) }) {
+			continue
+		}
+		out = append(out, argv)
+	}
+	return out
 }
 
 // TestSplitCityBeadCommandConformance runs every `gc bd` row of the table
@@ -555,6 +642,25 @@ func TestSplitCityBeadCommandConformance(t *testing.T) {
 						if after := fx.bindingRow(t, id); after.Status != before.Status {
 							t.Errorf("the refused gc bd %v moved %s from %q to %q", argv, id, before.Status, after.Status)
 						}
+					}
+					alternatives := splitCityRunnableAlternatives(t, stderr.String(), []string{id, fx.otherStepID, splitCityWorkID})
+					if len(alternatives) != row.runs {
+						t.Errorf("gc bd %v named %d runnable alternative(s) %q, want %d:\n%s", argv, len(alternatives), alternatives, row.runs, stderr.String())
+					}
+					for _, alternative := range alternatives {
+						var altOut, altErr bytes.Buffer
+						if code := doBd(alternative, &altOut, &altErr); code != 0 {
+							t.Errorf("the alternative `gc bd %s` exited %d: %s", strings.Join(alternative, " "), code, altErr.String())
+						}
+						// The work half of a split is bd's to answer.
+						if slices.Contains(alternative, splitCityWorkID) && !slices.Contains(fx.bdCalls(t), strings.Join(alternative, " ")) {
+							t.Errorf("the work half `gc bd %s` was not forwarded to bd; bd saw %q", strings.Join(alternative, " "), fx.bdCalls(t))
+						}
+					}
+					if id != "" {
+						// The alternatives for a bead the binding holds are served
+						// in process too.
+						fx.requireBdNeverTargeted(t, id)
 					}
 				case splitCityPassthrough:
 					if code != 0 {

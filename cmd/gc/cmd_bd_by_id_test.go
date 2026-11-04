@@ -2078,6 +2078,10 @@ func TestBdCloseServesBdsReasonAliases(t *testing.T) {
 		{"resolution before message before comment", []string{"--comment", "c", "--message", "m", "--resolution", "r"}, "r"},
 		{"message before comment", []string{"--comment", "c", "-m", "m"}, "m"},
 		{"a repeated alias keeps the last", []string{"-m", "first", "-m", "second"}, "second"},
+		// pflag reads `-x=` as the value "=", and a long flag's `--x=` as empty.
+		{"an empty inline short reason is an equals sign", []string{"-r="}, "="},
+		{"an empty inline short alias is an equals sign", []string{"-m="}, "="},
+		{"an empty inline long reason is empty", []string{"--reason=", "--comment", "commented"}, "commented"},
 		{"an empty --reason defers to the alias", []string{"--reason", "", "-m", "alias"}, "alias"},
 		{"a non-empty --reason wins", []string{"-m", "alias", "--reason", "reason"}, "reason"},
 	} {
@@ -2369,12 +2373,81 @@ func TestBdCloseRefusalNamesTheCommandWithoutTheFlag(t *testing.T) {
 		{[]string{"close", id, "--session=s-1"}, "run it without --session (the class store records no closing session): `gc bd close " + id + "`"},
 		{[]string{"close", id, "-f", "-r", "done"}, "run it without -f (the class store's close runs none of the pinned-issue or gate checks it waives): `gc bd close " + id + " -r done`"},
 		{[]string{"close", id, "--claim-next"}, "run it without --claim-next (the in-process close claims nothing): `gc bd close " + id + "`, then `gc hook --claim`"},
-		{[]string{"close", id, "--continue", "--no-auto"}, "run it without --continue and --no-auto (the in-process close advances no molecule; it only qualifies --continue): `gc bd close " + id + "`, then `gc hook --claim`"},
+		// --no-auto turns --continue's claim of the next step into a look at
+		// it, so the alternative looks rather than claims.
+		{[]string{"close", id, "--continue", "--no-auto"}, "run it without --continue and --no-auto (the in-process close advances no molecule; it only qualifies --continue): `gc bd close " + id + "`, then `gc ready`"},
+		{[]string{"close", id, "--continue"}, "run it without --continue (the in-process close advances no molecule): `gc bd close " + id + "`, then `gc hook --claim`"},
 		{[]string{"close", id, "--suggest-next"}, "run it without --suggest-next (the in-process close lists nothing it unblocked): `gc bd close " + id + "`, then `gc ready`"},
 		{[]string{"reopen", id, "-r", "wrong call"}, "run it without -r (the class store's reopen records no reason): `gc bd reopen " + id + "`"},
 		{[]string{"update", id, "--set-metadata", "gc.outcome=pass", "--status", "closed", "--append-notes", "final review: clean"}, "run it without --append-notes (a bead in the class store has no notes field): `gc bd update " + id + " --set-metadata gc.outcome=pass --status closed`; keep the text as metadata instead: `gc bd update " + id + " --set-metadata <key>=<text>`"},
 		{[]string{"update", id, "--notes", "only a note"}, "keep the text as metadata instead: `gc bd update " + id + " --set-metadata <key>=<text>`"},
 		{[]string{"heartbeat", id}, "a claim the class store holds carries no lease, so there is nothing to refresh: it stays held until it is released or the bead closes, and `gc bd show " + id + " --json` shows the holder"},
+		{[]string{"close", id, "--reason-file", "-"}, "the in-process close does not read stdin; pass the reason in a file or inline: `gc bd close " + id + " --reason-file <path>` or `gc bd close " + id + " --reason <text>`"},
+		// bd refuses --continue and --suggest-next on more than one id, so a
+		// batch carrying one has no command to name.
+		{[]string{"close", id, "gc-other", "--continue"}, ""},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, cityPath, "", tc.args, &stdout, &stderr)
+			if !handled || code != 1 {
+				t.Fatalf("%v = (%d, %t), want a refusal: %s", tc.args, code, handled, stderr.String())
+			}
+			if tc.instead == "" {
+				if strings.Contains(stderr.String(), "instead:") {
+					t.Errorf("the refusal names an alternative bd would refuse: %q", stderr.String())
+				}
+			} else if !strings.HasSuffix(stderr.String(), " — instead: "+tc.instead+"\n") {
+				t.Errorf("the refusal does not end with the alternative:\n got %q\nwant suffix %q", stderr.String(), " — instead: "+tc.instead+"\n")
+			}
+			requireOpen(t, classStore, id)
+		})
+	}
+}
+
+// TestBdCloseRefusalSplitsTheAlternativeByResidence pins the alternative for
+// a batch whose ids live on both sides of the split. The same command without
+// the dropped flag is not an alternative there: the door refuses it as a mixed
+// batch, and the work half would lose a flag bd serves. So the alternative is
+// two commands: the ids the binding holds without the flag, which the door
+// serves, and the rest with every flag it was typed with, which bd answers.
+func TestBdCloseRefusalSplitsTheAlternativeByResidence(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "a step", Type: "task", Metadata: closeOutcomeNoOp()}).ID
+	work, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "a work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	const split = ", and the rest as typed, which bd answers from the work store: "
+	for _, tc := range []struct {
+		args    []string
+		instead string
+	}{
+		{
+			[]string{"close", held, work.ID, "--actor", "someone"},
+			"run the ids the infra class binding holds without --actor (the class store records no close actor): `gc bd close " + held + "`" + split + "`gc bd close " + work.ID + " --actor someone`",
+		},
+		{
+			[]string{"--actor", "someone", "close", work.ID, held, "--reason", "done", "--json"},
+			"run the ids the infra class binding holds without --actor (the class store records no close actor): `gc bd close " + held + " --reason done --json`" + split + "`gc bd close " + work.ID + " --reason done --json --actor someone`",
+		},
+		{
+			[]string{"close", work.ID, held, "-r", "for the work bead", "-r", "for the step", "--session=s-1"},
+			"run the ids the infra class binding holds without --session (the class store records no closing session): `gc bd close " + held + " --reason 'for the step'`" + split + "`gc bd close " + work.ID + " --reason 'for the work bead' --session=s-1`",
+		},
+		{
+			[]string{"close", held, work.ID, "--force"},
+			"run the ids the infra class binding holds without --force (the class store's close runs none of the pinned-issue or gate checks it waives): `gc bd close " + held + "`" + split + "`gc bd close " + work.ID + " --force`",
+		},
+		{
+			// The work half claims the next bead itself, so no claim follows.
+			[]string{"close", held, work.ID, "--claim-next"},
+			"run the ids the infra class binding holds without --claim-next (the in-process close claims nothing): `gc bd close " + held + "`" + split + "`gc bd close " + work.ID + " --claim-next`",
+		},
+		{
+			[]string{"close", held, work.ID, "--reason-file", "-"},
+			"the in-process close does not read stdin; pass the reason in a file or inline: `gc bd close " + held + " --reason-file <path>` or `gc bd close " + held + " --reason <text>`" + split + "`gc bd close " + work.ID + " --reason-file -`",
+		},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -2383,10 +2456,37 @@ func TestBdCloseRefusalNamesTheCommandWithoutTheFlag(t *testing.T) {
 				t.Fatalf("%v = (%d, %t), want a refusal: %s", tc.args, code, handled, stderr.String())
 			}
 			if !strings.HasSuffix(stderr.String(), " — instead: "+tc.instead+"\n") {
-				t.Errorf("the refusal does not end with the alternative:\n got %q\nwant suffix %q", stderr.String(), " — instead: "+tc.instead+"\n")
+				t.Errorf("the refusal does not end with the split alternative:\n got %q\nwant suffix %q", stderr.String(), " — instead: "+tc.instead+"\n")
 			}
-			requireOpen(t, classStore, id)
+			requireOpen(t, classStore, held)
 		})
+	}
+
+	// The class half the refusal names is a command the door serves.
+	var stdout, stderr bytes.Buffer
+	if code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"close", held}, &stdout, &stderr); !handled || code != 0 {
+		t.Fatalf("the class half `gc bd close %s` = (%d, %t): %s", held, code, handled, stderr.String())
+	}
+}
+
+// TestBdCloseRefusalSplitsALabelWriteByResidence pins the label alternative
+// for a label write that names ids on both sides: the served update for each
+// id the binding holds, and the rest as typed.
+func TestBdCloseRefusalSplitsALabelWriteByResidence(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "a step", Type: "task"}).ID
+	work, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "a work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"label", "add", held, work.ID, "triage,urgent"}, &stdout, &stderr)
+	if !handled || code != 1 {
+		t.Fatalf("label add = (%d, %t), want a refusal: %s", code, handled, stderr.String())
+	}
+	want := " — instead: the served update takes the same labels: `gc bd update " + held + " --add-label triage --add-label urgent`, and the rest as typed, which bd answers from the work store: `gc bd label add " + work.ID + " triage,urgent`\n"
+	if !strings.HasSuffix(stderr.String(), want) {
+		t.Errorf("the refusal does not end with the split alternative:\n got %q\nwant suffix %q", stderr.String(), want)
 	}
 }
 

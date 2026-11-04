@@ -15,6 +15,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -72,10 +73,6 @@ const bdByIDNotesKeep = "keep the text as metadata instead: `gc bd update %s --s
 // no lease, so there is nothing to push.
 const bdByIDHeartbeatInstead = "a claim the class store holds carries no lease, so there is nothing to refresh: it stays held until it is released or the bead closes, and `gc bd show %s --json` shows the holder"
 
-// bdByIDReasonFileStdinInstead answers `close --reason-file -`: stdin is the
-// one reason source the in-process close does not read.
-const bdByIDReasonFileStdinInstead = "the in-process close does not read stdin; pass the reason in a file (`--reason-file <path>`) or inline (`gc bd close %s --reason <text>`)"
-
 // bdByIDCommentsReadInstead and bdByIDCommentsWriteInstead answer a comment
 // read or write of a bead the binding holds: the class store contract carries
 // no comments, so there are none to list and nowhere to add one.
@@ -84,19 +81,43 @@ const (
 	bdByIDCommentsWriteInstead = "the class store contract carries no comments; keep the text as metadata instead: `gc bd update %s --set-metadata <key>=<text>`"
 )
 
+// bdByIDResidence is what an alternative needs to know about where the ids of
+// a refused command live: the binding's name for the sentence, and whether it
+// holds a given id. An error from holds is a residence the door could not
+// decide, and the alternative then names nothing rather than guess.
+type bdByIDResidence struct {
+	binding string
+	holds   func(id string) (bool, error)
+}
+
+// bdByIDNoAutoThen is what follows a close whose --continue carried --no-auto:
+// bd then shows the next step without claiming it, which is a look at the
+// frontier, not a claim.
+const bdByIDNoAutoThen = "gc ready"
+
+// bdByIDSplitRest joins the class half of a split alternative to its work half.
+const bdByIDSplitRest = ", and the rest as typed, which bd answers from the work store: "
+
 // bdByIDUnservedAlternative returns what to run instead of an unserved
 // invocation that addresses id, a bead the class binding holds, or "" when
 // there is nothing to name. flag is the spelling the served parser rejected
 // (bdByIDUnservedFlag), or "".
-func bdByIDUnservedAlternative(bdArgs []string, id, flag string) string {
+//
+// An alternative is a command the reader can run as it stands. A close batch
+// that also names ids the binding does not hold is spelled as two commands:
+// the ids the binding holds, which the door serves, and the rest exactly as
+// typed, which bd serves from the work store — dropping a flag from the work
+// half would change a command bd can run, and naming the whole batch would
+// name a command the door refuses.
+func bdByIDUnservedAlternative(bdArgs []string, id, flag string, res bdByIDResidence) string {
 	verb := bdByIDRefusedVerb(bdArgs, id)
 	switch {
 	case verb == "heartbeat":
 		return fmt.Sprintf(bdByIDHeartbeatInstead, id)
-	case verb == "close" && flag == "--reason-file "+bdByIDReasonFileStdin:
-		return fmt.Sprintf(bdByIDReasonFileStdinInstead, id)
+	case verb == "close" && flag == bdByIDReasonFileStdinFlag:
+		return bdByIDCloseStdinInstead(bdArgs, res)
 	case verb == "label add" || verb == "label remove":
-		return bdByIDLabelInstead(verb, bdArgs, id)
+		return bdByIDLabelInstead(verb, bdArgs, res)
 	case verb == "comments" || verb == "comments list":
 		return fmt.Sprintf(bdByIDCommentsReadInstead, id)
 	case verb == "comment" || verb == "comments add":
@@ -106,7 +127,7 @@ func bdByIDUnservedAlternative(bdArgs []string, id, flag string) string {
 	if droppable == nil {
 		return ""
 	}
-	rest, dropped := bdArgvWithout(bdArgs, droppable)
+	rest, dropped, removed := bdArgvWithout(bdArgs, droppable)
 	if len(dropped) == 0 {
 		return ""
 	}
@@ -114,30 +135,155 @@ func bdByIDUnservedAlternative(bdArgs []string, id, flag string) string {
 	for _, flag := range dropped {
 		spec := droppable[flag]
 		losses = appendUniqueString(losses, spec.lost)
-		if spec.then != "" {
-			thens = appendUniqueString(thens, spec.then)
+		then := spec.then
+		if flag == "--continue" && slices.Contains(dropped, "--no-auto") {
+			then = bdByIDNoAutoThen
+		}
+		if then != "" {
+			thens = appendUniqueString(thens, then)
 		}
 		if spec.keep != "" {
 			keeps = appendUniqueString(keeps, fmt.Sprintf(spec.keep, id))
 		}
 	}
 	var parts []string
-	if _, served := parseBdByIDOp(rest); served {
-		run := fmt.Sprintf("run it without %s (%s): %s", strings.Join(dropped, " and "), strings.Join(losses, "; "), bdByIDCommandText(rest))
-		for _, then := range thens {
-			run += fmt.Sprintf(", then `%s`", then)
-		}
+	without := fmt.Sprintf("without %s (%s)", strings.Join(dropped, " and "), strings.Join(losses, "; "))
+	if run := bdByIDRunWithout(rest, removed, without, thens, res); run != "" {
 		parts = append(parts, run)
 	}
 	parts = append(parts, keeps...)
 	return strings.Join(parts, "; ")
 }
 
-// bdByIDLabelInstead spells `label add|remove <ids...> <label>` as the served
-// update of id: --add-label or --remove-label with the same label. bd takes the
-// last positional as the label. bdflags carries no manifest for the label
-// verbs, so the argv after the verb's own words is read directly.
-func bdByIDLabelInstead(verb string, bdArgs []string, id string) string {
+// bdByIDRunWithout spells rest — the refused argv without the dropped flags,
+// which removed holds as typed — as the command to run, or "" when there is
+// none: rest is not a command the door serves, it is a reason shape bd itself
+// refuses, or it is a batch carrying a flag bd takes on one id only. without
+// says what was dropped and what that gives up, and thens are the gc commands
+// that do the dropped part, run after.
+func bdByIDRunWithout(rest, removed []string, without string, thens []string, res bdByIDResidence) string {
+	op, served := parseBdByIDOp(rest)
+	if !served || op.Close.Invalid != "" {
+		return ""
+	}
+	whole := "run it " + without + ": " + bdByIDCommandText(rest)
+	for _, then := range thens {
+		whole += fmt.Sprintf(", then `%s`", then)
+	}
+	if op.Verb != bdByIDClose {
+		return whole
+	}
+	if len(op.Close.IDs) > 1 && bdArgvHasAny(removed, bdByIDSingleIDCloseFlags) {
+		return ""
+	}
+	held, notHeld, ok := bdByIDCloseResidence(op, res)
+	switch {
+	case !ok || len(held) == 0:
+		return ""
+	case len(notHeld) == 0:
+		return whole
+	}
+	// The work half keeps every flag it was typed with, so it does the
+	// dropped part itself and no gc command follows.
+	return fmt.Sprintf("run the ids %s holds %s: %s%s%s", res.binding, without,
+		bdByIDCommandText(bdByIDCloseArgv(op, held)), bdByIDSplitRest,
+		bdByIDCommandText(append(bdByIDCloseArgv(op, notHeld), removed...)))
+}
+
+// bdByIDSingleIDCloseFlags are the close flags bd refuses on more than one id
+// ("--continue only works when closing a single issue").
+var bdByIDSingleIDCloseFlags = map[string]bool{"--continue": true, "--suggest-next": true}
+
+// bdArgvHasAny reports whether argv carries any of the named flags, in either
+// spelling.
+func bdArgvHasAny(argv []string, names map[string]bool) bool {
+	for _, arg := range argv {
+		if name, _, _ := strings.Cut(arg, "="); names[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// bdByIDCloseResidence splits a close's ids by where they live: the indices
+// the binding holds and the rest. ok is false when a residence could not be
+// decided.
+func bdByIDCloseResidence(op bdByIDOp, res bdByIDResidence) (held, notHeld []int, ok bool) {
+	known := make(map[string]bool, len(op.Close.IDs))
+	for i, id := range op.Close.IDs {
+		holds, seen := known[id]
+		if !seen {
+			var err error
+			if holds, err = res.holds(id); err != nil {
+				return nil, nil, false
+			}
+			known[id] = holds
+		}
+		if holds {
+			held = append(held, i)
+		} else {
+			notHeld = append(notHeld, i)
+		}
+	}
+	return held, notHeld, true
+}
+
+// bdByIDCloseStdinInstead answers `close --reason-file -`: stdin is the one
+// reason source the in-process close does not read. The ids the binding holds
+// take the reason from a file or inline; the rest keep `--reason-file -`,
+// which bd reads.
+func bdByIDCloseStdinInstead(bdArgs []string, res bdByIDResidence) string {
+	rest, removed := bdArgvWithoutReasonFileStdin(bdArgs)
+	op, served := parseBdByIDOp(rest)
+	if !served || op.Verb != bdByIDClose || op.Close.Invalid != "" || len(op.Close.Reasons) > 0 {
+		// A reason beside the file is bd's own refusal of the command.
+		return ""
+	}
+	held, notHeld, ok := bdByIDCloseResidence(op, res)
+	if !ok || len(held) == 0 {
+		return ""
+	}
+	class := bdByIDCloseArgv(op, held)
+	text := "the in-process close does not read stdin; pass the reason in a file or inline: " +
+		bdByIDCommandTextWith(class, "--reason-file <path>") + " or " + bdByIDCommandTextWith(class, "--reason <text>")
+	if len(notHeld) > 0 {
+		text += bdByIDSplitRest + bdByIDCommandText(append(bdByIDCloseArgv(op, notHeld), removed...))
+	}
+	return text
+}
+
+// bdByIDReasonFileStdinFlag is the rejected spelling parseBdByIDCloseArgs
+// reports for a reason file read from stdin.
+const bdByIDReasonFileStdinFlag = "--reason-file " + bdByIDReasonFileStdin
+
+// bdArgvWithoutReasonFileStdin returns argv without `--reason-file -` (either
+// spelling), and the tokens it removed, as typed.
+func bdArgvWithoutReasonFileStdin(argv []string) (rest, removed []string) {
+	rest = make([]string, 0, len(argv))
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case arg == "--":
+			return append(rest, argv[i:]...), removed
+		case arg == "--reason-file="+bdByIDReasonFileStdin:
+			removed = append(removed, arg)
+		case arg == "--reason-file" && i+1 < len(argv) && argv[i+1] == bdByIDReasonFileStdin:
+			removed = append(removed, arg, argv[i+1])
+			i++
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, removed
+}
+
+// bdByIDLabelInstead spells `label add|remove <ids...> <labels>` as the served
+// update of each id the binding holds, one --add-label or --remove-label per
+// label, and the ids it does not hold as the label write as typed. bd takes
+// the last positional as a comma list of labels. bdflags carries no manifest
+// for the label verbs, so the argv after the verb's own words is read
+// directly.
+func bdByIDLabelInstead(verb string, bdArgs []string, res bdByIDResidence) string {
 	var positionals []string
 	for _, arg := range bdArgsAfterWords(bdArgs, strings.Fields(verb)) {
 		if !strings.HasPrefix(arg, "-") {
@@ -147,21 +293,42 @@ func bdByIDLabelInstead(verb string, bdArgs []string, id string) string {
 	if len(positionals) < 2 {
 		return ""
 	}
+	ids, labels := positionals[:len(positionals)-1], positionals[len(positionals)-1]
 	flag := "--add-label"
 	if verb == "label remove" {
 		flag = "--remove-label"
 	}
-	// bd's label verbs take a comma list; update takes one label per flag.
-	argv := []string{"update", id}
-	for _, label := range strings.Split(positionals[len(positionals)-1], ",") {
-		if label = strings.TrimSpace(label); label != "" {
-			argv = append(argv, flag, label)
+	var updates, notHeld []string
+	for _, id := range ids {
+		holds, err := res.holds(id)
+		if err != nil {
+			return ""
 		}
+		if !holds {
+			notHeld = append(notHeld, id)
+			continue
+		}
+		// bd's label verbs take a comma list; update takes one label per flag.
+		argv := []string{"update", id}
+		for _, label := range strings.Split(labels, ",") {
+			if label = strings.TrimSpace(label); label != "" {
+				argv = append(argv, flag, label)
+			}
+		}
+		if len(argv) == 2 {
+			return ""
+		}
+		updates = append(updates, bdByIDCommandText(argv))
 	}
-	if len(argv) == 2 {
+	if len(updates) == 0 {
 		return ""
 	}
-	return "the served update takes the same labels: " + bdByIDCommandText(argv)
+	text := "the served update takes the same labels: " + strings.Join(updates, ", ")
+	if len(notHeld) > 0 {
+		argv := append(strings.Fields(verb), notHeld...)
+		text += bdByIDSplitRest + bdByIDCommandText(append(argv, labels))
+	}
+	return text
 }
 
 // bdArgsAfterWords returns the argv after the first run of words, in order,
@@ -184,9 +351,9 @@ func bdArgsAfterWords(bdArgs, words []string) []string {
 
 // bdArgvWithout returns argv with every flag named in drop removed — both its
 // separated spelling, with the value a value flag consumes, and its inline
-// `--flag=value` one — and the flags it removed, in the order first seen.
-// Everything after `--` is positional and kept.
-func bdArgvWithout(argv []string, drop map[string]bdByIDDroppableFlag) (rest, dropped []string) {
+// `--flag=value` one — the flags it removed, in the order first seen, and the
+// removed tokens as typed. Everything after `--` is positional and kept.
+func bdArgvWithout(argv []string, drop map[string]bdByIDDroppableFlag) (rest, dropped, removed []string) {
 	rest = make([]string, 0, len(argv))
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
@@ -201,11 +368,13 @@ func bdArgvWithout(argv []string, drop map[string]bdByIDDroppableFlag) (rest, dr
 			continue
 		}
 		dropped = appendUniqueString(dropped, name)
-		if spec.takesValue && !inline {
+		removed = append(removed, arg)
+		if spec.takesValue && !inline && i+1 < len(argv) {
 			i++
+			removed = append(removed, argv[i])
 		}
 	}
-	return rest, dropped
+	return rest, dropped, removed
 }
 
 // bdByIDReadInstead returns what to run instead of an unserved by-ID read of a
@@ -267,5 +436,16 @@ func bdReadFlagInstead(verb, flag string, ids []string) string {
 
 // bdByIDCommandText spells argv as the `gc bd` command a reader can paste.
 func bdByIDCommandText(argv []string) string {
-	return "`" + shellquote.Join(append([]string{"gc", "bd"}, argv...)) + "`"
+	return bdByIDCommandTextWith(argv, "")
+}
+
+// bdByIDCommandTextWith spells argv as bdByIDCommandText does, followed by
+// placeholder, a fragment like `--reason <text>` the reader fills in, which
+// is left unquoted.
+func bdByIDCommandTextWith(argv []string, placeholder string) string {
+	text := shellquote.Join(append([]string{"gc", "bd"}, argv...))
+	if placeholder != "" {
+		text += " " + placeholder
+	}
+	return "`" + text + "`"
 }

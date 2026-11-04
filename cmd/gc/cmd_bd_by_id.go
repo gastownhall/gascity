@@ -257,8 +257,9 @@ const (
 	// work ledger and left the step open in the binding forever: a molecule
 	// that stalls with no error anywhere.
 	bdByIDUpdate bdByIDVerb = "update"
-	// bdByIDClose is `gc bd close <id> [-r|--reason <text>] [--json]`, and
-	// bdByIDReopen (`gc bd reopen <id> [--json]`) its undo.
+	// bdByIDClose is `gc bd close <id>... [reason flags] [--json]` — one id or
+	// a batch, with every reason spelling bd reads — and bdByIDReopen (`gc bd
+	// reopen <id> [--json]`) its undo.
 	//
 	// They are the drain verbs for a class resident: the row a class store
 	// minted under a work-shaped id has no other way to be retired, because
@@ -276,8 +277,9 @@ const (
 	bdByIDDepDirectionDown = "down"
 )
 
-// bdByIDOp is a parsed by-ID invocation: exactly one bead id and the operation
-// to apply to it.
+// bdByIDOp is a parsed by-ID invocation: the bead id it addresses (for close,
+// the first of a batch, all of which are in Close.IDs) and the operation to
+// apply to it.
 type bdByIDOp struct {
 	Verb     bdByIDVerb
 	ID       string
@@ -591,19 +593,24 @@ func parseBdByIDCloseArgs(verb bdByIDVerb, args []string) (op bdByIDOp, rejected
 		}
 		// A value is the next token whatever it looks like, as bd's flag
 		// parser takes it.
-		if !hasInline {
+		switch {
+		case !hasInline:
 			if i+1 >= len(args) {
 				return bdByIDOp{}, name, false
 			}
 			i++
 			value = args[i]
+		case value == "" && len(name) == 2:
+			// pflag reads a shorthand's `-x=` as the value "=" (the rest of
+			// the token after the letter), where a long flag's `--x=` is empty.
+			value = "="
 		}
 		switch long {
 		case "--reason":
 			reasons = append(reasons, value)
 		case "--reason-file":
 			if value == bdByIDReasonFileStdin {
-				return bdByIDOp{}, "--reason-file " + bdByIDReasonFileStdin, false
+				return bdByIDOp{}, bdByIDReasonFileStdinFlag, false
 			}
 			op.Close.ReasonFile, op.Close.HasReasonFile = value, true
 		default:
@@ -1359,7 +1366,11 @@ func refuseUnservedClassTarget(door bdByIDClassDoor, bdArgs, classIDs, subjectID
 		return refuseUnservedClassRead(door, bdArgs, manifest, resident, stderr)
 	}
 	flag := bdByIDUnservedFlag(bdArgs)
-	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs, resident), resident, flag, bdByIDUnservedAlternative(bdArgs, resident, flag), stderr)
+	residence := bdByIDResidence{binding: door.bindingName(), holds: func(id string) (bool, error) {
+		resolution, err := door.resolve(id)
+		return resolution.Found, err
+	}}
+	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs, resident), resident, flag, bdByIDUnservedAlternative(bdArgs, resident, flag, residence), stderr)
 }
 
 // serveBdByIDResolved answers a served by-ID op other than close
@@ -1504,13 +1515,19 @@ func bdByIDCloseGateArgv(ids []string) []string {
 // for the work half, which is the passthrough's job, and half-applying it would
 // leave the caller unable to tell from the exit code what landed.
 //
-// What follows is bd's own order. bd refuses a reason shape it cannot map
-// (Invalid) and a reason file it cannot read before it writes anything, the
-// work-record gate runs over the whole batch before the first close, and each
-// id is then closed on its own: an id whose close fails is reported and the
-// rest still close, and a batch with a failure ends with bd's count of how
-// many failed and exit 1 (reportCloseFailures in bd's close.go). A single id
-// that fails reports only its own line, as bd does.
+// The checks follow bd's order: a reason shape bd cannot map (Invalid) and a
+// reason file that cannot be read are refused before anything is written, and
+// the work-record gate runs over the whole batch before the first close. The
+// writes do not. bd writes a batch as one transaction per store, while the
+// class store contract's CloseAll stamps one metadata set on every id and
+// leaves an already-closed bead's metadata to the store (closeBdByIDResident),
+// so the door closes each id with its own write, in the order typed. A write
+// that fails is reported in line and the rest still close — the per-id
+// outcome bd reports when its batch refuses an id — and a batch with a failure
+// ends with bd's count of how many failed and exit 1 (reportCloseFailures in
+// bd's close.go). A single id that fails reports only its own line, as bd
+// does. What the door does not give is bd's atomicity across ids: a store
+// fault partway leaves the ids before it closed.
 func serveBdByIDClose(door bdByIDClassDoor, op bdByIDOp, rigName, scopeRoot string, repoDirs workRecordRepoDirs, stdout, stderr io.Writer) (int, bool) {
 	req := op.Close
 	current := make(map[string]beads.Bead, len(req.IDs))
