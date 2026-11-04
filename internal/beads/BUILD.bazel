@@ -286,6 +286,7 @@ go_test(
         "runview_lifecycle_test.go",
         "runview_roundtrip_test.go",
         "schema_cursor_drift_test.go",
+        "schema_cursor_ready_test.go",
         "session_key_hook_bd_integration_test.go",
         "session_key_hook_test.go",
         "sqlite_sequence_floor_lock_test.go",
