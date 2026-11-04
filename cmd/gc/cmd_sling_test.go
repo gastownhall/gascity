@@ -5178,10 +5178,9 @@ func TestSlingDirectSessionResolverReportsDeferredNamedStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig: %v", err)
 	}
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
+	// The resolver is handed the session-class store, as sling's callers hand
+	// it one: the store a named session materializes into.
+	store := openCitySessionStoreForTest(t, cityDir)
 
 	var stderr bytes.Buffer
 	var deps slingDeps
