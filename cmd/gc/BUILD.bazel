@@ -1934,6 +1934,7 @@ go_test(
         "reconcile_effects_test.go",
         "reconcile_effects_wiring_test.go",
         "reconcile_enqueue_test.go",
+        "reconcile_exec_journeys_test.go",
         "reconcile_execution_stalled_oneshot_test.go",
         "reconcile_fenced_store_test.go",
         "reconcile_finalize_test.go",
@@ -1965,6 +1966,7 @@ go_test(
         "reconcile_sim_coverage_test.go",
         "reconcile_sim_determinism_test.go",
         "reconcile_sim_drift_test.go",
+        "reconcile_sim_exec_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",
@@ -2390,6 +2392,7 @@ go_test(
         "//:schemas/wait/inspect/result.schema.json",
         "//:schemas/wait/list/result.schema.json",
         "//:schemas/wisps-composite-index/common.sh",
+        "//contrib:all_files",
         "//docs:reference/cli.md",
         "//docs:runbooks/split-storage-classes.md",
         "//examples/bd:pack_files",
@@ -2693,6 +2696,20 @@ go_variant_test(
         "GC_V2_SIM_COVERAGE_FILES": " ".join(["$(rootpath :%s_run)" % r for r in SIM_RANGES]),
         "GC_V2_SIM_COVERAGE_RANGES": str(len(SIM_RANGES)),
     },
+    test = ":gc_test",
+)
+
+# Every sim scenario and corpus on the exec v2 backend (PAR-EXEC §13.3,
+# reconcile_sim_exec_test.go): GC_V2_SIM_LEAF=exec runs each scenario written
+# for tmux as a journey under exec, the corpora on their first simCISeeds.
+# A scenario whose subject is a capability exec v2 lacks skips itself
+# (skipOnSimExecLeaf). Replay one with
+#   GC_V2_SIM_LEAF=exec go test ./cmd/gc -run '^TestSimLostCommit$'
+go_variant_test(
+    name = "gc_sim_exec_test",
+    size = "medium",
+    args = ["-test.run=^(TestSim[A-Za-z0-9]*|TestI10V510mExemptions|TestDormantChangeFollowsRule2|TestCloseEndsSuspend|TestNamedPaneCountsAnOwnerlessRuntime|TestQuarantinedCommitBoundCountsOnlyV2sTime|TestQuietBoundFollowsRowTimersArmedInQuiescence|TestQuarantineAloneIsTheOnlyHold|TestStartRefusesARowClosedBeforeItsPreWake|TestFailedCreateCloseRetiresHolds|TestRollbackScreenParkRewritesHolds)$$"],
+    env = {"GC_V2_SIM_LEAF": "exec"},
     test = ":gc_test",
 )
 
