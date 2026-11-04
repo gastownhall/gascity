@@ -62,6 +62,11 @@ resource = "net_listen"
 calls = 8
 
 [[count]]
+path = "cmd/gc/beads_ephemeral_root_scrub_test.go"
+resource = "subprocess"
+calls = 2
+
+[[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "cwd"
 calls = 2
