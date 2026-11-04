@@ -188,7 +188,7 @@ func (c *crossStoreGatesCheck) heldByUnreadableStores(graph beads.Store, gates [
 		}
 		return resolved, nil
 	}
-	held, unreadable, err := dispatch.CrossStoreGatesHeldUndecided(graph, gates, resolve)
+	held, unreadable, err := dispatch.CrossStoreGatesHeldUndecided(beads.GraphStore{Store: graph}, gates, resolve)
 	if err != nil || len(unreadable) == 0 {
 		return nil, nil, err
 	}

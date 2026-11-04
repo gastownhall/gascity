@@ -918,10 +918,13 @@ func newMailProviderNamedWithSessionStore(v string, msgStore, sessStore beads.St
 	case "fail":
 		return mail.NewFailFake()
 	default:
+		// The callers resolved each store for its class; the handles carry that
+		// class to beadmail.
+		msg, sess := beads.MailStore{Store: msgStore}, beads.SessionStore{Store: sessStore}
 		if cached {
-			return beadmail.NewCachedWithStores(msgStore, sessStore)
+			return beadmail.NewCachedWithStores(msg, sess)
 		}
-		return beadmail.NewWithStores(msgStore, sessStore)
+		return beadmail.NewWithStores(msg, sess)
 	}
 }
 

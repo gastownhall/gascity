@@ -48,18 +48,25 @@ const (
 	// AwaitingHumanMetadataKey, on a claimed work bead, names the session
 	// (its ID) whose claim asked a person and is waiting on their decision:
 	// an approval asked by mail. While the key names the seat holding the
-	// claim (AwaitsHuman), the work ladder only nudges it, an hour after the
-	// ask and hourly after that: it never recycles or releases it, and raises
-	// none of the escalations its pacing would (started_recycled,
-	// started_unanswered, release_unfinished). A nudge the seat cannot take
-	// still counts toward nudge_refused, and a release already in flight that
-	// raced the claim's start still raises release_raced_start. The asking
-	// agent writes it with its request and clears it when it works the step
-	// again: the wait ends in a turn of the seat (or when the claim closes),
-	// and the hourly nudge is what takes up an answer whose turn died before
-	// it could clear the key. It names its seat, not the step: a claim
-	// released and taken by another seat is that seat's work, whatever the
-	// key still says, and no dispatch path reads it.
+	// claim (AwaitsHuman), the work ladder never recycles or releases it, and
+	// raises none of the escalations its pacing would (started_recycled,
+	// started_unanswered, release_unfinished). While the seat's own turns
+	// show the newest ended turn completed, it nudges the claim only a day
+	// after the ask or after its last nudge, however long the person takes:
+	// that takes up an answer that started no turn of the seat (a reply that
+	// asks for none, a wake that failed). Any other reading (a turn open, the
+	// newest turn failed, canceled or ended with no status, no turn) or none
+	// keeps it nudged an hour after the ask or after its last nudge, at once
+	// when that is already past, so a turn the answer started that died is
+	// redriven. A nudge the seat cannot take still counts toward
+	// nudge_refused, and a release already in flight that raced the claim's
+	// start still raises release_raced_start. The asking agent writes it with
+	// its request and clears it when it works the step again: the wait ends
+	// in a turn of the seat (or when the claim closes), and those nudges are
+	// what take up an answer whose turn died, or never started, before it
+	// could clear the key. It names its seat, not the step: a claim released
+	// and taken by another seat is that seat's work, whatever the key still
+	// says, and no dispatch path reads it.
 	AwaitingHumanMetadataKey  = "gc.awaiting_human"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"
@@ -422,6 +429,13 @@ const (
 // principal.
 const InitiatorMetadataKey = "gc.initiator"
 
+// OwnerNamespaceMetadataKey is the creation stamp a rig with federation =
+// "rig" writes on every row created through its guarded store: the rig's
+// identity namespace ("<rig>/" under the actor fold). It marks a gc-created row
+// that carries no owner identity as the creating city's. Only that store
+// writes it.
+const OwnerNamespaceMetadataKey = "gc.owner_namespace"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
@@ -689,6 +703,7 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
+	OwnerNamespaceMetadataKey,
 	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
@@ -774,6 +789,34 @@ var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 	IdemPrefix,
 }
+
+// WorktreeOwnershipEvidenceKeys are the eight worktree-ownership keys a
+// provisioner publishes onto a bead after `gc worktree ensure` succeeds. With
+// a work dir (WorkDirMetadataKey or LegacyWorkDirMetadataKey) and
+// WorkBranchMetadataKey they are the complete evidence the controller turns
+// into the verified spec it starts that bead's session in. Their presence is
+// what makes a bead's work dir a managed worktree rather than a plain
+// directory.
+var WorktreeOwnershipEvidenceKeys = []string{
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+}
+
+// ManagedWorktreeEvidenceKeys are every key of a bead's managed-worktree
+// evidence: the work dir pair, the branch and the eight ownership keys. The
+// evidence binds that one bead (the worktree's provenance names it), so a
+// bead cloned from it must not inherit any of them.
+var ManagedWorktreeEvidenceKeys = append([]string{
+	WorkDirMetadataKey,
+	LegacyWorkDirMetadataKey,
+	WorkBranchMetadataKey,
+}, WorktreeOwnershipEvidenceKeys...)
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
 // particular live session through continuation-group routing. They must be

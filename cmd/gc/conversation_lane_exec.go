@@ -440,6 +440,7 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // both: the price of never typing into a running turn.
 func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjournal.Tri {
 	running, known, err := e.turnOnScreen(e.target)
+	e.shadowPreread(running, known, err)
 	switch {
 	case !known:
 		return opjournal.TriYes
@@ -450,6 +451,28 @@ func (e *conversationLaneExec) quietBoundary(obs worker.LiveObservation) opjourn
 		return opjournal.TriYes
 	}
 	return e.staleTurnBoundary(obs)
+}
+
+// shadowPreread records, under the program-status shadow switch, the
+// screen reading quietBoundary decides with (wait_idle_preread): the op
+// lane's wait-idle pre-read, the leaf's busy-trust reading of whether a turn
+// runs (laneTurnOnScreen), which stands where the worker's and the session's
+// wait-idle deliveries take runtime.IdleBoundaryNow before they wait. A
+// reading the leaf does not take, or does not trust, is indeterminate; a
+// read that failed decided nothing and records nothing. It never feeds the
+// boundary.
+func (e *conversationLaneExec) shadowPreread(running, known bool, err error) {
+	if err != nil {
+		return
+	}
+	scrape := runtime.ProgramVerdictIdle
+	switch {
+	case !known:
+		scrape = runtime.ProgramVerdictIndeterminate
+	case running:
+		scrape = runtime.ProgramVerdictBusy
+	}
+	runtime.ShadowCompareIdle(e.deps.sp, e.target.sessionName, e.info.ID, e.target.providerFamily(), runtime.ProgramPointWaitIdlePreread, scrape)
 }
 
 // staleTurnBoundary is the boundary of a keystroke runtime whose screen shows
@@ -537,11 +560,17 @@ func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) ti
 	return at
 }
 
-// caps are the runtime's capabilities for conv. Content is live for a
-// keystroke-mode runtime, and for a protocol-mode one whose turns, starts
-// included, its own protocol reports (its boundary: a turn whose start is not
-// recorded never reads as in progress), that the conversation's row does not
-// stamp as hosted elsewhere for its current generation (DES-BX D7). Dedup is
+// caps are the runtime's capabilities for conv. Content is live where the
+// producers' rule says the executor serves the runtime (laneServesLive: a
+// keystroke-mode runtime, or a protocol-mode one whose turns, starts
+// included, its own protocol reports, its boundary, since a turn whose start
+// is not recorded never reads as in progress) and the conversation's row
+// does not stamp it as hosted elsewhere for its current generation (DES-BX
+// D7). The traits term restates laneServesLive from the session's turn
+// handle, which reads the same provider traits, so the two agree in every
+// reachable state (TestLaneServesLiveMatchesExecutorCaps); it is not a
+// second gate, and the conjunct is kept so the executor calls the
+// producers' rule itself rather than a copy of it. Dedup is
 // the worker boundary's read of whether the routed runtime deduplicates
 // keyed deliveries. A live runtime steers where its steer mode and the
 // session row allow it (e.steerable; D-STEER), per laneSteerCap, and
@@ -551,7 +580,7 @@ func (e *conversationLaneExec) quiescenceDeadline(obs worker.LiveObservation) ti
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
-		Live:     !e.protocol || e.traits.protocol && e.traits.starts,
+		Live:     laneServesLive(e.deps.sp, name) && (!e.protocol || e.traits.protocol && e.traits.starts),
 		Dedup:    worker.DeliveryKeysDeduplicated(e.deps.sp, name),
 		Input:    laneFenceMode(runtime.InputFencingFor(e.deps.sp, name)),
 		Text:     opjournal.TextReminder,
@@ -591,9 +620,22 @@ func laneSteerCap(caps opjournal.Caps, steerable bool) bool {
 // the runtime named name: a keystroke-mode runtime, not a protocol-mode one
 // (runtime.TurnInterruptProtocol), whose turns no keystroke starts. The
 // executor's Caps.Live also takes a protocol-mode runtime whose own protocol
-// reports its turns, starts included, which only its turn-traits read tells.
+// records its turn starts (laneServesLive).
 func laneTypesLive(sp runtime.Provider, name string) bool {
 	return runtime.TurnInterruptModeFor(sp, name) != runtime.TurnInterruptProtocol
+}
+
+// laneServesLive reports whether the live executor serves the runtime named
+// name: a keystroke-mode one (laneTypesLive), or a protocol-mode one whose
+// own protocol records its turn starts, so it has a boundary to deliver at
+// and a delivery can be tied to the turn it started. It is a static read of
+// the provider's traits, with no I/O, so producers deciding whether to
+// propose a lane op and the executor deciding Caps.Live apply one rule.
+func laneServesLive(sp runtime.Provider, name string) bool {
+	if laneTypesLive(sp, name) {
+		return true
+	}
+	return runtime.TurnCapabilitiesFor(sp, name).Start == runtime.TurnStartRecorded
 }
 
 // hostedElsewhere reports whether stamp says another host serves message for
@@ -658,6 +700,12 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		delivery = worker.NudgeDeliveryImmediate
 	}
 	at := e.deps.clk.Now()
+	if delivery == worker.NudgeDeliveryDefault && !d.Replacement {
+		// A delivery at the boundary the lane waited for is the op lane's
+		// idle wait returning: under the shadow switch it is recorded beside
+		// the record (wait_for_idle), on a reading taken before it types.
+		runtime.ShadowWaitForIdle(e.deps.sp, e.target.sessionName, laneWaitStarted(d.Ops, at), at, runtime.ProgramVerdictIdle)
+	}
 	res, err := h.Nudge(ctx, sessionActor(session.ActorController, e.deps.cityPath), worker.NudgeRequest{
 		Text:          d.Text,
 		Delivery:      delivery,
@@ -681,6 +729,18 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		out = dv
 	}
 	return out
+}
+
+// laneWaitStarted is when a delivery's wait for its boundary began: its
+// earliest op's proposal, but never later than at.
+func laneWaitStarted(ops []opjournal.Op, at time.Time) time.Time {
+	started := at
+	for _, op := range ops {
+		if !op.CreatedAt.IsZero() && op.CreatedAt.Before(started) {
+			started = op.CreatedAt
+		}
+	}
+	return started
 }
 
 // laneDeliveryResult maps one nudge's answer to the lane's result (DES-O1

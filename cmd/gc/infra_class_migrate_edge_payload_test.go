@@ -316,7 +316,7 @@ func TestInfraSourceEdgePayloadRefusalPassesAnySourceItCanRead(t *testing.T) {
 			Store:    backing,
 			payloads: map[[2]string]string{{from.ID, to.ID}: tc.payload},
 		}
-		carrying, err := infraSourceEdgePayloadRefusal(source, rows)
+		carrying, _, err := infraSourceEdgePayloadRefusal(source, rows)
 		if err != nil {
 			t.Errorf("an edge whose payload is %q was refused, but the copy carries payloads now: %v", tc.payload, err)
 			continue
@@ -333,7 +333,7 @@ func TestInfraSourceEdgePayloadRefusalPassesAnySourceItCanRead(t *testing.T) {
 
 	// The control. Only an unreadable source stops the migration here, or the
 	// loop above is passing because the check does nothing.
-	if _, err := infraSourceEdgePayloadRefusal(mutePayloadSource{Store: backing}, rows); err == nil {
+	if _, _, err := infraSourceEdgePayloadRefusal(mutePayloadSource{Store: backing}, rows); err == nil {
 		t.Error("a source that cannot be asked about edge payloads was cleared")
 	}
 }
@@ -359,7 +359,7 @@ func TestInfraMigrationRefusesADestinationThatCannotCarryBeforeItClearsIt(t *tes
 		Store:    backing,
 		payloads: map[[2]string]string{{from.ID, to.ID}: `{"gate":"waits_for"}`},
 	}
-	payloadCarried, err := infraSourceEdgePayloadRefusal(carrying, rows)
+	payloadCarried, _, err := infraSourceEdgePayloadRefusal(carrying, rows)
 	if err != nil {
 		t.Fatalf("the source refusal rejected the fixture: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestInfraMigrationRefusesADestinationThatCannotCarryBeforeItClearsIt(t *tes
 	// The control: the same destination, a source carrying nothing. It must be
 	// accepted, or the refusal is a blanket one that rejects every destination
 	// in this tree apart from SQLite.
-	payloadless, err := infraSourceEdgePayloadRefusal(backing, rows)
+	payloadless, _, err := infraSourceEdgePayloadRefusal(backing, rows)
 	if err != nil {
 		t.Fatalf("the source refusal rejected the payloadless control: %v", err)
 	}

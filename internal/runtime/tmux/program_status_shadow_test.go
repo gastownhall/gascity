@@ -62,7 +62,7 @@ func (e *shadowExecutor) execute(args []string) (string, error) {
 		}
 		e.reads++
 		e.order = append(e.order, "program-read")
-		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, runtimeInventoryEnd}, "\t"), nil
+		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, "", runtimeInventoryEnd}, "\t"), nil
 	case tmuxSubcommand(args) == "show-environment" && strings.HasPrefix(args[len(args)-1], "="):
 		return "GC_PROVIDER=claude\nGC_SESSION_ID=gc-7\nSECRET=x", nil
 	}
@@ -1244,5 +1244,165 @@ func TestShadowIdleProofTakesTwoObservations(t *testing.T) {
 				t.Fatalf("%d fresh reads, want one on each side of the proof", reads)
 			}
 		})
+	}
+}
+
+// shadowedStartOps are fake start ops whose startup ladder tm shadows, as a
+// tmuxStartOps's Tmux does.
+type shadowedStartOps struct {
+	*fakeStartOps
+	tm *Tmux
+}
+
+func (o shadowedStartOps) shadowStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.shadowStartupLadder(name, send, busy)
+}
+
+// providerPaneExecutor serves a session's agent pane (fakeAgentPaneRow),
+// whose GC_PROVIDER is provider, and answers every other command with "".
+// paneErr, when set, fails the agent-pane lookup.
+type providerPaneExecutor struct {
+	provider string
+	paneErr  error
+}
+
+func (e providerPaneExecutor) execute(args []string) (string, error) {
+	if row, ok := fakeAgentPaneRow(args); ok {
+		if e.paneErr != nil {
+			return "", e.paneErr
+		}
+		return row, nil
+	}
+	if tmuxSubcommand(args) == "show-environment" && args[len(args)-1] == "GC_PROVIDER" {
+		return "GC_PROVIDER=" + e.provider, nil
+	}
+	return "", nil
+}
+
+func (e providerPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// Kills a submit verification read off a pane other than the one the nudge
+// sent to, or a pane that cannot be resolved read as one the scan does not
+// verify: only claude and codex are verified.
+func TestSubmitVerifiedReadsTheAgentPane(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		ex           providerPaneExecutor
+		verified, ok bool
+	}{
+		{"claude", providerPaneExecutor{provider: "claude"}, true, true},
+		{"codex", providerPaneExecutor{provider: "codex"}, true, true},
+		{"pi", providerPaneExecutor{provider: "pi"}, false, true},
+		{"no pane", providerPaneExecutor{provider: "claude", paneErr: errors.New("no server running")}, false, false},
+	} {
+		tm := &Tmux{cfg: DefaultConfig(), exec: c.ex}
+		if verified, ok := tm.submitVerified("s"); verified != c.verified || ok != c.ok {
+			t.Errorf("%s: submitVerified = %v, %v; want %v, %v", c.name, verified, ok, c.verified, c.ok)
+		}
+	}
+}
+
+// Kills a startup ladder whose decisions go unrecorded on the path a start
+// takes (ga-f4ovjm.69): a startup nudge the scan confirms on its first send
+// ends the ladder with no busy look, and that send is the ladder's decision;
+// a ladder that retries records each send and each look. A family the scan
+// does not verify is sent best-effort, so its send that succeeded saw no
+// turn start: none. The ladder sends exactly as it does with the switch
+// off, and off records nothing.
+func TestShadowStartupLadderRecordsEachDecision(t *testing.T) {
+	stubShadowFollow(t)
+	origBackoffs := startupNudgeRetryBackoffs
+	startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { startupNudgeRetryBackoffs = origBackoffs })
+	idle := psRecord(t, readNonce, runtime.ProgramIdle, liveSince)
+	started := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 2 })
+	// The first read is the baseline, before the ladder's first send.
+	record := func(n int) string {
+		if n == 0 {
+			return idle
+		}
+		return started
+	}
+	for _, c := range []struct {
+		name     string
+		provider string
+		sends    []error
+		scrape   []runtime.ProgramVerdict
+	}{
+		{"confirmed on the first send", "claude", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictConfirmed}},
+		{"confirmed on a retry", "claude", []error{ErrNudgeSubmitUnconfirmed, nil}, []runtime.ProgramVerdict{
+			runtime.ProgramVerdictUnconfirmed, runtime.ProgramVerdictUnconfirmed, runtime.ProgramVerdictConfirmed,
+		}},
+		{"sent best-effort to a family the scan does not verify", "pi", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictNone}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := runtime.Config{Command: c.provider, Nudge: "start working"}
+			pane := providerPaneExecutor{provider: c.provider}
+			offOps := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(c.sends)}
+			off, offEx := shadowTmux(runtime.ProgramStatusOff, pane, record, nil)
+			offErr := doStartSession(context.Background(), shadowedStartOps{offOps, off}, "s", cfg, DefaultConfig().SetupTimeout)
+
+			col := newShadowCollector()
+			shOps := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(c.sends)}
+			sh, _ := shadowTmux(runtime.ProgramStatusShadow, pane, record, col.sink)
+			shErr := doStartSession(context.Background(), shadowedStartOps{shOps, sh}, "s", cfg, DefaultConfig().SetupTimeout)
+
+			if offErr != nil || shErr != nil {
+				t.Fatalf("start: shadow %v, off %v; want both nil", shErr, offErr)
+			}
+			if !slices.Equal(offOps.callMethods(), shOps.callMethods()) {
+				t.Fatalf("shadow start called %v, off %v", shOps.callMethods(), offOps.callMethods())
+			}
+			if offEx.programReads() != 0 {
+				t.Fatalf("the switch off took %d program reads, want none", offEx.programReads())
+			}
+			// Comparisons reach the sink from shadow goroutines, in any order.
+			var scrapes []runtime.ProgramVerdict
+			for _, g := range col.wait(t, len(c.scrape)) {
+				if g.Point != runtime.ProgramPointStartupLadder || g.Program != runtime.ProgramVerdictConfirmed {
+					t.Fatalf("comparison %+v, want startup_ladder beside a confirmed record", g)
+				}
+				scrapes = append(scrapes, g.Scrape)
+			}
+			slices.Sort(scrapes)
+			want := slices.Clone(c.scrape)
+			slices.Sort(want)
+			if !slices.Equal(scrapes, want) {
+				t.Fatalf("scrape verdicts %v, want %v", scrapes, want)
+			}
+		})
+	}
+}
+
+// Kills an idle wait decided outside the leaf (the op lane's boundary) that
+// the leaf does not record as its own wait_for_idle: on a decision reading
+// taken before the call returns, followed to time the record's boundary.
+// Off shadow it reads nothing.
+func TestShadowIdleWaitDecidedOutsideTheLeaf(t *testing.T) {
+	stubShadowFollow(t)
+	working := psRecord(t, readNonce, runtime.ProgramWorking, liveSince)
+	ended := psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+		s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 3, 1, 1, time.Now()
+	})
+	records := []string{working, working, ended}
+	record := func(n int) string { return records[min(n, len(records)-1)] }
+
+	off, offEx := shadowTmux(runtime.ProgramStatusOff, &fakeExecutor{}, record, nil)
+	(&Provider{tm: off}).ProgramStatusShadowIdleWait("s", time.Now(), time.Now(), runtime.ProgramVerdictIdle)
+	if offEx.programReads() != 0 {
+		t.Fatalf("the switch off took %d program reads, want none", offEx.programReads())
+	}
+
+	col := newShadowCollector()
+	sh, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, record, col.sink)
+	(&Provider{tm: sh}).ProgramStatusShadowIdleWait("s", time.Now(), time.Now(), runtime.ProgramVerdictIdle)
+	if ex.programReads() < 1 {
+		t.Fatal("the decision reading was not taken before the call returned")
+	}
+	got := col.wait(t, 1)[0]
+	if got.Point != runtime.ProgramPointWaitForIdle || got.Scrape != runtime.ProgramVerdictIdle || got.Program != runtime.ProgramVerdictBusy || !got.Timed {
+		t.Fatalf("comparison %+v, want a timed wait_for_idle idle/busy", got)
 	}
 }

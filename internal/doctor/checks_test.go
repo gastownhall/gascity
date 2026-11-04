@@ -223,6 +223,38 @@ func TestConfigValidCheck_BadRig(t *testing.T) {
 	}
 }
 
+func TestConfigValidCheck_GuardedRigWarnsNotEnforced(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs:      []config.Rig{{Name: "beta", Path: filepath.Join(t.TempDir(), "beta"), Federation: config.RigFederationRig}},
+	}
+	c := NewConfigValidCheck(cfg)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "NOT protected") {
+		t.Errorf("status = %d, msg = %q; want a warning that rig beta is not protected", r.Status, r.Message)
+	}
+}
+
+func TestConfigValidCheck_GuardedRigSharingADirectory(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: shared, Prefix: "al"},
+			{Name: "beta", Path: shared, Prefix: "be", Federation: config.RigFederationRig},
+		},
+	}
+	c := NewConfigValidCheck(cfg)
+	// A nil context must not panic.
+	r := c.Run(nil)
+	if r.Status != StatusError || !strings.Contains(r.Message, "needs its own store directory") {
+		t.Errorf("status = %d, msg = %q; want the shared-directory error", r.Status, r.Message)
+	}
+}
+
 // --- ConfigRefsCheck ---
 
 func TestConfigRefsCheck_AllValid(t *testing.T) {

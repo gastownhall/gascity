@@ -43,7 +43,7 @@ import (
 //
 // Gates exist only on a split city, and only in the store the drain's item
 // workflow lives in — the class binding (a SQLite or workspace engine). A drain
-// on a city with no binding names no member stores, never classifies a blocker
+// on a city with no binding names no member tail, never classifies a blocker
 // as unprojectable, and so never mints one. A gate must never land in a bd
 // work store: bd would read the gate's own edges by its prefix rules, not ours.
 //
@@ -169,8 +169,8 @@ func crossStoreGateRoot(control beads.Bead) string {
 
 // crossStoreGateID is the deterministic id of control's gate for blockerID in
 // store, or "" when store declares no mint prefix to pin it under.
-func crossStoreGateID(store beads.Store, control beads.Bead, blockerID string) string {
-	prefixed, ok := store.(interface{ IDPrefix() string })
+func crossStoreGateID(store beads.GraphStore, control beads.Bead, blockerID string) string {
+	prefixed, ok := beads.As[interface{ IDPrefix() string }](store)
 	if !ok {
 		return ""
 	}
@@ -244,7 +244,7 @@ func controllerClosed(gate beads.Bead) bool {
 // operator-closed gate is final, and its override is recorded the first time
 // it is seen. It returns the gate's id when it holds the item, "" when it does
 // not.
-func gateAnswer(store beads.Store, gate beads.Bead, foundOpen bool) (string, error) {
+func gateAnswer(store beads.GraphStore, gate beads.Bead, foundOpen bool) (string, error) {
 	if gate.Status != "closed" {
 		live, err := clearLeftoverGateMarker(store, gate)
 		if err != nil {
@@ -323,7 +323,7 @@ func classifyHandBack(b beads.Bead) gateHandBack {
 // reopened with its state cleared (it holds the item until the pass judges it
 // afresh). The release pass lists only open and released gates, so a gate
 // left closed any other way would let the item run on a judgement nobody made.
-func handBackGate(store beads.Store, gate beads.Bead) (string, error) {
+func handBackGate(store beads.GraphStore, gate beads.Bead) (string, error) {
 	kind := classifyHandBack(gate)
 	still := func(b beads.Bead) bool { return classifyHandBack(b) == kind }
 	switch kind {
@@ -382,7 +382,7 @@ func leftoverOpenGateMarker(b beads.Bead) bool {
 // caller cleared it), or both revision checks were lost and the marker stays
 // for a later pass. That row may be closed, and is judged as the closed gate
 // it is, never as the caller's open copy with the marker deleted.
-func clearLeftoverGateMarker(store beads.Store, gate beads.Bead) (beads.Bead, error) {
+func clearLeftoverGateMarker(store beads.GraphStore, gate beads.Bead) (beads.Bead, error) {
 	if !leftoverOpenGateMarker(gate) {
 		return gate, nil
 	}
@@ -397,7 +397,7 @@ func clearLeftoverGateMarker(store beads.Store, gate beads.Bead) (beads.Bead, er
 		return gate, fmt.Errorf("clearing the leftover marker of reopened cross-store gate %s: %w", gate.ID, err)
 	}
 	if !wrote {
-		live, err := beads.HandlesFor(store).Live.Get(gate.ID)
+		live, err := beads.LiveFor(store).Get(gate.ID)
 		if err != nil {
 			return gate, fmt.Errorf("re-reading cross-store gate %s after its leftover marker was not cleared: %w", gate.ID, err)
 		}
@@ -416,8 +416,8 @@ func clearLeftoverGateMarker(store beads.Store, gate beads.Bead) (beads.Bead, er
 
 // reReadGateAnswer answers from the gate's live row after a write whose
 // premise moved under it: an open gate holds, a closed one does not.
-func reReadGateAnswer(store beads.Store, id string) (string, error) {
-	fresh, err := beads.HandlesFor(store).Live.Get(id)
+func reReadGateAnswer(store beads.GraphStore, id string) (string, error) {
+	fresh, err := beads.LiveFor(store).Get(id)
 	if err != nil {
 		return "", fmt.Errorf("re-reading cross-store gate %s: %w", id, err)
 	}
@@ -437,9 +437,9 @@ func reReadGateAnswer(store beads.Store, id string) (string, error) {
 // city's beads.conditional_writes, or a store with none) the live re-check is
 // the guard, as for every other controller close (autocloseCloseIfStill). It
 // reports whether it wrote.
-func writeGateIfStill(store beads.Store, id string, still func(beads.Bead) bool, opts beads.UpdateOpts, closing bool) (bool, error) {
+func writeGateIfStill(store beads.GraphStore, id string, still func(beads.Bead) bool, opts beads.UpdateOpts, closing bool) (bool, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		fresh, err := beads.HandlesFor(store).Live.Get(id)
+		fresh, err := beads.LiveFor(store).Get(id)
 		if err != nil {
 			return false, err
 		}
@@ -470,7 +470,7 @@ func writeGateIfStill(store beads.Store, id string, still func(beads.Bead) bool,
 // also clears its state marker and close reason (set empty: every engine
 // takes that in the same write, where removing a key is refused by some), so
 // it holds its items again and reads as an ordinary open gate.
-func reopenCrossStoreGate(store beads.Store, id string) (bool, error) {
+func reopenCrossStoreGate(store beads.GraphStore, id string) (bool, error) {
 	wrote, err := writeGateIfStill(store, id, func(b beads.Bead) bool {
 		return b.Status == "closed" && controllerClosed(b)
 	}, reopenGateOpts(), false)
@@ -498,7 +498,7 @@ func reopenGateOpts() beads.UpdateOpts {
 // closeCrossStoreGate closes an open gate in ONE write carrying its
 // controller state (released or retired) and why. A gate retired while open
 // records it, so a reopened drain hands it back to be judged afresh.
-func closeCrossStoreGate(store beads.Store, id, state, reason string) (bool, error) {
+func closeCrossStoreGate(store beads.GraphStore, id, state, reason string) (bool, error) {
 	closed := "closed"
 	meta := map[string]string{
 		beadmeta.CrossStoreGateStateMetadataKey: state,
@@ -522,10 +522,10 @@ func closeCrossStoreGate(store beads.Store, id, state, reason string) (bool, err
 // whether the caller FOUND the blocker holding its dependents (open, or closed
 // blocked), rather than not finding it at all: only then is a controller-closed
 // gate reopened (gateAnswer). It returns "" when no gate holds the item.
-func ensureCrossStoreGate(store beads.Store, control beads.Bead, blockerID string, foundOpen bool) (string, error) {
+func ensureCrossStoreGate(store beads.GraphStore, control beads.Bead, blockerID string, foundOpen bool) (string, error) {
 	pinned := crossStoreGateID(store, control, blockerID)
 	if pinned != "" {
-		if gate, err := beads.HandlesFor(store).Live.Get(pinned); err == nil {
+		if gate, err := beads.LiveFor(store).Get(pinned); err == nil {
 			return gateAnswer(store, gate, foundOpen)
 		} else if !errors.Is(err, beads.ErrNotFound) {
 			return "", fmt.Errorf("reading cross-store gate %s: %w", pinned, err)
@@ -558,7 +558,7 @@ func ensureCrossStoreGate(store beads.Store, control beads.Bead, blockerID strin
 		if pinned != "" {
 			// A racing minter won the pinned id: settle its gate exactly as
 			// one found up front.
-			if raced, getErr := beads.HandlesFor(store).Live.Get(pinned); getErr == nil {
+			if raced, getErr := beads.LiveFor(store).Get(pinned); getErr == nil {
 				return gateAnswer(store, raced, foundOpen)
 			}
 		}
@@ -576,7 +576,7 @@ func ensureCrossStoreGate(store beads.Store, control beads.Bead, blockerID strin
 // cmd/gc rig_import.go) creates exactly this bead and adds the same-store edge
 // owner -> gate itself. The gate retires when owner closes (judgeCrossStoreGate
 // reads the owner as its drain control).
-func NewCrossStoreGate(store beads.Store, owner beads.Bead, blockerID string) beads.Bead {
+func NewCrossStoreGate(store beads.GraphStore, owner beads.Bead, blockerID string) beads.Bead {
 	return beads.Bead{
 		ID:     crossStoreGateID(store, owner, blockerID),
 		Title:  fmt.Sprintf("Waits for %s, held in another store", blockerID),
@@ -595,8 +595,8 @@ func NewCrossStoreGate(store beads.Store, owner beads.Bead, blockerID string) be
 // first: deleting a bead an open gate names makes that gate's blocker
 // unresolvable, which holds its drain items forever (the delete guard's half
 // of the contract; the guard lives with the delete, not here).
-func OpenCrossStoreGatesNaming(store beads.Store, blockerID string) ([]beads.Bead, error) {
-	if store == nil || strings.TrimSpace(blockerID) == "" {
+func OpenCrossStoreGatesNaming(store beads.GraphStore, blockerID string) ([]beads.Bead, error) {
+	if store == (beads.GraphStore{}) || strings.TrimSpace(blockerID) == "" {
 		return nil, nil
 	}
 	return store.List(beads.ListQuery{
@@ -673,9 +673,9 @@ type CrossStoreGateReport struct {
 // nothing: the gates whose blocker it may hold are left as they are, and the
 // report names the store (Unreadable) and the gates held only on it
 // (Undecided).
-func ReleaseCrossStoreGates(store beads.Store, resolve CrossStoreBlockerResolver) (CrossStoreGateReport, error) {
+func ReleaseCrossStoreGates(store beads.GraphStore, resolve CrossStoreBlockerResolver) (CrossStoreGateReport, error) {
 	var report CrossStoreGateReport
-	if store == nil || resolve == nil {
+	if store == (beads.GraphStore{}) || resolve == nil {
 		return report, nil
 	}
 	open, err := store.List(beads.ListQuery{
@@ -837,8 +837,8 @@ func ReleaseCrossStoreGates(store beads.Store, resolve CrossStoreBlockerResolver
 // leaves holding their drain items only because a store that may hold their
 // blocker was not read (CrossStoreGateReport.Undecided), and the stores
 // resolve could not read. gc doctor reports them.
-func CrossStoreGatesHeldUndecided(store beads.Store, open []beads.Bead, resolve CrossStoreBlockerResolver) ([]beads.Bead, []error, error) {
-	if store == nil || resolve == nil {
+func CrossStoreGatesHeldUndecided(store beads.GraphStore, open []beads.Bead, resolve CrossStoreBlockerResolver) ([]beads.Bead, []error, error) {
+	if store == (beads.GraphStore{}) || resolve == nil {
 		return nil, nil, nil
 	}
 	open = slices.DeleteFunc(slices.Clone(open), func(g beads.Bead) bool { return g.Status == "closed" })
@@ -899,7 +899,7 @@ const (
 
 // gateControls reads the drain control of every gate, one read per distinct
 // control in the gates' own store (the binding, which is local).
-func gateControls(store beads.Store, gates []beads.Bead) (map[string]gateControlState, error) {
+func gateControls(store beads.GraphStore, gates []beads.Bead) (map[string]gateControlState, error) {
 	out := make(map[string]gateControlState)
 	var ids []string
 	for _, gate := range gates {

@@ -652,6 +652,7 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 // routing instead. Any other error (a live graph.v2 workflow conflict, or a
 // metadata-clear failure) keeps hard-failing regardless of this flag.
 func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName, method, errLabel string, fallbackToPlainOnMoleculeConflict bool, result SlingResult) (SlingResult, error) {
+	depsWork := beads.WorkStore{Store: deps.Store}
 	a := opts.Target
 	formulaVars := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
@@ -666,7 +667,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title: opts.Title,
 			Vars:  formulaVars,
 		}); err != nil {
-			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+			graphv2.CloseSyntheticInputConvoy(depsWork, graphInv.InputConvoy, beadID)
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		var fellBackToPlainRoute bool
@@ -747,7 +748,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// nil error). Either way the convoy was never handed to a live
 			// graph workflow, so close it here — otherwise it leaks as an
 			// open, claim-attracting convoy.
-			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+			graphv2.CloseSyntheticInputConvoy(depsWork, graphInv.InputConvoy, beadID)
 		}
 		return lockedResult, lockedErr
 	}
@@ -1015,7 +1016,7 @@ func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, bead
 				// bd update --parent evicts any prior parent-child edge; the
 				// tracks dep is additive and does not disturb the epic
 				// rollup.
-				if err := convoycore.TrackItem(deps.Store, convoy.ID, beadID); err != nil {
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: deps.Store}}, convoy.ID, beadID); err != nil {
 					result.MetadataErrors = append(result.MetadataErrors,
 						fmt.Sprintf("linking bead to convoy: %v", err))
 				} else {
@@ -1258,7 +1259,8 @@ func listSourceWorkflowRoots(deps SlingDeps, sourceBeadID string) ([]sourceWorkf
 // expose only one store (no cross-store SourceWorkflowStores enumerator). Every
 // scan failure is fatal here because there is no non-selected store to tolerate.
 func singleStoreSourceWorkflowRoots(store beads.Store, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowRoot, error) {
-	roots, err := sourceworkflow.ListLiveRoots(store, sourceBeadID, sourceStoreRef, sourceStoreRef)
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	roots, err := sourceworkflow.ListLiveRoots(beads.GraphMolecule(beads.GraphStore{Store: store}), sourceBeadID, sourceStoreRef, sourceStoreRef)
 	if err != nil {
 		return nil, err
 	}
@@ -1347,7 +1349,8 @@ func (c *sourceWorkflowRootCollector) scanStore(index int, info SourceWorkflowSt
 	var matches []beads.Bead
 	err := beads.RelicRead(func() error {
 		var listErr error
-		matches, listErr = sourceworkflow.ListLiveRoots(info.Store, c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
+		// info.Store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		matches, listErr = sourceworkflow.ListLiveRoots(beads.GraphMolecule(beads.GraphStore{Store: info.Store}), c.sourceBeadID, c.sourceStoreRef, rootStoreRef)
 		return listErr
 	})
 	if err != nil {
@@ -1561,7 +1564,7 @@ func pendingGraphWorkflowLaunch(rootID, sourceBeadID, workBeadID, mergeStrategy 
 			// own members. Closing it through deps.Store on a city that
 			// relocates graph reads an empty subtree and silently leaves the
 			// abandoned launch open and claim-attracting.
-			_, err := sourceworkflow.CloseWorkflowSubtree(deps.graphStore(), rootID)
+			_, err := sourceworkflow.CloseWorkflowSubtree(beads.GraphMolecule(beads.GraphStore{Store: deps.graphStore()}), rootID)
 			return err
 		},
 	}
@@ -1596,7 +1599,8 @@ func snapshotBlockingWorkflowState(roots []sourceWorkflowRoot, replacement pendi
 		if root.root.ID == "" || sameWorkflowRoot(root, replacement.workflowID, replacement.storeRef) {
 			continue
 		}
-		snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(root.store, root.root.ID)
+		// root.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(beads.GraphMolecule(beads.GraphStore{Store: root.store}), root.root.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -1613,7 +1617,8 @@ func snapshotBlockingWorkflowState(roots []sourceWorkflowRoot, replacement pendi
 func restoreBlockingWorkflowState(states []workflowRestoreState) error {
 	var restoreErr error
 	for _, state := range states {
-		if err := sourceworkflow.RestoreWorkflowBeads(state.store, state.snapshots); err != nil {
+		// state.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+		if err := sourceworkflow.RestoreWorkflowBeads(beads.GraphMolecule(beads.GraphStore{Store: state.store}), state.snapshots); err != nil {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore workflow %s in %s: %w", state.rootID, state.storeRef, err))
 		}
 	}
@@ -1720,7 +1725,8 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 				if root.root.ID == "" || sameWorkflowRoot(root, launch.workflowID, launch.storeRef) {
 					continue
 				}
-				if _, err := sourceworkflow.CloseWorkflowSubtree(root.store, root.root.ID); err != nil {
+				// root.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+				if _, err := sourceworkflow.CloseWorkflowSubtree(beads.GraphMolecule(beads.GraphStore{Store: root.store}), root.root.ID); err != nil {
 					if rollbackErr := rollbackSourceWorkflowReplacement(launch, deps.Store, sourceBeadID, previousWorkflowID, previousRouting, restoreState); rollbackErr != nil {
 						return errors.Join(fmt.Errorf("close superseded workflow %s for %s: %w", root.root.ID, sourceBeadID, err), rollbackErr)
 					}
@@ -1967,7 +1973,7 @@ func isGraphSlingFormula(ctx context.Context, formulaName string, searchPaths []
 func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID string, opts SlingOpts, deps SlingDeps, a config.Agent) (graphv2.Invocation, bool, error) {
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	vars := buildGraphV2SlingFormulaVars(formulaName, targetID, opts.Vars, a, deps)
-	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars)
+	inv, err := graphv2.PrepareInvocation(ctx, beads.WorkStore{Store: deps.Store}, formulaName, searchPaths, targetID, vars)
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}
@@ -2059,7 +2065,7 @@ func sourceWorkflowLockScope(deps SlingDeps) string {
 
 func listContainerChildren(querier BeadChildQuerier, containerID string, includeClosed bool) ([]beads.Bead, error) {
 	if store, ok := querier.(beads.Store); ok {
-		return convoycore.Members(store, containerID, includeClosed)
+		return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, containerID, includeClosed)
 	}
 	return querier.List(beads.ListQuery{
 		ParentID:      containerID,

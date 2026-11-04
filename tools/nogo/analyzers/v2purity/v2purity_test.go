@@ -430,6 +430,15 @@ func TestDefaultForbidsTheCapabilityHelpers(t *testing.T) {
 	}
 }
 
+// TestDefaultForbidsTheMoleculeTarget: the molecule target (typed-stores
+// T5a) is a store handle like the class handles, so a pure root may not read
+// through it either.
+func TestDefaultForbidsTheMoleculeTarget(t *testing.T) {
+	if !slices.Contains(v2purity.Default.ForbiddenTypes, "github.com/gastownhall/gascity/internal/beads.MoleculeTarget") {
+		t.Error("beads.MoleculeTarget is not a forbidden type")
+	}
+}
+
 // Kills a forbidden interface found only where the driver shows it: under
 // an export-data driver, a package that reaches the interface only through
 // another package's embedding does not see it among its imports, so the

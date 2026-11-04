@@ -168,7 +168,7 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 	if scopeKind == "rig" {
 		store = s.state.BeadStore(scopeRef)
 	}
-	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
+	detail, err := buildFormulaDetail(ctx, beads.WorkStore{Store: store}, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, apierr.FormulaNotFound.Msg(err.Error())

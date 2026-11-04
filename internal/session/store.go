@@ -680,7 +680,7 @@ func (s *Store) CloseWithoutReason(id string) error {
 // Callers use `if !sessFront.Backed() { return }` instead of reaching for the
 // raw embedded store to nil-check it.
 func (s *Store) Backed() bool {
-	return s != nil && s.store.Store != nil
+	return s != nil && s.store != (beads.SessionStore{})
 }
 
 // CircuitResetGeneration returns the persisted session-circuit-breaker reset

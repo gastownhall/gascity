@@ -27,7 +27,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)

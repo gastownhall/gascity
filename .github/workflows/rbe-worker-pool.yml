@@ -115,6 +115,33 @@ jobs:
           # dispatch starts cold.
           RBE_WARM_URL: ${{ vars.RBE_WARM_URL || '' }}
           RBE_WARM_EVERY: ${{ vars.RBE_WARM_EVERY || '1' }}
+          # Hot tier (infra README "Hot blobs on R2"): compressed reads of big
+          # blobs come from the read-only R2 hot tier through the worker's
+          # rbe-hotread sidecar on 127.0.0.1:50090 (slot users refused), every
+          # blob re-hashed; any miss or failure reads the zread host. Needs
+          # RBE_WIRE_ZSTD=1. Off until RBE_HOT_URL is set, to https://HOST/h/oss
+          # (this tier's prefix alone: anything else, the worker warns and runs
+          # without it). RBE_HOT_EVERY=N takes the runs whose run id is a
+          # multiple of N, as RBE_WARM_EVERY does; keep RBE_WARM_EVERY at 1
+          # during a hot canary, or the two arms mix. Rollback: unset
+          # RBE_HOT_URL (it also feeds rbe-worker-legacy.yml), and new VMs read
+          # the zread host alone; for an emergency also cancel the running
+          # pool runs, which keep their sidecar until they retire.
+          RBE_HOT_URL: ${{ vars.RBE_HOT_URL || '' }}
+          RBE_HOT_EVERY: ${{ vars.RBE_HOT_EVERY || '1' }}
+          # Local CAS cap (blacksmith-worker.sh CAS_MAX_BYTES; empty: its
+          # 150 GB default). Plain decimal bytes, 10 to 13 digits, no leading
+          # zero (^[1-9][0-9]{9,12}$): 400 GB is 400000000000. Anything else
+          # (400e9, 400G, 4.0e11) makes every worker exit 2 at start, taking
+          # this pool down. The 32-vCPU runners have 1.5 TB; heavy VMs end
+          # pinned at 150 GB (2026-11-02), fetching again what they evict.
+          # NativeLink keeps an uncounted 0o555 copy of executable inputs, so
+          # the CAS can take up to twice this on disk. Each VM fixes the value
+          # when it starts. Rollback: unset RBE_CAS_MAX_BYTES (it also feeds
+          # rbe-worker-legacy.yml), and new VMs take 150 GB. For an emergency,
+          # also cancel the running pool runs, which keep their cap until they
+          # retire.
+          CAS_MAX_BYTES: ${{ vars.RBE_CAS_MAX_BYTES || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # Beside the worker, which serves for hours: wait for its drift upload to

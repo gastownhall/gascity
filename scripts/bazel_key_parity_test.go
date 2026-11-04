@@ -46,9 +46,15 @@ var bazelClientEnvAllowed = map[string]bool{"GC_TEST_REPO_ROOT": true}
 // The result-policy flags were checked against Bazel 9.2.0 on
 // //scripts/cipolicy:cipolicy_test: --flaky_test_attempts (any value) and
 // --[no]cache_test_results leave the aquery action keys and the executed
-// TestRunner spawn (arguments, environment, input digests, outputs,
-// platform, timeout: what the remote action cache hashes) unchanged, while a
-// different --test_env=PATH changes both. --profile only writes a local file.
+// TestRunner spawn's arguments, environment, input digests, outputs,
+// platform and timeout unchanged, while a different --test_env=PATH changes
+// both. That comparison missed Action.do_not_cache, which the REAPI action
+// digest also hashes: --nocache_test_results makes Bazel 9 mark each test
+// spawn no-cache (StandaloneTestStrategy), which sets it, so the TestRunner
+// action gets its own digest (as GoTestRun=+no-cache does below). It stays
+// admitted for --config=fresh, whose runs are meant not to share results;
+// it would re-key any other config that set it. --profile only writes a
+// local file.
 func bazelTransportFlag(flag string) bool {
 	name, _, _ := strings.Cut(flag, "=")
 	switch name {
@@ -175,9 +181,9 @@ func checkBazelKeyParity(bazelrc string) []error {
 // checkBazelRCLocalLines checks lines destined for .bazelrc.local: only
 // build:remote-exec and build:fork-cache transport flags, the fork-cache
 // selection and the remote repo contents cache reader's two lines.
-// bazel.yml's probe-gated `build:fork-cache --remote_cache_compression` (zstd
-// while rbe-cache advertises it) is such a transport flag: compression
-// changes the bytes on the wire, never a digest. The reader's lines
+// `build:fork-cache --remote_cache_compression` (zstd, now committed in
+// .bazelrc's fork-cache) would be such a transport flag: compression changes
+// the bytes on the wire, never a digest. The reader's lines
 // (bazelRRCReadLines) change where external repositories' trees come from
 // and how many threads resolve them; a repository's cached tree is keyed by
 // its rule's predeclared inputs, and with it remote actions keep their keys
@@ -214,6 +220,7 @@ func TestBazelKeyParity(t *testing.T) {
 		"build:remote-exec --remote_download_minimal --jobs=64\n" +
 		"build:fork-cache --remote_cache=" + ep + " --remote_instance_name oss\n" +
 		"build:fork-cache --noremote_local_fallback --experimental_circuit_breaker_strategy=failure\n" +
+		"build:fork-cache --remote_cache_compression\n" +
 		"test:ci --flaky_test_attempts=1\n" +
 		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
 		"test:ci --experimental_use_validation_aspect\n" +
@@ -294,33 +301,23 @@ func TestBazelKeyParity(t *testing.T) {
 
 // TestBazelCIRCLocalCarriesOnlyTransport runs bazel.yml's lane steps that
 // write .bazelrc.local: both repo contents cache readers (the fork-cache one
-// with rbe-cache answering and without) and the zstd step (with rbe-cache
-// advertising zstd and without). Whatever they write must be transport-only,
-// so fork-cache lanes hash actions like trusted, rbe-fork and developer runs.
+// with rbe-cache answering and without). Whatever they write must be
+// transport-only, so fork-cache lanes hash actions like trusted, rbe-fork
+// and developer runs.
 func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
 	rrc := bazelRCLocalLaneStep(t, bazelRRCReadStep)
-	lines, _ := runBazelRCLocalStep(t, rrc.Run, nil)
+	lines := runBazelRCLocalStep(t, rrc.Run, nil)
 	for _, err := range checkBazelRCLocalLines(lines) {
 		t.Errorf("%q: %v", rrc.Name, err)
 	}
 	fork := bazelRCLocalLaneStep(t, bazelForkRRCReadStep)
 	for _, probe := range []string{"", "ok"} {
-		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_RRC_PROBE": probe})
+		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_PROBE": "zstd", "BAZEL_TEST_RRC_PROBE": probe})
 		for _, err := range checkBazelRCLocalLines(run.lines) {
 			t.Errorf("%q, rrc probe %q: %v", fork.Name, probe, err)
 		}
 		if probe == "ok" && !slices.Equal(run.lines, bazelRRCReadLines) {
 			t.Errorf("%q with rbe-cache answering wrote %q, so this test no longer classifies the reader's lines", fork.Name, run.lines)
-		}
-	}
-	step := bazelCacheZstdLaneStep(t)
-	for _, probe := range []string{"", "zstd"} {
-		lines, _ := runBazelRCLocalStep(t, step.Run, map[string]string{"BAZEL_TEST_PROBE": probe})
-		for _, err := range checkBazelRCLocalLines(lines) {
-			t.Errorf("probe %q: %v", probe, err)
-		}
-		if probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
-			t.Errorf("with rbe-cache advertising zstd the step wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
 		}
 	}
 }

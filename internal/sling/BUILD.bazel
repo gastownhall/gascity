@@ -72,6 +72,7 @@ go_test(
         "//internal/agentutil",
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/exec",
         "//internal/beads/splittest",
         "//internal/citylayout",

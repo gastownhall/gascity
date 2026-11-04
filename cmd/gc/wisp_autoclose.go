@@ -154,7 +154,8 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	if !sourceworkflow.IsWorkflowRoot(parent) {
 		return run
 	}
-	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")
+	// graphStore may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(beads.GraphMolecule(beads.GraphStore{Store: graphStore}), parent.ID, "")
 	if err != nil || closed == 0 {
 		return run
 	}
@@ -217,7 +218,7 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 	// side. TrackingConvoysForItem is single-store by contract, so probe both.
 	// On a single-store city graphStore == workStore and this collapses to
 	// the pre-split single read.
-	convoys, err := convoycore.TrackingConvoysForItem(workStore, parent.ID)
+	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: workStore}, parent.ID)
 	if err != nil {
 		return nil
 	}
@@ -227,7 +228,9 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 		var graphConvoys []beads.Bead
 		gerr := beads.FederatedRead(func() error {
 			var listErr error
-			graphConvoys, listErr = convoycore.TrackingConvoysForItem(graphStore, parent.ID)
+			// graphStore is a federated leg, not the work class: the convoys a
+			// graph store may hold are read through it here (typed-store T7).
+			graphConvoys, listErr = convoycore.TrackingConvoysForItem(beads.WorkStore{Store: graphStore}, parent.ID)
 			return listErr
 		})
 		if gerr != nil {
