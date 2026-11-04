@@ -965,7 +965,10 @@ func registerSessionResetTestRuntime(t *testing.T, cityDir string) {
 		t.Fatalf("openCityStoreAt(%s): %v", cityDir, err)
 	}
 	registerResidencyRoutes(cityDir, nil, func() beads.Store { return store })
-	t.Cleanup(func() { unregisterResidencyRoutes(cityDir, nil) })
+	t.Cleanup(func() {
+		unregisterResidencyRoutes(cityDir, nil)
+		_ = closeBeadStoreHandle(store)
+	})
 }
 
 // startSessionResetTestController serves the real controller socket for

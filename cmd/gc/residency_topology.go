@@ -206,6 +206,21 @@ func registerResidencyRoutes(cityPath string, routes *storageRoutes, work func()
 	dropCLIResidencyBindings(key)
 }
 
+// retireCityFunnelForBoot drops every one-shot answer this process holds for
+// cityPath — the funnel's memo and the bindings derived from it — before a
+// boot's pre-registration reads. A supervisor calls it once it holds the
+// city's controller lock, when no runtime of the city can be registered here:
+// an answer taken on an earlier boot, or while the city was stopped (before a
+// `gc storage migrate`, say), must not answer for this one.
+func retireCityFunnelForBoot(cityPath string) {
+	if cityPath == "" {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	retireCLIStorageRoutesFor(key, nil)
+	dropCLIResidencyBindings(key)
+}
+
 // unregisterResidencyRoutes drops a runtime's registration, and ONLY its own.
 // The routes it named are the runtime's to close; this just stops the spine from
 // naming them.
@@ -283,7 +298,9 @@ var (
 //
 // The funnel underneath is already memoized, so what this adds is that the
 // class-to-binding grouping — the part a by-id read would otherwise redo on
-// every call — happens once per process. That is the ga-4qdfn latency fix as a
+// every call — happens once per funnel answer: each hit re-reads the funnel
+// (a memo lookup) and re-derives only when the funnel's routes changed (a
+// runtime registered, or a retired or expired memo was resolved again). That is the ga-4qdfn latency fix as a
 // property of the resolver rather than a short-circuit at one call site; the
 // other half is the identity fast-path, where a single-store city's plan has
 // one leg and performs no probe at all.

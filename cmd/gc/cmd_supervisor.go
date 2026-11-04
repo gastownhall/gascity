@@ -2365,7 +2365,7 @@ func startOneCity(
 	// an earlier boot, or while it was stopped and before a `gc storage
 	// migrate`. The pre-registration reads below (the provider snapshot, the
 	// v2 boot census) must not answer from that memo.
-	retireCLIStorageRoutesFor(path, nil)
+	retireCityFunnelForBoot(path)
 
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(

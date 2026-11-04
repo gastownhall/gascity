@@ -176,6 +176,13 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 				continue
 			}
 		}
+		// A runtime that registered while this resolution ran retired no slot
+		// (there was none yet), so this one would stay open for the whole
+		// registration: retire it now and answer with the runtime's routes.
+		if registered, ok := registeredResidencyEntry(cityPath); ok {
+			retireCLIStorageRoutesFor(clean, registered.routes)
+			return registered.routes
+		}
 		return entry.routes
 	}
 }
@@ -451,8 +458,10 @@ func retireCLIStorageRoutesFor(cityPath string, keep *storageRoutes) {
 // place that knows the last call site has run.
 //
 // The memo is detached under the lock before anything is closed, so a second
-// call closes nothing and a call that races the first cannot hand out a closed
-// store: the next resolution starts from an empty memo and opens again.
+// call closes nothing and the next resolution starts from an empty memo and
+// opens again. A resolution already in flight when the memo is detached is
+// waited for and its routes closed, so its caller can get a closed store for
+// that one call (it fails closed with the store's own error).
 //
 // The DERIVED memo goes with it. cliResidencyBindings caches the class-to-store
 // grouping it read out of these routes, so leaving it behind would let the next

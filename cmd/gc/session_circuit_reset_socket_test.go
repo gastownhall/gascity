@@ -302,8 +302,14 @@ func TestRetireMarksARacingResolversSlotAbandoned(t *testing.T) {
 	if !entry.abandoned {
 		t.Fatal("the slot the retirement completed is not marked abandoned; its resolver would take nil routes on a split city")
 	}
+
+	// The state between a retirement's Once and its delete: an abandoned slot
+	// still in the map. The resolver that finds it must resolve again.
+	cliStorageRoutesMu.Lock()
+	cliStorageRoutesByCity[filepath.Clean(cityDir)] = entry
+	cliStorageRoutesMu.Unlock()
 	if got := cliStorageRoutes(cityDir); got == nil {
-		t.Fatal("cliStorageRoutes resolved nil routes for a split city after the retirement")
+		t.Fatal("cliStorageRoutes answered nil routes from an abandoned slot on a split city")
 	}
 }
 
@@ -338,9 +344,14 @@ func TestBindingsMemoDerivedAcrossARegistrationIsAMiss(t *testing.T) {
 		defer close(registered)
 		registerResidencyRoutes(cityDir, reg, func() beads.Store { return beads.NewMemStore() })
 	}()
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, ok := registeredResidencyEntry(cityDir); ok {
 			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the registration never landed")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -436,8 +447,32 @@ func TestSessionCircuitResetSocketNeedsNoWorkStoreWhenSessionsAreRelocated(t *te
 		registerResidencyRoutes(cityDir, nil, func() beads.Store { return nil })
 		t.Cleanup(func() { unregisterResidencyRoutes(cityDir, nil) })
 		reply := runCircuitResetSocketCmd(t, cityDir, "demo-1")
-		if reply.Outcome != "failed" || !strings.Contains(reply.Error, "has no session store open") {
+		if reply.Outcome != "failed" || !strings.Contains(reply.Error, "has no session store") {
 			t.Fatalf("reset reply = %+v, want a refusal naming the missing session store", reply)
 		}
 	})
+}
+
+// TestRetireCityFunnelForBootRereadsTheConfig is the supervisor's lock-time
+// step: a funnel answer taken while the city was single-store (before a
+// `gc storage migrate`) must not answer for the boot that follows.
+func TestRetireCityFunnelForBootRereadsTheConfig(t *testing.T) {
+	capture, cityDir := bdSQLRefusalCityDir(t, "")
+	_ = capture
+	t.Cleanup(func() { _ = closeCLIStorageRoutes() })
+	if routes := cliStorageRoutes(cityDir); routes != nil {
+		t.Fatalf("precondition: the single-store city resolves nil routes, got %+v", routes)
+	}
+	// The city is migrated onto a binding while this process keeps running.
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\nprefix = \"demo\"\n"+bdSQLRefusalSplitStorage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if routes := cliStorageRoutes(cityDir); routes != nil {
+		t.Fatal("precondition: the settled single-store memo still answers until it is retired")
+	}
+
+	retireCityFunnelForBoot(cityDir)
+	if routes := cliStorageRoutes(cityDir); routes == nil {
+		t.Fatal("after the boot retirement the funnel still answers from the pre-migration memo")
+	}
 }

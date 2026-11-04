@@ -37,7 +37,7 @@ func registeredSessionFrontDoor(cityPath string) (*session.Store, error) {
 	}
 	sessions := scopeStores(cityPath, entry.routes, work).Sessions()
 	if sessions == (beads.SessionStore{}) {
-		return nil, fmt.Errorf("the runtime serving city %s has no session store open (its city work store is not open); retry once it is running", cityPath)
+		return nil, fmt.Errorf("the runtime serving city %s has no session store: its city work store did not open (see the controller log); restart the controller once the store is reachable", cityPath)
 	}
 	return session.NewStore(sessions), nil
 }
