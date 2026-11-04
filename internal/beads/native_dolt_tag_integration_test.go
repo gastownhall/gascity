@@ -4,6 +4,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,9 +42,9 @@ func TestNativeDoltStoreDoltTagOnARealServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tagger, ok := As[DoltTagger](store)
+	tagger, ok := NativeDoltTagger(WorkStore{Store: store})
 	if !ok {
-		t.Fatal("NativeDoltStore does not answer As[DoltTagger]")
+		t.Fatal("NativeDoltTagger does not see the native store under a class handle")
 	}
 	got, err := tagger.DoltTag("gc-storage-snapshot-test", "snapshot test")
 	if err != nil {
@@ -55,14 +56,24 @@ func TestNativeDoltStoreDoltTagOnARealServer(t *testing.T) {
 	if _, err := store.Create(Bead{Title: "after the tag"}); err != nil {
 		t.Fatal(err)
 	}
-	commit, found, err := store.DoltTagCommit("gc-storage-snapshot-test")
+	commit, found, err := tagger.DoltTagCommit("gc-storage-snapshot-test")
 	if err != nil || !found {
 		t.Fatalf("DoltTagCommit = (%q, %v, %v), want the tag", commit, found, err)
 	}
 	if commit != got.Commit {
 		t.Fatalf("the tag points at %s, want the HEAD it reported, %s", commit, got.Commit)
 	}
-	if _, found, err := store.DoltTagCommit("gc-storage-snapshot-missing"); err != nil || found {
+	if _, found, err := tagger.DoltTagCommit("gc-storage-snapshot-missing"); err != nil || found {
 		t.Fatalf("DoltTagCommit of a missing tag = (%v, %v), want not found", found, err)
+	}
+
+	// A read-only (proxied) handle refuses the tag, a write, before it
+	// reaches storage.
+	store.readOnlyReason = "test"
+	if _, err := tagger.DoltTag("gc-storage-snapshot-readonly", "x"); !errors.Is(err, ErrProxiedNativeReadOnly) {
+		t.Fatalf("DoltTag on a read-only handle = %v, want ErrProxiedNativeReadOnly", err)
+	}
+	if _, found, _ := tagger.DoltTagCommit("gc-storage-snapshot-readonly"); found {
+		t.Fatal("a read-only handle took the tag")
 	}
 }

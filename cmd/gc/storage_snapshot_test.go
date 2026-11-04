@@ -871,6 +871,18 @@ func (s *taggingStore) DoltTag(name, _ string) (beads.DoltTagResult, error) {
 	return beads.DoltTagResult{Commit: "abc123", DirtyWorkingSet: true}, nil
 }
 
+func (s *taggingStore) DoltTagCommit(name string) (string, bool, error) {
+	if s.err != nil {
+		return "", false, s.err
+	}
+	for _, tag := range s.tags {
+		if tag == name {
+			return "abc123", true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // TestStorageSnapshotWorkStoreDoltTag is the native-Dolt arm: a store that
 // can be tagged is tagged gc-storage-snapshot-<id> rather than exported, the
 // manifest records the tag and the commit, and a dirty working set is noted.

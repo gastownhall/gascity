@@ -546,7 +546,7 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, id, d
 	}
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close
 	under, _, _ := unwrapBeadPolicyStore(store)
-	tagger, taggable := beads.As[beads.DoltTagger](under)
+	tagger, taggable := beads.NativeDoltTagger(under)
 	files := strings.ReplaceAll(scope.name, ":", "-")
 
 	method := snapshotExactMethod(provider, taggable)
