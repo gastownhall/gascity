@@ -766,6 +766,10 @@ func LegacyInitEnv(env *Env) *Env {
 // real Dolt-backed bd store instead of the file store, and this run's bd and
 // dolt ahead of any host copies but behind the hermetic provider doubles, which
 // must stay first.
+//
+// It keeps base's bd mode: on an Env that runs the real bd (NewEnv's default)
+// gc runs bdPath itself, ahead of the wrapper; on a wrapped Env
+// (WithWrappedBD, WithHostHome) gc finds the wrapper first.
 func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	t.Helper()
 	linkDir := filepath.Join(root, "bin")
@@ -777,11 +781,15 @@ func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	// baseline is the flag-off lane, and an operator running the matrix with
 	// GC_BEADS_PROXIED_NATIVE exported would otherwise measure the other lane
 	// against flag-off expectations and read the result as a regression.
-	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
+	env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
 		Without("GC_BEADS_BACKEND").
 		Without(EnvProxiedNative)
+	if env.RunsRealBD() {
+		env.WithRealBD(bdPath)
+	}
+	return env
 }
 
 // NativeLaneEnv is r's environment with the proxied-native flag on.
