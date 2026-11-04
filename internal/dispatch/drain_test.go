@@ -2374,6 +2374,15 @@ func TestProcessDrainRefusesAWorkLegTheTailDisagreesWith(t *testing.T) {
 			want: errDispatchNoWorkStore,
 		},
 		{
+			// Without a tail the mismatch check would refuse a zero Work too;
+			// this case pins that the zero-Work guard answers first.
+			name: "no tail and no work store",
+			opts: func(beads.Store) ProcessOptions {
+				return ProcessOptions{}
+			},
+			want: errDispatchNoWorkStore,
+		},
+		{
 			name: "no tail and a work store that is not the graph store",
 			opts: func(work beads.Store) ProcessOptions {
 				return ProcessOptions{Work: beadstest.Work(work)}

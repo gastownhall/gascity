@@ -58,10 +58,10 @@ func TestControlMemberTail(t *testing.T) {
 		beadmeta.KindRalph:     true,
 	}
 	for _, kind := range beadmeta.ControlKinds {
-		if got := controlMemberTail(kind, scope, scope); got {
+		if got := controlMemberTail(kind, beads.GraphStore{Store: scope}, beads.WorkStore{Store: scope}); got {
 			t.Errorf("%s on a city that relocates nothing: member tail = true, want false", kind)
 		}
-		if got, want := controlMemberTail(kind, binding, scope), tailKinds[kind]; got != want {
+		if got, want := controlMemberTail(kind, beads.GraphStore{Store: binding}, beads.WorkStore{Store: scope}), tailKinds[kind]; got != want {
 			t.Errorf("%s on a split city: member tail = %v, want %v", kind, got, want)
 		}
 	}

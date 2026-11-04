@@ -268,9 +268,8 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
-	memberTail := controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graphStore, store)
-	graph := beads.GraphStore{Store: graphStore}
-	opts := controlDispatchOptions(cityPath, storePath, graph, beads.WorkStore{Store: store}, memberTail)
+	graph, work := beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}
+	opts := controlDispatchOptions(cityPath, storePath, graph, work, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -381,20 +380,15 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	return nil
 }
 
-// controlMemberTail reports whether a control of kind, held in graphStore and
-// dispatched from the scope store, reads its work beads through the scope
-// store as a member tail. The kinds that read beads they did not create — a
-// drain's convoy members, a retry lane's required-artifact source — need it,
-// but only when the graph class relocated: on any other city graphStore IS
-// store, and no tail keeps each of those reads on the single store the control
-// runs in.
-//
-// TODO(T2/S7): under strict per-class views the two stores are distinct
-// handles over what may be one physical store; compute relocation then as
-// !beads.SameStore over the minted graph and work handles, not as interface
-// inequality on the raw stores.
-func controlMemberTail(kind string, graphStore, store beads.Store) bool {
-	relocated := graphStore != store // residency:allow route-gated work-leg tail: the drain's membership and the retry lane's cross-store required-artifact source read
+// controlMemberTail reports whether a control of kind, held in graph and
+// dispatched from the scope store work, reads its work beads through work as
+// a member tail. The kinds that read beads they did not create — a drain's
+// convoy members, a retry lane's required-artifact source — need it, but only
+// when the graph class relocated: on any other city graph and work are one
+// physical store, and no tail keeps each of those reads on the single store
+// the control runs in.
+func controlMemberTail(kind string, graph beads.GraphStore, work beads.WorkStore) bool {
+	relocated := !beads.SameStore(graph, work)
 	switch kind {
 	case beadmeta.KindDrain, beadmeta.KindRetryEval, beadmeta.KindRetry, beadmeta.KindRalph:
 		return relocated

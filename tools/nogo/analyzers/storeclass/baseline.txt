@@ -489,7 +489,6 @@ cmd/gc/cmd_convoy_dispatch.go	controlDispatchOptions	mint	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphBinding	raw-result	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	controlGraphStore	raw-result	1
-cmd/gc/cmd_convoy_dispatch.go	controlMemberTail	raw-param	2
 cmd/gc/cmd_convoy_dispatch.go	controlScopeTakesGraphClass	cap-assert	1
 cmd/gc/cmd_convoy_dispatch.go	decorateDrainItemRecipe	mint	1
 cmd/gc/cmd_convoy_dispatch.go	decorateDrainItemRecipe	raw-param	1

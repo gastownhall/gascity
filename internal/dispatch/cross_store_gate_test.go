@@ -2016,3 +2016,66 @@ func TestCrossStoreGateRereadsPastACache(t *testing.T) {
 		}
 	})
 }
+
+// racingGateMinter is a store whose Create loses a race: another minter's
+// gate, already closed by an operator, lands under the same id first.
+type racingGateMinter struct {
+	beads.Store
+	raced bool
+}
+
+func (s *racingGateMinter) Create(b beads.Bead) (beads.Bead, error) {
+	if s.raced {
+		return s.Store.Create(b)
+	}
+	s.raced = true
+	b.Status = "closed"
+	if _, err := s.Store.Create(b); err != nil {
+		return beads.Bead{}, err
+	}
+	return beads.Bead{}, errors.New("unique constraint: the pinned id is taken")
+}
+
+// TestCrossStoreGateRacedMintRereadsPastACache covers the last of the gate's
+// live reads: after a lost race to mint the pinned gate, ensureCrossStoreGate
+// settles the winner's gate from its live row. The cache still holds an open
+// row for that id from before the gate was removed and re-minted, so a read
+// through it would hold the item on a gate an operator has closed.
+func TestCrossStoreGateRacedMintRereadsPastACache(t *testing.T) {
+	sqlite := sqliteGraphStore(t)
+	backing := &racingGateMinter{Store: sqlite}
+	cache := beads.NewCachingStoreForTestWithPrefix(backing, "gcg", nil)
+	store := beadstest.Graph(cache)
+	control := beads.Bead{ID: "gcg-drain", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-root"}}
+	gateBead := NewCrossStoreGate(store, control, "wrk-blocker")
+	if gateBead.ID == "" {
+		t.Fatal("fixture: the cache declares no mint prefix to pin the gate under")
+	}
+	// The cache primes an open row for the pinned id, which then leaves the
+	// store, so the up-front reads find no gate and the drain mints one.
+	backing.raced = true
+	if _, err := sqlite.Create(gateBead); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlite.Delete(gateBead.ID); err != nil {
+		t.Fatal(err)
+	}
+	backing.raced = false
+	if stale, err := cache.Get(gateBead.ID); err != nil || stale.Status != "open" {
+		t.Fatalf("fixture: cache.Get = %q (%v), want the stale open row", stale.Status, err)
+	}
+
+	answer, err := ensureCrossStoreGate(store, control, "wrk-blocker", true)
+	if err != nil {
+		t.Fatalf("ensureCrossStoreGate: %v", err)
+	}
+	if !backing.raced {
+		t.Fatal("fixture: the drain never tried to mint the gate")
+	}
+	if answer != "" {
+		t.Fatalf("ensureCrossStoreGate = %q, want \"\": the racing minter's gate is operator-closed, and the cache's open row must not hold the item", answer)
+	}
+}
