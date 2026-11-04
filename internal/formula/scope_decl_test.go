@@ -2,6 +2,7 @@ package formula
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -487,4 +488,94 @@ needs = ["setup"]
 	if cleanup := recipe.StepByID("decl-child.cleanup-scope-check"); cleanup != nil {
 		t.Error("teardown step minted a scope-check; teardown is exempt")
 	}
+}
+
+func TestResolveScopeDeclRejectsMalformedNamesAndTeardown(t *testing.T) {
+	cases := []struct {
+		name  string
+		child string
+		want  []string
+	}{
+		{
+			name: "declared_twice_in_one_formula",
+			child: `
+[[scope]]
+name = "dup"
+body = "body"
+members = ["setup"]
+
+[[scope]]
+name = "dup"
+body = "body"
+members = ["implement"]
+`,
+			want: []string{`scope "dup" is declared twice`},
+		},
+		{
+			name: "no_name",
+			child: `
+[[scope]]
+body = "body"
+members = ["setup"]
+`,
+			want: []string{"no name"},
+		},
+		{
+			name: "body_listed_as_teardown",
+			child: `
+[[scope]]
+name = "worktree"
+body = "body"
+members = ["setup"]
+teardown = ["body"]
+`,
+			want: []string{`scope "worktree"`, `"body"`, "teardown"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveScopeDecl(t, tc.child)
+			if err == nil {
+				t.Fatal("Resolve succeeded, want a scope declaration error")
+			}
+			for _, substr := range tc.want {
+				requireErrorContains(t, err, substr)
+			}
+		})
+	}
+}
+
+func TestResolveScopeDeclEarlierParentWinsForASharedName(t *testing.T) {
+	enableV2ForTest(t)
+	dir := t.TempDir()
+	steps := `
+[[steps]]
+id = "a"
+title = "A"
+
+[[steps]]
+id = "b"
+title = "B"
+
+[[steps]]
+id = "body"
+title = "Body"
+needs = ["a", "b"]
+`
+	parent := func(name, member string) string {
+		return "formula = \"" + name + "\"\n\n[requires]\nformula_compiler = \">=2.0.0\"\n\n" +
+			"[[scope]]\nname = \"shared\"\nbody = \"body\"\nmembers = [\"" + member + "\"]\n" + steps
+	}
+	writeNamedFormula(t, dir, "first-parent", parent("first-parent", "a"))
+	writeNamedFormula(t, dir, "second-parent", strings.Replace(parent("second-parent", "b"), steps, "", 1))
+	writeNamedFormula(t, dir, "two-parents", "formula = \"two-parents\"\nextends = [\"first-parent\", \"second-parent\"]\n")
+
+	f, err := resolveScopeFixture(t, "two-parents", dir)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	requireScopeMetadata(t, f, map[string]map[string]string{
+		"a": {"gc.scope_ref": "body", "gc.scope_role": "member"},
+		"b": {},
+	})
 }
