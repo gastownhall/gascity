@@ -580,3 +580,45 @@ func TestTraceStatusOmitsHeadWriteTimeWithoutHead(t *testing.T) {
 		t.Fatalf("status output = %q, want no head write line for a city with no head file", got)
 	}
 }
+
+// TestTraceStatusClampsFutureHeadWriteTime pins that a head write time ahead
+// of the local clock (clock skew between writer and reader) renders as a zero
+// age rather than a negative duration.
+func TestTraceStatusClampsFutureHeadWriteTime(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	written := time.Now().UTC().Add(10 * time.Minute).Truncate(time.Second)
+	rootDir := traceCityRuntimeDir(cityDir)
+	if err := os.MkdirAll(rootDir, sessionReconcilerTraceOwnerDirPerm); err != nil {
+		t.Fatalf("creating trace root: %v", err)
+	}
+	head := sessionReconcilerTraceHead{
+		SchemaVersion: sessionReconcilerTraceSchemaVersion,
+		Seq:           40222373,
+		CurrentPath:   "segments/2026/09/21/segment-000002.jsonl",
+		CurrentBytes:  3178487,
+		UpdatedAt:     written,
+	}
+	data, err := json.Marshal(head)
+	if err != nil {
+		t.Fatalf("marshaling head: %v", err)
+	}
+	headPath := filepath.Join(rootDir, sessionReconcilerTraceHeadFile)
+	if err := os.WriteFile(headPath, data, sessionReconcilerTraceOwnerFilePerm); err != nil {
+		t.Fatalf("writing head: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceStatusWithJSON(false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON(text) = %d; stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, "(0s ago)") {
+		t.Fatalf("status output = %q, want a future head write clamped to (0s ago)", got)
+	}
+	if strings.Contains(got, "(-") {
+		t.Fatalf("status output = %q, want no negative head write age", got)
+	}
+}
