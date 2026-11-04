@@ -552,7 +552,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// a collapsed identity the query env may carry), so liveness readers keep
 	// resolving the assignee to this exact session.
 	alias := strings.TrimSpace(runtimeAlias)
-	assignee := hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
+	assignee := hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName, overrides["GC_SESSION_ORIGIN"])
 	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
 	// work (hookClaimExistingAssignment, claimFirstReadyHookAssignment, and
 	// the display path's hookCandidateVisible own-work check); it must be
@@ -1223,7 +1223,21 @@ func hookSessionAgentForQuery() string {
 // Everything after sessionID is the pre-existing fallback chain, reached only
 // when the environment carries no session bead id (a bare shell, an explicit
 // target outside a session).
-func hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName string) string {
+//
+// One origin is the exception: an unaliased MANUAL session (sessionOrigin ==
+// "manual", GC_SESSION_ORIGIN) claims under its session_name. A manual
+// session's session_name is not a chair: it is minted per session, and
+// session.AssigneeIdentifier — the source of its BEADS_ACTOR and GC_AGENT —
+// gives it the raw session_name, reserving the bead id for pool-managed and
+// ephemeral sessions. Recording the claim under the bead id would leave the
+// session's own bd close/unclaim/heartbeat (actored by BEADS_ACTOR) unable to
+// match the assignee. A pool or ephemeral origin, an unknown origin, and any
+// aliased session keep the order above, so the pool-worker contract does not
+// move.
+func hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName, sessionOrigin string) string {
+	if strings.TrimSpace(sessionOrigin) == "manual" {
+		return firstNonEmptyHookValue(alias, sessionName, sessionID, agentForQuery, resolvedAgentName)
+	}
 	return firstNonEmptyHookValue(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
 }
 

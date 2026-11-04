@@ -720,16 +720,21 @@ select the current ownership string in this order:
 5. session bead ID when no name metadata exists
 
 `BEADS_ACTOR`, API assignment normalization, hook claims, and scripted claims
-must all use that selector. One known divergence remains: `gc hook --claim` is
-origin-blind — it records a claim under the first non-empty of `GC_ALIAS` then
-`GC_SESSION_ID`, so it selects the session bead ID whenever `GC_SESSION_ID` is
-exported. For every pool-managed and `ephemeral` session that is the selector's
-own answer (step 3), but an unaliased **manual** session in template context
-claims under its bead ID while its actor stays `session_name` (step 4).
-Adoption re-stamping deliberately does not repair that case: moving the stored
-spelling would make it differ from the actor bd checks. Making
-`hookClaimAssigneeIdentity` origin-aware is the fix; until then this paragraph
-is the contract.
+must all use that selector. `gc hook --claim` reads the origin the controller
+exported (`GC_SESSION_ORIGIN`) to do so: an unaliased **manual** session claims
+under its `session_name` (step 4), and every other session keeps the order
+`GC_ALIAS`, then `GC_SESSION_ID` (the bead ID, the selector's own answer for a
+pool-managed or `ephemeral` session, step 3), then the agent and session-name
+forms (`hookClaimAssigneeIdentity`). A claim a manual session recorded under its
+bead ID before this change keeps that spelling: adoption re-stamping
+deliberately does not move it, because the stored assignee must stay
+byte-identical to the actor bd checks; the new writer applies to claims made
+after the `gc` binary is deployed.
+
+A script that passes an explicit `--actor` to a `bd` mutation inside a formula
+or pack script must pass `$BEADS_ACTOR` or a `GC_*` chain in a claim-writer
+order; an actor-less mutation already resolves `$BEADS_ACTOR`.
+`TestRawBdMutationRequiresActorOrForce` (`test/packlint`) enforces this.
 
 `GC_AGENT` mirrors the selected value only for compatibility; new ownership
 logic reads `BEADS_ACTOR` or the typed session projection rather than treating
