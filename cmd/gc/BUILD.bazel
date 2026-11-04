@@ -1590,6 +1590,7 @@ go_test(
         "drain_ack_row_test.go",
         "drain_reminder_ack_binding_test.go",
         "drain_reminder_test.go",
+        "drained_named_holder_routed_demand_test.go",
         "drift_client_test.go",
         "drift_history_test.go",
         "drift_test.go",
