@@ -501,6 +501,27 @@ func TestDrainAckKeepsConfiguredNamedIdentityClaims(t *testing.T) {
 	}
 }
 
+// TestReleaseSeatReadsNamedIdentity: a release seat built off the session
+// bead and one built off the row's Info read the same configured named
+// identity, so a path that holds only the row keeps the same claims as the
+// drain-ack path that holds the bead. Kills either reader dropping the field.
+func TestReleaseSeatReadsNamedIdentity(t *testing.T) {
+	const namedIdentity = "frontend/refinery"
+	bead := drainAckSessionBead()
+	bead.Metadata[session.NamedSessionIdentityMetadata] = " " + namedIdentity + " "
+	for name, seat := range map[string]releaseSeat{
+		"Info": releaseSeatOfInfo(sessionInfoFromBead(bead)),
+		"bead": releaseSeatOfBead(bead),
+	} {
+		if !seat.keepsNamedIdentity(beads.Bead{Assignee: namedIdentity}) {
+			t.Errorf("%s seat does not keep a claim assigned to %q", name, namedIdentity)
+		}
+		if seat.keepsNamedIdentity(beads.Bead{Assignee: "worker-1"}) {
+			t.Errorf("%s seat keeps a claim assigned to its session_name", name)
+		}
+	}
+}
+
 // TestRefusedDrainAckNamesAFailedLegRead (F2): a seat's own drain-ack is
 // refused because it holds started work, and a second leg could not be read.
 // The refusal releases nothing, but the failed read is still reported. Kills
