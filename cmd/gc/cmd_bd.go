@@ -1162,7 +1162,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// store AND the store the rest of the chain would pick are the same store,
 	// the answer is that store whatever the probes say — and the passthrough
 	// below is the one bd invocation the command pays.
-	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, args)
+	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, bdScopeProbeArgs(args))
 	fallback, gcRigDiscarded, fallbackErr := bdScopeFallbackTarget(cfg, cityPath, cityTarget, args)
 	if len(candidates) > 0 && fallbackErr == nil && gcRigDiscarded == "" && bdScopeCandidatesAgree(candidates, fallback) {
 		return fallback, nil
@@ -1217,6 +1217,18 @@ func bdScopeProbeCandidates(cfg *config.City, cityTarget execStoreTarget, cityPa
 		}
 	}
 	return candidates
+}
+
+// bdScopeProbeArgs narrows argv to the tokens that may name the bead whose
+// store the command runs in. A release-if-current names its bead first and the
+// expected assignee second; the assignee is an identity, often a pool
+// session's bead id that exists in the city store, so probing it would run
+// the release of a rig bead in the city store, where it is skipped.
+func bdScopeProbeArgs(args []string) []string {
+	if id, _, ok, err := parseBdReleaseIfCurrentArgs(args); ok && err == nil {
+		return []string{args[0], id}
+	}
+	return args
 }
 
 // bdScopeCandidatesAgree reports whether every candidate routes to fallback,
