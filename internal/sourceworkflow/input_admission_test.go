@@ -113,7 +113,10 @@ func TestInputAdmissionLifecycleAndTerminalConvoy(t *testing.T) {
 			}
 			// No work handle: lifecycle admission cannot depend on reading the
 			// input, even while its owner is unavailable.
-			got, err := (InputStores{Graph: stores.Graph}).Admission(context.Background(), candidate)
+			got, err := (InputStores{Graph: stores.Graph, OpenWork: func(context.Context) ([]beads.WorkStore, error) {
+				t.Fatal("lifecycle opened work stores")
+				return nil, errors.New("unavailable")
+			}}).Admission(context.Background(), candidate)
 			if err != nil || !got.Ready {
 				t.Fatalf("lifecycle blocked: %+v, %v", got, err)
 			}
@@ -226,6 +229,70 @@ func TestInputAdmissionRelationFailures(t *testing.T) {
 			if (failure == "read" || failure == "relation") && !strings.Contains(err.Error(), "fixture") {
 				t.Fatal(err)
 			}
+		})
+	}
+}
+
+func TestInputAdmissionStructuralExpansion(t *testing.T) {
+	for _, kind := range []string{"drain", "fanout", "check", ""} {
+		t.Run(kind, func(t *testing.T) {
+			work := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "convoy", Type: "convoy", Status: "open"},
+				{ID: "a", Status: "open"},
+				{ID: "b", Status: "open", Labels: []string{"hold:external"}},
+			}, []beads.Dep{
+				{IssueID: "convoy", DependsOnID: "a", Type: "tracks"},
+				{IssueID: "convoy", DependsOnID: "b", Type: "tracks"},
+				{IssueID: "b", DependsOnID: "a", Type: "blocks"},
+			})
+			graph := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "root", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "convoy"}},
+				{ID: "step", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "root", "gc.kind": kind}},
+			}, nil)
+			stores := InputStores{Graph: beadstest.Graph(graph), Work: []beads.WorkStore{beadstest.Work(work)}}
+			step, _ := graph.Get("step")
+			structural := kind == "drain" || kind == "fanout"
+			check := func(ready bool, wantErr bool) {
+				t.Helper()
+				got, err := stores.Admission(context.Background(), step)
+				if got.Ready != ready || (err != nil) != wantErr {
+					t.Fatalf("Admission = %+v, %v; want ready=%v error=%v", got, err, ready, wantErr)
+				}
+			}
+			check(structural, false)
+			for _, id := range []string{"convoy", "root", "step"} {
+				target := work
+				if id != "convoy" {
+					target = graph
+				}
+				if err := target.Update(id, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+					t.Fatal(err)
+				}
+				step, _ = graph.Get("step")
+				check(false, false)
+				if err := target.Update(id, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
+					t.Fatal(err)
+				}
+				step, _ = graph.Get("step")
+			}
+			if err := work.DepAdd("convoy", "a", "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			check(false, false)
+			if err := work.DepRemove("convoy", "a"); err != nil {
+				t.Fatal(err)
+			}
+			if err := work.DepAdd("convoy", "missing", "tracks"); err != nil {
+				t.Fatal(err)
+			}
+			check(false, true)
+			if err := work.DepRemove("convoy", "missing"); err != nil {
+				t.Fatal(err)
+			}
+			if err := work.DepAdd("a", "b", "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			check(false, true)
 		})
 	}
 }

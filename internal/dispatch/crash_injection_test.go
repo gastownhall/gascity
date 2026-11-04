@@ -530,7 +530,7 @@ func processControlUnderFault(fx crashFixture, bead beads.Bead, inj *writeFaultI
 			crashed = true
 		}
 	}()
-	result, err = ProcessControl(fx.dispatch, bead, fx.opts)
+	result, err = processNativeControl(fx.dispatch, bead, fx.opts)
 	return result, false, err
 }
 

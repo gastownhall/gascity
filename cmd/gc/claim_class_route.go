@@ -848,7 +848,13 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			work := base.WorkflowStore(ctx, dir, env, rootID, "")
 			routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: route.class}}
 			classes := scopeStores("", routes, work)
-			return (sourceworkflow.InputStores{Graph: classes.Graph(), Work: []beads.WorkStore{classes.Work()}}).Admission(ctx, candidate)
+			inputs := sourceworkflow.InputStores{Graph: classes.Graph(), Work: []beads.WorkStore{classes.Work()}}
+			if base.InputWorkStores != nil {
+				inputs.OpenWork = func(ctx context.Context) ([]beads.WorkStore, error) {
+					return base.InputWorkStores(ctx, dir, env, classes.Work())
+				}
+			}
+			return inputs.Admission(ctx, candidate)
 		}
 	}
 	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {

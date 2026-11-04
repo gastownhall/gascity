@@ -92,6 +92,7 @@ go_test(
         "//internal/formulatest",
         "//internal/graphv2",
         "//internal/molecule",
+        "//internal/readywork",
         "//internal/rollout/gate",
         "//internal/session",
         "//internal/sourceworkflow",

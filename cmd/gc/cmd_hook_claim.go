@@ -264,6 +264,9 @@ type hookClaimOps struct {
 	// InputAdmission shares the native-input gate with ready/demand and control
 	// dispatch. Production supplies the named class handles at composition.
 	InputAdmission func(context.Context, string, []string, beads.Bead) (sourceworkflow.InputAdmission, error)
+	// InputWorkStores composes the serving work scopes for admission. It keeps
+	// graph routing separate from the work frame that owns live prerequisites.
+	InputWorkStores func(context.Context, string, []string, beads.WorkStore) ([]beads.WorkStore, error)
 	// SkipDoneWorkflow closes a workflow root and its open steps with
 	// gc.outcome=skipped after InputDone reported the input terminal.
 	SkipDoneWorkflow hookSkipDoneWorkflowFunc

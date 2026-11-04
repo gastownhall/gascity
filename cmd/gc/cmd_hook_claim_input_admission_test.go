@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -106,5 +108,59 @@ func TestHookClaimNativeInputAdmissionSplitRoute(t *testing.T) {
 		if err != nil || got.Ready != ready {
 			t.Fatalf("split admission = %+v, %v; want ready=%v", got, err, ready)
 		}
+	}
+}
+
+// The claim/control work frame must include cross-rig prerequisites, while
+// reusing the current scope's handle to avoid duplicate-residence false errors.
+func TestInputAdmissionWorkFrame(t *testing.T) {
+	cityPath, rigPaths := newReadySuspensionCity(t, readySuspensionRigs)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityWork := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "input", Status: "open"},
+		{ID: "convoy", Type: "convoy", Status: "open"},
+		{ID: "root", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "convoy"}},
+	}, []beads.Dep{
+		{IssueID: "convoy", DependsOnID: "input", Type: "tracks"},
+		{IssueID: "input", DependsOnID: "remote", Type: "blocks"},
+	})
+	remote := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "remote", Status: "open"}}, nil)
+	previous := readyRigStoreOpener
+	fail := false
+	readyRigStoreOpener = func(*config.City) rigStoreOpener {
+		return func(rigPath, _ string) (beads.Store, error) {
+			if fail {
+				return nil, errors.New("work frame unavailable")
+			}
+			if rigPath == rigPaths["alpha"] {
+				return remote, nil
+			}
+			return beads.NewMemStore(), nil
+		}
+	}
+	t.Cleanup(func() { readyRigStoreOpener = previous })
+	inputs, err := inputWorkStoresForScope(context.Background(), cityPath, cityPath, cfg, beadstest.Work(cityWork))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := sourceworkflow.InputStores{Graph: beadstest.Graph(cityWork), Work: inputs}
+	root, _ := cityWork.Get("root")
+	got, err := stores.Admission(context.Background(), root)
+	if err != nil || got.Ready {
+		t.Fatalf("open remote prerequisite: %+v, %v", got, err)
+	}
+	if err := remote.Close("remote"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = stores.Admission(context.Background(), root)
+	if err != nil || !got.Ready {
+		t.Fatalf("closed remote prerequisite: %+v, %v", got, err)
+	}
+	fail = true
+	if _, err := inputWorkStoresForScope(context.Background(), cityPath, cityPath, cfg, beadstest.Work(cityWork)); err == nil {
+		t.Fatal("unread work frame admitted")
 	}
 }

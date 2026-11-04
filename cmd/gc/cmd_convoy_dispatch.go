@@ -273,7 +273,12 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	if relicGraphLeg {
 		inputClasses = scopeStores(cityPath, nil, store)
 	}
-	inputStores := sourceworkflow.InputStores{Graph: inputClasses.Graph(), Work: []beads.WorkStore{scopeStores(cityPath, nil, store).Work()}}
+	inputStores := sourceworkflow.InputStores{
+		Graph: inputClasses.Graph(),
+		OpenWork: func(ctx context.Context) ([]beads.WorkStore, error) {
+			return inputWorkStoresForScope(ctx, cityPath, storePath, cfg, scopeStores(cityPath, nil, store).Work())
+		},
+	}
 	opts.InputStores = &inputStores
 	opts.Tracef = workflowTracef
 	loadCfg := false

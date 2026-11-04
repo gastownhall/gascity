@@ -106,6 +106,7 @@ package main
 // deduped by the plan rather than federated twice.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -404,4 +405,64 @@ func relocatedGraphLegFrom(binding beads.Store, relocated bool, cityStore beads.
 		return nil
 	}
 	return binding
+}
+
+// inputWorkStoresForScope supplies the same serving work frame as ready/demand,
+// preserving the caller's primary handle so a unified graph/work store remains
+// one physical participant. Every other leg is bound to the admission deadline.
+func inputWorkStoresForScope(ctx context.Context, cityPath, scopePath string, cfg *config.City, primary beads.WorkStore) ([]beads.WorkStore, error) {
+	if cfg == nil || len(cfg.Rigs) == 0 {
+		return []beads.WorkStore{scopeStores(cityPath, nil, primary).Work()}, nil
+	}
+	rigStores, err := readyRigLegStores(cfg, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	var cityStore beads.Store = primary
+	matched := samePath(scopePath, cityPath)
+	if !matched {
+		cityStore, err = openCityStoreAtWithConfig(cityPath, cfg)
+		if err != nil {
+			return nil, err
+		}
+		for _, rig := range cfg.Rigs {
+			rigPath := rig.Path
+			if !filepath.IsAbs(rigPath) {
+				rigPath = filepath.Join(cityPath, rigPath)
+			}
+			if samePath(scopePath, rigPath) {
+				if rigStores[rig.Name] == nil {
+					return nil, fmt.Errorf("input admission: scope %s is not serving", scopePath)
+				}
+				rigStores[rig.Name] = primary
+				matched = true
+				break
+			}
+		}
+	}
+	if !matched {
+		return nil, fmt.Errorf("input admission: unknown work scope %s", scopePath)
+	}
+	legs, err := readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
+	if err != nil {
+		return nil, err
+	}
+	var work []beads.WorkStore
+	for _, leg := range legs {
+		if beads.IsNilStore(leg.Work) {
+			continue
+		}
+		raw := leg.Store
+		if !beads.SameStore(raw, primary) {
+			bound, err := scopedStoreLike(ctx, cityPath, cfg, raw)
+			if err != nil {
+				return nil, err
+			}
+			if bound != nil {
+				raw = bound
+			}
+		}
+		work = append(work, scopeStores(cityPath, nil, raw).Work())
+	}
+	return work, ctx.Err()
 }

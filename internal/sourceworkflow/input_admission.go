@@ -19,6 +19,10 @@ import (
 type InputStores struct {
 	Graph beads.GraphStore
 	Work  []beads.WorkStore
+	// OpenWork optionally opens the named work frame for this read. It replaces
+	// Work only after proving ordinary native execution needs admission, so
+	// lifecycle cleanup never depends on opening input stores.
+	OpenWork func(context.Context) ([]beads.WorkStore, error)
 }
 
 // InputAdmission is the current input eligibility of a native workflow step.
@@ -35,6 +39,10 @@ type InputAdmission struct {
 // nonterminal input's current prerequisites and explicit parks to permit work.
 // An input need not close before execution. Routes and assignees are separate
 // admission constraints. The result is scoped to this read, never persisted.
+//
+// Drain and fanout expand graphs without executing their tracked inputs; they
+// validate those relations but omit descendant readiness. The input convoy
+// itself and the graph root/control parks still apply.
 //
 // Finalization, teardown and terminal-root cleanup retain their lifecycle
 // semantics. Ordinary work with no native input relation keeps its eligibility.
@@ -72,24 +80,33 @@ func (s InputStores) Admission(ctx context.Context, candidate beads.Bead) (Input
 	if convoyID == "" {
 		return ready, nil
 	}
+	tail, err := molecule.IsTeardownTailMember(beads.GraphMolecule(s.Graph), candidate)
+	if err != nil {
+		return InputAdmission{}, fmt.Errorf("input admission: resolving teardown for %s: %w", candidate.ID, err)
+	}
+	if tail {
+		return ready, nil
+	}
+	if s.OpenWork != nil {
+		s.Work, err = s.OpenWork(ctx)
+		if err != nil {
+			return InputAdmission{}, fmt.Errorf("input admission: opening work scopes: %w", err)
+		}
+	}
 	walk := inputAdmissionWalk{ctx: ctx, stores: s, convoyID: convoyID, now: time.Now(), active: make(map[string]bool), done: make(map[string]bool)}
+	walk.structural = candidate.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindDrain ||
+		candidate.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindFanout
+	walk.park(root)
+	walk.park(candidate)
 	input, owner, err := walk.resolve(convoyID, false)
 	if err != nil {
 		return InputAdmission{}, err
 	}
-	if err := walk.visit(input, owner, true); err != nil {
+	if err := walk.visit(input, owner, true, true); err != nil {
 		return InputAdmission{}, err
 	}
 	if walk.reason != "" {
-		// Attempts can inherit teardown through their step id alone. Reuse the
-		// existing tail definition rather than copying a topology onto inputs.
-		tail, err := molecule.IsTeardownTailMember(beads.GraphMolecule(s.Graph), candidate)
-		if err != nil {
-			return InputAdmission{}, fmt.Errorf("input admission: resolving teardown for %s: %w", candidate.ID, err)
-		}
-		if !tail {
-			return InputAdmission{BlockerID: walk.blocker, Reason: walk.reason}, nil
-		}
+		return InputAdmission{BlockerID: walk.blocker, Reason: walk.reason}, nil
 	}
 	return ready, nil
 }
@@ -104,6 +121,7 @@ type inputAdmissionWalk struct {
 	now          time.Time
 	active, done map[string]bool
 	reads        int
+	structural   bool
 	reason       string
 	blocker      string
 }
@@ -180,7 +198,14 @@ func (w *inputAdmissionWalk) hold(id, reason string) {
 	}
 }
 
-func (w *inputAdmissionWalk) visit(b beads.Bead, owner beads.LiveReader, input bool) error {
+func (w *inputAdmissionWalk) park(b beads.Bead) {
+	if !convoy.IsTerminalStatus(b.Status) && (b.Status == "blocked" || b.SourceStatus == "blocked" || b.Status == "deferred" || b.SourceStatus == "deferred" ||
+		b.IndefinitelyDeferred || (b.DeferUntil != nil && b.DeferUntil.After(w.now)) || beadmeta.HasDispatchHold(b.Labels)) {
+		w.hold(b.ID, fmt.Sprintf("input %s is parked", b.ID))
+	}
+}
+
+func (w *inputAdmissionWalk) visit(b beads.Bead, owner beads.LiveReader, input, required bool) error {
 	if w.active[b.ID] {
 		return fmt.Errorf("input admission: cyclic relation at %s", b.ID)
 	}
@@ -188,6 +213,7 @@ func (w *inputAdmissionWalk) visit(b beads.Bead, owner beads.LiveReader, input b
 	if input {
 		key = b.ID + ":input"
 	}
+	key = fmt.Sprintf("%s:%t", key, required)
 	if w.done[key] {
 		return nil
 	}
@@ -200,12 +226,11 @@ func (w *inputAdmissionWalk) visit(b beads.Bead, owner beads.LiveReader, input b
 	}
 	w.active[b.ID] = true
 	defer delete(w.active, b.ID)
-	if !input {
+	if !input && required {
 		w.hold(b.ID, fmt.Sprintf("prerequisite %s is not satisfied", b.ID))
 	}
-	if !terminal && (b.Status == "blocked" || b.SourceStatus == "blocked" || b.Status == "deferred" || b.SourceStatus == "deferred" ||
-		b.IndefinitelyDeferred || (b.DeferUntil != nil && b.DeferUntil.After(w.now)) || beadmeta.HasDispatchHold(b.Labels)) {
-		w.hold(b.ID, fmt.Sprintf("input %s is parked", b.ID))
+	if required {
+		w.park(b)
 	}
 	if err := w.check(); err != nil {
 		return err
@@ -227,7 +252,7 @@ func (w *inputAdmissionWalk) visit(b beads.Bead, owner beads.LiveReader, input b
 		if err != nil {
 			return err
 		}
-		if err := w.visit(member, next, tracked); err != nil {
+		if err := w.visit(member, next, tracked, required && (!tracked || !w.structural)); err != nil {
 			return err
 		}
 	}

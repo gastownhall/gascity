@@ -6,6 +6,15 @@ candidate rows; hooks check before a new claim and revalidate before delivery;
 ordinary native controls check after their existing lifecycle cleanup gate.
 Keep those consumers on this domain predicate.
 
+Drain and fanout only expand/reconcile graphs: they validate input relations
+without requiring descendant members to be execution-ready. The input convoy's
+own prerequisites and parks, root/control parks, and existing graph dependency,
+ownership and reservation gates still apply. Discovery must expose these
+structural controls so a ready A can be materialized while B depends on A.
+Generated item work uses its actual unit convoy; executable steps and effectful
+checks require every current input in that scope. Never blanket-exempt controls
+or use missing class handles as a permissive fixture fallback.
+
 Read the root's current `gc.input_convoy_id`, the convoy's actual `tracks`
 relations, and current blocking prerequisites through named Work and Graph
 handles from the residency composition edge. Check explicit blocked/deferred
