@@ -2220,6 +2220,11 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 		// new proxy in ~/.beads/shared-server and persist that choice into the
 		// scope's config.yaml. See applyProxiedSharedServerOptOut.
 		applyProxiedSharedServerOptOut(env)
+		// The store is durable and its timeout may be "never", which bd
+		// refuses beside an ambient BEADS_EPHEMERAL_ROOT=1. Pinned off rather
+		// than the flag omitted: omitted, bd applies its short ephemeral
+		// default and the store is no longer never-idle.
+		env["BEADS_EPHEMERAL_ROOT"] = "0"
 		// The idle timeout is always passed explicitly: left out, bd retires
 		// the proxy and its Dolt child after its own 30s default, and it is
 		// also what makes bd write the client-info sidecar the lifecycle reads

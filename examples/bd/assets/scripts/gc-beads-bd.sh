@@ -4086,6 +4086,9 @@ run_bd_init_proxied() {
         export BEADS_DOLT_PROXIED_SERVER=1
         pin_proxied_shared_server_off
         unset BEADS_DOLT_AUTO_START
+        # A durable store may be never-idle, which bd refuses beside an
+        # ambient BEADS_EPHEMERAL_ROOT=1.
+        unset BEADS_EPHEMERAL_ROOT
         unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
         unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
         unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
@@ -5170,6 +5173,9 @@ run_provider_owned_bd() {
         # That split needs the operator to force the mode on by env.
         if [ "${GC_BEADS_PROVIDER_INIT:-}" = "1" ] && [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
             pin_proxied_shared_server_off
+            # The store being created is durable and may be never-idle, which
+            # bd refuses beside an ambient BEADS_EPHEMERAL_ROOT=1.
+            unset BEADS_EPHEMERAL_ROOT
         elif { [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ] || scope_is_proxied "$dir"; } && scope_pins_shared_server_off "$dir"; then
             pin_proxied_shared_server_off
         fi
