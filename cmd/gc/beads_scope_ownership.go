@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"gopkg.in/yaml.v3"
 )
 
 // scopeOwnershipFile records the durable lifecycle owner for scopes that were
@@ -297,10 +299,9 @@ func providerOwnedScopeIsProxied(scopeRoot string, entry providerScopeOwnershipE
 
 // providerOwnedScopeState resolves the effective ownership record for a scope:
 // the journal entry when Gas City recorded the initialization, otherwise a
-// synthesized ready record for a scope whose committed handoff or persisted
-// proxied binding already puts the lifecycle in bd's hands. Both synthesized
-// forms are ready by construction — the durable artifact exists only because
-// bd finished writing it — so their topology comes from the binding.
+// synthesized ready record for a scope whose committed handoff, proxied binding,
+// or native scope-local database puts the lifecycle in bd's hands. These ready
+// records describe durable ownership; they do not assert process liveness.
 func providerOwnedScopeState(cityPath, scopeRoot string) (providerScopeOwnershipEntry, bool, error) {
 	entry, owned, err := providerScopeOwnership(cityPath, scopeRoot)
 	if err != nil || owned {
@@ -312,8 +313,14 @@ func providerOwnedScopeState(cityPath, scopeRoot string) (providerScopeOwnership
 	}
 	if !transferred {
 		proxied, bindingErr := scopeBindingIsProviderOwnedProxied(scopeRoot)
-		if bindingErr != nil || !proxied {
+		if bindingErr != nil {
 			return providerScopeOwnershipEntry{}, false, bindingErr
+		}
+		if !proxied {
+			local, localErr := scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot)
+			if localErr != nil || !local {
+				return providerScopeOwnershipEntry{}, false, localErr
+			}
 		}
 	}
 	return providerScopeOwnershipEntry{
@@ -321,6 +328,151 @@ func providerOwnedScopeState(cityPath, scopeRoot string) (providerScopeOwnership
 		LifecycleOwner: providerScopeLifecycleOwner,
 		State:          providerScopeReady,
 	}, true, nil
+}
+
+// scopeBindingIsProviderOwnedDirectLocal recognizes the native bd standalone
+// layout before gc can stamp city endpoint authority over it. Ownership rests
+// on the scope's durable metadata and actual local database, not a process's
+// current liveness; a stopped server must not become a fresh city database.
+func scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot string) (bool, error) {
+	path := scopeMetadataJSONPath(scopeRoot)
+	data, err := os.ReadFile(path)
+	if scopeArtifactAbsent(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var header struct {
+		Backend string `json:"backend"`
+		Mode    string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return false, fmt.Errorf("read native bd ownership at %s: %w", path, err)
+	}
+	if header.Backend != "dolt" || header.Mode != "server" {
+		return false, nil
+	}
+	if bound, err := scopeHasCompleteStorageBinding(path); err != nil || bound {
+		return false, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("native bd metadata %q is not a regular file", path)
+	}
+	var metadata struct {
+		Backend   string          `json:"backend"`
+		Mode      string          `json:"dolt_mode"`
+		Database  string          `json:"dolt_database"`
+		ProjectID string          `json:"project_id"`
+		Host      string          `json:"dolt_server_host"`
+		Port      json.RawMessage `json:"dolt_server_port"`
+		Socket    string          `json:"dolt_server_socket"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return false, fmt.Errorf("read native bd ownership at %s: %w", path, err)
+	}
+	if entry, recorded, err := providerScopeOwnership(cityPath, scopeRoot); err != nil {
+		return false, err
+	} else if recorded && entry.State == providerScopeInitializing {
+		return false, nil
+	}
+	// Explicit upstreams and gc-authoritative config have their own ownership
+	// contracts. A leftover local database cannot override either one.
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	if err != nil {
+		return false, err
+	}
+	if resolved.Kind == contract.ScopeConfigAuthoritative {
+		return false, nil
+	}
+	if external, err := scopeIsBdOwnedDirectExternal(cityPath, scopeRoot); err != nil || external {
+		return false, err
+	}
+	if strings.TrimSpace(metadata.ProjectID) == "" {
+		return false, fmt.Errorf("native bd scope %q has no proven project identity; refusing city fallback or initialization", scopeRoot)
+	}
+	if metadata.Host != "" || metadata.Port != nil || metadata.Socket != "" {
+		return false, fmt.Errorf("native bd scope %q has an unproven local or incomplete server endpoint; refusing city fallback or initialization", scopeRoot)
+	}
+	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
+	if info, statErr := os.Lstat(configPath); statErr == nil && !info.Mode().IsRegular() {
+		return false, fmt.Errorf("native bd config %q is not a regular file", configPath)
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return false, statErr
+	}
+	if configData, readErr := os.ReadFile(configPath); readErr == nil {
+		var ownConfig struct {
+			Dolt struct {
+				Shared  *bool  `yaml:"shared-server"`
+				DataDir string `yaml:"data-dir"`
+			} `yaml:"dolt"`
+			Shared  *bool  `yaml:"dolt.shared-server"`
+			DataDir string `yaml:"dolt.data-dir"`
+		}
+		if err := yaml.Unmarshal(configData, &ownConfig); err != nil {
+			return false, fmt.Errorf("read native bd config at %s: %w", configPath, err)
+		}
+		if (ownConfig.Shared != nil && *ownConfig.Shared) || (ownConfig.Dolt.Shared != nil && *ownConfig.Dolt.Shared) || ownConfig.DataDir != "" || ownConfig.Dolt.DataDir != "" {
+			return false, fmt.Errorf("native bd scope %q has shared or custom local storage whose binding is not proven; refusing city fallback or initialization", scopeRoot)
+		}
+	} else if !os.IsNotExist(readErr) {
+		return false, readErr
+	}
+	database := strings.TrimSpace(metadata.Database)
+	if database == "" || database == "." || database == ".." || filepath.Base(database) != database || strings.ContainsAny(database, `/\`) {
+		return false, fmt.Errorf("native bd scope %q has no safe local database identity", scopeRoot)
+	}
+	// Missing scope-local storage is no evidence of a standalone binding.
+	// Symlinks or non-directories are ambiguous and cannot authorize init.
+	for _, directory := range []string{
+		filepath.Join(scopeRoot, ".beads"), filepath.Join(scopeRoot, ".beads", "dolt"),
+		filepath.Join(scopeRoot, ".beads", "dolt", database),
+		filepath.Join(scopeRoot, ".beads", "dolt", database, ".dolt"),
+		filepath.Join(scopeRoot, ".beads", "dolt", database, ".dolt", "noms"),
+	} {
+		info, statErr := os.Lstat(directory)
+		if os.IsNotExist(statErr) {
+			return false, fmt.Errorf("native bd scope %q has no proven local database storage at %q; refusing city fallback or initialization", scopeRoot, directory)
+		}
+		if statErr != nil {
+			return false, statErr
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return false, fmt.Errorf("native bd storage %q is not an owned physical directory", directory)
+		}
+	}
+	// Existing native ownership records are retained byte-for-byte. A partial
+	// or malformed pair is a refusal, never a reason to attach the city's DB.
+	var records [2][]byte
+	for i, name := range []string{"dolt-server.pid", "dolt-server.port"} {
+		file := filepath.Join(scopeRoot, ".beads", name)
+		info, statErr := os.Lstat(file)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return false, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf("native bd ownership record %q is not a regular file", file)
+		}
+		records[i], err = os.ReadFile(file)
+		if err != nil {
+			return false, err
+		}
+		value, parseErr := strconv.Atoi(strings.TrimSpace(string(records[i])))
+		if parseErr != nil || value <= 0 || (i == 1 && value > 65535) {
+			return false, fmt.Errorf("native bd ownership record %q is invalid", file)
+		}
+	}
+	if (records[0] == nil) != (records[1] == nil) {
+		return false, fmt.Errorf("native bd scope %q has an incomplete PID/port ownership pair", scopeRoot)
+	}
+	return true, nil
 }
 
 func scopeProviderOwned(cityPath, scopeRoot string) (bool, error) {

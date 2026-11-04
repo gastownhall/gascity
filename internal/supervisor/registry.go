@@ -46,11 +46,19 @@ type RigEntry struct {
 	DefaultCity string `toml:"default_city,omitempty"` // absolute path to default city (empty = unset)
 }
 
+// PendingCityOperation distinguishes recoverable creation from legacy
+// correlation records, which may also belong to an unregister request.
+type PendingCityOperation string
+
+// PendingCityCreate identifies a create stored before scaffold/registration.
+const PendingCityCreate PendingCityOperation = "city.create"
+
 // PendingCityRequestEntry stores async request correlation while the
 // supervisor reconciler completes city-scoped infrastructure work.
 type PendingCityRequestEntry struct {
-	Path      string `toml:"path"`
-	RequestID string `toml:"request_id"`
+	Path      string               `toml:"path"`
+	RequestID string               `toml:"request_id"`
+	Operation PendingCityOperation `toml:"operation,omitempty"`
 }
 
 // registryFile is the TOML structure of ~/.gc/cities.toml.
@@ -237,6 +245,16 @@ func IsValidCityName(s string) bool {
 // reconciliation. The entry is persisted in the supervisor registry so a
 // restarted supervisor can still emit the terminal async result event.
 func (r *Registry) StorePendingCityRequestID(cityPath, requestID string) error {
+	return r.storePendingCityRequestID(cityPath, requestID, "")
+}
+
+// StorePendingCityCreateRequestID records the create discriminator needed to
+// settle a supervisor process interrupted before the city was registered.
+func (r *Registry) StorePendingCityCreateRequestID(cityPath, requestID string) error {
+	return r.storePendingCityRequestID(cityPath, requestID, PendingCityCreate)
+}
+
+func (r *Registry) storePendingCityRequestID(cityPath, requestID string, operation PendingCityOperation) error {
 	r.refuseHostRegistryDuringTests()
 
 	abs, err := resolveAbsPath(cityPath)
@@ -265,8 +283,70 @@ func (r *Registry) StorePendingCityRequestID(cityPath, requestID string) error {
 	rf.PendingCityRequests = append(rf.PendingCityRequests, PendingCityRequestEntry{
 		Path:      abs,
 		RequestID: requestID,
+		Operation: operation,
 	})
 	return r.saveAllLocked(rf)
+}
+
+// RecoverInterruptedCityCreates settles unregistered create requests before
+// the supervisor opens admission. The supervisor must hold its instance lock:
+// this is not a periodic sweep of potentially active API calls. Registered
+// requests and records without a known create operation remain untouched.
+//
+// settle must acknowledge the terminal outcome before returning nil and must
+// not reenter Registry: the file lock stays held to serialize external city
+// registration with the orphan decision. A failed settlement retains that
+// request and every later one; successful earlier settlements are committed.
+func (r *Registry) RecoverInterruptedCityCreates(settle func(PendingCityRequestEntry) error) error {
+	r.refuseHostRegistryDuringTests()
+	if settle == nil {
+		return errors.New("interrupted city create settlement is not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+	kept := make([]PendingCityRequestEntry, 0, len(rf.PendingCityRequests))
+	changed := false
+	var settleErr error
+	for i, pending := range rf.PendingCityRequests {
+		registered := false
+		for _, city := range rf.Cities {
+			if sameRegistryPath(city.Path, pending.Path) {
+				registered = true
+				break
+			}
+		}
+		if pending.Operation != PendingCityCreate || registered {
+			kept = append(kept, pending)
+			continue
+		}
+		if strings.TrimSpace(pending.Path) == "" || strings.TrimSpace(pending.RequestID) == "" {
+			settleErr = errors.New("invalid interrupted city create correlation; preserve the registry for recovery")
+		} else {
+			settleErr = settle(pending)
+		}
+		if settleErr != nil {
+			kept = append(kept, rf.PendingCityRequests[i:]...)
+			settleErr = fmt.Errorf("settling interrupted create %q at %q: %w", pending.RequestID, pending.Path, settleErr)
+			break
+		}
+		changed = true
+	}
+	if changed {
+		rf.PendingCityRequests = kept
+		if err := r.saveAllLocked(rf); err != nil {
+			return errors.Join(settleErr, fmt.Errorf("saving interrupted city create recovery: %w", err))
+		}
+	}
+	return settleErr
 }
 
 // ConsumePendingCityRequestID returns and removes the pending request_id for a

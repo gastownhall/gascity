@@ -720,6 +720,11 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 		return nil, err
 	}
 	env := runtimeEnvEntriesToMap(base)
+	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, dir); err != nil {
+		return nil, err
+	} else if local {
+		applyProviderOwnedDirectLocalEnv(env)
+	}
 	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return nil, err
 	}
@@ -1096,6 +1101,9 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 // storage binding — its own or, when it inherits, the city's — so callers
 // avoid managed-Dolt setup for a store gc does not serve.
 func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
+	if owned, err := scopeProviderOwned(cityPath, dir); err != nil || owned {
+		return owned, err
+	}
 	path := scopeMetadataJSONPath(dir)
 	if completeBinding, err := scopeHasCompleteStorageBinding(path); err != nil {
 		return false, err
@@ -3728,6 +3736,21 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 // the city's own store is unresolvable and initializing a scope against a
 // half-built environment would put beads somewhere nobody chose.
 func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider string) ([]string, error) {
+	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot); err != nil {
+		return nil, err
+	} else if local {
+		env, err := providerOwnedDirectLocalRuntimeEnv(cityPath, scopeRoot, nil)
+		if err != nil {
+			return nil, err
+		}
+		projected, err := providerLifecycleProcessEnvFromBase(cityPath, provider, mergeRuntimeEnv(nil, env))
+		if err != nil {
+			return nil, err
+		}
+		env = runtimeEnvEntriesToMap(projected)
+		applyProviderOwnedDirectLocalEnv(env)
+		return mergeRuntimeEnv(nil, env), nil
+	}
 	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
 	if err != nil {
 		return nil, err

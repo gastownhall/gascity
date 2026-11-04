@@ -48,6 +48,15 @@ type PendingRequestStore interface {
 	ConsumePendingRequestID(cityPath string) (string, bool, error)
 }
 
+// PendingCityCreateRequestStore is the durable create-specific extension. A
+// supervisor uses it to distinguish an interrupted pre-registration create
+// from unregister correlation after a process restart. Legacy resolvers can
+// continue to provide PendingRequestStore without restart recovery.
+type PendingCityCreateRequestStore interface {
+	PendingRequestStore
+	StorePendingCityCreateRequestID(cityPath, requestID string) error
+}
+
 // SupervisorEventSource is an optional CityResolver extension that
 // provides a supervisor-level event recorder for city lifecycle events
 // (create/unregister completion). These events belong on the supervisor

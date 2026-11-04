@@ -10037,6 +10037,61 @@
         ],
         "type": "object"
       },
+      "SessionProviderAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "connection_restore_failed"
+            ],
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "runtime_generation": {
+            "description": "Opaque current runtime incarnation identity; clients must compare it as a whole, never parse it.",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "native_ui"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "description": "A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.",
+            "enum": [
+              "unknown",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "source",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "SessionProviderAvailabilityEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "provider_availability": {
+            "$ref": "#/components/schemas/SessionProviderAvailability"
+          }
+        },
+        "required": [
+          "id",
+          "provider_availability"
+        ],
+        "type": "object"
+      },
       "SessionRawMessageFrame": {
         "description": "Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.",
         "title": "Session raw transcript frame"
@@ -10241,6 +10296,9 @@
           "provider": {
             "type": "string"
           },
+          "provider_availability": {
+            "$ref": "#/components/schemas/SessionProviderAvailability"
+          },
           "reason": {
             "type": "string"
           },
@@ -10385,7 +10443,7 @@
         "type": "object"
       },
       "SessionStreamCommonEvent": {
-        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+        "description": "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/SessionActivityEvent"
@@ -10398,6 +10456,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionProgramStatusEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionProviderAvailabilityEvent"
           },
           {
             "$ref": "#/components/schemas/HeartbeatEvent"
@@ -56451,6 +56512,32 @@
                           "event"
                         ],
                         "title": "Event program_status",
+                        "type": "object"
+                      },
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/SessionProviderAvailabilityEvent"
+                          },
+                          "event": {
+                            "const": "provider_availability",
+                            "description": "The event name.",
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "The event resume cursor.",
+                            "type": "string"
+                          },
+                          "retry": {
+                            "description": "The retry time in milliseconds.",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "title": "Event provider_availability",
                         "type": "object"
                       },
                       {

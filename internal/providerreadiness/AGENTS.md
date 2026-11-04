@@ -58,3 +58,13 @@ literal-send size threshold. Claude can record only a suffix after multiline
 literal typing; Codex can leave a typed multiline burst drafted. Preserve the
 ordinary-message native-question guard and guarded submit. Journal delivery
 acknowledgment alone does not prove all native user-input bytes arrived.
+
+## Live native diagnostics
+
+Local login configuration and live provider availability are separate facts.
+The runtime adapter may expose a current native-UI failure through the optional
+provider-availability observation. Bind it to the exact agent pane and input
+incarnation before and after a visible-screen capture. A complete current
+native widget may establish unavailable; missing, quoted, historical or
+unreadable evidence establishes no ready verdict. Preserve liveness, native
+turn records, questions and operator recovery policy.

@@ -705,3 +705,29 @@ atomic transaction across all stores. Mutation admission still owns race
 resolution. See `engdocs/design/beads-list-read-contract.md`.
 
 Strict local bead-list reads must establish an existing physical work-scope directory before invoking a potentially lazy store factory. BD-contract scopes require existing valid backend metadata. Preserve the file provider's legitimate empty-before-first-write contract for an already declared, existing scope; a read must never create a missing rig directory. Database availability is still proved by the provider's ordinary open/List result, without initialization or migration.
+
+## Interrupted city creation
+
+New supervisor city-create requests persist their create operation before
+scaffolding. On supervisor process startup, before admission opens, only known
+create requests absent from the registered-city set may be terminalized as
+`request.failed` with `city_init_interrupted`. Record that outcome in the
+supervisor event provider, visible on global event list/SSE with no city, and
+acknowledge the append before removing its pending correlation. Reuse a matching
+request ID and create terminal event after append-before-cleanup interruption;
+a failure for another operation does not settle a create. Include in-flight
+rotated event segments when checking prior terminal outcomes. Keep registry
+registration serialized with this decision; the event callback must not reenter
+the registry. Failed event reads/appends retain pending requests and explicitly
+warn while healthy registered-city startup continues. Legacy records without a
+create discriminator and unregister requests remain untouched.
+
+This is process-interruption terminalization and operator recovery, not durable
+replay of the process-local Idempotency-Key response cache. An empty path may
+accept a new create after settlement; an existing scaffold still returns 409 and
+must be preserved for native CLI `gc init --no-start` finalization recovery.
+Event append acknowledgment promises readable history, not OS-crash fsync.
+
+## Current provider availability diagnostics
+
+Single-session reads may project the worker's optional current native-UI diagnostic as provider_availability. It is independent of runtime/process liveness, transcript activity and OSC program status: unavailable is a qualified current native failure, unknown is an indeterminate supported observation, and omission is no observation, never readiness. Only the session GET and its existing session streams perform this opt-in read; lists and agent/fleet projections do not aggregate it. The session stream sends an initial view (including an explicit null when no diagnostic is observed) and semantic state/code/source/opaque runtime-incarnation changes, ignoring observed_at-only refreshes. Frames name the exact session ID, and runtime_generation is the existing opaque InputFence digest, never raw fence data. These live side frames have no durable transcript/event cursor or history-replay promise. Controls and recovery policy are unchanged.

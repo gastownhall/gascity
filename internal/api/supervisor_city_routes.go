@@ -14,14 +14,15 @@ import (
 // without re-defining the shape.
 func sessionStreamEventMap() map[string]any {
 	return map[string]any{
-		"turn":            SessionStreamMessageEvent{},
-		"message":         SessionStreamRawMessageEvent{},
-		"structured":      SessionStreamStructuredMessageEvent{},
-		"activity":        SessionActivityEvent{},
-		"pending":         runtime.PendingInteraction{},
-		"pending_cleared": SessionPendingClearedEvent{},
-		"program_status":  SessionProgramStatusEvent{},
-		"heartbeat":       HeartbeatEvent{},
+		"turn":                  SessionStreamMessageEvent{},
+		"message":               SessionStreamRawMessageEvent{},
+		"structured":            SessionStreamStructuredMessageEvent{},
+		"activity":              SessionActivityEvent{},
+		"pending":               runtime.PendingInteraction{},
+		"pending_cleared":       SessionPendingClearedEvent{},
+		"program_status":        SessionProgramStatusEvent{},
+		"provider_availability": SessionProviderAvailabilityEvent{},
+		"heartbeat":             HeartbeatEvent{},
 	}
 }
 

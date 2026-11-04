@@ -72,6 +72,7 @@ type ProfileBackend interface {
 	ProgramStatusHoldProvider
 	ProgramStatusProvider
 	ProgramStatusShadowProvider
+	ProviderAvailabilityObserver
 	RelaunchProvider
 	ServerDeathConfirmer
 	ServerLifecycleProvider
@@ -122,6 +123,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			ProgramStatusHoldProvider:     b,
 			ProgramStatusProvider:         b,
 			ProgramStatusShadowProvider:   b,
+			ProviderAvailabilityObserver:  b,
 			RelaunchProvider:              b,
 			ServerDeathConfirmer:          b,
 			ServerLifecycleProvider:       b,
@@ -236,6 +238,7 @@ type (
 		ProgramStatusHoldProvider
 		ProgramStatusProvider
 		ProgramStatusShadowProvider
+		ProviderAvailabilityObserver
 		RelaunchProvider
 		ServerDeathConfirmer
 		ServerLifecycleProvider
@@ -909,3 +912,9 @@ func (acpProfile) SupportsReconcilerOwnedMergeablePaths() bool        { return t
 func (subprocessProfile) SupportsReconcilerOwnedMergeablePaths() bool { return true }
 func (k8sProfile) SupportsReconcilerOwnedMergeablePaths() bool        { return true }
 func (execProfile) SupportsReconcilerOwnedMergeablePaths() bool       { return false }
+
+// ObserveProviderAvailability leaves a full fake unclassified unless a test overrides it.
+func (f FullFake) ObserveProviderAvailability(_ context.Context, name string, _ ProviderAvailabilityRequest) *ProviderAvailability {
+	f.record("ObserveProviderAvailability", name)
+	return nil
+}

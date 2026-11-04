@@ -1,16 +1,23 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/cityinit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -699,5 +706,295 @@ func TestCityRegistryCityChangesSignalsMembershipChanges(t *testing.T) {
 	reg.Remove("/path/a")
 	if !cityChangeFired(ch) {
 		t.Fatal("CityChanges did not fire when the city was removed")
+	}
+}
+
+// This is the durable boundary after the API stored correlation but before
+// registration. Exercise the real pre-admission production seam with durable
+// files, without invoking the listener-owning supervisor loop.
+func TestSupervisorRegistryStartupSettlesInterruptedCreateBeforeRegistration(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	city := filepath.Join(t.TempDir(), "not-yet-created")
+	const requestID = "req-interrupted-before-scaffold"
+	old := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := old.StorePendingCityCreateRequestID(city, requestID); err != nil {
+		t.Fatal(err)
+	}
+	file, err := openSupervisorEventsRecorder(supervisor.RuntimeDir(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	restarted := newCityRegistry()
+	restarted.SetSupervisorRecorder(file)
+	var stderr bytes.Buffer
+	reopened := restarted.prepareSupervisorRegistry(&stderr)
+	rows, err := file.ListInFlight(events.Filter{Type: events.RequestFailed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("interrupted create terminal events=%d, want one globally observable failure; stderr=%s", len(rows), &stderr)
+	}
+	var failed api.RequestFailedPayload
+	if err := json.Unmarshal(rows[0].Payload, &failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.RequestID != requestID || failed.Operation != api.RequestOperationCityCreate || failed.ErrorCode != "city_init_interrupted" {
+		t.Fatalf("interrupted create failure=%+v", failed)
+	}
+	if id, ok, err := reopened.ConsumePendingCityRequestID(city); err != nil || ok || id != "" {
+		t.Fatalf("reopened registry still fences path: (%q,%t,%v)", id, ok, err)
+	}
+	if _, err := os.Stat(city); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery touched uncreated city: %v", err)
+	}
+}
+
+func interruptedCreateRegistry(t *testing.T) (*cityRegistry, *supervisor.Registry, *events.FileRecorder) {
+	t.Helper()
+	configureIsolatedRuntimeEnv(t)
+	file, err := events.NewFileRecorder(filepath.Join(supervisor.RuntimeDir(), "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	registry := newCityRegistry()
+	registry.SetSupervisorRecorder(file)
+	return registry, supervisor.NewRegistry(supervisor.RegistryPath()), file
+}
+
+func postRecoveryCity(t *testing.T, mux *api.SupervisorMux, city, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(struct {
+		Dir      string `json:"dir"`
+		Provider string `json:"provider"`
+	}{city, "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v0/city", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", "true")
+	req.Header.Set("Idempotency-Key", key)
+	out := httptest.NewRecorder()
+	mux.ServeHTTP(out, req)
+	return out
+}
+
+func TestCityRegistryInterruptedCreateGlobalOutcomeAndNewRequest(t *testing.T) {
+	registry, durable, _ := interruptedCreateRegistry(t)
+	city := filepath.Join(t.TempDir(), "uncreated")
+	const requestID = "req-lost-before-scaffold"
+	if err := registry.StorePendingCityCreateRequestID(city, requestID); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen both the resolver and durable registry as a new process would.
+	restarted := newCityRegistry()
+	restarted.SetSupervisorRecorder(registry.SupervisorEventRecorder())
+	if err := restarted.recoverInterruptedCityCreates(supervisor.NewRegistry(supervisor.RegistryPath())); err != nil {
+		t.Fatal(err)
+	}
+	oldReload := reloadSupervisorNoWaitHook
+	reloadSupervisorNoWaitHook = func() error { return nil }
+	t.Cleanup(func() { reloadSupervisorNoWaitHook = oldReload })
+	mux := api.NewSupervisorMux(restarted, mustNewCityInitService(t), false, "test", "test", time.Time{}).WithAnyHostAllowed()
+	listed := httptest.NewRecorder()
+	mux.ServeHTTP(listed, httptest.NewRequest(http.MethodGet, "/v0/events?type=request.failed", nil))
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), requestID) || !strings.Contains(listed.Body.String(), "__supervisor__") {
+		t.Fatalf("orphan failure not globally observable without a city: %d %s", listed.Code, listed.Body.String())
+	}
+	created := postRecoveryCity(t, mux, city, "new-create")
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("real domain create after settlement=%d %s", created.Code, created.Body.String())
+	}
+	entries, err := durable.List()
+	if err != nil || len(entries) != 1 || pendingRequestKey(entries[0].Path) != pendingRequestKey(city) {
+		t.Fatalf("real scaffold did not register exactly its new city: %+v %v", entries, err)
+	}
+	if _, err := os.Stat(filepath.Join(city, "city.toml")); err != nil {
+		t.Fatalf("real domain scaffold absent: %v", err)
+	}
+	if replay := postRecoveryCity(t, mux, city, "new-create"); replay.Code != http.StatusAccepted || replay.Body.String() != created.Body.String() {
+		t.Fatalf("same-process replay changed accepted body: %d %s", replay.Code, replay.Body.String())
+	}
+	changed := city + "-changed"
+	if conflict := postRecoveryCity(t, mux, changed, "new-create"); conflict.Code != http.StatusUnprocessableEntity || !strings.Contains(conflict.Body.String(), "idempotency-mismatch") {
+		t.Fatalf("changed-body retry was not refused: %d %s", conflict.Code, conflict.Body.String())
+	}
+	if _, err := os.Stat(changed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("changed-body retry touched another directory: %v", err)
+	}
+}
+
+func TestCityRegistryInterruptedPartialCreatePreservesScaffoldAndGuidesOperator(t *testing.T) {
+	registry, durable, file := interruptedCreateRegistry(t)
+	city := filepath.Join(t.TempDir(), "partial-create")
+	if err := cityInitDoInit(context.Background(), cityinit.InitRequest{Dir: city, ConfigName: "gascity", Provider: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(city, "city.toml")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(city, "kept-user-file.txt")
+	if err := os.WriteFile(kept, []byte("preserve this actual file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.StorePendingCityCreateRequestID(city, "req-partial-create"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.recoverInterruptedCityCreates(durable); err != nil {
+		t.Fatal(err)
+	}
+	mux := api.NewSupervisorMux(registry, mustNewCityInitService(t), false, "test", "test", time.Time{}).WithAnyHostAllowed()
+	out := postRecoveryCity(t, mux, city, "new-request-for-partial")
+	if out.Code != http.StatusConflict || !strings.Contains(out.Body.String(), "gc init --no-start") {
+		t.Fatalf("partial scaffold must refuse overwrite and name operator recovery: %d %s", out.Code, out.Body.String())
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("recovery changed the existing config: %v", err)
+	}
+	contents, err := os.ReadFile(kept)
+	if err != nil || string(contents) != "preserve this actual file" {
+		t.Fatalf("recovery changed user files: %v", err)
+	}
+	rows, err := file.List(events.Filter{Type: events.RequestFailed})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("partial create terminal rows=%+v err=%v", rows, err)
+	}
+	var failed api.RequestFailedPayload
+	if err := json.Unmarshal(rows[0].Payload, &failed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failed.ErrorMessage, city) || !strings.Contains(failed.ErrorMessage, "preserved") || !strings.Contains(failed.ErrorMessage, "gc init --no-start") {
+		t.Fatalf("interrupted-create guidance=%q", failed.ErrorMessage)
+	}
+}
+
+func TestCityRegistryInterruptedCreateDeduplicatesOnlyMatchingOperation(t *testing.T) {
+	for _, operation := range []string{api.RequestOperationCityCreate, api.RequestOperationCityUnregister} {
+		t.Run(operation, func(t *testing.T) {
+			registry, durable, file := interruptedCreateRegistry(t)
+			city := filepath.Join(t.TempDir(), "interrupted")
+			const requestID = "req-append-before-registry-save"
+			if err := registry.StorePendingCityCreateRequestID(city, requestID); err != nil {
+				t.Fatal(err)
+			}
+			// Real file append with the pending registry still intact models a
+			// process death before the registry transaction could commit.
+			api.EmitTypedEvent(file, events.RequestFailed, "interrupted", api.RequestFailedPayload{RequestID: requestID, Operation: operation, ErrorCode: "prior_failure", ErrorMessage: "retained prior outcome"})
+			if err := registry.recoverInterruptedCityCreates(supervisor.NewRegistry(supervisor.RegistryPath())); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := file.List(events.Filter{Type: events.RequestFailed})
+			want := 1
+			if operation != api.RequestOperationCityCreate {
+				want = 2
+			}
+			if err != nil || len(rows) != want {
+				t.Fatalf("terminal rows=%d want=%d err=%v", len(rows), want, err)
+			}
+			if _, found, err := durable.ConsumePendingCityRequestID(city); err != nil || found {
+				t.Fatalf("acknowledged create remains pending: found=%t err=%v", found, err)
+			}
+		})
+	}
+}
+
+type inFlightCreateRecoveryProvider struct {
+	*events.Fake
+	appends int
+}
+
+func (p *inFlightCreateRecoveryProvider) List(events.Filter) ([]events.Event, error) { return nil, nil }
+
+func (p *inFlightCreateRecoveryProvider) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	return p.Fake.List(filter)
+}
+
+func (p *inFlightCreateRecoveryProvider) RecordAck(event events.Event) error {
+	p.appends++
+	return p.Fake.RecordAck(event)
+}
+
+func TestCityRegistryInterruptedCreateReusesRotatingTerminal(t *testing.T) {
+	registry, durable, _ := interruptedCreateRegistry(t)
+	city := filepath.Join(t.TempDir(), "rotating-terminal")
+	const requestID = "req-terminal-in-rotating-segment"
+	if err := registry.StorePendingCityCreateRequestID(city, requestID); err != nil {
+		t.Fatal(err)
+	}
+	provider := &inFlightCreateRecoveryProvider{Fake: events.NewFake()}
+	api.EmitTypedEvent(provider.Fake, events.RequestFailed, "rotating-terminal", api.RequestFailedPayload{RequestID: requestID, Operation: api.RequestOperationCityCreate, ErrorCode: "retained", ErrorMessage: "already appended before process death"})
+	registry.SetSupervisorRecorder(provider)
+	if err := registry.recoverInterruptedCityCreates(durable); err != nil {
+		t.Fatal(err)
+	}
+	if provider.appends != 0 {
+		t.Fatalf("appended %d duplicate outcomes while terminal was in rotation", provider.appends)
+	}
+}
+
+func TestCityRegistryInterruptedCreateRetainsFailedAcknowledgment(t *testing.T) {
+	registry, durable, file := interruptedCreateRegistry(t)
+	city := filepath.Join(t.TempDir(), "unacknowledged")
+	if err := registry.StorePendingCityCreateRequestID(city, "req-unacknowledged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.recoverInterruptedCityCreates(durable); err == nil {
+		t.Fatal("closed event recorder silently acknowledged recovery")
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).StorePendingCityCreateRequestID(city, "req-other"); !errors.Is(err, supervisor.ErrPendingCityRequestExists) {
+		t.Fatalf("failed acknowledgment discarded pending request: %v", err)
+	}
+}
+
+func TestSupervisorRegistryStartupRetainsUnacknowledgedRequestAndReturnsUsableRegistry(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	city := filepath.Join(t.TempDir(), "orphan")
+	durable := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := durable.StorePendingCityCreateRequestID(city, "req-unavailable-events"); err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.Register(filepath.Join(t.TempDir(), "healthy"), "healthy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(supervisor.RuntimeDir(), "events.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if recorder, err := openSupervisorEventsRecorder(supervisor.RuntimeDir(), io.Discard); err == nil {
+		if err := recorder.Close(); err != nil {
+			t.Error(err)
+		}
+		t.Fatal("fixture event-log directory did not refuse its native recorder")
+	}
+	// This is the state runSupervisor passes to the production startup seam
+	// when its actual event recorder cannot be opened. There is no listener.
+	restarted := newCityRegistry()
+	var stderr bytes.Buffer
+	usable := restarted.prepareSupervisorRegistry(&stderr)
+	if usable == nil || !strings.Contains(stderr.String(), "recovery deferred; pending request retained") {
+		t.Fatalf("event failure blocked or silently cleared registry preparation: stderr=%s", &stderr)
+	}
+	if id, found, err := usable.ConsumePendingCityRequestID(city); err != nil || !found || id != "req-unavailable-events" {
+		t.Fatalf("unacknowledged request not retained: %q %t %v", id, found, err)
+	}
+	entries, err := usable.List()
+	if err != nil || len(entries) != 1 || entries[0].EffectiveName() != "healthy" {
+		t.Fatalf("unrelated registered city changed: %+v %v", entries, err)
 	}
 }

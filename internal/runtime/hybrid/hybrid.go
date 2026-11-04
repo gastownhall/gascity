@@ -526,3 +526,13 @@ func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.Turn
 		runtime.TurnEventSource{Name: "local", Provider: p.local},
 		runtime.TurnEventSource{Name: "remote", Provider: p.remote})
 }
+
+// ObserveProviderAvailability reads only the selected backend; unsupported or
+// unknown routes do not fall back to a different runtime.
+func (p *Provider) ObserveProviderAvailability(ctx context.Context, name string, req runtime.ProviderAvailabilityRequest) *runtime.ProviderAvailability {
+	route := p.RouteFor(name)
+	if !route.Known {
+		return nil
+	}
+	return runtime.ObserveProviderAvailability(ctx, route.Provider, name, req)
+}

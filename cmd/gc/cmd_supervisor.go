@@ -1560,6 +1560,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		defer supFR.Close() //nolint:errcheck
 	}
 	emitSupervisorStarted(stderr, registry.SupervisorEventRecorder(), previousExit, previousExitDetail)
+	reg := registry.prepareSupervisorRegistry(stderr)
 	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
 		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
@@ -1589,7 +1590,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
 		return 1

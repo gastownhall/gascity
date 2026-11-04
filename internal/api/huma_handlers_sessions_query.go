@@ -188,6 +188,9 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	if input.PeekStrict {
 		resp.LastOutput = strictOutput
 	}
+	if !info.Closed {
+		resp.ProviderAvailability = sessionProviderAvailabilityForRecord(ctx, mgr, info, pr, s.sessionLogPaths())
+	}
 	if len(s.conversationLaneKinds()) > 0 {
 		resp.Turn = s.observedSessionTurn(id, info.Generation)
 	}

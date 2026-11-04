@@ -152,7 +152,8 @@ func (SessionRawMessageFrame) Schema(r huma.Registry) *huma.Schema {
 // SessionStreamCommonEvent is a documentation-only union over the
 // lifecycle/state events emitted on the session SSE stream
 // (SessionActivityEvent, runtime.PendingInteraction,
-// SessionPendingClearedEvent, SessionProgramStatusEvent, HeartbeatEvent).
+// SessionPendingClearedEvent, SessionProgramStatusEvent,
+// SessionProviderAvailabilityEvent, HeartbeatEvent).
 // The wire shape of each variant is unchanged; this type exists purely
 // to give downstream consumers a single schema name that groups the
 // non-message events the stream can emit.
@@ -168,6 +169,7 @@ func (SessionStreamCommonEvent) Schema(r huma.Registry) *huma.Schema {
 			reflect.TypeOf(runtime.PendingInteraction{}),
 			reflect.TypeOf(SessionPendingClearedEvent{}),
 			reflect.TypeOf(SessionProgramStatusEvent{}),
+			reflect.TypeOf(SessionProviderAvailabilityEvent{}),
 			reflect.TypeOf(HeartbeatEvent{}),
 		}
 		oneOf := make([]*huma.Schema, len(variants))
@@ -176,7 +178,7 @@ func (SessionStreamCommonEvent) Schema(r huma.Registry) *huma.Schema {
 		}
 		r.Map()[name] = &huma.Schema{
 			Title:       "Session stream lifecycle event",
-			Description: "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
+			Description: "Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.",
 			OneOf:       oneOf,
 		}
 	}

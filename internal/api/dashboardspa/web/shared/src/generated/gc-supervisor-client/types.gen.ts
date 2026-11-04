@@ -4358,6 +4358,25 @@ export type SessionProgramStatusShadowPayload = {
     validity: 'unread' | 'valid' | 'not_armed' | 'silent' | 'cleared' | 'reader_lost' | 'exited';
 };
 
+export type SessionProviderAvailability = {
+    code?: 'connection_restore_failed';
+    observed_at: string;
+    /**
+     * Opaque current runtime incarnation identity; clients must compare it as a whole, never parse it.
+     */
+    runtime_generation?: string;
+    source: 'native_ui';
+    /**
+     * A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.
+     */
+    state: 'unknown' | 'unavailable';
+};
+
+export type SessionProviderAvailabilityEvent = {
+    id: string;
+    provider_availability: SessionProviderAvailability;
+};
+
 /**
  * Session raw transcript frame
  *
@@ -4464,6 +4483,7 @@ export type SessionResponse = {
      */
     program_status?: SessionProgramStatus;
     provider: string;
+    provider_availability?: SessionProviderAvailability;
     reason?: string;
     rig?: string;
     /**
@@ -4547,9 +4567,9 @@ export type SessionStrandedPayload = {
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
-export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | SessionProgramStatusEvent | HeartbeatEvent;
+export type SessionStreamCommonEvent = SessionActivityEvent | PendingInteraction | SessionPendingClearedEvent | SessionProgramStatusEvent | SessionProviderAvailabilityEvent | HeartbeatEvent;
 
 export type SessionStreamMessageEvent = {
     format: string;
@@ -21333,6 +21353,20 @@ export type StreamSessionResponses = {
          * The event name.
          */
         event: 'program_status';
+        /**
+         * The event resume cursor.
+         */
+        id?: string;
+        /**
+         * The retry time in milliseconds.
+         */
+        retry?: number;
+    } | {
+        data: SessionProviderAvailabilityEvent;
+        /**
+         * The event name.
+         */
+        event: 'provider_availability';
         /**
          * The event resume cursor.
          */

@@ -344,3 +344,13 @@ which waits for CN-1b2.
 The worker reads work beads and other state it does not own through lookups
 injected as func values (for example `FactoryConfig.ResolveBead`), and never
 enumerates stores itself.
+
+## Live provider availability
+
+Read models opt in through `ObserveHandleWithAvailability`; ordinary liveness
+and control observations retain their existing cost and semantics. Keep a live
+provider diagnostic independent of running, transcript activity and program
+status. Unsupported/no evidence stays absent; an indeterminate supported read
+is unknown. Session-backed reads use the existing input fence and a bounded,
+shared observation keyed by city and exact session ID. Surface only the public
+incarnation digest. Availability never authorizes lifecycle changes or input.

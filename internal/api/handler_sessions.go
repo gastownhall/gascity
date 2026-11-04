@@ -82,6 +82,9 @@ type sessionResponse struct {
 	// WakeReasons are the reasons the controller keeps an open session awake,
 	// set only when the list request asks for them (they cost runtime probes).
 	WakeReasons []string `json:"wake_reasons,omitempty" doc:"Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them."`
+	// ProviderAvailability is an optional current native UI diagnostic.
+	// It is populated on single-session reads only, independently of Running.
+	ProviderAvailability *SessionProviderAvailability `json:"provider_availability,omitempty"`
 
 	// SubmissionCapabilities describes which semantic submit intents the
 	// session runtime can honor.
@@ -417,6 +420,9 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err == nil {
 		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
+		if !info.Closed {
+			resp.ProviderAvailability = sessionProviderAvailability(r.Context(), info.ID, handle)
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -3166,7 +3167,10 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 	}
 	const initErrText = "managed Dolt server unreachable while inspecting existing store 'ar'"
 	provider := filepath.Join(cityPath, "gc-beads-bd")
-	script := "#!/bin/sh\nif [ \"$1\" = init ]; then echo \"" + initErrText + "\" >&2; exit 1; fi\nexit 0\n"
+	script := "#!/bin/sh\nset -e\nif [ \"$1\" = init ]; then " +
+		"printf '\\n' >> \"$2/.beads/metadata.json\"; " +
+		"printf '\\n# failed provider init\\n' >> \"$2/.beads/config.yaml\"; " +
+		"echo \"" + initErrText + "\" >&2; exit 1; fi\nexit 0\n"
 	if err := os.WriteFile(provider, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3200,6 +3204,20 @@ func TestDoRigAdd_AdoptFailedInitLeavesStoreFilesAsFound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	// Explicit inherited-city authority proves the pre-existing GC-managed
+	// binding. A native bd store without that proof must be refused instead.
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(beads, "config.yaml"), contract.ConfigState{
+		IssuePrefix: "ar", EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	configBefore, err := os.ReadFile(filepath.Join(beads, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before["config.yaml"] = string(configBefore)
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
@@ -3339,6 +3357,13 @@ func TestDoRigAdd_AdoptFailedInitRestoresBeadsDirMode(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(beads, "config.yaml"), contract.ConfigState{
+		IssuePrefix: "ar", EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer

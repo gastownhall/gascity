@@ -623,6 +623,39 @@ func prepareRigAdoptProviderState(cityPath, rigPath string) error {
 	if err := validateProxiedScopeBindingHasStore(rigPath); err != nil {
 		return err
 	}
+	if cityUsesBdStoreContract(cityPath) {
+		owned, err := scopeProviderOwned(cityPath, rigPath)
+		if err != nil {
+			return err
+		}
+		metadata, exists, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(rigPath))
+		if err != nil {
+			return err
+		}
+		if exists && metadata.Backend == "dolt" && metadata.DoltMode == "server" && !owned {
+			bound, err := scopeSkipsManagedDoltForInit(cityPath, rigPath)
+			if err != nil {
+				return err
+			}
+			// Canonical GC management authority is valid before registration;
+			// initialization retains the separate connectivity/readiness check.
+			resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, rigPath, "")
+			if err != nil {
+				return err
+			}
+			knownManaged := resolved.Kind == contract.ScopeConfigAuthoritative &&
+				(resolved.State.EndpointOrigin == contract.EndpointOriginManagedCity || resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity)
+			if cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); cfgErr != nil {
+				return cfgErr
+			} else if cfg != nil {
+				resolveRigPaths(cityPath, cfg.Rigs)
+				knownManaged = knownManaged || (rigConfigForScopeRoot(cityPath, rigPath, cfg.Rigs) != nil && scopeStoreLivesInTheCitysManagedDolt(cityPath, rigPath))
+			}
+			if !bound && !knownManaged {
+				return fmt.Errorf("refuse adoption of native bd store %q: its existing local binding cannot be proven; no store was initialized or relocated", rigPath)
+			}
+		}
+	}
 	if rawBeadsProvider(cityPath) != "file" {
 		return nil
 	}

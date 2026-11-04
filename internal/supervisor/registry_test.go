@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -858,6 +859,96 @@ func TestIsValidCityName(t *testing.T) {
 	for _, tt := range tests {
 		if got := IsValidCityName(tt.in); got != tt.want {
 			t.Errorf("IsValidCityName(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestRegistryRecoverInterruptedCityCreatesPreservesOtherOperations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cities.toml")
+	registry := NewRegistry(path)
+	root := t.TempDir()
+	entries := []struct {
+		name       string
+		op         PendingCityOperation
+		registered bool
+	}{
+		{"orphan", PendingCityCreate, false},
+		{"registered", PendingCityCreate, true},
+		{"legacy", "", false},
+		{"unregister", "city.unregister", false},
+		{"future", "future.operation", false},
+	}
+	for _, entry := range entries {
+		city := filepath.Join(root, entry.name)
+		if err := registry.storePendingCityRequestID(city, "req-"+entry.name, entry.op); err != nil {
+			t.Fatal(err)
+		}
+		if entry.registered {
+			if err := registry.Register(city, entry.name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	calls := 0
+	if err := NewRegistry(path).RecoverInterruptedCityCreates(func(entry PendingCityRequestEntry) error {
+		calls++
+		if entry.Operation != PendingCityCreate || entry.RequestID != "req-orphan" {
+			t.Fatalf("settled a registered or unknown request: %+v", entry)
+		}
+		// The callback runs inside the same OS transaction that Register
+		// uses; an external registration cannot change the orphan decision.
+		lock, err := os.OpenFile(path+".lock", os.O_RDWR, 0o600)
+		if err != nil {
+			return err
+		}
+		defer lock.Close() //nolint:errcheck // closes the independent lock probe
+		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			t.Fatalf("recovery released the registration transaction: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("settlement calls=%d, want exactly the orphan create", calls)
+	}
+	for _, entry := range entries {
+		_, found, err := NewRegistry(path).ConsumePendingCityRequestID(filepath.Join(root, entry.name))
+		if err != nil || found == (entry.name == "orphan") {
+			t.Fatalf("pending %s found=%t err=%v", entry.name, found, err)
+		}
+	}
+	if err := NewRegistry(path).StorePendingCityCreateRequestID(filepath.Join(root, "orphan"), "req-new"); err != nil {
+		t.Fatalf("new create remains fenced after acknowledged settlement: %v", err)
+	}
+}
+
+func TestRegistryRecoverInterruptedCityCreatesRetainsUnacknowledgedRequests(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cities.toml")
+	registry := NewRegistry(path)
+	root := t.TempDir()
+	for _, name := range []string{"first", "failed", "later"} {
+		if err := registry.StorePendingCityCreateRequestID(filepath.Join(root, name), "req-"+name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := errors.New("event append refused")
+	calls := 0
+	err := NewRegistry(path).RecoverInterruptedCityCreates(func(entry PendingCityRequestEntry) error {
+		calls++
+		if entry.RequestID == "req-failed" {
+			return refused
+		}
+		return nil
+	})
+	if !errors.Is(err, refused) || calls != 2 {
+		t.Fatalf("recovery=%v calls=%d, want refusal and no later callback", err, calls)
+	}
+	for _, name := range []string{"first", "failed", "later"} {
+		_, found, err := NewRegistry(path).ConsumePendingCityRequestID(filepath.Join(root, name))
+		if err != nil || found == (name == "first") {
+			t.Fatalf("pending %s found=%t err=%v", name, found, err)
 		}
 	}
 }

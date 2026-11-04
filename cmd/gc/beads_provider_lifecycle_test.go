@@ -2180,6 +2180,27 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 		}
 	}
 
+	// This is a GC-managed city, not an unclaimed standalone bd store.
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "config.yaml"), contract.ConfigState{
+		IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the original drift precondition: synchronization must still repair
+	// auto-start instead of this fixture pre-normalizing the behavior under test.
+	cityConfigPath := filepath.Join(cityDir, ".beads", "config.yaml")
+	cityConfig, err := os.ReadFile(cityConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(cityConfig), "dolt.auto-start: false") != 1 {
+		t.Fatalf("canonical fixture lost its auto-start field: %s", cityConfig)
+	}
+	if err := os.WriteFile(cityConfigPath, []byte(strings.Replace(string(cityConfig), "dolt.auto-start: false", "dolt.auto-start: true", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := writeDoltState(cityDir, doltRuntimeState{
 		Running:   true,
 		PID:       os.Getpid(),

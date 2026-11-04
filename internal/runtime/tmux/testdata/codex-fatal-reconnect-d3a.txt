@@ -1,0 +1,13 @@
+■ Automatic reconnect could not restore this session. Your draft is still
+editable. Copy it before quitting with Ctrl+C, then reconnect with the same
+command.
+
+■ Server connection could not be restored
+
+• Reconnect failed — check the endpoint, then relaunch (4m 39s)
+
+
+› blocker gcg-35n closed — routed dependent gcg-pnb may be ready to claim
+
+  GPT-6.1-Sol medium · ~/rfc8191/acceptance/d3aae819b-journey-codex1/journey/br…
+  ⌃c quit

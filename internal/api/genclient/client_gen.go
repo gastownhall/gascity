@@ -1281,6 +1281,54 @@ func (e SessionProgramStatusShadowPayloadValidity) Valid() bool {
 	}
 }
 
+// Defines values for SessionProviderAvailabilityCode.
+const (
+	ConnectionRestoreFailed SessionProviderAvailabilityCode = "connection_restore_failed"
+)
+
+// Valid indicates whether the value is a known member of the SessionProviderAvailabilityCode enum.
+func (e SessionProviderAvailabilityCode) Valid() bool {
+	switch e {
+	case ConnectionRestoreFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProviderAvailabilitySource.
+const (
+	NativeUi SessionProviderAvailabilitySource = "native_ui"
+)
+
+// Valid indicates whether the value is a known member of the SessionProviderAvailabilitySource enum.
+func (e SessionProviderAvailabilitySource) Valid() bool {
+	switch e {
+	case NativeUi:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionProviderAvailabilityState.
+const (
+	SessionProviderAvailabilityStateUnavailable SessionProviderAvailabilityState = "unavailable"
+	SessionProviderAvailabilityStateUnknown     SessionProviderAvailabilityState = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SessionProviderAvailabilityState enum.
+func (e SessionProviderAvailabilityState) Valid() bool {
+	switch e {
+	case SessionProviderAvailabilityStateUnavailable:
+		return true
+	case SessionProviderAvailabilityStateUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SessionResponseActivitySource.
 const (
 	SessionResponseActivitySourceProgram    SessionResponseActivitySource = "program"
@@ -1961,19 +2009,19 @@ func (e SupervisorShutdownPayloadSource) Valid() bool {
 
 // Defines values for SupervisorStartedPayloadPreviousExit.
 const (
-	Clean   SupervisorStartedPayloadPreviousExit = "clean"
-	Crash   SupervisorStartedPayloadPreviousExit = "crash"
-	Unknown SupervisorStartedPayloadPreviousExit = "unknown"
+	SupervisorStartedPayloadPreviousExitClean   SupervisorStartedPayloadPreviousExit = "clean"
+	SupervisorStartedPayloadPreviousExitCrash   SupervisorStartedPayloadPreviousExit = "crash"
+	SupervisorStartedPayloadPreviousExitUnknown SupervisorStartedPayloadPreviousExit = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorStartedPayloadPreviousExit enum.
 func (e SupervisorStartedPayloadPreviousExit) Valid() bool {
 	switch e {
-	case Clean:
+	case SupervisorStartedPayloadPreviousExitClean:
 		return true
-	case Crash:
+	case SupervisorStartedPayloadPreviousExitCrash:
 		return true
-	case Unknown:
+	case SupervisorStartedPayloadPreviousExitUnknown:
 		return true
 	default:
 		return false
@@ -6017,6 +6065,34 @@ type SessionProgramStatusShadowPayloadState string
 // SessionProgramStatusShadowPayloadValidity The record reading's validity.
 type SessionProgramStatusShadowPayloadValidity string
 
+// SessionProviderAvailability defines model for SessionProviderAvailability.
+type SessionProviderAvailability struct {
+	Code       *SessionProviderAvailabilityCode `json:"code,omitempty"`
+	ObservedAt time.Time                        `json:"observed_at"`
+
+	// RuntimeGeneration Opaque current runtime incarnation identity; clients must compare it as a whole, never parse it.
+	RuntimeGeneration *string                           `json:"runtime_generation,omitempty"`
+	Source            SessionProviderAvailabilitySource `json:"source"`
+
+	// State A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.
+	State SessionProviderAvailabilityState `json:"state"`
+}
+
+// SessionProviderAvailabilityCode defines model for SessionProviderAvailability.Code.
+type SessionProviderAvailabilityCode string
+
+// SessionProviderAvailabilitySource defines model for SessionProviderAvailability.Source.
+type SessionProviderAvailabilitySource string
+
+// SessionProviderAvailabilityState A current native UI failure diagnostic or an indeterminate observation. Never a readiness or liveness report.
+type SessionProviderAvailabilityState string
+
+// SessionProviderAvailabilityEvent defines model for SessionProviderAvailabilityEvent.
+type SessionProviderAvailabilityEvent struct {
+	Id                   string                      `json:"id"`
+	ProviderAvailability SessionProviderAvailability `json:"provider_availability"`
+}
+
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
 type SessionRawMessageFrame = interface{}
 
@@ -6078,27 +6154,28 @@ type SessionResponse struct {
 	AgentKind      *string                        `json:"agent_kind,omitempty"`
 
 	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
-	AgentName              *string               `json:"agent_name,omitempty"`
-	Alias                  *string               `json:"alias,omitempty"`
-	Attached               bool                  `json:"attached"`
-	ConfiguredNamedSession *bool                 `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                `json:"context_pct,omitempty"`
-	ContextWindow          *int64                `json:"context_window,omitempty"`
-	CreatedAt              string                `json:"created_at"`
-	DisplayName            *string               `json:"display_name,omitempty"`
-	Id                     string                `json:"id"`
-	Kind                   *string               `json:"kind,omitempty"`
-	LastActive             *string               `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string               `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string               `json:"last_output,omitempty"`
-	Metadata               *map[string]string    `json:"metadata,omitempty"`
-	Model                  *string               `json:"model,omitempty"`
-	Options                *map[string]string    `json:"options,omitempty"`
-	Pool                   *string               `json:"pool,omitempty"`
-	ProgramStatus          *SessionProgramStatus `json:"program_status,omitempty"`
-	Provider               string                `json:"provider"`
-	Reason                 *string               `json:"reason,omitempty"`
-	Rig                    *string               `json:"rig,omitempty"`
+	AgentName              *string                      `json:"agent_name,omitempty"`
+	Alias                  *string                      `json:"alias,omitempty"`
+	Attached               bool                         `json:"attached"`
+	ConfiguredNamedSession *bool                        `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                       `json:"context_pct,omitempty"`
+	ContextWindow          *int64                       `json:"context_window,omitempty"`
+	CreatedAt              string                       `json:"created_at"`
+	DisplayName            *string                      `json:"display_name,omitempty"`
+	Id                     string                       `json:"id"`
+	Kind                   *string                      `json:"kind,omitempty"`
+	LastActive             *string                      `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string                      `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string                      `json:"last_output,omitempty"`
+	Metadata               *map[string]string           `json:"metadata,omitempty"`
+	Model                  *string                      `json:"model,omitempty"`
+	Options                *map[string]string           `json:"options,omitempty"`
+	Pool                   *string                      `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus        `json:"program_status,omitempty"`
+	Provider               string                       `json:"provider"`
+	Reason                 *string                      `json:"reason,omitempty"`
+	Rig                    *string                      `json:"rig,omitempty"`
+	ProviderAvailability   *SessionProviderAvailability `json:"provider_availability,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -6163,7 +6240,7 @@ type SessionStrandedPayload struct {
 	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
 }
 
-// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+// SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
 type SessionStreamCommonEvent struct {
 	union json.RawMessage
 }
@@ -16208,6 +16285,32 @@ func (t *SessionStreamCommonEvent) FromSessionProgramStatusEvent(v SessionProgra
 
 // MergeSessionProgramStatusEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionProgramStatusEvent
 func (t *SessionStreamCommonEvent) MergeSessionProgramStatusEvent(v SessionProgramStatusEvent) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionProviderAvailabilityEvent returns the union data inside the SessionStreamCommonEvent as a SessionProviderAvailabilityEvent
+func (t SessionStreamCommonEvent) AsSessionProviderAvailabilityEvent() (SessionProviderAvailabilityEvent, error) {
+	var body SessionProviderAvailabilityEvent
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionProviderAvailabilityEvent overwrites any union data inside the SessionStreamCommonEvent as the provided SessionProviderAvailabilityEvent
+func (t *SessionStreamCommonEvent) FromSessionProviderAvailabilityEvent(v SessionProviderAvailabilityEvent) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionProviderAvailabilityEvent performs a merge with any union data inside the SessionStreamCommonEvent, using the provided SessionProviderAvailabilityEvent
+func (t *SessionStreamCommonEvent) MergeSessionProviderAvailabilityEvent(v SessionProviderAvailabilityEvent) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

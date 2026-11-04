@@ -1245,6 +1245,38 @@ func clearProjectedDoltEnv(env map[string]string) {
 	}
 }
 
+// providerOwnedDirectLocalRuntimeEnv builds the ordinary bd safeguards and
+// workspace binary pin without resolving or recovering the city's database.
+func providerOwnedDirectLocalRuntimeEnv(cityPath, scopeRoot string, cfg *config.City) (map[string]string, error) {
+	env := cityRuntimeEnvMapForCity(cityPath)
+	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
+		return nil, err
+	}
+	env["BEADS_DIR"] = filepath.Join(scopeRoot, ".beads")
+	env["GC_RIG_ROOT"] = scopeRoot
+	env["GC_RIG"] = ""
+	if cfg != nil {
+		if rig := rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs); rig != nil {
+			env["GC_RIG"] = rig.Name
+		}
+	}
+	applyExportSuppressionEnv(env)
+	applyBdContributorRoutingOptOut(env)
+	applyBdCLIRemoteSyncOptOut(env)
+	applyBdAutoBackupOptOut(env)
+	applyProviderOwnedDirectLocalEnv(env)
+	return env, nil
+}
+
+// applyProviderOwnedDirectLocalEnv lets bd resolve its own existing local
+// database and restart its own server. It must never inherit city coordinates.
+func applyProviderOwnedDirectLocalEnv(env map[string]string) {
+	clearProjectedDoltEnv(env)
+	clearManagedDoltLifecycleEnv(env)
+	env["GC_BEADS_BACKEND"] = "dolt"
+	env["BEADS_BACKEND"] = "dolt"
+}
+
 // clearManagedDoltLifecycleEnv removes Gas City's direct sql-server control
 // plane when beads owns a proxied server and its child Dolt process.
 func clearManagedDoltLifecycleEnv(env map[string]string) {
@@ -1815,6 +1847,12 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 }
 
 func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
+	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, rigPath); err != nil {
+		return err
+	} else if local {
+		applyProviderOwnedDirectLocalEnv(env)
+		return nil
+	}
 	if usedCanonical, err := applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
 		if errors.As(err, &invalid) {
@@ -1915,6 +1953,12 @@ func rigManagedRuntimeUnavailable(cityPath string, cfg *config.City, rigPath str
 // recoverable resolution failure (isRecoverableManagedDoltEnvError) that the env
 // answers with its Dolt coordinates cleared rather than with an error.
 func bdRuntimeEnvForRigReportingContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, bool, error) {
+	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, rigPath); err != nil {
+		return nil, false, err
+	} else if local {
+		env, err := providerOwnedDirectLocalRuntimeEnv(cityPath, rigPath, cfg)
+		return env, false, err
+	}
 	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath)
 	if ok {
 		return cached, false, nil

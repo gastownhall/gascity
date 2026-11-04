@@ -2386,6 +2386,19 @@ export const zSessionProgramStatusShadowPayload = z.object({
     ])
 });
 
+export const zSessionProviderAvailability = z.object({
+    code: z.enum(['connection_restore_failed']).optional(),
+    observed_at: z.iso.datetime(),
+    runtime_generation: z.string().optional(),
+    source: z.enum(['native_ui']),
+    state: z.enum(['unknown', 'unavailable'])
+});
+
+export const zSessionProviderAvailabilityEvent = z.object({
+    id: z.string(),
+    provider_availability: zSessionProviderAvailability
+});
+
 /**
  * Session raw transcript frame
  *
@@ -2434,13 +2447,14 @@ export const zSessionStrandedPayload = z.object({
 /**
  * Session stream lifecycle event
  *
- * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
+ * Non-message events emitted on the session SSE stream: activity transitions, pending-interaction lifecycle updates, program-status changes, current provider-availability diagnostics, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
  */
 export const zSessionStreamCommonEvent = z.union([
     zSessionActivityEvent,
     zPendingInteraction,
     zSessionPendingClearedEvent,
     zSessionProgramStatusEvent,
+    zSessionProviderAvailabilityEvent,
     zHeartbeatEvent
 ]);
 
@@ -3864,6 +3878,7 @@ export const zSessionResponse = z.object({
     pool: z.string().optional(),
     program_status: zSessionProgramStatus.optional(),
     provider: z.string(),
+    provider_availability: zSessionProviderAvailability.optional(),
     reason: z.string().optional(),
     rig: z.string().optional(),
     running: z.boolean(),
@@ -11721,6 +11736,12 @@ export const zStreamSessionResponse = z.array(z.union([
     z.object({
         data: zSessionProgramStatusEvent,
         event: z.literal('program_status'),
+        id: z.string().optional(),
+        retry: z.int().optional()
+    }),
+    z.object({
+        data: zSessionProviderAvailabilityEvent,
+        event: z.literal('provider_availability'),
         id: z.string().optional(),
         retry: z.int().optional()
     }),

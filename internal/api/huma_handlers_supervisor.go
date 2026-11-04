@@ -411,7 +411,7 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 	// in test configurations that build a SupervisorMux without an
 	// initializer.
 	if cityDirAlreadyInitialized(dir) {
-		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
+		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir + "; preserve the directory; if setup was interrupted, run gc init --no-start there to resume finalization")
 	}
 
 	if sm.initializer == nil {
@@ -428,7 +428,11 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 	}
 	pendingStored := false
 	if store, ok := sm.resolver.(PendingRequestStore); ok {
-		if err := store.StorePendingRequestID(dir, reqID); err != nil {
+		storeCreate := store.StorePendingRequestID
+		if createStore, ok := store.(PendingCityCreateRequestStore); ok {
+			storeCreate = createStore.StorePendingCityCreateRequestID
+		}
+		if err := storeCreate(dir, reqID); err != nil {
 			if errors.Is(err, ErrPendingRequestExists) {
 				return zero, apierr.OperationInProgress.Msg("conflict: city initialization already in progress at " + dir)
 			}
@@ -449,7 +453,7 @@ func (sm *SupervisorMux) scaffoldCityOnce(ctx context.Context, body cityCreateRe
 	switch {
 	case errors.Is(scaffoldErr, cityinit.ErrAlreadyInitialized):
 		sm.clearPendingCityRequestID(dir, pendingStored)
-		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir)
+		return zero, apierr.ConflictWrongState.Msg("conflict: city already initialized at " + dir + "; preserve the directory; if setup was interrupted, run gc init --no-start there to resume finalization")
 	case errors.Is(scaffoldErr, cityinit.ErrInvalidDirectory),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidTemplate),
 		errors.Is(scaffoldErr, cityinit.ErrInvalidProvider),
