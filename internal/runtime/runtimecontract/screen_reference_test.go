@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
@@ -30,14 +31,20 @@ func screenReferencePath(t *testing.T) string {
 // gc-session-screen in a private state directory (its screen sockets live
 // there too): it must pass every requirement it does not skip, read
 // v2-ready, and skip only what it does not declare (exec, provision,
-// report-activity's last_activity). Skipped where screen, jq, flock or
-// cksum is missing: the RBE worker image has no screen, so in CI it runs
-// only on a lane that installs it.
+// report-activity's last_activity). Skipped where screen, jq, flock, cksum
+// or procps ps is missing, each of which the script requires: macOS has
+// only BSD ps, so the Mac lane skips it, and in CI it runs on the Bazel
+// lane's RBE workers.
 func TestScreenReferenceIsConformant(t *testing.T) {
 	for _, tool := range []string{"screen", "jq", "flock", "cksum", "bash"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not installed", tool)
 		}
+	}
+	// The script reads the process table in procps ps's fixed-width columns
+	// (pid:10=), which BSD ps refuses.
+	if exec.Command("ps", "-o", "pid:10=", "-p", strconv.Itoa(os.Getpid())).Run() != nil {
+		t.Skip("procps ps not installed")
 	}
 	script := screenReferencePath(t)
 	if _, err := os.Stat(script); err != nil {
