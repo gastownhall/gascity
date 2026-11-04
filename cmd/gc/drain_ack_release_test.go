@@ -460,16 +460,18 @@ func TestDrainAckKeepsConfiguredNamedIdentityClaims(t *testing.T) {
 		name         string
 		seatIdentity string // the seat's configured_named_identity metadata
 		assignee     string // who holds the claim
+		labels       []string
 		wantKept     bool
 	}{
-		{"claim under the configured named identity is kept", namedIdentity, namedIdentity, true},
-		{"claim under the named seat's session_name is released", namedIdentity, "worker-1", false},
-		{"pool worker without a named identity is released", "", "worker-1", false},
+		{"claim under the configured named identity is kept", namedIdentity, namedIdentity, nil, true},
+		{"claim under the named seat's session_name is released", namedIdentity, "worker-1", nil, false},
+		{"pool worker without a named identity is released", "", "worker-1", nil, false},
+		{"dispatch-held claim under the named identity is released", namedIdentity, namedIdentity, []string{beadmeta.HoldMayorLabel}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			work := splittest.NewWorkStore(t, "gc")
 			claim := mustCreateDrainAckBead(t, work, beads.Bead{
-				Title: "claimed work", Type: "task", Metadata: routedToWorker(),
+				Title: "claimed work", Type: "task", Metadata: routedToWorker(), Labels: c.labels,
 			}, "in_progress", c.assignee)
 
 			seat := drainAckSessionBead()
