@@ -411,21 +411,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc doctor` reports as a warning per gate. `require`, which refuses a
     request it cannot record, stays opt-in.
 
-- **Beads (`bd`) v1.3.3 is the pinned and tested bd.** `deps.env`
+- **Beads (`bd`) v1.3.4 is the pinned and tested bd.** `deps.env`
   (`BD_VERSION`, `BD_CURRENT_VERSION`, `BD_CURRENT_REF`), the go.mod library,
-  the CI workflows' `BD_VERSION` pins, the Bazel test bd (`bd_bin_v1_3_3`)
+  the CI workflows' `BD_VERSION` pins, the Bazel test bd (`bd_bin_v1_3_4`)
   and the agent image move from bd v1.3.2 to
-  [v1.3.3](https://github.com/gastownhall/beads/releases/tag/v1.3.3), which
+  [v1.3.4](https://github.com/gastownhall/beads/releases/tag/v1.3.4), which
   keeps the 1.3.0 schema (no new migration), so upgrading is a binary swap:
-  `brew upgrade beads`. The 1.3.0 floor is unchanged. bd v1.3.3 changes what
-  some commands accept: `.beads/.env` keys outside its allowlist (`BEADS_*`,
-  `BD_*`, `DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`) are ignored with a
-  warning on stderr, so a rig's `.beads/.env` `GT_ROOT` line now draws
-  `beads: ignoring GT_ROOT from .beads/.env`; `mail.delegate` is read only
-  from the environment and user config; option-shaped remote URLs are
-  refused; `bd rules compact` previews unless given `--force`; and
-  `bd delete` needs full ids. gc embeds a bd 1.3.3
-  command inventory beside the 1.3.2 one, so a split city admits both.
+  `brew upgrade beads`. The 1.3.0 floor is unchanged. bd v1.3.3 and later
+  change what some commands accept: `.beads/.env` keys outside the allowlist
+  (`BEADS_*`, `BD_*`, `GT_ROOT`, `DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`)
+  are ignored with a warning on stderr; `mail.delegate` is read only from the
+  environment and user config; option-shaped remote URLs are refused;
+  `bd rules compact` previews unless given `--force`; and `bd delete` needs
+  full ids. v1.3.4 admits the `GT_ROOT` line `gc rig add` writes to a rig's
+  `.beads/.env`, so bd no longer prints `beads: ignoring GT_ROOT from
+  .beads/.env` there, as v1.3.3 did. gc embeds a bd 1.3.4 command inventory
+  beside the 1.3.2 one; bd 1.3.3 has the same command tree as 1.3.4, so a
+  split city admits 1.3.2, 1.3.3 and 1.3.4.
 
 - **Dolt 2.6.0 or newer is now required.** `gc init` and `gc start` readiness,
   `gc doctor`'s `dolt-version` check and the dolt pack's `check-dolt` doctor
@@ -1219,6 +1221,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --inject` stays.
 
 ### Fixed
+
+- **`gc lint` no longer flags bd's hidden flag aliases as unknown.** The bd
+  flag tables now list `bd create`'s `--label`, `--body`, `-m`/`--message`
+  and `--description-file`, `bd update`'s `--body`, `-m`/`--message`,
+  `--description-file` and `--acceptance-criteria`, and `bd close`'s
+  `--resolution`, `-m`/`--message` and `--comment`, which bd accepts without
+  listing them in its help. A prompt or script using one of them no longer
+  gets an unknown-flag finding.
+- **`gc bd` passes bd's hidden flag aliases through.** `gc bd close` with
+  `-m`/`--message`, `--resolution` or `--comment`, and `gc bd update` with
+  `--body`, `-m`/`--message`, `--description-file` or
+  `--acceptance-criteria`, used to stop with "cannot safely verify bead IDs
+  (unrecognized flag ...)"; they now run. `gc bd create` reads the token
+  after a valueless `--description-file` as that flag's value, as bd does,
+  so a `--metadata` there is no longer checked as a flag of its own.
+- **`gc agent-script`'s `bd_claim` and `bd_update` fail when the city config
+  cannot be loaded.** They used to run the write in the agent's default
+  store, so a city-scoped agent's claim of a rig bead could land in the
+  wrong store. The action now fails with the load error and runs no `bd`.
+
+- **The orphan sweep protects malformed claim rows and keeps sweeping.** A
+  claim whose bead id or assignee contains a tab, newline or carriage return
+  is protected and named, never asked about or released, since it could
+  forge a row of its own. A scope whose in-progress listing cannot be read is
+  dropped for the pass (its claims kept) while the other scopes are still
+  swept; one unreadable listing used to empty the whole pass.
+- **The orphan sweep releases a dead pool session's claim in a rig.** Its
+  release named no store, and `gc bd release-if-current` picked one from its
+  arguments, trying the assignee too: a pool session's bead id carries the
+  city's prefix and exists in the city store, so the release of a rig bead
+  went there and was skipped. `gc bd release-if-current` now routes by the
+  bead alone, and the sweep names the rig (`--rig`) for a rig claim.
 
 - **The supervisor built `/status`, `/agents` and `/rigs` slowly on cities
   with many unlimited pools (#8453).** Each unlimited pool listed the

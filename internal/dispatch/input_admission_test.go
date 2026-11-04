@@ -41,7 +41,7 @@ func TestProcessControlNativeInputAdmission(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			result, err := ProcessControl(graph, control, opts)
+			result, err := ProcessControl(beadstest.Graph(graph), control, opts)
 			if phase == "ordinary" {
 				if !errors.Is(err, ErrControlPending) || result.Processed {
 					t.Fatalf("result=%+v err=%v; want pending", result, err)
@@ -52,7 +52,7 @@ func TestProcessControlNativeInputAdmission(t *testing.T) {
 				if err := work.Update(conv.ID, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
 					t.Fatal(err)
 				}
-				result, err = ProcessControl(graph, control, opts)
+				result, err = ProcessControl(beadstest.Graph(graph), control, opts)
 			}
 			if err != nil || !result.Processed {
 				t.Fatalf("result=%+v err=%v", result, err)
@@ -61,19 +61,20 @@ func TestProcessControlNativeInputAdmission(t *testing.T) {
 	}
 }
 
-// processNativeControl composes the native fixture's named classes. Drain
-// fixtures explicitly supply separate work stores through MemberStores; fixtures
-// without that list keep both classes in their single in-memory store.
+// processNativeControl composes named class handles for a native fixture.
+// A zero Work handle is the graph store itself, which is the single-store
+// case and leaves the member tail off. A caller that names a separate work
+// store sets Work and MemberTail. Missing InputStores are filled from that
+// work store so a root carrying gc.input_convoy_id is not refused for lack
+// of handles.
 func processNativeControl(graph beads.Store, control beads.Bead, opts ProcessOptions) (ControlResult, error) {
-	if opts.InputStores != nil {
-		return ProcessControl(graph, control, opts)
+	if opts.Work == (beads.WorkStore{}) {
+		opts.Work = beadstest.Work(graph)
 	}
-	work := opts.MemberStores
-	if len(work) == 0 {
-		work = []beads.Store{graph}
+	if opts.InputStores == nil {
+		opts.InputStores = nativeFixtureInputs(graph, opts.Work.Store)
 	}
-	opts.InputStores = nativeFixtureInputs(graph, work...)
-	return ProcessControl(graph, control, opts)
+	return ProcessControl(beadstest.Graph(graph), control, opts)
 }
 
 func TestNativeDrainMaterializesBeforeInputExecutionAdmission(t *testing.T) {
@@ -82,7 +83,7 @@ func TestNativeDrainMaterializesBeforeInputExecutionAdmission(t *testing.T) {
 	work, graph, control, members := seedSplitClassDrainWorkflow(t, false)
 	mustDepAdd(t, work, members[1], members[0], "blocks")
 	inputs := sourceworkflow.InputStores{Graph: beadstest.Graph(graph), Work: []beads.WorkStore{beadstest.Work(work)}}
-	opts := ProcessOptions{InputStores: &inputs, MemberStores: []beads.Store{work}, FormulaSearchPaths: []string{dir}}
+	opts := ProcessOptions{InputStores: &inputs, Work: beadstest.Work(work), MemberTail: true, FormulaSearchPaths: []string{dir}}
 	legs := []readywork.Leg{
 		{Label: "work", Store: work, Work: beadstest.Work(work), Graph: beadstest.Graph(work)},
 		{Label: "graph", Store: graph, Graph: beadstest.Graph(graph), ClassBinding: true},
@@ -110,13 +111,13 @@ func TestNativeDrainMaterializesBeforeInputExecutionAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	ready(control.ID, false)
-	if _, err := ProcessControl(graph, control, opts); !errors.Is(err, ErrControlPending) {
+	if _, err := ProcessControl(beadstest.Graph(graph), control, opts); !errors.Is(err, ErrControlPending) {
 		t.Fatalf("held expansion: %v", err)
 	}
 	if err := work.Update(parent, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ProcessControl(graph, control, opts); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(graph), control, opts); err != nil {
 		t.Fatal(err)
 	}
 	manifest := mustDrainManifest(t, mustGet(t, graph, control.ID))
@@ -196,7 +197,7 @@ func TestNativeControlSettlementWithoutInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := ProcessControl(graph, control, ProcessOptions{InputStores: &inputs})
+			result, err := ProcessControl(beadstest.Graph(graph), control, ProcessOptions{Work: beadstest.Work(graph), InputStores: &inputs})
 			if err != nil || !result.Processed {
 				t.Fatalf("settle: %+v, %v", result, err)
 			}
@@ -220,7 +221,7 @@ func TestNativeExpandedSharedDrainStillRequiresInputs(t *testing.T) {
 	opens := 0
 	unavailable := errors.New("work scope unavailable")
 	inputs := sourceworkflow.InputStores{Graph: beadstest.Graph(graph), OpenWork: func(context.Context) ([]beads.WorkStore, error) { opens++; return nil, unavailable }}
-	result, err := ProcessControl(graph, mustGet(t, graph, "control"), ProcessOptions{InputStores: &inputs})
+	result, err := ProcessControl(beadstest.Graph(graph), mustGet(t, graph, "control"), ProcessOptions{InputStores: &inputs})
 	if !errors.Is(err, unavailable) || result.Processed || opens != 1 {
 		t.Fatalf("result=%+v err=%v opens=%d", result, err, opens)
 	}

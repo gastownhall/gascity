@@ -9474,7 +9474,8 @@
               "proved_idle",
               "queued_delivery",
               "drain_reminder",
-              "observation"
+              "observation",
+              "starved_bypass"
             ],
             "type": "string"
           },
