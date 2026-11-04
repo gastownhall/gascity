@@ -336,6 +336,8 @@ Do not bump the version for:
 - Comments, tests, or documentation.
 - Changes to consumers such as `session_reconciler.go` or
   `LogCoreFingerprintDrift` that do not change hash output.
+- A new `core_hash_breakdown.fields` key for an input `hashCoreFields`
+  already hashes, when the hash bytes do not change.
 
 ### PR Review Checklist
 
