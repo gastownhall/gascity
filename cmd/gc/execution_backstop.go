@@ -163,6 +163,11 @@ const (
 	// rather than drained.
 	executionHoldExecuting     = "executing"
 	executionHoldSnapshotError = "snapshot_error"
+	// executionHoldProgramRecord names the program's own record holding a
+	// session every other gate read quiet: under the switch on, its pane
+	// declares the mid-turn hold and a fresh read says working or blocked
+	// (programRecordHold).
+	executionHoldProgramRecord = "program_record"
 )
 
 // executionClaimNudgeLabel names the execution backstop in its log lines and
@@ -451,16 +456,33 @@ func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
 // session sessName (its row s) from being treated as quiet at now, "" when it
 // is quiet, its screen read by screen. The pool-claim backstop reads it before
 // its terminal drain, with the screen read as its nudges read it
-// (turnHoldFor).
+// (turnHoldFor). A session every other gate reads quiet is still held while
+// its program's record holds it (programRecordHold).
 func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time, screen func(runtime.Provider, string) string) string {
 	last, err := sp.GetLastActivity(sessName)
 	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
-	if !executionSnapshotVetoApplies(s.Metadata) {
-		return ""
+	if executionSnapshotVetoApplies(s.Metadata) {
+		if hold := screen(sp, sessName); hold != "" {
+			return hold
+		}
 	}
-	return screen(sp, sessName)
+	return programRecordHold(sp, sessName, now)
+}
+
+// programRecordHold is executionHoldProgramRecord when sp's session
+// sessName's program record, read fresh on the leaf serving it, holds a
+// quiet decision at now (runtime.ProgramRecordHold: under the switch on, a
+// pane declaring the mid-turn hold whose record says working or blocked
+// within its hold bound), "" otherwise. The leaf reads nothing unless the
+// switch is on. Callers ask only once every other gate reads quiet, so a
+// session already held costs no read.
+func programRecordHold(sp runtime.Provider, sessName string, now time.Time) string {
+	if _, held := runtime.ProgramRecordHold(sp, sessName, now); held {
+		return executionHoldProgramRecord
+	}
+	return ""
 }
 
 // snapshotHoldFor asks the runtime sp whether a session whose activity clock is

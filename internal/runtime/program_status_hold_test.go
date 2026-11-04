@@ -9,11 +9,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
-// holdRow is armedRow under mode with a root record in st that entered st
-// at since.
+// holdRow is armedRow under mode, declaring the mid-turn hold, with a root
+// record in st that entered st at since.
 func holdRow(mode runtime.ProgramStatusMode, st runtime.ProgramState, since time.Time) runtime.ProgramPaneRow {
 	row := armedRow()
-	row.Mode = mode
+	row.Mode, row.HoldDeclared = mode, true
 	row.Record.State, row.Record.Since = st, since
 	return row
 }
@@ -27,7 +27,6 @@ func heldFake(t *testing.T, row runtime.ProgramPaneRow) (*runtime.Fake, runtime.
 		t.Fatal(err)
 	}
 	f.SetProgramPane("s", row)
-	f.SetProgramHold("s", true)
 	return f, runtime.FullFake{Fake: f}
 }
 
@@ -154,22 +153,41 @@ func TestProgramRecordHoldUsesThePanesActivity(t *testing.T) {
 	}
 }
 
-// Kills a refusal that does not defer: a turn or a child working refuses as
-// busy, a blocked record as a pending interaction, and neither as the other.
+// Kills a refusal that does not defer: it is a busy refusal, never a
+// pending-interaction one.
 func TestProgramHoldRefusal(t *testing.T) {
-	child := valid(runtime.ProgramIdle, 2, 1)
-	child.WorkingChildren = 1
+	err := runtime.ProgramHoldRefusal("s")
+	if !errors.Is(err, runtime.ErrSessionBusy) || errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("ProgramHoldRefusal = %v, want a busy refusal only", err)
+	}
+}
+
+// Kills a typing hold wider than a running turn: a blocked record or a
+// working child is the quiet decisions' hold (ProgramHolds), never the
+// leaf's, and the typing hold keeps the bound.
+func TestProgramTypingHoldsOnlyARunningTurn(t *testing.T) {
+	now := time.Now()
+	at := func(st runtime.ProgramState, since time.Time, children int) runtime.ProgramHoldReading {
+		s := valid(st, 2, 1)
+		s.Since, s.WorkingChildren = since, children
+		return runtime.ProgramHoldReading{Status: s}
+	}
 	for _, c := range []struct {
-		s                runtime.ProgramStatus
-		busy, pendingErr bool
+		name          string
+		r             runtime.ProgramHoldReading
+		typing, quiet bool
 	}{
-		{valid(runtime.ProgramWorking, 2, 1), true, false},
-		{child, true, false},
-		{valid(runtime.ProgramBlocked, 2, 1), false, true},
+		{"working", at(runtime.ProgramWorking, now, 0), true, true},
+		{"blocked", at(runtime.ProgramBlocked, now, 0), false, true},
+		{"working child", at(runtime.ProgramIdle, now, 1), false, true},
+		{"idle", at(runtime.ProgramIdle, now, 0), false, false},
+		{"working past its bound", at(runtime.ProgramWorking, now.Add(-runtime.ProgramStatusHoldLimit-time.Second), 0), false, false},
 	} {
-		err := runtime.ProgramHoldRefusal("s", c.s)
-		if errors.Is(err, runtime.ErrSessionBusy) != c.busy || errors.Is(err, runtime.ErrPendingInteraction) != c.pendingErr {
-			t.Errorf("%s (children %d): %v, want busy=%v pending=%v", c.s.State, c.s.WorkingChildren, err, c.busy, c.pendingErr)
+		if got := runtime.ProgramTypingHolds(c.r, now); got != c.typing {
+			t.Errorf("%s: ProgramTypingHolds = %v, want %v", c.name, got, c.typing)
+		}
+		if got := runtime.ProgramHolds(c.r, now); got != c.quiet {
+			t.Errorf("%s: ProgramHolds = %v, want %v", c.name, got, c.quiet)
 		}
 	}
 }
@@ -195,6 +213,10 @@ func TestFakeNudgeHonorsTheProgramHold(t *testing.T) {
 	if err := ff.Nudge("s", content); err != nil {
 		t.Errorf("Nudge under an idle record: %v", err)
 	}
+	f.SetProgramPane("s", holdRow(runtime.ProgramStatusOn, runtime.ProgramBlocked, now.Add(-time.Second)))
+	if err := ff.Nudge("s", content); err != nil {
+		t.Errorf("Nudge under a blocked record: %v, want delivered (a dialog is not the leaf hold's)", err)
+	}
 	f.SetProgramPane("s", holdRow(runtime.ProgramStatusShadow, runtime.ProgramWorking, now.Add(-time.Second)))
 	if err := ff.Nudge("s", content); err != nil {
 		t.Errorf("Nudge under shadow: %v", err)
@@ -207,7 +229,8 @@ func TestFakeNudgeHonorsTheProgramHold(t *testing.T) {
 }
 
 // Kills a heal that loses or invents the hold declaration: arming declares
-// it exactly when the wanted capture does, and disarming drops it.
+// it exactly when the wanted capture does, a healthy capture converges to
+// want, and disarming drops it.
 func TestFakeHealCarriesTheHoldDeclaration(t *testing.T) {
 	f := runtime.NewFake()
 	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
@@ -218,13 +241,23 @@ func TestFakeHealCarriesTheHoldDeclaration(t *testing.T) {
 	if a, err := ff.HealProgramCapture("s", runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}); err != nil || a != runtime.ProgramCaptureArmed {
 		t.Fatalf("heal = %q, %v", a, err)
 	}
-	if !f.ProgramHolds["s"] {
+	declared := func() bool { row, _ := f.ProgramPane("s"); return row.HoldDeclared }
+	if !declared() {
 		t.Fatal("a pane armed declaring the hold does not declare it")
+	}
+	if a, err := ff.HealProgramCapture("s", runtime.ProgramStatusArm{Capture: true}); err != nil || a != runtime.ProgramCaptureDeclared || declared() {
+		t.Fatalf("withdrawal = %q, %v, declared=%v; want the declaration withdrawn", a, err, declared())
+	}
+	if a, err := ff.HealProgramCapture("s", runtime.ProgramStatusArm{Capture: true}); err != nil || a != runtime.ProgramCaptureUnchanged {
+		t.Fatalf("converged heal = %q, %v; want unchanged", a, err)
+	}
+	if a, err := ff.HealProgramCapture("s", runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}); err != nil || a != runtime.ProgramCaptureDeclared || !declared() {
+		t.Fatalf("backfill = %q, %v, declared=%v; want the declaration set", a, err, declared())
 	}
 	if a, err := ff.HealProgramCapture("s", runtime.ProgramStatusArm{}); err != nil || a != runtime.ProgramCaptureDisarmed {
 		t.Fatalf("disarm = %q, %v", a, err)
 	}
-	if f.ProgramHolds["s"] {
+	if declared() {
 		t.Fatal("a disarmed pane still declares the hold")
 	}
 }

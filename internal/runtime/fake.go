@@ -128,14 +128,6 @@ type Fake struct {
 	// its ProgramPanes row, while every fresh read (ProgramStatusShadowRead,
 	// ProgramStatusHoldRead) judges ProgramPanes. Absent, both agree.
 	ProgramCachedPanes map[string]ProgramPaneRow
-	// ProgramHolds marks the sessions whose capture is armed declaring the
-	// mid-turn hold ([ProgramStatusArm.HoldMidTurn]), by session name;
-	// HealProgramCapture rewrites it. Under the switch on, a live working or
-	// blocked record of such a session refuses Nudge, NudgeNow,
-	// NudgeFenced and NudgeKeyed as the tmux leaf refuses typing
-	// ([ProgramHoldRefusal]). Use SetProgramHold while other goroutines may
-	// read the fake.
-	ProgramHolds map[string]bool
 	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
 	ProgramStatusErrors map[string]error
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
@@ -572,8 +564,8 @@ func (f *Fake) ProcessAlive(name string, processNames []string) bool {
 }
 
 // Nudge records the call and returns nil, or an error: the fake is broken,
-// NudgeErrors names one, or a fresh program record holds the input
-// ([Fake.ProgramHolds]).
+// NudgeErrors names one, or, under the switch on, a pane declaring the
+// mid-turn hold reads a live working record ([ProgramTypingHolds]).
 func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

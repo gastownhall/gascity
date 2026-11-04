@@ -20,16 +20,17 @@ func init() {
 }
 
 // holdWorkerRow is programStatusPhaseRow under mode whose state was entered
-// now, so a hold it makes is live.
-func holdWorkerRow(mode runtime.ProgramStatusMode, st runtime.ProgramState) runtime.ProgramPaneRow {
+// now, so a hold it makes is live, its pane declaring the mid-turn hold
+// when declared.
+func holdWorkerRow(mode runtime.ProgramStatusMode, st runtime.ProgramState, declared bool) runtime.ProgramPaneRow {
 	row := programStatusPhaseRow(mode, st)
 	row.Record.Since = time.Now()
+	row.HoldDeclared = declared
 	return row
 }
 
 // holdWorkerSession starts a session handle of profile's family on a fresh
-// fake whose agent pane declares the mid-turn hold, and returns the handle,
-// the fake and the session's runtime name.
+// fake, and returns the handle, the fake and the session's runtime name.
 func holdWorkerSession(t *testing.T, profile Profile) (worker.Handle, *runtime.Fake, string, error) {
 	t.Helper()
 	fake := runtime.NewFake()
@@ -55,7 +56,6 @@ func holdWorkerSession(t *testing.T, profile Profile) (worker.Handle, *runtime.F
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("State: %w", err)
 	}
-	fake.SetProgramHold(state.SessionName, true)
 	// The fake's idle wait returns at once, so a wait-idle nudge is
 	// delivered unless something holds it.
 	fake.WaitForIdleErrors = map[string]error{state.SessionName: nil}
@@ -81,11 +81,19 @@ func holdNudgeOutcome(r worker.NudgeResult, err error) string {
 
 // checkProgramStatusHoldMidTurn is WC-PSTAT-009: under on, a session whose
 // pane declares the mid-turn hold takes no wait-idle, default or immediate
-// nudge while its fresh record says working or blocked, and takes one once
+// nudge while its fresh record says a turn is running, and takes one once
 // the record reaches an input boundary; under off and shadow, the same
 // record holds nothing back, so every nudge the hold holds is one the
 // session would otherwise have been delivered.
 func checkProgramStatusHoldMidTurn(t *testing.T, profile Profile) Result {
+	t.Helper()
+	return runHoldMidTurnCheck(t, profile, true)
+}
+
+// runHoldMidTurnCheck is WC-PSTAT-009's check over panes that declare the
+// hold exactly when declared: the check's own panes declare it, and its
+// mutation test runs it over panes that do not.
+func runHoldMidTurnCheck(t *testing.T, profile Profile, declared bool) Result {
 	t.Helper()
 	code := RequirementProgramStatusHoldMidTurn
 	ctx := context.Background()
@@ -102,7 +110,7 @@ func checkProgramStatusHoldMidTurn(t *testing.T, profile Profile) Result {
 		if err != nil {
 			return "", nil, nil, "", err
 		}
-		fake.SetProgramPane(name, holdWorkerRow(mode, st))
+		fake.SetProgramPane(name, holdWorkerRow(mode, st, declared))
 		return nudge(h, d), h, fake, name, nil
 	}
 	delivered := 0
@@ -121,7 +129,8 @@ func checkProgramStatusHoldMidTurn(t *testing.T, profile Profile) Result {
 		if shadow != off {
 			return Fail(profile.ID, code, fmt.Sprintf("shadow, working record, %s nudge: %s, want %s as off", d, shadow, off))
 		}
-		for _, st := range []runtime.ProgramState{runtime.ProgramWorking, runtime.ProgramBlocked} {
+		{
+			st := runtime.ProgramWorking
 			got, h, fake, name, err := outcome(runtime.ProgramStatusOn, st, d)
 			if err != nil {
 				return Fail(profile.ID, code, err.Error())
@@ -133,11 +142,19 @@ func checkProgramStatusHoldMidTurn(t *testing.T, profile Profile) Result {
 				}
 				continue
 			}
+			// A blocked record is no typing hold: a dialog the record
+			// reports is the pending-interaction slice's, so typing is
+			// decided as off decides it.
+			if blocked, _, _, _, err := outcome(runtime.ProgramStatusOn, runtime.ProgramBlocked, d); err != nil {
+				return Fail(profile.ID, code, err.Error())
+			} else if blocked != off {
+				return Fail(profile.ID, code, fmt.Sprintf("on, blocked record, %s nudge: %s, want %s as off", d, blocked, off))
+			}
 			delivered++
 			if !strings.HasPrefix(got, "held:") {
 				return Fail(profile.ID, code, fmt.Sprintf("on, %s record, %s nudge: %s, want it held back", st, d, got))
 			}
-			fake.SetProgramPane(name, holdWorkerRow(runtime.ProgramStatusOn, runtime.ProgramIdle))
+			fake.SetProgramPane(name, holdWorkerRow(runtime.ProgramStatusOn, runtime.ProgramIdle, declared))
 			if after := nudge(h, d); after != "delivered" {
 				return Fail(profile.ID, code, fmt.Sprintf("on, after the %s record turned idle, %s nudge: %s, want delivered", st, d, after))
 			}
@@ -146,7 +163,7 @@ func checkProgramStatusHoldMidTurn(t *testing.T, profile Profile) Result {
 	if delivered == 0 {
 		return Fail(profile.ID, code, "the switch off delivered no nudge, so the hold held nothing")
 	}
-	return Pass(profile.ID, code, "a declared mid-turn hold holds every delivery off makes under a live working or blocked record, and shadow decides as off").
+	return Pass(profile.ID, code, "a declared mid-turn hold holds every delivery off makes under a live working record, and shadow, and a blocked record, decide as off").
 		WithEvidence(map[string]string{"provider": profile.Provider, "steps": strings.Join(checked, ",")})
 }
 
@@ -169,18 +186,12 @@ func TestProgramStatusHoldMidTurnCheckPassesForEveryProfile(t *testing.T) {
 }
 
 // Kills a WC-PSTAT-009 check that passes a session that types into a held
-// pane: with no hold declared, the working record holds nothing back, and
-// the check fails.
+// pane: run over panes that do not declare the hold, the working record
+// holds nothing back, and the check fails.
 func TestProgramStatusHoldMidTurnCheckFailsWithoutTheHold(t *testing.T) {
 	profile := Phase1Profiles()[0]
-	h, fake, name, err := holdWorkerSession(t, profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake.SetProgramHold(name, false)
-	fake.SetProgramPane(name, holdWorkerRow(runtime.ProgramStatusOn, runtime.ProgramWorking))
-	got := holdNudgeOutcome(h.Nudge(context.Background(), sessionpkg.Actor{Kind: sessionpkg.ActorAgent}, worker.NudgeRequest{Text: "hello", Delivery: worker.NudgeDeliveryImmediate}))
-	if got != "delivered" {
-		t.Fatalf("an undeclared pane's immediate nudge under a working record: %s, want delivered (the hold is opt-in)", got)
+	r := runHoldMidTurnCheck(t, profile, false)
+	if r.Status != ResultFail || !strings.Contains(r.Detail, "want it held back") {
+		t.Fatalf("WC-PSTAT-009 over undeclared panes: %+v, want a failure naming the delivered nudge", r)
 	}
 }

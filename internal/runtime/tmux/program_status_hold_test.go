@@ -166,7 +166,8 @@ func TestNudgeSessionHeldByAFreshRecord(t *testing.T) {
 		busy, pendingRefus bool
 	}{
 		{"working", psRecord(t, holdNonce, runtime.ProgramWorking, liveSince), 0, true, false},
-		{"blocked", psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince), 0, false, true},
+		// A dialog the record reports is not the leaf hold's to refuse.
+		{"blocked", psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince), 0, false, false},
 		{"working past its bound", psRecord(t, holdNonce, runtime.ProgramWorking, old), 0, false, false},
 		{"working past its bound, drawing", psRecord(t, holdNonce, runtime.ProgramWorking, old), now.Add(-time.Minute).Unix(), true, false},
 		{"idle", psRecord(t, holdNonce, runtime.ProgramIdle, liveSince), 0, false, false},
@@ -282,5 +283,107 @@ func TestArmCommandsCarryTheHoldDeclaration(t *testing.T) {
 	}
 	if cmds := disarmCommands("%5"); !contains(cmds, unset) {
 		t.Errorf("disarm %q: want the option unset", cmds)
+	}
+}
+
+// Kills a heal that leaves a live capture's hold declaration stale: a
+// healthy capture armed before its provider declared the hold has it set,
+// one whose provider withdrew it has it unset, each guarded by the pane's
+// own nonce, and a converged capture is left alone.
+func TestHealConvergesTheHoldDeclarationOfALiveCapture(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	agent := &healModelPane{session: "s", window: "@1", id: "%5", mark: "agent", pipe: true, tap: "l1vE.%5"}
+	server := &healServer{panes: []*healModelPane{agent}, taps: map[string]bool{"l1vE.%5": true}}
+	p := healProvider(server, &now)
+	holding := runtime.ProgramStatusArm{Capture: true, App: "codex", HoldMidTurn: true}
+
+	mustHeal(t, p, "s", holding, runtime.ProgramCaptureDeclared)
+	if agent.hold != "%5" || agent.tap != "l1vE.%5" || !agent.pipe {
+		t.Fatalf("after the backfill: %+v, want the declaration bound to %%5 and the capture untouched", agent)
+	}
+	muts := server.mutations()
+	if len(muts) != 1 || muts[0][0] != "if-shell" || muts[0][4] != "#{==:#{"+programTapOption+"},l1vE.%5}" {
+		t.Fatalf("mutations %q, want one if-shell guarded by the pane's nonce", muts)
+	}
+	mustHeal(t, p, "s", holding, runtime.ProgramCaptureUnchanged)
+	mustHeal(t, p, "s", healWant, runtime.ProgramCaptureDeclared)
+	if agent.hold != "" {
+		t.Fatalf("after the withdrawal: hold %q, want unset", agent.hold)
+	}
+
+	// A pane re-armed under another nonce between the read and the act
+	// keeps the declaration its own arm gave it.
+	agent.tap, server.taps = "n3wNonce.%5", map[string]bool{"n3wNonce.%5": true}
+	if err := p.tm.declareHold(healPane{programPane: programPane{id: "%5", tap: "l1vE.%5"}, target: "=s:@1.%5"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if agent.hold != "" {
+		t.Fatalf("a guarded declaration landed on a pane re-armed under another nonce: hold %q", agent.hold)
+	}
+}
+
+// captureCount is how many capture-pane commands calls holds.
+func captureCount(calls [][]string) int {
+	n := 0
+	for _, c := range calls {
+		if slices.Contains(c, "capture-pane") {
+			n++
+		}
+	}
+	return n
+}
+
+// Kills a wait-idle nudge that waits out its idle window before the hold
+// refuses it: Provider.Nudge reads the record once its permission-prompt
+// look is done, and refuses as busy without a single idle-wait look and
+// with nothing typed.
+func TestProviderNudgeRefusesAHeldPaneBeforeItsIdleWait(t *testing.T) {
+	working := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince)
+	const session = "held-wait"
+	t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+
+	look := &paneExecutor{pane: busyPane, inMode: "0"}
+	baseline, _ := holdTmux(runtime.ProgramStatusOn, look, nil)
+	_ = baseline.checkNoApprovalPrompt(session)
+	lookCaptures := captureCount(look.calls)
+
+	inner := &paneExecutor{pane: busyPane, inMode: "0"}
+	tm, ex := holdTmux(runtime.ProgramStatusOn, inner, func(int) string { return holdPaneRow(working, "%1", 0) })
+	tm.cfg.NudgeIdleTimeout = 2 * time.Second
+	p := &Provider{tm: tm, cfg: tm.cfg, workDirs: map[string]string{}}
+	err := p.Nudge(session, runtime.TextContent("reminder"))
+	if !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("Nudge = %v, want a busy refusal", err)
+	}
+	if got := captureCount(inner.calls); got != lookCaptures {
+		t.Fatalf("%d pane captures before the refusal, want the prompt look's %d alone: the idle wait ran first", got, lookCaptures)
+	}
+	if typed(inner.calls) || ex.holdReads() != 1 {
+		t.Fatalf("typed=%v after %d hold reads, want nothing typed after one read", typed(inner.calls), ex.holdReads())
+	}
+}
+
+// Kills a hidden-attach delivery that types past the hold: a held pane's
+// hidden client receives nothing, and the refusal is busy.
+func TestSendHiddenAttachedTextRefusesAHeldPane(t *testing.T) {
+	working := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince)
+	const session = "held-hidden"
+	inner := &paneExecutor{pane: "❯ ", inMode: "0"}
+	tm, ex := holdTmux(runtime.ProgramStatusOn, inner, func(int) string { return holdPaneRow(working, "%1", 0) })
+	tm.cfg.DebounceMs = 0
+	sink := &recordingWriteCloser{}
+	tm.hiddenAttachMu.Lock()
+	tm.hiddenAttachClients = map[string]*hiddenAttachClient{session: {stdin: sink}}
+	tm.hiddenAttachMu.Unlock()
+
+	handled, err := tm.sendHiddenAttachedText(context.Background(), session, "reminder")
+	if !handled || !errors.Is(err, runtime.ErrSessionBusy) {
+		t.Fatalf("sendHiddenAttachedText = %v, %v; want handled and a busy refusal", handled, err)
+	}
+	if got := sink.written(); got != "" || ex.holdReads() != 1 {
+		t.Fatalf("hidden client received %q after %d hold reads, want nothing after one", got, ex.holdReads())
+	}
+	if pokeRecorded(tm, session) {
+		t.Error("a refused hidden nudge recorded a poke")
 	}
 }

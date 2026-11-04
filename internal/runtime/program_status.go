@@ -77,6 +77,10 @@ type ProgramStatus struct {
 	LastError       bool // an error report was seen; sticky across clear (annotation only)
 	Reported        bool // a root report was seen this incarnation: no root then reads cleared, not silent
 	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable
+	// HoldDeclared annotates a reading under our nonce (valid, silent or
+	// cleared): the pane was armed declaring the mid-turn hold
+	// ([ProgramStatusArm.HoldMidTurn]). It is the pane's, not the program's.
+	HoldDeclared bool
 }
 
 // Valid reports whether the reading may be used: judged valid, with a root
@@ -220,6 +224,7 @@ const (
 	ProgramCaptureArmed     ProgramCaptureAction = "armed"
 	ProgramCaptureDisarmed  ProgramCaptureAction = "disarmed"
 	ProgramCaptureDeferred  ProgramCaptureAction = "deferred" // pipe busy, pane dead, or backoff
+	ProgramCaptureDeclared  ProgramCaptureAction = "declared" // a healthy capture's hold declaration set or withdrawn
 )
 
 // ProgramCaptureHealer is an optional extension the controller calls on the
@@ -318,8 +323,11 @@ type ProgramPaneRow struct {
 	Tap         string             // the pane's tap nonce option as read ("<rand>.<pane_id>")
 	TapLiveness ProgramTapLiveness // a process holding Tap's nonce, from the process table
 	AgentGone   bool               // the caller's liveness says the agent is gone
-	RecordForm  ProgramRecordForm
-	Record      ProgramStatus // the decoded record; read only when RecordForm is decoded
+	// HoldDeclared is the pane's hold declaration as read: set only when
+	// the pane's hold option names this row's pane.
+	HoldDeclared bool
+	RecordForm   ProgramRecordForm
+	Record       ProgramStatus // the decoded record; read only when RecordForm is decoded
 }
 
 // JudgeProgramStatus derives a reading from one agent-pane row. The first
@@ -335,6 +343,8 @@ type ProgramPaneRow struct {
 //  6. no root: silent if no root was ever reported this incarnation (a
 //     probe or child reports alone leave it silent), else cleared;
 //  7. valid, ReaderVerified when the process table confirmed the tap.
+//
+// A silent, cleared or valid reading carries the pane's HoldDeclared.
 //
 // Only a valid reading carries state. The others carry none of the record's
 // claims, only its annotations (LastError under rule 3; Probed, Reported and
@@ -361,14 +371,17 @@ func JudgeProgramStatus(row ProgramPaneRow) ProgramStatus {
 		return ProgramStatus{Mode: mode, Validity: ProgramStatusReaderLost, Nonce: row.Tap}
 	}
 	if !ours {
-		return ProgramStatus{Mode: mode, Validity: ProgramStatusSilent, Nonce: row.Tap}
+		return ProgramStatus{Mode: mode, Validity: ProgramStatusSilent, Nonce: row.Tap, HoldDeclared: row.HoldDeclared}
 	}
 	if row.Record.State == "" {
-		return judgeNoRoot(mode, row.Record)
+		s := judgeNoRoot(mode, row.Record)
+		s.HoldDeclared = row.HoldDeclared
+		return s
 	}
 	s := row.Record
 	s.Mode, s.Validity = mode, ProgramStatusValid
 	s.ReaderVerified = row.TapLiveness == ProgramTapAlive
+	s.HoldDeclared = row.HoldDeclared
 	s.Kind = blockKind(s.State, s.Kind)
 	return s
 }

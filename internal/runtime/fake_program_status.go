@@ -14,15 +14,18 @@ var (
 	_ ProgramStatusHoldProvider   = FullFake{}
 )
 
-// SetProgramHold marks session name's capture as armed declaring the
-// mid-turn hold, or not ([Fake.ProgramHolds]), under the fake's lock.
+// SetProgramHold marks session name's agent-pane row as declaring the
+// mid-turn hold, or not ([ProgramPaneRow.HoldDeclared]), under the fake's
+// lock.
 func (f *Fake) SetProgramHold(name string, hold bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.ProgramHolds == nil {
-		f.ProgramHolds = map[string]bool{}
+	if f.ProgramPanes == nil {
+		f.ProgramPanes = map[string]ProgramPaneRow{}
 	}
-	f.ProgramHolds[name] = hold
+	row := f.ProgramPanes[name]
+	row.HoldDeclared = hold
+	f.ProgramPanes[name] = row
 }
 
 // SetProgramCachedPane sets the row a FullFake's ProgramStatus judges for
@@ -104,7 +107,8 @@ func (f FullFake) ProgramStatusShadowRead(name string) (ProgramStatus, bool) {
 // agent-pane row judged fresh, as ProgramStatusShadowRead judges it, with
 // the session's configured activity ([Fake.Activity]), recorded as a call of
 // its own. ok is false unless the row's switch is on, the session is marked
-// as declaring the hold ([Fake.ProgramHolds]), and the read would succeed.
+// as declaring the hold ([ProgramStatus.HoldDeclared]), and the read would
+// succeed.
 func (f FullFake) ProgramStatusHoldRead(name string) (ProgramHoldReading, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -116,21 +120,25 @@ func (f FullFake) ProgramStatusHoldRead(name string) (ProgramHoldReading, bool) 
 // f.mu.
 func (f *Fake) programHoldReadLocked(name string) (ProgramHoldReading, bool) {
 	row := f.ProgramPanes[name]
-	if row.Mode != ProgramStatusOn || !f.ProgramHolds[name] || f.programReadableLocked(name) != nil || f.ProgramStatusErrors[name] != nil {
+	if row.Mode != ProgramStatusOn || f.programReadableLocked(name) != nil || f.ProgramStatusErrors[name] != nil {
 		return ProgramHoldReading{}, false
 	}
-	return ProgramHoldReading{Status: JudgeProgramStatus(row), Activity: f.Activity[name]}, true
+	s := JudgeProgramStatus(row)
+	if !s.HoldDeclared {
+		return ProgramHoldReading{}, false
+	}
+	return ProgramHoldReading{Status: s, Activity: f.Activity[name]}, true
 }
 
 // programHoldRefusalLocked is the typing refusal of a nudge to name whose
-// fresh record holds input ([ProgramRecordHold]'s rule), nil otherwise. The
-// caller holds f.mu.
+// fresh record holds typing ([ProgramTypingHolds]), as the tmux leaf
+// refuses, nil otherwise. The caller holds f.mu.
 func (f *Fake) programHoldRefusalLocked(name string) error {
 	r, ok := f.programHoldReadLocked(name)
-	if !ok || !ProgramHolds(r, time.Now()) {
+	if !ok || !ProgramTypingHolds(r, time.Now()) {
 		return nil
 	}
-	return ProgramHoldRefusal(name, r.Status)
+	return ProgramHoldRefusal(name)
 }
 
 // HealProgramCapture implements [ProgramCaptureHealer] over name's agent-pane
@@ -143,7 +151,9 @@ func (f *Fake) programHoldRefusalLocked(name string) error {
 //     its own tap alive, since any other pipe may be foreign; while its pipe
 //     is open and its tap's liveness is unknown, it is deferred with its
 //     nonce kept, since the pipe may be its live tap's;
-//   - an armed pane whose pipe is open and tap not gone is unchanged;
+//   - an armed pane whose pipe is open and tap not gone is unchanged, but
+//     for a hold declaration that differs from want's, which is set or
+//     withdrawn (declared);
 //   - any other open pipe (a foreign reader, or a dead tap's pipe not yet
 //     closed) is deferred: heal never takes a pipe over;
 //   - otherwise the pane is armed under a new nonce naming it, with nothing
@@ -175,6 +185,9 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 		row.Tap, row.TapLiveness = "", ProgramTapUnknown
 		row.RecordForm, row.Record = ProgramRecordAbsent, ProgramStatus{}
 		action = ProgramCaptureDisarmed
+	case armed && row.PanePipe && row.TapLiveness != ProgramTapGone && row.HoldDeclared != want.HoldMidTurn:
+		row.HoldDeclared = want.HoldMidTurn
+		action = ProgramCaptureDeclared
 	case armed && row.PanePipe && row.TapLiveness != ProgramTapGone:
 		action = ProgramCaptureUnchanged
 	case row.PanePipe:
@@ -185,12 +198,15 @@ func (f FullFake) HealProgramCapture(name string, want ProgramStatusArm) (Progra
 		row.RecordForm, row.Record = ProgramRecordAbsent, ProgramStatus{}
 		action = ProgramCaptureArmed
 	}
-	if action == ProgramCaptureArmed || action == ProgramCaptureDisarmed {
+	switch action {
+	case ProgramCaptureArmed:
+		row.HoldDeclared = want.HoldMidTurn
 		f.ProgramPanes[name] = row
-		if f.ProgramHolds == nil {
-			f.ProgramHolds = map[string]bool{}
-		}
-		f.ProgramHolds[name] = action == ProgramCaptureArmed && want.HoldMidTurn
+	case ProgramCaptureDisarmed:
+		row.HoldDeclared = false
+		f.ProgramPanes[name] = row
+	case ProgramCaptureDeclared:
+		f.ProgramPanes[name] = row
 	}
 	call.Value = string(action)
 	return action, nil

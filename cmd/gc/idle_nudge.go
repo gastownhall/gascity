@@ -646,10 +646,12 @@ func claimNudgeScreenHold(sp runtime.Provider, s beads.Bead, sessName string, no
 	if err != nil || (!last.IsZero() && now.Sub(last) < idleClaimNudgeGrace) {
 		return executionHoldNotQuiet
 	}
-	if !executionSnapshotVetoApplies(s.Metadata) {
-		return ""
+	if executionSnapshotVetoApplies(s.Metadata) {
+		if hold := turnHoldFor(sp, sessName); hold != "" {
+			return hold
+		}
 	}
-	return turnHoldFor(sp, sessName)
+	return programRecordHold(sp, sessName, now)
 }
 
 // claimHoldTurnRunning names the live turn reading (turnHoldFor) holding a

@@ -571,6 +571,9 @@ func (p *ladderPass) observeRuntime(row beads.Bead) ladderRuntime {
 		if executionSnapshotVetoApplies(row.Metadata) {
 			hold = snapshotHoldFor(sp, name)
 		}
+		if hold == "" {
+			hold = programRecordHold(sp, name, p.now)
+		}
 	}
 	if hold == "" {
 		rt.quiet = workladder.Quiet{State: workladder.Quiescent}
@@ -913,7 +916,9 @@ func recycleReason(r workladder.Recycle) string {
 // (write-ahead). A delivery error counts the attempt, but one that says the
 // runtime is unavailable, or that the seat is at a prompt only a human can
 // answer (a permission prompt), is re-counted as paused: neither is the
-// agent ignoring its work. A delivery the runtime proved but whose turn it
+// agent ignoring its work. One the runtime deferred, typing nothing, because
+// a turn is running (runtime.ErrSessionBusy) is re-counted as paused too,
+// with no refusal counted: the seat is working. A delivery the runtime proved but whose turn it
 // never saw start (runtime.ErrNudgeDeliveredUnobserved) reached the seat,
 // as the conversation lane acks it: a provider that refuses the turn at once
 // is one cause, and that refusal answers this nudge.
@@ -933,7 +938,11 @@ func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
 	if err != nil && !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
 		fmt.Fprintf(p.l.stderr, "work-ladder: nudging %s about %s failed: %v\n", row.ID, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
 		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
-		if (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && !n.Paused && p.refused(row.ID, n) {
+		switch {
+		case n.Paused:
+		case errors.Is(err, runtime.ErrSessionBusy):
+			p.deferred(row.ID, n)
+		case (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && p.refused(row.ID, n):
 			p.event(events.WorkEscalated, row, n.Key, gen, workLadderEventFields{Reason: workladder.AlertNudgeRefused})
 		}
 		return
@@ -979,6 +988,14 @@ func (p *ladderPass) nudgeText(row beads.Bead, n workladder.Nudge) string {
 // permission prompt, the runtime unavailable): the attempt is re-counted as
 // paused and the entry backs off (workladder.NudgeRefused). It reports
 // whether this refusal is the one to raise the nudge_refused alert for.
+// deferred re-counts n, which the runtime deferred with nothing typed, as
+// paused (workladder.NudgeDeferred).
+func (p *ladderPass) deferred(id string, n workladder.Nudge) {
+	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {
+		return workladder.NudgeDeferred(r, n.Key, n.Attempt, p.now)
+	})
+}
+
 func (p *ladderPass) refused(id string, n workladder.Nudge) bool {
 	var alert bool
 	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {

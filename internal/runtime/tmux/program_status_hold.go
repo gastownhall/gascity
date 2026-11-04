@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -12,30 +13,30 @@ import (
 // The mid-turn hold at the tmux leaf (runtime.ProgramStatusHoldProvider). A
 // pane armed for a provider declaring hold_mid_turn carries the hold option,
 // its value bound to the pane's own id as the tap nonce is, so a value set
-// at window, session or global scope declares nothing for this pane. Under
-// the switch on, a typing path and the controller's queued delivery read the
-// pane fresh, its capture fields, the hold option and its window's activity
-// in one tmux command, and hold while the program's own record says working
-// or blocked (runtime.ProgramHolds). Under off or shadow nothing is read.
+// at window, session or global scope declares nothing for this pane; heal
+// converges it on a live capture whose declaration changed. Under the
+// switch on, a typing path and the controller's quiet decisions read the
+// pane fresh, its capture fields (the hold option among them) and its
+// window's activity (#{window_activity}: tmux keeps no per-pane activity)
+// in one tmux command. A typing path refuses while the record says a turn is
+// running (runtime.ProgramTypingHolds). Under off or shadow nothing is read.
 
 // programHoldOption is the pane option a hold-declaring arm sets to the
 // pane's id (set-option -F "#{pane_id}").
 const programHoldOption = "@gc_ps_hold"
 
 // programHoldFormat is the hold read's row of one pane: pane_dead, the
-// capture fields (programPaneFormat), the sanitized hold option and the
-// pane's window activity, terminated against the executor's trim.
-const programHoldFormat = "#{pane_dead}\t" + programPaneFormat + "\t" +
-	"#{s/" + programReadSanitizer + "//:" + programHoldOption + "}\t#{window_activity}\t" + runtimeInventoryEnd
+// capture fields (programPaneFormat) and the pane's window activity,
+// terminated against the executor's trim.
+const programHoldFormat = "#{pane_dead}\t" + programPaneFormat + "\t#{window_activity}\t" + runtimeInventoryEnd
 
 // programHoldFields is the field count of programHoldFormat.
-const programHoldFields = 1 + programPaneFields + 2 + 1
+const programHoldFields = 1 + programPaneFields + 1 + 1
 
-// programHoldRow is one pane's hold-read row: its capture fields, the hold
-// option as read, and its window's activity.
+// programHoldRow is one pane's hold-read row: its capture fields and its
+// window's activity.
 type programHoldRow struct {
 	pane     programPane
-	hold     string
 	activity string
 }
 
@@ -49,7 +50,7 @@ func parseProgramHoldRow(line string) (programHoldRow, bool) {
 	if !ok {
 		return programHoldRow{}, false
 	}
-	return programHoldRow{pane: pane, hold: fields[1+programPaneFields], activity: fields[2+programPaneFields]}, true
+	return programHoldRow{pane: pane, activity: fields[1+programPaneFields]}, true
 }
 
 // holdRead takes one fresh hold reading of session's agent pane: a
@@ -93,24 +94,21 @@ func (t *Tmux) holdRead(session, target string) (runtime.ProgramHoldReading, boo
 		panes[i] = row.pane
 	}
 	pane, named := foldProgramPane(panes)
-	if !named {
+	if !named || !pane.holdDeclared() {
 		return runtime.ProgramHoldReading{}, false
 	}
-	var row programHoldRow
+	var activity string
 	for _, r := range rows {
 		if r.pane.id == pane.id {
-			row = r
+			activity = r.activity
 		}
-	}
-	if row.hold != pane.id {
-		return runtime.ProgramHoldReading{}, false
 	}
 	var taps programTaps
 	if t.shadow.taps != nil {
 		taps = t.shadow.taps()
 	}
 	reading := runtime.ProgramHoldReading{Status: judgeProgramPane(mode, t.captureGatePassed(), pane, true, taps)}
-	if secs, err := strconv.ParseInt(row.activity, 10, 64); err == nil && secs > 0 {
+	if secs, err := strconv.ParseInt(activity, 10, 64); err == nil && secs > 0 {
 		reading.Activity = t.discountedActivity(session, time.Unix(secs, 0))
 	}
 	return reading, true
@@ -118,14 +116,15 @@ func (t *Tmux) holdRead(session, target string) (runtime.ProgramHoldReading, boo
 
 // refuseHeldInput returns the typing refusal (runtime.ProgramHoldRefusal)
 // when session's agent pane, target when the caller resolved it, declares
-// the hold and its fresh record holds input now; nil otherwise, having read
-// nothing unless the switch is on.
+// the hold and its fresh record says a turn is running now
+// (runtime.ProgramTypingHolds); nil otherwise, having read nothing unless
+// the switch is on.
 func (t *Tmux) refuseHeldInput(session, target string) error {
 	r, ok := t.holdRead(session, target)
-	if !ok || !runtime.ProgramHolds(r, time.Now()) {
+	if !ok || !runtime.ProgramTypingHolds(r, time.Now()) {
 		return nil
 	}
-	return runtime.ProgramHoldRefusal(session, r.Status)
+	return runtime.ProgramHoldRefusal(session)
 }
 
 // ProgramStatusHoldRead implements [runtime.ProgramStatusHoldProvider]: one
@@ -136,3 +135,19 @@ func (p *Provider) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReadin
 }
 
 var _ runtime.ProgramStatusHoldProvider = (*Provider)(nil)
+
+// declareHold sets pane's hold declaration to hold, guarded by the nonce
+// heal read on it: tmux runs the change only while the pane still carries
+// that nonce, so a pane re-armed or disarmed in between keeps the
+// declaration its own arm gave it.
+func (t *Tmux) declareHold(pane healPane, hold bool) error {
+	change := []string{"set-option", "-pu", "-t", pane.target, programHoldOption}
+	if hold {
+		change = []string{"set-option", "-p", "-F", "-t", pane.target, programHoldOption, "#{pane_id}"}
+	}
+	guard := "#{==:#{" + programTapOption + "}," + pane.tap + "}"
+	if _, err := t.run("if-shell", "-F", "-t", pane.target, guard, tmuxCommandLines([][]string{change})); err != nil {
+		return fmt.Errorf("declaring the hold of %s: %w", pane.target, err)
+	}
+	return nil
+}

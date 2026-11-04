@@ -621,7 +621,10 @@ func checkPS013(t *testing.T, f ProgramStatusFixtures) error {
 
 // PS-014: heal arms a not_armed pane, re-arms one whose pipe closed, leaves
 // a healthy capture alone, and disarms when the switch goes off; each
-// re-armed pane reads valid at its next report.
+// re-armed pane reads valid at its next report. A healthy capture whose
+// mid-turn hold declaration differs from want's has it set (backfilled on a
+// pane armed before its provider declared it) or withdrawn, the capture
+// otherwise untouched.
 func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Armed == nil || f.Unarmed == nil {
 		return skip("needs armed- and unarmed-session fixtures")
@@ -648,6 +651,9 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 	}
 	if missing := heal(ProgramStatusSession{Provider: u.Provider, Name: programStatusMissingSession}, "missing session", captureAll, ""); !errors.Is(missing, runtime.ErrSessionNotFound) {
 		return wantSessionNotFound("heal of a missing session", missing)
+	}
+	if err := checkHoldDeclarationHeal(t, f); err != nil {
+		return err
 	}
 
 	s := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
@@ -764,4 +770,49 @@ func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 		}
 	}
 	return nil
+}
+
+// checkHoldDeclarationHeal is PS-014's hold half: a healthy capture armed
+// without the mid-turn hold has it backfilled when want declares it, is
+// left alone once it matches, and has it withdrawn when want stops
+// declaring it; each change is seen by the next fresh hold read, and the
+// capture keeps reading valid. A provider without hold reads, or fixtures
+// without a held one, skip it.
+func checkHoldDeclarationHeal(t *testing.T, f ProgramStatusFixtures) error {
+	a := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
+	if _, ok := runtime.ProgramStatusHoldFor(a.Provider, a.Name); !ok {
+		return nil
+	}
+	holding := runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}
+	declared := func(label string, want bool) error {
+		_, ok, err := holdRead(a)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if ok != want {
+			return fmt.Errorf("%s: hold read ok=%v, want the pane to declare the hold: %v", label, ok, want)
+		}
+		return nil
+	}
+	if err := declared("armed without the hold", false); err != nil {
+		return err
+	}
+	if err := heal(a, "backfill", holding, runtime.ProgramCaptureDeclared); err != nil {
+		return err
+	}
+	if err := declared("backfilled", true); err != nil {
+		return err
+	}
+	if err := heal(a, "backfilled, converged", holding, runtime.ProgramCaptureUnchanged); err != nil {
+		return err
+	}
+	if err := heal(a, "withdrawal", captureAll, runtime.ProgramCaptureDeclared); err != nil {
+		return err
+	}
+	if err := declared("withdrawn", false); err != nil {
+		return err
+	}
+	a.Emit(t, "report state=idle")
+	_, err := readValid(a, "after the declaration changes", runtime.ProgramIdle)
+	return err
 }
