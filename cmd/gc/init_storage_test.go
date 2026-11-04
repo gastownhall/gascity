@@ -4,21 +4,23 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // stubInitBDVersion makes every `bd version` probe gc init runs report line
-// (or fail, when line is "").
+// (or fail, when line is ""), whatever path names the bd.
 func stubInitBDVersion(t *testing.T, line string) {
 	t.Helper()
 	prev := initRunVersion
 	initRunVersion = func(binary string) (string, error) {
-		if binary != "bd" {
+		if filepath.Base(binary) != "bd" {
 			return prev(binary)
 		}
 		if line == "" {
@@ -27,6 +29,46 @@ func stubInitBDVersion(t *testing.T, line string) {
 		return line, nil
 	}
 	t.Cleanup(func() { initRunVersion = prev })
+}
+
+// initStorageFakeBD puts an executable bd first on PATH, with BD_BIN unset, and
+// returns its path: the bd a new city's gc bd would run. It never runs; tests
+// stub the command-tree judgment and the version probe.
+func initStorageFakeBD(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bd := filepath.Join(dir, "bd")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // stands in for an executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_BIN", "")
+	return bd
+}
+
+// stubInitSplitBDJudge makes the split floor's command-tree judgment answer the
+// pinned inventory named inventory ("" for none) or err, and returns the
+// binaries it was asked to judge.
+func stubInitSplitBDJudge(t *testing.T, inventory string, err error) *[]string {
+	t.Helper()
+	var judged []string
+	prev := initJudgeSplitBD
+	initJudgeSplitBD = func(bdPath string) (*bdflags.Inventory, error) {
+		judged = append(judged, bdPath)
+		if err != nil {
+			return nil, err
+		}
+		if inventory == "" {
+			return nil, nil
+		}
+		inv := bdflags.InventoryByName(inventory)
+		if inv == nil {
+			t.Fatalf("no pinned inventory %q", inventory)
+		}
+		return inv, nil
+	}
+	t.Cleanup(func() { initJudgeSplitBD = prev })
+	return &judged
 }
 
 // initStorageTestCity runs doInit on a fake filesystem and returns the written
@@ -140,38 +182,52 @@ func TestInitStorageSplitWritesTheBornSplitBlock(t *testing.T) {
 	}
 }
 
-// The split floor is bd 1.3.2 (maintainer ruling 2026-11-04): a split request
-// on an older bd starts the city single-store, with a hint to upgrade.
-func TestInitStorageSplitHonoursTheBDFloor(t *testing.T) {
+// The split floor (maintainer ruling 2026-11-04, design D3(b)): a split city's
+// gc bd runs only a bd whose command tree matches a pinned inventory, so gc
+// init judges the bd that city would run the same way, by tree and not by
+// version string, and keeps OSS releases before 1.3.2 single-store. Every
+// Enterprise build reports 1.3.0, and an OSS build from main reports 1.3.2
+// with another tree, so a version floor alone misjudges both.
+func TestInitStorageSplitJudgesTheBDByItsCommandTree(t *testing.T) {
 	for _, tc := range []struct {
-		version   string
-		wantSplit bool
+		name, version, inventory string
+		wantSplit                bool
 	}{
-		{"bd version 1.3.0 (Homebrew)", false},
-		{"bd version 1.3.1 (3ac028bf: main)", false},
-		{"bd version 1.3.2 (dev)", true},
-		{"bd version 1.3.4", true},
-		{"bd version 1.4.0", true},
+		{name: "OSS 1.3.0 has no pinned tree", version: "bd version 1.3.0 (f45b249ce: HEAD@f45b249ce6b4)"},
+		{name: "OSS 1.3.1 has 1.3.2's tree but predates the floor", version: "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)", inventory: "bd-1.3.2"},
+		{name: "OSS 1.3.2", version: "bd version 1.3.2 (9b65b9e19: HEAD@9b65b9e198ac)", inventory: "bd-1.3.2", wantSplit: true},
+		{name: "OSS 1.3.3 has 1.3.4's tree", version: "bd version 1.3.3 (e86e46fd4: HEAD@e86e46fd462c)", inventory: "bd-1.3.4", wantSplit: true},
+		{name: "OSS 1.3.4", version: "bd version 1.3.4 (7ef2fd05e: HEAD@7ef2fd05eb0c)", inventory: "bd-1.3.4", wantSplit: true},
+		{name: "the pinned Enterprise 1.3.0 build", version: "bd version 1.3.0 (Enterprise dev, Observer unknown; 77612097cec0: enterprise@77612097cec0)", inventory: "bd-1.3.0-enterprise-77612097cec0", wantSplit: true},
+		{name: "an Enterprise build with no pinned tree", version: "bd version 1.3.0 (Enterprise dev, Observer unknown; d4c35678ec5e: enterprise@d4c35678ec5e)"},
+		{name: "an OSS main build reporting 1.3.2 with another tree", version: "bd version 1.3.2 (dev)"},
+		{name: "a release gc pins no tree for yet", version: "bd version 1.4.0"},
+		{name: "an unversioned build with a pinned tree", version: "bd (development build)", inventory: "bd-1.3.4", wantSplit: true},
 	} {
-		t.Run(tc.version, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GC_BEADS", "bd")
 			t.Setenv("GC_SESSION", "")
+			bd := initStorageFakeBD(t)
 			stubInitBDVersion(t, tc.version)
+			judged := stubInitSplitBDJudge(t, tc.inventory, nil)
 			_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
 			if code != 0 {
 				t.Fatalf("doInit = %d: %s", code, stderr)
 			}
+			if len(*judged) != 1 || (*judged)[0] != bd {
+				t.Errorf("judged %v, want only the bd on PATH %s", *judged, bd)
+			}
 			if tc.wantSplit {
 				assertBornSplit(t, cfg)
 				if stderr != "" {
-					t.Errorf("stderr = %q, want nothing on a bd at or above the floor", stderr)
+					t.Errorf("stderr = %q, want nothing for a bd a split city admits", stderr)
 				}
 				return
 			}
 			if cfg.Storage != nil {
 				t.Fatalf("a split request on %s wrote [storage] %+v; want single-store", tc.version, cfg.Storage)
 			}
-			for _, want := range []string{"1.3.2", "single-store", "upgrade bd", "gc storage migrate"} {
+			for _, want := range []string{bd, "single-store", "1.3.2", "upgrade bd", "gc storage migrate"} {
 				if !strings.Contains(stderr, want) {
 					t.Errorf("stderr %q does not mention %q", stderr, want)
 				}
@@ -180,20 +236,68 @@ func TestInitStorageSplitHonoursTheBDFloor(t *testing.T) {
 	}
 }
 
-// A bd gc cannot version (missing, or a version line it cannot parse) is not
-// judged here: the dependency check and gc bd's own trust check own it.
-func TestInitStorageSplitKeepsTheSplitWhenBDCannotBeVersioned(t *testing.T) {
-	for _, line := range []string{"", "bd (development build)"} {
-		t.Run(line, func(t *testing.T) {
-			t.Setenv("GC_BEADS", "bd")
-			t.Setenv("GC_SESSION", "")
-			stubInitBDVersion(t, line)
-			_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
-			if code != 0 {
-				t.Fatalf("doInit = %d: %s", code, stderr)
-			}
-			assertBornSplit(t, cfg)
-		})
+// A bd whose tree gc cannot check (a walk that fails or times out, as a mise
+// or asdf shim does) would be refused by a split city's gc bd as well, so the
+// city starts single-store and the notice says why.
+func TestInitStorageSplitStartsSingleStoreWhenTheBDTreeCannotBeChecked(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SESSION", "")
+	initStorageFakeBD(t)
+	stubInitBDVersion(t, "bd version 1.3.4")
+	stubInitSplitBDJudge(t, "", errors.New("checking its command tree: the walk exceeded 2m0s"))
+	_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
+	if code != 0 {
+		t.Fatalf("doInit = %d: %s", code, stderr)
+	}
+	if cfg.Storage != nil {
+		t.Fatalf("wrote [storage] %+v for a bd gc could not check", cfg.Storage)
+	}
+	for _, want := range []string{"the walk exceeded 2m0s", "single-store", "gc storage migrate"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr %q does not mention %q", stderr, want)
+		}
+	}
+}
+
+// With no bd at all there is nothing to judge: the dependency check reports
+// the missing bd and stops init, so the request stands.
+func TestInitStorageSplitWithNoBDLeavesItToTheDependencyCheck(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SESSION", "")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("BD_BIN", "")
+	judged := stubInitSplitBDJudge(t, "", nil)
+	_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
+	if code != 0 {
+		t.Fatalf("doInit = %d: %s", code, stderr)
+	}
+	assertBornSplit(t, cfg)
+	if len(*judged) != 0 {
+		t.Errorf("judged %v with no bd installed", *judged)
+	}
+}
+
+// gc bd on a city whose workspace.env pins no bd (gc init writes none) runs an
+// ambient BD_BIN that names an absolute executable ahead of PATH, so that is
+// the bd the floor judges.
+func TestInitStorageSplitJudgesTheAmbientBDBin(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SESSION", "")
+	initStorageFakeBD(t)
+	pinned := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(pinned, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // stands in for an executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", pinned)
+	stubInitBDVersion(t, "bd version 1.3.4")
+	judged := stubInitSplitBDJudge(t, "bd-1.3.4", nil)
+	_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
+	if code != 0 {
+		t.Fatalf("doInit = %d: %s", code, stderr)
+	}
+	assertBornSplit(t, cfg)
+	if len(*judged) != 1 || (*judged)[0] != pinned {
+		t.Errorf("judged %v, want only BD_BIN %s", *judged, pinned)
 	}
 }
 
@@ -203,17 +307,21 @@ func TestInitStorageSplitOnAFileStoreNeverProbesBD(t *testing.T) {
 	t.Setenv("GC_SESSION", "")
 	prev := initRunVersion
 	initRunVersion = func(binary string) (string, error) {
-		if binary == "bd" {
+		if filepath.Base(binary) == "bd" {
 			t.Errorf("gc init probed bd for a file-store city")
 		}
 		return prev(binary)
 	}
 	t.Cleanup(func() { initRunVersion = prev })
+	judged := stubInitSplitBDJudge(t, "", nil)
 	_, cfg, code, stderr := initStorageTestCity(t, "/bright-lights", wizardConfig{storage: initStorageSplit})
 	if code != 0 {
 		t.Fatalf("doInit = %d: %s", code, stderr)
 	}
 	assertBornSplit(t, cfg)
+	if len(*judged) != 0 {
+		t.Errorf("judged %v for a file-store city", *judged)
+	}
 }
 
 // Remote session runtimes stay single-store until worker-site transport

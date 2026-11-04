@@ -1703,6 +1703,7 @@ go_test(
         "init_identity_failure_test.go",
         "init_prompt_template_path_test.go",
         "init_provider_readiness_test.go",
+        "init_storage_realbd_integration_test.go",
         "init_storage_test.go",
         "init_workspace_prefix_preserve_test.go",
         "invocation_store_memo_test.go",

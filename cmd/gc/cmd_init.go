@@ -448,7 +448,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
-	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; needs bd >= "+initSplitBDMinVersion+" on a bd work store, else the city starts single-store, and is refused for remote session runtimes)")
+	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix for the new city (default: derived from the city name)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	// --from copies its source verbatim and never adds the split (a K8S pod
