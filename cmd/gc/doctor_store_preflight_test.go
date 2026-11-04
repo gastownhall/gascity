@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -388,5 +389,89 @@ func TestBuildDoctorChecks_SkipStorePreflightSkipsProbe(t *testing.T) {
 	}
 	if doctorCheckIndex(names, "beads-store") < 0 {
 		t.Fatalf("store checks omitted with SkipStorePreflight; names=%v", names)
+	}
+}
+
+// writeDoctorPreflightBdStub installs an absolute-path bd stub that records
+// every invocation in marker, then runs body. It is pinned through BD_BIN and
+// PATH so the preflight's runner can only resolve this stub.
+func writeDoctorPreflightBdStub(t *testing.T, body string) (marker string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker = filepath.Join(dir, "bd-invoked")
+	stub := filepath.Join(dir, "bd")
+	script := "#!/bin/sh\necho \"$@\" >> '" + marker + "'\n" + body + "\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("BD_BIN", stub)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return marker
+}
+
+func fileBackedDoctorCity(t *testing.T) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	return cityDir
+}
+
+func noDoctorStoreFactory(string) (beads.Store, error) { return nil, nil }
+
+// TestDefaultDoctorBeadStorePreflight_FileProviderDoesNotForkBd: a file-backed
+// city's store is a local JSON file, so there is no server whose outage the
+// preflight could detect. Forking bd there probes a backend the city does not
+// use, and that fork is the only way the preflight can time out (ga-qu3ef2).
+func TestDefaultDoctorBeadStorePreflight_FileProviderDoesNotForkBd(t *testing.T) {
+	cityDir := fileBackedDoctorCity(t)
+	marker := writeDoctorPreflightBdStub(t, `echo '[]'`)
+
+	_ = defaultDoctorBeadStorePreflight(cityDir, noDoctorStoreFactory)
+
+	if data, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("preflight forked bd for a file-backed city (argv: %s); the city store is not bd", strings.TrimSpace(string(data)))
+	}
+}
+
+// TestDefaultDoctorBeadStorePreflight_FileProviderSlowBdIsNotAnOutage
+// reproduces the TestTutorial01/pack-v2-imports signature deterministically:
+// a bd that answers slower than the 5s caller deadline (the cmd/gc test binary
+// re-exec'd as bd under full-suite load) turns into "timed out after 5s
+// (caller deadline)", which isBeadStoreUnreachable classifies as an outage, so
+// gc doctor registers a blocking bead-store-preflight failure for a city whose
+// file store was never unreachable.
+func TestDefaultDoctorBeadStorePreflight_FileProviderSlowBdIsNotAnOutage(t *testing.T) {
+	cityDir := fileBackedDoctorCity(t)
+	writeDoctorPreflightBdStub(t, `sleep 30`)
+
+	start := time.Now()
+	err := defaultDoctorBeadStorePreflight(cityDir, noDoctorStoreFactory)
+	elapsed := time.Since(start)
+
+	if isBeadStoreUnreachable(err) {
+		t.Fatalf("file-backed city reported as an unreachable bead store after %s: %v", elapsed.Round(time.Millisecond), err)
+	}
+}
+
+// TestDefaultDoctorBeadStorePreflight_BdProviderStillForksBd is the control:
+// for a bd-backed city the probe is the #5064 outage gate and must keep
+// forking bd.
+func TestDefaultDoctorBeadStorePreflight_BdProviderStillForksBd(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	marker := writeDoctorPreflightBdStub(t, `echo '[]'`)
+
+	err := defaultDoctorBeadStorePreflight(cityDir, noDoctorStoreFactory)
+
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("preflight did not fork bd for a bd-backed city (err=%v); the #5064 outage probe must stay on", err)
 	}
 }
