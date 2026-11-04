@@ -149,7 +149,8 @@ type RuntimeLeaseRequest struct {
 	// ID is the open row whose record is taken. Empty takes the flock alone,
 	// for a stopper of a runtime no open row owns (the closed-row reaper).
 	ID string
-	// TTL is the record's lifetime, RuntimeLeaseTTL of the startup timeout;
+	// TTL is the record's lifetime. Callers pass RuntimeLeaseTTL for their
+	// complete bounded work window (startup plus any caller-specific slack);
 	// required with ID, and at least RuntimeLeaseMargin.
 	TTL time.Duration
 	now func() time.Time // test hook; nil reads the wall clock
