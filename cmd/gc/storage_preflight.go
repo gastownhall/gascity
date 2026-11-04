@@ -269,7 +269,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 			if err != nil {
 				literalErr = fmt.Errorf("listing the open rows' dependencies: %w", err)
 			}
-			literals = malformedLiteralsOnto(deps, moved)
+			literals = malformedLiteralRows(deps, moved, allIDs)
 		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
@@ -301,7 +301,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	case literalErr != nil:
 		preflightNote(stdout, "malformed edges", fmt.Sprintf("could not read the open rows' edges (%v), so rows blocked on a malformed <type>:<id> literal are not listed", literalErr))
 	case len(literals) > 0:
-		preflightNote(stdout, "malformed edges", fmt.Sprintf("%d work row(s) block on a malformed <type>:<id> literal naming a bead the copy moves; after the split gc ready holds each until `gc doctor --check dangling-blocking-edges --fix` removes the literal and records the edge on the row (%s). Or remove each now with bd dep remove <row> <literal>, and it stays ready across the split:", len(literals), beadmeta.MigratedCrossEdgesMetadataKey))
+		preflightNote(stdout, "malformed edges", fmt.Sprintf("%d work row(s) block on a malformed <type>:<id> literal. bd reads it as no blocker, but no store resolves it, so after the split gc ready holds each row until `gc doctor --check dangling-blocking-edges --fix` repairs it: a literal whose <id> stays in the work store is rewritten as that typed edge, one whose <id> moves to the binding is removed and the edge recorded on the row (%s), and one whose <id> no store holds is removed (a rig's is left for you). Or repair each now (bd dep remove <row> <literal>, then, where <id> stays, bd dep add <row> <id> -t <type>), and the row stays ready across the split:", len(literals), beadmeta.MigratedCrossEdgesMetadataKey))
 		for _, edge := range literals {
 			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
 		}

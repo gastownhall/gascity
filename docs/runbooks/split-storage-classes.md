@@ -495,13 +495,19 @@ learn it.
 
 A work row that blocks on a malformed `<type>:<id>` literal (such as
 `discovered-from:<id>`, a typed edge written as a `blocks` target) reads as
-ready on a single-store city. Once its `<id>` has moved to the binding, `gc
-ready` holds it, because no store resolves the literal. `gc storage preflight`
-lists these rows under `malformed edges` before the window. After the split,
-`gc doctor --check dangling-blocking-edges --fix` removes each literal and
-records the edge it meant on the row (`gc.migrated_cross_edges`, `action:
-"dropped"`). It writes no edge, because no edge crosses stores. A literal whose
-`<id>` a rig holds is still left for you.
+ready on a single-store city, because bd reads the literal as no blocker. On a
+split city `gc ready` holds the row, because no store resolves the literal,
+whether or not the split moved `<id>`. `gc storage preflight` lists every such
+row under `malformed edges` before the window, with where its `<id>` ends up.
+After the split, `gc doctor --check dangling-blocking-edges --fix` repairs each
+literal:
+
+- one whose `<id>` is still in the row's store is rewritten as that typed edge;
+- one whose `<id>` moved to the binding is removed, and the edge it meant is
+  recorded on the row (`gc.migrated_cross_edges`, `action: "dropped"`). It
+  writes no edge, because no edge crosses stores;
+- one whose `<id>` no store holds is removed;
+- one whose `<id>` a rig holds is left for you.
 
 ## gc bd on split cities
 

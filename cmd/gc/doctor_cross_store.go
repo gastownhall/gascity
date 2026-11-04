@@ -289,12 +289,15 @@ func typedDepLiteral(target string) (depType, id string, ok bool) {
 	return depType, strings.TrimSpace(id), true
 }
 
-// malformedLiteralsOnto lists, sorted, each blocking edge of rows (deps, keyed
-// by row) whose target is a malformed "<type>:<id>" literal naming one of
-// moved: the rows a storage split leaves blocked on an id only the class
-// binding holds, which gc ready holds until doctor --fix removes the literal
-// (ga-vt61ld). It reads nothing.
-func malformedLiteralsOnto(deps map[string][]beads.Dep, moved map[string]bool) []string {
+// malformedLiteralRows lists, sorted, each blocking edge of rows (deps, keyed
+// by row) whose target is a malformed "<type>:<id>" literal, with where <id>
+// ends up: moved (a bead the copy moves to the class binding), staying (any
+// other row the work store holds, in held), or in no row of the work store. bd
+// reads such a literal as no blocker, so the row is ready on a single-store
+// city; no store resolves the literal, so a split city's gc ready holds the
+// row until doctor --fix repairs it (ga-vt61ld), whichever case it is. A moved
+// row's own edges are not listed: they move with it. It reads nothing.
+func malformedLiteralRows(deps map[string][]beads.Dep, moved, held map[string]bool) []string {
 	var out []string
 	for row, edges := range deps {
 		if moved[row] {
@@ -304,9 +307,18 @@ func malformedLiteralsOnto(deps map[string][]beads.Dep, moved map[string]bool) [
 			if !beads.IsReadyBlockingDependencyType(d.Type) {
 				continue
 			}
-			if _, id, ok := typedDepLiteral(d.DependsOnID); ok && moved[id] {
-				out = append(out, fmt.Sprintf("%s -[%s]-> %s", row, d.Type, d.DependsOnID))
+			_, id, ok := typedDepLiteral(d.DependsOnID)
+			if !ok {
+				continue
 			}
+			where := "stays in the work store"
+			switch {
+			case moved[id]:
+				where = "moves to the binding"
+			case !held[id]:
+				where = "is not in the work store"
+			}
+			out = append(out, fmt.Sprintf("%s -[%s]-> %s (%s %s)", row, d.Type, d.DependsOnID, id, where))
 		}
 	}
 	sort.Strings(out)

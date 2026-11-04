@@ -1468,12 +1468,14 @@ func TestDanglingBlockingEdgesFixReportsARemovalBdRefuses(t *testing.T) {
 	}
 }
 
-// TestPreflightNamesWorkRowsBlockedOnAMalformedLiteralTheCopyMoves is
-// ga-vt61ld's preflight leg: a work row that blocks on a malformed
-// "<type>:<id>" literal whose <id> is a bead the copy moves becomes one gc
-// ready holds forever after the split, until doctor --fix removes it. The
-// operator sees each before the window; the preflight does not block on them.
-func TestPreflightNamesWorkRowsBlockedOnAMalformedLiteralTheCopyMoves(t *testing.T) {
+// TestPreflightNamesWorkRowsBlockedOnAMalformedLiteral is ga-vt61ld's
+// preflight leg. bd reads a malformed "<type>:<id>" blocks literal as no
+// blocker, so the row is ready on a single-store city; no store resolves the
+// literal, so a split city's gc ready holds the row until doctor --fix repairs
+// it, whether or not the copy moves <id>. The operator sees every such open row
+// before the window, with where its <id> ends up, which decides the repair; the
+// preflight does not block on them.
+func TestPreflightNamesWorkRowsBlockedOnAMalformedLiteral(t *testing.T) {
 	request, _, _ := preflightReadyCity(t, 0)
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
@@ -1483,23 +1485,39 @@ func TestPreflightNamesWorkRowsBlockedOnAMalformedLiteralTheCopyMoves(t *testing
 	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work origin", Type: "task"})
 	handoff := mustCreateInfraBead(t, source, beads.Bead{Title: "handoff", Type: "task"})
 	local := mustCreateInfraBead(t, source, beads.Bead{Title: "literal onto work", Type: "task"})
+	orphan := mustCreateInfraBead(t, source, beads.Bead{Title: "literal onto nothing", Type: "task"})
+	done := mustCreateInfraBead(t, source, beads.Bead{Title: "closed row", Type: "task"})
 	for _, edge := range []beads.Dep{
 		{IssueID: handoff.ID, DependsOnID: "discovered-from:" + step.ID, Type: "blocks"},
 		{IssueID: local.ID, DependsOnID: "discovered-from:" + work.ID, Type: "blocks"},
+		{IssueID: orphan.ID, DependsOnID: "related:gc-404", Type: "blocks"},
+		{IssueID: done.ID, DependsOnID: "discovered-from:" + step.ID, Type: "blocks"},
 	} {
 		if err := source.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := source.Close(done.ID); err != nil {
+		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
 	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
 		t.Fatalf("preflight blocked on a malformed literal doctor can fix: exit %d stdout=%q", code, stdout.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "1 work row(s) block on a malformed") || !strings.Contains(out, handoff.ID+" -[blocks]-> discovered-from:"+step.ID) {
-		t.Fatalf("preflight does not name the row blocked on a literal the copy moves: %s", out)
+	if !strings.Contains(out, "3 work row(s) block on a malformed") {
+		t.Fatalf("preflight does not count every open row a split city holds behind a malformed literal: %s", out)
 	}
-	if strings.Contains(out, local.ID+" -[blocks]->") {
-		t.Fatalf("preflight names a literal onto a work bead, which doctor rewrites in place after the split: %s", out)
+	for _, want := range []string{
+		handoff.ID + " -[blocks]-> discovered-from:" + step.ID + " (" + step.ID + " moves to the binding)",
+		local.ID + " -[blocks]-> discovered-from:" + work.ID + " (" + work.ID + " stays in the work store)",
+		orphan.ID + " -[blocks]-> related:gc-404 (gc-404 is not in the work store)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preflight does not name %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, done.ID+" -[blocks]->") {
+		t.Errorf("preflight names %s, a closed row nothing holds: %s", done.ID, out)
 	}
 }
