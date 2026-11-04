@@ -902,20 +902,15 @@ func (c *client) tabClose(ctx context.Context, tabID string) error {
 // with the same label (left by a previous life of this session — e.g. an
 // exited agent whose pane sits at a shell prompt) is closed first, so every
 // Start gets a clean shell with the right cwd/env and dead panes never
-// accumulate across restarts.
+// accumulate across restarts. herdr closes a workspace together with its last
+// tab, so a recycle that empties the workspace is recovered by recreating it.
 func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd string, env map[string]string) (tabID, paneID string, err error) {
 	wsID, err := c.findWorkspace(ctx, wsLabel)
 	if err != nil {
 		return "", "", err
 	}
 	if wsID == "" {
-		// New workspace: repurpose the default tab herdr spawns for this agent.
-		tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
-		if err != nil {
-			return "", "", err
-		}
-		_ = c.tabRename(ctx, tabID, tabLabel) // cosmetic; ignore failure
-		return tabID, paneID, nil
+		return c.placeInNewWorkspace(ctx, wsLabel, tabLabel, cwd, env)
 	}
 	tabs, err := c.listTabs(ctx, wsID)
 	if err != nil {
@@ -926,7 +921,24 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 			_ = c.tabClose(ctx, tb.TabID) // best-effort: replaced below either way
 		}
 	}
-	return c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+	tabID, paneID, err = c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+	if herdrAnswerCode(err) == "workspace_not_found" {
+		// The recycle above closed the workspace's only tab, and herdr closed
+		// the workspace with it.
+		return c.placeInNewWorkspace(ctx, wsLabel, tabLabel, cwd, env)
+	}
+	return tabID, paneID, err
+}
+
+// placeInNewWorkspace creates the workspace wsLabel and repurposes the default
+// tab herdr spawns in it for this agent, relabeling it tabLabel.
+func (c *client) placeInNewWorkspace(ctx context.Context, wsLabel, tabLabel, cwd string, env map[string]string) (tabID, paneID string, err error) {
+	tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
+	if err != nil {
+		return "", "", err
+	}
+	_ = c.tabRename(ctx, tabID, tabLabel) // cosmetic; ignore failure
+	return tabID, paneID, nil
 }
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
