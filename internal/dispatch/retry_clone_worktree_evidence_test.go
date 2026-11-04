@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -153,7 +154,8 @@ func TestProcessRetryEvalCloneOfStampedRunIsBornUnbound(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{
+		Work:           beadstest.Work(store),
 		RecycleSession: func(beads.Bead) error { return nil },
 	})
 	if err != nil {
@@ -210,7 +212,7 @@ func TestRalphRetryClonesOfStampedIterationAreBornUnbound(t *testing.T) {
 		subject := newBead(ralphIterOneSubject)
 		member := newBead(ralphIterOnePlainMember)
 		check := newBead(ralphIterOneCheck)
-		mapping, err := appendRalphRetryLegacy(store, logical.ID, subject, check,
+		mapping, err := appendRalphRetryLegacy(beadstest.Graph(store), logical.ID, subject, check,
 			map[string]beads.Bead{subject.ID: subject, member.ID: member},
 			1, 2, "review-loop.iteration.1", "review-loop.iteration.2", nil)
 		if err != nil {
