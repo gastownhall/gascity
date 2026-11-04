@@ -63,6 +63,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -234,9 +235,10 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
 	rows, allIDs, listErr := readInfraSnapshotWithIDs(source, coordclass.CurrentGeneration)
-	var edgeErr, holdsErr error
+	var edgeErr, holdsErr, literalErr error
 	var gates []infraCopyGate
 	var plan infraCopyPlan
+	var literals []string
 	if listErr == nil {
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
@@ -245,6 +247,29 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		// before the window rather than inside it.
 		if edgeErr == nil {
 			gates, holdsErr = planInfraCopyHolds(plan, source, time.Now())
+		}
+		// The open work rows' edges, as doctor's dangling-edge scan reads them.
+		moved := make(map[string]bool, len(rows))
+		for _, b := range rows {
+			moved[b.ID] = true
+		}
+		var live []string
+		for _, status := range []string{"open", "in_progress"} {
+			got, err := source.List(beads.ListQuery{Status: status, AllowScan: true, Live: true, TierMode: beads.TierBoth})
+			if err != nil {
+				literalErr = fmt.Errorf("listing %s rows: %w", status, err)
+				break
+			}
+			for _, b := range got {
+				live = append(live, b.ID)
+			}
+		}
+		if literalErr == nil && len(live) > 0 {
+			deps, err := doctorDepsFor(source, live)
+			if err != nil {
+				literalErr = fmt.Errorf("listing the open rows' dependencies: %w", err)
+			}
+			literals = malformedLiteralsOnto(deps, moved)
 		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
@@ -270,6 +295,16 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		}
 	} else {
 		preflightPass(stdout, "cross-store edges", "no work bead links to a bead the copy moves")
+	}
+	// Informational: doctor --fix settles each after the split.
+	switch {
+	case literalErr != nil:
+		preflightNote(stdout, "malformed edges", fmt.Sprintf("could not read the open rows' edges (%v), so rows blocked on a malformed <type>:<id> literal are not listed", literalErr))
+	case len(literals) > 0:
+		preflightNote(stdout, "malformed edges", fmt.Sprintf("%d work row(s) block on a malformed <type>:<id> literal naming a bead the copy moves; after the split gc ready holds each until `gc doctor --check dangling-blocking-edges --fix` removes the literal and records the edge on the row (%s). Or remove each now with bd dep remove <row> <literal>, and it stays ready across the split:", len(literals), beadmeta.MigratedCrossEdgesMetadataKey))
+		for _, edge := range literals {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
+		}
 	}
 
 	// 7. What the destination already holds. Read-only: the database is opened

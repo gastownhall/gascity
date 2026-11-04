@@ -25,6 +25,9 @@ import (
 type doctorScope struct {
 	label string
 	store beads.Store
+	// binding: the scope is the city's class binding, which holds the
+	// relocated infrastructure classes.
+	binding bool
 }
 
 // splitCityDoctorScopes returns the stores a split city's cross-store checks
@@ -68,7 +71,7 @@ func splitCityDoctorScopes(cfg *config.City, cityPath string, newStore func(stri
 			scopes = append(scopes, doctorScope{label: "rig " + rig.Name, store: store})
 		}
 	}
-	scopes = append(scopes, doctorScope{label: "graph binding", store: graph})
+	scopes = append(scopes, doctorScope{label: "graph binding", store: graph, binding: true})
 	return scopes, unread, skipped
 }
 
@@ -172,7 +175,7 @@ func (c *crossStoreGatesCheck) heldByUnreadableStores(graph beads.Store, gates [
 	scopes, unread, skipped := splitCityDoctorScopes(c.cfg, c.cityPath, c.newStore)
 	legs := make([]crossStoreBlockerLeg, 0, len(scopes))
 	for _, sc := range scopes {
-		legs = append(legs, crossStoreBlockerLeg(sc))
+		legs = append(legs, crossStoreBlockerLeg{label: sc.label, store: sc.store})
 	}
 	read := crossStoreBlockerResolverOver(graph, legs, unread)
 	resolve := func(ids []string) (dispatch.CrossStoreBlockerResolution, error) {
@@ -206,9 +209,13 @@ func (c *crossStoreGatesCheck) heldByUnreadableStores(graph beads.Store, gates [
 //   - A blocking edge to a malformed "<type>:<id>" literal — the
 //     maintainer-city shape is "discovered-from:<id>", a typed edge written as
 //     a blocks target — is REWRITTEN as the real <type> edge to <id> when the
-//     row's own store holds <id>. When only another store holds <id> it is
-//     reported for the operator and left alone: a rewrite there would be a
-//     cross-store edge, which gc never writes.
+//     row's own store holds <id>. When only the class binding holds <id> (a
+//     storage split moved it there) the literal is REMOVED and the typed edge
+//     it meant is recorded on the row (gc.migrated_cross_edges, action
+//     "dropped"), as the split records every edge it drops (ga-vt61ld):
+//     writing it would be a cross-store edge, which gc never writes. When
+//     another store holds <id> — a rig, or one that could not be read — it is
+//     reported for the operator and left alone.
 //   - Any other blocking edge whose target no store holds is removed from the
 //     row's own store. Nothing is written in its place. The exception is an
 //     "external:<id>" edge in a store bd's CLI serves: `bd dep remove` refuses
@@ -242,8 +249,12 @@ const (
 	// holds; the edge is rewritten as the real <type> edge.
 	danglingRewrite
 	// danglingOperator: a "<type>:<id>" literal whose <id> only another store
-	// holds; left for the operator.
+	// (not the class binding) holds, or may hold; left for the operator.
 	danglingOperator
+	// danglingCrossStore: a "<type>:<id>" literal whose <id> only the class
+	// binding holds; the literal is removed and the typed edge recorded on
+	// the row, never written.
+	danglingCrossStore
 	// danglingUnremovable: an "external:<id>" edge no store resolves, in a
 	// store bd's CLI serves. `bd dep remove` takes an external: target only as
 	// external:<project>:<capability> and refuses this one, so it is left for
@@ -258,8 +269,10 @@ type danglingEdge struct {
 	rowID   string
 	target  string // the edge's DependsOnID as written
 	action  danglingAction
-	depType string // danglingRewrite / danglingOperator: the literal's type
-	realID  string // danglingRewrite / danglingOperator: the literal's id
+	depType string // danglingRewrite / danglingOperator / danglingCrossStore: the literal's type
+	realID  string // danglingRewrite / danglingOperator / danglingCrossStore: the literal's id
+	// realStatus is the binding's status for realID (danglingCrossStore).
+	realStatus string
 }
 
 // typedDepLiteralTypes are the edge types a malformed "<type>:<id>" blocks
@@ -274,6 +287,30 @@ func typedDepLiteral(target string) (depType, id string, ok bool) {
 		return "", "", false
 	}
 	return depType, strings.TrimSpace(id), true
+}
+
+// malformedLiteralsOnto lists, sorted, each blocking edge of rows (deps, keyed
+// by row) whose target is a malformed "<type>:<id>" literal naming one of
+// moved: the rows a storage split leaves blocked on an id only the class
+// binding holds, which gc ready holds until doctor --fix removes the literal
+// (ga-vt61ld). It reads nothing.
+func malformedLiteralsOnto(deps map[string][]beads.Dep, moved map[string]bool) []string {
+	var out []string
+	for row, edges := range deps {
+		if moved[row] {
+			continue
+		}
+		for _, d := range edges {
+			if !beads.IsReadyBlockingDependencyType(d.Type) {
+				continue
+			}
+			if _, id, ok := typedDepLiteral(d.DependsOnID); ok && moved[id] {
+				out = append(out, fmt.Sprintf("%s -[%s]-> %s", row, d.Type, d.DependsOnID))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // collect reads, per store, the open and in-progress rows (two lists), their
@@ -346,6 +383,8 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 	}
 	sort.Strings(targets)
 	heldBy := make(map[string]map[beads.Store]bool, len(targets))
+	// bindingStatus is each target's status in the class binding.
+	bindingStatus := map[string]string{}
 	for _, sc := range scopes {
 		found, err := beads.GetMany(sc.store, targets)
 		if err != nil {
@@ -353,11 +392,14 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 			// rather than call a held blocker dangling.
 			return nil, append(skipped, fmt.Sprintf("%s: reading blockers: %v (no edge reported dangling while a store is unreadable)", sc.label, err))
 		}
-		for id := range found {
+		for id, b := range found {
 			if heldBy[id] == nil {
 				heldBy[id] = map[beads.Store]bool{}
 			}
 			heldBy[id][sc.store] = true
+			if sc.binding {
+				bindingStatus[id] = b.Status
+			}
 		}
 	}
 	for _, cand := range candidates {
@@ -370,7 +412,11 @@ func (c *danglingBlockingEdgesCheck) collect() (edges []danglingEdge, skipped []
 			switch {
 			case heldBy[realID][cand.scope.store]:
 				edge.action = danglingRewrite
-			case len(heldBy[realID]) > 0 || inUnreadNamespace(realID, unread):
+			case inUnreadNamespace(realID, unread):
+				edge.action = danglingOperator
+			case len(heldBy[realID]) == 1 && bindingStatus[realID] != "":
+				edge.action, edge.realStatus = danglingCrossStore, bindingStatus[realID]
+			case len(heldBy[realID]) > 0:
 				edge.action = danglingOperator
 			}
 		} else if cand.bdCLI && strings.HasPrefix(strings.TrimSpace(cand.raw), "external:") {
@@ -440,6 +486,8 @@ func (e danglingEdge) describe() string {
 		return fmt.Sprintf("%s row %s blocks on the malformed literal %q; --fix rewrites it as a %s edge to %s", e.label, e.rowID, e.target, e.depType, e.realID)
 	case danglingOperator:
 		return fmt.Sprintf("%s row %s blocks on the malformed literal %q; %s is held by another store, so it is left for the operator (gc never writes a cross-store edge)", e.label, e.rowID, e.target, e.realID)
+	case danglingCrossStore:
+		return fmt.Sprintf("%s row %s blocks on the malformed literal %q; %s moved to the class binding, so --fix removes the literal and records the %s edge on the row (%s); no cross-store edge is written", e.label, e.rowID, e.target, e.realID, e.depType, beadmeta.MigratedCrossEdgesMetadataKey)
 	case danglingUnremovable:
 		return fmt.Sprintf("%s row %s blocks on %s, which no store holds; bd dep remove takes an external: target only as external:<project>:<capability> and refuses this one, so it is left for the operator", e.label, e.rowID, e.target)
 	default:
@@ -558,6 +606,18 @@ func fixDanglingEdge(e danglingEdge, stillAbsent func(string) (bool, error)) err
 			}
 			return fmt.Errorf("%s row %s: re-reading %s before the rewrite: %w", e.label, e.rowID, e.realID, err)
 		}
+	case danglingCrossStore:
+		// The literal itself must still resolve nowhere; where the bead it
+		// names lives now is settled below.
+		if stillAbsent != nil {
+			absent, err := stillAbsent(e.target)
+			if err != nil {
+				return fmt.Errorf("%s row %s: %w", e.label, e.rowID, err)
+			}
+			if !absent {
+				return nil
+			}
+		}
 	default:
 		target, _ := beads.ExternalBlockerTarget(e.target)
 		if stillAbsent != nil {
@@ -590,6 +650,21 @@ func fixDanglingEdge(e danglingEdge, stillAbsent func(string) (bool, error)) err
 			}
 		}
 	}
+	if action == danglingCrossStore {
+		// The row's own store may hold the bead by now: then it is a rewrite.
+		_, err := beads.HandlesFor(e.store).Live.Get(e.realID)
+		switch {
+		case err == nil:
+			action = danglingRewrite
+		case !errors.Is(err, beads.ErrNotFound):
+			return fmt.Errorf("%s row %s: re-reading %s before the removal: %w", e.label, e.rowID, e.realID, err)
+		default:
+			// Recorded before the literal goes, so a failed write loses nothing.
+			if err := recordDroppedTypedLiteral(e); err != nil {
+				return fmt.Errorf("%s row %s: recording the %s edge to %s (the literal %q is kept): %w", e.label, e.rowID, e.depType, e.realID, e.target, err)
+			}
+		}
+	}
 	if action == danglingRewrite && !realPresent {
 		if err := addTypedEdgeLike(e); err != nil {
 			return fmt.Errorf("%s row %s: writing the %s edge to %s (the literal %q is kept): %w", e.label, e.rowID, e.depType, e.realID, e.target, err)
@@ -599,6 +674,23 @@ func fixDanglingEdge(e danglingEdge, stillAbsent func(string) (bool, error)) err
 		return fmt.Errorf("%s row %s: removing edge %q: %w", e.label, e.rowID, e.target, err)
 	}
 	return nil
+}
+
+// recordDroppedTypedLiteral records, on the row, the typed edge a malformed
+// literal meant onto a bead the class binding holds, as a "dropped" entry in
+// gc.migrated_cross_edges beside any the row already carries.
+func recordDroppedTypedLiteral(e danglingEdge) error {
+	row, err := beads.HandlesFor(e.store).Live.Get(e.rowID)
+	if err != nil {
+		return err
+	}
+	value, changed, err := mergeCrossEdgeRecords(row.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], []rigCrossEdgeRecord{
+		{Dir: "out", Type: e.depType, Other: e.realID, OtherStatus: e.realStatus, Action: rigEdgeDropped},
+	})
+	if err != nil || !changed {
+		return err
+	}
+	return e.store.SetMetadata(e.rowID, beadmeta.MigratedCrossEdgesMetadataKey, value)
 }
 
 // addTypedEdgeLike writes the rewrite's typed edge, with the literal edge's

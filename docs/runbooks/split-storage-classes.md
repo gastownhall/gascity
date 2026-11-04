@@ -493,6 +493,16 @@ On a converged city `source:` reads 0 and `binding:` carries the count. On an
 unconverged city `binding:` reads zero without the database being created to
 learn it.
 
+A work row that blocks on a malformed `<type>:<id>` literal (such as
+`discovered-from:<id>`, a typed edge written as a `blocks` target) reads as
+ready on a single-store city. Once its `<id>` has moved to the binding, `gc
+ready` holds it, because no store resolves the literal. `gc storage preflight`
+lists these rows under `malformed edges` before the window. After the split,
+`gc doctor --check dangling-blocking-edges --fix` removes each literal and
+records the edge it meant on the row (`gc.migrated_cross_edges`, `action:
+"dropped"`). It writes no edge, because no edge crosses stores. A literal whose
+`<id>` a rig holds is still left for you.
+
 ## gc bd on split cities
 
 On a split city, `gc bd` is an allowlist. bd writes whatever it is told into
