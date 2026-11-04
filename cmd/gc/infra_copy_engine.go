@@ -264,6 +264,24 @@ func (p infraCopyPlan) internalEdges() []beads.DepWithPayload {
 	return out
 }
 
+// infraCrossEdgesAtRisk is every edge from a work bead into a row of the plan
+// that the clear re-adds once the row is gone, sorted: what a work store that
+// refuses an edge onto a bead it no longer holds drops. A blocking edge onto a
+// row whose copy satisfies it is released instead, as the clear releases it.
+func infraCrossEdgesAtRisk(plan infraCopyPlan) []infraBackupEdge {
+	var out []infraBackupEdge
+	for _, row := range plan.rows {
+		for _, d := range plan.up[row.ID] {
+			if beads.IsReadyBlockingDependencyType(d.Type) && beads.DependencySatisfied(row.Status, beads.ReadinessWorkOutcome(row.Metadata)) {
+				continue
+			}
+			out = append(out, infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type})
+		}
+	}
+	sortInfraBackupEdges(out)
+	return out
+}
+
 // infraPrepared is what prepareInfraDestination left in the binding for the
 // copy to build on: the stamped rows it kept, and the edges between kept rows
 // with the type and payload each already carries.

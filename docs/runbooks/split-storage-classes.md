@@ -362,15 +362,27 @@ blocking is not expressible on a split city yet (ga-2orlf); the migration does
 not refuse over it, because refusing would leave a city that boot also refuses
 with no way forward. Instead:
 
+- `gc storage preflight` lists every such edge under `cross-store edges`
+  before the window, as a note that does not block;
 - the migrate output lists every such edge as **AT RISK** before the first row
   is removed;
-- every edge the store then refuses is recorded in
+- every edge the store then refuses is recorded on its work bead, as a
+  `dropped` entry in `gc.migrated_cross_edges` (the shape `--from-rigs` uses:
+  `dir`, `type`, `other`, `other_status_at_import`, `payload`, `action`), so
+  `gc bd show <id>` still names the bead a bug was discovered from;
+- every edge the store then refuses is also recorded in
   `.gc/storage-infra-cleared.json`, listed under `lost cross-store edges` by
   `gc storage status`, and carried as `lost_cross_edges` on every
   `storage.binding.*` event that reads the note;
 - every one stays in the backup (`dependents` on the moved bead's entry).
 
 A file or SQLite work store keeps them.
+
+On a work store served by the city's managed Dolt server, the clear's
+deletes stay in the database's Dolt history, and the migrate output ends with
+a reminder to run `gc dolt compact`. Compaction reclaims that space and also
+ends `AS OF` recovery from before the clear, so run it only once you no longer
+need that backstop. The migration never compacts on its own.
 
 The command is idempotent. Run it again on a converged city and it re-proves
 convergence and finishes any clear that did not complete — including the

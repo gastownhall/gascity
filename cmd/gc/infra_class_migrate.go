@@ -1520,9 +1520,22 @@ func clearInfraRetainedCopiesReport(cityPath string, target infraBindingTarget, 
 	}
 	fmt.Fprintf(stderr, "%s: %s\n", logPrefix, describeInfraClear(result)) //nolint:errcheck // best-effort stderr
 	for _, edge := range result.Unrestorable {
-		fmt.Fprintf(stderr, "%s: WARNING: cross-store edge %s could not be kept: the work store refuses an edge to a bead it no longer holds. A blocking edge no longer holds its work bead back; a tracks or related edge no longer links the two. It is recorded in %s and listed by `%s`\n", logPrefix, edge, result.Backup, storageStatusInstruction()) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: WARNING: cross-store edge %s could not be kept: the work store refuses an edge to a bead it no longer holds. A blocking edge no longer holds its work bead back; a tracks or related edge no longer links the two. It is recorded on its work bead (%s), in %s, and listed by `%s`\n", logPrefix, edge, beadmeta.MigratedCrossEdgesMetadataKey, result.Backup, storageStatusInstruction()) //nolint:errcheck // best-effort stderr
+	}
+	// Removing the slice is history a Dolt work store keeps (ga-3xxr0o).
+	// Compaction reclaims it and ends AS OF recovery from before the clear,
+	// so it is the operator's call, never automatic.
+	if result.Cleared > 0 && infraWorkStoreIsManagedDolt(cityPath) {
+		fmt.Fprintf(stderr, "%s: the work store's Dolt history still holds the %d cleared row(s); once you no longer need AS OF recovery from before the clear, run `gc dolt compact` to reclaim it\n", logPrefix, result.Cleared) //nolint:errcheck // best-effort stderr
 	}
 	return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: provenBeads, Clear: result, LostCrossEdges: result.LostCrossEdges}
+}
+
+// infraWorkStoreIsManagedDolt reports whether the city's work store lives in
+// the city's managed Dolt server, the store `gc dolt compact` compacts. Tests
+// replace it.
+var infraWorkStoreIsManagedDolt = func(cityPath string) bool {
+	return scopeStoreLivesInTheCitysManagedDolt(cityPath, cityPath)
 }
 
 // clearRetainedInfraCopiesFn is the clear the operator command runs. Tests
