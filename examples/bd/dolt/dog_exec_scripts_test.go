@@ -642,6 +642,12 @@ set_hash() {
 # (including live table enumeration) return drifted values as a regression
 # trap if a future change drops the pin.
 if [ "$mode" = "pin_no_false_quarantine_concurrent_writer" ] && { [ "$(current_head)" = "compactcommit" ] || [ "$(current_head)" = "writercommit" ]; }; then
+  # Log every query reaching this block so the test can assert each
+  # post-flatten read carried its pin, even when the run ends in writer-race
+  # deferral rather than quarantine.
+  if [ -n "$hash_state_file" ]; then
+    printf '%%s\n' "$query" >> "$(dirname "$hash_state_file")/pin_queries.log"
+  fi
   case "$query" in
     *"SELECT COUNT(*) FROM"*"AS OF 'compactcommit'"*)
       set_head writercommit

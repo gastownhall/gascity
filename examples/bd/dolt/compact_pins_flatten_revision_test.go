@@ -27,6 +27,47 @@ func TestCompactScriptPinsFlattenRevisionAgainstConcurrentCommitBetweenVerificat
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("pinned flatten revision must not write a quarantine marker; stat=%v", err)
 	}
+	// The no-quarantine assertions above also hold when a dropped pin ends the
+	// run in writer-race deferral, so assert each post-flatten read was issued
+	// in its pinned form.
+	logData, err := os.ReadFile(filepath.Join(fixture.binDir, "pin_queries.log"))
+	if err != nil {
+		t.Fatalf("read pinned query log: %v\n%s", err, out)
+	}
+	queries := strings.Split(string(logData), "\n")
+	for _, pin := range []struct {
+		name  string
+		parts []string
+	}{
+		{"pinned table list", []string{"TABLES AS OF 'compactcommit'"}},
+		{"pinned row count", []string{"SELECT COUNT(*) FROM", "AS OF 'compactcommit'"}},
+		{"pinned table value hash", []string{"USE `beads/compactcommit`; SELECT DOLT_HASHOF_TABLE('beads')"}},
+		{"pinned database value hash", []string{"USE `beads/compactcommit`; SELECT DOLT_HASHOF_DB('HEAD')"}},
+	} {
+		if !containsQueryWithParts(queries, pin.parts) {
+			t.Errorf("post-flatten verification never issued the %s query (want all of %q)\nqueries:\n%s", pin.name, pin.parts, logData)
+		}
+	}
+}
+
+// containsQueryWithParts reports whether any query contains every part in order.
+func containsQueryWithParts(queries, parts []string) bool {
+	for _, q := range queries {
+		rest := q
+		matched := true
+		for _, part := range parts {
+			i := strings.Index(rest, part)
+			if i < 0 {
+				matched = false
+				break
+			}
+			rest = rest[i+len(part):]
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // TestCompactScriptStillQuarantinesRealDriftAtPinnedFlattenRevision asserts that
