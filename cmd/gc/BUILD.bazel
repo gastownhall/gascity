@@ -163,6 +163,7 @@ go_library(
         "cmd_analyze_reliability.go",
         "cmd_bd.go",
         "cmd_bd_by_id.go",
+        "cmd_bd_by_id_instead.go",
         "cmd_bd_show_watch.go",
         "cmd_bd_store_bridge.go",
         "cmd_beads.go",

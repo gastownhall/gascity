@@ -99,7 +99,7 @@ func TestBdCloseClassResidentAsksTheOwningRigsCheckout(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", landed.ID}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"close", landed.ID}, &stdout, &stderr)
 	if !handled {
 		t.Fatalf("a class-resident close fell through to the bd subprocess: %q", stderr.String())
 	}
@@ -137,7 +137,7 @@ func TestBdCloseClassResidentBlocksACommitNoCheckoutHolds(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", nowhere.ID}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"close", nowhere.ID}, &stdout, &stderr)
 	if !handled {
 		t.Fatalf("a class-resident close fell through to the bd subprocess: %q", stderr.String())
 	}

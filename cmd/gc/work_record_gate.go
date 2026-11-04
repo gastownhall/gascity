@@ -34,9 +34,10 @@ import (
 // because the city relocated a coordination class and the bead resides in the
 // class binding — never reaches this fall-through, so the door runs the same
 // evaluateWorkRecordCloseGate against the class bead it is about to write
-// (gateBdByIDClassClose), reusing the row it already resolved. Both spellings
-// the door serves — `gc bd close <id>` and `gc bd update <id> --status closed`
-// — are therefore gated wherever they land; the two entry points cover disjoint
+// (gateBdByIDClassClose), reusing the rows it already resolved. Both spellings
+// the door serves — `gc bd close <id>...` (one id or a batch, judged whole
+// before the first close) and `gc bd update <id> --status closed` — are
+// therefore gated wherever they land; the two entry points cover disjoint
 // stores, and neither trusts the other's read.
 //
 // The DUAL-RESIDENT case is why the split matters rather than being a redundant

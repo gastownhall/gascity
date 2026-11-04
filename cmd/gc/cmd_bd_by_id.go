@@ -79,9 +79,11 @@ package main
 //     storage and says nothing about a bead the work ledger still serves. See
 //     resolve.
 //
-// Served here: show, update (fields and metadata, including --claim), close
-// (with or without one --reason), reopen, release-if-current, dep list, and
-// dep tree. `gc bd heartbeat` is not — it
+// Served here: show (with or without --include-comments), update (fields and
+// metadata, including --claim), close (one id or a batch, with every reason
+// spelling bd reads), reopen, release-if-current, dep list, and dep tree. A
+// refusal of any other spelling names what to run instead
+// (cmd_bd_by_id_instead.go). `gc bd heartbeat` is not served — it
 // forwards to bd's native owner-only lease-refresh verb (commit 80aad8c), a
 // literal spelling parseBdByIDOp does not recognize, and it is no longer
 // rewritten to a metadata update the way it once was. On a city that relocates
@@ -198,6 +200,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -287,29 +290,72 @@ type bdByIDOp struct {
 	DepType   string
 	// MaxDepth is `dep tree`'s safety limit, always populated for that verb.
 	MaxDepth int
-	// Reason is close's --reason, trimmed: the text the close records as the
-	// bead's close reason. Empty means a bare close.
-	Reason string
+	// IncludeComments is show's --include-comments. The class store contract
+	// carries no comments, so it adds none; the read says so on stderr.
+	IncludeComments bool
+	// Close carries close's subjects and reasons (bdByIDClose only).
+	Close bdByIDCloseRequest
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
 	Update beads.UpdateOpts
 }
 
+// bdByIDCloseRequest is a parsed `gc bd close`: every id it names and the
+// reason each one is closed with, collected the way bd collects them
+// (resolveCloseReasons in bd's cmd/bd/close.go).
+type bdByIDCloseRequest struct {
+	// IDs are the subjects in the order they were typed. ID is IDs[0].
+	IDs []string
+	// Reasons are the non-empty reason values: none (a bare close), one shared
+	// by every id, or one per id, matched by position.
+	Reasons []string
+	// ReasonFile is --reason-file as typed. It is read only once the door knows
+	// it serves the close, so a binding miss leaves it for bd to read.
+	ReasonFile    string
+	HasReasonFile bool
+	// Invalid is bd's own refusal of this argv's reason shape. bd refuses it
+	// before writing anything, and so does the door when it serves the close.
+	Invalid string
+}
+
+// reasonFor returns the reason id number i closes with: the shared one, its
+// own, or "" for a bare close.
+func (r bdByIDCloseRequest) reasonFor(i int) string {
+	switch len(r.Reasons) {
+	case 0:
+		return ""
+	case 1:
+		return r.Reasons[0]
+	default:
+		return r.Reasons[i]
+	}
+}
+
+// subjects returns every id an op addresses: close's whole batch, or the one
+// id of every other verb.
+func (op bdByIDOp) subjects() []string {
+	if len(op.Close.IDs) > 0 {
+		return op.Close.IDs
+	}
+	return []string{op.ID}
+}
+
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
-// else — a different verb, several ids, or a flag the in-process arm does not
-// implement — is not recognized, and the caller leaves it on its existing path
-// rather than serving a partial imitation of bd.
+// else — a different verb, several ids for a verb other than close, or a flag
+// the in-process arm does not implement — is not recognized, and the caller
+// leaves it on its existing path rather than serving a partial imitation of bd.
 func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 	if len(bdArgs) == 0 {
 		return bdByIDOp{}, false
 	}
 	switch bdArgs[0] {
 	case "show":
-		id, jsonOut, ok := parseBdByIDPositional(bdArgs[1:], nil)
+		includeComments := false
+		id, jsonOut, ok := parseBdByIDPositional(bdArgs[1:], map[string]*bool{"--include-comments": &includeComments})
 		if !ok {
 			return bdByIDOp{}, false
 		}
-		return bdByIDOp{Verb: bdByIDShow, ID: id, JSON: jsonOut}, true
+		return bdByIDOp{Verb: bdByIDShow, ID: id, JSON: jsonOut, IncludeComments: includeComments}, true
 	case "update":
 		op, _, ok := parseBdByIDUpdateArgs(bdArgs[1:])
 		return op, ok
@@ -489,77 +535,136 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 //
 // rejected names the first flag that stopped this from being served, the same
 // way parseBdByIDUpdateArgs does, so a refusal can say WHICH spelling kept the
-// command off this surface; for two reasons it names the second.
+// command off this surface.
 //
-// The served form is one id plus --json and, for close, bd's -r/--reason, and
-// that is the whole of what the closed contract can express. GraphStore.Close
-// and GraphStore.Reopen take an id and return an error. A close reason has a
-// place in it: GraphStore.CloseAll stamps the metadata it is given on the bead
-// it closes, and every store records a stamped metadata.close_reason as the
-// bead's close reason (doBdByIDClose). bd takes one reason for one id and drops
-// an empty one, and so does this arm; two reasons for one id are bd's own
-// refusal, so they stay unserved, and bd counts a blank reason toward them as
-// it counts any other non-empty one. The reason is recorded trimmed, as every
-// store records a close reason (recordCloseReason, BdStore.CloseAll), so a
-// blank one closes bare rather than stamping a metadata.close_reason the bead's
-// CloseReason reads as empty. bd's --reason-file/--session and its reason
-// aliases (--resolution, -m/--message, --comment) carry text this arm does not
-// read, and --claim-next/--continue/--force/--no-auto/--suggest-next name
-// workflow it does not run. Serving any of them by ignoring it would report a
+// close is served with every reason spelling bd reads, and only those: the ids
+// (one or a batch), --json, the repeatable -r/--reason, bd's hidden reason
+// aliases --resolution, -m/--message and --comment, and --reason-file. They are
+// collected exactly as bd collects them (bdByIDCloseRequest): the non-empty
+// --reason values, or failing those the first non-empty alias, or the file. One
+// reason is shared by every id and N reasons map onto N ids by position; any
+// other count, and a file beside a reason, is bd's own refusal, which the door
+// repeats rather than serves (Invalid). The contract has a place for a reason:
+// GraphStore.CloseAll stamps metadata.close_reason, which every store records
+// as the bead's close reason (closeBdByIDResident).
+//
+// `--reason-file -` reads stdin, and the in-process close does not, so it stays
+// unserved, as do --session and the global --actor (the class store records no
+// closing session and no close actor), --force (it waives pinned-issue and gate
+// checks the class store's close does not run), --claim-next, --continue,
+// --no-auto and --suggest-next (workflow this arm does not run), and the
+// enterprise --if-revision. Serving any of them by ignoring it would report a
 // command as executed after silently changing what it meant — the partial
-// write this whole surface exists to remove.
+// write this whole surface exists to remove. Each refusal names the command
+// that does the job (bdByIDUnservedAlternative).
 //
-// Several ids stay unrecognized for a different reason: a batch spans stores,
-// so it would need per-id routing with partial-failure semantics bd's exit
-// contract does not express. The refusal path keeps such a batch honest when
-// one of its ids is class-owned; it is never half-applied here.
+// reopen takes one id and --json only.
 func parseBdByIDCloseArgs(verb bdByIDVerb, args []string) (op bdByIDOp, rejected string, ok bool) {
 	op = bdByIDOp{Verb: verb}
-	hasReason := false
+	var reasons []string
+	aliases := map[string]string{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "-") {
-			if op.ID != "" || arg == "" {
-				// A second positional is a batch, not a flag: there is no
-				// spelling to name, and naming the id would read as a claim
+			if arg == "" || (verb == bdByIDReopen && op.ID != "") {
+				// A second reopen positional is a batch, not a flag: there is
+				// no spelling to name, and naming the id would read as a claim
 				// about that id rather than about the shape.
 				return bdByIDOp{}, "", false
 			}
-			op.ID = arg
+			if op.ID == "" {
+				op.ID = arg
+			}
+			if verb == bdByIDClose {
+				op.Close.IDs = append(op.Close.IDs, arg)
+			}
 			continue
 		}
 		if arg == "--json" {
 			op.JSON = true
 			continue
 		}
-		name, reason, hasInline := strings.Cut(arg, "=")
-		if verb != bdByIDClose || (name != "--reason" && name != "-r") {
+		name, value, hasInline := strings.Cut(arg, "=")
+		long, served := bdByIDCloseReasonFlags[name]
+		if verb != bdByIDClose || !served {
 			return bdByIDOp{}, name, false
 		}
-		// The reason is the next token whatever it looks like, as bd's flag
+		// A value is the next token whatever it looks like, as bd's flag
 		// parser takes it.
 		if !hasInline {
 			if i+1 >= len(args) {
 				return bdByIDOp{}, name, false
 			}
 			i++
-			reason = args[i]
+			value = args[i]
 		}
-		if reason == "" {
-			continue
+		switch long {
+		case "--reason":
+			reasons = append(reasons, value)
+		case "--reason-file":
+			if value == bdByIDReasonFileStdin {
+				return bdByIDOp{}, "--reason-file " + bdByIDReasonFileStdin, false
+			}
+			op.Close.ReasonFile, op.Close.HasReasonFile = value, true
+		default:
+			// The aliases are plain string flags: a repeat replaces.
+			aliases[long] = value
 		}
-		if hasReason {
-			// Two reasons for one id: the shape is what bd refuses, and the
-			// second reason is the spelling that made it that shape.
-			return bdByIDOp{}, "a second " + name, false
-		}
-		hasReason = true
-		op.Reason = strings.TrimSpace(reason)
 	}
 	if op.ID == "" {
 		return bdByIDOp{}, "", false
 	}
+	if verb == bdByIDClose {
+		op.Close.Reasons, op.Close.Invalid = bdByIDCloseReasons(reasons, aliases, op.Close.HasReasonFile, len(op.Close.IDs))
+	}
 	return op, "", true
+}
+
+// bdByIDCloseReasonFlags maps every reason spelling close serves to the long
+// name bd registers it under.
+var bdByIDCloseReasonFlags = map[string]string{
+	"--reason":      "--reason",
+	"-r":            "--reason",
+	"--resolution":  "--resolution",
+	"--message":     "--message",
+	"-m":            "--message",
+	"--comment":     "--comment",
+	"--reason-file": "--reason-file",
+}
+
+// bdByIDCloseReasonAliases are bd's hidden spellings of --reason, in the order
+// bd consults them when no --reason carries text.
+var bdByIDCloseReasonAliases = []string{"--resolution", "--message", "--comment"}
+
+// bdByIDReasonFileStdin is the --reason-file value that names stdin.
+const bdByIDReasonFileStdin = "-"
+
+// bdByIDCloseReasons collects close's reasons the way bd's resolveCloseReasons
+// does, and returns bd's own refusal of the shape when it has one. A reason
+// file is read later; here it only counts as the one reason it will supply.
+func bdByIDCloseReasons(flagValues []string, aliases map[string]string, hasReasonFile bool, ids int) (reasons []string, invalid string) {
+	for _, value := range flagValues {
+		// bd drops an empty --reason and counts every other one, a blank
+		// one included.
+		if value != "" {
+			reasons = append(reasons, value)
+		}
+	}
+	if len(reasons) == 0 {
+		for _, alias := range bdByIDCloseReasonAliases {
+			if text := aliases[alias]; text != "" {
+				reasons = []string{text}
+				break
+			}
+		}
+	}
+	switch {
+	case hasReasonFile && len(reasons) > 0:
+		return reasons, "cannot specify both --reason-file and --reason/--resolution/--message/--comment"
+	case len(reasons) > 1 && len(reasons) != ids:
+		return reasons, fmt.Sprintf("got %d close reasons for %d issue IDs; provide exactly one shared reason or one reason per issue", len(reasons), ids)
+	}
+	return reasons, ""
 }
 
 // bdByIDUnservedFlag names the flag that kept an otherwise-routable invocation
@@ -1025,18 +1130,17 @@ func bdByIDReadManifestFor(bdArgs []string) (bdByIDReadManifest, bool) {
 // (parseBdByIDPositional, parseBdDepListArgs, parseBdDepTreeArgs). Any other
 // flag is what kept a read off this surface, and the refusal names it.
 var bdByIDServedReadFlags = map[string]map[string]bool{
-	"show":     {"--json": true},
+	"show":     {"--json": true, "--include-comments": true},
 	"dep list": {"--json": true, "--direction": true, "--type": true, "-t": true},
 	"dep tree": {"--json": true, "--reverse": true, "--direction": true, "--max-depth": true, "-d": true},
 }
 
-// bdByIDUnservedReadShape describes what kept a by-ID read off this surface:
-// the first flag its served parser does not accept, more than one subject, or
-// both. A flag after the verb is reported first; failing that, a flag before
-// the verb counts, because the served parsers take the verb first. Values of value flags are skipped, so a value is never reported
-// as a flag.
-func bdByIDUnservedReadShape(bdArgs []string, manifest bdByIDReadManifest, subjects []string) string {
-	flag := ""
+// bdByIDUnservedReadFlag returns the first flag of a by-ID read that its served
+// parser does not accept, or "". A flag after the verb is reported first;
+// failing that, a flag before the verb counts, because the served parsers take
+// the verb first. Values of value flags are skipped, so a value is never
+// reported as a flag.
+func bdByIDUnservedReadFlag(bdArgs []string, manifest bdByIDReadManifest) string {
 	for i := 0; i < len(manifest.rest); i++ {
 		arg := manifest.rest[i]
 		if arg == "--" {
@@ -1047,18 +1151,24 @@ func bdByIDUnservedReadShape(bdArgs []string, manifest bdByIDReadManifest, subje
 		}
 		name, _, inline := strings.Cut(arg, "=")
 		if !bdByIDServedReadFlags[manifest.verb][name] {
-			flag = name
-			break
+			return name
 		}
 		if !inline && manifest.valueFlags[name] {
 			i++
 		}
 	}
 	for _, arg := range bdArgs[:len(bdArgs)-len(manifest.rest)] {
-		if flag == "" && strings.HasPrefix(arg, "-") {
-			flag, _, _ = strings.Cut(arg, "=")
+		if strings.HasPrefix(arg, "-") {
+			flag, _, _ := strings.Cut(arg, "=")
+			return flag
 		}
 	}
+	return ""
+}
+
+// bdByIDUnservedReadShape describes what kept a by-ID read off this surface:
+// its unserved flag (bdByIDUnservedReadFlag), more than one subject, or both.
+func bdByIDUnservedReadShape(flag string, subjects []string) string {
 	var parts []string
 	if flag != "" {
 		parts = append(parts, flag)
@@ -1074,11 +1184,18 @@ func bdByIDUnservedReadShape(bdArgs []string, manifest bdByIDReadManifest, subje
 
 // refuseUnservedClassRead refuses a by-ID READ, in a spelling this surface
 // does not serve, of a bead the class binding holds. It names what made the
-// spelling unserved and the spelling that IS served, because the read itself
-// is answerable: only this shape of it is not.
+// spelling unserved and the command that IS served for each id it addresses,
+// because the read itself is answerable: only this shape of it is not.
 func refuseUnservedClassRead(door bdByIDClassDoor, bdArgs []string, manifest bdByIDReadManifest, id string, stderr io.Writer) (int, bool) {
-	shape := bdByIDUnservedReadShape(bdArgs, manifest, bdByIDReadSubjects(bdArgs))
-	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` %s is not served in process; refusing rather than running it against the work store, which does not hold the authoritative copy — read each id on its own: `gc bd %s <id>`\n", id, door.bindingName(), manifest.verb, shape, manifest.verb) //nolint:errcheck // best-effort stderr
+	subjects := bdByIDReadSubjects(bdArgs)
+	flag := bdByIDUnservedReadFlag(bdArgs, manifest)
+	ids := subjects
+	if len(ids) == 0 {
+		// A flag outside bd's manifest stops the subject scan; the resident
+		// is the one id the refusal is sure of.
+		ids = []string{id}
+	}
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` %s is not served in process; refusing rather than running it against the work store, which does not hold the authoritative copy — instead: %s\n", id, door.bindingName(), manifest.verb, bdByIDUnservedReadShape(flag, subjects), bdByIDReadInstead(manifest, flag, ids)) //nolint:errcheck // best-effort stderr
 	return 1, true
 }
 
@@ -1120,7 +1237,11 @@ func bdIDIsClassReserved(id string) bool {
 // invocation, so treating that as a deliberate scope would refuse the
 // step-completion write the core pack renders on every worked bead. See
 // refuseRigScopedClassOwnedTarget.
-func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
+//
+// scopeRoot is the directory the bd passthrough would run in (doBd's
+// target.ScopeRoot). bd reads a relative --reason-file from there, so a close
+// this door serves reads it from there too.
+func maybeRouteBdByID(cityPath, scopeRoot, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
 	classIDs := bdArgsAddressedClassIDs(bdArgs)
 	subjectIDs := bdByIDMutationSubjects(bdArgs)
@@ -1160,16 +1281,20 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 	if !served {
 		return refuseUnservedClassTarget(door, bdArgs, classIDs, subjectIDs, stderr)
 	}
+	if op.Verb == bdByIDClose {
+		return serveBdByIDClose(door, op, rigName, scopeRoot, classDoorRepoDirs(cityPath), stdout, stderr)
+	}
 	return serveBdByIDResolved(door, op, bdArgs, rigName, classDoorRepoDirs(cityPath), stdout, stderr)
 }
 
-// bdByIDDoorSubjects is the id set the door resolves for one invocation: the
-// served op's one id, or every subject the scanners reduced an unserved argv
-// to. It is the funnel skip's input, and it has to be exactly what the door
-// would probe — a skip decided on fewer ids would let an unprobed one through.
+// bdByIDDoorSubjects is the id set the door resolves for one invocation: every
+// id the served op addresses (close's whole batch), or every subject the
+// scanners reduced an unserved argv to. It is the funnel skip's input, and it
+// has to be exactly what the door would probe — a skip decided on fewer ids
+// would let an unprobed one through.
 func bdByIDDoorSubjects(op bdByIDOp, served bool, subjectIDs []string) []string {
 	if served {
-		return []string{op.ID}
+		return op.subjects()
 	}
 	return subjectIDs
 }
@@ -1233,16 +1358,18 @@ func refuseUnservedClassTarget(door bdByIDClassDoor, bdArgs, classIDs, subjectID
 	if manifest, read := bdByIDReadManifestFor(bdArgs); read {
 		return refuseUnservedClassRead(door, bdArgs, manifest, resident, stderr)
 	}
-	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), resident, bdByIDUnservedFlag(bdArgs), stderr)
+	flag := bdByIDUnservedFlag(bdArgs)
+	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs, resident), resident, flag, bdByIDUnservedAlternative(bdArgs, resident, flag), stderr)
 }
 
-// serveBdByIDResolved answers a served by-ID op from the class front door. It
-// resolves the id against the class binding, falls through to the passthrough
-// on any binding miss whatever the id's prefix, refuses the one case this
-// surface must not serve (an explicit --rig work scope on a bead the binding
-// holds), runs the ADR-0009 work-record close gate, and dispatches the verb
-// against the class graph. repoDirs is the checkout table the close gate
-// resolves a closing bead's repository from.
+// serveBdByIDResolved answers a served by-ID op other than close
+// (serveBdByIDClose) from the class front door. It resolves the id against the
+// class binding, falls through to the passthrough on any binding miss whatever
+// the id's prefix, refuses the one case this surface must not serve (an
+// explicit --rig work scope on a bead the binding holds), runs the ADR-0009
+// work-record close gate on an update, and dispatches the verb against the
+// class graph. repoDirs is the checkout table the close gate resolves a
+// closing bead's repository from.
 func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName string, repoDirs workRecordRepoDirs, stdout, stderr io.Writer) (int, bool) {
 	resolution, err := door.resolve(op.ID)
 	if err != nil {
@@ -1280,11 +1407,17 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
 	}
-	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr) {
+	if op.Verb == bdByIDUpdate && gateBdByIDClassClose(door, bdArgs, map[string]beads.Bead{op.ID: resolution.Bead}, repoDirs, stderr) {
 		return 1, true
 	}
 	switch op.Verb {
 	case bdByIDShow:
+		if op.IncludeComments {
+			// bd omits an empty comments list from its JSON, so the record
+			// below is what bd prints for a bead with none. Say why there are
+			// none rather than leave a reader to infer it.
+			fmt.Fprintf(stderr, "gc bd: %s is served in process from %s, and the class store contract carries no comments, so --include-comments adds none\n", op.ID, door.bindingName()) //nolint:errcheck // best-effort stderr
+		}
 		return printBdByIDBead(resolution.Bead, op.JSON, door.bindingName(), stdout, stderr), true
 	case bdByIDClaim:
 		return doBdByIDClaim(resolution.Graph, op.ID, bdByIDClaimActor(), op.JSON, door.bindingName(), stdout, stderr), true
@@ -1318,8 +1451,6 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 			return 1, true
 		}
 		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
-	case bdByIDClose:
-		return doBdByIDClose(resolution.Graph, op, resolution.Bead, door.bindingName(), stdout, stderr), true
 	case bdByIDReopen:
 		return doBdByIDReopen(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	}
@@ -1328,26 +1459,235 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 	// case that must not reach bd: the id is already known to be class-owned,
 	// so the passthrough would run a verb this build recognized against the one
 	// ledger that cannot hold the bead.
-	return refuseClassOwnedTarget(door, string(op.Verb), op.ID, "", stderr)
+	return refuseClassOwnedTarget(door, string(op.Verb), op.ID, "", "", stderr)
 }
 
 // gateBdByIDClassClose runs the ADR-0009 work-record close gate against the
-// resolved class bead before the door serves a close or a closing update. The
+// resolved class beads before the door serves a close or a closing update. The
 // class door writes the class copy, so — unlike the fall-through path in
 // cmd_bd.go — the prefix-store gate never saw these closes; this is where the
-// contract is enforced for them. It is a no-op for every non-closing op:
-// evaluateWorkRecordCloseGate consults workRecordCloseTargets, which reports
-// not-a-close for show/claim/release/dep/reopen and for updates that do not set
-// status closed. The resolved bead is handed in as the preFetched value so the
-// gate reuses it rather than re-reading the class store, and door.Store answers
-// any other id the argv might name. Returns true only when the close must be
-// blocked (enforcement on and the work record invalid).
-func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) bool {
-	if op.Verb != bdByIDClose && op.Verb != bdByIDUpdate {
-		return false
+// contract is enforced for them. argv is what the gate reads the closing ids
+// (and an update's metadata) from: the update's own argv, or close's ids
+// spelled plainly (bdByIDCloseGateArgv), because bd's hidden reason aliases are
+// not in the mutation scanner's manifest and an argv it cannot scan reads as
+// not-a-close. An update that does not set status closed is not a close, and
+// the gate passes it. The resolved beads are handed in as preFetched so the
+// gate reuses them rather than re-reading the class store, and door.Store
+// answers any other id. Returns true only when the close must be blocked
+// (enforcement on and a work record invalid).
+func gateBdByIDClassClose(door bdByIDClassDoor, argv []string, preFetched map[string]beads.Bead, repoDirs workRecordRepoDirs, stderr io.Writer) bool {
+	return evaluateWorkRecordCloseGate(argv, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr)
+}
+
+// bdByIDCloseGateArgv spells a served close for the work-record gate: the verb
+// and every id once, which is all the gate reads of a close.
+func bdByIDCloseGateArgv(ids []string) []string {
+	argv := []string{"close"}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			argv = append(argv, id)
+		}
 	}
-	preFetched := map[string]beads.Bead{op.ID: resolution.Bead}
-	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr)
+	return argv
+}
+
+// serveBdByIDClose answers a served `gc bd close` — one id or a batch — from
+// the class front door.
+//
+// Every id is resolved before anything is written, and the batch is served
+// only when the binding holds all of them. When it holds none the passthrough
+// answers, byte-identically, as for every other binding miss. When it holds
+// some, the batch is refused whole and the refusal spells the two commands
+// that close it, one per store: splitting it here would need per-store routing
+// for the work half, which is the passthrough's job, and half-applying it would
+// leave the caller unable to tell from the exit code what landed.
+//
+// What follows is bd's own order. bd refuses a reason shape it cannot map
+// (Invalid) and a reason file it cannot read before it writes anything, the
+// work-record gate runs over the whole batch before the first close, and each
+// id is then closed on its own: an id whose close fails is reported and the
+// rest still close, and a batch with a failure ends with bd's count of how
+// many failed and exit 1 (reportCloseFailures in bd's close.go). A single id
+// that fails reports only its own line, as bd does.
+func serveBdByIDClose(door bdByIDClassDoor, op bdByIDOp, rigName, scopeRoot string, repoDirs workRecordRepoDirs, stdout, stderr io.Writer) (int, bool) {
+	req := op.Close
+	current := make(map[string]beads.Bead, len(req.IDs))
+	var held, notHeld []int
+	for i, id := range req.IDs {
+		resolution, err := door.resolve(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1, true
+		}
+		if !resolution.Found {
+			notHeld = append(notHeld, i)
+			continue
+		}
+		held = append(held, i)
+		if _, seen := current[id]; !seen {
+			current[id] = resolution.Bead
+		}
+	}
+	if len(held) == 0 {
+		// The binding holds none of them: bd is their truth. See
+		// serveBdByIDResolved for why a miss is decided before --rig.
+		return 0, false
+	}
+	if rig := strings.TrimSpace(rigName); rig != "" {
+		return refuseRigScopedClassOwnedTarget(door, req.IDs[held[0]], rig, stderr)
+	}
+	if req.Invalid != "" {
+		fmt.Fprintf(stderr, "gc bd close: %s. Nothing was closed.\n", req.Invalid) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	if len(notHeld) > 0 {
+		return refuseMixedBdByIDCloseBatch(door, op, held, notHeld, stderr)
+	}
+	reasons := req.Reasons
+	if req.HasReasonFile {
+		text, err := readBdByIDCloseReasonFile(scopeRoot, req.ReasonFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd close: %v. Nothing was closed.\n", err) //nolint:errcheck // best-effort stderr
+			return 1, true
+		}
+		reasons = []string{text}
+	}
+	req.Reasons = reasons
+	if gateBdByIDClassClose(door, bdByIDCloseGateArgv(req.IDs), current, repoDirs, stderr) {
+		return 1, true
+	}
+
+	closedHere := make(map[string]bool, len(req.IDs))
+	written := make([]beads.Bead, 0, len(req.IDs))
+	failed, unread := 0, 0
+	for i, id := range req.IDs {
+		before := current[id]
+		if closedHere[id] {
+			// The same id named twice: the first close settled it, and bd's
+			// close of a closed issue changes nothing.
+			before.Status = "closed"
+		}
+		if err := closeBdByIDResident(door.Graph, id, req.reasonFor(i), before); err != nil {
+			fmt.Fprintf(stderr, "gc bd close: %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			failed++
+			continue
+		}
+		closedHere[id] = true
+		after, err := door.Graph.Get(id)
+		if err != nil {
+			// The close landed; only the report of it did not.
+			fmt.Fprintf(stderr, "gc bd close: %s was written and could not be re-read: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			unread++
+			continue
+		}
+		written = append(written, after)
+	}
+	code := 0
+	if len(written) > 0 {
+		code = printBdByIDBeads(written, op.JSON, door.bindingName(), stdout, stderr)
+	}
+	if failed > 0 && len(req.IDs) > 1 {
+		fmt.Fprintf(stderr, "gc bd close: %d of %d issues failed to close\n", failed, len(req.IDs)) //nolint:errcheck // best-effort stderr
+	}
+	if failed > 0 || unread > 0 {
+		code = 1
+	}
+	return code, true
+}
+
+// closeBdByIDResident retires one class-store bead through the closed graph
+// contract, current being the row the door resolved for it.
+//
+// The already-closed answer is the STORE's: the contract's Close carries the
+// canonical no-op semantics, and a "is it closed yet" check here would be a
+// second implementation of a rule the store already has, free to drift from it.
+//
+// A close with a reason is the contract's CloseAll of that one id stamping
+// metadata.close_reason, the write gc's own reasoned closes make (the stale
+// order-wisp sweep): whole-row stores record the key as the bead's close reason
+// when the write closes it, and BdStore and NativeDoltStore forward it to their
+// close. The reason is recorded trimmed, as every store records a close reason
+// (recordCloseReason, BdStore.CloseAll), so a blank one closes bare rather than
+// stamping a metadata.close_reason the bead's CloseReason reads as empty. The
+// already-closed rule is the one place this arm asks first, because the
+// contract leaves it to the caller: CloseAll keeps a closed bead closed, but
+// whether it rewrites that bead's metadata is store-specific, and bd's own close
+// of a closed issue changes nothing.
+func closeBdByIDResident(graph storebinding.GraphStore, id, reason string, current beads.Bead) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || current.Status == "closed" {
+		return graph.Close(id)
+	}
+	_, err := graph.CloseAll([]string{id}, map[string]string{"close_reason": reason})
+	return err
+}
+
+// readBdByIDCloseReasonFile reads close's --reason-file the way bd does: the
+// whole file, a relative path from scopeRoot (the directory bd runs in), and a
+// file holding nothing but whitespace refused, because a reason file is a
+// reason bd requires (resolveReasonFile in bd's close.go).
+func readBdByIDCloseReasonFile(scopeRoot, path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("reading reason file %q: no path given", path)
+	}
+	resolved := path
+	if !filepath.IsAbs(resolved) && scopeRoot != "" {
+		resolved = filepath.Join(scopeRoot, resolved)
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", fmt.Errorf("reading reason file %q: %w", path, err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return "", fmt.Errorf("--reason-file %q is empty; close reason is required", path)
+	}
+	return string(data), nil
+}
+
+// refuseMixedBdByIDCloseBatch refuses a close batch whose ids live on both
+// sides of the split, and spells the two commands that close it: the ids the
+// binding holds, which this door serves, and the rest, which bd answers from
+// the work store. held and notHeld index op.Close.IDs.
+func refuseMixedBdByIDCloseBatch(door bdByIDClassDoor, op bdByIDOp, held, notHeld []int, stderr io.Writer) (int, bool) {
+	req := op.Close
+	pick := func(indices []int) []string {
+		ids := make([]string, 0, len(indices))
+		for _, i := range indices {
+			ids = append(ids, req.IDs[i])
+		}
+		return ids
+	}
+	fmt.Fprintf(stderr, "gc bd close: %s holds %s and not %s, and one close never spans two stores, so nothing was closed. Close them in two commands: %s (served in process) and %s (answered by bd from the work store)\n", //nolint:errcheck // best-effort stderr
+		door.bindingName(), strings.Join(pick(held), ", "), strings.Join(pick(notHeld), ", "),
+		bdByIDCommandText(bdByIDCloseArgv(op, held)), bdByIDCommandText(bdByIDCloseArgv(op, notHeld)))
+	return 1, true
+}
+
+// bdByIDCloseArgv spells the close of the ids at indices with the reasons they
+// carry in op: the shared reason, or each id's own, or the reason file. Every
+// reason alias is spelled --reason, which bd reads the same way.
+func bdByIDCloseArgv(op bdByIDOp, indices []int) []string {
+	req := op.Close
+	argv := []string{"close"}
+	for _, i := range indices {
+		argv = append(argv, req.IDs[i])
+	}
+	switch {
+	case req.HasReasonFile:
+		argv = append(argv, "--reason-file", req.ReasonFile)
+	case len(req.Reasons) == 1:
+		argv = append(argv, "--reason", req.Reasons[0])
+	case len(req.Reasons) > 1:
+		for _, i := range indices {
+			argv = append(argv, "--reason", req.Reasons[i])
+		}
+	}
+	if op.JSON {
+		argv = append(argv, "--json")
+	}
+	return argv
 }
 
 // refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig
@@ -1400,26 +1740,32 @@ func refuseRigScopedClassOwnedTarget(door bdByIDClassDoor, id, rigName string, s
 // flag, when known, names the spelling that kept the command off this surface.
 // Without it an operator hitting a rejected `--notes` sees only that `gc bd
 // update` "is not served", which is false in general and unactionable in
-// particular.
-func refuseClassOwnedTarget(door bdByIDClassDoor, verb, id, flag string, stderr io.Writer) (int, bool) {
+// particular. instead, when known, is what to run in its place
+// (bdByIDUnservedAlternative).
+func refuseClassOwnedTarget(door bdByIDClassDoor, verb, id, flag, instead string, stderr io.Writer) (int, bool) {
 	because := ""
 	if flag != "" {
 		because = fmt.Sprintf(" (%s has no representation in the class store contract)", flag)
 	}
-	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` is not served in process%s; refusing rather than running it against the work store, which does not hold the authoritative copy\n", id, door.bindingName(), verb, because) //nolint:errcheck // best-effort stderr
+	if instead != "" {
+		instead = " — instead: " + instead
+	}
+	fmt.Fprintf(stderr, "gc bd: %s is owned by %s, and `gc bd %s` is not served in process%s; refusing rather than running it against the work store, which does not hold the authoritative copy%s\n", id, door.bindingName(), verb, because, instead) //nolint:errcheck // best-effort stderr
 	return 1, true
 }
 
-// bdByIDRefusedVerb names the subcommand a refusal is about, as an operator
-// typed it.
+// bdByIDRefusedVerb names the subcommand a refusal about subject is about, as
+// an operator typed it.
 //
 // It reports the bd subcommand rather than argv[0], so a root flag before the
 // verb (`gc bd --json close gcg-1`) does not make the refusal name a flag. When
 // the manifest does not carry the subcommand it reconstructs the spelling from
 // the leading non-flag tokens instead of truncating to the first: `dep tree` is
 // not in bdflags (only dep add/list/remove are), and reporting it as "dep" tells
-// an operator to look for a command they did not run.
-func bdByIDRefusedVerb(bdArgs []string) string {
+// an operator to look for a command they did not run. The reconstruction stops
+// at the subject as it stops at a reserved id: a relic's work-shaped id is not
+// a second verb word, and `heartbeat <relic>` is the verb `heartbeat`.
+func bdByIDRefusedVerb(bdArgs []string, subject string) string {
 	if sub, _, resolved := bdByIDSubcommand(bdArgs); resolved {
 		return sub
 	}
@@ -1431,7 +1777,7 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 	for i := 0; i < len(bdArgs) && len(words) < 2; i++ {
 		arg := bdArgs[i]
 		if !strings.HasPrefix(arg, "-") {
-			if bdIDIsClassReserved(arg) {
+			if bdIDIsClassReserved(arg) || arg == subject {
 				break
 			}
 			words = append(words, arg)
@@ -1903,17 +2249,45 @@ const bdByIDDepTreeLooseEdge = "relates-to"
 // the record came from, so a human who expected bd's own layout can see why it
 // differs rather than assume the bead is thin.
 func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr io.Writer) int {
+	return printBdByIDBeads([]beads.Bead{b}, jsonOut, binding, stdout, stderr)
+}
+
+// printBdByIDBeads renders routed beads: one JSON array of all of them, or
+// each record in turn, a blank line between two, under one stderr line saying
+// where they came from. A batch close renders this way, and a single bead
+// renders exactly as printBdByIDBead describes.
+func printBdByIDBeads(bs []beads.Bead, jsonOut bool, binding string, stdout, stderr io.Writer) int {
 	if jsonOut {
-		out, err := json.MarshalIndent([]beads.Bead{b}, "", "  ")
+		out, err := json.MarshalIndent(bs, "", "  ")
 		if err != nil {
-			fmt.Fprintf(stderr, "gc bd: rendering %q: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc bd: rendering %s: %v\n", bdByIDBeadIDs(bs), err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		fmt.Fprintln(stdout, string(out)) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stderr, "gc bd: served in process from %s\n", binding) //nolint:errcheck // best-effort stderr
+	for i, b := range bs {
+		if i > 0 {
+			fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
+		}
+		writeBdByIDRecord(b, stdout)
+	}
+	return 0
+}
 
+// bdByIDBeadIDs names a rendered set in an error: one quoted id, or the list.
+func bdByIDBeadIDs(bs []beads.Bead) string {
+	ids := make([]string, 0, len(bs))
+	for _, b := range bs {
+		ids = append(ids, strconv.Quote(b.ID))
+	}
+	return strings.Join(ids, ", ")
+}
+
+// writeBdByIDRecord writes one bead's text record: every field that is set,
+// then the description, last and never elided.
+func writeBdByIDRecord(b beads.Bead, stdout io.Writer) {
 	line := func(label, value string) {
 		if strings.TrimSpace(value) == "" {
 			return
@@ -1959,12 +2333,11 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 	fmt.Fprintln(stdout, "description:") //nolint:errcheck // best-effort stdout
 	if strings.TrimSpace(b.Description) == "" {
 		fmt.Fprintln(stdout, "  (none)") //nolint:errcheck // best-effort stdout
-		return 0
+		return
 	}
 	for _, descLine := range strings.Split(b.Description, "\n") {
 		fmt.Fprintf(stdout, "  %s\n", descLine) //nolint:errcheck // best-effort stdout
 	}
-	return 0
 }
 
 // bdByIDUpdateMutation states a served update's class-relevant fields as the
@@ -2022,33 +2395,8 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 	return printBdByIDBead(updated, op.JSON, binding, stdout, stderr)
 }
 
-// doBdByIDClose retires a class-store bead through the closed graph contract.
-//
-// The already-closed answer is the STORE's: the contract's Close carries the
-// canonical no-op semantics, and a "is it closed yet" check here would be a
-// second implementation of a rule the store already has, free to drift from it.
-//
-// A close with a reason is the contract's CloseAll of that one id stamping
-// metadata.close_reason, the write gc's own reasoned closes make (the stale
-// order-wisp sweep): whole-row stores record the key as the bead's close reason
-// when the write closes it, and BdStore and NativeDoltStore forward it to their
-// close. The already-closed rule is the one place this arm asks first, because
-// the contract leaves it to the caller: CloseAll keeps a closed bead closed, but
-// whether it rewrites that bead's metadata is store-specific, and bd's own close
-// of a closed issue changes nothing. current is the row the door just resolved.
-func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, current beads.Bead, binding string, stdout, stderr io.Writer) int {
-	closeBead := graph.Close
-	if op.Reason != "" && current.Status != "closed" {
-		closeBead = func(id string) error {
-			_, err := graph.CloseAll([]string{id}, map[string]string{"close_reason": op.Reason})
-			return err
-		}
-	}
-	return doBdByIDLifecycleWrite(graph, op, "close", closeBead, binding, stdout, stderr)
-}
-
-// doBdByIDReopen is doBdByIDClose's undo, and exists for the same reason: a
-// drain that can close a class resident but not reopen one is a one-way door.
+// doBdByIDReopen is the served close's undo, and exists for the same reason:
+// a drain that can close a class resident but not reopen one is a one-way door.
 func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
 	return doBdByIDLifecycleWrite(graph, op, "reopen", graph.Reopen, binding, stdout, stderr)
 }

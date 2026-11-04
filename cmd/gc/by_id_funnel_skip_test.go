@@ -622,6 +622,6 @@ func bindingTargetOf(t *testing.T, cityPath string) infraBindingTarget {
 // here is exactly the door's answer.
 func routeByIDForTest(cityPath string, argv []string) (int, bool, string) {
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, "", argv, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, cityPath, "", argv, &stdout, &stderr)
 	return code, handled, stdout.String() + "|" + stderr.String()
 }
