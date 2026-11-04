@@ -1137,6 +1137,7 @@ go_test(
         "by_id_funnel_skip_test.go",
         "by_id_relic_proof_test.go",
         "by_id_store_route_test.go",
+        "byid_raw_store_guard_test.go",
         "cache_age_footer_test.go",
         "cache_notification_journal_test.go",
         "cache_notification_test.go",

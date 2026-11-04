@@ -1,0 +1,73 @@
+# TestByIDOpsDoNotTargetRawWorkStores baseline (cmd/gc/byid_raw_store_guard_test.go).
+#
+# A row is file<TAB>function<TAB>rule<TAB>count: the number of sites in that
+# function where a by-id bead op (rule byid), a front-door constructor
+# (frontdoor), a class-handle relabel (relabel) or a package helper whose
+# beads.Store parameter reaches one (via) is aimed at a RAW work or rig store.
+# On a split city a coordination-class bead lives only in its relocated class
+# binding, so such an op reads "not found" or patches a stale pre-migration copy.
+#
+# The counts may only fall. Growth fails, and so does a row the tree no longer
+# reaches: lower or delete it in the change that retires the site.
+#
+# A NEW hit is fixed, not baselined: route the read through cliByIDOwner /
+# classRoutedStoreForID / cliByIDBindingOwner or the class resolvers
+# (cliSessionStore, cliStores(...).X(), resolve*Store). If the bead is
+# work-class by construction, add a trailing `// residency:allow <reason>` on
+# the flagged line instead; the reason is the review.
+#
+# UPDATE_BYID_RAW_STORE_GOLDEN=1 go test ./cmd/gc/ -run TestByIDOpsDoNotTargetRawWorkStores
+# rewrites counts in place and files new keys under an UNDOCUMENTED group, which
+# the test refuses: every row must sit under a "## <reason>" header.
+
+## work-store base by construction: runBdStoreBridge is the bd-workspace bridge, and the gc bd close gate judges the bead bd itself is about to close in the store bd serves
+cmd_bd_store_bridge.go	runBdStoreBridge	byid	9
+cmd_bd_store_bridge.go	runBdStoreBridge	via	1
+work_record_gate.go	runWorkRecordCloseGate	via	1
+
+## bd-context by construction: the work hook claims, stamps and releases through the bd workspace (dir/env) that served the bead to its own work query; that context also owns the claimed step's workflow root
+cmd_hook_claim.go	emitExecutionStepStarted	relabel	1
+cmd_hook_claim.go	hookAssignContinuationWithBdStore	byid	1
+cmd_hook_claim.go	hookClaimReleaseWithBdStore	byid	1
+cmd_hook_claim.go	hookClaimRestampWithBdStore	byid	1
+cmd_hook_claim.go	hookClaimWithBdStore	byid	1
+cmd_hook_claim.go	hookConfirmBeadBlockedWithBdStore	via	1
+cmd_hook_claim.go	hookReadClaimedBeadWithBdStore	byid	1
+cmd_hook_claim.go	hookSkipDoneWorkflowWithBdStore	via	1
+cmd_hook_claim.go	hookStampWorkMetaWithBdStore	byid	1
+
+## storage migration tools operate on pre-migration work copies by definition
+infra_class_clear.go	clearRetainedInfraCopies	byid	2
+infra_class_clear.go	clearRetainedInfraCopies	via	3
+infra_class_migrate.go	runInfraClassMigrationFrom	via	3
+infra_class_recover.go	doStorageRecoverStranded	via	2
+storage_preflight.go	doStoragePreflight	via	1
+
+## work-class by construction: user convoys and their members (convoy.TrackItemIn refuses a cross-class member); the bd on_close autoclose fallback runs for the work ledgers bd serves, and the controller's beadCloseAutoclose covers binding rows
+cmd_convoy.go	cmdConvoyCreateWithOptionsJSON	via	1
+cmd_convoy.go	doConvoyAutoclose	via	2
+cmd_convoy.go	doConvoyCreateWithOptionsJSON	byid	1
+
+## work-class by construction: pool-assigned work beads (orphaned-assignment release) and GitHub PR repair task beads
+city_runtime.go	CityRuntime.beadReconcileTick	via	1
+cmd_start.go	doStartStandalone	via	1
+cmd_github.go	ensureGitHubPRRepairBead	via	1
+
+## work leg beside a routed class leg: the just-closed bead (or the control bead's scope) is read on its work store while every graph-class read goes through a separately routed store (cliGraphStore, controlBeadLedger); doMoleculeAutoclose's owning-store arm counts by name only (flow-insensitive)
+cmd_convoy_dispatch.go	runControlDispatcherInStore	via	1
+molecule_autoclose.go	doMoleculeAutoclose	via	2
+wisp_autoclose.go	doWispAutoclose	via	2
+
+## binding-first callee: loadWaitDependencyBead asks cliByIDBindingOwner before it reads the work residual; the guard cannot see the ordering
+cmd_wait.go	cmdSessionWait	via	1
+
+## single-store by refusal: newFormulaCookCmd's graph.v2 attach arm refuses every split-city shape first (graphPlacementForScope != store), so store IS the placement store
+cmd_formula.go	newFormulaCookCmd	byid	1
+cmd_formula.go	newFormulaCookCmd	relabel	1
+cmd_formula.go	newFormulaCookCmd	via	7
+
+## relic-sweep legs: completionReconcileInputs leads with the routed graph store and keeps a work leg only while it may still hold pre-S4 graph roots
+api_state.go	controllerState.completionReconcileInputs	relabel	1
+
+## scope carrier: openOrderStoreForOrder labels the order's scope work store, and every consumer re-routes it through cliStores(...).Orders() (orderTrackingFrontDoor)
+order_store.go	openOrderStoreForOrder	relabel	1

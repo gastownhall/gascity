@@ -225,13 +225,20 @@ func cmdBeadsMetadataCAS(request beadsMetadataCASRequest, stdout, stderr io.Writ
 		return 1
 	}
 	request.storeRef = canonicalRef
+	if refusal, err := beadsMetadataCASBindingOwnedRefusal(ctx.CityPath, request); err != nil || refusal != "" {
+		if err != nil {
+			refusal = fmt.Sprintf("gc beads metadata-cas: resolving which store owns %s: %v", request.beadID, err)
+		}
+		fmt.Fprintf(stderr, "%s\n", refusal) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	store, err := openBeadsMetadataCASStore(scopeRoot, ctx.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads metadata-cas: opening %s: %v\n", canonicalRef, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if refusal := beadsMetadataCASClassFlipRefusal(store, request, workStoreClassHolds(cfg)); refusal != "" {
+	if refusal := beadsMetadataCASClassFlipRefusal(store, request, workStoreClassHolds(cfg)); refusal != "" { // residency:allow binding-owned ids were refused above (beadsMetadataCASBindingOwnedRefusal); only a work-resident id reaches here
 		_ = closeBeadsMetadataCASStore(store)
 		fmt.Fprintf(stderr, "%s\n", refusal) //nolint:errcheck // best-effort stderr
 		return 1
@@ -247,6 +254,21 @@ func cmdBeadsMetadataCAS(request beadsMetadataCASRequest, stdout, stderr io.Writ
 		return 1
 	}
 	return renderBeadsMetadataCAS(result, request.format, stdout, stderr)
+}
+
+// beadsMetadataCASBindingOwnedRefusal refuses an id a relocated class binding
+// owns. metadata-cas reads and swaps on the exact work store --store-ref names;
+// on a split city a coordination-class bead lives only in its binding, and any
+// copy of that id in a work store is a retained pre-migration relic, so a CAS
+// there would report success against a stale row. The binding is asked first,
+// the way `gc bd`'s by-id door refuses a class-owned target. A single-store
+// city has no binding leg and is never refused.
+func beadsMetadataCASBindingOwnedRefusal(cityPath string, request beadsMetadataCASRequest) (string, error) {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, request.beadID)
+	if err != nil || !ownedByBinding {
+		return "", err
+	}
+	return fmt.Sprintf("gc beads metadata-cas %s: %s is owned by the relocated class binding %q, which --store-ref %s does not name; refusing rather than swapping the work store's stale pre-migration copy. Nothing was written.", request.beadID, request.beadID, string(owner.Ref), request.storeRef), nil
 }
 
 // beadsMetadataCASClassFlipRefusal is the metadata-cas door onto the one
