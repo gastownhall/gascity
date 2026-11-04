@@ -176,3 +176,132 @@ func precededByGc(before string) bool {
 	last := strings.Trim(fields[len(fields)-1], "`\"';&|()")
 	return last == "gc"
 }
+
+// TestBdMutationGuardRules pins the guard's rule set on synthetic commands
+// (ga-u3g2r3, FR-4 re-based after #6324). The whole-repo walk above proves the
+// shipped formulas pass; these cases prove the rules would catch a bad one.
+//
+// The rule: an actor-less mutation is fine (bd resolves it through
+// $BEADS_ACTOR, which is what the session's claim was recorded under); an
+// EXPLICIT --actor must be $BEADS_ACTOR or a GC_* fallback chain consistent
+// with a claim-writer order; --force and "# guard-ack:<slug>" still exempt.
+func TestBdMutationGuardRules(t *testing.T) {
+	const (
+		idFirst   = `"${GC_ALIAS:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"`
+		nameFirst = `"${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`
+		aliasLast = `"${GC_SESSION_NAME:-${GC_ALIAS:-}}"`
+	)
+	tests := []struct {
+		name string
+		cmd  string
+		want int // violations
+	}{
+		{"actor-less raw bd close resolves through BEADS_ACTOR", `bd close "$ID" --reason r`, 0},
+		{"actor-less gc bd close resolves through BEADS_ACTOR", `gc bd close "$ID" --reason r`, 0},
+		{"alias-id-name chain is a claim-writer order", `gc bd close "$ID" --actor ` + idFirst, 0},
+		{"alias-name-id chain is the manual claim-writer order", `gc bd close "$ID" --actor ` + nameFirst, 0},
+		{"alias must lead any chain", `gc bd close "$ID" --actor ` + aliasLast, 1},
+		{"BEADS_ACTOR is valid", `gc bd close "$ID" --actor "$BEADS_ACTOR"`, 0},
+		{"BEADS_ACTOR in equals form is valid", `gc bd close "$ID" --actor=${BEADS_ACTOR}`, 0},
+		{"a literal actor is not an identity the claim recorded", `gc bd close "$ID" --actor builder`, 1},
+		{"an unrecognized variable is not valid", `gc bd close "$ID" --actor "$close_actor"`, 1},
+		{"gc-prefixed invocations are scanned, not skipped", `gc bd update "$ID" --status closed --actor ` + aliasLast, 1},
+		{"flags between bd and the verb do not hide the verb", `gc bd --city X close "$ID" --actor bogus`, 1},
+		{"short flags between bd and the verb do not hide the verb", `bd -q update "$ID" --status=closed --actor bogus`, 1},
+		{"a trailing && bd close is its own invocation", `gc bd update "$A" --actor "$BEADS_ACTOR" && bd close "$B" --actor bogus`, 1},
+		{"a valid --actor on one invocation does not exempt the next", `gc bd close "$A" --actor "$BEADS_ACTOR" && gc bd close "$B" --actor bogus`, 1},
+		{"two bad invocations are two violations", `gc bd close "$A" --actor x; gc bd close "$B" --actor y`, 2},
+		{"--force exempts its own invocation", `gc bd close "$A" --actor bogus --force`, 0},
+		{"--force on another invocation does not exempt this one", `gc bd close "$A" --force && gc bd close "$B" --actor bogus`, 1},
+		{"guard-ack exempts the command", `bd close "$A" --actor bogus # guard-ack:reviewed`, 0},
+		{"a non-mutating bd verb is out of scope", `gc bd show close --actor bogus`, 0},
+		{"a separator inside quotes does not start a new invocation", `gc bd close "$A" --reason "done; bd close B --actor bogus"`, 0},
+		{"a commented-out command is skipped", `# gc bd close "$A" --actor bogus`, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bdCommandViolations(tc.cmd)
+			if len(got) != tc.want {
+				t.Fatalf("bdCommandViolations(%q) = %d violation(s) %q, want %d", tc.cmd, len(got), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdInvocationsParsing pins the tokenizer on the shapes that used to hide a
+// mutation from the line-level scan.
+func TestBdInvocationsParsing(t *testing.T) {
+	tests := []struct {
+		name  string
+		cmd   string
+		verbs []string
+	}{
+		{"plain", `bd close X`, []string{"close"}},
+		{"gc wrapper", `gc bd close X`, []string{"close"}},
+		{"valued flag between bd and verb", `gc bd --city X close Y`, []string{"close"}},
+		{"equals flag between bd and verb", `gc bd --city=X heartbeat Y`, []string{"heartbeat"}},
+		{"boolean flag before verb", `bd -v unclaim Y`, []string{"unclaim"}},
+		{"chained with and", `gc bd update A --set-metadata k=v && bd close A`, []string{"update", "close"}},
+		{"chained with semicolon and pipe", `bd close A; bd update B | cat`, []string{"close", "update"}},
+		{"non-mutating verb", `gc bd show X`, nil},
+		{"verb word inside another command", `echo close bd`, nil},
+		{"identifier containing bd", `dry_run_bd close X`, nil},
+		{"quoted separator", `gc bd close A --reason "x && bd close B"`, []string{"close"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			for _, inv := range bdInvocations(tc.cmd) {
+				got = append(got, inv.verb)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.verbs, ",") {
+				t.Fatalf("bdInvocations(%q) verbs = %v, want %v", tc.cmd, got, tc.verbs)
+			}
+		})
+	}
+}
+
+// TestLogicalCommandsJoinContinuations: a backslash-continued command is one
+// command, reported at the line it starts on, so an --actor on a continuation
+// line belongs to its invocation and not to a line of its own.
+func TestLogicalCommandsJoinContinuations(t *testing.T) {
+	src := "echo start\n" +
+		"gc bd close \"$ID\" \\\n" +
+		"  --reason done \\\n" +
+		"  --actor bogus\n" +
+		"gc bd close \"$OTHER\"\n"
+	got := logicalCommands(src)
+	if len(got) != 3 {
+		t.Fatalf("logicalCommands = %d commands %+v, want 3", len(got), got)
+	}
+	if got[1].line != 2 {
+		t.Fatalf("continued command starts at line %d, want 2", got[1].line)
+	}
+	if v := bdCommandViolations(got[1].text); len(v) != 1 {
+		t.Fatalf("continued command violations = %q, want the bogus --actor flagged once", v)
+	}
+	if v := bdCommandViolations(got[2].text); len(v) != 0 {
+		t.Fatalf("following command violations = %q, want none", v)
+	}
+}
+
+// RED-phase stubs (ga-u3g2r3): the rule implementation lands in the GREEN
+// commit. These are inert so the package compiles and the rule tests above fail
+// on behavior, not on a build error the pre-commit lint would reject.
+
+// bdInvocation is one guarded bd invocation found in a command.
+type bdInvocation struct {
+	verb string
+}
+
+// logicalCommand is one shell command after backslash-continuation joining.
+type logicalCommand struct {
+	line int
+	text string
+}
+
+func bdInvocations(_ string) []bdInvocation { return nil }
+
+func logicalCommands(_ string) []logicalCommand { return nil }
+
+func bdCommandViolations(_ string) []string { return nil }
