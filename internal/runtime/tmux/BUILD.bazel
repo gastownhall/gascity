@@ -107,6 +107,7 @@ go_test(
         "interaction_test.go",
         "kimi_process_test.go",
         "lifecycle_test.go",
+        "liveness_absent_probe_test.go",
         "liveness_present_test.go",
         "main_test.go",
         "nudge_busy_codex_test.go",
