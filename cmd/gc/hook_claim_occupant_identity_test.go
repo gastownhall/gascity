@@ -338,3 +338,148 @@ func TestPoolWorkerClaimAndCloseIdentity(t *testing.T) {
 		t.Fatalf("claim assignee %q != runtime BEADS_ACTOR %q -- the close actor must match what the claim was recorded under", assignee, env["BEADS_ACTOR"])
 	}
 }
+
+// hookClaimIdentityFromRuntimeEnv computes the identity gc hook --claim records
+// a claim under for a session whose runtime environment is env, exactly as the
+// claim door feeds it: GC_ALIAS, GC_SESSION_ID, GC_AGENT and GC_SESSION_NAME
+// from the projection, with no separately resolved agent name.
+func hookClaimIdentityFromRuntimeEnv(env map[string]string) string {
+	return hookClaimAssigneeIdentity(env["GC_ALIAS"], env["GC_SESSION_ID"], env["GC_AGENT"], "", env["GC_SESSION_NAME"])
+}
+
+// TestManualUnaliasedSessionClaimAndCloseIdentity is the manual-session sibling
+// of TestPoolWorkerClaimAndCloseIdentity (ga-u3g2r3, architect ruling D2).
+//
+// AssigneeIdentifier gives an unaliased MANUAL session its raw session_name:
+// only pool-managed or ephemeral sessions are claimed under the bead id. The
+// runtime projection therefore sets BEADS_ACTOR (the actor of every bd command
+// the session runs, including the close that releases a claim) to the
+// session_name. A claim recorded under the session bead id, which is what the
+// writer's flat alias > session id > ... chain picks, never matches that
+// actor, so the session's own close is rejected by bd's actor==assignee guard.
+//
+// The writer must be origin-aware: a manual session claims under the same
+// string its actor carries.
+func TestManualUnaliasedSessionClaimAndCloseIdentity(t *testing.T) {
+	const (
+		beadID      = "gcg-session-manual-worker"
+		sessionName = "s-gcg-manual-worker"
+	)
+	info := sessiontest.SeedBead(t, beads.Bead{
+		ID:     beadID,
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:rig/claude"},
+		Metadata: map[string]string{
+			"template":       "rig/claude",
+			"agent_name":     "rig/claude",
+			"session_name":   sessionName,
+			"session_origin": "manual",
+		},
+	})
+
+	env := sessionpkg.RuntimeEnvWithSessionContext(info, 1, 1, "tok")
+	if env["GC_ALIAS"] != "" {
+		t.Fatalf("GC_ALIAS = %q, want empty for an unaliased manual session", env["GC_ALIAS"])
+	}
+	if env["GC_SESSION_ORIGIN"] != "manual" {
+		t.Fatalf("GC_SESSION_ORIGIN = %q, want manual -- the writer reads the origin from here", env["GC_SESSION_ORIGIN"])
+	}
+	if env["BEADS_ACTOR"] != sessionName {
+		t.Fatalf("BEADS_ACTOR = %q, want the session_name %q (AssigneeIdentifier's unaliased-manual shape)", env["BEADS_ACTOR"], sessionName)
+	}
+
+	assignee := hookClaimIdentityFromRuntimeEnv(env)
+	if assignee != env["BEADS_ACTOR"] {
+		t.Fatalf("claim assignee %q != runtime BEADS_ACTOR %q -- the close actor must match what the claim was recorded under, or the session cannot close its own work", assignee, env["BEADS_ACTOR"])
+	}
+}
+
+// The origin split must not move anyone else: an ephemeral pool worker still
+// claims under its bead id, and an aliased session of ANY origin (manual
+// included) still leads with its alias.
+func TestClaimIdentityByOriginKeepsPoolAndAliasShapes(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     func(beadID string) string
+	}{{
+		name: "ephemeral pool worker claims under its bead id",
+		metadata: map[string]string{
+			"session_name": "rig--claude-1-pool", "session_origin": "ephemeral",
+			"pool_slot": "1", poolManagedMetadataKey: boolMetadata(true),
+		},
+		want: func(beadID string) string { return beadID },
+	}, {
+		name: "aliased manual session keeps its alias",
+		metadata: map[string]string{
+			"session_name": "s-gcg-aliased", "session_origin": "manual", "alias": "rig/claude-mine",
+		},
+		want: func(string) string { return "rig/claude-mine" },
+	}}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			beadID := fmt.Sprintf("gcg-session-origin-%d", i)
+			md := map[string]string{"template": "rig/claude", "agent_name": "rig/claude"}
+			for k, v := range tc.metadata {
+				md[k] = v
+			}
+			info := sessiontest.SeedBead(t, beads.Bead{
+				ID: beadID, Type: sessionBeadType, Status: "open",
+				Labels:   []string{sessionBeadLabel, "agent:rig/claude"},
+				Metadata: md,
+			})
+			env := sessionpkg.RuntimeEnvWithSessionContext(info, 1, 1, "tok")
+			got := hookClaimIdentityFromRuntimeEnv(env)
+			if want := tc.want(beadID); got != want {
+				t.Fatalf("claim assignee = %q, want %q", got, want)
+			}
+			if got != env["BEADS_ACTOR"] {
+				t.Fatalf("claim assignee %q != BEADS_ACTOR %q", got, env["BEADS_ACTOR"])
+			}
+		})
+	}
+}
+
+// The production shape for a manual session: through the claim door, the
+// recorded assignee (and the actor of the claim mutation) is the session_name,
+// not the session bead id.
+func TestCmdHookClaimUnaliasedManualSessionClaimsUnderItsSessionName(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const (
+		beadID      = "ga-fresh1"
+		sessionName = "s-gcg-manual-worker"
+		sessionID   = "gcg-session-manual-worker"
+	)
+	logPath := unaliasedPoolWorkerHookCity(t, beadID)
+
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", sessionName)
+	t.Setenv("GC_SESSION_NAME", sessionName)
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_SESSION_ORIGIN", "manual")
+	t.Setenv("BEADS_ACTOR", sessionName)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON (code %d): %v\nraw: %s\nstderr: %s", code, err, stdout.String(), stderr.String())
+	}
+	if result.Action != "work" || result.BeadID != beadID {
+		t.Fatalf("result = %+v (code %d), want a fresh claim of %q; stderr: %s", result, code, beadID, stderr.String())
+	}
+	if result.Assignee != sessionName {
+		t.Fatalf("claim assignee = %q, want the session_name %q (the manual session's BEADS_ACTOR), not its bead id", result.Assignee, sessionName)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	if !strings.Contains(string(logData), sessionName+"\t") {
+		t.Fatalf("no bd subprocess ran under BEADS_ACTOR=%q; the whole log:\n%s", sessionName, logData)
+	}
+}
