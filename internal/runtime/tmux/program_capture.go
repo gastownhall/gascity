@@ -81,11 +81,13 @@ type captureCapability struct {
 
 // capturePlan is one arm of one pane: the capability, the session's
 // declaration and a fresh nonce rand. shell is the shell the relay runs the
-// pane's command with, set when relay is.
+// pane's command with, set when relay is. hold marks the pane as declaring
+// the mid-turn hold (programHoldOption).
 type capturePlan struct {
 	capability captureCapability
 	app        string
 	relay      bool
+	hold       bool
 	shell      string
 	rand       string
 }
@@ -143,7 +145,7 @@ func (t *Tmux) planCapture(arm runtime.ProgramStatusArm) *capturePlan {
 		_, _ = fmt.Fprintf(captureWarningOut, "warning: program-status capture not armed: %v\n", err)
 		return nil
 	}
-	plan := &capturePlan{capability: capability, app: arm.App, rand: r}
+	plan := &capturePlan{capability: capability, app: arm.App, hold: arm.HoldMidTurn, rand: r}
 	if t.relayRuns(arm, capability) {
 		plan.relay, plan.shell = true, t.paneShell(capability.shell)
 	}
@@ -395,8 +397,10 @@ func (p *capturePlan) tapCommand() string {
 }
 
 // armCommands are the commands arming target's capture: the nonce bound to
-// the pane id, then the tap. clearRecord also unsets the record an earlier
-// incarnation's tap published, for a pane that outlives its program.
+// the pane id, the hold declaration bound to it when the plan holds, then
+// the tap. clearRecord also unsets the record an earlier incarnation's tap
+// published, and a hold declaration the plan does not make, for a pane that
+// outlives its program.
 func (p *capturePlan) armCommands(target string, clearRecord bool) [][]string {
 	cmds := [][]string{{"set-option", "-p", "-F", "-t", target, programTapOption, p.rand + ".#{pane_id}"}}
 	if clearRecord {
@@ -404,18 +408,25 @@ func (p *capturePlan) armCommands(target string, clearRecord bool) [][]string {
 			[]string{"set-option", "-pu", "-t", target, programStatusOption},
 			[]string{"set-option", "-pu", "-t", target, programTextOption})
 	}
+	switch {
+	case p.hold:
+		cmds = append(cmds, []string{"set-option", "-p", "-F", "-t", target, programHoldOption, "#{pane_id}"})
+	case clearRecord:
+		cmds = append(cmds, []string{"set-option", "-pu", "-t", target, programHoldOption})
+	}
 	return append(cmds, []string{"pipe-pane", "-O", "-t", target, p.tapCommand()})
 }
 
 // disarmCommands are the commands removing target's capture: the nonce, then
-// the record, then the tap. With the nonce gone first, the tap's last write
-// cannot land; pipe-pane comes last because it fails on an exited pane, which
-// would otherwise abort the unsets.
+// the record and the hold declaration, then the tap. With the nonce gone
+// first, the tap's last write cannot land; pipe-pane comes last because it
+// fails on an exited pane, which would otherwise abort the unsets.
 func disarmCommands(target string) [][]string {
 	return [][]string{
 		{"set-option", "-pu", "-t", target, programTapOption},
 		{"set-option", "-pu", "-t", target, programStatusOption},
 		{"set-option", "-pu", "-t", target, programTextOption},
+		{"set-option", "-pu", "-t", target, programHoldOption},
 		{"pipe-pane", "-t", target},
 	}
 }

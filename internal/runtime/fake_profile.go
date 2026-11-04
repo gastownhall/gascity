@@ -69,6 +69,7 @@ type ProfileBackend interface {
 	LivenessObserverWithError
 	ProcessTableScanner
 	ProgramCaptureHealer
+	ProgramStatusHoldProvider
 	ProgramStatusProvider
 	ProgramStatusShadowProvider
 	RelaunchProvider
@@ -118,6 +119,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			LivenessObserverWithError:     b,
 			ProcessTableScanner:           b,
 			ProgramCaptureHealer:          b,
+			ProgramStatusHoldProvider:     b,
 			ProgramStatusProvider:         b,
 			ProgramStatusShadowProvider:   b,
 			RelaunchProvider:              b,
@@ -228,6 +230,7 @@ type (
 		LivenessObserverWithError
 		ProcessTableScanner
 		ProgramCaptureHealer
+		ProgramStatusHoldProvider
 		ProgramStatusProvider
 		ProgramStatusShadowProvider
 		RelaunchProvider
