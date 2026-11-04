@@ -252,6 +252,9 @@ type splitCityBeadRow struct {
 	// names (one with no <placeholder> left in it). Each is run after the
 	// refusal and must succeed, so an alternative is a command that works.
 	runs int
+	// beforeAlternatives prepares what a refused row's alternatives need, such
+	// as a work bead for a work half's pre-read.
+	beforeAlternatives func(t *testing.T, fx splitCityConformanceFixture)
 	// check asserts what a served row did, given its stdout and stderr.
 	check func(t *testing.T, fx splitCityConformanceFixture, id, stdout, stderr string)
 }
@@ -464,6 +467,25 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 			refusal: "`gc bd label add` is not served in process", instead: "the served update takes the same labels: `gc bd update <id> --add-label conformance`", runs: 1,
 		},
 		{
+			// A global value flag's value is neither an id nor a label.
+			form: "label add <id> L --actor A", argv: splitCityArgv("label", "add", "<id>", "conformance", "--actor", "bot"), shapes: minted, want: splitCityRefused,
+			refusal: "`gc bd label add` is not served in process", instead: "the served update takes the same labels: `gc bd update <id> --add-label conformance`", runs: 1,
+		},
+		{
+			form: "label add <id> <work-id> L --actor A (split)", argv: splitCityArgv("label", "add", "<id>", splitCityWorkID, "conformance", "--actor", "bot"),
+			shapes: minted, want: splitCityRefused, refusal: "`gc bd label add` is not served in process", runs: 2,
+			instead:            "`gc bd update <id> --add-label conformance`, and the rest as typed, which bd answers from the work store: `gc bd label add " + splitCityWorkID + " conformance --actor bot`",
+			beforeAlternatives: splitCityWorkBeadInBd,
+		},
+		{
+			form: "update <id> --claim --actor A", argv: splitCityArgv("update", "<id>", "--claim", "--actor", "someone-else"), want: splitCityRefused,
+			refusal: refusedFlag("--actor"), gap: "the served claim claims for BEADS_ACTOR, so no command claims for another actor",
+		},
+		{
+			form: "update <work-id> --parent <id> --notes N", argv: splitCityArgv("update", splitCityWorkID, "--parent", "<id>", "--notes", "a note"), shapes: minted,
+			want: splitCityRefused, refusal: refusedFlag("--notes"), gap: "the bead the binding holds is the new parent, not the subject, so no command it serves does what was asked",
+		},
+		{
 			form: "comments <id>", argv: splitCityArgv("comments", "<id>"), shapes: minted, want: splitCityRefused,
 			refusal: "`gc bd comments` is not served in process", instead: "the class store contract carries no comments, so the bead has none to list", runs: 1,
 		},
@@ -517,6 +539,13 @@ func splitCityBeadRows(t *testing.T) []splitCityBeadRow {
 	}
 }
 
+// splitCityWorkBeadInBd makes the work-store bd answer for splitCityWorkID, so
+// a work half the split judge pre-reads finds its bead.
+func splitCityWorkBeadInBd(t *testing.T, _ splitCityConformanceFixture) {
+	t.Helper()
+	t.Setenv("BD_STUB_STDOUT", `[{"id":"`+splitCityWorkID+`","title":"a work bead","status":"open","issue_type":"task"}]`)
+}
+
 // requireShownJSON asserts stdout is bd's show --json shape for id.
 func requireShownJSON(t *testing.T, _ splitCityConformanceFixture, id, stdout, _ string) {
 	t.Helper()
@@ -568,24 +597,29 @@ var splitCityAlternativeSpan = regexp.MustCompile("`(gc bd [^`]+)`")
 // splitCityOptionalGroup is a usage spelling's optional group, `[--json]`.
 var splitCityOptionalGroup = regexp.MustCompile(`\s*\[[^\]]*\]`)
 
+// splitCityVerbMentions are what follows the refused verb where a refusal
+// quotes it (`gc bd close` is not served in process; `gc bd show` with --long
+// is not served): the verb named, not a command to run.
+var splitCityVerbMentions = []string{"` is not served", "` with ", "` in this spelling"}
+
 // splitCityRunnableAlternatives returns the gc bd argv of every command a
-// refusal names that can run as it stands: a backticked `gc bd` span with its
-// optional groups dropped, left with no <placeholder>, and naming one of ids.
-// A span naming no id is the refused verb quoted (`gc bd close` is not served),
-// not a command to run.
-func splitCityRunnableAlternatives(t *testing.T, stderr string, ids []string) [][]string {
+// refusal names that can run as it stands: each backticked `gc bd` span that
+// is not the refused verb quoted, with its optional groups dropped and no
+// <placeholder> left in it. Every other span counts — one naming the wrong id
+// is run like the rest, so it fails rather than being skipped.
+func splitCityRunnableAlternatives(t *testing.T, stderr string) [][]string {
 	t.Helper()
 	var out [][]string
-	for _, match := range splitCityAlternativeSpan.FindAllStringSubmatch(stderr, -1) {
-		command := splitCityOptionalGroup.ReplaceAllString(match[1], "")
+	for _, loc := range splitCityAlternativeSpan.FindAllStringSubmatchIndex(stderr, -1) {
+		after := stderr[loc[1]-1:]
+		if slices.ContainsFunc(splitCityVerbMentions, func(mention string) bool { return strings.HasPrefix(after, mention) }) {
+			continue
+		}
+		command := splitCityOptionalGroup.ReplaceAllString(stderr[loc[2]:loc[3]], "")
 		if strings.ContainsAny(command, "<>") {
 			continue
 		}
-		argv := shellquote.Split(command)[2:]
-		if !slices.ContainsFunc(argv, func(arg string) bool { return slices.Contains(ids, arg) }) {
-			continue
-		}
-		out = append(out, argv)
+		out = append(out, shellquote.Split(command)[2:])
 	}
 	return out
 }
@@ -643,7 +677,10 @@ func TestSplitCityBeadCommandConformance(t *testing.T) {
 							t.Errorf("the refused gc bd %v moved %s from %q to %q", argv, id, before.Status, after.Status)
 						}
 					}
-					alternatives := splitCityRunnableAlternatives(t, stderr.String(), []string{id, fx.otherStepID, splitCityWorkID})
+					alternatives := splitCityRunnableAlternatives(t, stderr.String())
+					if row.beforeAlternatives != nil {
+						row.beforeAlternatives(t, fx)
+					}
 					if len(alternatives) != row.runs {
 						t.Errorf("gc bd %v named %d runnable alternative(s) %q, want %d:\n%s", argv, len(alternatives), alternatives, row.runs, stderr.String())
 					}

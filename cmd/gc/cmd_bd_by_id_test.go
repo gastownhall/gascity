@@ -2479,14 +2479,79 @@ func TestBdCloseRefusalSplitsALabelWriteByResidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the work store: %v", err)
 	}
-	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"label", "add", held, work.ID, "triage,urgent"}, &stdout, &stderr)
-	if !handled || code != 1 {
-		t.Fatalf("label add = (%d, %t), want a refusal: %s", code, handled, stderr.String())
+	for _, tc := range []struct {
+		args    []string
+		instead string
+	}{
+		{
+			[]string{"label", "add", held, work.ID, "triage,urgent"},
+			"the served update takes the same labels: `gc bd update " + held + " --add-label triage --add-label urgent`, and the rest as typed, which bd answers from the work store: `gc bd label add " + work.ID + " triage,urgent`",
+		},
+		{
+			// A global value flag's value is neither an id nor a label.
+			[]string{"label", "add", held, "triage", "--actor", "bot"},
+			"the served update takes the same labels: `gc bd update " + held + " --add-label triage`",
+		},
+		{
+			// --json goes to both halves; the work half is the argv as typed,
+			// root flags and all, without the ids the binding holds.
+			[]string{"--actor", "bot", "label", "remove", work.ID, held, "triage", "--json"},
+			"the served update takes the same labels: `gc bd update " + held + " --remove-label triage --json`, and the rest as typed, which bd answers from the work store: `gc bd --actor bot label remove " + work.ID + " triage --json`",
+		},
+		// A flag this reading cannot place might take the next token, so
+		// nothing is named.
+		{[]string{"label", "add", held, "triage", "--frob", "x"}, ""},
+		{[]string{"label", "remove", held, "triage", "--prefix", "p"}, ""},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, cityPath, "", tc.args, &stdout, &stderr)
+			if !handled || code != 1 {
+				t.Fatalf("%v = (%d, %t), want a refusal: %s", tc.args, code, handled, stderr.String())
+			}
+			if tc.instead == "" {
+				if strings.Contains(stderr.String(), "instead:") {
+					t.Errorf("the refusal names an alternative it cannot vouch for: %q", stderr.String())
+				}
+				return
+			}
+			if want := " — instead: " + tc.instead + "\n"; !strings.HasSuffix(stderr.String(), want) {
+				t.Errorf("the refusal does not end with the alternative:\n got %q\nwant suffix %q", stderr.String(), want)
+			}
+		})
 	}
-	want := " — instead: the served update takes the same labels: `gc bd update " + held + " --add-label triage --add-label urgent`, and the rest as typed, which bd answers from the work store: `gc bd label add " + work.ID + " triage,urgent`\n"
-	if !strings.HasSuffix(stderr.String(), want) {
-		t.Errorf("the refusal does not end with the split alternative:\n got %q\nwant suffix %q", stderr.String(), want)
+}
+
+// TestBdUnservedAlternativeNamesNothingItCannotVouchFor pins the refusals
+// that name no alternative, because every command the door could name would
+// do something other than what was asked.
+func TestBdUnservedAlternativeNamesNothingItCannotVouchFor(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	held := mustCreateClassBead(t, classStore, beads.Bead{Title: "a step", Type: "task"}).ID
+	work, err := workStoreFor(t, cityPath).Create(beads.Bead{Title: "a work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the work store: %v", err)
+	}
+	for name, args := range map[string][]string{
+		// The served claim claims for BEADS_ACTOR, not for --actor.
+		"a claim for another actor": {"update", held, "--claim", "--actor", "someone-else"},
+		// The bead the binding holds is the new parent, not the subject: a
+		// command without --notes is the split judge's to refuse, and the
+		// note's metadata would land on the parent.
+		"the resident is a parent value": {"update", work.ID, "--parent", held, "--notes", "a note"},
+		// A second reason file after the stdin one leaves no reason to name.
+		"a reason file beside stdin": {"close", held, "--reason-file", "-", "--reason-file", "/tmp/why"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, cityPath, "", args, &stdout, &stderr)
+			if !handled || code != 1 {
+				t.Fatalf("%v = (%d, %t), want a refusal: %s", args, code, handled, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "instead:") {
+				t.Errorf("the refusal names an alternative it cannot vouch for: %q", stderr.String())
+			}
+		})
 	}
 }
 

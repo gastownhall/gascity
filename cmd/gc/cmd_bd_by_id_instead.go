@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -127,6 +128,13 @@ func bdByIDUnservedAlternative(bdArgs []string, id, flag string, res bdByIDResid
 	if droppable == nil {
 		return ""
 	}
+	if (verb == "update" || verb == "reopen") && bdByIDSoleSubject(bdArgs, verb) != id {
+		// The bead the binding holds is not the one being written — an update
+		// naming it as the new --parent, say — so no command the door serves
+		// does what was asked, and a note's metadata would land on the wrong
+		// bead.
+		return ""
+	}
 	rest, dropped, removed := bdArgvWithout(bdArgs, droppable)
 	if len(dropped) == 0 {
 		return ""
@@ -163,7 +171,9 @@ func bdByIDUnservedAlternative(bdArgs []string, id, flag string, res bdByIDResid
 // that do the dropped part, run after.
 func bdByIDRunWithout(rest, removed []string, without string, thens []string, res bdByIDResidence) string {
 	op, served := parseBdByIDOp(rest)
-	if !served || op.Close.Invalid != "" {
+	if !served || op.Close.Invalid != "" || op.Verb == bdByIDClaim {
+		// The served claim claims for BEADS_ACTOR, so dropping --actor from a
+		// claim would claim for someone other than the one named.
 		return ""
 	}
 	whole := "run it " + without + ": " + bdByIDCommandText(rest)
@@ -235,8 +245,9 @@ func bdByIDCloseResidence(op bdByIDOp, res bdByIDResidence) (held, notHeld []int
 func bdByIDCloseStdinInstead(bdArgs []string, res bdByIDResidence) string {
 	rest, removed := bdArgvWithoutReasonFileStdin(bdArgs)
 	op, served := parseBdByIDOp(rest)
-	if !served || op.Verb != bdByIDClose || op.Close.Invalid != "" || len(op.Close.Reasons) > 0 {
-		// A reason beside the file is bd's own refusal of the command.
+	if !served || op.Verb != bdByIDClose || op.Close.Invalid != "" || len(op.Close.Reasons) > 0 || op.Close.HasReasonFile {
+		// A reason beside the file is bd's own refusal of the command, and a
+		// second reason file leaves no reason source to name.
 		return ""
 	}
 	held, notHeld, ok := bdByIDCloseResidence(op, res)
@@ -279,44 +290,57 @@ func bdArgvWithoutReasonFileStdin(argv []string) (rest, removed []string) {
 
 // bdByIDLabelInstead spells `label add|remove <ids...> <labels>` as the served
 // update of each id the binding holds, one --add-label or --remove-label per
-// label, and the ids it does not hold as the label write as typed. bd takes
-// the last positional as a comma list of labels. bdflags carries no manifest
-// for the label verbs, so the argv after the verb's own words is read
-// directly.
+// label, and the label write as typed without those ids for the ids it does
+// not hold. bd takes the last positional as a comma list of labels. bdflags
+// carries no manifest for the label verbs, whose only local flag is --help, so
+// the argv after the verb's own words is read against the global flags: a
+// global value flag's value is skipped, --json goes to both halves, and any
+// other flag names nothing, since it might take the next token.
 func bdByIDLabelInstead(verb string, bdArgs []string, res bdByIDResidence) string {
-	var positionals []string
-	for _, arg := range bdArgsAfterWords(bdArgs, strings.Fields(verb)) {
-		if !strings.HasPrefix(arg, "-") {
-			positionals = append(positionals, arg)
-		}
-	}
-	if len(positionals) < 2 {
+	tail := bdArgsAfterWords(bdArgs, strings.Fields(verb))
+	if tail == nil {
 		return ""
 	}
-	ids, labels := positionals[:len(positionals)-1], positionals[len(positionals)-1]
+	head := bdArgs[:len(bdArgs)-len(tail)]
+	positions, jsonOut, ok := bdByIDLabelPositions(tail)
+	if !ok || len(positions) < 2 {
+		return ""
+	}
+	jsonOut = jsonOut || slices.Contains(head, "--json")
 	flag := "--add-label"
 	if verb == "label remove" {
 		flag = "--remove-label"
 	}
-	var updates, notHeld []string
-	for _, id := range ids {
+	// bd's label verbs take a comma list; update takes one label per flag.
+	var labelFlags []string
+	for _, label := range strings.Split(tail[positions[len(positions)-1]], ",") {
+		if label = strings.TrimSpace(label); label != "" {
+			labelFlags = append(labelFlags, flag, label)
+		}
+	}
+	if len(labelFlags) == 0 {
+		return ""
+	}
+	held := map[int]bool{}
+	seen := map[string]bool{}
+	var updates []string
+	for _, at := range positions[:len(positions)-1] {
+		id := tail[at]
 		holds, err := res.holds(id)
 		if err != nil {
 			return ""
 		}
 		if !holds {
-			notHeld = append(notHeld, id)
 			continue
 		}
-		// bd's label verbs take a comma list; update takes one label per flag.
-		argv := []string{"update", id}
-		for _, label := range strings.Split(labels, ",") {
-			if label = strings.TrimSpace(label); label != "" {
-				argv = append(argv, flag, label)
-			}
+		held[at] = true
+		if seen[id] {
+			continue
 		}
-		if len(argv) == 2 {
-			return ""
+		seen[id] = true
+		argv := append([]string{"update", id}, labelFlags...)
+		if jsonOut {
+			argv = append(argv, "--json")
 		}
 		updates = append(updates, bdByIDCommandText(argv))
 	}
@@ -324,11 +348,70 @@ func bdByIDLabelInstead(verb string, bdArgs []string, res bdByIDResidence) strin
 		return ""
 	}
 	text := "the served update takes the same labels: " + strings.Join(updates, ", ")
-	if len(notHeld) > 0 {
-		argv := append(strings.Fields(verb), notHeld...)
-		text += bdByIDSplitRest + bdByIDCommandText(append(argv, labels))
+	if len(held) < len(positions)-1 {
+		work := slices.Clone(head)
+		for at, arg := range tail {
+			if !held[at] {
+				work = append(work, arg)
+			}
+		}
+		text += bdByIDSplitRest + bdByIDCommandText(work)
 	}
 	return text
+}
+
+// bdByIDLabelPositions reads a label verb's tail: the indices of its
+// positionals, and whether it carries --json. ok is false for a flag this
+// reading cannot place (any but a global one), or for help, which runs
+// nothing.
+func bdByIDLabelPositions(tail []string) (positions []int, jsonOut, ok bool) {
+	valueFlags, boolFlags := bdflags.GlobalValueFlags(), bdflags.GlobalBoolFlags()
+	for i := 0; i < len(tail); i++ {
+		arg := tail[i]
+		if arg == "--" {
+			for j := i + 1; j < len(tail); j++ {
+				positions = append(positions, j)
+			}
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positions = append(positions, i)
+			continue
+		}
+		name, _, inline := strings.Cut(arg, "=")
+		switch {
+		case bdByIDHelpFlags[name]:
+			return nil, false, false
+		case arg == "--json":
+			jsonOut = true
+		case boolFlags[name]:
+		case valueFlags[name]:
+			if !inline {
+				i++
+			}
+		default:
+			return nil, false, false
+		}
+	}
+	return positions, jsonOut, true
+}
+
+// bdByIDHelpFlags print help or a version and run nothing.
+var bdByIDHelpFlags = map[string]bool{"--help": true, "-h": true, "--version": true, "-V": true}
+
+// bdByIDSoleSubject returns the one id a single-subject verb's argv writes, or
+// "" when the argv cannot be read into exactly one: a verb this reading does
+// not resolve, a flag that might take the next token, or several ids.
+func bdByIDSoleSubject(bdArgs []string, verb string) string {
+	sub, rest, resolved := bdByIDSubcommand(bdArgs)
+	if !resolved || sub != verb {
+		return ""
+	}
+	ids, ambiguous := bdScanPositionalIDs(rest, bdflags.ValueFlags(sub), bdflags.BoolFlags(sub), nil)
+	if ambiguous || len(ids) != 1 {
+		return ""
+	}
+	return ids[0]
 }
 
 // bdArgsAfterWords returns the argv after the first run of words, in order,
