@@ -145,6 +145,17 @@ an operator attestation precisely because no process can verify it, and
 preflight says so rather than letting a clean report read as broader than it
 is.
 
+A split can also release maintenance a large work store was starving. The core
+reaper runs its steps in order under one run budget, and on a work store
+holding many infrastructure rows the early steps can spend it every run. Its
+later steps, such as auto-closing stale issues (step 5), then never run. Once
+the split moves those rows out, the first reaper run after it reaches those
+steps and acts on everything that was eligible all along: one city closed 98
+stale work beads in a single run. Before the window, look at the reaper's
+recent `order.skipped` events and its summary's `budget_skipped:` field, which
+names each `<scope>@<step>` the budget kept from running. If later steps have
+been skipped, expect that burst, and decide beforehand whether to let it run.
+
 ## Step 4: run the migration
 
 ```
