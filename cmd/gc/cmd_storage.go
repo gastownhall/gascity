@@ -320,8 +320,12 @@ the rig import does not check it, so it is refused there. The run checks it
 between batches, never inside one, and when it is spent stops at the next
 boundary and exits 75, naming the phase and how far it got. Running the same
 command again continues: the copy keeps every row an earlier run copied that
-still equals the work store, and the clear resumes from the rows it had not yet
-removed.`,
+still equals its source (the work store, or the backup), and the clear resumes
+from the rows it had not yet removed. That holds for the re-copy of a binding
+whose database is gone too: before it creates the database it writes a record
+beside the marker (infra.recopying), and until its own marker lands the binding
+stays unconverged, so boot refuses it and the same command resumes it, whether
+the run paused, failed or was killed.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sources := 0
 			for _, set := range []bool{fromWork, fromBackup, fromRigs} {
@@ -816,7 +820,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		if present, err := infraPathExists(target.RetainedBackupPath()); err == nil && present {
 			remedy = storageRecopyFromBackupInstruction()
 		}
-		fmt.Fprintf(stdout, "converged: no (the marker is present and the database is gone)\nblocking invariant: re-copy the binding with `%s`\n", remedy) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "converged: no (the marker is present and %s)\nblocking invariant: re-copy the binding with `%s`\n", infraStaleCause(target), remedy) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if state != infraConvergenceMarked {

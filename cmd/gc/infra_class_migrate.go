@@ -240,6 +240,13 @@ const infraMigratedMarkerName = "infra.migrated"
 // GC doing its job. See "What absence from the binding actually means".
 const infraCopyManifestName = "infra.migrated.beads"
 
+// infraRecopyRecordName is the record a stale binding's re-copy writes beside
+// the marker before it creates the database, and removes once its own marker
+// has landed. Until then the old marker sits over a database the re-copy may
+// have only partly written, and the record is what keeps the binding stale
+// (readInfraConvergenceState) whether the re-copy pauses, fails or is killed.
+const infraRecopyRecordName = "infra.recopying"
+
 // infraMigrationStampKey marks a destination row as one this migration wrote.
 // The stamp — not id equality — is what tells a resumable partial attempt apart
 // from content the destination owns: the source and destination mint from
@@ -780,6 +787,12 @@ func (t infraBindingTarget) ManifestPath() string {
 	return filepath.Join(t.Root, infraCopyManifestName)
 }
 
+// RecopyRecordPath returns the record of a stale binding's unfinished re-copy
+// for this target.
+func (t infraBindingTarget) RecopyRecordPath() string {
+	return filepath.Join(t.Root, infraRecopyRecordName)
+}
+
 // resolveInfraBindingTarget reports the binding that owns all five
 // infrastructure classes. ok=false with no error means the city is not
 // configured for the split; an error means it is configured and the destination
@@ -918,8 +931,8 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		if backedUp, err := infraPathExists(target.RetainedBackupPath()); err == nil && backedUp {
 			remedy = storageRecopyFromBackupInstruction()
 		}
-		return say(fmt.Errorf("%s claims convergence but %s is gone; the binding cannot serve until it is re-copied with:  %s",
-			target.MarkerPath(), target.Database, remedy))
+		return say(fmt.Errorf("%s claims convergence but %s; the binding cannot serve until it is re-copied with:  %s",
+			target.MarkerPath(), infraStaleCause(target), remedy))
 	}
 
 	// No marker. Either this city has infrastructure beads in the work store —
@@ -1270,7 +1283,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		return say(infraMigrationUncheckable, fmt.Errorf("reading the retained-source backup: %w", err))
 	}
 	if from == infraMigrationFromBackup && state != infraConvergenceStale {
-		return say(infraMigrationUncheckable, fmt.Errorf("--%s re-copies only a binding whose database is gone (a convergence marker at %s with no %s); this binding is not in that state, so nothing was copied", storageFromBackupFlag, target.MarkerPath(), target.Database))
+		return say(infraMigrationUncheckable, fmt.Errorf("--%s re-copies only a binding whose database is gone (a convergence marker at %s with no %s), or one whose re-copy has not finished (%s beside the marker); this binding is in neither state, so nothing was copied", storageFromBackupFlag, target.MarkerPath(), target.Database, target.RecopyRecordPath()))
 	}
 
 	switch state {
@@ -1294,11 +1307,11 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 			// The work store's copies were cleared into the backup, so a re-copy
 			// from it would rebuild a binding holding only what was written to
 			// the work store since — and the marker would bless it.
-			return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s is gone, and this city's retained work-store copies were cleared into %s. Re-copying from the work store would rebuild an empty binding; re-copy from the backup instead:  %s",
-				target.MarkerPath(), target.Database, target.RetainedBackupPath(), storageRecopyFromBackupInstruction()))
+			return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s, and this city's retained work-store copies were cleared into %s. Re-copying from the work store would rebuild an empty binding; re-copy from the backup instead:  %s",
+				target.MarkerPath(), infraStaleCause(target), target.RetainedBackupPath(), storageRecopyFromBackupInstruction()))
 		}
-		fmt.Fprintf(stderr, "%s: %s claims convergence but %s is gone; re-running the copy\n", //nolint:errcheck // best-effort stderr
-			logPrefix, target.MarkerPath(), target.Database)
+		fmt.Fprintf(stderr, "%s: %s claims convergence but %s; re-running the copy\n", //nolint:errcheck // best-effort stderr
+			logPrefix, target.MarkerPath(), infraStaleCause(target))
 	}
 
 	if state == infraConvergenceAbsent {
@@ -1343,6 +1356,17 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 	}
 
+	// A stale binding's re-copy records itself before it creates the
+	// database: from the first batch until its own marker lands, the old
+	// marker sits over a database holding only part of the copy, and the
+	// record is what keeps every reader of the state seeing it stale — boot
+	// refuses it, a rerun resumes it, and nothing clears against it — however
+	// this run ends.
+	if state == infraConvergenceStale {
+		if err := writeInfraRecopyRecord(target, from); err != nil {
+			return fail(err)
+		}
+	}
 	writer, err := openInfraDestination(target)
 	if err != nil {
 		return fail(fmt.Errorf("opening binding %q at %s: %w", target.Binding, target.Database, err))
@@ -1433,6 +1457,12 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := writeInfraMigratedMarker(target, current); err != nil {
 		return fail(err)
 	}
+	// The new marker speaks for the binding now. The record comes off whether
+	// or not this run wrote it: a record outliving its marker would hold a
+	// converged binding stale.
+	if err := removeInfraRecopyRecord(target); err != nil {
+		return fail(err)
+	}
 	if err := infraEngineCrashPoint("marker"); err != nil {
 		return fail(err)
 	}
@@ -1518,9 +1548,10 @@ const (
 	// infraConvergenceMarked reports a marker whose database is present — a
 	// city that converged and is being served from the binding.
 	infraConvergenceMarked
-	// infraConvergenceStale reports a marker whose database is gone. The city
-	// converged at some point, so the marker's claim about the past still
-	// holds; only its claim about the present does not.
+	// infraConvergenceStale reports a marker whose database is gone, or whose
+	// re-copy has not finished. The city converged at some point, so the
+	// marker's claim about the past still holds; only its claim about the
+	// present does not.
 	infraConvergenceStale
 )
 
@@ -1532,6 +1563,13 @@ const (
 // wipe, a restore, a hand-edit — leaves a marker that would otherwise bless an
 // empty destination as migrated. A marker with no database is reported stale
 // and the copy runs again; the destination is empty, so it simply re-converges.
+//
+// Nor is the database the answer once that re-copy has started: it creates
+// the database before its first batch, and until its own marker lands the old
+// marker sits over a database holding only what the re-copy wrote so far. The
+// re-copy record (infraRecopyRecordName) says so, and a marker with a record
+// beside it is stale whatever the database holds, so a re-copy that paused,
+// failed or was killed is resumed, never served or cleared against.
 //
 // An error is never a state. Neither a marker that could not be read nor a
 // database that could not be stat'ed says the city failed to converge, and the
@@ -1548,6 +1586,13 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 	if !marked {
 		return infraConvergenceAbsent, nil
 	}
+	recopying, err := infraPathExists(target.RecopyRecordPath())
+	if err != nil {
+		return infraConvergenceAbsent, fmt.Errorf("reading the re-copy record: %w", err)
+	}
+	if recopying {
+		return infraConvergenceStale, nil
+	}
 	present, err := infraPathExists(target.Database)
 	if err != nil {
 		return infraConvergenceAbsent, fmt.Errorf("reading the binding database %s: %w", target.Database, err)
@@ -1556,6 +1601,55 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 		return infraConvergenceMarked, nil
 	}
 	return infraConvergenceStale, nil
+}
+
+// infraStaleCause says what makes a marked binding stale, for a message: a
+// re-copy whose record is still present, or a database that is gone.
+func infraStaleCause(target infraBindingTarget) string {
+	recopying, err := infraPathExists(target.RecopyRecordPath())
+	switch {
+	case err != nil:
+		return fmt.Sprintf("%s is gone or only partly re-copied (the re-copy record %s cannot be read: %v)", target.Database, target.RecopyRecordPath(), err)
+	case recopying:
+		return fmt.Sprintf("the re-copy into %s that %s records has not finished", target.Database, target.RecopyRecordPath())
+	default:
+		return target.Database + " is gone"
+	}
+}
+
+// writeInfraRecopyRecord records that a stale binding's re-copy is under way,
+// before the re-copy creates the database, unless an earlier run of it already
+// did: the record names the command that finishes it, and the time it began.
+func writeInfraRecopyRecord(target infraBindingTarget, from infraMigrationSource) error {
+	present, err := infraPathExists(target.RecopyRecordPath())
+	if err != nil {
+		return fmt.Errorf("reading the re-copy record: %w", err)
+	}
+	if present {
+		return nil
+	}
+	finish := storageClearInstruction()
+	if from == infraMigrationFromBackup {
+		finish = storageRecopyFromBackupInstruction()
+	}
+	line := fmt.Sprintf("re-copy of binding %s into %s under way since %s; until its marker lands the binding is stale. Finish it with `%s`", target.Binding, target.Database, time.Now().UTC().Format(time.RFC3339), finish)
+	if err := writeRigImportRecord(target.RecopyRecordPath(), line); err != nil {
+		return fmt.Errorf("recording the re-copy of %s at %s: %w", target.Database, target.RecopyRecordPath(), err)
+	}
+	return nil
+}
+
+// removeInfraRecopyRecord removes the re-copy record once a marker has landed.
+// A record that is not there is already removed.
+func removeInfraRecopyRecord(target infraBindingTarget) error {
+	if err := os.Remove(target.RecopyRecordPath()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("removing the re-copy record %s: %w", target.RecopyRecordPath(), err)
+	}
+	syncInfraDir(target.Root)
+	return nil
 }
 
 // confirmInfraConvergence re-proves a city an earlier boot already converged.

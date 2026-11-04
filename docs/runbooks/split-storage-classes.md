@@ -276,14 +276,14 @@ the copy's batches and between the clear's chunks, never inside one. A clear
 chunk runs to its end once started, so a dense one (1,000 pour steps of a
 formula) can overrun the budget by about 2.5 minutes on a native-Dolt work
 store and 4 to 5 minutes on the proxied or hosted-bd lanes. When it is spent,
-the run stops at the next boundary and exits 75 with "paused in <phase> at <n>/<N>":
+the run stops at the next boundary and exits 75 with `paused in <phase> at <n>/<N>`:
 
-- before the marker, the city is unconverged and boot refuses it, as for any
-  copy still under way. Running the same command again keeps every row an
-  earlier run copied that still equals the work store, and every edge between
-  kept rows that already carries the right payload. It deletes and copies
-  again any row the work store changed since, or that the binding holds an
-  edge of the work store no longer has.
+- before a first cutover's marker, the city is unconverged and boot refuses
+  it, as for any copy still under way. Running the same command again keeps
+  every row an earlier run copied that still equals the work store, and every
+  edge between kept rows that already carries the right payload. It deletes
+  and copies again any row the work store changed since, or that the binding
+  holds an edge of the work store no longer has.
 - after the marker, the clear is pending and boot refuses it as retained
   copies. Running the same command again finishes the clear from the rows it
   had not yet removed. The cross-store edges the clear keeps (from a work bead
@@ -292,10 +292,19 @@ the run stops at the next boundary and exits 75 with "paused in <phase> at <n>/<
   store: a blocking one does not hold its work bead back until the clear is
   finished. They are recorded in the backup, and the finishing run restores
   them.
+- in the re-copy of a binding whose database is gone (`--from-backup`, or
+  `--from-work` on a city whose work store was never cleared), the old marker
+  is still in place, so before the re-copy creates the database it writes
+  `infra.recopying` beside the marker. Until the re-copy's own marker lands and
+  removes that record, the binding is stale whatever its database holds: boot
+  refuses it, `gc storage status` reports it unconverged, and running the same
+  command again resumes the re-copy, keeping every row already copied that
+  still equals its source. A re-copy that fails or is killed part way stays
+  stale the same way.
 
-Either way the proof is unchanged: the copy is proven against a re-read of
-the work store before the marker, and the clear deletes only rows the
-manifest proves the binding holds.
+In every case the proof is unchanged: the copy is proven against a re-read of
+its source before the marker, and the clear deletes only rows the manifest
+proves the binding holds.
 
 Nothing in the work store changes before the marker: until step 8 the source is
 exactly as you left it, and the cutover can still be abandoned by a config
@@ -1335,6 +1344,12 @@ Leave the marker alone. The procedure does not need it gone — a marker with no
 database is precisely the state that re-runs the copy — and it is the binding's
 own record that this city has been in service, which the post-cutover refusals
 key on.
+
+If the re-copy stops part way (it exits 75 when `--time-budget` is spent, or
+it fails, or it is killed), run the same command again, and leave
+`infra.recopying` alone too: until the re-copy finishes, that record is what
+keeps boot from serving the partly re-copied database, and a rerun of
+`--from-backup` from refusing it as a binding that is not stale.
 
 ## What a later boot keeps checking
 

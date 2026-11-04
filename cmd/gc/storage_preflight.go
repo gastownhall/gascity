@@ -212,7 +212,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return 0
 	}
 	if state == infraConvergenceStale {
-		preflightPass(stdout, "cutover", "a convergence marker exists with no database under it, so the copy would run again and re-converge")
+		preflightPass(stdout, "cutover", fmt.Sprintf("a convergence marker exists and %s, so the copy would run again and re-converge", infraStaleCause(target)))
 	} else {
 		preflightPass(stdout, "cutover", "not converged yet, which is what the migration is for")
 	}

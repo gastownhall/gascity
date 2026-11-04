@@ -24,7 +24,9 @@ package main
 // binding before the marker, and the clear deletes only rows the manifest
 // proves the binding holds. A paused or killed copy leaves stamped rows the
 // next run keeps when they still equal the source (resumable copy) and
-// deletes when they do not.
+// deletes when they do not. A stale binding's re-copy runs under its old
+// marker, so it also leaves its re-copy record, which keeps the partial
+// binding stale until the re-copy's own marker lands.
 
 import (
 	"errors"
@@ -63,8 +65,9 @@ var (
 var infraEngineCrashPoint = func(string) error { return nil }
 
 // infraEnginePause is the engine stopping at a boundary because the run's time
-// budget is spent. Before the marker it leaves the city unconverged; after it,
-// the clear pending. The same command continues from where it stopped.
+// budget is spent. Before the marker it leaves the city unconverged, or a stale
+// binding's re-copy stale (infraRecopyRecordName); after it, the clear pending.
+// The same command continues from where it stopped.
 type infraEnginePause struct {
 	Phase       string
 	Done, Total int

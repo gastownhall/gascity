@@ -2,7 +2,10 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -114,9 +117,10 @@ func (s *SQLiteStore) DepRemoveBatch(pairs []DepPair) error {
 	})
 }
 
-// DepListBatch returns each held anchor's DOWN edges, one query per chunk of
-// anchors; an anchor the store does not hold gets no entry. It satisfies
-// DependencyBatchLister.
+// DepListBatch returns each held anchor's DOWN edges, in a stable order: the
+// held anchors one query per chunk, then their edges through sqliteDepsFor,
+// the read every row's edges take. An anchor the store does not hold gets no
+// entry. It satisfies DependencyBatchLister, so a failed read returns no map.
 func (s *SQLiteStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -133,30 +137,20 @@ func (s *SQLiteStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 			var id string
 			if err := held.Scan(&id); err != nil {
 				_ = held.Close()
-				return nil, err
+				return nil, fmt.Errorf("listing the dep edges of %d anchor(s): %w", len(chunk), err)
 			}
 			out[id] = []Dep{}
 		}
-		if err := held.Close(); err != nil {
-			return nil, err
-		}
-		rows, err := s.readDB.QueryContext(context.Background(), `SELECT issue_id, depends_on_id, dep_type FROM deps WHERE issue_id IN (`+in+`)`, args...)
-		if err != nil {
+		if err := sqliteRowsDone(held); err != nil {
 			return nil, fmt.Errorf("listing the dep edges of %d anchor(s): %w", len(chunk), err)
 		}
-		for rows.Next() {
-			var d Dep
-			if err := rows.Scan(&d.IssueID, &d.DependsOnID, &d.Type); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			if _, ok := out[d.IssueID]; ok {
-				out[d.IssueID] = append(out[d.IssueID], d)
-			}
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
+	}
+	edges, err := sqliteDepsFor(context.Background(), s.readDB, slices.Sorted(maps.Keys(out)))
+	if err != nil {
+		return nil, fmt.Errorf("listing the dep edges of %d anchor(s): %w", len(out), err)
+	}
+	for id, deps := range edges {
+		out[id] = deps
 	}
 	return out, nil
 }
@@ -194,17 +188,30 @@ func (s *SQLiteStore) DepMetadataBatch(ids []string) (map[DepPair]string, error)
 			var key, value string
 			if err := rows.Scan(&key, &value); err != nil {
 				_ = rows.Close()
-				return nil, err
+				return nil, fmt.Errorf("reading Graph dependency metadata of %d edge(s): %w", len(chunk), err)
 			}
 			if DepMetadataCarries(value) {
 				out[keys[key]] = value
 			}
 		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+		if err := sqliteRowsDone(rows); err != nil {
+			return nil, fmt.Errorf("reading Graph dependency metadata of %d edge(s): %w", len(chunk), err)
 		}
 	}
 	return out, nil
+}
+
+// sqliteRowsDone ends a read of rows: the error that stopped the iteration,
+// else the one closing them. A driver error part way through a result ends
+// Next as the last row does, and closes the rows itself, so only Err reports
+// it; checking Close alone takes the rows read before it for the whole
+// answer.
+func sqliteRowsDone(rows *sql.Rows) error {
+	err := rows.Err()
+	if closeErr := rows.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // sqliteInList binds ids as the arguments of an IN list.

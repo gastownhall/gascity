@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -406,6 +408,80 @@ func TestInfraEngineRecopiesAStampedRowTheSourceChanged(t *testing.T) {
 	city.assertNotLossy(t)
 }
 
+// operatorRequest is the operator command's request on c, with what a run
+// needs stubbed: no controller, no live session, no other city on the work
+// store, and a maintenance window that starts and stops nothing.
+func (c engineCity) operatorRequest(t *testing.T) storageOperatorRequest {
+	t.Helper()
+	request := storageTestRequest(t, infraSplitConfig(".gc/store"))
+	request.CityPath = c.cityPath
+	stubInfraControllerPing(t, 0)
+	stubSessionInventory(t, nil, true, nil)
+	stubOtherCities(t)
+	stubMigrationWindowProvider(t, &migrationWindowProvider{})
+	return request
+}
+
+// runStorageMigrate runs the operator command once: its exit code and what
+// it said on stderr.
+func runStorageMigrate(request storageOperatorRequest) (int, string) {
+	var stdout, stderr bytes.Buffer
+	code := doStorageMigrate(context.Background(), request, &stdout, &stderr)
+	return code, stderr.String()
+}
+
+// migrateUntilConverged runs request until it exits 0 and returns the pauses
+// it printed. Every other run must pause (exit 75), and after each pause boot
+// must refuse the city: a paused run leaves it unconverged, stale or holding
+// retained copies, never served.
+func (c engineCity) migrateUntilConverged(t *testing.T, request storageOperatorRequest) []string {
+	t.Helper()
+	var phases []string
+	for run := 0; run < 60; run++ {
+		code, said := runStorageMigrate(request)
+		if code == 0 {
+			if len(phases) == 0 {
+				t.Fatal("a nanosecond budget never paused the run")
+			}
+			return phases
+		}
+		if code != storagePausedExitCode {
+			t.Fatalf("run %d = exit %d, want 0 or %d: %s", run, code, storagePausedExitCode, said)
+		}
+		for _, line := range strings.Split(said, "\n") {
+			if strings.Contains(line, "paused in ") && strings.Contains(line, "run the same command again") {
+				phases = append(phases, line)
+			}
+		}
+		if report := checkInfraClassConvergence(c.cityPath, request.Cfg, "gc start", io.Discard); report.serving() {
+			t.Fatalf("boot serves the city (%s) after run %d paused: %s", report.Outcome, run, said)
+		}
+	}
+	t.Fatalf("the city did not converge in 60 budgeted runs: %v", phases)
+	return nil
+}
+
+// assertPaused fails unless every pause in want is among phases.
+func assertPaused(t *testing.T, phases []string, want ...string) {
+	t.Helper()
+	joined := strings.Join(phases, "\n")
+	for _, w := range want {
+		if !strings.Contains(joined, w) {
+			t.Fatalf("no pause %q among %v", w, phases)
+		}
+	}
+}
+
+// assertNoRecopyRecord fails while the re-copy record is still present: once
+// the marker a re-copy writes has landed, a record left behind would keep the
+// converged binding stale.
+func (c engineCity) assertNoRecopyRecord(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat(c.target.RecopyRecordPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the re-copy record %s outlived the marker that finished the re-copy (stat: %v)", c.target.RecopyRecordPath(), err)
+	}
+}
+
 // TestStorageMigrateTimeBudgetPausesAndResumes: a spent budget stops the run at
 // the next batch boundary with exit 75, naming the phase and how far it got,
 // before the marker and in the clear; the same command run again continues,
@@ -413,41 +489,140 @@ func TestInfraEngineRecopiesAStampedRowTheSourceChanged(t *testing.T) {
 func TestStorageMigrateTimeBudgetPausesAndResumes(t *testing.T) {
 	smallEngineBatches(t)
 	city := newEngineCity(t, 700, "sqlite")
-	request := storageTestRequest(t, infraSplitConfig(".gc/store"))
-	request.CityPath = city.cityPath
-	city.target = mustResolveInfraTarget(t, city.cityPath, request.Cfg)
-	stubInfraControllerPing(t, 0)
-	stubSessionInventory(t, nil, true, nil)
-	stubOtherCities(t)
-	stubMigrationWindowProvider(t, &migrationWindowProvider{})
+	request := city.operatorRequest(t)
 	request.TimeBudget = time.Nanosecond
-	var phases []string
-	for run := 0; run < 60; run++ {
-		var stdout, stderr bytes.Buffer
-		code := doStorageMigrate(context.Background(), request, &stdout, &stderr)
-		if code == 0 {
-			if len(phases) == 0 {
-				t.Fatal("a nanosecond budget never paused the run")
-			}
-			joined := strings.Join(phases, "\n")
-			for _, want := range []string{"paused in copying rows at 100/", "paused in clearing at 90/"} {
-				if !strings.Contains(joined, want) {
-					t.Fatalf("no pause %q among %v", want, phases)
-				}
-			}
-			city.assertNotLossy(t)
-			return
-		}
-		if code != storagePausedExitCode {
-			t.Fatalf("run %d = exit %d, want 0 or %d: %s", run, code, storagePausedExitCode, stderr.String())
-		}
-		for _, line := range strings.Split(stderr.String(), "\n") {
-			if strings.Contains(line, "paused in ") && strings.Contains(line, "run the same command again") {
-				phases = append(phases, line)
-			}
-		}
+	phases := city.migrateUntilConverged(t, request)
+	assertPaused(t, phases, "paused in copying rows at 100/", "paused in clearing at 90/")
+	city.assertNotLossy(t)
+}
+
+// TestStorageMigrateResumesAPausedReCopyFromTheBackup: the budget pauses the
+// re-copy of a stale binding (its database removed after the clear) from the
+// retained-source backup. Until the re-copy's own marker lands the binding
+// stays stale, though the old marker now sits over a partial database: boot
+// refuses it, and the same command run again resumes the copy instead of
+// refusing a binding that is "not stale". The city ends without loss.
+func TestStorageMigrateResumesAPausedReCopyFromTheBackup(t *testing.T) {
+	smallEngineBatches(t)
+	city := newEngineCity(t, 700, "sqlite")
+	request := city.operatorRequest(t)
+	request.TimeBudget = 0
+	if code, said := runStorageMigrate(request); code != 0 {
+		t.Fatalf("cutover = exit %d: %s", code, said)
 	}
-	t.Fatalf("the city did not converge in 60 budgeted runs: %v", phases)
+	if err := os.RemoveAll(city.target.Dir); err != nil {
+		t.Fatal(err)
+	}
+	request.FromBackup = true
+	request.TimeBudget = time.Nanosecond
+	phases := city.migrateUntilConverged(t, request)
+	assertPaused(t, phases, "paused in copying rows at 100/", "paused in copying edges at 40/")
+	city.assertNoRecopyRecord(t)
+	city.assertNotLossy(t)
+}
+
+// TestStorageMigrateResumesAPausedReCopyFromANeverClearedWorkStore: a cutover
+// stopped at its marker leaves the work store uncleared and no backup; its
+// binding's database is then removed. The budget pauses the re-copy of the
+// stale binding from the work store, and every run after it resumes the
+// re-copy rather than taking the partial binding for the converged one, whose
+// clear would remove from the work store every row the binding never
+// received. The city ends without loss.
+func TestStorageMigrateResumesAPausedReCopyFromANeverClearedWorkStore(t *testing.T) {
+	smallEngineBatches(t)
+	city := newEngineCity(t, 700, "sqlite")
+	request := city.operatorRequest(t)
+	request.TimeBudget = 0
+	killed := errors.New("killed after the marker")
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "marker" {
+			return killed
+		}
+		return nil
+	}
+	code, said := runStorageMigrate(request)
+	infraEngineCrashPoint = prev
+	if code == 0 || !strings.Contains(said, killed.Error()) {
+		t.Fatalf("the kill at the marker did not stop the cutover: exit %d: %s", code, said)
+	}
+	if _, present, err := readInfraRetainedBackup(city.target); err != nil || present {
+		t.Fatalf("precondition: the cutover stopped before its clear, so no backup (present=%v, err=%v)", present, err)
+	}
+	if err := os.RemoveAll(city.target.Dir); err != nil {
+		t.Fatal(err)
+	}
+	request.TimeBudget = time.Nanosecond
+	phases := city.migrateUntilConverged(t, request)
+	city.assertNotLossy(t)
+	assertPaused(t, phases, "paused in copying rows at 100/", "paused in copying edges at 40/", "paused in clearing at 90/")
+	city.assertNoRecopyRecord(t)
+}
+
+// TestAStaleReCopyKilledPartWayStaysStale: a re-copy killed inside its copy,
+// with no budget involved, leaves the same partial database under the old
+// marker. It stays stale, so boot refuses it and the same command run again
+// finishes the re-copy without loss.
+func TestAStaleReCopyKilledPartWayStaysStale(t *testing.T) {
+	smallEngineBatches(t)
+	city := newEngineCity(t, 700, "sqlite")
+	request := city.operatorRequest(t)
+	request.TimeBudget = 0
+	if code, said := runStorageMigrate(request); code != 0 {
+		t.Fatalf("cutover = exit %d: %s", code, said)
+	}
+	if err := os.RemoveAll(city.target.Dir); err != nil {
+		t.Fatal(err)
+	}
+	request.FromBackup = true
+	killed := errors.New("killed inside the re-copy")
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if strings.HasPrefix(p, "copying rows 100/") {
+			return killed
+		}
+		return nil
+	}
+	code, said := runStorageMigrate(request)
+	infraEngineCrashPoint = prev
+	if code == 0 || !strings.Contains(said, killed.Error()) {
+		t.Fatalf("the kill did not stop the re-copy: exit %d: %s", code, said)
+	}
+	if state, err := readInfraConvergenceState(city.target); err != nil || state != infraConvergenceStale {
+		t.Fatalf("the killed re-copy left the binding %v (err %v), want stale", state, err)
+	}
+	var boot bytes.Buffer
+	if report := checkInfraClassConvergence(city.cityPath, request.Cfg, "gc start", &boot); report.serving() {
+		t.Fatalf("boot serves the partial binding a killed re-copy left (%s)", report.Outcome)
+	}
+	if !strings.Contains(boot.String(), "has not finished") || !strings.Contains(boot.String(), city.target.RecopyRecordPath()) {
+		t.Fatalf("boot's refusal does not name the unfinished re-copy and its record: %s", boot.String())
+	}
+	if code, said := runStorageMigrate(request); code != 0 {
+		t.Fatalf("the re-run of the killed re-copy = exit %d: %s", code, said)
+	}
+	city.assertNoRecopyRecord(t)
+	city.assertNotLossy(t)
+}
+
+// TestARecopyRecordNeverLicensesOverwritingALiveBinding: a re-copy record
+// keeps a binding stale, so --from-backup runs against it, but the copy still
+// refuses a database holding a row it did not write. A record left over a
+// binding in service, which has minted rows since cutover, overwrites nothing.
+func TestARecopyRecordNeverLicensesOverwritingALiveBinding(t *testing.T) {
+	cityPath, _, _, target := convergedInfraCity(t)
+	minted := mustCreateInfraBead(t, openMigratedDestination(t, target), beads.Bead{Title: "minted after cutover", Type: "session", Labels: []string{"gc:session"}})
+	if err := writeRigImportRecord(target.RecopyRecordPath(), "a re-copy record left over a binding in service"); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	got := runInfraClassMigrationFrom(cityPath, target, infraMigrationFromBackup, "gc storage migrate", &log)
+	if got.Outcome == infraMigrationConverged || !strings.Contains(log.String(), "refusing to overwrite a populated destination") {
+		t.Fatalf("outcome = %s, want the populated-destination refusal: %s", got.Outcome, log.String())
+	}
+	if _, err := openMigratedDestination(t, target).Get(minted.ID); err != nil {
+		t.Fatalf("the refused re-copy removed %s, a row the binding minted after cutover: %v", minted.ID, err)
+	}
 }
 
 // TestVerifyInfraCopyNamesARowTheCopyInvented: a binding holding a row the

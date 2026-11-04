@@ -1108,7 +1108,7 @@ func importInfraRows(t *testing.T, destination, source beads.Store, rows []beads
 	plan, err := infraSourceEdgePayloadRefusal(source, rows, nil)
 	if errors.Is(err, beads.ErrDepMetadataUnsupported) {
 		// A double that cannot be asked about payloads still has edges to
-		// copy; the copy reads each payload itself (infraCopyDepEdge).
+		// copy; planned with no payloads, they are copied carrying none.
 		plan = infraCopyPlan{rows: rows, infraIDs: map[string]bool{}}
 		for _, b := range rows {
 			plan.infraIDs[b.ID] = true
