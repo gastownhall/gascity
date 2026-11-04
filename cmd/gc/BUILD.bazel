@@ -1208,6 +1208,7 @@ go_test(
         "cmd_bd_batch_guard_test.go",
         "cmd_bd_by_id_rig_test.go",
         "cmd_bd_by_id_test.go",
+        "cmd_bd_hidden_aliases_test.go",
         "cmd_bd_show_watch_test.go",
         "cmd_bd_single_exec_test.go",
         "cmd_bd_store_bridge_test.go",

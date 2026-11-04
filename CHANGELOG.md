@@ -1220,6 +1220,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc lint` no longer flags bd's hidden flag aliases as unknown.** The bd
+  flag tables now list `bd create`'s `--label`, `--body`, `-m`/`--message`
+  and `--description-file`, `bd update`'s `--body`, `-m`/`--message`,
+  `--description-file` and `--acceptance-criteria`, and `bd close`'s
+  `--resolution`, `-m`/`--message` and `--comment`, which bd accepts without
+  listing them in its help. A prompt or script using one of them no longer
+  gets an unknown-flag finding.
+- **`gc bd` passes bd's hidden flag aliases through.** `gc bd close` with
+  `-m`/`--message`, `--resolution` or `--comment`, and `gc bd update` with
+  `--body`, `-m`/`--message`, `--description-file` or
+  `--acceptance-criteria`, used to stop with "cannot safely verify bead IDs
+  (unrecognized flag ...)"; they now run. `gc bd create` reads the token
+  after a valueless `--description-file` as that flag's value, as bd does,
+  so a `--metadata` there is no longer checked as a flag of its own.
+- **`gc agent-script`'s `bd_claim` and `bd_update` fail when the city config
+  cannot be loaded.** They used to run the write in the agent's default
+  store, so a city-scoped agent's claim of a rig bead could land in the
+  wrong store. The action now fails with the load error and runs no `bd`.
+
 - **The supervisor built `/status`, `/agents` and `/rigs` slowly on cities
   with many unlimited pools (#8453).** Each unlimited pool listed the
   runtime's sessions on its own, so on tmux every pool forked
