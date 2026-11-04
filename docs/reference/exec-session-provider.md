@@ -75,7 +75,7 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible). From `start`, and from an operation the script declares, it is not success; see below. |
-| 66 | `peek` only, from a script that declares `observe.v1`: no screen. Nothing holds a screen for the name (no box, or a dead box whose screen is gone). See [`peek` under observe.v1](#peek-name-lines-under-observev1). On any other operation, or from a script that does not declare `observe.v1`, 66 is an ordinary failure. |
+| 66 | `peek` only, from a v2-ready script (one that declares `observe.v1` and `report-attachment`): no screen. Nothing holds a screen for the name (no box, or a dead box whose screen is gone). See [`peek` under observe.v1](#peek-name-lines-under-observev1). On any other operation, or from a script that is not v2-ready, 66 is an ordinary failure. |
 | 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
@@ -703,7 +703,9 @@ box gc runs `peek` itself. The script must:
   a capture that wrote nothing is a failure, not a blank screen);
 - exit **66** (no screen) when nothing holds a screen for the name: no box,
   or a dead box whose screen is gone. gc reads it as a known-empty screen
-  and recycles the box;
+  wherever it reads one: v2 recycles the box, and a start whose agent
+  exited while its startup dialogs were read goes on as over a blank
+  screen;
 - exit non-zero otherwise (the backend cannot be read, the screen cannot be
   captured). gc never reads a failed `peek` as an empty screen: v2 refuses
   the recycle (`peek-error`) and retries it on the row's backoff (10s,
@@ -827,7 +829,9 @@ stops a box only when a fresh `observe` shows it carrying that start's token.
 ### Conformance
 
 `gc runtime conformance <script>` gates every promise above as the `observe`
-group (`RPP-OBSERVE-001` to `RPP-OBSERVE-016`); `gc runtime check` runs a
+group (`RPP-OBSERVE-001` to `RPP-OBSERVE-016`), except `peek` of a dead box:
+the kit has no way to leave one, so `RPP-OBSERVE-016` reads only a running
+box (exit 0) and a name no box holds (exit 66). `gc runtime check` runs a
 smoke check of the three ops. `contrib/session-scripts/gc-session-screen` is
 the reference implementation.
 

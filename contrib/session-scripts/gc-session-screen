@@ -423,13 +423,17 @@ forget() {
   rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window" "$META/$1".meta.*
 }
 
-# forget_stale forgets name $1's metadata, not its lock, once the window
-# process its last start recorded is gone and no box holds the name: the
-# record $2 (as inventory read it) is unchanged under the name's lock, taken
-# without waiting, so no start has run since (a start rewrites it), and a
-# busy name is left for a later call. Records otherwise pile up, one per
-# pool session name, each costing every inventory a read, and each wrapper
-# keeping a session's env.
+# forget_stale forgets name $1's start record (its window and box records,
+# identity, wrapper and seeded metadata) once the window process it
+# recorded is gone and no box holds the name. Under the name's lock, taken
+# without waiting (a busy name is left for a later call): the record $2, as
+# inventory read it, must be unchanged, so no start has run since (a start
+# rewrites it); and a fresh listing must show no row of the name, since
+# inventory's own predates the lock (a box started since may be dead and
+# still hold it). Records otherwise pile up, one per pool session name, each
+# costing every inventory a read, and each wrapper keeping a session's env.
+# The lock and the keys gc set (set-meta) stay until a start or stop clears
+# them: gc reads a drain ack after its box is gone.
 forget_stale() {
   (
     exec 9>"$META/$1.lock"
@@ -439,7 +443,10 @@ forget_stale() {
     # inventory read.
     [ -n "$2" ] && [ "$REPLY" = "$2" ] || exit 0
     if window_alive "$1"; then exit 0; fi
-    forget "$1"
+    load_rows || exit 0
+    [ -z "$(rows_of "$1")" ] || exit 0
+    rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window"
+    for k in $META_KEYS; do rm -f "$META/$1.meta.$k"; done
   ) || true
 }
 
@@ -727,7 +734,7 @@ case "$op" in
     # A name no box lists is still held while the window process its last
     # start recorded runs (its agent outlived the box): it is listed
     # unknown, never left out of a complete answer. Once that process is
-    # gone, the name's metadata is forgotten (forget_stale), so no later
+    # gone, the name's start record is forgotten (forget_stale), so no later
     # inventory reads it again.
     declare -A listed=()
     while IFS=$'\t' read -r pid sname _; do

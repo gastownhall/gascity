@@ -833,8 +833,18 @@ func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
 	return err
 }
 
+// peekOp runs the `peek` op. A v2-ready script's exit 66
+// ([runtime.ExitCodeNoScreen]) answers "no screen" (no box, or a dead box
+// whose screen is gone): an empty screen with no error, for every caller, so
+// a start whose agent exits while its startup dialogs are read sees a blank
+// screen, not a failed start.
 func (p *Provider) peekOp(name string, lines int) (string, error) {
-	return p.run(nil, "peek", name, strconv.Itoa(lines))
+	out, err := p.run(nil, "peek", name, strconv.Itoa(lines))
+	var e *opExitError
+	if errors.As(err, &e) && e.code == runtime.ExitCodeNoScreen && p.v2Ready() {
+		return "", nil
+	}
+	return out, err
 }
 
 func (p *Provider) sendKeysOp(name string, keys ...string) error {

@@ -559,12 +559,16 @@ func screenKit(t *testing.T, sp runtime.Provider, state, gen, tok string) *txKit
 // gc-session-screen: the start lands on its PreWake token with the box
 // observed alive; with the agent killed in its running box, the next start
 // recycles that exact object by kill-object and starts a new box. Skipped
-// where screen, jq, flock or cksum is missing.
+// where screen, jq, flock or cksum is missing, or where there is no procfs
+// to find the agent in (screenAgentPID), as on macOS.
 func TestExecJourneyOnScreen(t *testing.T) {
 	for _, tool := range []string{"screen", "jq", "flock", "cksum", "bash"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not installed", tool)
 		}
+	}
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skipf("no procfs: %v", err)
 	}
 	state, err := os.MkdirTemp("", "gcj") // short: a screen socket path must fit 107 bytes
 	if err != nil {

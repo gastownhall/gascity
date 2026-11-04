@@ -19,8 +19,10 @@ import (
 // table are tested deterministically, without a terminal or real agents.
 
 // fakeBackend is a directory of fake screen and ps executables. screen -ls
-// prints the file ls (or fails when ls.fail exists) and logs every other
-// invocation to calls; ps prints ps.procs as its snapshot (or fails it when
+// prints the file ls (or fails when ls.fail exists), first running the
+// script ls.then once if it exists (an op that runs after the listing is
+// read, before its reader acts on it), and logs every other invocation to
+// calls; ps prints ps.procs as its snapshot (or fails it when
 // ps.fail exists), cut to COLUMNS without -ww as procps cuts it even into a
 // pipe, and for -o lstart= a fixed start time (lstart.<pid> when it exists,
 // none for a pid in gone); kill logs to calls and adds the pid to gone unless
@@ -63,6 +65,7 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 if [ "$1" = -ls ]; then
   if [ -f "$F/ls.fail" ]; then echo "Cannot open your terminal"; exit 1; fi
   rows=$(cat "$F/ls" "$L" 2>/dev/null)
+  if [ -f "$F/ls.then" ]; then mv -f "$F/ls.then" "$F/ls.then.ran"; sh "$F/ls.then.ran"; fi
   if [ -n "$rows" ]; then printf 'There are screens on:\n%s\n%s Sockets in /x.\n' "$rows" 1; exit 1; fi
   echo "No Sockets found in /x."; exit 1
 fi
@@ -1032,8 +1035,21 @@ func TestScreenScriptInventoryForgetsStaleRecords(t *testing.T) {
 	}
 	f.procFile("4194990/stat", "4194990 (claude) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 0 0\n")
 	f.file(filepath.Join(meta, "mc-live.window"), "boot-a 4194990 777")
+	// A stale name whose session gc acked a drain: gc reads the ack after
+	// the box is gone, so the keys gc set outlive the start's record.
+	f.file(filepath.Join(meta, "mc-acked.window"), "boot-a 4100100 12345")
+	f.file(filepath.Join(meta, "mc-acked.meta.GC_INSTANCE_TOKEN"), "tok")
+	f.file(filepath.Join(meta, "mc-acked.meta.GC_DRAIN_ACK"), "1")
 	if out, code := f.run("", "inventory"); code != 0 || out != `{"complete":true,"sessions":[{"name":"mc-live","state":"unknown"}]}` {
 		t.Fatalf("inventory = %q (%d), want only the live window's name, unknown", out, code)
+	}
+	if out, _ := f.run("", "get-meta", "mc-acked", "GC_DRAIN_ACK"); out != "1" {
+		t.Fatalf("drain ack after the stale record was forgotten = %q, want 1", out)
+	}
+	for _, gone := range []string{"mc-acked.window", "mc-acked.meta.GC_INSTANCE_TOKEN"} {
+		if _, err := os.Stat(filepath.Join(meta, gone)); !os.IsNotExist(err) {
+			t.Fatalf("the stale record's %s was kept (%v)", gone, err)
+		}
 	}
 	if data, _ := os.ReadFile(filepath.Join(f.dir, "ps.calls")); strings.Contains(string(data), "lstart") {
 		t.Fatalf("inventory asked ps for a start time with procfs mounted: %q", data)
@@ -1058,5 +1074,48 @@ func TestScreenScriptInventoryForgetsStaleRecords(t *testing.T) {
 	f.run("", "inventory")
 	if _, err := os.Stat(filepath.Join(meta, "mc-new.meta.GC_SESSION_ID")); err != nil {
 		t.Fatalf("an empty record's name lost its metadata: %v", err)
+	}
+}
+
+// Kills (PR-3b adoption review) a cleanup that acts on inventory's listing
+// once it is stale: a start can run between the listing and the cleanup,
+// and its box die with its window. The name's window record is then
+// unchanged under the lock and names a process that is gone, but the dead
+// box holds the name, and forgetting its box record would leave that box
+// unknown for good. Under the lock the name is listed again: a row keeps
+// the record, so the dead box keeps its object and identity, and the next
+// inventory lists it dead.
+func TestScreenScriptInventoryKeepsABoxStartedSinceItsListing(t *testing.T) {
+	f := newFakeBackend(t)
+	f.file("ps.procs", "4194998 4194999 claude /usr/bin/claude\n")
+	// Once inventory has read its listing, mc-x starts, and then its box and
+	// window die.
+	f.file("start.json", `{"command":"claude","env":{"GC_SESSION_ID":"sid-x"}}`)
+	f.file("ls.then", fmt.Sprintf(`%q start mc-x < %q || echo "exit $?" > %q
+printf '\t4194999.mc-x\t(11/02/2026 01:00:00 PM)\t(Dead ???)\n' > %q
+: > "$SCREENDIR/fake-ls"
+echo 4194998 >> %q
+`, f.script, filepath.Join(f.dir, "start.json"), filepath.Join(f.dir, "ls.then.err"), filepath.Join(f.dir, "ls"), filepath.Join(f.dir, "gone")))
+	if out, code := f.run("", "inventory"); code != 0 || out != `{"complete":true,"sessions":[]}` {
+		t.Fatalf("inventory over a listing read before mc-x started = %q (%d), want its listing's answer", out, code)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "ls.then.ran")); err != nil {
+		t.Fatalf("mc-x never started between the listing and the cleanup: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.dir, "ls.then.err")); err == nil {
+		t.Fatalf("mc-x's start failed: %s", data)
+	}
+	var o struct {
+		State  string
+		Object struct{ ID, Created string }
+	}
+	if out, _ := f.run("", "observe", "mc-x"); json.Unmarshal([]byte(out), &o) != nil || o.State != "dead" || o.Object.ID != "4194999" || o.Object.Created == "" {
+		t.Fatalf("observe of the dead box = %q, want dead with its recorded object", out)
+	}
+	if out, _ := f.run("", "get-meta", "mc-x", "GC_SESSION_ID"); out != "sid-x" {
+		t.Fatalf("identity of the dead box = %q, want sid-x kept", out)
+	}
+	if out, _ := f.run("", "inventory"); !strings.Contains(out, `{"name":"mc-x","state":"dead","object":{"id":"4194999"`) {
+		t.Fatalf("next inventory = %q, want mc-x listed dead with its object", out)
 	}
 }
