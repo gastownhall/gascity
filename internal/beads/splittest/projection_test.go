@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -181,7 +182,7 @@ func TestProjectionMarkersCoverReadsOnly(t *testing.T) {
 	}
 	// A write under the marker is still a violation.
 	_ = beads.FederatedRead(func() error {
-		return convoy.SetConvoyFields(p.WorkView(), session.ID, convoy.ConvoyFields{Owner: "x"})
+		return convoy.SetConvoyFields(beadstest.Work(p.WorkView()), session.ID, convoy.ConvoyFields{Owner: "x"})
 	})
 	sites := sink.summaries()
 	if len(sites) != 1 || sites[0].Key.Op != "set-metadata" {

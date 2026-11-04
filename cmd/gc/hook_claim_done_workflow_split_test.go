@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -62,7 +63,7 @@ func newDoneWorkflowSplitFixture(t *testing.T, sourceClosed bool) doneWorkflowSp
 		t.Fatal(err)
 	}
 	f.convoyID = conv.ID
-	if err := convoy.TrackItem(work, conv.ID, f.source.ID); err != nil {
+	if err := convoy.TrackItemIn(convoy.MemberClasses{Convoy: beadstest.Work(work)}, conv.ID, f.source.ID); err != nil {
 		t.Fatalf("tracking the source in the input convoy: %v", err)
 	}
 
@@ -100,7 +101,7 @@ func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 	t.Helper()
 	return hookClaimOps{
 		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
-			return workflowInputDone(f.work, candidate, ids)
+			return workflowInputDone(beadstest.Work(f.work), candidate, ids)
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			return skipDoneWorkflow(f.work, rootID)

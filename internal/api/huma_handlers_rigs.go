@@ -69,9 +69,10 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	wantGit := input.Git
 
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
+	pools := newRequestSessionListing(sp)
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		resp := s.buildRigResponse(cfg, rig, sp, runtimeSessions, cityName, s.state.CityPath())
+		resp := s.buildRigResponse(cfg, rig, sp, pools, runtimeSessions, cityName, s.state.CityPath())
 		if wantGit {
 			resp.Git = fetchGitStatus(rig.Path)
 		}
@@ -101,7 +102,7 @@ func (s *Server) humaHandleRigGet(ctx context.Context, input *RigGetInput) (*Ind
 		if rig.Name == name {
 			cityName := s.state.CityName()
 			runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
-			resp := s.buildRigResponse(cfg, rig, sp, runtimeSessions, cityName, s.state.CityPath())
+			resp := s.buildRigResponse(cfg, rig, sp, newRequestSessionListing(sp), runtimeSessions, cityName, s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}

@@ -429,6 +429,13 @@ const (
 // principal.
 const InitiatorMetadataKey = "gc.initiator"
 
+// OwnerNamespaceMetadataKey is the creation stamp a rig with federation =
+// "rig" writes on every row created through its guarded store: the rig's
+// identity namespace ("<rig>/" under the actor fold). It marks a gc-created row
+// that carries no owner identity as the creating city's. Only that store
+// writes it.
+const OwnerNamespaceMetadataKey = "gc.owner_namespace"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
@@ -696,6 +703,7 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
+	OwnerNamespaceMetadataKey,
 	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
@@ -781,6 +789,34 @@ var KnownMetadataPrefixes = []string{
 	FormulaVarPrefix,
 	IdemPrefix,
 }
+
+// WorktreeOwnershipEvidenceKeys are the eight worktree-ownership keys a
+// provisioner publishes onto a bead after `gc worktree ensure` succeeds. With
+// a work dir (WorkDirMetadataKey or LegacyWorkDirMetadataKey) and
+// WorkBranchMetadataKey they are the complete evidence the controller turns
+// into the verified spec it starts that bead's session in. Their presence is
+// what makes a bead's work dir a managed worktree rather than a plain
+// directory.
+var WorktreeOwnershipEvidenceKeys = []string{
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+}
+
+// ManagedWorktreeEvidenceKeys are every key of a bead's managed-worktree
+// evidence: the work dir pair, the branch and the eight ownership keys. The
+// evidence binds that one bead (the worktree's provenance names it), so a
+// bead cloned from it must not inherit any of them.
+var ManagedWorktreeEvidenceKeys = append([]string{
+	WorkDirMetadataKey,
+	LegacyWorkDirMetadataKey,
+	WorkBranchMetadataKey,
+}, WorktreeOwnershipEvidenceKeys...)
 
 // SessionAffinityMetadataKeys are the metadata keys that pin a work bead to a
 // particular live session through continuation-group routing. They must be

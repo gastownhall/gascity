@@ -62,7 +62,7 @@ func (f *observeFixture) alerts(t *testing.T) []string {
 // v2PassRecordWireFields are the planner's reconcile.pass record fields. They
 // are pinned: mdash and the Gate S queries read them by name (B6).
 var v2PassRecordWireFields = []string{
-	"admitted", "admitted_total", "alerts", "boot_gate", "deferred", "deferred_total", "duration_ms",
+	"admitted", "admitted_total", "alerts", "boot_gate", "claimed_demand_cut", "deferred", "deferred_total", "duration_ms",
 	"duration_p99_ms", "duty_1m", "effects", "gap_p99_ms", "idle_respawn_begun", "idle_respawn_completed",
 	"idle_respawn_voided", "in_flight", "input_age_ms", "panicked", "panics", "passes", "rows", "settled",
 	"stale_self_rekeys", "stop_escalations", "stops_outstanding_30m", "wakes",

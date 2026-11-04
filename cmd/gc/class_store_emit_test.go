@@ -1507,7 +1507,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 			},
 			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
 		}
-		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+		result, err := molecule.Attach(context.Background(), beadstest.GraphMolecule(graph), recipe, control.ID, molecule.AttachOptions{
 			IdempotencyKey: control.ID + ":attempt:2",
 			ExpectedEpoch:  1,
 		})
@@ -1743,6 +1743,9 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
+			// DepMetadataAbsentByProtocol forwards the engine's declaration, and
+			// neither engine declares one: ("", false), as its absence answers.
+			"DepMetadataAbsentByProtocol",
 			"HasResidentOutside", "NamespaceCensusHandle",
 			// ReadyBlockedByAbsent over native Dolt reports no rows, and
 			// StrandsAbsentTargets answers false, so ReadyBlockedByAbsentFor
@@ -1754,6 +1757,7 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ConditionalWritesModeSource", "Count", "DepListBatch",
+			"DepMetadataAbsentByProtocol",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
 			// GetExactBatch over a SQLite binding reports
 			// beads.ErrExactBatchGetUnsupported, and the caller reads per id:

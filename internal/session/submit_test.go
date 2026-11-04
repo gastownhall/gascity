@@ -1510,6 +1510,41 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 }
 
+// TestSubmitInterruptNowRestartFallbackQueuesOnBusyReplacement pins the
+// restart fallback's answer to a replacement runtime that defers the message
+// because a turn is already running there (runtime.ErrSessionBusy, nothing
+// typed): the outgoing turn is gone, so the message is queued, never
+// dropped, as a plain send queues it.
+func TestSubmitInterruptNowRestartFallbackQueuesOnBusyReplacement(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+	sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: a turn is running", runtime.ErrSessionBusy)}
+
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now) with a busy replacement: %v, want the message queued", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(interrupt_now) with a busy replacement did not queue the message")
+	}
+	var sawStop bool
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+	}
+	if !sawStop {
+		t.Fatalf("calls = %#v, want the restart fallback's Stop", sp.Calls)
+	}
+}
+
 // TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer pins the restart
 // fallback as a cleanup of the outgoing incarnation: replacement only needs
 // that session gone, so tmux's ErrNoServer answer from the fallback stop must

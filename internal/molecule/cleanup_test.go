@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // blockValidatingStore wraps a beads.Store and rejects CloseAll when the
@@ -81,7 +82,7 @@ func TestCloseSubtreeClosesOpenDescendantThroughClosedParent(t *testing.T) {
 		t.Fatalf("close child: %v", err)
 	}
 
-	closed, err := CloseSubtree(store, root.ID)
+	closed, err := CloseSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseSubtree: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestCloseSubtreeClosesLogicalRootMembersAndTheirChildren(t *testing.T) {
 		t.Fatalf("create logical child: %v", err)
 	}
 
-	closed, err := CloseSubtree(store, root.ID)
+	closed, err := CloseSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseSubtree: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestCloseSubtreeClosesLogicalMembersAcrossStorageTiers(t *testing.T) {
 		t.Fatalf("create no-history child: %v", err)
 	}
 
-	closed, err := CloseSubtree(store, root.ID)
+	closed, err := CloseSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseSubtree: %v", err)
 	}
@@ -244,7 +245,7 @@ func TestCloseSubtreeOrdersBlockersBeforeBlocked(t *testing.T) {
 	}
 
 	guarded := &blockValidatingStore{Store: store}
-	closed, err := CloseSubtree(guarded, root.ID)
+	closed, err := CloseSubtree(beadstest.GraphMolecule(guarded), root.ID)
 	if err != nil {
 		t.Fatalf("CloseSubtree: %v", err)
 	}
@@ -288,7 +289,7 @@ func TestCloseSubtreeReturnsDepListError(t *testing.T) {
 	}
 
 	guarded := &depListFailingStore{Store: store, failID: child.ID}
-	if _, err := CloseSubtree(guarded, root.ID); err == nil {
+	if _, err := CloseSubtree(beadstest.GraphMolecule(guarded), root.ID); err == nil {
 		t.Fatalf("CloseSubtree succeeded, want dependency list error")
 	}
 }
@@ -315,7 +316,7 @@ func TestCloseSubtreeHandlesParentCycles(t *testing.T) {
 		t.Fatalf("Update(root.ParentID): %v", err)
 	}
 
-	closed, err := CloseSubtree(store, root.ID)
+	closed, err := CloseSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseSubtree: %v", err)
 	}
@@ -354,7 +355,7 @@ func TestCloseSubtree_StampsCloseReason(t *testing.T) {
 		t.Fatalf("create child: %v", err)
 	}
 
-	closed, err := CloseSubtree(store, root.ID)
+	closed, err := CloseSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseSubtree: %v", err)
 	}
@@ -444,12 +445,12 @@ func TestListSubtreeBatchedWalkMatchesPerParentWalk(t *testing.T) {
 		}
 	}
 
-	perParent, err := ListSubtree(store, root.ID)
+	perParent, err := ListSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("ListSubtree (per parent): %v", err)
 	}
 	batched := &batchedChildrenStore{Store: store}
-	got, err := ListSubtree(batched, root.ID)
+	got, err := ListSubtree(beadstest.GraphMolecule(batched), root.ID)
 	if err != nil {
 		t.Fatalf("ListSubtree (batched): %v", err)
 	}

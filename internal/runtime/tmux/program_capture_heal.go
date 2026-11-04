@@ -132,7 +132,9 @@ func (p programPane) ownNonce() bool {
 //     opened in between is never replaced; an open pipe that is not ours, or
 //     ours with its tap gone from the process table (tmux closes it at the
 //     pane's next output), is deferred; our live tap writing a codec this gc
-//     does not read is replaced; anything else is unchanged.
+//     does not read is replaced; a healthy capture of ours whose hold
+//     declaration differs from want's has it set or withdrawn (declared),
+//     guarded by its nonce; anything else is unchanged.
 //   - want declares nothing: a pane carrying our nonce is disarmed by
 //     disarmPipe's rule (its pipe closed only when the process table shows
 //     our tap holding it, then the capture options unset); while the table
@@ -181,6 +183,11 @@ func (p *Provider) HealProgramCapture(name string, want runtime.ProgramStatusArm
 					return p.tm.replaceTap(pane, want)
 				})
 			}
+		}
+		if pane.holdDeclared() != want.HoldMidTurn {
+			return p.healAct(pane, runtime.ProgramCaptureDeclared, func() (bool, error) {
+				return true, p.tm.declareHold(pane, want.HoldMidTurn)
+			})
 		}
 		return runtime.ProgramCaptureUnchanged, nil
 	}
@@ -270,6 +277,7 @@ func (t *Tmux) armIdlePane(pane healPane, want runtime.ProgramStatusArm) (bool, 
 	armList := tmuxCommandLines(plan.armCommands(pane.target, true))
 	out, err := t.run("if-shell", "-F", "-t", pane.target, "#{pane_pipe}", "", armList,
 		";", "display-message", "-p", "-t", pane.target, "#{s/"+programReadSanitizer+"//:"+programTapOption+"}")
+	t.programArms.noteArmed(plan)
 	if err != nil {
 		return false, fmt.Errorf("arming %s: %w", pane.target, err)
 	}
@@ -284,7 +292,9 @@ func (t *Tmux) replaceTap(pane healPane, want runtime.ProgramStatusArm) (bool, e
 	if plan == nil {
 		return false, nil
 	}
-	if _, err := t.run(tmuxArgvList(plan.armCommands(pane.target, true))...); err != nil {
+	_, err := t.run(tmuxArgvList(plan.armCommands(pane.target, true))...)
+	t.programArms.noteArmed(plan)
+	if err != nil {
 		return false, fmt.Errorf("replacing the tap of %s: %w", pane.target, err)
 	}
 	return true, nil
@@ -319,7 +329,7 @@ func (t *Tmux) disarmPane(target string, closePipe bool) error {
 	if closePipe {
 		cmds = append(cmds, []string{"pipe-pane", "-t", target})
 	}
-	for _, opt := range []string{programTapOption, programStatusOption, programTextOption} {
+	for _, opt := range []string{programTapOption, programStatusOption, programTextOption, programHoldOption} {
 		cmds = append(cmds, []string{"set-option", "-pu", "-t", target, opt})
 	}
 	if _, err := t.run(tmuxArgvList(cmds)...); err != nil {

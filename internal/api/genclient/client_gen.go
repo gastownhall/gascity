@@ -931,6 +931,7 @@ const (
 	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
 	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
 	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	StarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
 	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
 	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
 	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
@@ -962,6 +963,8 @@ func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	case Readiness:
 		return true
 	case StartupLadder:
+		return true
+	case StarvedBypass:
 		return true
 	case SubmitConfirm:
 		return true
@@ -13359,6 +13362,9 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
 	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
+
+	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
 // PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
@@ -38778,6 +38784,22 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 		if params.Lite != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "lite", *params.Lite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

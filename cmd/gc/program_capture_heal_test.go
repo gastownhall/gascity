@@ -130,6 +130,34 @@ func TestProgramCaptureHealNeeded(t *testing.T) {
 	}
 }
 
+// Kills a heal gate that never converges a live capture's mid-turn hold:
+// a capture of ours whose declaration differs from the config's heals, one
+// that matches does not, and a reading not under our nonce is judged as
+// before.
+func TestProgramCaptureHealNeededForAHoldDeclarationDrift(t *testing.T) {
+	holding := runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}
+	plain := runtime.ProgramStatusArm{Capture: true}
+	for _, v := range []runtime.ProgramStatusValidity{runtime.ProgramStatusValid, runtime.ProgramStatusSilent, runtime.ProgramStatusCleared} {
+		for _, tc := range []struct {
+			declared bool
+			want     runtime.ProgramStatusArm
+			heal     bool
+		}{
+			{false, holding, true},
+			{true, plain, true},
+			{true, holding, false},
+			{false, plain, false},
+		} {
+			if got := programCaptureHealNeeded(runtime.ProgramStatus{Validity: v, HoldDeclared: tc.declared}, tc.want); got != tc.heal {
+				t.Errorf("%s, declared=%v, want hold=%v: heal = %v, want %v", v, tc.declared, tc.want.HoldMidTurn, got, tc.heal)
+			}
+		}
+	}
+	if programCaptureHealNeeded(runtime.ProgramStatus{Validity: runtime.ProgramStatusExited}, holding) {
+		t.Error("an exited reading heals for its hold declaration")
+	}
+}
+
 // sweepLeaf is a leaf backend with a disarm sweep that disarms one pane and
 // answers its script's deferred count and error, counting its runs.
 type sweepLeaf struct {

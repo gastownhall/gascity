@@ -58,6 +58,12 @@ sh_test(
 # it is larger than the CGO_ENABLED=0 release-shaped build the script's
 # default cap is measured against: 207,034,352 bytes at 9fdc52d82c versus
 # 180,287,491 for the release shape. The cap keeps the same ~5.4% headroom.
+#
+# Re-baselined 2026-11-03 (#8724). main 3efe0a867a measured 217,918,032
+# bytes; the observe.v1 conformance kit, which `gc runtime conformance` and
+# `gc runtime check` compile in, brings it to 218,018,960. main grew
+# 10,883,680 bytes in the 28 days since 9fdc52d82c, ~394KB/day, so
+# 230,000,000 keeps ~5.5% headroom, about 30 days of that growth.
 sh_test(
     name = "check_native_dependency_surface_test",
     srcs = ["check-native-dependency-surface.sh"],
@@ -69,7 +75,7 @@ sh_test(
         "//:go.sum",
         "//cmd/gc",
     ],
-    env = {"GC_NATIVE_DEP_MAX_BINARY_BYTES": "218000000"},
+    env = {"GC_NATIVE_DEP_MAX_BINARY_BYTES": "230000000"},
 )
 
 go_test(

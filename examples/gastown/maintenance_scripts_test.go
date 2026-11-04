@@ -1547,8 +1547,10 @@ exit 1
 	if !strings.Contains(log, "--rig project session list --json") {
 		t.Fatalf("rig-scoped session list was not queried:\n%s", log)
 	}
-	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session") {
-		t.Fatalf("rig orphan bead was not reset:\n%s", log)
+	// The release names the rig the claim was listed from, so it runs in
+	// that rig's store whatever its arguments' prefixes say.
+	if !strings.Contains(log, "bd release-if-current ga-rig-orphan missing-rig-session --rig project") {
+		t.Fatalf("rig orphan bead was not reset in its rig:\n%s", log)
 	}
 	if !strings.Contains(log, "bd release-if-current ga-rig-closed-default-filtered project__worker-gc-closed") {
 		t.Fatalf("closed/default-filtered session assignee was not reset:\n%s", log)
@@ -1946,7 +1948,12 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			}
 			log := string(logData)
 			lines := nonEmptyLogLines(log)
+			// A rig orphan's release names the rig it was listed from; an HQ
+			// orphan's names none.
 			orphanUpdate := "bd release-if-current " + tt.orphanID + " " + tt.orphanAssignee
+			if tt.scope != "hq" {
+				orphanUpdate += " --rig " + tt.scope
+			}
 			if got := countExactLine(lines, orphanUpdate); got != 1 {
 				t.Fatalf("orphan update count = %d, want 1 for %q\n%s", got, orphanUpdate, orphanSweepFailureContext(out, gcLog))
 			}
@@ -2087,10 +2094,12 @@ if [ "$*" = "session list --json" ]; then
   fi
   exit 0
 fi
-if [ "$*" = "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE" ]; then
-  printf 'released\n'
-  exit 0
-fi
+case "$*" in
+  "bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE"|"bd release-if-current $ORPHAN_SWEEP_ORPHAN_ID $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --rig "*)
+    printf 'released\n'
+    exit 0
+    ;;
+esac
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ID --json" ]; then
   printf '[{"id":"%s","status":"in_progress","assignee":"%s","metadata":{}}]\n' "$ORPHAN_SWEEP_ORPHAN_ID" "$ORPHAN_SWEEP_ORPHAN_ASSIGNEE"
   exit 0
@@ -2098,9 +2107,11 @@ fi
 if [ "$*" = "bd show $ORPHAN_SWEEP_ORPHAN_ASSIGNEE --json" ]; then
   exit 1
 fi
-if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched" ]; then
-  exit 0
-fi
+case "$*" in
+  "bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched"|"bd update $ORPHAN_SWEEP_ORPHAN_ID --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee $ORPHAN_SWEEP_ORPHAN_ASSIGNEE -- no live session matched --rig "*)
+    exit 0
+    ;;
+esac
 case "$*" in
   "mail send human "*) exit 0 ;;
 esac
@@ -13381,11 +13392,11 @@ func TestOrphanSweepSummaryQuotesUntrustedIdentities(t *testing.T) {
 
 // TestOrphanSweepNeverVouchesForAnEmptyIdentity keeps the gate's memo from
 // answering for an identity the gate was never asked about. A newline in an
-// assignee splits its row, so the tail reads as a row of its own whose bead ID
-// is attacker-chosen text and whose assignee is empty. Once a dead local claim
-// has been vouched for, the memo must not vouch for "" too: that would release
-// an unrelated in-progress bead that has no assignee at all, a bead the sweep
-// never selects on its own.
+// assignee would split its row, so the tail would read as a row of its own
+// whose bead ID is attacker-chosen text and whose assignee is empty; vouched
+// for by the memo, it would release an unrelated in-progress bead that has no
+// assignee at all. The row is kept whole instead, protected as untrusted and
+// never asked about, and the unassigned bead is never selected.
 func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	run := runOrphanSweepGateFixture(t, nil,
 		[]orphanSweepGateRow{
@@ -13401,17 +13412,18 @@ func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	}
 	for _, bead := range []string{"sh-split", "sh-unassigned"} {
 		if run.released(bead) {
-			t.Fatalf("%s was released under an empty identity the gate never vouched for\n%s", bead, run.context())
+			t.Fatalf("%s was released under an identity the gate never vouched for\n%s", bead, run.context())
 		}
 	}
-	if !strings.Contains(run.out, `"" (2: sh-split, sh-unassigned)`) {
-		t.Fatalf("output does not name the claims kept under the empty identity:\n%s", run.out)
+	if !strings.Contains(run.out, `" sh-unassigned" (1: sh-split)`) {
+		t.Fatalf("output does not name the untrusted claim as one row:\n%s", run.out)
 	}
-	// An empty identity cannot name a scope; it must not shift its reason into
-	// the scope name either.
+	if strings.Contains(run.log, "agent is-foreign --json -- \n") || strings.Contains(run.log, "agent is-foreign --json -- sh-unassigned") {
+		t.Fatalf("the gate was asked about the untrusted claim\n%s", run.context())
+	}
 	outcome, ok := run.outcome(t)
-	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 0 {
-		t.Fatalf("outcome = %+v (written %v), want partial with no scope", outcome, ok)
+	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 1 || !strings.Contains(outcome.Scopes[0].Reason, "tab or line break") {
+		t.Fatalf("outcome = %+v (written %v), want partial with the untrusted claim's scope and reason", outcome, ok)
 	}
 }
 
@@ -13704,5 +13716,136 @@ func TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(archiveRepo, ".git")); err != nil {
 		t.Fatalf("archive repo not initialized after the race: %v", err)
+	}
+}
+
+// TestOrphanSweepRefusesForgedClaimRows is the row-forging regression: the
+// sweep re-reads its claims as tab-separated rows, so an assignee carrying a
+// newline and a tab spells a whole claim row of its own, naming another bead
+// under another holder. A row whose bead id or assignee holds a tab, newline
+// or carriage return is protected and named instead: never asked about and
+// never released.
+func TestOrphanSweepRefusesForgedClaimRows(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{
+			inProgress("hq-1", "retired-hand"),
+			inProgress("hq-9", "zz\nhq-1\tgc-d34d2"),
+			inProgress("hq-2", "carriage\rreturn"),
+		}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		[]string{"retired-hand"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	for _, bead := range []string{"hq-1", "hq-9", "hq-2"} {
+		if run.released(bead) {
+			t.Fatalf("%s was released through a forged claim row\n%s", bead, run.context())
+		}
+	}
+	if got := run.gateCalls(); got != 1 {
+		t.Fatalf("gate calls = %d, want 1 (retired-hand; the untrusted rows are never asked)\n%s", got, run.context())
+	}
+	for _, want := range []string{
+		`"retired-hand" (1: hq-1)`,
+		`"zz hq-1 gc-d34d2" (1: hq-9)`,
+		`"carriage return" (1: hq-2)`,
+	} {
+		if !strings.Contains(run.out, want) {
+			t.Fatalf("output missing %q:\n%s", want, run.out)
+		}
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	named := false
+	for _, scope := range outcome.Scopes {
+		if scope.Scope == "zz hq-1 gc-d34d2" && strings.Contains(scope.Reason, "tab or line break") {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("outcome scopes = %+v, want the forged row named with why it was kept", outcome.Scopes)
+	}
+}
+
+// TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest: a rig listing that
+// does not parse is dropped for the pass (its claims kept), while the other
+// scopes are still swept.
+func TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{"ORPHAN_SWEEP_SHARED_BEADS_JSON": `[{"id":"sh-x","status":"in_progress","assignee":"neighbor"}] not json`})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("one unreadable rig listing stopped the HQ sweep\n%s", run.context())
+	}
+	if run.released("sh-x") {
+		t.Fatalf("a claim from an unreadable listing was released\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "could not read the in-progress listing of shared") {
+		t.Fatalf("no note for the unreadable listing:\n%s", run.out)
+	}
+}
+
+// TestOrphanSweepSkipsAListingThatIsNotAnArray: a listing that is a lone
+// object carries rows no scope tag reaches. It is dropped like one that does
+// not parse: its rows are neither asked about nor released, never read as HQ
+// rows, and the other scopes are still swept.
+func TestOrphanSweepSkipsAListingThatIsNotAnArray(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{
+			"ORPHAN_SWEEP_SHARED_BEADS_JSON": `{"wrap":{"id":"sh-x","status":"in_progress","assignee":"neighbor"}}`,
+		})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	for _, line := range nonEmptyLogLines(run.log) {
+		if strings.HasPrefix(line, "agent is-foreign ") && strings.HasSuffix(line, " neighbor") {
+			t.Fatalf("a row of a listing that is not an array was asked about: %s\n%s", line, run.context())
+		}
+	}
+	if run.released("sh-x") {
+		t.Fatalf("a row of a listing that is not an array was released\n%s", run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("a rig listing that is not an array stopped the HQ sweep\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "could not read the in-progress listing of shared") {
+		t.Fatalf("no note for the listing that is not an array:\n%s", run.out)
+	}
+}
+
+// TestOrphanSweepReleasesARigClaimInItsRig: a dead pool session's claim in a
+// rig is released, and its cause recorded, with --rig naming the rig it was
+// listed from, so the release runs in that rig's store whatever the prefixes
+// of its arguments say. The rig's scope read wins over the federated read's
+// row for the same claim, which names no scope. An HQ claim names no rig.
+func TestOrphanSweepReleasesARigClaimInItsRig(t *testing.T) {
+	shared := []orphanSweepGateRow{inProgress("sh-dead", "gc-session-d34d2")}
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-dead", "gc-d34d3")}, shared,
+		[]orphanSweepGateRow{
+			{ID: "gc-session-d34d2", Status: "closed", IssueType: "session"},
+			{ID: "gc-d34d3", Status: "closed", IssueType: "session"},
+		},
+		nil, map[string]string{"ORPHAN_SWEEP_FEDERATED_BEADS_JSON": orphanSweepGateJSON(t, shared)})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	lines := nonEmptyLogLines(run.log)
+	if got := countExactLine(lines, "bd release-if-current sh-dead gc-session-d34d2 --rig shared"); got != 1 {
+		t.Fatalf("rig release with --rig shared count = %d, want 1\n%s", got, run.context())
+	}
+	if got := countExactLine(lines, "bd update sh-dead --set-metadata gc.orphan_sweep_reason=orphan-sweep: reset from assignee gc-session-d34d2 -- no live session matched --rig shared"); got != 1 {
+		t.Fatalf("rig reset cause with --rig shared count = %d, want 1\n%s", got, run.context())
+	}
+	if got := countExactLine(lines, "bd release-if-current hq-dead gc-d34d3"); got != 1 {
+		t.Fatalf("HQ release without a rig count = %d, want 1\n%s", got, run.context())
 	}
 }
