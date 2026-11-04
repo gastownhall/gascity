@@ -1,121 +1,330 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "gc hook --claim --json result",
-  "description": "One JSON record describing the routed-work claim result for a session startup hook.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "ok",
-    "command",
-    "action",
-    "reason"
-  ],
-  "properties": {
-    "schema_version": {
-      "const": "1"
+  "title": "gc hook claim result",
+  "description": "Version 1 is generic acquisition; version 2 is explicit workflow-root continuation.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/v1"
     },
-    "ok": {
-      "const": true
-    },
-    "command": {
-      "const": "hook"
-    },
-    "action": {
-      "enum": [
-        "work",
-        "drain"
-      ]
-    },
-    "reason": {
-      "enum": [
-        "claimed",
-        "existing_assignment",
-        "ready_assignment",
-        "started_claim_held",
-        "no_work",
-        "claims_errored",
-        "stale_session",
-        "non_turn_context",
-        "drain_pending",
-        "missing_session_registration",
-        "city_suspended",
-        "agent_suspended",
-        "rig_suspended"
-      ]
-    },
-    "bead_id": {
-      "type": "string"
-    },
-    "assignee": {
-      "type": "string"
-    },
-    "route": {
-      "type": "string"
-    },
-    "root_bead_id": {
-      "type": "string"
-    },
-    "continuation_group": {
-      "type": "string"
-    },
-    "continuation_assigned": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "drain_acknowledged": {
-      "type": "boolean"
+    {
+      "$ref": "#/$defs/v2"
     }
-  },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "action": {
-            "const": "work"
+  ],
+  "$defs": {
+    "v1": {
+      "title": "gc hook --claim --json result",
+      "description": "One JSON record describing the routed-work claim result for a session startup hook.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "ok",
+        "command",
+        "action",
+        "reason"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1"
+        },
+        "ok": {
+          "const": true
+        },
+        "command": {
+          "const": "hook"
+        },
+        "action": {
+          "enum": [
+            "work",
+            "drain"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "claimed",
+            "existing_assignment",
+            "ready_assignment",
+            "started_claim_held",
+            "no_work",
+            "claims_errored",
+            "stale_session",
+            "non_turn_context",
+            "drain_pending",
+            "missing_session_registration",
+            "city_suspended",
+            "agent_suspended",
+            "rig_suspended"
+          ]
+        },
+        "bead_id": {
+          "type": "string"
+        },
+        "assignee": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        },
+        "root_bead_id": {
+          "type": "string"
+        },
+        "continuation_group": {
+          "type": "string"
+        },
+        "continuation_assigned": {
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
-        "required": [
-          "action"
-        ]
+        "drain_acknowledged": {
+          "type": "boolean"
+        }
       },
-      "then": {
-        "required": [
-          "bead_id",
-          "assignee"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "action": {
-            "const": "drain"
-          }
-        },
-        "required": [
-          "action"
-        ]
-      },
-      "then": {
-        "properties": {
-          "reason": {
-            "enum": [
-              "no_work",
-              "claims_errored",
-              "stale_session",
-              "non_turn_context",
-              "drain_pending",
-              "missing_session_registration",
-              "city_suspended",
-              "agent_suspended",
-              "rig_suspended"
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "work"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "bead_id",
+              "assignee"
             ]
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "drain"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "no_work",
+                  "claims_errored",
+                  "stale_session",
+                  "non_turn_context",
+                  "drain_pending",
+                  "missing_session_registration",
+                  "city_suspended",
+                  "agent_suspended",
+                  "rig_suspended"
+                ]
+              }
+            }
+          }
         }
-      }
+      ]
+    },
+    "v2": {
+      "title": "Explicit workflow continuation result",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "ok",
+        "command",
+        "action",
+        "reason",
+        "root_bead_id"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2"
+        },
+        "ok": {
+          "const": true
+        },
+        "command": {
+          "const": "hook"
+        },
+        "action": {
+          "enum": [
+            "work",
+            "wait",
+            "complete"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "claimed",
+            "existing_assignment",
+            "ready_assignment",
+            "workflow_blocked",
+            "workflow_no_ready",
+            "different_workflow_assignment",
+            "workflow_complete"
+          ]
+        },
+        "root_bead_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bead_id": {
+          "type": "string"
+        },
+        "assignee": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        },
+        "continuation_group": {
+          "type": "string"
+        },
+        "continuation_assigned": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "work"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "claimed",
+                  "existing_assignment",
+                  "ready_assignment"
+                ]
+              }
+            },
+            "required": [
+              "bead_id",
+              "assignee"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "wait"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "workflow_blocked",
+                  "workflow_no_ready",
+                  "different_workflow_assignment"
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "bead_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "assignee"
+                  ]
+                },
+                {
+                  "required": [
+                    "route"
+                  ]
+                },
+                {
+                  "required": [
+                    "continuation_group"
+                  ]
+                },
+                {
+                  "required": [
+                    "continuation_assigned"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "workflow_complete"
+                ]
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "bead_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "assignee"
+                  ]
+                },
+                {
+                  "required": [
+                    "route"
+                  ]
+                },
+                {
+                  "required": [
+                    "continuation_group"
+                  ]
+                },
+                {
+                  "required": [
+                    "continuation_assigned"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
-  ]
+  }
 }

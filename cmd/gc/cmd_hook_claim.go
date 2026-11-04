@@ -177,7 +177,8 @@ type hookClaimReleaseRecord struct {
 }
 
 type hookClaimOptions struct {
-	Assignee string
+	Assignee   string
+	RootBeadID string
 	// SessionID is this session's durable bead ID. Assignee is deliberately the
 	// alias/agent form that read paths query through GC_AGENT, but a continuation
 	// pin means "run this on THIS session", which only a session identity can
@@ -478,6 +479,13 @@ type hookClaimResult struct {
 }
 
 func doHookClaim(workQuery, dir string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" {
+		if ops.Runner == nil {
+			return reportClaimWorkQueryFailure(errors.New("missing scoped ready query runner"), stderr)
+		}
+		run := func(command, dir string, _ []string) (string, error) { return ops.Runner(command, dir) }
+		return claimRootHookWorkWithRunner(dir, opts.Env, nil, opts, ops, run, stdout, stderr)
+	}
 	res := tryHookClaim(workQuery, dir, &opts, &ops, stdout, stderr)
 	if res.terminal {
 		return res.code
@@ -561,6 +569,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 			return hookClaimResult{terminal: true, code: reportHookDrainFenceClosed("gc hook --claim", sessionID, err, stderr)}
 		case err != nil:
+			if opts.RootBeadID != "" {
+				return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
+			}
 			// Fail open on a transient fault. This probe is one store read on every agent turn in the
 			// city, so a store hiccup here must not idle every healthy seat; the
 			// drain lanes remain the backstop exactly as they are today. Name the
@@ -595,7 +606,13 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{terminal: true, code: 1}
 	}
 	for _, skip := range skipped {
+		if opts.RootBeadID != "" {
+			return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(skip.Err, stderr)}
+		}
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
+	}
+	if opts.RootBeadID != "" {
+		candidates = slices.DeleteFunc(candidates, func(b beads.Bead) bool { return !hookRootContains(opts.RootBeadID, b) })
 	}
 	if len(candidates) == 0 {
 		return hookClaimResult{}
@@ -609,11 +626,27 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 
 	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+		var verdict hookAdoptionVerdict
+		var canonicalAssignee string
+		if opts.RootBeadID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+			canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee)
+			cancel()
+			if err != nil {
+				return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
+			}
+			if !hookRootContains(opts.RootBeadID, canonical) || canonical.Status != "in_progress" || !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
+				return hookClaimResult{}
+			}
+			bead = canonical
+			verdict, canonicalAssignee = hookAdoptionOwned, canonical.Assignee
+		} else {
+			verdict, canonicalAssignee = certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		}
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
-		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
 		// Holding a bead is no reason to resume it once its workflow stopped:
 		// the step a worker took before its root failed is exactly the one a
 		// re-poll would otherwise hand straight back. A stopped bead is closed
@@ -934,7 +967,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
-		if strings.TrimSpace(candidate.ID) == "" ||
+		if !hookRootContains(opts.RootBeadID, candidate) || strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
 			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
@@ -1098,6 +1131,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	// on stderr only if the invocation then claims nothing.
 	var leftToAnotherSession []beads.Bead
 	for _, candidate := range candidates {
+		if !hookRootContains(opts.RootBeadID, candidate) {
+			continue
+		}
 		if hookClaimSeatLeaves(candidate, opts.PoolSeat, seatManaged) {
 			// Work placed for another directory belongs to the seat the
 			// controller starts there; this seat would run it in the wrong
@@ -1423,6 +1459,9 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
+		if opts.RootBeadID != "" {
+			return hookAdoptionRefused, ""
+		}
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
 		return hookAdoptionUnverified, ""
 	}
@@ -1521,7 +1560,7 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
 	for _, candidate := range candidates {
-		if hookClaimCandidateIsMessage(candidate) {
+		if !hookRootContains(opts.RootBeadID, candidate) || hookClaimCandidateIsMessage(candidate) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(candidate.Status), "in_progress") &&
@@ -1571,6 +1610,20 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // claimLandingWindowSpent); adoption passes the zero time.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, verdict hookAdoptionVerdict, landedAt time.Time, stdout, stderr io.Writer) int {
 	minted := verdict == hookClaimMinted
+	if opts.RootBeadID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+		canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, bead.ID, opts.Assignee)
+		cancel()
+		if err != nil || !hookRootContains(opts.RootBeadID, canonical) || canonical.Status != "in_progress" || beadmeta.HasDispatchHold(canonical.Labels) || !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
+			cause := fmt.Sprintf("scoped claim %s cannot be verified in root %s: %v", bead.ID, opts.RootBeadID, err)
+			if minted {
+				return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
+			}
+			return reportClaimWorkQueryFailure(errors.New(cause), stderr)
+		}
+		bead = canonical
+		result.SchemaVersion = "2"
+	}
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
 	// window plus its reserved claim budget: the claim-write child carries its own
 	// ceiling, so a claim can commit after the invoking turn is already gone. That
@@ -1593,7 +1646,11 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// open, as the pre-claim fence does.
 	if minted && ops.DrainPending != nil {
 		if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
-			if pending, err := ops.DrainPending(sessionID); err == nil && pending {
+			pending, err := ops.DrainPending(sessionID)
+			if opts.RootBeadID != "" && err != nil {
+				return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, fmt.Sprintf("reading scoped session drain state: %v", err), bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
+			}
+			if err == nil && pending {
 				cause := fmt.Sprintf("claim of %s landed on session %s after its drain began; releasing it rather than parking it", bead.ID, sessionID)
 				unwindUndeliveredHookClaim(hookClaimReleaseReasonDraining, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
 				return writeHookClaimDrainPending(hookClaimLabel, sessionID, opts, ops, dir, stdout, stderr)
@@ -1601,6 +1658,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		}
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if opts.RootBeadID != "" {
+		result.RootBeadID = opts.RootBeadID
+	}
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	// The started write (PHASE1-2 §6.4): before the result line, so a claim
@@ -1618,6 +1678,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		if minted {
 			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, fmt.Sprintf("refusing to hand %s to a closed session; giving it back", bead.ID), bead, opts, ops, dir, started, stderr)
 		}
+		if opts.RootBeadID != "" {
+			return reportClaimWorkQueryFailure(errors.New("scoped session closed during delivery"), stderr)
+		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	case hookStartedStale:
 		// As for a closed row: no turn of another incarnation runs the claim.
@@ -1628,6 +1691,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause+"; giving it back", bead, opts, ops, dir, started, stderr)
 		} else {
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
+		}
+		if opts.RootBeadID != "" {
+			return reportClaimWorkQueryFailure(errors.New("scoped session changed during delivery"), stderr)
 		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	}
@@ -1748,6 +1814,9 @@ func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops ho
 	} else {
 		fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 	}
+	if opts.RootBeadID != "" {
+		return reportClaimWorkQueryFailure(errors.New(cause), stderr)
+	}
 	if opts.JSON {
 		if err := writeCLIJSONLine(stdout, hookClaimJSONResult{
 			SchemaVersion: "1",
@@ -1769,7 +1838,19 @@ func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops ho
 // is precisely the shape a dead tool pipe takes.
 func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout io.Writer) error {
 	if jsonOut {
+		if result.SchemaVersion == "2" {
+			return writeCLIJSONLine(stdout, hookRootJSONResult{
+				SchemaVersion: "2", OK: result.OK, Command: result.Command,
+				Action: result.Action, Reason: result.Reason, RootBeadID: result.RootBeadID, BeadID: result.BeadID,
+				Assignee: result.Assignee, Route: result.Route, ContinuationGroup: result.ContinuationGroup,
+				ContinuationAssigned: result.ContinuationAssigned,
+			})
+		}
 		return writeCLIJSONLine(stdout, result)
+	}
+	if result.SchemaVersion == "2" {
+		_, err := fmt.Fprintf(stdout, "work %s %s\n", result.RootBeadID, result.BeadID)
+		return err
 	}
 	_, err := fmt.Fprintln(stdout, result.BeadID)
 	return err
@@ -1931,6 +2012,9 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 // drain on its behalf) and the exit code is 0 regardless, so a provider does not
 // retry the refusal on every prompt submit. Only a failed JSON write is an error.
 func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" {
+		return reportClaimWorkQueryFailure(fmt.Errorf("scoped continuation refused: %s", hookClaimReasonNonTurnContext), stderr)
+	}
 	_, _ = fmt.Fprintf(stderr,
 		"gc hook --claim: refusing to claim from a non-turn context (%s is set); a provider callback's result reaches no agent turn, so a claim minted here would be parked the instant it is won\n",
 		marker)
@@ -1974,6 +2058,9 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // know which one answered. The JSON record is identical either way: the command
 // is "hook" for both, and a consumer should not have to care.
 func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" {
+		return reportClaimWorkQueryFailure(fmt.Errorf("scoped continuation refused: %s", hookClaimReasonDrainPending), stderr)
+	}
 	if code, fenced := fenceHookDrainAck(label, hookClaimReasonDrainPending, opts, ops, dir, stdout, stderr); fenced {
 		return code
 	}
@@ -2097,6 +2184,9 @@ func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaim
 // acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" {
+		return reportClaimWorkQueryFailure(fmt.Errorf("scoped continuation refused: %s", hookClaimReasonStaleSession), stderr)
+	}
 	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(opts.drainAckFn()), stdout, stderr)
 }
 
@@ -2109,6 +2199,9 @@ func (opts hookCommandOptions) drainAckFn() hookDrainAckFunc {
 }
 
 func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" {
+		return reportClaimWorkQueryFailure(fmt.Errorf("scoped continuation refused: %s", reason), stderr)
+	}
 	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, opts.drainAckFn(), stdout, stderr)
 }
 
@@ -2120,6 +2213,9 @@ func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdou
 // distinct reason so a wrapper or dashboard can tell "never registered" apart
 // from "registered, then went stale."
 func writeHookClaimMissingSessionRegistrationDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	if opts.RootBeadID != "" {
+		return reportClaimWorkQueryFailure(fmt.Errorf("scoped continuation refused: %s", hookClaimReasonMissingSessionRegistration), stderr)
+	}
 	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(opts.drainAckFn()), stdout, stderr)
 }
 
@@ -2180,6 +2276,9 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	if !hookRootContains(opts.RootBeadID, bead) {
+		return nil, fmt.Errorf("continuation bead %s is outside root %s", bead.ID, opts.RootBeadID)
+	}
 	if rootID == "" || group == "" {
 		return nil, nil
 	}
@@ -2220,6 +2319,9 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
 		if strings.TrimSpace(sibling.ID) == "" ||
+			(opts.RootBeadID != "" && (strings.TrimSpace(sibling.Metadata[beadmeta.RootBeadIDMetadataKey]) != rootID ||
+				strings.TrimSpace(sibling.Metadata[beadmeta.ContinuationGroupMetadataKey]) != group)) ||
+			sibling.Metadata[beadmeta.KindMetadataKey] == "workflow-finalize" ||
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
@@ -2237,7 +2339,15 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			stoppedSibling(sibling) {
 			continue
 		}
-		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
+		if opts.RootBeadID != "" {
+			reserved, err := molecule.ReserveContinuation(workflowStore, sibling, pinAssignee)
+			if err != nil {
+				return assigned, err
+			}
+			if !reserved {
+				continue
+			}
+		} else if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
