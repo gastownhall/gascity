@@ -316,7 +316,19 @@ rig $rig_name"
     # Suspended rigs are left cold: any bd call restarts a suspended scope's
     # retired proxy and Dolt, and nothing writes to it while it is suspended,
     # so its backup waits for it to resume.
-    done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false) | .name // empty' 2>/dev/null)
+    done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false)
+        | select(((.federation // "") | tostring | ascii_downcase) as $f | $f == "" or $f == "city") | .name // empty' 2>/dev/null)
+    # Guarded rigs (federation = "rig") are skipped, and declared so: their
+    # bead store is shared with other cities, so its operator backs it up, and
+    # gc bd refuses this order's verbs there. Any federation value other than
+    # "" or "city" counts as guarded, so an unexpected spelling never fails
+    # open.
+    while IFS= read -r rig_name; do
+        [ -n "$rig_name" ] || continue
+        echo "backup: skipping rig $rig_name: federation = \"rig\" (its bead store is shared with other cities; its operator backs it up)" >&2
+        outcome_scope_skipped "rig:$rig_name" "federation = rig: its operator backs it up"
+    done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false)
+        | select(((.federation // "") | tostring | ascii_downcase) as $f | $f != "" and $f != "city") | .name // empty' 2>/dev/null)
 else
     echo "backup: gc rig list failed; backing up the city scope only" >&2
     outcome_scope_skipped "rigs" "rig list unavailable"

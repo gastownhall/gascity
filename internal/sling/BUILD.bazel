@@ -4,6 +4,7 @@ go_library(
     name = "sling",
     srcs = [
         "cycle.go",
+        "rig_namespace_route.go",
         "sling.go",
         "sling_attachment.go",
         "sling_child_outcome.go",
@@ -41,6 +42,7 @@ go_test(
     srcs = [
         "cycle_native_store_test.go",
         "cycle_test.go",
+        "rig_namespace_route_test.go",
         "sling_attached_hint_test.go",
         "sling_attachment_test.go",
         "sling_child_outcome_test.go",

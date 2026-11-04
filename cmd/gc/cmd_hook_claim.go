@@ -261,7 +261,9 @@ type hookClaimOps struct {
 	// returning the workflow root id so SkipDoneWorkflow can retire it.
 	InputDone hookInputDoneFunc
 	// SkipDoneWorkflow closes a workflow root and its open steps with
-	// gc.outcome=skipped after InputDone reported the input terminal.
+	// gc.outcome=skipped after InputDone reported the input terminal. keep,
+	// when set, names the rows it may close (the rig namespace guard's
+	// retireFilter); nil closes them all.
 	SkipDoneWorkflow hookSkipDoneWorkflowFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
@@ -396,6 +398,12 @@ type hookClaimOps struct {
 	// its result is written. Nil — the default — announces nothing; only
 	// claimHookWork installs it. Best-effort.
 	AnnounceBeadEvents func()
+	// RigGuard is the rig namespace guard (hook_rig_namespace.go): it drops
+	// Foreign candidates of a guarded rig and refuses every claim-cycle
+	// write whose actor that rig does not admit, before any bd process is
+	// spawned. Nil — every city with no federation = "rig" rig — checks
+	// nothing.
+	RigGuard *hookRigGuard
 }
 
 type (
@@ -405,7 +413,7 @@ type (
 	hookDrainAckFunc              func(io.Writer) error
 	hookDrainPendingFunc          func(sessionID string) (bool, error)
 	hookInputDoneFunc             func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error)
-	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string) error
+	hookSkipDoneWorkflowFunc      func(ctx context.Context, dir string, env []string, rootID string, keep func(beads.Bead) bool) error
 	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
 	hookResolveSessionWorkDirFunc func(sessionID string) string
@@ -597,6 +605,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	for _, skip := range skipped {
 		fmt.Fprintf(stderr, "gc hook --claim: skipping undecodable bead %s: %v\n", skip.ID, skip.Err) //nolint:errcheck
 	}
+	// Every tier below, adoption included, sees only the rows a guarded rig
+	// lets this city act on, judged by the leg they were read from. The rows
+	// are in hand, so this costs no read.
+	ops.RigGuard = ops.RigGuard.boundTo(dir)
+	candidates = ops.RigGuard.filterCandidates(candidates, stderr)
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
@@ -608,12 +621,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok && !ops.RigGuard.refuseClaim(bead, stderr, opts.Assignee) {
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
-		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		verdict, canonicalAssignee, canonical := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		// The canonical row, not the (possibly stale) query row, is what the
+		// stop gate and the re-stamp write against: a guarded rig must not
+		// find it Foreign, and must admit both its holder and this session.
+		if verdict == hookAdoptionOwned && ops.RigGuard.refuseClaim(canonical, stderr, canonicalAssignee, opts.Assignee) {
+			verdict = hookAdoptionRefused
+		}
 		// Holding a bead is no reason to resume it once its workflow stopped:
 		// the step a worker took before its root failed is exactly the one a
 		// re-poll would otherwise hand straight back. A stopped bead is closed
@@ -957,6 +976,11 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
+		// The promotion runs as the stored assignee and the re-stamp below
+		// moves it to the claim identity: a guarded rig must admit both.
+		if ops.RigGuard.refuseClaim(candidate, stderr, claimActor, opts.Assignee) {
+			continue
+		}
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
@@ -1109,16 +1133,22 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		reclaimedFrom := ""
-		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
-			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
-			// blocker is an existing (possibly stale) assignee gets a scoped,
-			// opt-in reclaim attempt before being skipped. Off by default
-			// (NFR4/NFR5): the flag check short-circuits before
-			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
-			// flag-off path is byte-for-byte unchanged.
-			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
-				continue
-			}
+		claimable := hookCandidateClaimable(candidate, opts.RouteTargets, now)
+		// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
+		// blocker is an existing (possibly stale) assignee gets a scoped,
+		// opt-in reclaim attempt before being skipped. Off by default
+		// (NFR4/NFR5): the flag check short-circuits before
+		// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
+		// flag-off path is byte-for-byte unchanged.
+		if !claimable && (!opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now)) {
+			continue
+		}
+		// Both the stale reclaim and the claim are writes: a guarded rig must
+		// admit the claim actor before either spawns bd.
+		if ops.RigGuard.refuseClaim(candidate, stderr, opts.Assignee) {
+			continue
+		}
+		if !claimable {
 			if ops.claimWindowSpent() {
 				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 			}
@@ -1413,26 +1443,30 @@ const (
 // store hiccup, the same trade the F-D probe makes for the same reason.
 //
 // On hookAdoptionOwned it also returns the canonical assignee spelling, which
-// may differ from the work query's (cached) row.
-func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string) {
+// may differ from the work query's (cached) row, and the canonical row itself
+// (its ID always set), which the rig namespace guard judges.
+func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string, beads.Bead) {
 	beadID := strings.TrimSpace(bead.ID)
 	if beadID == "" || ops.ReadWorkMeta == nil {
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, "", beads.Bead{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, "", beads.Bead{}
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
 			"gc hook --claim: refusing to re-serve %s: the canonical store records assignee=%q, not this session (%s)\n",
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
-		return hookAdoptionRefused, ""
+		return hookAdoptionRefused, "", beads.Bead{}
 	}
-	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+	if strings.TrimSpace(canonical.ID) == "" {
+		canonical.ID = beadID
+	}
+	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee), canonical
 }
 
 // restampHookAdoption rewrites an adopted bead's assignee from a legacy
@@ -2177,6 +2211,17 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 	return 1
 }
 
+// continuationPinFor is the identity a continuation sibling is pinned to:
+// pin, or on a guarded rig the identity guard admits for the sibling. ok is
+// false when a guarded rig admits none: the sibling then stays routed.
+func continuationPinFor(guard *hookRigGuard, sibling beads.Bead, opts hookClaimOptions, pin string) (string, bool) {
+	if guard == nil {
+		return pin, true
+	}
+	pin = guard.continuationPin(sibling, opts)
+	return pin, pin != ""
+}
+
 func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
@@ -2237,7 +2282,11 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			stoppedSibling(sibling) {
 			continue
 		}
-		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
+		pin, ok := continuationPinFor(ops.RigGuard, sibling, opts, pinAssignee)
+		if !ok {
+			continue
+		}
+		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pin); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
@@ -2271,7 +2320,10 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 		now := ops.nowOrWallClock()
 		served := hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
 			hookCandidateClaimable(candidate, opts.RouteTargets, now)
-		if served && hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
+		// Retiring closes rows, so a guarded rig must admit the actor first;
+		// a candidate it refuses goes on to the claim tiers, which say why.
+		if served && ops.RigGuard.claimRefusal(candidate, opts.Assignee) == nil &&
+			hookSkipIfInputDone(candidate, opts, ops, dir, stderr) {
 			continue
 		}
 		kept = append(kept, candidate)
@@ -2295,7 +2347,7 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 	if !done {
 		return false
 	}
-	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID); err != nil {
+	if err := ops.SkipDoneWorkflow(ctx, dir, opts.Env, rootID, ops.RigGuard.retireFilter()); err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: retiring workflow %s whose input work is already terminal: %v\n", rootID, err) //nolint:errcheck
 		return false
 	}
@@ -2412,8 +2464,10 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 }
 
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
-// with gc.outcome=skipped so pool demand and continuation claims drop.
-func skipDoneWorkflow(store beads.Store, rootID string) error {
+// with gc.outcome=skipped so pool demand and continuation claims drop. keep,
+// when set, names the rows it may close: a step or root it rejects (another
+// city's, on a guarded rig) is left open, and the root is read to judge it.
+func skipDoneWorkflow(store beads.Store, rootID string, keep func(beads.Bead) bool) error {
 	steps, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
@@ -2427,10 +2481,26 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 		if step.ID == "" || step.ID == rootID || seen[step.ID] || convoy.IsTerminalStatus(step.Status) {
 			continue
 		}
+		if keep != nil && !keep(step) {
+			continue
+		}
 		seen[step.ID] = true
 		ids = append(ids, step.ID)
 	}
-	ids = append(ids, rootID)
+	if keep == nil {
+		ids = append(ids, rootID)
+	} else {
+		root, err := store.Get(rootID)
+		if err != nil {
+			return fmt.Errorf("loading workflow root %s: %w", rootID, err)
+		}
+		if keep(root) {
+			ids = append(ids, rootID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
 	_, err = store.CloseAll(ids, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              hookSkipDoneWorkflowCloseReason,
@@ -2444,8 +2514,8 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 	return workflowInputDone(beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates)
 }
 
-func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string, keep func(beads.Bead) bool) error {
+	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID, keep)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
@@ -2533,7 +2603,7 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 // stamped only when absent, never touched again once set. Best-effort: a missing
 // repo, detached HEAD, absent session, or write error never blocks the claim.
 func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
-	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
+	patch := stripOwnerStamp(hookClaimIdentityPatch(bead, opts, ops, dir))
 	sessionID := hookClaimSessionID(opts.Env)
 	needsLifecycleIdentity := sessionID != "" && !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]))
 	if len(patch) == 0 {

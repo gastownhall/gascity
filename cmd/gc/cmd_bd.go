@@ -571,6 +571,25 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
 		return code
 	}
+	// A rig with federation = "rig" serves only its own namespace, and bd
+	// cannot know that: check the write here, before bd runs, and stamp a
+	// create with the rig's namespace (bd_rig_namespace.go). It runs after the
+	// by-id door above, which answers class-owned subjects from their own
+	// binding rather than from this scope.
+	var guardReader beads.Store
+	if guard := newBdRigNamespaceCheck(cfg, cityPath, target.ScopeRoot, func(id string) (beads.Bead, error) {
+		if guardReader == nil {
+			guardReader = bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
+		}
+		return guardReader.Get(id)
+	}); guard != nil {
+		checked, msg, refused := guard.check(bdArgs)
+		if refused {
+			fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		bdArgs = checked
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

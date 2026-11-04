@@ -58,7 +58,7 @@ func TestCmdGCRootClosesReadAsControllerClosesOnACrossStoreGate(t *testing.T) {
 	}
 	for name, closeRoot := range map[string]func(store beads.Store, rootID, gateID string) error{
 		"gc hook --claim skipDoneWorkflow": func(store beads.Store, rootID, _ string) error {
-			return skipDoneWorkflow(store, rootID)
+			return skipDoneWorkflow(store, rootID, nil)
 		},
 		"stale order wisp sweep": func(store beads.Store, rootID, gateID string) error {
 			_, err := closeStaleOrderWispIDs(store, []string{gateID, rootID}, "")

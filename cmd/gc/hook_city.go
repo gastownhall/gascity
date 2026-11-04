@@ -37,6 +37,33 @@ type hookCity struct {
 
 	mu    sync.Mutex
 	front *session.Store
+
+	// guardOnce builds the invocation's rig namespace guard (nil when the
+	// city guards no rig) with one session resolver, so its lookups are
+	// memoized across every claim step.
+	guardOnce sync.Once
+	guard     *hookRigGuard
+}
+
+// rigGuard returns the invocation's rig namespace guard, or nil when the
+// city has no federation = "rig" rig. Its session resolver reads this
+// city's sessions handle (cliStores over the city store), opened only when a
+// lookup needs it.
+func (h *hookCity) rigGuard() *hookRigGuard {
+	h.guardOnce.Do(func() {
+		if !cityHasGuardedRig(h.cfg) {
+			return
+		}
+		sessions := newCityCLISessionResolver(h.path, h.cfg, func() (beads.SessionStore, error) {
+			cityStore, err := hookCityStoreOpener(h.path, h.cfg)
+			if err != nil {
+				return beads.SessionStore{}, err
+			}
+			return cliStores(h.path, cityStore).Sessions(), nil
+		})
+		h.guard = newHookRigGuard(h.path, h.cfg, sessions)
+	})
+	return h.guard
 }
 
 // hookCityStoreOpener opens the city store behind a hook invocation's session
@@ -128,5 +155,6 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
 		emitWorkStartedUnrecordedTo(h.recorder(), sessionID, template, beadID, cause)
 	}
+	ops.RigGuard = h.rigGuard()
 	return ops
 }

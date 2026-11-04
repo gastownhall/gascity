@@ -29,6 +29,9 @@ type rigNamespace struct {
 	// city and is never shared with another, so provenance can only admit
 	// that city's ids. A nil resolver admits no session id.
 	sessions ownSessionResolver
+	// denyReason says why a deny-all namespace admits nothing (for example,
+	// the guarded rig's store is not its own), so a refusal can name it.
+	denyReason string
 }
 
 // rowClass is the ownership class of a row on a guarded rig.

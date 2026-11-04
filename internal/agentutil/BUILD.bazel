@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "pool.go",
         "resolve.go",
+        "rig_namespace_route.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/agentutil",
     visibility = ["//:__subpackages__"],
@@ -13,6 +14,7 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/config",
+        "//internal/storeref",
         "//internal/workdir",
     ],
 )
@@ -22,6 +24,7 @@ go_test(
     srcs = [
         "pool_test.go",
         "resolve_test.go",
+        "rig_namespace_route_test.go",
         "routed_to_boundary_test.go",
         "testenv_import_test.go",
     ],

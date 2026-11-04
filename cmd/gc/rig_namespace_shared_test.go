@@ -81,6 +81,51 @@ func TestGuardedRigForScope(t *testing.T) {
 	}
 }
 
+// TestRigNamespaceForScopeSharedOrPathless covers the scope decisions the
+// removed path-equality lookup (rigNamespaceFor) used to make, now by store
+// identity: two guarded rigs on one store are refused rather than resolved,
+// a guarded rig with no path of its own never matches a scope, and a scope
+// that is no guarded rig's store, the city root included, is unguarded.
+func TestRigNamespaceForScopeSharedOrPathless(t *testing.T) {
+	city := rnsBdCity(t)
+	alpha := filepath.Join(city, "alpha")
+	rnsScope(t, alpha, `{"backend":"dolt","dolt_database":"shared"}`)
+	beta := filepath.Join(city, "beta")
+	rnsScope(t, beta, `{"backend":"dolt","dolt_database":"shared"}`)
+	gamma := filepath.Join(city, "gamma")
+	rnsScope(t, gamma, `{"backend":"dolt","dolt_database":"gamma"}`)
+	sessions := rnsFakeResolver{}
+
+	twoGuarded := &config.City{Rigs: []config.Rig{
+		{Name: "alpha", Path: alpha, Federation: config.RigFederationRig},
+		{Name: "beta", Path: beta, Federation: config.RigFederationRig},
+	}}
+	for _, scope := range []string{alpha, beta} {
+		ns, err := rigNamespaceForScope(twoGuarded, city, scope, sessions)
+		if ns != nil || err == nil {
+			t.Fatalf("scope %s of two guarded rigs on one store = %v, %v; want a refusal", scope, ns, err)
+		}
+	}
+
+	pathless := &config.City{Rigs: []config.Rig{
+		{Name: "nopath", Federation: config.RigFederationRig},
+		{Name: "gamma", Path: gamma, Federation: config.RigFederationRig},
+	}}
+	res := newControllerSessionResolver(city, nil, nil)
+	ns, err := rigNamespaceForScope(pathless, city, gamma, res)
+	if err != nil || ns.rigName() != "gamma" {
+		t.Fatalf("gamma's scope beside a pathless guarded rig = %v, %v; want rig gamma", ns, err)
+	}
+	if ns.sessions != ownSessionResolver(res) {
+		t.Fatal("the namespace does not carry the caller's resolver")
+	}
+	for _, scope := range []string{city, ""} {
+		if ns, err := rigNamespaceForScope(pathless, city, scope, sessions); ns != nil || err != nil {
+			t.Fatalf("scope %q = %v, %v; want unguarded", scope, ns, err)
+		}
+	}
+}
+
 func TestErrRigNamespaceIsOneSentinel(t *testing.T) {
 	if !errors.Is(fmt.Errorf("refused: %w", errRigNamespace), config.ErrRigNamespace) {
 		t.Fatal("cmd/gc's sentinel is not config.ErrRigNamespace")

@@ -42,9 +42,10 @@ Set `federation = "rig"` on the rig in **every** city that attaches the store.
 The setting only constrains the city that sets it. Neither key can be set from
 a `[[patches.rigs]]` entry: the load refuses it there.
 
-A city that sets neither key behaves as before. The one visible difference is
-that `gc config show --json` lists both fields, empty, on every rig, as it
-does for any rig field.
+A city that sets neither key gets no namespace checks: nothing is filtered or
+refused for a rig's namespace. `gc config show --json` lists both fields,
+empty, on every rig, as it does for any rig field. A few fixes that came with
+the guard reach every city; the CHANGELOG lists them.
 
 ## Which identities a guarded rig admits
 
@@ -126,12 +127,114 @@ guard:
 scope runs the proxied native lane: the guard does not hand out the proxied
 store's internals, so the check cannot see the lane.
 
-Paths that do not go through the rig's store handles are not covered by this
-build yet; see the warning at the top of this page.
+Paths that write the rig's store without going through its store handles
+check the setting themselves; see the next section.
+
+## What the claim, routing and `gc bd` paths refuse
+
+The hook claim cycle, `gc sling`, graph routing, `gc agent-script` and `gc bd`
+write the rig's store without going through a guarded store, so they check
+the setting themselves. Every refusal happens before the write's `bd`
+process starts (`gc bd` and `gc agent-script` first read the row they would
+write, with `bd show`), and `--force` never overrides one.
+
+- **`gc hook --claim`** judges each candidate by the store it was read from,
+  not only by its id prefix, and skips rows the rig does not let this city
+  act on:
+
+  ```text
+  gc hook --claim: skipping be-12: rig "beta" serves only beta/ (federation = "rig"); its owner "crew.worker" is outside it
+  ```
+
+  It claims, adopts, re-stamps, pins or retires a finished workflow only as
+  an identity the rig admits, and a retirement leaves another city's rows
+  open. An agent claiming under a short session id gets a hint to give it a
+  rig alias or run it as a pool of the rig. For a city-scoped agent,
+  `gc hook --claim` does not search guarded rigs at all.
+- **`gc sling` and formula graphs** refuse a route into the rig that is not
+  one of its own agents, including custom `sling_query` targets, batch
+  children and every graph step. A graph needs the rig's own control
+  dispatcher; `gc config show --validate` and `gc doctor` warn when the rig
+  has none.
+
+  ```text
+  gc sling: refusing route into rig "beta": target "mayor" is outside its namespace "beta/" (federation = "rig"); route to one of the rig's own agents. --force does not override this.
+  ```
+- **`gc agent-script`** checks `bd_claim` and `bd_update` the way `gc bd`
+  does, and never falls back to another store.
+- **`gc bd`** in the rig's scope runs only what it can check first. Reads
+  pass. Writes that name beads (`update`, `close`, `reopen`, `delete`,
+  `heartbeat`, `assign`, `unclaim`, `defer`, `dep add`, `link`, `label add`,
+  `comment` and similar) are refused when another city owns a row they name.
+  Claims need an identity the rig admits; claims of an unnamed row
+  (`ready --claim`, `close --claim-next`, `close --continue` without
+  `--no-auto`) are refused. A create is stamped as this city's, and a claim
+  stamp (`gc.session_id`, `gc.session_name`, `gc.stranded_session`) is
+  checked as the store guard checks it. Anything else is refused:
+
+  ```text
+  gc bd: refusing sql: rig "beta" (federation = "rig") lets gc bd run only the writes it can check first; use raw bd
+  ```
+
+  `relate` and `unrelate` pass: they record a link that blocks nothing.
+
+  `gc bd` reads the command the way `bd` does, and `bd` takes the token after
+  a flag it does not know yet as that flag's value. So in the rig's scope only
+  `bd`'s global flags (`--actor`, `--json` and the like) may come before the
+  command, or before a sub-command such as `comments add`; an argv with any
+  other flag there is refused. So is a write that points `bd` at another
+  store: `--db`, `--database`, `--server-url`, `--global`, `--profile`, or a
+  `-C` that opens another store.
+
+  A write that names the rig's bead from any other scope (`--rig` another
+  rig, `--city`, `-C` another directory, or ids from two stores), or whose
+  `-C` opens the rig's store from another scope, is refused too, before `bd`
+  runs, because only the rig's own scope can check it:
+
+  ```text
+  gc bd: refusing update on be-12: it is rig "beta"'s bead (federation = "rig"), and this command runs in a scope that is no guarded rig's store, where that rig cannot check it; run it in rig "beta"'s scope (gc bd --rig beta ...)
+  ```
+
+  A claim of an unnamed row (`ready --claim`) is such a write, and `-C`
+  counts in every spelling `bd` reads, attached (`-C<dir>`) or in a run of
+  short flags (`-qC <dir>`).
+
+The core pack's maintenance orders (the orphan sweep and the scripts that ask
+`gc agent is-foreign`) are not covered by this build yet; see the warning at
+the top of this page. The dolt pack's backup order (`mol-dog-backup`) skips a
+guarded rig and records the skip in its run: the rig's store is shared with
+other cities, so whoever operates it backs it up.
+
+### Routes on a new bead
+
+The two layers apply one route rule at different strictness, by design:
+
+- **The store guard** refuses a route that is not rig-qualified (a bare
+  `crew.worker`), on a create and on any later write. On a create it accepts
+  a rig-qualified route outside the namespace (`alpha/crew.worker`): the new
+  row is stamped as this city's, so routing it elsewhere hands this city's
+  own work off. On an existing row such a route is accepted only when the
+  row is this city's own.
+- **`gc sling`, graph routing and `gc bd create`** are stricter: a new bead
+  may be routed only to one of the rig's own agents (`beta/...`), and a route
+  outside the namespace is refused before the write's `bd` process starts.
+  With `gc bd`, hand work off by updating the route of a row this city owns
+  (`gc bd update <id> --set-metadata gc.routed_to=alpha/crew.worker`), which
+  is checked against that row.
+
+A hand-off is one way. Owners decide before the creation stamp, so once a
+row's route names an identity outside the namespace the row is another
+city's to this city: it drops out of this city's discovery reads, and this
+city's writes to it, a route back included, are refused.
 
 ## What it does not cover
 
 - `bd` run directly by people or agents, and any writer other than Gas City.
+- `gc bd` from an unguarded scope that names another store itself:
+  `gc bd sql` against another database, or `gc bd --db <shared store>` (or
+  `--database`, `--server-url`, `--global`, `--profile`) with an id whose
+  prefix none of this city's rigs uses. Naming the store makes it the same as
+  raw `bd`. From a guarded rig's scope, `gc bd` refuses all of them.
 - Custom `work_query`, `scale_check` and `sling_query` commands.
 - Session names built at runtime from `[workspace] session_template` or an
   agent's `tmux_alias`. The load checks only configured identities.

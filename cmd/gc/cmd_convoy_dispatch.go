@@ -1613,7 +1613,9 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 			return err
 		}
 	}
-	return nil
+	// The fragment lands in its source's store: a guarded rig takes only
+	// routes to its own agents.
+	return graphroute.ValidateRigNamespaceRoutes(fragment.Steps, source.Metadata[beadmeta.RootStoreRefMetadataKey], cfg)
 }
 
 func graphRouteBindingRigContext(binding graphRouteBinding) string {

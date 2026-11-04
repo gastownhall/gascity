@@ -846,15 +846,15 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return workflowInputDoneAcross(route.class, beads.WorkStore{Store: work}, candidate, identityCandidates)
 	}
 
-	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string, keep func(beads.Bead) bool) error {
 		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
 		if err != nil {
 			return err
 		}
 		if resident {
-			return skipDoneWorkflow(route.class, rootID)
+			return skipDoneWorkflow(route.class, rootID, keep)
 		}
-		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
+		return base.SkipDoneWorkflow(ctx, dir, env, rootID, keep)
 	}
 
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
