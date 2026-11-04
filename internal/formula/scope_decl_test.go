@@ -261,7 +261,8 @@ members = ["setup"]
 		t.Fatalf("Resolve child: %v", err)
 	}
 	requireScopeMetadata(t, resolvedChild, map[string]map[string]string{
-		"setup":     declMember(),
+		// The child's declaration sets no on_fail, so setup carries none.
+		"setup":     {"gc.scope_ref": "body", "gc.scope_role": "member"},
 		"implement": {},
 		"review":    {},
 	})

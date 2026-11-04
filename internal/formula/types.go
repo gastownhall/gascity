@@ -107,6 +107,10 @@ type Formula struct {
 	// Steps defines the work items to create.
 	Steps []*Step `json:"steps,omitempty"`
 
+	// Scopes declares scope membership by step id. Resolve stamps it onto the
+	// final steps after extends; see ScopeDecl.
+	Scopes []*ScopeDecl `json:"scope,omitempty" toml:"scope,omitempty"`
+
 	// Template defines expansion template steps (for TypeExpansion formulas).
 	// Template steps use {target} and {target.description} placeholders
 	// that get substituted when the expansion is applied to a target step.

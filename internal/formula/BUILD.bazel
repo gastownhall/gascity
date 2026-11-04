@@ -19,6 +19,7 @@ go_library(
         "requirements.go",
         "resolve.go",
         "retry.go",
+        "scope_decl.go",
         "scope_membership.go",
         "selfclose.go",
         "source.go",
