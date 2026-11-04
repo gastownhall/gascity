@@ -260,6 +260,8 @@ const scopeAbortSkippedCloseReason = "scope member skipped: an earlier member of
 // settled-root closes because it runs after the root reaches a terminal state
 // by contract — cancellation is one such terminal state, not an exception to it.
 func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, beads.Bead, error) {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 		return ControlResult{}, false, beads.Bead{}, nil
 	}
@@ -278,7 +280,7 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		// the dispatcher, and is the consumer that gives gc.cancel_requested
 		// teeth.
 		if rootCanceled(root) {
-			teardown, err := isTeardownTailControl(store, bead, rootID)
+			teardown, err := isTeardownTailControl(storeMolecule, bead, rootID)
 			if err != nil {
 				return ControlResult{}, false, beads.Bead{}, fmt.Errorf("%s: resolving teardown tail under canceled root %s: %w", bead.ID, rootID, err)
 			}
@@ -301,7 +303,7 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 		// Gating per control makes settlement converge incrementally instead
 		// of depending on one bulk write succeeding.
 		if rootSettled(root) {
-			teardown, err := isTeardownTailControl(store, bead, rootID)
+			teardown, err := isTeardownTailControl(storeMolecule, bead, rootID)
 			if err != nil {
 				return ControlResult{}, false, beads.Bead{}, fmt.Errorf("%s: resolving teardown tail under settled root %s: %w", bead.ID, rootID, err)
 			}
@@ -367,7 +369,7 @@ func rootSettled(root beads.Bead) bool {
 // as their link back to a teardown step, so they need the subtree read. That
 // read happens only under an already-terminal root, at most once per control
 // before the gate closes it, never on the live dispatch path.
-func isTeardownTailControl(store beads.Store, bead beads.Bead, rootID string) (bool, error) {
+func isTeardownTailControl(store beads.MoleculeTarget, bead beads.Bead, rootID string) (bool, error) {
 	if bead.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return true, nil
 	}
@@ -1121,6 +1123,8 @@ func isRetryAttemptSubject(subject beads.Bead) bool {
 }
 
 func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	storeMolecule := beads.GraphMolecule(beads.GraphStore{Store: store})
 	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
@@ -1146,7 +1150,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: loading workflow root: %w", rootID, err))
 	}
 	if rootFound {
-		canceled, err := workflowCanceled(store, root)
+		canceled, err := workflowCanceled(storeMolecule, root)
 		if err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: reading workflow cancellation: %w", rootID, err))
 		}
@@ -1203,7 +1207,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// Generated spec sidecars are topology records rather than executable
 	// members; preserve their established successful cleanup outcome before the
 	// remaining subtree is skipped.
-	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
+	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(storeMolecule, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
 	// A terminal root makes every still-open generated member non-executable —
@@ -1213,7 +1217,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// workflows whose unused steps were never reached by ordinary dependency
 	// progression.
 	// One subtree read serves both the teardown-tail policy and the sweep.
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(storeMolecule, rootID)
 	if err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
 	}
@@ -1235,7 +1239,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 			"close_reason":              workflowCanceledMemberCloseReason,
 		}
 	}
-	if _, err := molecule.CloseMembersWithMetadataExcept(store, members, sweep, excludeFromSweep); err != nil {
+	if _, err := molecule.CloseMembersWithMetadataExcept(storeMolecule, members, sweep, excludeFromSweep); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
@@ -1323,7 +1327,7 @@ func finalizeRoot(store beads.Store, rootID string, opts ProcessOptions) (beads.
 // the cancel itself (rootCanceled), or it is a drain item workflow nested
 // under a run that does (molecule.StoppedWorkflowAncestor). A root that is not
 // a drain item costs no read.
-func workflowCanceled(store beads.Store, root beads.Bead) (bool, error) {
+func workflowCanceled(store beads.MoleculeTarget, root beads.Bead) (bool, error) {
 	if rootCanceled(root) {
 		return true, nil
 	}
@@ -1540,7 +1544,8 @@ func listLiveSourceWorkflowRoots(fallbackStore beads.Store, sourceBeadID, source
 				continue
 			}
 			visitedSources[sourceVisitKey] = struct{}{}
-			matches, err := sourceworkflow.ListLiveRoots(info.Store, currentSourceID, currentSourceStoreRef, rootStoreRef)
+			// info.Store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			matches, err := sourceworkflow.ListLiveRoots(beads.GraphMolecule(beads.GraphStore{Store: info.Store}), currentSourceID, currentSourceStoreRef, rootStoreRef)
 			if err != nil {
 				return fmt.Errorf("listing live workflows in %s: %w", sourceChainStoreLabel(rootStoreRef), err)
 			}

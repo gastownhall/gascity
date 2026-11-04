@@ -885,6 +885,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateProgramStatus(root); err != nil {
 		return nil, nil, err
 	}
+	// Rig federation settings decide which rows of a rig's bead store this
+	// city may act on, so an out-of-enum value or an unusable guarded rig
+	// name is a load error on the composed root rather than a ValidateRigs
+	// failure, which a reload only warns about.
+	if err := ValidateRigFederation(root.Rigs); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading

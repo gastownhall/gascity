@@ -751,7 +751,7 @@ func populateSlingDepsCallbacks(deps *slingDeps, stderr io.Writer) {
 // report of a start it left to the reconciler; nil discards it, for graph
 // routing that has no caller's stderr to report to.
 func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver {
-	return func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
+	return func(store beads.SessionStore, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
 		if cfg == nil {
 			return "", false, nil
 		}
@@ -774,7 +774,10 @@ func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver
 		// on a split city resolve and materialize through the sessions binding
 		// instead: through the scope store the canonical bead is invisible and a
 		// duplicate is minted where nothing reads it (write-audit B6).
-		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity, stderr)
+		// store.Store: the caller's raw scope store, as this resolver has always
+		// taken it; graphroute hands it over as a sessions handle (typed-store
+		// T5a), and the resolution below still takes the raw store (T9e).
+		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store.Store, cfg, cityPath), spec.Identity, stderr)
 		if err != nil {
 			return "", false, err
 		}
@@ -1135,7 +1138,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 
 func dryRunBatchChildren(querier BeadChildQuerier, containerID string) ([]beads.Bead, error) {
 	if store, ok := querier.(beads.Store); ok {
-		return convoycore.Members(store, containerID, true)
+		return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, containerID, true)
 	}
 	return querier.List(beads.ListQuery{
 		ParentID: containerID, IncludeClosed: true, Sort: beads.SortCreatedAsc,
@@ -1539,7 +1542,8 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", stepID)
 	}
 	if target.fromAssignee {
-		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
+		// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(beads.SessionStore{Store: store}, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
 		}

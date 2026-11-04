@@ -675,14 +675,14 @@ func conformanceByIDWriteResidence(t *testing.T, e splitEnv) {
 // ledger under the work prefix.
 func conformanceMaterializationResidence(t *testing.T, e splitEnv) {
 	ctx := context.Background()
-	res, err := molecule.Instantiate(ctx, e.graphStore(), conformanceGraphRecipe(), molecule.Options{})
+	res, err := molecule.Instantiate(ctx, beadstest.GraphMolecule(e.graphStore()), conformanceGraphRecipe(), molecule.Options{})
 	if err != nil {
 		t.Fatalf("materialize durable graph molecule: %v", err)
 	}
 	if res.Created != 2 {
 		t.Fatalf("durable molecule created %d beads, want 2 (root + finalize step)", res.Created)
 	}
-	wres, err := molecule.Instantiate(ctx, e.graphStore(), conformanceWispRecipe(), molecule.Options{})
+	wres, err := molecule.Instantiate(ctx, beadstest.GraphMolecule(e.graphStore()), conformanceWispRecipe(), molecule.Options{})
 	if err != nil {
 		t.Fatalf("materialize root-only wisp molecule: %v", err)
 	}
@@ -1432,7 +1432,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		t.Fatalf("create nudge bead: %v", err)
 	}
 	e.mintWisp(t, "sweep wisp")
-	if _, err := molecule.Instantiate(context.Background(), e.graphStore(), conformanceGraphRecipe(), molecule.Options{}); err != nil {
+	if _, err := molecule.Instantiate(context.Background(), beadstest.GraphMolecule(e.graphStore()), conformanceGraphRecipe(), molecule.Options{}); err != nil {
 		t.Fatalf("materialize sweep molecule: %v", err)
 	}
 

@@ -1532,7 +1532,7 @@
         },
         "auto_prune_worker_dir": {
           "type": "boolean",
-          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits.\nNil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, not a managed worktree (one gc worktree ensure\nprovisioned, which only its owner removes), clean working tree, no\nunpushed commits. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
           "default": true
         }
       },
@@ -2845,6 +2845,22 @@
           },
           "type": "array",
           "description": "DefaultSlingTargets is the plural form of DefaultSlingTarget.\nWhen set, targetless gc sling picks one entry at random each dispatch.\nTakes precedence over DefaultSlingTarget when non-empty. Each entry is\nresolved the same way as DefaultSlingTarget. Example:\n  default_sling_targets = [\"rig/polecat-a\", \"rig/polecat-b\"]"
+        },
+        "federation": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Federation selects which of this city's agents may act on the rig's bead\nstore. \"city\" (the default) keeps today's behavior: city-scoped agents\nread every rig, and any agent whose identity matches a row may serve,\nclaim or release it. \"rig\" restricts this city to identities inside the\nrig's namespace (\"\u003cname\u003e/...\", compared under the bead store's actor\nfold) and to this city's own pool sessions of the rig's agents; rows\nowned by anything else are left alone. Set it on a rig whose bead store\nanother city also attaches. It is deliberately not patchable. NOT YET\nENFORCED: this build validates the setting and warns at start and\nreload, but still acts on every row of the rig's store, so a rig with\nfederation = \"rig\" is not protected yet."
+        },
+        "namespace": {
+          "type": "string",
+          "enum": [
+            "shared",
+            "exclusive"
+          ],
+          "description": "Namespace declares whether another city may serve this rig's namespace\non the same bead store: \"shared\" (the default) or \"exclusive\".\n\"exclusive\" requires federation = \"rig\". It is a declaration that\ncross-city checks read; it changes nothing in this city on its own."
         },
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",

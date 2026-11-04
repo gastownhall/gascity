@@ -41,6 +41,10 @@ const (
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline
 	alertUnknownState   = "unknown-state"          // a state legacy does not know was written (I-legacy broke)
 	alertHealRefused    = "heal-refused"           // an A6 heal refused until its backoff reached the cap
+	// alertPeekHeld: a start's recycle or A12's classification held on a
+	// dead box's screen it cannot read (peek-error) until its backoff
+	// reached the cap. The hold has no deadline: this is what reports it.
+	alertPeekHeld = "peek-held"
 	// alertWorktreeRefused: the allocation refuses a pool work item whose
 	// worktree evidence it found unusable (C6.5(a)); no create effect ever
 	// sees the request, so this alert is all that reports the starved item.
@@ -50,6 +54,10 @@ const (
 // healRefusalsBeforeAlert is how many backed-off refusals in a row an A6 heal
 // takes before it alerts: the sixth reaches P4's 5-minute cap.
 const healRefusalsBeforeAlert = 6
+
+// peekHeldRepeat is how many more refusals in a row, at the cap, a peek
+// hold takes before its alert repeats: about every 30 minutes.
+const peekHeldRepeat = 6
 
 // passObserver is the planner's memory for alerting once and emitting on
 // change.
@@ -68,6 +76,8 @@ type passObserver struct {
 	// claimedCut is the last pass's claimed-demand cut, as template/bead keys
 	// (observeClaimedDemand).
 	claimedCut map[string]struct{}
+	// peekHeld is each held row's refusal count at its last peek-held alert.
+	peekHeld map[rowKey]int
 }
 
 // stopEscalationKey is one row incarnation's stop request.
@@ -115,9 +125,39 @@ func (p *planner) observeSettlement(s settlement) {
 		p.backoff.Record(rowBackoffKey(s.Key)).Consecutive == healRefusalsBeforeAlert {
 		p.alert(alertHealRefused, s.Key.ID, fmt.Sprintf("%s effect for %s refused %d times in a row, last with cause %q", s.Kind, s.Key.ID, healRefusalsBeforeAlert, s.Cause))
 	}
+	p.observePeekHold(s)
 	if (s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && strings.TrimPrefix(s.Cause, causeFinalizePrefix) == causeDeadline {
 		p.alert(alertEffectDeadline, s.Key.ID+s.Token, fmt.Sprintf("%s effect for %s settled at its deadline", s.Kind, s.Key.ID+s.Token))
 	}
+}
+
+// observePeekHold alerts on a start's recycle or A12's classification held
+// on a dead runtime's screen it cannot read (peek-error): once the row's
+// refusals in a row reach the backoff's cap with the latest a peek-error,
+// whatever the causes before it, and again every peekHeldRepeat refusals
+// while the latest stays one. A row whose refusals restart counts afresh.
+func (p *planner) observePeekHold(s settlement) {
+	if s.Kind != intentStart && s.Kind != intentZombie {
+		return
+	}
+	if s.Outcome != settledRefused || s.Cause != causePeekError {
+		if s.Outcome != settledRefused {
+			delete(p.obs.peekHeld, s.Key)
+		}
+		return
+	}
+	n := p.backoff.Record(rowBackoffKey(s.Key)).Consecutive
+	last, alerted := p.obs.peekHeld[s.Key]
+	if n < healRefusalsBeforeAlert || alerted && n >= last && n-last < peekHeldRepeat {
+		return
+	}
+	if p.obs.peekHeld == nil {
+		p.obs.peekHeld = map[rowKey]int{}
+	}
+	p.obs.peekHeld[s.Key] = n
+	p.alert(alertPeekHeld, s.Key.ID, fmt.Sprintf("%s effect for session %s held %d times in a row: the screen of its dead runtime cannot be read (%v); "+
+		"it is not recycled until the screen reads; suspending the session (gc session suspend %s) stops it, and the stop removes the dead runtime by its object without reading its screen",
+		s.Kind, s.Key.ID, n, s.Err, s.Key.ID))
 }
 
 // settledKey is a settlement's "settled" key: kind/outcome[/cause].

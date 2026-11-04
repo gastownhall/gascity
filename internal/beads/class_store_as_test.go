@@ -556,11 +556,13 @@ func TestLiveForSeesThroughClassHandles(t *testing.T) {
 		s    Store
 		want LiveReader
 	}{
-		"a cache":                     {cache, liveStoreReader{store: cache}},
-		"a handle over a cache":       {GraphStore{cache}, liveStoreReader{store: cache}},
-		"nested handles over a cache": {MailStore{OrdersStore{cache}}, liveStoreReader{store: cache}},
-		"a plain store":               {mem, logicalLiveStoreReader{store: mem}},
-		"a handle over a plain store": {MailStore{mem}, logicalLiveStoreReader{store: mem}},
+		"a cache":                              {cache, liveStoreReader{store: cache}},
+		"a handle over a cache":                {GraphStore{cache}, liveStoreReader{store: cache}},
+		"nested handles over a cache":          {MailStore{OrdersStore{cache}}, liveStoreReader{store: cache}},
+		"a plain store":                        {mem, logicalLiveStoreReader{store: mem}},
+		"a handle over a plain store":          {MailStore{mem}, logicalLiveStoreReader{store: mem}},
+		"a molecule target over a cache":       {GraphMolecule(GraphStore{cache}), liveStoreReader{store: cache}},
+		"a molecule target over a plain store": {WorkMolecule(WorkStore{mem}), logicalLiveStoreReader{store: mem}},
 	} {
 		if got := LiveFor(tc.s); got != tc.want {
 			t.Errorf("%s: LiveFor = %#v, want %#v", name, got, tc.want)
