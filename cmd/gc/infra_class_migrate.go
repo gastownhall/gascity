@@ -2305,16 +2305,17 @@ func prepareInfraDestination(destination beads.Store, plan *infraCopyPlan) (infr
 			drop = append(drop, b.ID)
 		}
 	}
-	if deleter, ok := beads.As[beads.BatchDeleter](destination); ok && len(drop) > 0 {
-		if err := deleter.DeleteBatch(drop); err != nil {
-			return prepared, fmt.Errorf("clearing %d partial attempt row(s): %w", len(drop), err)
-		}
+	if len(drop) == 0 {
 		return prepared, nil
 	}
-	for _, id := range drop {
-		if err := destination.Delete(id); err != nil {
-			return prepared, fmt.Errorf("clearing partial attempt row %s: %w", id, err)
-		}
+	// The binding is a SQLite store, which deletes in batches, as the copy
+	// after this requires it to write in batches (importInfraSnapshot).
+	deleter, ok := beads.As[beads.BatchDeleter](destination)
+	if !ok {
+		return prepared, fmt.Errorf("binding store %T cannot delete in batches, so the %d partial attempt row(s) in it cannot be cleared", destination, len(drop))
+	}
+	if err := deleter.DeleteBatch(drop); err != nil {
+		return prepared, fmt.Errorf("clearing %d partial attempt row(s): %w", len(drop), err)
 	}
 	return prepared, nil
 }

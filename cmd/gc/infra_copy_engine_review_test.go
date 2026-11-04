@@ -702,3 +702,22 @@ func TestABatchedClearKilledBetweenChunksKeepsTheEdgesIntoRowsItRemoved(t *testi
 		t.Fatalf("%s deps after the resumed clear = %+v; the kept edge into %s, removed by the first run, must be back", work.ID, deps, first.ID)
 	}
 }
+
+// TestPrepareRefusesABindingThatCannotDeleteInBatches (round 3 NIT): the
+// per-row delete of an earlier attempt's rows is gone, as the copy's per-row
+// writes are; a binding that cannot delete in batches is refused by name with
+// its rows left as they were, not cleared by an untested path.
+func TestPrepareRefusesABindingThatCannotDeleteInBatches(t *testing.T) {
+	binding := beads.NewMemStore()
+	if _, ok := beads.As[beads.BatchDeleter](beads.Store(binding)); ok {
+		t.Fatal("MemStore now deletes in batches, so it is no longer the binding this test needs")
+	}
+	stamped := mustCreateInfraBead(t, binding, infraMigrationRow(beads.Bead{Title: "an earlier attempt's row", Type: "session"}))
+	_, err := prepareInfraDestination(binding, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot delete in batches") {
+		t.Fatalf("prepareInfraDestination = %v, want the binding refused for lacking batched deletes", err)
+	}
+	if _, err := binding.Get(stamped.ID); err != nil {
+		t.Fatalf("the refused prepare removed %s: %v", stamped.ID, err)
+	}
+}
