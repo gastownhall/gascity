@@ -403,7 +403,8 @@ func RelocatedClassRefusal(op string, matched []RelocatedClass) error {
 		"exactly one of open, in_progress, blocked, closed (no --all, no comma list, and deferred is not selectable), "+
 		"so enumerating a molecule's full membership takes one invocation per status and cannot reach a deferred member "+
 		"at all. There is no federated equivalent of `bd list --all` yet. "+
-		"`gc bd dep tree <id>` is not served in process; on a relocated id it is refused rather than answered from this ledger",
+		"To walk a relocated molecule, `gc bd dep tree <root-id> --json` answers in process from the binding its "+
+		"class is served from, as `gc bd show <id>` does",
 		ErrBdSQLClassRelocated, op, describeRelocatedClasses(matched))
 }
 
