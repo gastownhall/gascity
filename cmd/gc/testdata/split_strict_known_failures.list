@@ -233,7 +233,6 @@ TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails	fails under the gate: ri
 TestOrderDispatchTrackingStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: ordersStoreFor returned *splittest.view(0x75527b020e0), want the identical store value 0x7552730e000
 TestOrderDispatchWispStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: graphStoreFor returned *splittest.view(0x1ed316d78840), want the identical store value 0x1ed31656d260
 TestOrderGatePoursWorkIsLazyAndFailsSafe	fails under the gate: poursWork was asked on a single-store city
-TestOrderHistoryRouteEquivalence	fails under the gate: order history bytes differ: gc order history lists order runs through the work view (internal/orders/store.go orders.(*Store).RecentRuns from gc.doOrderHistoryBounded, a ratchet key not yet ruled on), which hides the seeded runs the API route returns
 TestOrderSweepTrackingConfirmAboveThresholdSweepsAndPrunes	fails under the gate: sc-02 should be preserved at the retain floor: bead "sc-02" is not in this store: bead not found
 TestOrderSweepTrackingRequiresConfirm	fails under the gate: cmdOrderSweepTrackingWithOptions (no confirm) = 0, want 1; stderr: warning: this city does not import required builtin pack(s) core; run "gc doctor --fix" to ad
 TestOrderTrackingRetentionWatchdog_LogsPrunedCount	fails under the gate: stderr = "", want 'pruned' in output
