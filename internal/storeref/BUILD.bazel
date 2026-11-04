@@ -40,6 +40,7 @@ go_test(
         "stores_test.go",
         "testenv_import_test.go",
         "topology_prefix_fault_test.go",
+        "unview_test.go",
         "walk_test.go",
         "work_axis_test.go",
     ],
