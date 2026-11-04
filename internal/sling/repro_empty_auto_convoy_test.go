@@ -65,7 +65,7 @@ func TestAutoConvoyClosedWhenTrackFails(t *testing.T) {
 		if c.Title != AutoConvoyRootTitle(b.ID) {
 			continue
 		}
-		members, err := convoycore.Members(base, c.ID, true)
+		members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: base}}, c.ID, true)
 		if err != nil {
 			t.Fatalf("members of %s: %v", c.ID, err)
 		}
