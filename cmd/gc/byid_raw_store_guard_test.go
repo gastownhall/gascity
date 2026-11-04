@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -39,7 +38,7 @@ var byIDRawOpeners = []string{
 	"openStoreAtForCityWithAuthority", "openAuthoritativeStoreAtForCity",
 	"openOneShotStoreAtForCityWithConfig", "openScopeLocalFileStore", "openScopeLocalFileStoreForCity",
 	"openExistingScopeLocalFileStore", "openCompatibleFileStore", "openControlStoreAtForCity",
-	"openRigStore", "openRigAwareStore", "openSlingCityStore", "openWispStepStore",
+	"openRigAwareStore", "openSlingCityStore", "openWispStepStore",
 	"openCityStatusStore", "openStandaloneRigStores", "buildStandaloneRigStores",
 	"buildStandaloneRigStoresWithConfig", "hookClaimBdStore", "hookClaimBdStoreContext",
 	"openInfraMigrationSource", "openBdStoreAtScoped", "openBdStoreAtWithConfig",
@@ -51,6 +50,9 @@ var byIDRawOpeners = []string{
 	"openWorkStoreResultAtForCityScoped", "openStoreForCity", "openStoreResultForCity",
 	"openSlingStoreForSource", "openGitHubPRRepairStore", "openMailTargetStore",
 	"openStoreFactoryForCity",
+	// Per-id openers: they resolve the store that owns ONE id, so the handle
+	// is raw for every other id. A same-id read carries a byid:allow marker.
+	"openConvoyStoreByID", "openConvoyStoreByIDAt", "openSlingStore",
 }
 
 // byIDRawQualified are the raw openers outside cmd/gc, by qualified name.
@@ -59,7 +61,7 @@ var byIDRawQualified = []string{"beads.NewBdStore"}
 // byIDRawAccessors are method calls that return a raw work or rig store (or a
 // map of them): the controller's and city runtime's work-store accessors.
 // Taking .Store off one is raw too.
-var byIDRawAccessors = []string{"CityBeadStore", "cityBeadStore", "BeadStore", "BeadStores", "rigBeadStores", "Work", "cityWorkStore"}
+var byIDRawAccessors = []string{"CityBeadStore", "cityBeadStore", "BeadStore", "BeadStores", "rigBeadStores", "Work", "cityWorkStore", "openRigStore"}
 
 // byIDRawFields are struct fields holding raw work or rig stores.
 var byIDRawFields = []string{"cityBeadStore", "beadStores", "standaloneCityStore", "standaloneRigStores"}
@@ -77,9 +79,6 @@ var byIDRoutedOpeners = map[string]string{
 	"openOwnedNudgeBeadStore":              "returns cliStores(...).Nudges(); the second result is the owned work handle, closed, never read by id",
 	"openOrderStoreForOrder":               "returns an OrdersStore; its relabel is a baseline row (order_store.go)",
 	"openConvergeStore":                    "returns a convergeScopeReader, which routes by convergeScopeStore",
-	"openSlingStore":                       "consults the binding residence (slingResidenceBinding) for a source bead it holds",
-	"openConvoyStoreByID":                  "resolves the convoy's store by id (resolveConvoyStore); convoys are work class",
-	"openConvoyStoreByIDAt":                "resolves the convoy's store by id (resolveConvoyStore); convoys are work class",
 	"openConvoyStores":                     "returns convoyStoreView directory scans behind byIDStoreOpener; convoys are work class",
 	"openConvoyStoreDirs":                  "returns convoyStoreView directory scans; convoys are work class",
 	"openConvoyCheckStoresAt":              "returns convoyStoreView directory scans; convoys are work class",
@@ -113,9 +112,25 @@ var byIDMethods = []string{
 	"GetExactBatch", "DeleteBatch", "UpdateReporting", "SetLocalString", "GetLocalString",
 }
 
-// byIDFrontDoors are the constructors that turn a store into a class front door;
-// handing one a raw work store relabels it without routing it.
-var byIDFrontDoors = []string{"sessionFrontDoor", "nudgeFrontDoor", "session.NewStore", "orders.NewStore", "nudgequeue.NewStore"}
+// byIDFrontDoors are the cmd/gc constructors that turn a store into a class
+// front door; handing one a raw work store relabels it without routing it.
+// (session.NewStore, orders.NewStore and nudgequeue.NewStore take typed class
+// handles, so a raw store reaches them only through a relabel, flagged there.)
+var byIDFrontDoors = []string{"sessionFrontDoor", "nudgeFrontDoor"}
+
+// byIDQualifiedSinks are by-id functions outside cmd/gc, by qualified name,
+// with the index of their beads.Store argument.
+var byIDQualifiedSinks = map[string]int{
+	"beads.ApplyMetadataCAS": 0,
+	"beads.RelicGet":         0,
+	"sling.ProbeBeadInStore": 0,
+}
+
+// byIDAllowMarker exempts one flagged line: `// byid:allow <reason>` trailing
+// the line of the method selector, callee name or Store: key. It is honored
+// only at the site itself; a marker inside a helper does not exempt the
+// helper's callers.
+const byIDAllowMarker = "byid:allow"
 
 // byIDClassHandles are the beads class-handle structs; beads.X{Store: raw}
 // relabels a raw work store as a class store.
@@ -145,11 +160,18 @@ type byIDScanner struct {
 	fset     *token.FileSet
 	funcs    []*byIDFunc
 	byName   map[string][]*byIDFunc
-	allow    map[string]map[int]bool // file -> lines carrying residency:allow
+	allow    map[string]map[int]bool // file -> lines carrying byIDAllowMarker
 	raw      map[string]bool         // raw opener names, aliases resolved
 	routed   map[string]bool
 	sanitize map[string]bool
 	summary  map[string]map[int]bool // func key -> beads.Store param indexes reaching a sink
+	vars     map[string]ast.Expr     // package-level open*Store* vars -> value
+	declared map[string]bool         // every function, method and package var name
+	// derived are package functions classified raw only because a return
+	// statement hands back a raw store (return-value summaries).
+	derived map[string]bool
+	// stale are list entries naming nothing in the package.
+	stale []string
 	// unclassified are open*Store* functions/vars returning a store that are
 	// classified neither raw nor routed.
 	unclassified []string
@@ -173,6 +195,8 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 		allow:    map[string]map[int]bool{},
 		raw:      byIDSet(byIDRawOpeners),
 		routed:   map[string]bool{},
+		declared: map[string]bool{},
+		derived:  map[string]bool{},
 		sanitize: byIDSet(byIDSanitizers),
 	}
 	for name := range byIDRoutedOpeners {
@@ -194,7 +218,7 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 		s.allow[base] = map[int]bool{}
 		for _, cg := range f.Comments {
 			for _, c := range cg.List {
-				if strings.Contains(c.Text, "residency:allow") {
+				if strings.Contains(c.Text, byIDAllowMarker) {
 					s.allow[base][fset.Position(c.Pos()).Line] = true
 				}
 			}
@@ -225,6 +249,7 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 				}
 				s.funcs = append(s.funcs, fn)
 				s.byName[fn.name] = append(s.byName[fn.name], fn)
+				s.declared[fn.name] = true
 			case *ast.GenDecl:
 				ast.Inspect(d, func(n ast.Node) bool {
 					spec, ok := n.(*ast.ValueSpec)
@@ -232,6 +257,7 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 						return true
 					}
 					for i, id := range spec.Names {
+						s.declared[id.Name] = true
 						if i < len(spec.Values) && byIDOpenerName.MatchString(id.Name) {
 							vars = append(vars, openerVar{id.Name, spec.Values[i]})
 						}
@@ -241,32 +267,18 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 			}
 		}
 	}
-	// An opener var aliasing a classified function inherits its class.
-	for changed := true; changed; {
-		changed = false
-		for _, v := range vars {
-			id, ok := v.value.(*ast.Ident)
-			if !ok || s.raw[v.name] || s.routed[v.name] {
-				continue
-			}
-			switch {
-			case s.raw[id.Name]:
-				s.raw[v.name] = true
-				changed = true
-			case s.routed[id.Name]:
-				s.routed[v.name] = true
-				s.sanitize[v.name] = true
-				changed = true
-			}
-		}
+	s.vars = map[string]ast.Expr{}
+	for _, v := range vars {
+		s.vars[v.name] = v.value
 	}
+	s.deriveRawReturns()
 	seen := map[string]bool{}
 	for _, fn := range s.funcs {
 		if !byIDOpenerName.MatchString(fn.name) || !byIDReturnsStore(fn.decl.Type) || seen[fn.name] {
 			continue
 		}
 		seen[fn.name] = true
-		if !s.raw[fn.name] && !s.routed[fn.name] {
+		if !s.raw[fn.name] && !s.routed[fn.name] && (fn.decl.Recv == nil || !slices.Contains(byIDRawAccessors, fn.name)) {
 			s.unclassified = append(s.unclassified, fn.file+": func "+fn.name)
 		}
 	}
@@ -290,9 +302,93 @@ func newByIDScanner(fset *token.FileSet, files map[string]*ast.File) *byIDScanne
 			s.unclassified = append(s.unclassified, "var "+v.name)
 		}
 	}
+	s.staleListEntries()
 	slices.Sort(s.unclassified)
 	s.summarize()
 	return s
+}
+
+// deriveRawReturns classifies, to a fixed point, every package function whose
+// return statement hands back a raw store, and every opener var aliasing a raw
+// or routed function. A helper outside any naming convention that returns a
+// raw store is therefore raw at its call sites.
+func (s *byIDScanner) deriveRawReturns() {
+	for changed := true; changed; {
+		changed = false
+		for name, value := range s.vars {
+			id, ok := value.(*ast.Ident)
+			if !ok || s.raw[name] || s.routed[name] {
+				continue
+			}
+			switch {
+			case s.raw[id.Name]:
+				s.raw[name] = true
+				changed = true
+			case s.routed[id.Name]:
+				s.routed[name] = true
+				s.sanitize[name] = true
+				changed = true
+			}
+		}
+		for _, fn := range s.funcs {
+			if fn.decl.Recv != nil || s.raw[fn.name] || s.sanitize[fn.name] || fn.decl.Type.Results == nil {
+				continue
+			}
+			if s.returnsRaw(fn.decl.Body) {
+				s.raw[fn.name] = true
+				s.derived[fn.name] = true
+				changed = true
+			}
+		}
+	}
+}
+
+// returnsRaw reports whether a return statement of body (not of a closure
+// inside it) hands back a raw store in any position.
+func (s *byIDScanner) returnsRaw(body *ast.BlockStmt) bool {
+	raw := s.rawIdents(body, nil)
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			for _, r := range x.Results {
+				if !s.isSanitized(r) && s.isRawSource(r, raw) {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// staleListEntries records list entries that name nothing declared in the
+// package, so a renamed or deleted helper cannot leave a dead classification.
+// Method names (routed method resolvers) count as declared. The raw accessors
+// are not checked: several are methods of types outside cmd/gc.
+func (s *byIDScanner) staleListEntries() {
+	check := func(list string, names []string) {
+		for _, name := range names {
+			if !s.declared[name] {
+				s.stale = append(s.stale, list+": "+name)
+			}
+		}
+	}
+	check("byIDRawOpeners", byIDRawOpeners)
+	check("byIDSanitizers", byIDSanitizers)
+	routed := make([]string, 0, len(byIDRoutedOpeners))
+	for name := range byIDRoutedOpeners {
+		routed = append(routed, name)
+	}
+	slices.Sort(routed)
+	check("byIDRoutedOpeners", routed)
+	for _, fd := range byIDFrontDoors {
+		if !strings.Contains(fd, ".") {
+			check("byIDFrontDoors", []string{fd})
+		}
+	}
 }
 
 // byIDReturnsStore reports a result type that names a store.
@@ -489,11 +585,13 @@ func (s *byIDScanner) rawIdents(body *ast.BlockStmt, seed map[string]bool) map[s
 }
 
 // sinks returns the flagged sites in body for the raw identifiers.
-func (s *byIDScanner) sinks(file string, body *ast.BlockStmt, raw map[string]bool) []byIDHit {
+func (s *byIDScanner) sinks(file string, body *ast.BlockStmt, raw map[string]bool, honorMarkers bool) []byIDHit {
 	var out []byIDHit
-	add := func(rule, detail string, n ast.Node) {
-		line := s.fset.Position(n.Pos()).Line
-		if s.allow[file][line] {
+	// add anchors a hit to the line of anchor (the method selector, the callee
+	// name, the Store: key), which is the line a byid:allow marker must sit on.
+	add := func(rule, detail string, anchor ast.Node) {
+		line := s.fset.Position(anchor.Pos()).Line
+		if honorMarkers && s.allow[file][line] {
 			return
 		}
 		out = append(out, byIDHit{file: file, rule: rule, detail: detail, line: line})
@@ -517,21 +615,27 @@ func (s *byIDScanner) sinks(file string, body *ast.BlockStmt, raw map[string]boo
 				}
 			}
 			if shadowed {
-				out = append(out, s.sinks(file, x.Body, inner)...)
+				out = append(out, s.sinks(file, x.Body, inner, honorMarkers)...)
 				return false
 			}
 		case *ast.CallExpr:
 			name, qual := byIDCallee(x)
-			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && slices.Contains(byIDMethods, name) &&
-				(name != "Close" || len(x.Args) != 0) && s.isRawSource(sel.X, raw) {
-				add("byid", name+" on "+byIDExprString(sel.X), x)
+			anchor := ast.Node(x.Fun)
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				anchor = sel.Sel
+				if slices.Contains(byIDMethods, name) && (name != "Close" || len(x.Args) != 0) && s.isRawSource(sel.X, raw) {
+					add("byid", name+" on "+byIDExprString(sel.X), sel.Sel)
+				}
 			}
-			if slices.Contains(byIDFrontDoors, qual) || slices.Contains(byIDFrontDoors, name) {
+			if slices.Contains(byIDFrontDoors, name) {
 				for _, a := range x.Args {
 					if s.isRawSource(a, raw) {
-						add("frontdoor", qual+"("+byIDIdent(a)+")", x)
+						add("frontdoor", qual+"("+byIDIdent(a)+")", anchor)
 					}
 				}
+			}
+			if idx, ok := byIDQualifiedSinks[qual]; ok && idx < len(x.Args) && s.isRawSource(x.Args[idx], raw) {
+				add("via", qual+"("+byIDIdent(x.Args[idx])+")", anchor)
 			}
 			if _, ok := x.Fun.(*ast.Ident); ok && !s.sanitize[name] {
 				for _, cand := range s.byName[name] {
@@ -540,7 +644,7 @@ func (s *byIDScanner) sinks(file string, body *ast.BlockStmt, raw map[string]boo
 					}
 					for idx := range s.summary[cand.key] {
 						if idx < len(x.Args) && s.isRawSource(x.Args[idx], raw) {
-							add("via", name+"("+byIDIdent(x.Args[idx])+")", x)
+							add("via", name+"("+byIDIdent(x.Args[idx])+")", anchor)
 						}
 					}
 				}
@@ -553,7 +657,7 @@ func (s *byIDScanner) sinks(file string, body *ast.BlockStmt, raw map[string]boo
 						continue
 					}
 					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Store" && s.isRawSource(kv.Value, raw) {
-						add("relabel", "beads."+sel.Sel.Name+"{Store: "+byIDIdent(kv.Value)+"}", x)
+						add("relabel", "beads."+sel.Sel.Name+"{Store: "+byIDIdent(kv.Value)+"}", kv.Key)
 					}
 				}
 			}
@@ -576,7 +680,7 @@ func (s *byIDScanner) summarize() {
 					continue
 				}
 				raw := s.rawIdents(fn.decl.Body, map[string]bool{p: true})
-				if len(s.sinks(fn.file, fn.decl.Body, raw)) == 0 {
+				if len(s.sinks(fn.file, fn.decl.Body, raw, false)) == 0 {
 					continue
 				}
 				if s.summary[fn.key] == nil {
@@ -594,7 +698,7 @@ func (s *byIDScanner) hits() []byIDHit {
 	var out []byIDHit
 	for _, fn := range s.funcs {
 		raw := s.rawIdents(fn.decl.Body, nil)
-		for _, h := range s.sinks(fn.file, fn.decl.Body, raw) {
+		for _, h := range s.sinks(fn.file, fn.decl.Body, raw, true) {
 			h.fn = fn.key
 			out = append(out, h)
 		}
@@ -636,18 +740,21 @@ type byIDBaselineRow struct {
 	count      int
 }
 
-func readByIDBaseline(t *testing.T, path string) (rows []byIDBaselineRow, lines []string) {
+func readByIDBaseline(t *testing.T, path string) []string {
 	t.Helper()
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	defer func() { _ = f.Close() }()
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// parseByIDBaseline parses the golden's rows, each with the "## <reason>"
+// group it sits under.
+func parseByIDBaseline(lines []string) ([]byIDBaselineRow, error) {
+	var rows []byIDBaselineRow
 	group := ""
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		lines = append(lines, line)
+	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case trimmed == "":
@@ -660,57 +767,106 @@ func readByIDBaseline(t *testing.T, path string) (rows []byIDBaselineRow, lines 
 		}
 		parts := strings.Split(line, "\t")
 		if len(parts) != 4 {
-			t.Fatalf("%s: malformed row %q: want file<TAB>function<TAB>rule<TAB>count", path, line)
+			return nil, fmt.Errorf("malformed row %q: want file<TAB>function<TAB>rule<TAB>count", line)
 		}
 		n, err := strconv.Atoi(parts[3])
 		if err != nil || n <= 0 {
-			t.Fatalf("%s: row %q: count must be a positive integer", path, line)
+			return nil, fmt.Errorf("row %q: count must be a positive integer", line)
 		}
 		rows = append(rows, byIDBaselineRow{key: strings.Join(parts[:3], "\t"), group: group, count: n})
 	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return rows, lines
+	return rows, nil
 }
 
-// rewriteByIDBaseline updates counts in place, drops stale rows and files new
-// keys under the UNDOCUMENTED group.
-func rewriteByIDBaseline(t *testing.T, path string, lines []string, got map[string]int) {
-	t.Helper()
-	var out []string
-	kept := map[string]bool{}
+// regenByIDBaseline is the regeneration path. A documented row is kept, or
+// LOWERED in place when its count fell, or dropped when it reaches nothing. A
+// row is never raised in place: a grown key is commented out where it was and
+// filed, at its new count, in a fresh UNDOCUMENTED block with every new key and
+// every row an earlier regeneration left undocumented. The checker refuses that
+// block however many times regeneration runs.
+func regenByIDBaseline(lines []string, got map[string]int) []string {
+	var out, pending []string
+	group := ""
+	filed := map[string]bool{}
 	for _, line := range lines {
-		parts := strings.Split(line, "\t")
 		trimmed := strings.TrimSpace(line)
+		parts := strings.Split(line, "\t")
+		if strings.HasPrefix(trimmed, "## ") {
+			group = strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
+			if group == byIDUndocumentedGroup {
+				continue
+			}
+		}
 		if len(parts) != 4 || strings.HasPrefix(trimmed, "#") {
-			if trimmed == "## "+byIDUndocumentedGroup {
+			if group == byIDUndocumentedGroup && trimmed == "" {
 				continue
 			}
 			out = append(out, line)
 			continue
 		}
 		key := strings.Join(parts[:3], "\t")
-		if got[key] == 0 {
-			continue
+		n, _ := strconv.Atoi(parts[3])
+		filed[key] = true
+		switch {
+		case got[key] == 0:
+		case group == "" || group == byIDUndocumentedGroup:
+			pending = append(pending, fmt.Sprintf("%s\t%d", key, got[key]))
+		case got[key] > n:
+			out = append(out, fmt.Sprintf("# grew from %d to %d; reclassify: %s", n, got[key], strings.ReplaceAll(key, "\t", " ")))
+			pending = append(pending, fmt.Sprintf("%s\t%d", key, got[key]))
+		default:
+			out = append(out, fmt.Sprintf("%s\t%d", key, got[key]))
 		}
-		kept[key] = true
-		out = append(out, fmt.Sprintf("%s\t%d", key, got[key]))
 	}
-	var fresh []string
 	for key, n := range got {
-		if !kept[key] {
-			fresh = append(fresh, fmt.Sprintf("%s\t%d", key, n))
+		if !filed[key] {
+			pending = append(pending, fmt.Sprintf("%s\t%d", key, n))
 		}
 	}
-	if len(fresh) > 0 {
-		slices.Sort(fresh)
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	if len(pending) > 0 {
+		slices.Sort(pending)
 		out = append(out, "", "## "+byIDUndocumentedGroup)
-		out = append(out, fresh...)
+		out = append(out, pending...)
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
+	return out
+}
+
+// checkByIDBaseline reports every way the tree and the golden disagree.
+func checkByIDBaseline(rows []byIDBaselineRow, got map[string]int, sites map[string][]string) []string {
+	var problems []string
+	want := map[string]int{}
+	for _, r := range rows {
+		if _, dup := want[r.key]; dup {
+			problems = append(problems, fmt.Sprintf("duplicate row %q", r.key))
+		}
+		want[r.key] = r.count
+		if r.group == "" || r.group == byIDUndocumentedGroup {
+			problems = append(problems, fmt.Sprintf("row %q is undocumented: move it under a \"## <reason>\" header, or fix the site", strings.ReplaceAll(r.key, "\t", " ")))
+		}
 	}
+	keys := make([]string, 0, len(got))
+	for k := range got {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if got[k] > want[k] {
+			problems = append(problems, fmt.Sprintf("NEW by-id op on a raw work store: %s: %d site(s), baseline %d:\n\t%s\n"+
+				"Route it through cliByIDOwner / cliByIDBindingOwner / classRoutedStoreForID / the class resolvers (cliSessionStore, cliStores(...).X(), resolve*Store),"+
+				" or, if the bead is work-class by construction, add a trailing `// %s <reason>` on the flagged line.",
+				strings.ReplaceAll(k, "\t", " "), got[k], want[k], strings.Join(sites[k], "\n\t"), byIDAllowMarker))
+		}
+	}
+	for _, r := range rows {
+		if got[r.key] < r.count {
+			problems = append(problems, fmt.Sprintf("%s: %d site(s), below its baseline %d: lower the row (or remove it) in the same change (%s=1 rewrites counts)",
+				strings.ReplaceAll(r.key, "\t", " "), got[r.key], r.count, byIDRawStoreUpdateEnv))
+		}
+	}
+	return problems
 }
 
 // TestByIDOpsDoNotTargetRawWorkStores fails CI when a by-id bead operation is
@@ -724,22 +880,36 @@ func rewriteByIDBaseline(t *testing.T, path string, lines []string, got map[stri
 // #8137, ga-ylpbsy.36 and `gc session reset`.
 //
 // Per function (go/parser, flow-insensitive), an identifier is RAW when
-// assigned from a raw opener (byIDRawOpeners and their package-var aliases), a
-// raw accessor or field, .Store off one, or a range value over one; it is
-// cleared when assigned from a class/residency helper (byIDSanitizers,
+// assigned from a raw opener (byIDRawOpeners, their package-var aliases, and
+// any package function whose return statement hands back a raw store), a raw
+// accessor or field, .Store off one, or a range value over one; it is cleared
+// when assigned from a class/residency helper (byIDSanitizers,
 // byIDRoutedOpeners). Flagged: a by-id method on a raw store (rule byid), a raw
 // store handed to a front-door constructor (frontdoor) or relabeled as a class
 // handle (relabel), and a raw store passed to a package function whose
-// beads.Store parameter reaches any of those (via).
+// beads.Store parameter reaches any of those, or to a byIDQualifiedSinks
+// function (via).
+//
+// Known residuals, by design of a name-based scan: identifiers are matched by
+// NAME, not by scope, so a same-named variable in another block of the
+// function is conflated with the raw one (closure parameters excepted); and the
+// analysis is flow-insensitive, so a function that swaps one variable between
+// a raw and a routed store is judged by whether it was EVER assigned a routed
+// store. Methods, interfaces and other packages are not followed; that typed
+// reachability is a separate guard.
 //
 // The counts ratchet against byIDRawStoreBaseline: growth fails, and so does a
 // row the tree no longer reaches. A self-check fails any open*Store* function
-// or opener var returning a store that is classified neither raw nor routed.
+// or opener var returning a store that is classified neither raw nor routed,
+// and any classification list entry that names nothing in the package.
 func TestByIDOpsDoNotTargetRawWorkStores(t *testing.T) {
 	fset, files := parseByIDPackage(t, ".")
 	s := newByIDScanner(fset, files)
 	for _, u := range s.unclassified {
 		t.Errorf("%s returns a store but is classified neither raw (byIDRawOpeners) nor routed (byIDRoutedOpeners) in byid_raw_store_guard_test.go; classify it so a by-id op on what it returns is policed", u)
+	}
+	for _, e := range s.stale {
+		t.Errorf("stale classification entry %s: it names nothing declared in cmd/gc; drop or rename it", e)
 	}
 	hits := s.hits()
 	got := map[string]int{}
@@ -751,40 +921,75 @@ func TestByIDOpsDoNotTargetRawWorkStores(t *testing.T) {
 	if len(hits) == 0 || len(s.funcs) < 1000 {
 		t.Fatalf("flagged %d sites over %d functions; the scan missed the package", len(hits), len(s.funcs))
 	}
-	rows, lines := readByIDBaseline(t, byIDRawStoreBaseline)
+	lines := readByIDBaseline(t, byIDRawStoreBaseline)
 	if os.Getenv(byIDRawStoreUpdateEnv) != "" {
-		rewriteByIDBaseline(t, byIDRawStoreBaseline, lines, got)
-		t.Logf("rewrote %s; document every row under an UNDOCUMENTED header before committing", byIDRawStoreBaseline)
+		out := regenByIDBaseline(lines, got)
+		if err := os.WriteFile(byIDRawStoreBaseline, []byte(strings.Join(out, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rewrote %s; document every UNDOCUMENTED row under a reason before committing", byIDRawStoreBaseline)
 		return
 	}
-	want := map[string]int{}
+	rows, err := parseByIDBaseline(lines)
+	if err != nil {
+		t.Fatalf("%s: %v", byIDRawStoreBaseline, err)
+	}
+	for _, p := range checkByIDBaseline(rows, got, sites) {
+		t.Errorf("%s: %s", byIDRawStoreBaseline, p)
+	}
+}
+
+// TestByIDBaselineRegenerationNeverLaundersARow proves regeneration cannot
+// document a row: a grown key and a new key land in the UNDOCUMENTED block,
+// and a second regeneration leaves them there, so the check still fails.
+func TestByIDBaselineRegenerationNeverLaundersARow(t *testing.T) {
+	golden := []string{
+		"# header",
+		"",
+		"## documented reason",
+		"a.go\tf\tbyid\t1",
+		"a.go\tg\tvia\t2",
+		"a.go\tgone\tbyid\t1",
+	}
+	got := map[string]int{
+		"a.go\tf\tbyid": 2, // grew
+		"a.go\tg\tvia":  1, // fell
+		"b.go\th\tbyid": 1, // new
+	}
+	once := regenByIDBaseline(golden, got)
+	twice := regenByIDBaseline(once, got)
+	if !slices.Equal(once, twice) {
+		t.Errorf("regeneration is not idempotent:\nonce:\n%s\ntwice:\n%s", strings.Join(once, "\n"), strings.Join(twice, "\n"))
+	}
+	rows, err := parseByIDBaseline(twice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string]string{}
 	for _, r := range rows {
-		if _, dup := want[r.key]; dup {
-			t.Errorf("%s: duplicate row %q", byIDRawStoreBaseline, r.key)
-		}
-		want[r.key] = r.count
-		if r.group == "" || r.group == byIDUndocumentedGroup {
-			t.Errorf("%s: row %q has no reason: move it under a \"## <reason>\" header, or fix the site", byIDRawStoreBaseline, r.key)
+		groups[r.key] = r.group
+	}
+	if g := groups["a.go\tf\tbyid"]; g != byIDUndocumentedGroup {
+		t.Errorf("the grown row sits under %q, want the UNDOCUMENTED block", g)
+	}
+	if g := groups["b.go\th\tbyid"]; g != byIDUndocumentedGroup {
+		t.Errorf("the new row sits under %q, want the UNDOCUMENTED block", g)
+	}
+	if g := groups["a.go\tg\tvia"]; g != "documented reason" {
+		t.Errorf("the lowered row moved to %q; a fall keeps its reason", g)
+	}
+	if _, ok := groups["a.go\tgone\tbyid"]; ok {
+		t.Error("a row reaching nothing survived regeneration")
+	}
+	problems := checkByIDBaseline(rows, got, nil)
+	undocumented := 0
+	for _, p := range problems {
+		if strings.Contains(p, "is undocumented") {
+			undocumented++
 		}
 	}
-	keys := make([]string, 0, len(got))
-	for k := range got {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	for _, k := range keys {
-		if got[k] > want[k] {
-			t.Errorf("NEW by-id op on a raw work store: %s: %d site(s), baseline %d:\n\t%s\n"+
-				"Route it through cliByIDOwner / classRoutedStoreForID / the class resolvers (cliSessionStore, cliStores(...).X(), resolve*Store),"+
-				" or, if the bead is work-class by construction, add a trailing `// residency:allow <reason>` on the line.",
-				strings.ReplaceAll(k, "\t", " "), got[k], want[k], strings.Join(sites[k], "\n\t"))
-		}
-	}
-	for _, r := range rows {
-		if got[r.key] < r.count {
-			t.Errorf("%s: %s: %d site(s), below its baseline %d: lower the row (or remove it) in the same change (%s=1 rewrites counts)",
-				byIDRawStoreBaseline, strings.ReplaceAll(r.key, "\t", " "), got[r.key], r.count, byIDRawStoreUpdateEnv)
-		}
+	if undocumented != 2 {
+		t.Fatalf("after two regenerations the check reports %d undocumented row(s), want 2: %v", undocumented, problems)
 	}
 }
 
@@ -877,9 +1082,43 @@ func shadowedByClosure(id string) {
 	read(nil)
 }
 
+func derivedHelper() beads.Store {
+	store, _ := openCityStoreAt("/city")
+	return store
+}
+
+func viaDerived(id string) {
+	_, _ = derivedHelper().Get(id)
+}
+
+func qualifiedSink(id string) {
+	raw, _ := openCityStoreAt("/city")
+	_, _ = beads.ApplyMetadataCAS(raw, id, "k", "a", "b")
+}
+
+func markedHelper(store beads.Store, id string) {
+	_, _ = store.Get(id) // byid:allow marked inside the helper
+}
+
+func callerOfMarkedHelper(id string) {
+	raw, _ := openCityStoreAt("/city")
+	markedHelper(raw, id)
+}
+
+func otherMarker(id string) {
+	raw, _ := openCityStoreAt("/city")
+	_, _ = raw.Get(id) // residency:allow a different guard's marker
+}
+
+func multiLineMarked(id string) {
+	raw, _ := openCityStoreAt("/city")
+	_ = raw.
+		SetMetadata(id, "k", "v") // byid:allow anchored on the selector line
+}
+
 func allowed(id string) {
 	raw, _ := openCityStore(nil, "gc x")
-	_, _ = raw.Get(id) // residency:allow work bead by construction
+	_, _ = raw.Get(id) // byid:allow work bead by construction
 }
 `
 	s := byIDScanSnippet(t, src)
@@ -888,23 +1127,27 @@ func allowed(id string) {
 		got[h.fn] = h.rule
 	}
 	want := map[string]string{
-		"directGet":   "byid",
-		"relabel":     "relabel",
-		"frontDoor":   "frontdoor",
-		"viaHelper":   "via",
-		"accessor":    "byid",
-		"rangeValue":  "byid",
-		"resultStore": "byid",
-		"aliasOpener": "byid",
+		"directGet":            "byid",
+		"relabel":              "relabel",
+		"frontDoor":            "frontdoor",
+		"viaHelper":            "via",
+		"accessor":             "byid",
+		"rangeValue":           "byid",
+		"resultStore":          "byid",
+		"aliasOpener":          "byid",
+		"viaDerived":           "byid",
+		"qualifiedSink":        "via",
+		"callerOfMarkedHelper": "via",
+		"otherMarker":          "byid",
 	}
 	for fn, rule := range want {
 		if got[fn] != rule {
 			t.Errorf("%s: flagged as %q, want %q", fn, got[fn], rule)
 		}
 	}
-	for _, fn := range []string{"sessionRouted", "classRouted", "handleClose", "shadowedByClosure", "allowed", "helper"} {
+	for _, fn := range []string{"sessionRouted", "classRouted", "handleClose", "shadowedByClosure", "allowed", "multiLineMarked", "helper", "markedHelper", "derivedHelper"} {
 		if rule, ok := got[fn]; ok {
-			t.Errorf("%s: flagged as %q; a routed store, a handle Close, a closure parameter shadowing a raw name, a residency:allow line and a helper's own parameter are not hits", fn, rule)
+			t.Errorf("%s: flagged as %q; a routed store, a handle Close, a closure parameter shadowing a raw name, a byid:allow line (on the selector's line) and a helper's own parameter are not hits", fn, rule)
 		}
 	}
 	if len(got) != len(want) {
@@ -927,10 +1170,15 @@ func openStoreLabels(path string) []string { return nil }
 var openShinySeamStore = func(path string) (beads.Store, error) { return nil, nil }
 
 var openRawAliasStore = openCityStoreAt
+
+func openDerivedRawStore(path string) (beads.Store, error) {
+	store, err := openCityStoreAt(path)
+	return store, err
+}
 `
 	s := byIDScanSnippet(t, src)
 	want := []string{"snippet.go: func openShinyNewStore", "var openShinySeamStore"}
 	if !slices.Equal(s.unclassified, want) {
-		t.Fatalf("unclassified = %v, want %v (a non-store result and an alias of a raw opener are classified)", s.unclassified, want)
+		t.Fatalf("unclassified = %v, want %v (a non-store result, an alias of a raw opener and a function returning a raw store are classified)", s.unclassified, want)
 	}
 }

@@ -876,7 +876,7 @@ func TestBeadsMetadataCASRefusesABindingOwnedIDOnASplitCity(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("metadata-cas exited 0 for a binding-owned id; stdout=%q stderr=%q", stdout, stderr)
 		}
-		for _, want := range []string{resident.ID, "is owned by", "refusing"} {
+		for _, want := range []string{resident.ID, "is owned by the relocated class binding", "refused", "Nothing was written"} {
 			if !strings.Contains(stderr, want) {
 				t.Errorf("refusal is missing %q; stderr=%q", want, stderr)
 			}
@@ -890,6 +890,32 @@ func TestBeadsMetadataCASRefusesABindingOwnedIDOnASplitCity(t *testing.T) {
 		}
 		if got.Metadata["review_sha"] != "old" {
 			t.Fatalf("the relic copy was swapped to %q; a refused CAS must write nothing", got.Metadata["review_sha"])
+		}
+	})
+
+	t.Run("split city, work-shaped relic id", func(t *testing.T) {
+		_, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+		resetCLIStorageRoutes(t)
+		captureCLIStorageStderr(t)
+		relic, _ := classResidentWorkShapedBead(t, cityDir, "demo-relic1", "migrated under a work-shaped id")
+		work := beads.NewMemStore()
+		work.HonorExplicitIDs = true
+		if _, err := work.Create(beads.Bead{ID: relic.ID, Title: "frozen copy", Metadata: beads.StringMap{"review_sha": "old"}}); err != nil {
+			t.Fatal(err)
+		}
+		installMetadataCASStoreSeams(t, func(_, _ string) (beads.Store, error) {
+			return work, nil
+		}, func(beads.Store) error { return nil })
+
+		stdout, stderr, code := runMetadataCASTestCommand(cityDir, relic.ID, "--expected=old", "--next=new")
+		if code == 0 {
+			t.Fatalf("metadata-cas exited 0 for binding-owned relic %s; stdout=%q stderr=%q", relic.ID, stdout, stderr)
+		}
+		if !strings.Contains(stderr, relic.ID+" is owned by the relocated class binding") {
+			t.Errorf("refusal does not name the owner; stderr=%q", stderr)
+		}
+		if got, _ := work.Get(relic.ID); got.Metadata["review_sha"] != "old" {
+			t.Fatalf("the work copy was swapped to %q", got.Metadata["review_sha"])
 		}
 	})
 

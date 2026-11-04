@@ -13,28 +13,33 @@
 # A NEW hit is fixed, not baselined: route the read through cliByIDOwner /
 # classRoutedStoreForID / cliByIDBindingOwner or the class resolvers
 # (cliSessionStore, cliStores(...).X(), resolve*Store). If the bead is
-# work-class by construction, add a trailing `// residency:allow <reason>` on
-# the flagged line instead; the reason is the review.
+# work-class by construction, add a trailing `// byid:allow <reason>` on the
+# flagged line (the line of the method selector, callee name or Store: key)
+# instead; the reason is the review. A marker inside a helper does not exempt
+# the helper's callers.
 #
 # UPDATE_BYID_RAW_STORE_GOLDEN=1 go test ./cmd/gc/ -run TestByIDOpsDoNotTargetRawWorkStores
-# rewrites counts in place and files new keys under an UNDOCUMENTED group, which
-# the test refuses: every row must sit under a "## <reason>" header.
+# lowers or drops rows in place and files every new or grown key in an
+# UNDOCUMENTED group, which the test refuses however often it is rerun: every
+# row must sit under a "## <reason>" header.
 
 ## work-store base by construction: runBdStoreBridge is the bd-workspace bridge, and the gc bd close gate judges the bead bd itself is about to close in the store bd serves
 cmd_bd_store_bridge.go	runBdStoreBridge	byid	9
 cmd_bd_store_bridge.go	runBdStoreBridge	via	1
 work_record_gate.go	runWorkRecordCloseGate	via	1
 
-## bd-context by construction: the work hook claims, stamps and releases through the bd workspace (dir/env) that served the bead to its own work query; that context also owns the claimed step's workflow root
+## hook claim seams wrapped by classRoutedHookClaimOps: each runs on the work-scope bd context first and escalates to the class binding on a not-found the route proves the binding holds (Claim, StampWorkMeta, ReadWorkMeta, AssignContinuation, Release, RestampAdopted, SkipDoneWorkflow, EmitExecutionStepStarted)
 cmd_hook_claim.go	emitExecutionStepStarted	relabel	1
 cmd_hook_claim.go	hookAssignContinuationWithBdStore	byid	1
 cmd_hook_claim.go	hookClaimReleaseWithBdStore	byid	1
 cmd_hook_claim.go	hookClaimRestampWithBdStore	byid	1
 cmd_hook_claim.go	hookClaimWithBdStore	byid	1
-cmd_hook_claim.go	hookConfirmBeadBlockedWithBdStore	via	1
 cmd_hook_claim.go	hookReadClaimedBeadWithBdStore	byid	1
 cmd_hook_claim.go	hookSkipDoneWorkflowWithBdStore	via	1
 cmd_hook_claim.go	hookStampWorkMetaWithBdStore	byid	1
+
+## KNOWN GAP (follow-up): the ConfirmBlocked seam is NOT wrapped by classRoutedHookClaimOps (cmd_hook_claim.go applyDefaults), so on a split city it reads a binding-resident bead's blocks deps on the work-scope bd context
+cmd_hook_claim.go	hookConfirmBeadBlockedWithBdStore	via	1
 
 ## storage migration tools operate on pre-migration work copies by definition
 infra_class_clear.go	clearRetainedInfraCopies	byid	2
@@ -43,31 +48,39 @@ infra_class_migrate.go	runInfraClassMigrationFrom	via	3
 infra_class_recover.go	doStorageRecoverStranded	via	2
 storage_preflight.go	doStoragePreflight	via	1
 
-## work-class by construction: user convoys and their members (convoy.TrackItemIn refuses a cross-class member); the bd on_close autoclose fallback runs for the work ledgers bd serves, and the controller's beadCloseAutoclose covers binding rows
-cmd_convoy.go	cmdConvoyCreateWithOptionsJSON	via	1
-cmd_convoy.go	doConvoyAutoclose	via	2
-cmd_convoy.go	doConvoyCreateWithOptionsJSON	byid	1
+## raw fallback of the bd on_close autoclose hooks: reached only when autocloseOwningStore resolves no owning store (an external checkout with no city.toml, or an unloadable config), it reads the just-closed bead on the cwd store bd serves; graph-class reads go through cliGraphStore, and the controller's beadCloseAutoclose covers binding rows
+cmd_convoy.go	doConvoyAutoclose	via	1
+molecule_autoclose.go	doMoleculeAutoclose	via	1
+wisp_autoclose.go	doWispAutoclose	via	1
 
-## work-class by construction: pool-assigned work beads (orphaned-assignment release) and GitHub PR repair task beads
+## pool-assigned work beads: releaseOrphanedPoolAssignments writes only work beads on their owner store; its one relabel (beads.SessionStore{Store: store}) is a nil-session-store fallback both callers make unreachable by passing a routed session store
 city_runtime.go	CityRuntime.beadReconcileTick	via	1
 cmd_start.go	doStartStandalone	via	1
+
+## work-class by construction: GitHub PR repair beads are task beads in the rig's work store
 cmd_github.go	ensureGitHubPRRepairBead	via	1
 
-## work leg beside a routed class leg: the just-closed bead (or the control bead's scope) is read on its work store while every graph-class read goes through a separately routed store (cliGraphStore, controlBeadLedger); doMoleculeAutoclose's owning-store arm counts by name only (flow-insensitive)
+## control dispatch: the control bead's scope store is a work leg (or, from findBeadScopeAcrossStores, a relic leg or the binding); the gated bead is re-read from the store the dispatch mutates, and graph-class reads go through controlBeadLedger's separately routed graph store
+cmd_convoy_dispatch.go	runControlDispatcher	via	1
 cmd_convoy_dispatch.go	runControlDispatcherInStore	via	1
-molecule_autoclose.go	doMoleculeAutoclose	via	2
-wisp_autoclose.go	doWispAutoclose	via	2
 
-## binding-first callee: loadWaitDependencyBead asks cliByIDBindingOwner before it reads the work residual; the guard cannot see the ordering
+## relic legs (S4 debt): findBeadScopeAcrossStores probes the city and rig scope stores through beads.RelicGet, which counts each read as relic debt, before the graph binding leg
+cmd_convoy_dispatch.go	findBeadScopeAcrossStores	via	2
+
+## binding-first: the class binding is asked before the raw read (loadWaitDependencyBead through cliByIDBindingOwner; probeExistingSlingSourceBead through sling.ProbeBeadInStore on the binding); the guard cannot see the ordering
+cmd_sling.go	probeExistingSlingSourceBead	via	1
 cmd_wait.go	cmdSessionWait	via	1
 
-## single-store by refusal: newFormulaCookCmd's graph.v2 attach arm refuses every split-city shape first (graphPlacementForScope != store), so store IS the placement store
+## refused split shapes: newFormulaCookCmd's graph.v2 attach arm runs attachGraftClassRefusal and refuses when graphPlacementForScope differs from store; past those refusals placement == store, which holds because partial splits are refused at startup
 cmd_formula.go	newFormulaCookCmd	byid	1
 cmd_formula.go	newFormulaCookCmd	relabel	1
-cmd_formula.go	newFormulaCookCmd	via	7
+cmd_formula.go	newFormulaCookCmd	via	8
 
-## relic-sweep legs: completionReconcileInputs leads with the routed graph store and keeps a work leg only while it may still hold pre-S4 graph roots
+## relic-sweep legs: completionReconcileInputs leads with the routed graph store; it always sweeps the city work leg and each awake rig leg not yet proven relic-free, because pre-S4 graph.v2 roots may remain there; the runtime plane stops at the first (graph) leg
 api_state.go	controllerState.completionReconcileInputs	relabel	1
 
 ## scope carrier: openOrderStoreForOrder labels the order's scope work store, and every consumer re-routes it through cliStores(...).Orders() (orderTrackingFrontDoor)
 order_store.go	openOrderStoreForOrder	relabel	1
+
+## KNOWN GAP (follow-up, SPLIT CAVEAT at the site): scopedStoreLike is class-blind; gc status's session snapshot stays on the routed store only because scopedStoreLike passes a non-bd-CLI store (every class binding today) through unchanged
+cmd_citystatus.go	loadStatusSessionSnapshot	via	1

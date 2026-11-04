@@ -284,3 +284,20 @@ func newUnprobedWorkResidual() unprobedWorkResidual {
 func (unprobedWorkResidual) Get(id string) (beads.Bead, error) {
 	return beads.Bead{}, fmt.Errorf("%w: probed for %s", errWorkResidualProbed, id)
 }
+
+// firstBindingOwnedID reports the first of ids a relocated class binding owns,
+// and the binding's ref. A command that reads or writes those ids on an exact
+// work store refuses such an id instead: the work store does not hold its
+// authoritative row. A single-store city has no binding leg and owns none.
+func firstBindingOwnedID(cityPath string, ids []string) (id string, binding storeref.StoreRef, owned bool, err error) {
+	for _, id := range ids {
+		owner, ok, err := cliByIDBindingOwner(cityPath, id)
+		if err != nil {
+			return id, "", false, fmt.Errorf("resolving which store owns %s: %w", id, err)
+		}
+		if ok {
+			return id, owner.Ref, true, nil
+		}
+	}
+	return "", "", false, nil
+}

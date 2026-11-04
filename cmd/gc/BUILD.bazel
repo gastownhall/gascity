@@ -1239,6 +1239,7 @@ go_test(
         "cmd_config_validation_test.go",
         "cmd_context_test.go",
         "cmd_converge_test.go",
+        "cmd_convoy_binding_member_test.go",
         "cmd_convoy_dispatch_test.go",
         "cmd_convoy_test.go",
         "cmd_costs_test.go",

@@ -55,7 +55,7 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	// this the hook reads an empty graph on a migrated city and reports success.
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath)) // byid:allow name reuse: this store is autocloseOwningStore's owning-store answer, not the raw fallback opened below
 		return
 	}
 
