@@ -1275,6 +1275,59 @@ done <<EOF
 $SCOPE_SPECS
 EOF
 
+# The infrastructure binding of a split city is not a bd scope. The
+# binding-snapshot order snapshots it into $BINDING_ARCHIVE; the newest
+# complete snapshot's JSONL (gc.storage.snapshot/v1), proven against its
+# manifest's sha256, is archived as gc-binding/issues.jsonl. A city with no
+# binding has no snapshots and this step does nothing.
+BINDING_ARCHIVE="${GC_BINDING_ARCHIVE_DIR:-$PACK_STATE_DIR/binding-archive}"
+
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+stage_binding_snapshot() {
+    local latest="" path id jsonl want got dest="$ARCHIVE_REPO/gc-binding"
+
+    [ -d "$BINDING_ARCHIVE" ] || return 0
+    # Glob order is sorted, and snapshot ids sort by time.
+    for path in "$BINDING_ARCHIVE"/[0-9]*T[0-9]*Z*; do
+        id=$(basename "$path")
+        [[ "$id" =~ ^[0-9]{8}T[0-9]{6}Z(-[0-9]+)?$ ]] || continue
+        [ -f "$path/manifest.json" ] && latest="$id"
+    done
+    [ -n "$latest" ] || return 0
+    if [ "$(cat "$dest/snapshot-id" 2>/dev/null)" = "$latest" ]; then
+        return 0
+    fi
+    jsonl=$(jq -r '.stores[] | select(.name == "binding") | .jsonl.path' "$BINDING_ARCHIVE/$latest/manifest.json" 2>/dev/null) || jsonl=""
+    want=$(jq -r '.stores[] | select(.name == "binding") | .jsonl.sha256' "$BINDING_ARCHIVE/$latest/manifest.json" 2>/dev/null) || want=""
+    if [ -z "$jsonl" ] || [ -z "$want" ] || [ ! -f "$BINDING_ARCHIVE/$latest/$jsonl" ]; then
+        echo "jsonl-export: binding snapshot $latest records no binding JSONL; not archived" >&2
+        return 0
+    fi
+    got=$(file_sha256 "$BINDING_ARCHIVE/$latest/$jsonl")
+    if [ "$got" != "$want" ]; then
+        echo "jsonl-export: binding snapshot $latest JSONL has sha256 $got, its manifest records $want; not archived" >&2
+        return 0
+    fi
+    mkdir -p "$dest"
+    if ! { cp -f "$BINDING_ARCHIVE/$latest/$jsonl" "$dest/issues.jsonl.tmp" \
+        && mv -f "$dest/issues.jsonl.tmp" "$dest/issues.jsonl" \
+        && printf '%s\n' "$latest" >"$dest/snapshot-id"; }; then
+        echo "jsonl-export: archiving binding snapshot $latest failed" >&2
+        rm -f "$dest/issues.jsonl.tmp"
+        return 0
+    fi
+    STAGE_PATHS+=("gc-binding")
+    echo "jsonl-export: archived binding snapshot $latest"
+}
+stage_binding_snapshot
+
 if [ "$TOTAL_DBS" -eq 0 ]; then
     order_outcome_set skipped "no bd bead store to export"
 elif [ "$FAILED_DB_COUNT" -ge "$TOTAL_DBS" ]; then
