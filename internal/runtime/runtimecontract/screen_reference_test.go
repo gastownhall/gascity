@@ -44,7 +44,9 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 		t.Skipf("reference script not available: %v", err)
 	}
 	// A short state directory: screen's socket paths must fit 107 bytes.
-	state, err := os.MkdirTemp("", "gcs")
+	// Under /tmp, not os.TempDir: macOS's $TMPDIR (/var/folders/...) alone
+	// is about 50 bytes, too long for the catalog's session names.
+	state, err := os.MkdirTemp("/tmp", "gcs")
 	if err != nil {
 		t.Fatal(err)
 	}
