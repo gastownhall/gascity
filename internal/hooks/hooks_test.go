@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -1837,6 +1838,22 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 			t.Errorf("gemini prompt hooks missing bounded command %q:\n%s", want, geminiHooks)
 		}
 	}
+	// Gemini delivers SessionStart output to the model and the startup prompt is
+	// already delivered at launch, so SessionStart (and only SessionStart) must
+	// carry the managed-hook markers that let `gc prime --hook` drop the repeat.
+	// PreCompress output is dropped by Gemini and must not be routed as SessionStart.
+	for _, want := range []string{"GC_MANAGED_SESSION_HOOK=1", "GC_HOOK_EVENT_NAME=SessionStart", "--hook-format gemini"} {
+		if !strings.Contains(strings.Join(overlayHookCommands(t, fs.Files["/work/.gemini/settings.json"], "SessionStart"), "\n"), want) {
+			t.Errorf("gemini SessionStart command missing %q:\n%s", want, geminiHooks)
+		}
+	}
+	for _, event := range []string{"PreCompress", "BeforeAgent"} {
+		for _, command := range overlayHookCommands(t, fs.Files["/work/.gemini/settings.json"], event) {
+			if strings.Contains(command, "GC_MANAGED_SESSION_HOOK") || strings.Contains(command, "GC_HOOK_EVENT_NAME") {
+				t.Errorf("gemini %s command must not carry managed-hook markers: %q", event, command)
+			}
+		}
+	}
 	for path, wants := range map[string][]string{
 		"/work/.github/hooks/gascity.json": {
 			`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
@@ -2038,8 +2055,133 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 			t.Errorf("Kiro agent config uses undocumented hook trigger %q", trigger)
 		}
 	}
+	// agentSpawn is Kiro's SessionStart analog and its output reaches the model.
+	// `< /dev/null` is load-bearing: a stdin hook_event_name overrides the env
+	// event, and /dev/null is a char device readPrimeHookStdin skips.
+	for _, hook := range kiroAgent.Hooks["agentSpawn"] {
+		for _, want := range []string{"GC_MANAGED_SESSION_HOOK=1", "GC_HOOK_EVENT_NAME=SessionStart"} {
+			if !strings.Contains(hook.Command, want) {
+				t.Errorf("Kiro agentSpawn command missing %q: %q", want, hook.Command)
+			}
+		}
+		if !strings.HasSuffix(hook.Command, "prime --hook < /dev/null") {
+			t.Errorf("Kiro agentSpawn command must end with `prime --hook < /dev/null`: %q", hook.Command)
+		}
+	}
+	for _, hook := range kiroAgent.Hooks["userPromptSubmit"] {
+		if strings.Contains(hook.Command, "GC_MANAGED_SESSION_HOOK") || strings.Contains(hook.Command, "GC_HOOK_EVENT_NAME") {
+			t.Errorf("Kiro userPromptSubmit command must not carry managed-hook markers (callback-lane fence): %q", hook.Command)
+		}
+	}
 	if strings.Contains(string(fs.Files["/work/.kiro/agents/gascity.json"]), "gc handoff") {
 		t.Error("Kiro agent config should not install unsupported compaction handoff hooks")
+	}
+}
+
+// overlayHookCommands returns every command registered under event in a
+// Gemini-style settings document ({"hooks": {event: [{"hooks": [{"command"}]}]}}).
+func overlayHookCommands(t *testing.T, doc []byte, event string) []string {
+	t.Helper()
+	var parsed struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(doc, &parsed); err != nil {
+		t.Fatalf("unmarshal settings: %v\n%s", err, doc)
+	}
+	var commands []string
+	for _, entry := range parsed.Hooks[event] {
+		for _, hook := range entry.Hooks {
+			commands = append(commands, hook.Command)
+		}
+	}
+	return commands
+}
+
+// TestGeminiSessionStartMarkerConvergesOnExistingSettings pins that a workspace
+// whose .gemini/settings.json predates the managed-hook markers converges to
+// exactly one marker-carrying SessionStart entry: the matcher-keyed merge
+// replaces the entry in place instead of appending a second prime hook.
+func TestGeminiSessionStartMarkerConvergesOnExistingSettings(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"gemini"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	embedded := fs.Files["/work/.gemini/settings.json"]
+	const markers = "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart "
+	preFix := bytes.Replace(embedded, []byte(markers), nil, 1)
+	if bytes.Equal(preFix, embedded) {
+		t.Fatalf("embedded gemini settings carry no %q prefix to strip:\n%s", markers, embedded)
+	}
+
+	merged, err := overlay.MergeSettingsJSON(preFix, embedded)
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	start := overlayHookCommands(t, merged, "SessionStart")
+	if len(start) != 1 {
+		t.Fatalf("SessionStart commands after merge = %d, want exactly 1: %q", len(start), start)
+	}
+	for _, want := range []string{"GC_MANAGED_SESSION_HOOK=1", "GC_HOOK_EVENT_NAME=SessionStart"} {
+		if !strings.Contains(start[0], want) {
+			t.Errorf("merged SessionStart command missing %q: %q", want, start[0])
+		}
+	}
+	for _, event := range []string{"PreCompress", "BeforeAgent"} {
+		if got, want := len(overlayHookCommands(t, merged, event)), len(overlayHookCommands(t, preFix, event)); got != want {
+			t.Errorf("%s command count after merge = %d, want %d (unchanged)", event, got, want)
+		}
+	}
+}
+
+// TestCopilotAndCursorSessionStartHooksOmitManagedMarkers pins that the two
+// providers whose SessionStart output is not delivered as model context stay
+// marker-free (ga-m4xy49). Copilot CLI ignores sessionStart output, so routing
+// it as SessionStart would archive durable handoff mail the agent never sees.
+// Cursor needs JSON output, overrides the event through stdin
+// ("sessionStart", which never equals "SessionStart"), and captures
+// session_key from stdin, so an env marker would do nothing there either.
+func TestCopilotAndCursorSessionStartHooksOmitManagedMarkers(t *testing.T) {
+	for _, tc := range []struct{ provider, path string }{
+		{"copilot", "/work/.github/hooks/gascity.json"},
+		{"cursor", "/work/.cursor/hooks.json"},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			fs := fsys.NewFake()
+			if err := Install(fs, "/city", "/work", []string{tc.provider}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			var doc struct {
+				Hooks map[string][]struct {
+					Command    string `json:"command"`
+					Bash       string `json:"bash"`
+					PowerShell string `json:"powershell"`
+				} `json:"hooks"`
+			}
+			if err := json.Unmarshal(fs.Files[tc.path], &doc); err != nil {
+				t.Fatalf("unmarshal %s: %v", tc.path, err)
+			}
+			var sessionStart int
+			for event, entries := range doc.Hooks {
+				if !strings.EqualFold(event, "sessionStart") {
+					continue
+				}
+				for _, entry := range entries {
+					sessionStart++
+					for _, cmd := range []string{entry.Command, entry.Bash, entry.PowerShell} {
+						if strings.Contains(cmd, "GC_MANAGED_SESSION_HOOK") || strings.Contains(cmd, "GC_HOOK_EVENT_NAME") {
+							t.Errorf("%s sessionStart command must not carry managed-hook markers: %q", tc.provider, cmd)
+						}
+					}
+				}
+			}
+			if sessionStart == 0 {
+				t.Fatalf("%s overlay has no sessionStart hook to guard:\n%s", tc.provider, fs.Files[tc.path])
+			}
+		})
 	}
 }
 
@@ -2255,7 +2397,9 @@ export default {
 		t.Fatal("legacy OMP object-export hook was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OMP_HOOK_VERSION = 2",
+		"const GC_OMP_HOOK_VERSION = 3",
+		"pendingPrimeContext",
+		`hookEnv(ctx, "SessionStart")`,
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
@@ -2277,7 +2421,7 @@ export default {
 
 func TestOMPHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for Oh My Pi (OMP).
-const GC_OMP_HOOK_VERSION = 2;
+const GC_OMP_HOOK_VERSION = 3;
 function logRunFailure(args: string[], cwd: string | undefined, err: unknown) {}
 function providerSessionEnv(ctx: { sessionManager?: { getSessionId?: () => string } }): Record<string, string> {}
 export default function gascityOmpExtension(pi: ExtensionAPI) {
@@ -2287,11 +2431,17 @@ export default function gascityOmpExtension(pi: ExtensionAPI) {
 }
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
+GC_MANAGED_SESSION_HOOK;
+GC_HOOK_EVENT_NAME;
+pendingPrimeContext = run();
 stdio: ["ignore", "pipe", "inherit"];
 `)
-	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 1"), 1)
-	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 3"), 1)
+	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 3"), []byte("GC_OMP_HOOK_VERSION = 2"), 1)
+	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 3"), []byte("GC_OMP_HOOK_VERSION = 4"), 1)
 	missingRequiredProvider := bytes.Replace(current, []byte("GC_PROVIDER_SESSION_ID_REQUIRED;\n"), nil, 1)
+	missingManagedHookMarkers := bytes.Replace(current, []byte("GC_MANAGED_SESSION_HOOK;\n"), nil, 1)
+	missingHookEventName := bytes.Replace(current, []byte("GC_HOOK_EVENT_NAME;\n"), nil, 1)
+	missingPendingPrimeContext := bytes.Replace(current, []byte("pendingPrimeContext = "), nil, 1)
 
 	if !ompHookNeedsUpgrade(stale) {
 		t.Fatal("stale OMP hook version did not request upgrade")
@@ -2304,6 +2454,15 @@ stdio: ["ignore", "pipe", "inherit"];
 	}
 	if !ompHookNeedsUpgrade(missingRequiredProvider) {
 		t.Fatal("OMP hook without required provider session marker did not request upgrade")
+	}
+	if !ompHookNeedsUpgrade(missingManagedHookMarkers) {
+		t.Fatal("OMP hook without GC_MANAGED_SESSION_HOOK did not request upgrade")
+	}
+	if !ompHookNeedsUpgrade(missingHookEventName) {
+		t.Fatal("OMP hook without GC_HOOK_EVENT_NAME did not request upgrade")
+	}
+	if !ompHookNeedsUpgrade(missingPendingPrimeContext) {
+		t.Fatal("OMP hook that discards the SessionStart prime output did not request upgrade")
 	}
 }
 

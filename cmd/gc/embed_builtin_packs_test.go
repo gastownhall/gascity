@@ -362,7 +362,10 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
 	for _, want := range []string{
 		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
-		`const GC_OMP_HOOK_VERSION = 2`,
+		`const GC_OMP_HOOK_VERSION = 3`,
+		`pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`GC_MANAGED_SESSION_HOOK`,
+		`GC_HOOK_EVENT_NAME`,
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
@@ -386,6 +389,18 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 		if strings.Contains(data, legacy) {
 			t.Errorf("bundled OMP hook still contains legacy API marker %q:\n%s", legacy, data)
 		}
+	}
+	// Only session_start may carry the managed-hook markers: OMP's compaction
+	// output reaches the model, and the markers must never ride a non-SessionStart
+	// invocation (they would route PreCompact as a fenced SessionStart callback).
+	if !strings.Contains(data, `run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`) {
+		t.Errorf("bundled OMP session_compact must keep the marker-free providerSessionEnv(ctx) call:\n%s", data)
+	}
+	if got := strings.Count(data, `hookEnv(ctx, "`); got != 1 { // session_start only
+		t.Errorf("bundled OMP hook has %d hookEnv(ctx, ...) call sites, want exactly 1 (session_start):\n%s", got, data)
+	}
+	if strings.Contains(data, "process.env.GC_MANAGED_SESSION_HOOK") || strings.Contains(data, "process.env.GC_HOOK_EVENT_NAME") {
+		t.Errorf("bundled OMP hook must pass the markers per-invocation, never via process.env:\n%s", data)
 	}
 }
 
