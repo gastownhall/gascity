@@ -343,15 +343,31 @@ type assistantMessage struct {
 	// ID is the provider message identifier (msg_*). Claude Code writes one
 	// assistant entry per content block of a single API response; every
 	// block entry repeats the same message ID and usage object.
-	ID    string `json:"id"`
-	Role  string `json:"role"`
-	Model string `json:"model"`
-	Usage *struct {
+	ID      string          `json:"id"`
+	Role    string          `json:"role"`
+	Model   string          `json:"model"`
+	Content json.RawMessage `json:"content"`
+	Usage   *struct {
 		InputTokens              int `json:"input_tokens"`
 		OutputTokens             int `json:"output_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
+}
+
+// isClaudeLocalNoResponse recognizes the qualified native local notice shape,
+// not arbitrary zero-usage responses or other synthetic transcript content.
+// The row remains visible to history, activity and usage consumers.
+func isClaudeLocalNoResponse(msg assistantMessage) bool {
+	if msg.Role != "assistant" || msg.Model != "<synthetic>" {
+		return false
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	return json.Unmarshal(msg.Content, &blocks) == nil && len(blocks) == 1 &&
+		blocks[0].Type == "text" && blocks[0].Text == "No response requested."
 }
 
 // extractFromLines walks lines backwards to find model, context usage, and activity.
@@ -395,7 +411,7 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 			}
 			// Match the canonical Claude API-error classification: these rows
 			// retain their activity/usage, but do not identify an inference model.
-			if model == "" && msg.Model != "" && !entry.IsAPIErrorMessage {
+			if model == "" && msg.Model != "" && !entry.IsAPIErrorMessage && !isClaudeLocalNoResponse(msg) {
 				model = msg.Model
 			}
 			if lastUsage == nil && msg.Usage != nil && msg.Usage.InputTokens > 0 {
