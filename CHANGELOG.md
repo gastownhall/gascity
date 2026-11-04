@@ -1134,21 +1134,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a partial outcome.
   The controller's pool dead-assignee sweep keeps and counts the same
   claims, judging this city's own pool sessions with the same session
-  resolver as the city's guarded rig stores. The reaper and JSONL export skip
-  guarded rigs, as does the one-shot `is_blocked` repair after a bd upgrade;
-  `cross-rig-deps` leaves their dependents alone (in bd's
+  resolver as the city's guarded rig stores. The reaper, the JSONL export and
+  `gate-sweep` skip guarded rigs, as does the one-shot `is_blocked` repair
+  after a bd upgrade; `cross-rig-deps` leaves their dependents alone (in bd's
   `external:<project>:<capability>` form and gc's own `external:<rig>/<id>`
   spelling); the nudge and gate-notification orders check a guarded rig's
-  assignee, route or addressee first, best effort: with no readable rig list
-  they nudge and notify as before. The stale human-gate re-nudge also leaves
-  an unaddressed gate whose creation stamp names another city's namespace.
-  The reaper, the export and the
-  `is_blocked` repair no longer touch a guarded rig, so whoever operates that
-  shared store must maintain and back it up, and run `bd recompute-blocked`
-  there after a bd upgrade. Run the core pack from the same build as gc: an
-  older core pack under a newer gc asks without `--rig-namespace` and does
-  not apply the namespace (a newer core pack under an older gc fails
-  closed).
+  assignee, route or addressee first. The controller exports the guarded
+  rigs' names to every exec order as `GC_GUARDED_RIGS` (empty when the city
+  has none); in a city with none these orders skip the checks, and
+  nudge-on-route does not read `gc rig list` at all. Otherwise, without a
+  readable rig list they nudge and notify nothing new and fail, so the run is
+  recorded as `order.failed` with the reason; nudge-on-route reads the list
+  only when a routed bead it has not nudged yet remains. An order run by a gc
+  that does not export the variable reads the rig list and fails closed. Both human-gate notifications also leave an
+  unaddressed gate whose creation stamp names another city's namespace. The
+  reaper, the export, `gate-sweep` and the `is_blocked` repair no longer touch
+  a guarded rig, so whoever operates that shared store must maintain and back
+  it up, close its timer and GitHub gates (`bd gate check`), and run
+  `bd recompute-blocked` there after a bd upgrade. Run the core pack from the
+  same build as gc: an older core pack under a newer gc asks without
+  `--rig-namespace` and does not apply the namespace (a newer core pack under
+  an older gc fails closed).
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
@@ -1728,9 +1734,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc bd create` reads the token after a valueless `--description-file` as
   that flag's value, as bd does, so a `--metadata` there is no longer
   checked as a flag of its own.
-- **`cross-rig-deps` rewrites nothing when `gc rig list` fails.** It used to
-  carry on as if no rig were suspended (or guarded); it now skips the run and
-  declares it skipped (scope `rigs`, "rig list unavailable").
+- **`cross-rig-deps` rewrites nothing when `gc rig list` fails in a city
+  with a guarded rig.** It used to carry on as if no rig were guarded; there
+  it now rewrites nothing and fails the run (`order.failed`). In a city with
+  no guarded rig it carries on as before.
 - **The orphan sweep protects malformed claim rows and keeps sweeping.** A
   claim whose bead id or assignee contains a tab, newline or carriage return
   is protected and named, never asked about or released, since it could

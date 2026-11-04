@@ -137,11 +137,12 @@ read_federated_claims() {
 # append_scope_rows tags every row of a bead listing with the scope it came
 # from ("" for HQ, else the rig name) and appends it to $TMP. The scope decides
 # how the foreign-identity gate is asked about the row's claim, so a listing
-# that cannot be tagged is dropped (its claims are kept), never appended
-# untagged. A third argument "federated" also marks the rows as the federated
-# read's (read_federated_claims): that read names no scope, so a row a scope
-# read also listed is judged under that scope's tag (Step 1c), and only a row
-# no scope read listed keeps the HQ tag.
+# that cannot be tagged (text that does not parse, or JSON that is not an
+# array, such as bd's schema-version envelope) is dropped (its claims are
+# kept), never appended untagged. A third argument "federated" also marks the
+# rows as the federated read's (read_federated_claims): that read names no
+# scope, so a row a scope read also listed is judged under that scope's tag
+# (Step 1c), and only a row no scope read listed keeps the HQ tag.
 append_scope_rows() {
     local scope="$1"
     local listing="$2"
@@ -149,7 +150,7 @@ append_scope_rows() {
     local tagged
     [ "${3:-}" = federated ] && federated="true"
     if ! tagged=$(jq -c --arg scope "$scope" --argjson federated "$federated" '
-        if type == "array" then map(if type == "object" then . + {_gc_scope: $scope} + (if $federated then {_gc_federated: true} else {} end) else . end) else . end
+        if type == "array" then map(if type == "object" then . + {_gc_scope: $scope} + (if $federated then {_gc_federated: true} else {} end) else . end) else error("not a listing") end
     ' "$listing" 2>/dev/null); then
         echo "orphan-sweep: could not read the in-progress listing of ${scope:-HQ}; its claims are kept this pass" >&2
         return 0

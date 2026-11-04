@@ -225,7 +225,26 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	for k, v := range vars {
 		env[k] = v
 	}
+	// The guarded-rig list is a fact of the loaded config, set after both
+	// overlays so neither [order.env] nor a dispatch var can make an order
+	// believe the city has no guarded rig.
+	if cfg != nil {
+		env[orders.GuardedRigsEnv] = guardedRigNamesEnv(cfg)
+	}
 	return mergeRuntimeEnv(nil, env), nil
+}
+
+// guardedRigNamesEnv returns the names of the city's rigs with federation =
+// "rig" (config.Rig.FederationGuarded), comma-separated in declaration order,
+// for orders.GuardedRigsEnv. It is "" when no rig is guarded.
+func guardedRigNamesEnv(cfg *config.City) string {
+	var names []string
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].FederationGuarded() {
+			names = append(names, cfg.Rigs[i].Name)
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 func validateOrderExecEnvOverrides(a orders.Order) error {

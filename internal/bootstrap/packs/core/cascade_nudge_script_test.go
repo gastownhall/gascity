@@ -148,9 +148,13 @@ func (f cascadeFake) body() string {
 	b.WriteString("    *direction=down*) printf '%s\\n' '" + down + "' ;;\n")
 	b.WriteString("    *) printf '%s\\n' '" + f.depJSON + "' ;;\n")
 	b.WriteString("    esac ;;\n")
-	if f.rigJSON != "" {
-		b.WriteString("rig) printf '%s\\n' '" + f.rigJSON + "' ;;\n")
+	// An empty rigJSON answers a city with no rigs: the order nudges nothing
+	// without a readable rig list.
+	rigJSON := f.rigJSON
+	if rigJSON == "" {
+		rigJSON = `{"rigs":[]}`
 	}
+	b.WriteString("rig) printf '%s\\n' '" + rigJSON + "' ;;\n")
 	b.WriteString("session)\n")
 	b.WriteString("  if [ \"$2\" = \"list\" ]; then\n")
 	b.WriteString("    tmpl=''\n")
@@ -588,6 +592,7 @@ func cascadeNudgeOnce(t *testing.T, down string) (int, string) {
 	}
 	binDir, logPath := fakeGCBin(t, `case "$1" in
 events) cat '`+eventsPath+`' ;;
+rig) printf '%s\n' '{"rigs":[]}' ;;
 bd) case "$*" in
     *direction=down*) `+down+` ;;
     *) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
@@ -684,6 +689,7 @@ func TestCascadeNudgeRecordsAStillBlockedPair(t *testing.T) {
 	}
 	binDir, logPath := fakeGCBin(t, `case "$1" in
 events) cat '`+eventsPath+`' ;;
+rig) printf '%s\n' '{"rigs":[]}' ;;
 bd) case "$*" in
     *direction=down*) printf '%s\n' '[{"id":"ga-blk","status":"closed"},{"id":"ga-other","status":"open"}]' ;;
     *) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
@@ -732,6 +738,7 @@ func cascadeNudgeRuns(t *testing.T, runs []cascadeRun) string {
 	downPath := filepath.Join(dir, "down.json")
 	binDir, logPath := fakeGCBin(t, `case "$1" in
 events) cat '`+eventsPath+`' ;;
+rig) printf '%s\n' '{"rigs":[]}' ;;
 bd) case "$*" in
     *direction=down*) cat '`+downPath+`' ;;
     *) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;

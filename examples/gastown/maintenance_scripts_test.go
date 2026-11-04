@@ -7397,7 +7397,14 @@ func mergeTestEnv(overrides map[string]string) []string {
 		overrides["GC_MAINTENANCE_DONE_TARGET"] = "deacon/"
 	}
 	env := os.Environ()
+	// The controller's guarded-rig export (GC_GUARDED_RIGS) changes what the
+	// rig-namespace orders check, so a test sets it only when it means to; a
+	// value inherited from the shell running the tests is dropped.
+	strip := []string{"GC_GUARDED_RIGS"}
 	for key := range overrides {
+		strip = append(strip, key)
+	}
+	for _, key := range strip {
 		prefix := key + "="
 		filtered := env[:0]
 		for _, entry := range env {
@@ -11844,6 +11851,32 @@ func TestGateSweepSkipsHQAndSuspendedRigs(t *testing.T) {
 	}
 }
 
+// TestGateSweepLeavesGuardedRigsToTheirOperator verifies that a guarded
+// rig (federation = "rig", any spelling but "" or "city") is not swept: its
+// store is shared with other cities, so its gates are its operator's to
+// close. The skip is noted, and the city and the other rigs are still swept.
+func TestGateSweepLeavesGuardedRigsToTheirOperator(t *testing.T) {
+	binDir, bdLog, env := gateSweepEnv(t)
+	writeGateSweepScopeBd(t, binDir, "")
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"hq","hq":true},{"name":"web","federation":"rig"},{"name":"old","federation":"Rig"},{"name":"api"}]}`
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err != nil {
+		t.Fatalf("gate-sweep failed: %v\n%s", err, out)
+	}
+
+	log := readGateSweepLog(t, bdLog)
+	requireGateSweepChecked(t, log, "city", "rig:api")
+	for _, guarded := range []string{"web", "old"} {
+		if strings.Contains(log, "rig:"+guarded+" ") {
+			t.Errorf("gate-sweep swept guarded rig %s; bd log:\n%s", guarded, log)
+		}
+		if !strings.Contains(string(out), "skipping rig "+guarded+": federation = \"rig\"") {
+			t.Errorf("no skip note for guarded rig %s:\n%s", guarded, out)
+		}
+	}
+}
+
 // gateSweepReport returns the lines gate-sweep itself printed (prefixed
 // "gate-sweep:") that mention scope.
 func gateSweepReport(out, scope string) []string {
@@ -14056,12 +14089,17 @@ func TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename(t *testing.T) {
 // rig_namespace), else foreign with reason "namespace". Reads come from
 // GUARD_* variables; every call is logged to GC_CALL_LOG. GUARD_FEDERATION
 // spells beta's federation value, GUARD_NO_ACK drops the rig_namespace echo,
-// GUARD_RIG_LIST_FAIL makes "rig list" fail, and GUARD_READY is what
+// GUARD_RIG_LIST_FAIL makes "rig list" fail (printing nothing, or gc's JSON
+// error envelope when set to "envelope"), and GUARD_READY is what
 // `gc ready --status open` lists (the formula gates).
 const guardedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$1 $2" in
   "rig list")
+    if [ "${GUARD_RIG_LIST_FAIL:-}" = envelope ]; then
+      echo '{"schema_version":"1","ok":false,"error":{"code":"city_resolve_failed","message":"gc rig list: not in a city","exit_code":1}}'
+      exit 1
+    fi
     if [ -n "${GUARD_RIG_LIST_FAIL:-}" ]; then exit 1; fi
     echo "{\"rigs\":[{\"name\":\"city-b\",\"hq\":true,\"prefix\":\"gcx\"},{\"name\":\"alpha\",\"hq\":false,\"prefix\":\"al\"},{\"name\":\"beta\",\"hq\":false,\"prefix\":\"bt\",\"federation\":\"${GUARD_FEDERATION:-rig}\",\"namespace\":\"exclusive\"},{\"name\":\"gamma\",\"hq\":false,\"prefix\":\"my-rig\",\"federation\":\"rig\"}]}"
     exit 0
@@ -14126,6 +14164,17 @@ exit 0
 // returns its output and the gc call log.
 func runGuardedRigOrder(t *testing.T, script string, env map[string]string) (string, string) {
 	t.Helper()
+	out, log, err := runGuardedRigOrderResult(t, script, env)
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s\ngc calls:\n%s", script, err, out, log)
+	}
+	return out, log
+}
+
+// runGuardedRigOrderResult is runGuardedRigOrder for a run that may fail: it
+// returns the output, the gc call log and the script's error.
+func runGuardedRigOrderResult(t *testing.T, script string, env map[string]string) (string, string, error) {
+	t.Helper()
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
@@ -14145,10 +14194,7 @@ func runGuardedRigOrder(t *testing.T, script string, env map[string]string) (str
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatalf("ReadFile(gc log): %v", readErr)
 	}
-	if err != nil {
-		t.Fatalf("%s failed: %v\n%s\ngc calls:\n%s", script, err, out, logData)
-	}
-	return string(out), string(logData)
+	return string(out), string(logData), err
 }
 
 // TestCascadeNudgeGatesAssigneesInAGuardedRig: a dependent in the guarded rig
@@ -14327,8 +14373,10 @@ func TestRenudgeStaleHumanGatesJudgesAFormulaGateByItsStamp(t *testing.T) {
 }
 
 // TestRigNamespaceGuardedRigForBeadFailsOnAnUnreadableRigList: the prefix
-// lookup fails, rather than answering "no guarded rig", when the rig list is
-// not JSON, so its callers can fail closed.
+// lookup fails, rather than answering "no guarded rig", when the rig list
+// cannot be read: an empty answer (gc rig list failed), gc's error envelope,
+// or text that is not JSON. Its callers can then fail closed. A list that
+// names no guarded rig answers "no guarded rig".
 func TestRigNamespaceGuardedRigForBeadFailsOnAnUnreadableRigList(t *testing.T) {
 	wrapper := filepath.Join(t.TempDir(), "lookup.sh")
 	writeExecutable(t, wrapper, "#!/usr/bin/env bash\nset -uo pipefail\n. \""+coreScriptPath("rig_namespace_gate.sh")+"\"\n"+
@@ -14336,7 +14384,10 @@ func TestRigNamespaceGuardedRigForBeadFailsOnAnUnreadableRigList(t *testing.T) {
 	for _, tc := range []struct{ list, id, want string }{
 		{`{"rigs":[{"name":"beta","prefix":"bt","federation":"rig"}]}`, "BT-1", "0:beta"},
 		{`{"rigs":[{"name":"alpha","prefix":"al"}]}`, "al-1", "0:"},
-		{"", "bt-1", "0:"},
+		{`{"rigs":[]}`, "bt-1", "0:"},
+		{"", "bt-1", "2:"},
+		{`{"schema_version":"1","ok":false,"error":{"code":"city_resolve_failed","message":"gc rig list: not in a city","exit_code":1}}`, "bt-1", "2:"},
+		{`[{"name":"beta","prefix":"bt","federation":"rig"}]`, "bt-1", "2:"},
 		{`{"rigs":[`, "bt-1", "2:"},
 	} {
 		out, err := runScriptResult(t, wrapper, map[string]string{"PATH": os.Getenv("PATH"), "LOOKUP_LIST": tc.list, "LOOKUP_ID": tc.id})
@@ -14346,6 +14397,225 @@ func TestRigNamespaceGuardedRigForBeadFailsOnAnUnreadableRigList(t *testing.T) {
 		if got := strings.TrimSpace(string(out)); got != tc.want {
 			t.Fatalf("lookup(%q, %q) = %q, want %q", tc.list, tc.id, got, tc.want)
 		}
+	}
+}
+
+// rigNamespaceOrderCases are the event and sweep orders that act on rig rows,
+// each with rows in the guarded rig beta, the unguarded rig alpha and HQ.
+func rigNamespaceOrderCases() []struct {
+	script string
+	env    map[string]string
+} {
+	old := "2020-01-01T00:00:00Z"
+	return []struct {
+		script string
+		env    map[string]string
+	}{
+		{"nudge-on-route.sh", map[string]string{
+			"GUARD_EVENTS": `{"type":"bead.updated","payload":{"id":"bt-1","metadata":{"gc.routed_to":"pk.worker"}}}
+{"type":"bead.updated","payload":{"id":"al-3","metadata":{"gc.routed_to":"pk.worker"}}}`,
+		}},
+		{"cascade-nudge-on-blocker-close.sh", map[string]string{
+			"GUARD_EVENTS": `{"type":"bead.closed","payload":{"bead":{"id":"al-1"}}}`,
+			"GUARD_DEPS":   `[{"id":"bt-2","status":"open","assignee":"neighbor"},{"id":"al-4","status":"open","assignee":"neighbor"}]`,
+		}},
+		{"notify-on-human-gate-creation.sh", map[string]string{
+			"GUARD_EVENTS": `{"type":"bead.created","payload":{"bead":{"id":"bt-g1","issue_type":"gate"}}}
+{"type":"bead.created","payload":{"bead":{"id":"gcx-g0","issue_type":"gate"}}}`,
+			"GUARD_BEADS": `[{"id":"bt-g1","status":"open","await_type":"human","assignee":"neighbor"},
+				{"id":"gcx-g0","status":"open","await_type":"human"}]`,
+		}},
+		{"renudge-stale-human-gates.sh", map[string]string{
+			"GUARD_GATES_HQ": `[{"id":"gcx-g0","status":"open","await_type":"human","created_at":"` + old + `"}]`,
+			"GUARD_BEADS":    `[{"id":"gcx-g0","status":"open","await_type":"human","assignee":"neighbor"}]`,
+		}},
+		{"cross-rig-deps.sh", map[string]string{
+			"GUARD_CLOSED": `[{"id":"al-1"}]`,
+			"GUARD_DEPS":   `[{"id":"external:beta/bt-2"},{"id":"external:alpha/al-3"}]`,
+		}},
+	}
+}
+
+// TestRigNamespaceOrdersFailClosedWithoutTheRigList: in a city that may have
+// a guarded rig, the nudge, gate-notification and cross-rig orders cannot
+// tell a guarded rig apart without the rig list, so a run whose
+// `gc rig list` fails (printing nothing, or gc's error envelope) acts on no
+// row, not even in an unguarded rig or HQ, and fails: the controller records
+// order.failed with the reason, which the dashboard's attention list and
+// gc doctor report, where a declared skip would go unnoticed. That holds
+// both when gc exports the guarded rigs (GC_GUARDED_RIGS names beta) and when
+// a gc that does not export them runs the order (the variable is unset): the
+// order reads the rig list rather than assume no rig is guarded.
+func TestRigNamespaceOrdersFailClosedWithoutTheRigList(t *testing.T) {
+	for _, order := range rigNamespaceOrderCases() {
+		for _, guarded := range []string{"unset", "beta,gamma"} {
+			for _, failure := range []string{"1", "envelope"} {
+				t.Run(order.script+"/"+guarded+"/"+failure, func(t *testing.T) {
+					outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+					env := map[string]string{"GUARD_RIG_LIST_FAIL": failure, "GC_ORDER_OUTCOME_FILE": outcomeFile}
+					if guarded != "unset" {
+						env["GC_GUARDED_RIGS"] = guarded
+					}
+					for k, v := range order.env {
+						env[k] = v
+					}
+					out, log, err := runGuardedRigOrderResult(t, order.script, env)
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
+						t.Fatalf("run without the rig list: err = %v, want a non-zero exit (order.failed)\n%s\ngc calls:\n%s", err, out, log)
+					}
+					if !strings.Contains(log, "rig list --json") {
+						t.Fatalf("the rig list was not read\n%s", log)
+					}
+					for _, acted := range []string{"session nudge ", "mail send ", "bd dep remove ", "bd dep add "} {
+						if got := countExactLinePrefix(log, acted); got != 0 {
+							t.Fatalf("%d %q call(s) without the rig list\n%s", got, acted, log)
+						}
+					}
+					if !strings.Contains(out, "gc rig list failed in a city that may have a guarded rig") {
+						t.Fatalf("output does not say the rig list failed:\n%s", out)
+					}
+					if data, err := os.ReadFile(outcomeFile); err == nil {
+						t.Fatalf("a failed run declared an outcome, which the controller ignores: %s", data)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestRigNamespaceOrdersSkipTheGuardWithoutAGuardedRig: when gc exports
+// GC_GUARDED_RIGS empty (the city declares no rig with federation = "rig"),
+// nudge-on-route never runs `gc rig list` (in a large city that read takes
+// tens of seconds, on every routed bead), and no order asks
+// `gc agent is-foreign` or fails because the rig list cannot be read. The
+// other orders keep the best-effort rig list read they make for scoping in
+// every city, and act as they did before rig federation: here the fake
+// gc rig list fails, so they work in their default scope.
+func TestRigNamespaceOrdersSkipTheGuardWithoutAGuardedRig(t *testing.T) {
+	acts := map[string]string{
+		"nudge-on-route.sh":                 "session nudge pk.worker ",
+		"cascade-nudge-on-blocker-close.sh": "session nudge neighbor ",
+		"notify-on-human-gate-creation.sh":  "mail send ",
+		"renudge-stale-human-gates.sh":      "mail send neighbor ",
+		"cross-rig-deps.sh":                 "bd dep remove external:beta/bt-2 ",
+	}
+	for _, order := range rigNamespaceOrderCases() {
+		t.Run(order.script, func(t *testing.T) {
+			env := map[string]string{"GC_GUARDED_RIGS": "", "GUARD_RIG_LIST_FAIL": "1"}
+			for k, v := range order.env {
+				env[k] = v
+			}
+			out, log := runGuardedRigOrder(t, order.script, env)
+			if order.script == "nudge-on-route.sh" {
+				if strings.Contains(log, "rig list") {
+					t.Fatalf("nudge-on-route read the rig list in a city with no guarded rig\n%s", log)
+				}
+				if got := countExactLinePrefix(log, acts[order.script]); got != 2 {
+					t.Fatalf("%d nudge(s), want both routed beads nudged\n%s", got, log)
+				}
+			}
+			if !strings.Contains(log, acts[order.script]) {
+				t.Fatalf("%s did not act (%q) in a city with no guarded rig\n%s", order.script, acts[order.script], log)
+			}
+			if strings.Contains(log, "agent is-foreign") {
+				t.Fatalf("a rig namespace was asked about in a city with no guarded rig\n%s", log)
+			}
+			if strings.Contains(out, "gc rig list failed") {
+				t.Fatalf("the best-effort rig list read failed the run:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestRigNamespaceCityMayGuard pins how the orders read GC_GUARDED_RIGS:
+// unset (a gc that does not export it, or a run by hand) may guard, set and
+// empty (or only separators) does not, and any name does.
+func TestRigNamespaceCityMayGuard(t *testing.T) {
+	wrapper := filepath.Join(t.TempDir(), "may-guard.sh")
+	writeExecutable(t, wrapper, "#!/usr/bin/env bash\nset -uo pipefail\n. \""+coreScriptPath("rig_namespace_gate.sh")+"\"\n"+
+		"[ \"$MAY_GUARD_SET\" = 1 ] || unset GC_GUARDED_RIGS\n"+
+		"if rig_namespace_city_may_guard; then echo yes; else echo no; fi\n")
+	for _, tc := range []struct {
+		set   bool
+		value string
+		want  string
+	}{
+		{false, "", "yes"},
+		{true, "", "no"},
+		{true, " , ", "no"},
+		{true, "beta", "yes"},
+		{true, "beta,gamma", "yes"},
+	} {
+		env := map[string]string{"PATH": os.Getenv("PATH"), "MAY_GUARD_SET": "0", "GC_GUARDED_RIGS": tc.value}
+		if tc.set {
+			env["MAY_GUARD_SET"] = "1"
+		}
+		out, err := runScriptResult(t, wrapper, env)
+		if err != nil {
+			t.Fatalf("may-guard(set=%v, %q): %v\n%s", tc.set, tc.value, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.want {
+			t.Fatalf("may-guard(set=%v, %q) = %q, want %q", tc.set, tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestNudgeOnRouteAsksNothingForPairsItAlreadyNudged: the dedup state is read
+// before the rig list and the namespace. A run reads the rig list once,
+// however many new pairs it has, and a second run over the pairs the first
+// one nudged makes no `rig list` and no `agent is-foreign` call.
+func TestNudgeOnRouteAsksNothingForPairsItAlreadyNudged(t *testing.T) {
+	env := map[string]string{
+		"GC_PACK_STATE_DIR": filepath.Join(t.TempDir(), "state"),
+		"GUARD_EVENTS": `{"type":"bead.updated","payload":{"id":"bt-2","metadata":{"gc.routed_to":"beta/pk.worker"}}}
+{"type":"bead.updated","payload":{"id":"bt-5","metadata":{"gc.routed_to":"beta/pk.worker"}}}
+{"type":"bead.updated","payload":{"id":"al-3","metadata":{"gc.routed_to":"pk.worker"}}}`,
+	}
+	_, first := runGuardedRigOrder(t, "nudge-on-route.sh", env)
+	if got := countExactLinePrefix(first, "rig list"); got != 1 {
+		t.Fatalf("the first run read the rig list %d times, want once\n%s", got, first)
+	}
+	if got := countExactLinePrefix(first, "session nudge "); got != 3 {
+		t.Fatalf("the first run sent %d nudges, want one per routed bead (3)\n%s", got, first)
+	}
+	_, second := runGuardedRigOrder(t, "nudge-on-route.sh", env)
+	for _, call := range []string{"rig list", "agent is-foreign ", "session nudge "} {
+		if got := countExactLinePrefix(second, call); got != 0 {
+			t.Fatalf("the second run over already-nudged pairs made %d %q call(s)\n%s", got, call, second)
+		}
+	}
+}
+
+// TestNotifyOnHumanGateCreationJudgesAnUnaddressedGateByItsStamp: a guarded
+// rig's new gate that names no addressee is judged by its creation stamp, as
+// the stale-gate re-nudge judges it. Another city's (gc.owner_namespace
+// "alpha/") is left alone; this city's own stamp, an unstamped gate and an
+// unstamped HQ gate keep the escalation fallback.
+func TestNotifyOnHumanGateCreationJudgesAnUnaddressedGateByItsStamp(t *testing.T) {
+	created := func(id string) string {
+		return `{"type":"bead.created","payload":{"bead":{"id":"` + id + `","issue_type":"gate"}}}`
+	}
+	out, log := runGuardedRigOrder(t, "notify-on-human-gate-creation.sh", map[string]string{
+		"GUARD_EVENTS": strings.Join([]string{created("gcx-g0"), created("bt-g7"), created("bt-g8"), created("bt-g9")}, "\n"),
+		"GUARD_BEADS": `[{"id":"gcx-g0","status":"open","await_type":"human"},
+			{"id":"bt-g7","status":"open","await_type":"human"},
+			{"id":"bt-g8","status":"open","await_type":"human","metadata":{"gc.owner_namespace":" beta/"}},
+			{"id":"bt-g9","status":"open","await_type":"human","metadata":{"gc.owner_namespace":"alpha/"}}]`,
+	})
+	if strings.Contains(log, "Human gate awaiting you: bt-g9") {
+		t.Fatalf("another city's unaddressed gate in a guarded rig was notified to this city's escalation recipient\n%s", log)
+	}
+	for _, id := range []string{"gcx-g0", "bt-g7", "bt-g8"} {
+		if !strings.Contains(log, "mail send human -s Human gate awaiting you: "+id+" ") {
+			t.Fatalf("unaddressed gate %s lost the escalation fallback\n%s", id, log)
+		}
+	}
+	if strings.Contains(log, "agent is-foreign") {
+		t.Fatalf("an unaddressed gate was asked about an addressee\n%s", log)
+	}
+	if !strings.Contains(out, "left 1 gate(s) in guarded rigs") {
+		t.Fatalf("output does not report the skipped gate:\n%s", out)
 	}
 }
 
@@ -14492,33 +14762,6 @@ func TestCascadeNudgeJudgesDependentsInTheBlockersRig(t *testing.T) {
 	}
 }
 
-// TestCrossRigDepsRewritesNothingWithoutTheRigList: without the rig list a
-// dependent in a guarded rig cannot be told apart, so nothing is rewritten and
-// the run is declared skipped, as the reaper and the export do.
-func TestCrossRigDepsRewritesNothingWithoutTheRigList(t *testing.T) {
-	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
-	_, log := runGuardedRigOrder(t, "cross-rig-deps.sh", map[string]string{
-		"GUARD_RIG_LIST_FAIL":   "1",
-		"GC_ORDER_OUTCOME_FILE": outcomeFile,
-		"GUARD_CLOSED":          `[{"id":"al-1"}]`,
-		"GUARD_DEPS":            `[{"id":"external:beta/bt-2"},{"id":"external:alpha/al-3"}]`,
-	})
-	if strings.Contains(log, "bd dep remove") || strings.Contains(log, "bd dep add") {
-		t.Fatalf("dependencies were rewritten without the rig list\n%s", log)
-	}
-	data, err := os.ReadFile(outcomeFile)
-	if err != nil {
-		t.Fatalf("no outcome declared: %v", err)
-	}
-	var outcome scriptOutcome
-	if err := json.Unmarshal(data, &outcome); err != nil {
-		t.Fatalf("outcome is not the typed declaration: %v\n%s", err, data)
-	}
-	if outcome.Outcome != "skipped" || len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != "rigs" || outcome.Scopes[0].Reason != "rig list unavailable" {
-		t.Fatalf("outcome = %+v, want skipped with scope rigs: rig list unavailable", outcome)
-	}
-}
-
 // TestCrossRigDepsLeavesColonFormGuardedDependentsAlone: bd writes a
 // cross-rig dependent as "external:<project>:<capability>"
 // (validateExternalRef). One whose project is a guarded rig, or whose bead
@@ -14583,17 +14826,31 @@ func TestOrphanSweepDropsAnUnreadableListingAndKeepsTheRest(t *testing.T) {
 }
 
 // TestOrphanSweepSkipsRowsWithoutAScope: a listing that is a lone object
-// carries rows no scope tag reaches; they are neither asked about nor
-// released, never read as HQ rows.
+// carries rows no scope tag reaches. The listing is dropped like one that
+// does not parse: its rows are neither asked about nor released, never read
+// as HQ rows, and the other scopes are still swept.
 func TestOrphanSweepSkipsRowsWithoutAScope(t *testing.T) {
-	run := runOrphanSweepGateFixture(t, nil, nil, nil, nil, map[string]string{
-		"ORPHAN_SWEEP_HQ_BEADS_JSON":     " ",
-		"ORPHAN_SWEEP_SHARED_BEADS_JSON": `{"wrap":{"id":"sh-x","status":"in_progress","assignee":"neighbor"}}`,
-	})
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-local-dead", "gc-d34d2")}, nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		nil, map[string]string{
+			"ORPHAN_SWEEP_SHARED_BEADS_JSON": `{"wrap":{"id":"sh-x","status":"in_progress","assignee":"neighbor"}}`,
+		})
 	if run.err != nil {
 		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
 	}
-	if run.released("sh-x") || run.gateCalls() != 0 {
-		t.Fatalf("an untagged row was asked about (%d calls) or released\n%s", run.gateCalls(), run.context())
+	for _, line := range nonEmptyLogLines(run.log) {
+		if strings.HasPrefix(line, "agent is-foreign ") && strings.HasSuffix(line, " neighbor") {
+			t.Fatalf("an untagged row was asked about: %s\n%s", line, run.context())
+		}
+	}
+	if run.released("sh-x") {
+		t.Fatalf("an untagged row was released\n%s", run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("a rig listing that is not an array stopped the HQ sweep\n%s", run.context())
+	}
+	if !strings.Contains(run.out, "could not read the in-progress listing of shared") {
+		t.Fatalf("no note for the listing that is not an array:\n%s", run.out)
 	}
 }

@@ -76,22 +76,33 @@ fi
 # non-empty array above, so CLOSED_IDS is non-empty here.
 RESOLVED=0
 CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
-# The rig list says which rigs are guarded (federation = "rig"). Without it a
-# dependent in a guarded rig cannot be told apart, so nothing is rewritten
-# this run, as the reaper and the JSONL export skip the rig scopes then.
+# The rig list says which rigs are guarded (federation = "rig"). In a city gc
+# reports as having no guarded rig (GC_GUARDED_RIGS set and empty, see
+# rig_namespace_city_may_guard) it only names the suspended rigs, best
+# effort, as it always has. Otherwise, without it a dependent in a guarded
+# rig cannot be told apart, so nothing is rewritten this run and the run
+# fails: the controller records order.failed with the reason, which the
+# dashboard's attention list and gc doctor report.
+CITY_MAY_GUARD=""
+if rig_namespace_city_may_guard; then
+    CITY_MAY_GUARD=1
+fi
 RIGS_JSON=$(gc rig list --json 2>/dev/null) || RIGS_JSON=""
-if ! printf '%s' "$RIGS_JSON" | jq -e '(.rigs | type) == "array"' >/dev/null 2>&1; then
-    echo "cross-rig-deps: gc rig list failed; no dependencies rewritten this run" >&2
-    order_outcome_scope_skipped "rigs" "rig list unavailable"
-    order_outcome_set skipped "rig list unavailable"
-    order_outcome_write
-    exit 0
+if ! rig_namespace_rig_list_readable "$RIGS_JSON"; then
+    if [ -n "$CITY_MAY_GUARD" ]; then
+        echo "cross-rig-deps: gc rig list failed in a city that may have a guarded rig (federation = \"rig\"); no dependencies rewritten this run" >&2
+        exit 1
+    fi
+    RIGS_JSON=""
 fi
 # Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd
 # read restarts its retired proxy, so its beads wait for it to resume.
 SUSPENDED_PREFIXES=$(printf '%s' "$RIGS_JSON" \
     | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
-GUARDED_RIGS=$(rig_namespace_guarded_rigs "$RIGS_JSON")
+GUARDED_RIGS=""
+if [ -n "$CITY_MAY_GUARD" ]; then
+    GUARDED_RIGS=$(rig_namespace_guarded_rigs "$RIGS_JSON")
+fi
 SKIPPED_GUARDED=0
 
 # dependent_in_guarded_rig succeeds when a dependent lives in a rig with

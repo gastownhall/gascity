@@ -227,11 +227,13 @@ city's writes to it, a route back included, are refused.
 
 The core pack's orders treat a guarded rig's store as shared:
 
-- The reaper and the JSONL export skip guarded rigs, and so does the
-  one-shot `is_blocked` repair `gc start`, `gc rig add` and a resumed rig run
-  after a bd upgrade. This city neither reaps, archives nor repairs the
-  shared store, so whoever operates it must maintain and back it up, and run
-  `bd recompute-blocked` there after a bd upgrade.
+- The reaper, the JSONL export and `gate-sweep` skip guarded rigs, and so
+  does the one-shot `is_blocked` repair `gc start`, `gc rig add` and a
+  resumed rig run after a bd upgrade. This city neither reaps, archives nor
+  repairs the shared store, and it does not close the timer and GitHub gates
+  there, so their dependents stay blocked until someone does. Whoever
+  operates the store must maintain and back it up, close those gates
+  (`bd gate check`), and run `bd recompute-blocked` there after a bd upgrade.
 - `cross-rig-deps` leaves dependents in guarded rigs alone, whether written
   as bd writes them (`external:<project>:<capability>`) or in gc's own
   `external:<rig>/<id>` spelling, and rewrites nothing in a run where it
@@ -249,12 +251,19 @@ The core pack's orders treat a guarded rig's store as shared:
   claims, and admits this city's pool sessions with the same session records
   as the store guard.
 - The nudge and gate-notification orders check a guarded rig's assignee,
-  route or addressee first. The stale-gate re-nudge leaves a gate with no
+  route or addressee first. Both gate notifications leave a gate with no
   addressee alone when its creation stamp (`gc.owner_namespace`) names
-  another namespace. They are best effort: in a run where
-  `gc rig list` cannot be read they cannot tell a guarded rig apart, and they
-  nudge and notify as they would without the setting. Only `cross-rig-deps`,
-  which rewrites rows, stops on an unreadable rig list.
+  another namespace. The controller tells every exec order which rigs are
+  guarded (`GC_GUARDED_RIGS`, the names from the loaded config), so in a city
+  with no guarded rig these checks are skipped and `nudge-on-route` makes no
+  `gc rig list` call. In a city with one, a run where `gc rig list` cannot be
+  read cannot tell a guarded rig apart, so it nudges and notifies nothing new
+  and fails, as `cross-rig-deps` does: the controller records `order.failed`
+  with the reason, which the dashboard flags (and `gc doctor` after three in
+  a row). A later run tries again: the event orders while the event is in
+  their lookback window, the stale-gate re-nudge on its next sweep. An order
+  that a `gc` without the variable runs reads the rig list and fails closed
+  the same way.
 
 <Warning>
 Run the core pack from the same build as `gc`. Only the core pack's own

@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 const defaultManagedDoltHost = "127.0.0.1"
@@ -2536,6 +2537,9 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_PACK_STATE_DIR",
 		"GC_RIG",
 		"GC_RIG_ROOT",
+		// Set per order from the loaded config (orderExecEnvWithError); an
+		// inherited value must never stand in for it.
+		orders.GuardedRigsEnv,
 	}
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	keys = appendBdAutoBackupOptOutEnvKeys(keys)

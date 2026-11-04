@@ -1795,6 +1795,7 @@ go_test(
         "order_enabled_filter_test.go",
         "order_exec_escaped_groups_test.go",
         "order_gate_budget_test.go",
+        "order_guarded_rigs_env_test.go",
         "order_outcome_test.go",
         "order_scan_contract_test.go",
         "order_store_concurrency_test.go",

@@ -2,6 +2,15 @@ package orders
 
 import "fmt"
 
+// GuardedRigsEnv names the env var through which the controller tells an
+// exec order which rigs the city declares with federation = "rig": their
+// names, comma-separated, from the loaded config. The controller always sets
+// it, so present and empty means the city has no guarded rig and an order may
+// skip the rig-namespace checks without asking gc. Absent means a gc that
+// does not export it (or a manual run): the order must find out the slow way
+// and fail closed.
+const GuardedRigsEnv = "GC_GUARDED_RIGS"
+
 // ValidateExecEnvOverrides rejects [order.env] keys owned by the controller.
 func ValidateExecEnvOverrides(a Order) error {
 	for key := range a.Env {
@@ -53,6 +62,7 @@ func IsReservedExecEnvKey(key string) bool {
 		"GC_DOLT_PORT",
 		"GC_DOLT_STATE_FILE",
 		"GC_DOLT_USER",
+		GuardedRigsEnv,
 		ExecOutcomeFileEnv,
 		"GC_PACK_DIR",
 		"GC_PACK_NAME",

@@ -12,8 +12,33 @@
 # other than "" or "city" is read as guarded, like the Go accessor, so an
 # unexpected spelling never fails open.
 
+# rig_namespace_city_may_guard succeeds unless gc has told this order that
+# the city declares no guarded rig. The controller exports GC_GUARDED_RIGS to
+# every exec order: the guarded rigs' names, comma-separated, from the config
+# it loaded, and "" when there are none. Set and empty, the order needs no
+# rig-namespace check and no `gc rig list` for one (in a large city that read
+# takes tens of seconds). Unset, the gc that ran the order does not export it,
+# or the script was run by hand: the city may have a guarded rig, so the
+# caller reads the rig list and fails closed when it cannot.
+rig_namespace_city_may_guard() {
+    [ -n "${GC_GUARDED_RIGS+set}" ] || return 0
+    local names="${GC_GUARDED_RIGS//[[:space:],]/}"
+    [ -n "$names" ]
+}
+
+# rig_namespace_rig_list_readable <rig-list-json> succeeds when the rig list
+# is what `gc rig list --json` prints when it succeeds: an object with a rigs
+# array. An empty answer (the call failed), gc's error envelope and text that
+# does not parse fail, so a caller can tell "no rig is guarded" from "this
+# run cannot tell".
+rig_namespace_rig_list_readable() {
+    printf '%s' "${1:-}" | jq -e 'type == "object" and (.rigs | type) == "array"' >/dev/null 2>&1
+}
+
 # rig_namespace_guarded_rigs <rig-list-json> prints the names of the guarded,
-# non-HQ rigs, one per line.
+# non-HQ rigs, one per line. It prints nothing for a rig list it cannot read,
+# so a caller that must tell that apart from "no rig is guarded" checks
+# rig_namespace_rig_list_readable first.
 rig_namespace_guarded_rigs() {
     printf '%s' "${1:-}" | jq -r '
         (.rigs // [])[]
@@ -23,7 +48,8 @@ rig_namespace_guarded_rigs() {
 }
 
 # rig_namespace_rig_is_guarded <rig-list-json> <rig> succeeds when the named
-# rig is guarded.
+# rig is guarded. Like rig_namespace_guarded_rigs, it fails for a rig list it
+# cannot read.
 rig_namespace_rig_is_guarded() {
     local rig="${2:-}"
     [ -n "$rig" ] || return 1
@@ -33,10 +59,11 @@ rig_namespace_rig_is_guarded() {
 # rig_namespace_guarded_rig_for_bead <rig-list-json> <bead-id> prints the
 # guarded rig whose bead prefix the id carries ("<prefix>-...", compared
 # case-insensitively, the longest prefix winning), or nothing. It fails
-# (status 2) when the rig list cannot be read, so a caller fails closed
-# instead of judging the bead as in no guarded rig.
+# (status 2) when the rig list cannot be read (rig_namespace_rig_list_readable),
+# so a caller fails closed instead of judging the bead as in no guarded rig.
 rig_namespace_guarded_rig_for_bead() {
     local id="${2:-}"
+    rig_namespace_rig_list_readable "${1:-}" || return 2
     [ -n "$id" ] || return 0
     printf '%s' "${1:-}" | jq -r --arg id "$id" '
         [ (.rigs // [])[]
@@ -53,11 +80,13 @@ rig_namespace_guarded_rig_for_bead() {
 # store the row was read from (store-rig, "" for HQ or unknown) when it is
 # guarded, and the guarded rig the bead's prefix maps to when that differs.
 # The store the row came from is the authority; the prefix only adds a check.
+# It fails when the rig list cannot be read.
 rig_namespace_guarded_rigs_for_row() {
     local rigs_json="${1:-}"
     local store_rig="${2:-}"
     local id="${3:-}"
     local by_prefix
+    rig_namespace_rig_list_readable "$rigs_json" || return 1
     if [ -n "$store_rig" ] && rig_namespace_rig_is_guarded "$rigs_json" "$store_rig"; then
         printf '%s\n' "$store_rig"
     fi
@@ -152,4 +181,19 @@ rig_namespace_stamp_names_other() {
     own="$(rig_namespace_fold "$rig")" || return 0
     [ -n "$own" ] && [ "$folded" = "$own/" ] && return 1
     return 0
+}
+
+# rig_namespace_row_stamp_names_other <rig-list-json> <store-rig> <bead-id>
+# <stamp> succeeds when the creation stamp names a namespace other than that
+# of a guarded rig the row is judged in (rig_namespace_guarded_rigs_for_row):
+# another city's guard created the row. A row in no guarded rig fails. It
+# succeeds when those rigs cannot be read, so a caller fails closed.
+rig_namespace_row_stamp_names_other() {
+    local rig rigs
+    rigs="$(rig_namespace_guarded_rigs_for_row "$1" "$2" "$3")" || return 0
+    while IFS= read -r rig; do
+        [ -n "$rig" ] || continue
+        rig_namespace_stamp_names_other "$rig" "$4" && return 0
+    done <<<"$rigs"
+    return 1
 }

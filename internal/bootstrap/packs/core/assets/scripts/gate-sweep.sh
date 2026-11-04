@@ -33,6 +33,11 @@
 # list the rigs (gc rig list fails, or jq is missing) fails after the city
 # store is swept.
 #
+# Guarded rigs (federation = "rig") are left out of core_rig_names too: their
+# store is shared with other cities, so its timer and GitHub gates are its
+# operator's to close, and their dependents stay blocked until then. Each
+# skipped guarded rig is noted on stderr.
+#
 # Cost: one `gc rig list --json` (parsed with jq) on every run, even in a city
 # with no rigs, plus three `gc bd` calls per swept store (the database probe,
 # then the timer and the gh check). On the local fallback route the listing

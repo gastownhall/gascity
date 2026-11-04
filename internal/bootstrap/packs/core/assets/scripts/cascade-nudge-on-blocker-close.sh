@@ -33,7 +33,13 @@
 # attach) is nudged only when `gc agent is-foreign --rig-namespace <rig>`
 # vouches for its assignee (or, for an unassigned dependent, its gc.routed_to
 # target), so this city never pokes a session of the same name that serves
-# another city's row.
+# another city's row. In a city gc reports as having no guarded rig
+# (GC_GUARDED_RIGS set and empty, see rig_namespace_city_may_guard) none of
+# that is checked, and the rig list stays the best-effort scope lookup it has
+# always been. Otherwise a run that cannot read `gc rig list` cannot tell a
+# guarded rig apart, so it nudges no dependent (fail closed) and fails, so the
+# controller records order.failed with the reason; nothing is recorded, so a
+# later run in the lookback handles the closes again.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -74,10 +80,17 @@ duration_to_seconds() {
 }
 
 # Build a prefix->rig lookup once. `gc rig list` is queried per bead via
-# prefix_rig below (no associative arrays, for bash 3.2 portability).
-# Best-effort: a single-rig city resolves nothing here and simply runs the
-# bd/gc calls in their default scope.
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
+# prefix_rig below (no associative arrays, for bash 3.2 portability). A
+# single-rig city resolves nothing here and simply runs the bd/gc calls in
+# their default scope. A list that cannot be read is left empty. In a city
+# that may have a guarded rig the run then nudges nothing (see the blocker
+# loop); in one without, the bd/gc calls run in their default scope.
+CITY_MAY_GUARD=""
+if rig_namespace_city_may_guard; then
+    CITY_MAY_GUARD=1
+fi
+RIGS_JSON="$(gc rig list --json 2>/dev/null)" || RIGS_JSON=""
+rig_namespace_rig_list_readable "$RIGS_JSON" || RIGS_JSON=""
 
 # Resolve a bead id's rig into RIG_ARG1/RIG_ARG2 ("--rig" "<name>"), or
 # leave them empty when the prefix is unknown. Callers expand them with
@@ -194,18 +207,27 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
 SKIPPED_FOREIGN=0
+# Closed blockers whose dependents were not nudged because this run could not
+# read the rig list.
+SKIPPED_NO_RIG_LIST=0
 while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
+    if [ -n "$CITY_MAY_GUARD" ] && [ -z "$RIGS_JSON" ]; then
+        SKIPPED_NO_RIG_LIST=$((SKIPPED_NO_RIG_LIST + 1))
+        continue
+    fi
 
     set_rig_args "$blocker"
     [ -z "$RIG_SUSPENDED" ] || continue
+    blocker_rig="$RIG_ARG2"
     # The dependents are read from the blocker's rig store, so that store is
     # the one whose namespace judges their assignees. set_rig_args matches
     # only the id's first segment, exactly; a guarded rig whose prefix holds a
-    # "-" or differs in case is found by the full prefix match instead.
-    # An unreadable rig list fails closed: the blocker's dependents are not
-    # nudged this pass.
-    blocker_rig="${RIG_ARG2:-$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$blocker")}" || continue
+    # "-" or differs in case is found by the full prefix match instead. A
+    # lookup that fails leaves the blocker's dependents unnudged this pass.
+    if [ -n "$CITY_MAY_GUARD" ]; then
+        blocker_rig="${RIG_ARG2:-$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$blocker")}" || continue
+    fi
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
@@ -240,7 +262,7 @@ while IFS= read -r blocker; do
         [ -z "$RIG_SUSPENDED" ] || continue
         # In a guarded rig, the nudge target (assignee or routed target) must
         # be one this city can vouch for there.
-        if ! rig_namespace_admits_row "$RIGS_JSON" "$blocker_rig" "$dep_id" "$target"; then
+        if [ -n "$CITY_MAY_GUARD" ] && ! rig_namespace_admits_row "$RIGS_JSON" "$blocker_rig" "$dep_id" "$target"; then
             SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
             continue
         fi
@@ -295,4 +317,11 @@ if [ "$NUDGED" -gt 0 ]; then
 fi
 if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
     echo "cascade-nudge-on-blocker-close: skipped $SKIPPED_FOREIGN dependent(s) in guarded rigs whose assignee this city cannot vouch for"
+fi
+# Fail closed, loudly: the state is written, and a non-zero exit makes the
+# controller record order.failed with this line, which the dashboard's
+# attention list and gc doctor report.
+if [ "$SKIPPED_NO_RIG_LIST" -gt 0 ]; then
+    echo "cascade-nudge-on-blocker-close: gc rig list failed in a city that may have a guarded rig (federation = \"rig\"); the dependents of $SKIPPED_NO_RIG_LIST closed bead(s) were not nudged this run" >&2
+    exit 1
 fi

@@ -18,7 +18,14 @@
 # A bead in a rig with federation = "rig" (a bead store other cities also
 # attach) is nudged only when `gc agent is-foreign --rig-namespace <rig>`
 # vouches for its route. This is defence in depth: the guarded rig store is
-# meant to drop other cities' events before they get here.
+# meant to drop other cities' events before they get here. In a city gc
+# reports as having no guarded rig (GC_GUARDED_RIGS set and empty, see
+# rig_namespace_city_may_guard) there is nothing to check and the rig list is
+# never read. Otherwise the rig list that says which rigs are guarded is read
+# once per run, and only when a pair not nudged yet remains. A run that cannot
+# read it nudges no new pair (fail closed) and fails, so the controller records
+# order.failed with the reason; the pairs are not recorded, so a later run in
+# the lookback tries them again.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -114,29 +121,52 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
 SKIPPED_FOREIGN=0
+# Pairs not nudged because this run could not read the rig list.
+SKIPPED_NO_RIG_LIST=0
+RIG_LIST_READ=""
 RIGS_JSON=""
 GUARDED_RIGS=""
-if RIGS_JSON="$(gc rig list --json 2>/dev/null)"; then
-    GUARDED_RIGS="$(rig_namespace_guarded_rigs "$RIGS_JSON")"
-else
-    RIGS_JSON=""
+CITY_MAY_GUARD=""
+if rig_namespace_city_may_guard; then
+    CITY_MAY_GUARD=1
 fi
+
+# read_rig_list reads `gc rig list --json` into RIGS_JSON and GUARDED_RIGS, at
+# most once per run. RIGS_JSON stays empty when the list cannot be read
+# (rig_namespace_rig_list_readable). stdin is closed so gc cannot swallow the
+# caller's next loop line.
+read_rig_list() {
+    [ -z "$RIG_LIST_READ" ] || return 0
+    RIG_LIST_READ=1
+    RIGS_JSON="$(gc rig list --json </dev/null 2>/dev/null)" || RIGS_JSON=""
+    if rig_namespace_rig_list_readable "$RIGS_JSON"; then
+        GUARDED_RIGS="$(rig_namespace_guarded_rigs "$RIGS_JSON")"
+    else
+        RIGS_JSON=""
+    fi
+}
+
 while IFS="$(printf '\t')" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
-    if [ -n "$GUARDED_RIGS" ]; then
-        # A bead.updated event names the bead, not its store, so the bead's
-        # prefix is the only way to find its rig here.
-        if ! rig_namespace_admits_row "$RIGS_JSON" "" "$bead_id" "$routed_to"; then
-            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
-            continue
-        fi
-    fi
     key="$bead_id|$routed_to"
     if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
         # Already nudged. Refresh last-seen so this still-active routing is
         # not pruned and re-nudged while it keeps re-emitting.
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
+    fi
+    if [ -n "$CITY_MAY_GUARD" ]; then
+        read_rig_list
+        if [ -z "$RIGS_JSON" ]; then
+            SKIPPED_NO_RIG_LIST=$((SKIPPED_NO_RIG_LIST + 1))
+            continue
+        fi
+        # A bead.updated event names the bead, not its store, so the bead's
+        # prefix is the only way to find its rig here.
+        if [ -n "$GUARDED_RIGS" ] && ! rig_namespace_admits_row "$RIGS_JSON" "" "$bead_id" "$routed_to"; then
+            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+            continue
+        fi
     fi
     if nudge_routed_target "$routed_to"; then
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
@@ -161,4 +191,11 @@ if [ "$NUDGED" -gt 0 ]; then
 fi
 if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
     echo "nudge-on-route: skipped $SKIPPED_FOREIGN routed bead(s) in guarded rigs whose route this city cannot vouch for"
+fi
+# Fail closed, loudly: the state is written, and a non-zero exit makes the
+# controller record order.failed with this line, which the dashboard's
+# attention list and gc doctor report.
+if [ "$SKIPPED_NO_RIG_LIST" -gt 0 ]; then
+    echo "nudge-on-route: gc rig list failed in a city that may have a guarded rig (federation = \"rig\"); $SKIPPED_NO_RIG_LIST routed bead(s) not nudged this run" >&2
+    exit 1
 fi

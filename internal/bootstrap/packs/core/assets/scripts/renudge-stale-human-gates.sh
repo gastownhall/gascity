@@ -69,7 +69,13 @@
 # vouch for (`gc agent is-foreign --rig-namespace <rig>`) is another city's or
 # a person's, and is left alone. A gate that names no addressee is left alone
 # when its creation stamp (gc.owner_namespace) names another namespace;
-# otherwise it keeps the escalation fallback.
+# otherwise it keeps the escalation fallback. In a city gc reports as having
+# no guarded rig (GC_GUARDED_RIGS set and empty, see
+# rig_namespace_city_may_guard) none of that is checked, and a rig list that
+# cannot be read leaves the sweep to HQ, as it always has. Otherwise a sweep
+# that cannot read `gc rig list` can neither list the rigs' gates nor tell a
+# guarded rig apart, so it re-nudges nothing (fail closed) and fails, so the
+# controller records order.failed with the reason; the next sweep reads again.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -151,12 +157,21 @@ trap 'rm -f "$SCOPES_FILE"' EXIT
 READY_ERR_FILE="$(mktemp "$PACK_STATE_DIR/.renudge-ready-err.XXXXXX")"
 trap 'rm -f "$SCOPES_FILE" "$READY_ERR_FILE"' EXIT
 printf '\n' > "$SCOPES_FILE" # HQ scope: an empty line
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
-if [ -n "$RIGS_JSON" ]; then
-    printf '%s' "$RIGS_JSON" \
-        | jq -r '(.rigs // [])[] | select(.hq != true and .suspended != true) | .name' 2>/dev/null \
-        >> "$SCOPES_FILE" || true
+CITY_MAY_GUARD=""
+if rig_namespace_city_may_guard; then
+    CITY_MAY_GUARD=1
 fi
+RIGS_JSON="$(gc rig list --json 2>/dev/null)" || RIGS_JSON=""
+if [ -n "$CITY_MAY_GUARD" ] && ! rig_namespace_rig_list_readable "$RIGS_JSON"; then
+    # Fail closed, loudly: a non-zero exit makes the controller record
+    # order.failed with this line, which the dashboard's attention list and
+    # gc doctor report.
+    echo "renudge-stale-human-gates: gc rig list failed in a city that may have a guarded rig (federation = \"rig\"); no gate was re-nudged (will retry next sweep)" >&2
+    exit 1
+fi
+printf '%s' "$RIGS_JSON" \
+    | jq -r '(.rigs // [])[] | select(.hq != true and .suspended != true) | .name' 2>/dev/null \
+    >> "$SCOPES_FILE" || true
 
 # Load dedup state (object mapping "<gate-id>" -> ISO timestamp of last
 # re-nudge). A missing or corrupt file resets to an empty object.
@@ -226,7 +241,9 @@ renudge_gate() {
     # vouch for there. The rig is the scope the gate was listed in or, for a
     # formula gate gc ready listed (no --rig), the guarded rig its id maps to.
     gate_rig=""
-    if [ "${1:-}" = "--rig" ]; then
+    if [ -z "$CITY_MAY_GUARD" ]; then
+        : # gc reports no guarded rig: nothing to judge.
+    elif [ "${1:-}" = "--rig" ]; then
         gate_rig="${2:-}"
         rig_namespace_rig_is_guarded "$RIGS_JSON" "$gate_rig" || gate_rig=""
     else

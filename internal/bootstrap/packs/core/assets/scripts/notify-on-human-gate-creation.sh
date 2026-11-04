@@ -51,8 +51,17 @@
 #
 # In a rig with federation = "rig" (a bead store other cities also attach), a
 # gate whose own addressee this city cannot vouch for (`gc agent is-foreign
-# --rig-namespace <rig>`) is left alone. This is defence in depth: the guarded
-# rig store is meant to drop other cities' events before they get here.
+# --rig-namespace <rig>`) is left alone, and so is a gate that names no
+# addressee when its creation stamp (gc.owner_namespace) names another
+# namespace, as the stale-gate re-nudge judges it. This is defence in depth:
+# the guarded rig store is meant to drop other cities' events before they get
+# here. In a city gc reports as having no guarded rig (GC_GUARDED_RIGS set
+# and empty, see rig_namespace_city_may_guard) none of that is checked, and
+# the rig list stays the best-effort scope lookup it has always been.
+# Otherwise a run that cannot read `gc rig list` cannot tell a guarded rig
+# apart, so it notifies no new gate (fail closed) and fails, so the controller
+# records order.failed with the reason; the gates are not recorded, so a later
+# run in the lookback, or the stale-gate re-nudge, notifies them.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -95,9 +104,17 @@ duration_to_seconds() {
     esac
 }
 
-# Build a prefix->rig lookup once. Best-effort: a single-rig city resolves
-# nothing here and simply runs the bd/gc calls in their default scope.
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
+# Build a prefix->rig lookup once. A single-rig city resolves nothing here and
+# simply runs the bd/gc calls in their default scope. A list that cannot be
+# read is left empty. In a city that may have a guarded rig the run then
+# notifies no new gate (see the gate loop); in one without, the bd/gc calls run
+# in their default scope.
+CITY_MAY_GUARD=""
+if rig_namespace_city_may_guard; then
+    CITY_MAY_GUARD=1
+fi
+RIGS_JSON="$(gc rig list --json 2>/dev/null)" || RIGS_JSON=""
+rig_namespace_rig_list_readable "$RIGS_JSON" || RIGS_JSON=""
 
 # Resolve a bead id's rig into RIG_ARG1/RIG_ARG2 ("--rig" "<name>"), or leave
 # them empty when the prefix is unknown. Callers expand them with
@@ -155,6 +172,8 @@ NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NOTIFIED=0
 FAILED=0
 SKIPPED_FOREIGN=0
+# Gates not notified because this run could not read the rig list.
+SKIPPED_NO_RIG_LIST=0
 while IFS= read -r gate_id; do
     [ -n "$gate_id" ] || continue
 
@@ -162,6 +181,10 @@ while IFS= read -r gate_id; do
     # re-notified while the creation event is still inside the lookback window.
     if echo "$STATE" | jq -e --arg k "$gate_id" 'has($k)' >/dev/null 2>&1; then
         STATE="$(echo "$STATE" | jq --arg k "$gate_id" --arg now "$NOW" '.[$k] = $now')"
+        continue
+    fi
+    if [ -n "$CITY_MAY_GUARD" ] && [ -z "$RIGS_JSON" ]; then
+        SKIPPED_NO_RIG_LIST=$((SKIPPED_NO_RIG_LIST + 1))
         continue
     fi
 
@@ -193,12 +216,26 @@ while IFS= read -r gate_id; do
     ADDRESSEE="$(printf '%s' "$GATE_JSON" | jq -r \
         '[.assignee, .metadata."gc.deferred_assignee"]
          | map(select(. != null and . != "")) | (.[0] // "")' 2>/dev/null)"
-    if [ -n "$ADDRESSEE" ]; then
-        # The gate was read from RIG_ARG2's store; that rig's namespace judges
-        # its addressee (and the prefix's rig too, if it differs).
-        if ! rig_namespace_admits_row "$RIGS_JSON" "$RIG_ARG2" "$gate_id" "$ADDRESSEE"; then
-            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
-            continue
+    # The rig-namespace checks, only in a city that may have a guarded rig.
+    if [ -n "$CITY_MAY_GUARD" ]; then
+        if [ -n "$ADDRESSEE" ]; then
+            # The gate was read from RIG_ARG2's store; that rig's namespace judges
+            # its addressee (and the prefix's rig too, if it differs).
+            if ! rig_namespace_admits_row "$RIGS_JSON" "$RIG_ARG2" "$gate_id" "$ADDRESSEE"; then
+                SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+                continue
+            fi
+        else
+            # A guarded rig's gate that names no addressee is judged by its
+            # creation stamp, as the store guard judges such a row: one another
+            # city's guard created (gc.owner_namespace names another namespace) is
+            # that city's, and its escalation is not this city's to send. An
+            # unstamped gate keeps the escalation fallback.
+            owner_stamp="$(printf '%s' "$GATE_JSON" | jq -r '.metadata."gc.owner_namespace" // "" | tostring' 2>/dev/null)" || owner_stamp="?"
+            if rig_namespace_row_stamp_names_other "$RIGS_JSON" "$RIG_ARG2" "$gate_id" "$owner_stamp"; then
+                SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+                continue
+            fi
         fi
     fi
     [ -n "$ADDRESSEE" ] || ADDRESSEE="$ESCALATION_RECIPIENT"
@@ -246,13 +283,21 @@ if [ "$NOTIFIED" -gt 0 ]; then
     echo "notify-on-human-gate-creation: notified $NOTIFIED human gate addressee(s)"
 fi
 if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
-    echo "notify-on-human-gate-creation: left $SKIPPED_FOREIGN gate(s) in guarded rigs whose addressee this city cannot vouch for"
+    echo "notify-on-human-gate-creation: left $SKIPPED_FOREIGN gate(s) in guarded rigs that are not this city's (an addressee it cannot vouch for, or another city's creation stamp)"
 fi
 
 # Loud-fail: state has been written (successes are deduped), so a non-zero exit
 # now surfaces the per-gate failure lines above to the controller log without
-# losing the recorded successes. exit 0 would swallow them (#4543).
+# losing the recorded successes. exit 0 would swallow them (#4543). A run that
+# could not read the rig list in a city that may have a guarded rig fails the
+# same way, so the controller records order.failed, which the dashboard's
+# attention list and gc doctor report.
+if [ "$SKIPPED_NO_RIG_LIST" -gt 0 ]; then
+    echo "notify-on-human-gate-creation: gc rig list failed in a city that may have a guarded rig (federation = \"rig\"); $SKIPPED_NO_RIG_LIST created gate(s) not checked or notified this run" >&2
+fi
 if [ "$FAILED" -gt 0 ]; then
     echo "notify-on-human-gate-creation: $FAILED human gate addressee(s) failed to notify (see above; will retry)" >&2
+fi
+if [ "$FAILED" -gt 0 ] || [ "$SKIPPED_NO_RIG_LIST" -gt 0 ]; then
     exit 1
 fi
