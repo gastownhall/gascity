@@ -113,19 +113,27 @@ func foldProgramPane(rows []programPane) (programPane, bool) {
 
 // programTaps is the process table's account of capture readers: the nonce
 // ("<rand>.<pane_id>") every tap process carries. known is false when the
-// table was not read, and then no tap's liveness is known.
+// table was not read, and then no tap's liveness is known. pending holds the
+// rands of the nonces this process armed after the table was scanned (see
+// programArmStamps): their taps may postdate it.
 type programTaps struct {
-	known  bool
-	nonces map[string]struct{}
+	known   bool
+	nonces  map[string]struct{}
+	pending map[string]struct{}
 }
 
-// liveness is the tap-liveness tristate for nonce.
+// liveness is the tap-liveness tristate for nonce. A tap the table does not
+// hold is gone unless its arm postdates the table, and then it is unknown:
+// the table cannot say.
 func (t programTaps) liveness(nonce string) runtime.ProgramTapLiveness {
 	if !t.known {
 		return runtime.ProgramTapUnknown
 	}
 	if _, ok := t.nonces[nonce]; ok {
 		return runtime.ProgramTapAlive
+	}
+	if _, ok := t.pending[nonceRand(nonce)]; ok {
+		return runtime.ProgramTapUnknown
 	}
 	return runtime.ProgramTapGone
 }
@@ -209,17 +217,17 @@ func (p *Provider) ProgramStatus(name string) (runtime.ProgramStatus, error) {
 		// fields: there is nothing to judge.
 		return runtime.ProgramStatus{Mode: mode}, nil
 	}
-	return judgeProgramPane(mode, p.tm.captureGatePassed(), session.Program, session.ProgramNamed, obs.state.programTaps()), nil
+	return judgeProgramPane(mode, p.tm.captureGatePassed(), session.Program, session.ProgramNamed, p.tm.snapshotTaps(obs.state)), nil
 }
 
 // judgeInventoryPrograms fills each entry's Program from its session's agent
 // pane, judged under mode with the tap liveness of the state cache's process
 // table. That table can predate the inventory's listing by up to the cache's
-// TTL, so a pane armed in between reads reader_lost until the next refresh:
-// a reading that withholds state, never one that grants it.
+// TTL; a tap this process armed after the table was scanned reads unknown
+// liveness (snapshotTaps), not reader_lost, until the next refresh.
 func (p *Provider) judgeInventoryPrograms(mode runtime.ProgramStatusMode, entries map[string]runtime.InventoryEntry, panes map[string]programPane) {
 	gate := p.tm.captureGatePassed()
-	taps := p.cache.currentState().programTaps()
+	taps := p.tm.snapshotTaps(p.cache.currentState())
 	for name, e := range entries {
 		pane, named := panes[name]
 		e.Program = judgeProgramPane(mode, gate, pane, named, taps)

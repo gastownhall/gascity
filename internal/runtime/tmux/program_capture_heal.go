@@ -277,6 +277,7 @@ func (t *Tmux) armIdlePane(pane healPane, want runtime.ProgramStatusArm) (bool, 
 	armList := tmuxCommandLines(plan.armCommands(pane.target, true))
 	out, err := t.run("if-shell", "-F", "-t", pane.target, "#{pane_pipe}", "", armList,
 		";", "display-message", "-p", "-t", pane.target, "#{s/"+programReadSanitizer+"//:"+programTapOption+"}")
+	t.programArms.noteArmed(plan)
 	if err != nil {
 		return false, fmt.Errorf("arming %s: %w", pane.target, err)
 	}
@@ -291,7 +292,9 @@ func (t *Tmux) replaceTap(pane healPane, want runtime.ProgramStatusArm) (bool, e
 	if plan == nil {
 		return false, nil
 	}
-	if _, err := t.run(tmuxArgvList(plan.armCommands(pane.target, true))...); err != nil {
+	_, err := t.run(tmuxArgvList(plan.armCommands(pane.target, true))...)
+	t.programArms.noteArmed(plan)
+	if err != nil {
 		return false, fmt.Errorf("replacing the tap of %s: %w", pane.target, err)
 	}
 	return true, nil

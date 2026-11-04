@@ -98,7 +98,7 @@ func NewProviderWithConfig(cfg Config) *Provider {
 	}
 	// Shadow reads take tap liveness from the cache's last process table,
 	// never refreshing it.
-	tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+	tm.shadow.taps = func() programTaps { return tm.snapshotTaps(p.cache.observation().state) }
 	return p
 }
 

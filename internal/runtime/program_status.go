@@ -76,7 +76,7 @@ type ProgramStatus struct {
 	Probed          bool // the program sent the support probe this incarnation (doctor)
 	LastError       bool // an error report was seen; sticky across clear (annotation only)
 	Reported        bool // a root report was seen this incarnation: no root then reads cleared, not silent
-	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable
+	ReaderVerified  bool // the process table confirmed the tap; false when the snapshot was unavailable or predates the tap's arm
 	// HoldDeclared annotates a reading under our nonce (valid, silent or
 	// cleared): the pane was armed declaring the mid-turn hold
 	// ([ProgramStatusArm.HoldMidTurn]). It is the pane's, not the program's.
@@ -288,7 +288,8 @@ type ProgramStatusComparisonSink func(ProgramStatusComparison)
 
 // ProgramTapLiveness is the process table's word on whether a pane's capture
 // reader (the tap holding the pane's nonce) is alive. The zero value is
-// unknown: the snapshot was unavailable.
+// unknown: the snapshot was unavailable, or was scanned before the tap was
+// armed and so cannot hold it.
 type ProgramTapLiveness string
 
 // The tap-liveness tristate.
