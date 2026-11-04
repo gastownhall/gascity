@@ -174,15 +174,11 @@ func TestMain(m *testing.M) {
 			}
 			os.Exit(0)
 		}
-		// Pre-sweep: kill this run's root plus stale sibling orphans.
-		tmuxtest.KillAllTestSessions(&mainTB{})
 	}
-	// Best-effort pre-sweep of stale "gc supervisor run" / control-dispatcher
-	// processes left by a prior interrupted or timed-out run. This is not
-	// gated to the subprocess provider: both providers boot the same shared
-	// TestMain supervisor via gcBinary/testGCHome, and a `go test -timeout`
-	// panic bypasses per-test t.Cleanup for either one.
-	sweepSubprocessTestProcesses()
+	// Pre-sweep: kill this run's root plus stale sibling orphans.
+	runIntegrationPreSweep(subprocess,
+		func() { tmuxtest.KillAllTestSessions(&mainTB{}) },
+		sweepSubprocessTestProcesses)
 	// Reap dolt sql-server orphans left by prior crashed runs (SIGKILL /
 	// timeout bypasses in-process cleanup); scoped by owner-pid liveness so
 	// concurrent runs are spared (issue #3640).
@@ -370,6 +366,19 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(tmuxSocketParent)
 	}
 	os.Exit(code)
+}
+
+// runIntegrationPreSweep is TestMain's pre-sweep. killTmuxSessions runs only
+// for the tmux provider. sweepSupervisor reaps stale "gc supervisor run" /
+// control-dispatcher processes left by a prior interrupted or timed-out run;
+// it is not gated to the subprocess provider, because both providers boot the
+// same shared TestMain supervisor via gcBinary/testGCHome, and a `go test
+// -timeout` panic bypasses per-test t.Cleanup for either one.
+func runIntegrationPreSweep(subprocess bool, killTmuxSessions, sweepSupervisor func()) {
+	if !subprocess {
+		killTmuxSessions()
+	}
+	sweepSupervisor()
 }
 
 func installIntegrationSignalSweeper(subprocess bool) func() {
