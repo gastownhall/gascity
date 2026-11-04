@@ -651,8 +651,20 @@ in its handshake. A script that declares `observe.v1` **and**
 handshake alone. `gc runtime conformance` reports `v2-ready: yes` only for a
 script that also passes every requirement; otherwise it names the
 capabilities the script lacks and the requirements it failed. A script that
-declares neither keeps today's behavior exactly. Declaring `observe.v1`
-obliges the script to:
+declares neither keeps today's behavior exactly.
+
+Reconciler v2 runs on a v2-ready script, and refuses any other exec
+runtime, naming what its handshake lacks. Admission asks the script's
+`protocol` once per version of the file (its path, size, modification time
+and inode), within 10 seconds, and remembers the answer; at boot the
+controller checks that the provider it built reads the same. With
+`session_reconciler` unset, a v2-ready script switches the city to v2, and
+the boot log and `gc doctor` say so. `input-fence` is not required, but
+without it (with `proc.exec`) input gc fences to one incarnation is refused
+on the box, and `gc doctor` warns. The handshake's `locality` decides
+whether gc's storage verbs treat the runtime as remote (absent: remote).
+
+Declaring `observe.v1` obliges the script to:
 
 1. Implement `observe`, `inventory` and `kill-object` (below).
 2. Honor `fresh_only` on `start` (and `provision`, if declared).
@@ -844,7 +856,10 @@ other's boxes as dead and removes them.
 
 gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
 the city the provider serves. A script shared by several cities on one
-backend scopes its boxes and listings by them.
+backend scopes its boxes and listings by them. The one exception is the
+admission probe's `protocol` (see [observe.v1](#observev1-reconciler-v2)):
+it carries the city's name and no path, so a handshake must not depend on
+the path, and should read no state.
 
 A script runs with gc's own environment. The session's environment arrives
 in the start config's `env` (see [Session environment](#session-environment)).

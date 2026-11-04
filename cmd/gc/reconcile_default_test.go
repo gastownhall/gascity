@@ -183,7 +183,7 @@ func TestResolveReconcilerModeEachTrueGapFallsBack(t *testing.T) {
 			if len(res.Fallbacks) != 1 || !strings.Contains(res.Fallbacks[0], tc.config) || !strings.Contains(res.Fallbacks[0], tc.pr) {
 				t.Fatalf("fallbacks = %q, want one naming %q and %s", res.Fallbacks, tc.config, tc.pr)
 			}
-			boot := reconcilerBootWarnings(cfg, res)
+			boot := reconcilerBootWarnings(cfg, nil, res)
 			if len(boot) != 1 || !strings.Contains(boot[0], "legacy (default fallback: ") || !strings.Contains(boot[0], tc.config) || !strings.Contains(boot[0], `set session_reconciler = "legacy"`) {
 				t.Errorf("boot warnings = %q, want the fallback naming %q and the fix", boot, tc.config)
 			}

@@ -9,8 +9,9 @@ import (
 
 // v2DefaultFallbacks lists why an unset [daemon] session_reconciler resolves
 // to legacy rather than v2 (mc-dpo2b), in a fixed order, or nil when v2 is the
-// default. Like v2LatchRefusals it reads only cfg, lookupEnv and the builtin
-// runtime registry, never a store, so the controller latch, gc start and
+// default. Like v2LatchRefusals it reads cfg, lookupEnv, the builtin runtime
+// registry and, outside config, only the remembered exec admission probe
+// (execReadiness), never a store, so the controller latch, gc start and
 // doctor resolve the same mode. Beyond the latch refusals it mirrors C0.7
 // (v2CapabilityRefusal) from config: conditional writes must resolve on, and
 // the sessions and graph class stores must be a kind that fences and whose

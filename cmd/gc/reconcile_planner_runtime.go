@@ -24,6 +24,7 @@ import (
 // Boot states, for the pass record and the startup watchdog.
 const (
 	plannerBootCapabilities = "capabilities" // C0.7's read of the class stores has not passed
+	plannerBootRuntime      = "runtime"      // C0.8's read of the exec runtimes' handshakes has not passed
 	plannerBootCensus       = "census"       // C11's boot census has not passed
 	plannerBootGate         = "gate"         // no pass has completed with the boot gate open
 	plannerBootReady        = "ready"
@@ -41,13 +42,19 @@ var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
 // plannerHost is the only way the planner reaches the city (F2). bindHost
 // fills gather's Env and Recording; only publishEnv calls snapshotEnv; a nil
-// bootCensus skips C11's check, and a nil capabilities C0.7's.
+// bootCensus skips C11's check, a nil capabilities C0.7's, and a nil
+// runtimeReadiness C0.8's.
 type plannerHost struct {
 	gather           gatherEnv
 	snapshotEnv      func() (*config.City, runtime.Provider, string)
 	setInventoryHook func(fn func(prev, next *ObservationSnapshot))
 	bootCensus       func() (v2SessionMigration, error)
 	capabilities     func() error
+	// runtimeReadiness is C0.8 (v2RuntimeReadiness): nil when every exec
+	// leaf of the provider the city built is v2-ready, a
+	// *v2RuntimeUnreadError when a handshake could not be read, else the
+	// refusal.
+	runtimeReadiness func() error
 	beginTrace       func(trigger string) *sessionReconcilerTraceCycle // off the controller goroutine
 	inventoryFields  func() map[string]any                             // the pass record's view of the inventory lane
 	safeTick         func(fn func(), trigger string) (panicked bool)
@@ -70,6 +77,7 @@ type plannerRuntime struct {
 	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
 	softReload func(ctx context.Context, intent reloadIntent, r *reloadControlReply)
 	capable    atomic.Bool   // C0.7's read of the class stores passed
+	runtimeOK  atomic.Bool   // C0.8's read of the exec runtimes' handshakes passed
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
 	readyOnce  sync.Once
@@ -158,7 +166,9 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 
 // boot refuses stores that cannot fence (C0.7; a store C0.7 could not read
 // is retried with backoff, as a failed read is no verdict on the store),
-// publishes env Gen 1, refuses enterprise-era session rows on a live census
+// refuses an exec runtime the provider built whose handshake is not v2-ready
+// (C0.8; a handshake that could not be read is retried alike), publishes env
+// Gen 1, refuses enterprise-era session rows on a live census
 // (C11; a failed census is retried with backoff, as an error is not an empty
 // city), starts the planner, and returns once a pass has completed with the
 // boot gate open (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a
@@ -180,6 +190,25 @@ func (rt *plannerRuntime) boot(ctx context.Context) error {
 		}
 		failures++
 		if err := rt.bootBackoff(ctx, failures, "C0.7 store read", verdict); err != nil {
+			return err
+		}
+	}
+	for failures := 0; !rt.runtimeOK.Load(); {
+		var verdict error
+		if rt.host.runtimeReadiness != nil {
+			verdict = rt.host.runtimeReadiness()
+		}
+		var unread *v2RuntimeUnreadError
+		if !errors.As(verdict, &unread) {
+			if verdict != nil {
+				rt.planner.alert(alertBootRefused, "", verdict.Error())
+				return verdict
+			}
+			rt.runtimeOK.Store(true)
+			break
+		}
+		failures++
+		if err := rt.bootBackoff(ctx, failures, "C0.8 runtime handshake", verdict); err != nil {
 			return err
 		}
 	}
@@ -331,6 +360,8 @@ func (rt *plannerRuntime) bootState() string {
 		return plannerBootNoStore
 	case !rt.capable.Load():
 		return plannerBootCapabilities
+	case !rt.runtimeOK.Load():
+		return plannerBootRuntime
 	case !rt.census.Load():
 		return plannerBootCensus
 	}

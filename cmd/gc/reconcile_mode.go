@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // reconcilerMode is the session reconciler a controller latched at boot from
@@ -31,7 +32,8 @@ func (m reconcilerMode) String() string {
 }
 
 // v2EffectsReal reports that the planner submits what admission lets
-// through (C9, the cutover): v2 is admissible from config alone, and its
+// through (C9, the cutover): v2 is admissible from config (and an exec
+// runtime's remembered admission handshake, execReadiness), and its
 // passes act. The v2purity analyzer reads it as its cutover gate.
 const v2EffectsReal = true
 
@@ -71,6 +73,24 @@ func (r reconcilerResolution) String() string {
 	return r.Mode.String() + " (set by [daemon] session_reconciler)"
 }
 
+// v2ExecOptInHint is the fix doctor and the boot log give for a default v2
+// an exec runtime's handshake chose.
+const v2ExecOptInHint = `set session_reconciler = "v2" to keep v2 and silence this warning, or "legacy" to keep legacy`
+
+// v2ExecOptInNote is the note for a default v2 (session_reconciler unset)
+// on an exec session runtime: its handshake, not the config, switched the
+// city to v2 (D6). "" for any other resolution or runtime.
+func v2ExecOptInNote(cfg *config.City, lookupEnv func(string) (string, bool), r reconcilerResolution) string {
+	if r.Reason != reconcilerDefaultV2 {
+		return ""
+	}
+	name := v2SessionRuntimeName(cfg, lookupEnv)
+	if _, ok := execRuntimeScript(cfg, name); !ok {
+		return ""
+	}
+	return fmt.Sprintf("session reconciler: v2 by default on the exec session runtime %q, whose handshake declares v2 (%s)", name, strings.Join(sessionexec.V2ProfileCapabilities(), ", "))
+}
+
 // reconcilerFallbackHint is the fix doctor and the boot log give for a
 // fallback.
 const reconcilerFallbackHint = `to run v2, remove or change the settings named; or set session_reconciler = "legacy" to keep legacy and silence this warning`
@@ -85,7 +105,8 @@ func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)
 	return r.Mode, nil
 }
 
-// resolveReconcilerMode resolves the boot mode from config alone. Unknown
+// resolveReconcilerMode resolves the boot mode from config, and outside it
+// only the remembered exec admission handshake (execReadiness). Unknown
 // values and an inadmissible explicit v2 are errors: the city does not start.
 // An explicit v2 is admissible when the composed config enables no feature v2
 // defers (v2LatchRefusals). An unset key is v2 when v2DefaultFallbacks names
@@ -119,12 +140,16 @@ func resolveReconcilerMode(cfg *config.City, lookupEnv func(string) (string, boo
 }
 
 // reconcilerBootWarnings is what a controller logs once at boot about its
-// resolution: the fallback and its reasons, and under v2 each setting v2
-// ignores (v2IgnoredSettings).
-func reconcilerBootWarnings(cfg *config.City, r reconcilerResolution) []string {
+// resolution: the fallback and its reasons, a default v2 that an exec
+// session runtime's handshake opted the city into (owner decision D6), and
+// under v2 each setting v2 ignores (v2IgnoredSettings).
+func reconcilerBootWarnings(cfg *config.City, lookupEnv func(string) (string, bool), r reconcilerResolution) []string {
 	var out []string
 	if r.Reason == reconcilerFallbackLegacy {
 		out = append(out, "session reconciler: "+r.String()+"; "+reconcilerFallbackHint)
+	}
+	if note := v2ExecOptInNote(cfg, lookupEnv, r); note != "" {
+		out = append(out, note+"; "+v2ExecOptInHint)
 	}
 	if r.Mode == reconcilerV2 {
 		out = append(out, v2IgnoredSettings(cfg)...)
@@ -293,6 +318,21 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Status = doctor.StatusWarning
 		r.Message += "; " + strings.Join(ignored, "; ")
 		r.FixHint = "remove the settings v2 ignores"
+	}
+	if note := v2ExecOptInNote(c.cfg, c.lookupEnv, res); err == nil && note != "" {
+		r.Status = doctor.StatusWarning
+		r.Message += "; " + note
+		r.FixHint = v2ExecOptInHint
+	}
+	if detail, warn := execRuntimeDoctorDetail(c.cfg, c.lookupEnv, mode); detail != "" {
+		r.Details = append(r.Details, detail)
+		if warn != "" {
+			if r.Status == doctor.StatusOK {
+				r.Status = doctor.StatusWarning
+				r.FixHint = "declare proc.exec and input-fence in the script's handshake if it fences input"
+			}
+			r.Message += "; " + warn
+		}
 	}
 	for _, refusal := range v2LatchRefusals(c.cfg, c.lookupEnv) {
 		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())

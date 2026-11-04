@@ -804,9 +804,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Refuse an inadmissible session_reconciler before any init, so a refused
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
-	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
-	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
+	// The two agree: both read only cfg, which nothing below rewrites,
+	// reconcilerModeLookupEnv's GC_SESSION and GC_BEADS_CONDITIONAL_WRITES,
+	// which no gc code sets, and an exec runtime's admission handshake,
+	// remembered per version of its script (execReadiness); a script
+	// rewritten between the two is caught at boot (C0.8).
 	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr

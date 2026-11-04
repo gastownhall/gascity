@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -107,6 +108,10 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 		},
 		capabilities: func() error {
 			return v2CapabilityVerdict(v2ClassStoreCapabilities(cr.v2SessionsStore(), cr.v2GraphStore(), false))
+		},
+		runtimeReadiness: func() error {
+			_, sp, _ := cr.serviceEnvSnapshot()
+			return v2RuntimeReadiness(sp)
 		},
 		beginTrace: cr.beginV2Trace,
 		inventoryFields: func() map[string]any {
@@ -295,6 +300,52 @@ func v2CapabilityRefusal(caps []v2StoreCapability) error {
 	}
 	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: %s, or set session_reconciler = \"legacy\"", strings.Join(parts, "; "), fix)
 }
+
+// v2RuntimeReadiness is C0.8: the provider the city built, not the latch's
+// probe, decides whether v2 runs on it. Every leaf that reports v2 readiness
+// (an exec runtime) must have none of the v2 gaps in its own handshake;
+// one that lacks them refuses the boot (the script changed between the
+// latch's probe and the provider's handshake), and one whose handshake
+// could not be read is no verdict (a *v2RuntimeUnreadError), so boot
+// retries it.
+func v2RuntimeReadiness(sp runtime.Provider) error {
+	var refused []string
+	var unread error
+	for _, leaf := range inventoryLeaves(sp, "") {
+		r, ok := leaf.provider.(runtime.V2ReadinessReporter)
+		if !ok {
+			continue
+		}
+		label := leaf.label
+		if label == "" {
+			label = "the session runtime"
+		}
+		missing, err := r.V2Readiness()
+		switch {
+		case err != nil:
+			unread = &v2RuntimeUnreadError{Label: label, Err: err}
+		case len(missing) > 0:
+			refused = append(refused, fmt.Sprintf("%s's handshake does not declare %s", label, strings.Join(missing, " or ")))
+		}
+	}
+	if len(refused) > 0 {
+		return fmt.Errorf("v2 refuses to boot on an exec runtime that is not v2-ready (C0.8): %s; the latch read a v2-ready handshake, so the script changed since: restore its observe.v1 profile, or set session_reconciler = \"legacy\"", strings.Join(refused, "; "))
+	}
+	return unread
+}
+
+// v2RuntimeUnreadError is C0.8 failing to read an exec runtime's handshake:
+// no verdict on the runtime, so boot retries rather than refusing.
+type v2RuntimeUnreadError struct {
+	Label string
+	Err   error
+}
+
+func (e *v2RuntimeUnreadError) Error() string {
+	return fmt.Sprintf("C0.8 could not read %s's handshake: %v", e.Label, e.Err)
+}
+
+func (e *v2RuntimeUnreadError) Unwrap() error { return e.Err }
 
 // v2CapabilityUnreadError is C0.7 failing to read a class store's list
 // revisions: no verdict on the store, so boot retries rather than refusing.

@@ -56,6 +56,13 @@ umask 077
 op="${1:?missing operation}"
 name="${2:-}"
 
+# The handshake reads no state, so it is answered before any is set up: gc's
+# admission probe asks it with no city path.
+if [ "$op" = protocol ]; then
+  echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped"],"locality":"local"}'
+  exit 0
+fi
+
 IDENTITY_KEYS="GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES"
 META_KEYS="$IDENTITY_KEYS GC_CITY_PATH GC_BIN"
 
@@ -439,10 +446,6 @@ target() {
 }
 
 case "$op" in
-  protocol)
-    echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped"],"locality":"local"}'
-    ;;
-
   start)
     config=$(cat)
     valid_name "$name"

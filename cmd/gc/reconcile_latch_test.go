@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"maps"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,7 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/acp"
-	"github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
 	"github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/subprocess"
@@ -39,12 +39,7 @@ var v2RefusalCases = []struct {
 	{"herdr", func(c *config.City) { c.Session.Provider = " herdr " }, `[session] provider = "herdr"`, "PAR-HERDR"},
 	{"t3bridge", func(c *config.City) { c.Session.Provider = "t3bridge" }, `[session] provider = "t3bridge"`, "PAR-T3"},
 	{"exec t3bridge script", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/gc-session-t3" }, `[session] provider = "exec:/opt/bin/gc-session-t3"`, "PAR-T3"},
-	{"exec", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/runner" }, `[session] provider = "exec:/opt/bin/runner"`, "PAR-EXEC"},
 	{"ssh", func(c *config.City) { c.Session.Provider = "ssh:ops@box:22" }, `[session] provider = "ssh:ops@box:22"`, "PAR-SSH"},
-	{"pack runtime", func(c *config.City) {
-		c.Session.Provider = "cloudflare"
-		c.Runtimes = map[string]config.DiscoveredRuntime{"cloudflare": {Name: "cloudflare", PackName: "runtime-cloudflare"}}
-	}, `[session] provider = "cloudflare"`, "PAR-EXEC"},
 }
 
 // v2City is an admissible v2 city that mutate turns into the case under test.
@@ -207,12 +202,17 @@ func TestLatchRefusalNamesParityPR(t *testing.T) {
 	}
 }
 
-// Pins ruling (c) safe by construction, not by accident: v2 runs only on
-// tmux, acp and subprocess (and the test doubles), each of which reads
-// liveness fresh with errors, so the plain row writes that stay on the
-// pass's cached liveness never run where no fresh read could be made;
-// herdr, k8s and exec, which cannot read fresh, refuse at the latch. A
-// runtime added to the allowlist must read fresh, or this fails.
+// Pins ruling (c) safe by construction, not by accident: every runtime the
+// latch admits reads liveness fresh with errors, attests its listing, reads
+// identity and reports attachment, so the plain row writes that stay on the
+// pass's cached liveness never run where no fresh read could be made. The
+// allowlist is tmux, acp and subprocess (and the test doubles); an exec
+// runtime is admitted only when its handshake is v2-ready (PAR-EXEC), and
+// for each exec fixture (no handshake, observe.v1 without
+// report-attachment, ready, a broken handshake) the latch admits exactly
+// the providers the registry builds that read fresh. herdr and k8s, which
+// cannot read fresh, refuse. A runtime added to the allowlist must read
+// fresh, or this fails.
 func TestV2RunsOnlyOnRuntimesThatReadFresh(t *testing.T) {
 	want := map[string]bool{"": true, "tmux": true, "acp": true, "subprocess": true, "fake": true, "fail": true}
 	if !maps.Equal(v2SessionRuntimesAdmitted, want) {
@@ -223,9 +223,183 @@ func TestV2RunsOnlyOnRuntimesThatReadFresh(t *testing.T) {
 			t.Errorf("admitted runtime %s cannot read fresh", name)
 		}
 	}
-	for name, p := range map[string]runtime.Provider{"herdr": (*herdr.Provider)(nil), "k8s": (*k8s.Provider)(nil), "exec": (*exec.Provider)(nil)} {
+	for name, p := range map[string]runtime.Provider{"herdr": (*herdr.Provider)(nil), "k8s": (*k8s.Provider)(nil)} {
 		if v2SessionRuntimesAdmitted[name] || runtime.FreshReadable(p) {
 			t.Errorf("%s: admitted %t, reads fresh %t; want refused, and not fresh (else revisit ruling (c))", name, v2SessionRuntimesAdmitted[name], runtime.FreshReadable(p))
+		}
+	}
+	for _, f := range execAdmissionFixtures(t) {
+		cfg := v2City(func(c *config.City) { c.Session.Provider = "exec:" + f.script })
+		admitted := len(v2LatchRefusals(cfg, nil)) == 0
+		sp, err := runtimeRegistry.New("exec:"+f.script, config.SessionConfig{}, "test-city", t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if admitted != f.ready || admitted != runtime.FreshReadable(sp) {
+			t.Errorf("exec %s: admitted %t, reads fresh %t; want both %t", f.name, admitted, runtime.FreshReadable(sp), f.ready)
+		}
+		if !admitted {
+			continue
+		}
+		attested := false
+		if a, ok := sp.(runtime.ListingAttestation); ok {
+			attested = a.ListRunningComplete()
+		}
+		identity := false
+		if o, ok := sp.(runtime.IdentityObserver); ok {
+			identity = o.IdentityObservable()
+		}
+		if !attested || !identity || !sp.Capabilities().CanReportAttachment {
+			t.Errorf("admitted exec %s: listing attested %t, identity observable %t, reports attachment %t; want all", f.name, attested, identity, sp.Capabilities().CanReportAttachment)
+		}
+	}
+}
+
+// execAdmissionFixture is an exec script by its handshake, and whether it is
+// v2-ready.
+type execAdmissionFixture struct {
+	name, script string
+	ready        bool
+}
+
+// execAdmissionFixtures are a script with no handshake (v0), one declaring
+// observe.v1 without report-attachment, a ready one, and one whose
+// handshake is broken.
+func execAdmissionFixtures(t *testing.T) []execAdmissionFixture {
+	t.Helper()
+	pack := func(protocol string) string {
+		return writeRPPScript(t, `case "$1" in
+  protocol) `+protocol+` ;;
+  *) exit 2 ;;
+esac
+`)
+	}
+	return []execAdmissionFixture{
+		{"v0", pack(`exit 2`), false},
+		{"observe.v1 without report-attachment", pack(`echo '{"version":0,"capabilities":["observe.v1"]}'`), false},
+		{"ready", pack(`echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'`), true},
+		{"broken handshake", pack(`echo 'not json'`), false},
+	}
+}
+
+// Kills an exec refusal that does not tell the operator what to change: a
+// refused exec runtime, an exec: script or a pack's, names the setting and
+// a Fix (the capabilities its handshake lacks, or the error that kept it
+// from being read) and no parity PR, since PAR-EXEC lifted the runtime
+// itself; a ready one is admitted.
+func TestExecRefusalNamesTheMissingCapabilities(t *testing.T) {
+	fixtures := execAdmissionFixtures(t)
+	for _, c := range []struct {
+		name string
+		cfg  func(*config.City)
+		fix  []string // "" means admitted
+	}{
+		{"v0", func(c *config.City) { c.Session.Provider = "exec:" + fixtures[0].script }, []string{"does not declare observe.v1 or report-attachment"}},
+		{"observe.v1 alone", func(c *config.City) { c.Session.Provider = "exec:" + fixtures[1].script }, []string{"does not declare report-attachment", "gc runtime conformance"}},
+		{"ready", func(c *config.City) { c.Session.Provider = "exec:" + fixtures[2].script }, nil},
+		{"broken handshake", func(c *config.City) { c.Session.Provider = "exec:" + fixtures[3].script }, []string{"could not be read", "observe.v1 and report-attachment"}},
+		{"missing script", func(c *config.City) { c.Session.Provider = "exec:/nonexistent/gc-runner" }, []string{"could not be read"}},
+		{"pack runtime", func(c *config.City) {
+			c.Session.Provider = "cloudflare"
+			c.Runtimes = map[string]config.DiscoveredRuntime{"cloudflare": {Name: "cloudflare", PackName: "runtime-cloudflare", Command: fixtures[1].script}}
+		}, []string{"the pack runtime-cloudflare exec session runtime", "does not declare report-attachment"}},
+		{"ready pack runtime", func(c *config.City) {
+			c.Session.Provider = "cloudflare"
+			c.Runtimes = map[string]config.DiscoveredRuntime{"cloudflare": {Name: "cloudflare", PackName: "runtime-cloudflare", Command: fixtures[2].script}}
+		}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := v2LatchRefusals(v2City(c.cfg), nil)
+			if c.fix == nil {
+				if len(got) != 0 {
+					t.Fatalf("refusals %v, want a ready exec runtime admitted", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].ParityPR != "" || got[0].Fix == "" {
+				t.Fatalf("refusals %+v, want one with a Fix and no parity PR", got)
+			}
+			msg := got[0].String()
+			for _, part := range append(c.fix, got[0].Config, "is not available under v2: ") {
+				if !strings.Contains(msg, part) {
+					t.Errorf("refusal %q does not contain %q", msg, part)
+				}
+			}
+		})
+	}
+}
+
+// Kills an admission probe that forks on every latch, or remembers what it
+// should not: the decision reads config and, outside it, only the exec
+// handshake, one probe per version of the script file. The latch, the
+// default resolution, the swap check and doctor's detail all reuse it; a
+// rewrite of the script (size, modification time or inode) probes again;
+// a handshake that cannot be read is never remembered. Not parallel: it
+// replaces probeExecHandshake.
+func TestExecAdmissionProbeIsRemembered(t *testing.T) {
+	saved := probeExecHandshake
+	probes := 0
+	probeExecHandshake = func(path, cityName string) (runtime.ProtocolInfo, []string, error) {
+		probes++
+		return saved(path, cityName)
+	}
+	t.Cleanup(func() { probeExecHandshake = saved })
+	script := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'; exit 0; }; exit 2
+`)
+	cfg := v2City(func(c *config.City) { c.Session.Provider = "exec:" + script })
+	for range 3 {
+		if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
+			t.Fatalf("refusals %v, want the ready script admitted", got)
+		}
+	}
+	cfg.Daemon.SessionReconciler = ""
+	for _, f := range v2DefaultFallbacks(cfg, nil) {
+		if strings.Contains(f, script) {
+			t.Fatalf("default fallback %q, want the ready script admitted", f)
+		}
+	}
+	if _, refused := v2ProviderSwapRefusal(cfg, func(string) (string, bool) { return "", false }); refused {
+		t.Fatal("the swap check refused a ready script")
+	}
+	execRuntimeDoctorDetail(cfg, nil, reconcilerV2)
+	if probes != 1 {
+		t.Fatalf("%d probes for one version of the script, want 1", probes)
+	}
+	// A rewrite is a new version: probed again, and now refused.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n[ \"$1\" = protocol ] && { echo '{\"version\":0,\"capabilities\":[\"observe.v1\"]}'; exit 0; }; exit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := v2LatchRefusals(cfg, nil); len(got) != 1 || probes != 2 {
+		t.Fatalf("after a rewrite: refusals %v, %d probes; want refused on a second probe", got, probes)
+	}
+	// An error is not remembered.
+	broken := writeRPPScript(t, "exit 1\n")
+	bcfg := v2City(func(c *config.City) { c.Session.Provider = "exec:" + broken })
+	v2LatchRefusals(bcfg, nil)
+	v2LatchRefusals(bcfg, nil)
+	if probes != 4 {
+		t.Fatalf("%d probes after two latches over a broken handshake, want 4 (no error remembered)", probes)
+	}
+}
+
+// Kills a locality read that ignores the handshake (owner decision D4,
+// #8509's seam): an exec: runtime whose handshake declares locality=local
+// is local; one that declares none, another, or whose handshake cannot be
+// read is remote.
+func TestExecRuntimeLocalityComesFromTheHandshake(t *testing.T) {
+	for _, c := range []struct {
+		protocol string
+		remote   bool
+	}{
+		{`echo '{"version":0,"capabilities":[],"locality":"local"}'`, false},
+		{`echo '{"version":0,"capabilities":[]}'`, true},
+		{`echo '{"version":0,"capabilities":[],"locality":"remote"}'`, true},
+		{`exit 1`, true},
+	} {
+		script := writeRPPScript(t, `[ "$1" = protocol ] && { `+c.protocol+`; exit $?; }; exit 2
+`)
+		if got := sessionRuntimeIsRemote("exec:" + script); got != c.remote {
+			t.Errorf("handshake %s: remote %t, want %t", c.protocol, got, c.remote)
 		}
 	}
 }

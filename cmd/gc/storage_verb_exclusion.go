@@ -309,8 +309,8 @@ func cityRunsRemoteSessions(cfg *config.City) (string, bool) {
 
 // sessionRuntimeIsRemote reports whether a session-runtime selection name runs
 // sessions on another host. k8s, hybrid and ssh: always do. An exec: runtime
-// is remote unless its handshake declares locality=local (owner decision D4):
-// execRuntimeDeclaresLocal is where PAR-EXEC will consult that.
+// is remote unless its handshake declares locality=local (owner decision D4,
+// execRuntimeDeclaresLocal).
 func sessionRuntimeIsRemote(name string) bool {
 	switch {
 	case name == "k8s" || name == "hybrid" || strings.HasPrefix(name, "ssh:"):
@@ -322,13 +322,13 @@ func sessionRuntimeIsRemote(name string) bool {
 }
 
 // execRuntimeDeclaresLocal reports whether an exec: session runtime's
-// handshake declares locality=local. The handshake carries no locality yet
-// (PAR-EXEC adds it), so no exec runtime is local today: every one counts as
-// remote. PAR-EXEC replaces this body with the handshake read; it is a
+// handshake declares locality=local, read by the admission probe
+// (execReadiness, remembered per version of the script). A handshake that
+// cannot be read, or that says nothing or anything else, is remote. It is a
 // variable so tests can stand in a local one.
 var execRuntimeDeclaresLocal = func(script string) bool {
-	_ = script
-	return false
+	h := execReadiness(script, "")
+	return h.err == nil && h.info.DeclaresLocal()
 }
 
 // sharedWorkStoreLabel names this city's work store in the shared-store

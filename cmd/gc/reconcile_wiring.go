@@ -52,7 +52,7 @@ func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (stri
 		return nil, err
 	}
 	mode := res.Mode
-	for _, w := range reconcilerBootWarnings(cfg, res) {
+	for _, w := range reconcilerBootWarnings(cfg, lookupEnv, res) {
 		fmt.Fprintf(bootLog, "warning: %s\n", w) //nolint:errcheck // best-effort log
 	}
 	w := &controllerWiring{
