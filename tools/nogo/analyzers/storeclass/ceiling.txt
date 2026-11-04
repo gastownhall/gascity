@@ -4,7 +4,7 @@
 # growth fails. The generator only ever lowers a row; raising one is a
 # coordinator decision, made by hand, and visible in review.
 cmd/gc	cap-assert	106
-cmd/gc	mint	166
+cmd/gc	mint	167
 cmd/gc	raw-field	178
 cmd/gc	raw-param	1093
 cmd/gc	raw-result	269
