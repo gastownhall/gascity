@@ -542,7 +542,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 // halves the cost (measured on a loaded host: about 130 ms an edge one by
 // one, 60 ms in one transaction, where the library re-derives the blocked
 // state the edge touched). The remainder is then read row by row, and the
-// session-internal edges it finds go in a second call.
+// session-internal edges it finds go in further calls.
 func detachInfraClearedRow(source beads.Store, chunk []infraBackupEntry, session, listed map[string]bool) error {
 	batch, canBatch := beads.As[beads.DepBatchRemover](source)
 	remove := func(pairs []beads.DepPair) error {

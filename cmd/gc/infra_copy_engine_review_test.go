@@ -645,8 +645,10 @@ func TestTheClearSubBatchesADenseChunksEdges(t *testing.T) {
 	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged || report.Clear.Cleared != steps {
 		t.Fatalf("migrate = %s (cleared %d): %s", report.Outcome, report.Clear.Cleared, log.String())
 	}
-	if largest > infraDetachEdgeBatch {
-		t.Fatalf("one DepRemoveBatch carried %d edges, over the cap of %d", largest, infraDetachEdgeBatch)
+	// The cap is the literal the timing was measured for, not the variable:
+	// raising the variable past it must fail here.
+	if largest > 250 {
+		t.Fatalf("one DepRemoveBatch carried %d edges, over the cap of 250", largest)
 	}
 	if want := (edges + infraDetachEdgeBatch - 1) / infraDetachEdgeBatch; batches < want || single != 0 {
 		t.Fatalf("the %d edges went in %d batch(es) and %d single call(s), want at least %d batches and no single calls", edges, batches, single, want)

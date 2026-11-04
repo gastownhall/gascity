@@ -270,9 +270,13 @@ transaction on a loaded host, so the clear of an MC-sized city takes on the
 order of 20 to 30 minutes there, and a default budget may pause it once. A
 work store reached through the proxied lane or a hosted bd server removes
 edges one at a time, one commit each (about 130 ms an edge): about 50 minutes
-for an MC-sized city, pausing twice at the default budget. `--time-budget` (default `30m`, `0` for none) is checked between
-batches, never inside one. When it is spent, the run stops at the next
-boundary and exits 75 with "paused in <phase> at <n>/<N>":
+for an MC-sized city, so the default budget pauses it once and a second run
+finishes it. `--time-budget` (default `30m`, `0` for none) is checked between
+the copy's batches and between the clear's chunks, never inside one. A clear
+chunk runs to its end once started, so a dense one (1,000 pour steps of a
+formula) can overrun the budget by about 2.5 minutes on a native-Dolt work
+store and 4 to 5 minutes on the proxied or hosted-bd lanes. When it is spent,
+the run stops at the next boundary and exits 75 with "paused in <phase> at <n>/<N>":
 
 - before the marker, the city is unconverged and boot refuses it, as for any
   copy still under way. Running the same command again keeps every row an
