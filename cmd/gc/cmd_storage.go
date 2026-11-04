@@ -26,6 +26,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -74,6 +75,13 @@ const (
 	// the retained-source backup a clear wrote, for re-copying a binding whose
 	// database is gone after the work store's copies were cleared.
 	storageFromBackupFlag = "from-backup"
+	// storageTimeBudgetFlag bounds a migration's copy and clear.
+	storageTimeBudgetFlag = "time-budget"
+	// storageDefaultTimeBudget is --time-budget's default (S5 §3.4, O13).
+	storageDefaultTimeBudget = 30 * time.Minute
+	// storagePausedExitCode is EX_TEMPFAIL: the run stopped on its budget and
+	// the same command continues it.
+	storagePausedExitCode = 75
 
 	// storageFleetStoppedFlag is the operator's attestation that nothing this
 	// process cannot see is still writing to the source.
@@ -254,6 +262,7 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		abandonRig   bool
 		fleetStopped bool
 		forced       []string
+		timeBudget   time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -304,7 +313,19 @@ that did not finish exits non-zero, and running this command again finishes it.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
-half is an explicit operator attestation.`,
+half is an explicit operator attestation.
+
+--time-budget bounds the copy and the clear of --from-work and --from-backup;
+the rig import does not check it, so it is refused there. The run checks it
+between batches, never inside one, and when it is spent stops at the next
+boundary and exits 75, naming the phase and how far it got. Running the same
+command again continues: the copy keeps every row an earlier run copied that
+still equals its source (the work store, or the backup), and the clear resumes
+from the rows it had not yet removed. That holds for the re-copy of a binding
+whose database is gone too: before it creates the database it writes a record
+beside the marker (infra.recopying), and until its own marker lands the binding
+stays unconverged, so boot refuses it and the same command resumes it, whether
+the run paused, failed or was killed.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sources := 0
 			for _, set := range []bool{fromWork, fromBackup, fromRigs} {
@@ -315,6 +336,13 @@ half is an explicit operator attestation.`,
 			if sources != 1 {
 				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s, --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
 					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag, storageFromRigsFlag)
+				return errExit
+			}
+			// The rig import and the abandon do not check the budget, so a
+			// budget passed to either is refused rather than silently ignored.
+			if cmd.Flags().Changed(storageTimeBudgetFlag) && (fromRigs || abandonRig) {
+				fmt.Fprintf(stderr, "gc %s %s: --%s bounds the work-store copy and clear (--%s, --%s); the rig import and --%s do not check it, so it is refused rather than ignored\n", //nolint:errcheck // best-effort stderr
+					surface.Namespace, surface.Verb, storageTimeBudgetFlag, surface.Flag, storageFromBackupFlag, storageAbandonRigStoreFlag)
 				return errExit
 			}
 			if len(rigNames) > 0 && !fromRigs {
@@ -334,6 +362,7 @@ half is an explicit operator attestation.`,
 			request.FleetStopped = fleetStopped
 			request.FromBackup = fromBackup
 			request.Force = force
+			request.TimeBudget = timeBudget
 			if abandonRig {
 				if !fromRigs || len(rigNames) != 1 {
 					fmt.Fprintf(stderr, "gc %s %s: --%s needs --%s and exactly one --%s\n", surface.Namespace, surface.Verb, storageAbandonRigStoreFlag, storageFromRigsFlag, storageRigFlag) //nolint:errcheck // best-effort stderr
@@ -360,6 +389,8 @@ half is an explicit operator attestation.`,
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	addStorageForceFlag(cmd, &forced)
+	cmd.Flags().DurationVar(&timeBudget, storageTimeBudgetFlag, storageDefaultTimeBudget,
+		"stop the copy or the clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget)")
 	return cmd
 }
 
@@ -408,6 +439,9 @@ type storageOperatorRequest struct {
 	FromBackup bool
 	// Force carries the named hazards the operator attested (--force=).
 	Force storageForce
+	// TimeBudget bounds the migration's copy and clear (--time-budget); zero
+	// is none.
+	TimeBudget time.Duration
 }
 
 // resolveStorageOperatorRequest resolves the city and its configuration.
@@ -515,6 +549,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	defer window.closeReporting(logPrefix, stderr, &code)
+	window.setTimeBudget(request.TimeBudget)
 	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -537,6 +572,14 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	report.Target = target
 	report.BindingProvenEmpty, report.BindingProbe = infraBindingHoldsNothing(target)
 	rec := openCityRecorderAt(request.CityPath, stderr)
+	if report.Paused != nil {
+		// Not a failure: the budget is spent and the work is resumable. Boot
+		// refuses the city until a run finishes it, as for any copy or clear
+		// still under way.
+		fmt.Fprintf(stderr, "%s: %v (exit %d)\n", logPrefix, report.Paused, storagePausedExitCode) //nolint:errcheck // best-effort stderr
+		recordStorageBindingOutcome(rec, report, report.Paused.Error())
+		return storagePausedExitCode
+	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
 		if advice != "" {
@@ -777,7 +820,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		if present, err := infraPathExists(target.RetainedBackupPath()); err == nil && present {
 			remedy = storageRecopyFromBackupInstruction()
 		}
-		fmt.Fprintf(stdout, "converged: no (the marker is present and the database is gone)\nblocking invariant: re-copy the binding with `%s`\n", remedy) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "converged: no (the marker is present and %s)\nblocking invariant: re-copy the binding with `%s`\n", infraStaleCause(target), remedy) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if state != infraConvergenceMarked {
@@ -835,7 +878,19 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		}
 	}
 	if notePresent && !note.Complete {
-		fmt.Fprintf(stdout, "  clear: INTERRUPTED (%d bead(s) in the unfinished session)\nblocking invariant: an earlier clear of the retained copies did not finish. Stop the city and finish it with `%s`\n", len(note.Pending), storageClearInstruction()) //nolint:errcheck // best-effort stdout
+		// Pending is the whole session and never shrinks (see the clear), so
+		// what remains is the part of it the work store still holds.
+		held := make(map[string]bool, len(gap.Retained))
+		for _, id := range gap.Retained {
+			held[id] = true
+		}
+		left := 0
+		for _, id := range note.Pending {
+			if held[id] {
+				left++
+			}
+		}
+		fmt.Fprintf(stdout, "  clear: INTERRUPTED (%d of the %d bead(s) in the unfinished session are still in the work store)\nblocking invariant: an earlier clear of the retained copies did not finish. Stop the city and finish it with `%s`\n", left, len(note.Pending), storageClearInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if len(gap.Retained) > 0 {
