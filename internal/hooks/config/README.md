@@ -32,7 +32,7 @@ the event, or it does but Gas City has not opted in yet).
 |---|---|---|---|---|---|---|---|---|---|---|
 | session start    | `SessionStart` ✓ | `SessionStart` ✓ | `sessionStart` ✓ | `sessionStart` ✓ | `SessionStart` ✓ | `PreInvocation` ✓ | `session.created` ✓ | `session_start` ✓ | `session_start` ✓ | `SessionStart` ✓ |
 | pre-compaction   | `PreCompact` ✓   | `PreCompact` ✓   | `preCompact` ✓   | `preCompact` ✓   | `PreCompress` ✓  | — | `session.compacted` ✓ | `session_compact` ✓ | `session_compact` ✓ | — |
-| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | `beforeSubmitPrompt` ✓ | `userPromptSubmitted` ✓ | — | — | — | — | — | — |
+| user prompt submit | `UserPromptSubmit` ✓ | `UserPromptSubmit` ✓ | — | — | — | — | — | — | — | — |
 | before agent run | —                | —                | —                | —                | `BeforeAgent` ✓  | `PreInvocation` ✓ | —                | `before_agent_start` ✓ | `before_agent_start` ✓ | — |
 
 ### Gas City command bindings
@@ -70,6 +70,20 @@ pre-compaction hook is installed because Antigravity does not expose one.
    provider.
 
 ## Known gaps
+
+- **cursor and copilot user prompt submit** — Cursor's `beforeSubmitPrompt`
+  and Copilot CLI's `userPromptSubmitted` exist but are deliberately not
+  wired. Copilot ignores command-hook output for these events, and Cursor's
+  `beforeSubmitPrompt` can only return `continue`/`user_message` (its hook
+  output must be JSON). `gc nudge drain` and `gc mail check` treat a
+  successful stdout write as delivery: they terminalize the drained nudges
+  and archive auto-handoff mail. With the output discarded, that silently
+  lost them. The plain (non-`--inject`) `nudge drain` acks what it prints
+  too, so there is no safe form of either command to run from these hooks.
+  Queued nudges still reach these sessions through the supervisor's nudge
+  dispatcher (or the per-session poller), which types them in; unread mail
+  gets no hook-time injection on them, which in effect it never had.
+  `TestDiscardedOutputOverlaysRunNoConsumptiveHooks` pins it.
 
 - **kiro pre-compaction** — Kiro's hook config (under
   `.kiro/agents/gascity.json`) wires `agentSpawn` and `userPromptSubmit`
