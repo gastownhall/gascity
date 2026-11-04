@@ -517,7 +517,15 @@ func buildDemandTargetsPreRefactor(
 					coldWakeTemplates[template] = true
 				}
 			}
-			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
+			var probes []poolStoreProbe
+			if rigName == "" && hasCustomScaleCheck {
+				var probeErrs []error
+				probes, probeErrs = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, nil, suspendedRigPaths)
+				for _, probeErr := range probeErrs {
+					fmt.Fprintf(stderr, "scaleCheck: building fan-out probe for %s: %v\n", cfg.Agents[i].QualifiedName(), probeErr) //nolint:errcheck
+				}
+			}
+			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil, probes: probes})
 			continue
 		}
 
@@ -550,7 +558,15 @@ func buildDemandTargetsPreRefactor(
 			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
 			continue
 		}
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
+		var probes []poolStoreProbe
+		if rigName == "" && hasCustomScaleCheck {
+			var probeErrs []error
+			probes, probeErrs = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, env, suspendedRigPaths)
+			for _, probeErr := range probeErrs {
+				fmt.Fprintf(stderr, "scaleCheck: building fan-out probe for %s: %v\n", cfg.Agents[i].QualifiedName(), probeErr) //nolint:errcheck
+			}
+		}
+		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil, probes: probes})
 	}
 	return demandTargets{
 		pendingPools:             pendingPools,

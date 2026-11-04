@@ -116,7 +116,8 @@ func customScaleCheckWork(
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() || strings.TrimSpace(agent.ScaleCheck) == "" {
 			continue
 		}
-		if rig := configuredRigName(cityPath, agent, cfg.Rigs); rig != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rig, cfg.Rigs))] {
+		rig := configuredRigName(cityPath, agent, cfg.Rigs)
+		if rig != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rig, cfg.Rigs))] {
 			continue
 		}
 		sp := scaleParamsForTopology(agent, config.QueryTopology{Beads: cfg.Beads})
@@ -130,6 +131,15 @@ func customScaleCheckWork(
 				continue
 			}
 			w.env = env
+		}
+		if rig == "" {
+			// A city-scoped custom scale_check fans out across the city and
+			// every non-suspended rig store, as in legacy's demand pass.
+			var probeErrs []error
+			w.probes, probeErrs = cityScopedFanOutProbes(cityPath, cfg, agent, w.poolDir, w.env, suspendedRigPaths)
+			for _, probeErr := range probeErrs {
+				fmt.Fprintf(stderr, "scaleCheck: building fan-out probe for %s: %v\n", agent.QualifiedName(), probeErr) //nolint:errcheck
+			}
 		}
 		work = append(work, w)
 	}
