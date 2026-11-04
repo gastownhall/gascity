@@ -52,6 +52,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"DeleteBatch":      nativeStoreMutation,
 	"DepAdd":           nativeStoreMutation,
 	"DepRemove":        nativeStoreMutation,
+	"DepRemoveBatch":   nativeStoreMutation,
 
 	// beads.Store, reads.
 	"Get":            nativeStoreRead,

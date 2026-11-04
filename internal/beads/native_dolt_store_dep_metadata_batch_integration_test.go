@@ -125,3 +125,44 @@ func TestNativeDoltStoreDepBatchesAgreeAcrossChunkBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// TestNativeDoltStoreDepRemoveBatchRemovesInOneCommit: the batch removes every
+// edge it names, a pair that is not there included, in one Dolt commit where
+// DepRemove takes one per edge, and leaves every other edge in place.
+func TestNativeDoltStoreDepRemoveBatchRemovesInOneCommit(t *testing.T) {
+	store, db := openServerNativeStoreForTest(t)
+	var ids []string
+	for i := 0; i < 5; i++ {
+		b, err := store.Create(Bead{Title: fmt.Sprintf("row %d", i), Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, b.ID)
+	}
+	for i := 1; i < len(ids); i++ {
+		if err := store.DepAdd(ids[i], ids[0], "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commits := func() int {
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dolt_log").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := commits()
+	if err := store.DepRemoveBatch([]DepPair{{ids[1], ids[0]}, {ids[2], ids[0]}, {ids[3], ids[0]}, {ids[0], ids[4]}}); err != nil {
+		t.Fatalf("DepRemoveBatch: %v", err)
+	}
+	if got := commits() - before; got != 1 {
+		t.Fatalf("DepRemoveBatch took %d commit(s), want 1", got)
+	}
+	up, err := store.DepList(ids[0], "up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(up) != 1 || up[0].IssueID != ids[4] {
+		t.Fatalf("the dependents left of %s = %+v, want only %s", ids[0], up, ids[4])
+	}
+}

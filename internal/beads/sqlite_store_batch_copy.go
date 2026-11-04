@@ -86,6 +86,34 @@ func (s *SQLiteStore) DepAddBatch(edges []DepWithPayload) error {
 	})
 }
 
+// DepRemoveBatch removes edges, and the payload sidecar of each, in ONE
+// transaction, each as DepRemove removes it. It satisfies DepBatchRemover.
+func (s *SQLiteStore) DepRemoveBatch(pairs []DepPair) error {
+	if err := s.ensureOpen(); err != nil {
+		return err
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	return retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite batch dep remove: begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		for _, p := range pairs {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM deps WHERE issue_id=? AND depends_on_id=?`, p.IssueID, p.DependsOnID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM kv WHERE key GLOB ?`, sqliteGraphEdgeMetadataPairPrefix(p.IssueID, p.DependsOnID)+"*"); err != nil {
+				return fmt.Errorf("clearing Graph dependency metadata %s -> %s: %w", p.IssueID, p.DependsOnID, err)
+			}
+		}
+		return tx.Commit()
+	})
+}
+
 // DepListBatch returns each held anchor's DOWN edges, one query per chunk of
 // anchors; an anchor the store does not hold gets no entry. It satisfies
 // DependencyBatchLister.

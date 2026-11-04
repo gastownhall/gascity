@@ -192,3 +192,34 @@ func TestSQLiteDepBatchesAgreeAcrossChunkBoundaries(t *testing.T) {
 		t.Fatalf("DepMetadataBatch answered %d payloads, the per-edge reads %d, want %d", len(payloads), carrying, (anchors-1)/3)
 	}
 }
+
+// TestSQLiteDepRemoveBatchRemovesAsDepRemoveDoes: the batch removes each edge
+// and its payload sidecar, and an edge that is not there is already removed.
+func TestSQLiteDepRemoveBatchRemovesAsDepRemoveDoes(t *testing.T) {
+	s := openBatchTestSQLite(t)
+	if err := s.CreateWithForeignIDBatch([]Bead{{ID: "a", Title: "a"}, {ID: "b", Title: "b"}, {ID: "c", Title: "c"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DepAddBatch([]DepWithPayload{
+		{Dep: Dep{IssueID: "a", DependsOnID: "b", Type: "waits-for"}, Payload: `{"gate":"any-children"}`},
+		{Dep: Dep{IssueID: "a", DependsOnID: "c", Type: "blocks"}},
+		{Dep: Dep{IssueID: "b", DependsOnID: "c", Type: "blocks"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DepRemoveBatch([]DepPair{{IssueID: "a", DependsOnID: "b"}, {IssueID: "b", DependsOnID: "c"}, {IssueID: "c", DependsOnID: "a"}}); err != nil {
+		t.Fatalf("DepRemoveBatch: %v", err)
+	}
+	for id, want := range map[string]int{"a": 1, "b": 0, "c": 0} {
+		if got, err := s.DepList(id, "down"); err != nil || len(got) != want {
+			t.Errorf("DepList(%s) = %v (%v), want %d edge(s)", id, got, err, want)
+		}
+	}
+	var sidecars int
+	if err := s.readDB.QueryRow(`SELECT COUNT(*) FROM kv WHERE key GLOB ?`, sqliteGraphEdgeMetadataPairPrefix("a", "b")+"*").Scan(&sidecars); err != nil {
+		t.Fatal(err)
+	}
+	if sidecars != 0 {
+		t.Fatalf("the batch left %d payload sidecar row(s) for a -> b", sidecars)
+	}
+}

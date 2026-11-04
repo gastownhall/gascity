@@ -52,7 +52,24 @@ type DepMetadataBatchReader interface {
 	DepMetadataBatch(ids []string) (map[DepPair]string, error)
 }
 
+// DepBatchRemover removes edges, all or nothing per call, and on Dolt in one
+// commit: DepRemove for a batch. An edge that is not there is already removed,
+// as DepRemove treats it. A store, or a wrapper over one, that cannot remove
+// in one transaction reports ErrDepRemoveBatchUnsupported, and the caller
+// removes edge by edge.
+type DepBatchRemover interface {
+	DepRemoveBatch(pairs []DepPair) error
+}
+
+// ErrDepRemoveBatchUnsupported signals a DepRemoveBatch with no transaction
+// under it: a forwarding wrapper over a store without the capability, or a
+// native store served over the v0 wire, whose RunInTransaction is off the
+// served surface.
+var ErrDepRemoveBatchUnsupported = errors.New("batch dep remove unsupported by backing store")
+
 var (
+	_ DepBatchRemover        = (*SQLiteStore)(nil)
+	_ DepBatchRemover        = (*NativeDoltStore)(nil)
 	_ ForeignIDBatchCreator  = (*SQLiteStore)(nil)
 	_ DepBatchWriter         = (*SQLiteStore)(nil)
 	_ DepMetadataBatchReader = (*SQLiteStore)(nil)
@@ -101,4 +118,39 @@ func (s *NativeDoltStore) DepMetadataBatch(ids []string) (map[DepPair]string, er
 		}
 	}
 	return out, nil
+}
+
+// DepRemoveBatch removes the edges in one transaction, one Dolt commit, each
+// through the transaction's RemoveDependency (the structural teardown
+// DepRemove's editor does, writing no event). A backend with no transaction to
+// open reports ErrDepRemoveBatchUnsupported before anything is written.
+func (s *NativeDoltStore) DepRemoveBatch(pairs []DepPair) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	err = retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: remove %d dependencies", len(pairs)), func(tx beadslib.Transaction) error {
+			for _, p := range pairs {
+				if err := tx.RemoveDependency(ctx, p.IssueID, p.DependsOnID, s.actor); err != nil {
+					return nativeStoreError(p.IssueID, err)
+				}
+			}
+			return nil
+		})
+	})
+	var unsupported *beadslib.ErrUnsupported
+	if errors.As(err, &unsupported) {
+		return fmt.Errorf("%w: %w", ErrDepRemoveBatchUnsupported, err)
+	}
+	return err
 }

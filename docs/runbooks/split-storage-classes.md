@@ -257,9 +257,16 @@ before the clear) is the full-fidelity backstop for them.
 batches: rows are created 500 to a transaction, edges 2,000 to one, the edges
 and their payloads are read in batches of 1,000 rows, and the clear removes
 1,000 rows per batched delete (one Dolt commit each on a native-Dolt work
-store; a store without batched deletes removes them one at a time). On an
-MC-sized city (40,000 rows, 18,662 edges) the whole run takes about 30
-seconds. `--time-budget` (default `30m`, `0` for none) is checked between
+store; a store without batched deletes removes them one at a time). Before a
+chunk is deleted, every edge touching it is removed, in one transaction where
+the work store can (one Dolt commit per chunk), so the delete rewrites no work
+bead's text. On an MC-sized city (40,000 rows, 18,662 edges) with a SQLite
+work store the whole run takes 30 to 40 seconds, about 20 of them in the
+clear. A native-Dolt work store's clear is much slower: each edge removal
+re-derives the blocked state of the beads it touches, about 60 ms an edge
+even inside one transaction on a loaded host, so the clear of an MC-sized
+city takes on the order of 20 to 30 minutes there, and a default budget may
+pause it once. `--time-budget` (default `30m`, `0` for none) is checked between
 batches, never inside one. When it is spent, the run stops at the next
 boundary and exits 75 with "paused in <phase> at <n>/<N>":
 

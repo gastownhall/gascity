@@ -136,6 +136,7 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"CreateWithForeignIDBatch": nil,
 	"DepAddBatch":              nil,
 	"DepMetadataBatch":         nil,
+	"DepRemoveBatch":           nil,
 	"DepAddWithMetadata":       nil,
 	"HasResidentOutside":       nil,
 	"SequenceFloor":            nil,

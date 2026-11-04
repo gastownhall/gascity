@@ -1028,6 +1028,28 @@ func (s *emittingClassStore) DepMetadataBatch(ids []string) (map[beads.DepPair]s
 	return reader.DepMetadataBatch(ids)
 }
 
+// DepRemoveBatch forwards the engine's batched edge removal
+// (beads.DepBatchRemover) and emits an update for each dependent, as DepRemove
+// does. An engine without it reports beads.ErrDepRemoveBatchUnsupported, and
+// the caller removes per edge.
+func (s *emittingClassStore) DepRemoveBatch(pairs []beads.DepPair) error {
+	remover, ok := beads.As[beads.DepBatchRemover](s.Store)
+	if !ok {
+		return beads.ErrDepRemoveBatchUnsupported
+	}
+	if err := remover.DepRemoveBatch(pairs); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, p := range pairs {
+		if !seen[p.IssueID] {
+			seen[p.IssueID] = true
+			s.emitUpdated(p.IssueID)
+		}
+	}
+	return nil
+}
+
 func (s *emittingClassStore) SequenceFloor() (int64, error) {
 	floor, ok := s.Store.(interface{ SequenceFloor() (int64, error) })
 	if !ok {

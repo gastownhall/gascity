@@ -258,3 +258,138 @@ func TestPreflightReadsTheEdgesTheWayTheCopyWill(t *testing.T) {
 		t.Fatalf("preflight blocks without naming the batched read that failed: %q", said)
 	}
 }
+
+// listHidingStore is a work store whose List leaves one row out, as a native
+// or bd list leaves out a row whose metadata does not parse.
+type listHidingStore struct {
+	*beads.MemStore
+	hidden string
+}
+
+func (s listHidingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.MemStore.List(query)
+	out := rows[:0]
+	for _, b := range rows {
+		if b.ID != s.hidden {
+			out = append(out, b)
+		}
+	}
+	return out, err
+}
+
+func (s listHidingStore) DeleteBatch(ids []string) error {
+	for _, id := range ids {
+		if err := s.Delete(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TestTheClearNamesADependentTheListLeavesOut (review S4): the batched backup
+// reads a moved row's dependents from the down edges of every row the work
+// store lists, so a dependent the list leaves out is one it cannot record.
+// The clear refuses the row, and the refusal names that dependent and why, so
+// a resume that refuses again says what to repair.
+func TestTheClearNamesADependentTheListLeavesOut(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	mem := beads.NewMemStore()
+	moved := mustCreateInfraBead(t, mem, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	unparsed := mustCreateInfraBead(t, mem, beads.Bead{Title: "work whose metadata does not parse", Type: "task"})
+	if err := mem.DepAdd(unparsed.ID, moved.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	source := listHidingStore{MemStore: mem, hidden: unparsed.ID}
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
+	if report.Outcome != infraMigrationRetained {
+		t.Fatalf("migrate = %s, want the clear refused over the unlisted dependent: %s", report.Outcome, log.String())
+	}
+	advice := infraMigrationOperatorAdvice(report, "gc storage migrate")
+	if !strings.Contains(advice, unparsed.ID) || !strings.Contains(advice, "does not return "+unparsed.ID) || !strings.Contains(advice, "metadata does not parse") {
+		t.Fatalf("the refusal does not name the dependent %s the list leaves out, and why: %s", unparsed.ID, advice)
+	}
+	if _, err := mem.Get(moved.ID); err != nil {
+		t.Fatalf("the clear removed %s over a dependent it could not record: %v", moved.ID, err)
+	}
+	if deps, err := mem.DepList(unparsed.ID, "down"); err != nil || len(deps) != 1 {
+		t.Fatalf("%s deps = %+v (%v); the unrecorded edge must survive the refusal", unparsed.ID, deps, err)
+	}
+}
+
+// batchRemovingStore is a setRewritingStore that removes edges in batches and
+// counts how the clear removed them.
+type batchRemovingStore struct {
+	setRewritingStore
+	batches, single *int
+}
+
+func (s batchRemovingStore) DepRemoveBatch(pairs []beads.DepPair) error {
+	*s.batches++
+	for _, p := range pairs {
+		if err := s.setRewritingStore.DepRemove(p.IssueID, p.DependsOnID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s batchRemovingStore) DepRemove(issueID, dependsOnID string) error {
+	*s.single++
+	return s.setRewritingStore.DepRemove(issueID, dependsOnID)
+}
+
+// TestTheClearRemovesAChunksEdgesInOneBatch (review S3): a work store that
+// removes edges in batches has a chunk's edges removed in one call, not one
+// commit per edge; over a wrapper whose store cannot, the clear removes them
+// edge by edge. Either way no work bead's text is rewritten.
+func TestTheClearRemovesAChunksEdgesInOneBatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		batched bool
+	}{{"batched", true}, {"wrapper over a store without it", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubInfraControllerPing(t, 0)
+			rewriting := setRewritingStore{beads.NewMemStore()}
+			var batches, single int
+			var source beads.Store = batchRemovingStore{setRewritingStore: rewriting, batches: &batches, single: &single}
+			if !tc.batched {
+				source = wrapStoreWithBeadPolicies(rewriting, nil)
+			}
+			prev := openInfraMigrationSource
+			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+			t.Cleanup(func() { openInfraMigrationSource = prev })
+			var ids []string
+			for i := 0; i < 4; i++ {
+				ids = append(ids, mustCreateInfraBead(t, rewriting, beads.Bead{Title: "graft", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}}).ID)
+			}
+			for i := 1; i < len(ids); i++ {
+				if err := rewriting.DepAdd(ids[i], ids[i-1], "blocks"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			text := "tracks " + strings.Join(ids, ", ")
+			work := mustCreateInfraBead(t, rewriting, beads.Bead{Title: "work", Type: "task", Description: text})
+			for _, id := range ids {
+				if err := rewriting.DepAdd(work.ID, id, "related"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+			var log bytes.Buffer
+			if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged || report.Clear.Cleared != len(ids) {
+				t.Fatalf("migrate = %s (cleared %d): %s", report.Outcome, report.Clear.Cleared, log.String())
+			}
+			if tc.batched && (batches == 0 || single != 0) {
+				t.Fatalf("the clear removed edges in %d batch(es) and %d single call(s), want batches only", batches, single)
+			}
+			if got, err := rewriting.Get(work.ID); err != nil || got.Description != text {
+				t.Fatalf("the clear rewrote work bead %s: %q (%v), want %q", work.ID, got.Description, err, text)
+			}
+		})
+	}
+}

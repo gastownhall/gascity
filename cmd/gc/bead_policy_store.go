@@ -285,6 +285,18 @@ func (s *beadPolicyStore) DepMetadataBatch(ids []string) (map[beads.DepPair]stri
 	return reader.DepMetadataBatch(ids)
 }
 
+// DepRemoveBatch forwards the inner store's batched edge removal
+// (beads.DepBatchRemover), for the reason DepMetadataBatch is forwarded. An
+// inner store without it reports beads.ErrDepRemoveBatchUnsupported, and the
+// caller removes edge by edge through DepRemove.
+func (s *beadPolicyStore) DepRemoveBatch(pairs []beads.DepPair) error {
+	remover, ok := beads.As[beads.DepBatchRemover](s.Store)
+	if !ok {
+		return beads.ErrDepRemoveBatchUnsupported
+	}
+	return remover.DepRemoveBatch(pairs)
+}
+
 // ReadyPreferCache forwards the cache-preferred ready read with the policy's
 // expanded read tier, exactly as Ready and both handles do. An inner store
 // with no ready cache is read live, as beads.ReadyPreferCache reads any
