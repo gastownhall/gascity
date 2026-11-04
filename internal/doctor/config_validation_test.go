@@ -13,9 +13,6 @@ import (
 )
 
 func TestConfigValidationCapturesExpansionReads(t *testing.T) {
-	wasEnabled := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(wasEnabled) })
 	dir := t.TempDir()
 	t.Setenv("GC_FORMULA_REF", "working-tree")
 	inputs := map[string]string{
