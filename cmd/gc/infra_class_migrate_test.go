@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1615,13 +1616,12 @@ func failingInfraRename(t *testing.T, base string) {
 // stop listing partway through: the copy imports every bead and then fails,
 // leaving a populated binding with no manifest and no marker.
 //
-// The failure is armed on the THIRD read down of an id rather than on the
-// first, and the two forwards below are what keep this double meaning what its
-// name says. Three passes now read a source's edges: infraSourceEdgePayloadRefusal
-// walks every row to prove the payloads are readable and planInfraCopyHolds
-// walks them to plan the holds, both before the destination is touched, and
-// importInfraSnapshot walks them again to copy. A double that failed on an
-// earlier read — or that embedded beads.Store without forwarding
+// The failure is armed on the SECOND read of an id rather than on the first,
+// and the two forwards below are what keep this double meaning what its name
+// says. Two passes now read a source's edges before the import writes anything:
+// infraSourceEdgePayloadRefusal walks every row to prove the payloads are
+// readable, and importInfraSnapshot walks them again to copy. A double that
+// failed on the first read — or that embedded beads.Store without forwarding
 // DepMetadata, which strips beads.DepMetadataReader and reads as UNABLE TO
 // ANSWER — would be refused before the destination was ever opened, and this
 // case would quietly become a duplicate of the mute-source one instead of the
@@ -1637,11 +1637,10 @@ func (s undeppableInfraSource) DepList(id, direction string) ([]beads.Dep, error
 		return nil, s.err
 	}
 	// Per direction: the source refusal reads each row's edges both ways
-	// once and the holds plan reads them down once, so the import's third
-	// read down is the one that fails.
+	// once, and the import's second read down is the one that fails.
 	key := id + " " + direction
 	s.seen[key]++
-	if s.seen[key] > 2 {
+	if s.seen[key] > 1 {
 		return nil, s.err
 	}
 	return s.Store.DepList(id, direction)
@@ -2433,6 +2432,56 @@ func TestTheCopyKeepsAnInfraBeadBlockedOnOpenWork(t *testing.T) {
 	}
 	if ready := readyIDsOf(t, binding); !slices.Contains(ready, parked.ID) {
 		t.Fatalf("%s is not ready after the work bead it waited on closed and the gate lane ran: %v", parked.ID, ready)
+	}
+}
+
+// TestTheResumedCopyMintsEachGateOnce: a run killed after it minted its gates
+// leaves them stamped in the binding, as it leaves the rows it copied. The
+// rerun resumes over them and converges with exactly one gate per hold, its
+// owner still waiting on it; an unstamped gate would refuse the rerun, and a
+// kept stale one would hold the owner twice.
+func TestTheResumedCopyMintsEachGateOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	source := stubInfraMigrationSource(t)
+	parked := mustCreateInfraBead(t, source, beads.Bead{Title: "mol-dog-stale-db", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	openWork := mustCreateInfraBead(t, source, beads.Bead{Title: "open work the wisp waits on", Type: "task"})
+	if err := source.DepAdd(parked.ID, openWork.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+
+	prev := infraEngineCrashPoint
+	infraEngineCrashPoint = func(p string) error {
+		if p == "verify" {
+			return errors.New("killed before the manifest")
+		}
+		return nil
+	}
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, cityPath, cfg, &log)
+	infraEngineCrashPoint = prev
+	if report.Outcome == infraMigrationConverged {
+		t.Fatalf("the kill did not stop the run: %s", log.String())
+	}
+
+	log.Reset()
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("resumed migrate = %s: %s", report.Outcome, log.String())
+	}
+	binding := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg))
+	gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing gates: %v", err)
+	}
+	if len(gates) != 1 || gates[0].Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] != parked.ID {
+		t.Fatalf("binding holds gates %+v after the resumed run, want exactly one owned by %s", gates, parked.ID)
+	}
+	deps, err := binding.DepList(parked.ID, "down")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != gates[0].ID {
+		t.Fatalf("%s binding deps = %+v (%v), want one edge onto its gate %s", parked.ID, deps, err, gates[0].ID)
+	}
+	if slices.Contains(readyIDsOf(t, binding), parked.ID) {
+		t.Fatalf("%s is ready in the binding after the resumed run while its work blocker is open", parked.ID)
 	}
 }
 
