@@ -100,8 +100,13 @@ fi
 
 # A canary: a merge on main's first-parent line, and the pin's descendant
 # (never a rollback, never a commit only reachable through a merged branch).
+# rev-list's output is captured whole, then searched: under pipefail, a pipe
+# into grep -q would kill rev-list with SIGPIPE once grep stops at the
+# canary, and refuse a valid canary.
 if [ -n "$canary" ]; then
-	if ! git -C "$dir" rev-list --first-parent refs/remotes/origin/main | grep -qx "$sha"; then
+	first_parent=$(git -C "$dir" rev-list --first-parent refs/remotes/origin/main) ||
+		{ echo "::error title=rbe-worker::cannot list rbe-worker main's first-parent line"; exit 1; }
+	if ! grep -qx "$sha" <<<"$first_parent"; then
 		echo "::error title=rbe-worker::canary $sha is not on rbe-worker main's first-parent line; refused"
 		exit 1
 	fi

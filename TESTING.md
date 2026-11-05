@@ -1059,7 +1059,8 @@ manifest pin above). Bumping it is a one-line PR titled
 `chore(rbe): bump rbe-worker to <sha8> (<subject>)`:
 
 1. Merge the change into rbe-worker's main.
-1a. Canary it on real pool VMs before the bump, by hand: a dispatch by
+
+   Canary it on real pool VMs before the bump, by hand: a dispatch by
    any App or bot (`*[bot]`, the pool scalers' `bazel-allocator[bot]`
    included) with the input is refused. Two limits:
    - A commit that changes what the worker measures (`worker-env`) cannot

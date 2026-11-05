@@ -924,15 +924,26 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 	}
 }
 
-// canaryUpstreamFixture: rbe-worker's main with c0, c1 (the pin), a merge m2
-// of branch feature (f1, never on main's first-parent line), then c3; and
-// off-main o1, never merged. Each sha is written beside the upstream.
+// canaryUpstreamFixture: rbe-worker's main with 5000 empty commits, c0, c1
+// (the pin), a merge m2 of branch feature (f1, never on main's first-parent
+// line), then c3; and off-main o1, never merged. Each sha is written beside
+// the upstream. The empty commits make main's first-parent line (205 KB of
+// rev-list output) longer than a pipe and one grep read hold together, so
+// fetch.sh must read the whole line: with a reader that stops at the canary
+// (grep -q under pipefail), rev-list is still writing when it stops, dies of
+// SIGPIPE, and a valid canary is refused on every run, however the two
+// processes are scheduled.
 const canaryUpstreamFixture = `#!/usr/bin/env bash
 set -euo pipefail
 dir=${1:?usage: fixture.sh UPSTREAM_DIR}
 git -C "$dir" init -q -b main
 git -C "$dir" config user.email t@example.invalid
 git -C "$dir" config user.name "rbe-worker canary test"
+i=0
+while [ "$i" -lt 5000 ]; do
+	i=$((i + 1))
+	printf 'commit refs/heads/main\ncommitter t <t@example.invalid> %d +0000\ndata 3\nold\n' "$i"
+done | git -C "$dir" fast-import --quiet
 mkdir -p "$dir/worker"
 printf '#!/bin/sh\necho worker\n' >"$dir/worker/blacksmith-worker.sh"
 chmod +x "$dir/worker/blacksmith-worker.sh"
