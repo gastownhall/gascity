@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -3404,15 +3405,17 @@ func TestBdStoreListPushesCallerLimitForIssuesTierDefaultSort(t *testing.T) {
 	}
 }
 
-// TestBdStoreListForcesUnboundedForIDs pins that ListQuery.IDs — a Go-side-
-// only residual filter bd list has no flag for — still forces --limit 0 so a
-// bd-side limit can never truncate before the ID match runs.
+// TestBdStoreListForcesUnboundedForIDs pins that a ListQuery.IDs read sends the
+// ids to bd list as --id and still forces --limit 0: the --id chunks are merged
+// before the caller's Limit applies, so a bd-side limit could cut a chunk's
+// rows before the merge. bd returns a row that was not asked for (bd-a), and
+// the Go-side residual IDs filter still drops it.
 func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0 --id bd-b`: {
 			out: []byte(`[
 				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
 				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
@@ -3425,7 +3428,214 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "bd-b" {
-		t.Fatalf("got = %+v, want single bd-b matched Go-side after unbounded fetch", got)
+		t.Fatalf("got = %+v, want single bd-b: --id sent to bd, unrequested bd-a dropped by the residual filter", got)
+	}
+}
+
+// idListRunner answers `bd list ... --id a,b,c` the way bd does: one row per
+// requested id, matched exactly. It records every bd list argv, and it refuses
+// an id-less bd list outright so a regression to the whole-population scan
+// fails loudly instead of returning a plausible answer.
+type idListRunner struct {
+	mu     sync.Mutex
+	lists  []string
+	status string
+	// alsoReturn rows are added to every bd list answer, requested or not.
+	alsoReturn []string
+	// ephemeral rows answer the bd query leg (TierBoth / TierWisps).
+	ephemeral []string
+}
+
+func idListRow(id, status string, ephemeral bool) string {
+	return fmt.Sprintf(`{"id":%q,"title":%q,"status":%q,"issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":%t}`, id, id, status, ephemeral)
+}
+
+func (r *idListRunner) run(_, name string, args ...string) ([]byte, error) {
+	if name != "bd" {
+		return nil, fmt.Errorf("unexpected command: %s", name)
+	}
+	if len(args) > 0 && args[0] == "query" {
+		rows := make([]string, 0, len(r.ephemeral))
+		for _, id := range r.ephemeral {
+			rows = append(rows, idListRow(id, r.status, true))
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	}
+	if len(args) == 0 || args[0] != "list" {
+		return nil, fmt.Errorf("unexpected bd args: %v", args)
+	}
+	r.mu.Lock()
+	r.lists = append(r.lists, strings.Join(args, " "))
+	r.mu.Unlock()
+	var asked []string
+	for i, a := range args {
+		if a == "--id" && i+1 < len(args) {
+			asked = strings.Split(args[i+1], ",")
+		}
+	}
+	if asked == nil {
+		return nil, fmt.Errorf("id-less bd list scan: %v", args)
+	}
+	rows := make([]string, 0, len(asked)+len(r.alsoReturn))
+	for _, id := range append(append([]string(nil), asked...), r.alsoReturn...) {
+		rows = append(rows, idListRow(id, r.status, false))
+	}
+	return []byte("[" + strings.Join(rows, ",") + "]"), nil
+}
+
+// askedIDs returns the ids carried by one recorded bd list argv.
+func askedIDs(argv string) []string {
+	f := strings.Fields(argv)
+	for i, a := range f {
+		if a == "--id" && i+1 < len(f) {
+			return strings.Split(f[i+1], ",")
+		}
+	}
+	return nil
+}
+
+func idListIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("ga-%04d", i)
+	}
+	return ids
+}
+
+// TestBdStoreListPushesIDsDownAsSingleArgv is the demand-side shape
+// filterReadyByWorkOutcome sends (IDs, TierBoth, Status closed): the argv must
+// carry the requested ids as one comma-joined --id element, never an id-less
+// scan of the closed population.
+func TestBdStoreListPushesIDsDownAsSingleArgv(t *testing.T) {
+	runner := &idListRunner{status: "closed"}
+	s := beads.NewBdStore("/city", runner.run)
+	got, err := s.List(beads.ListQuery{IDs: []string{"ga-a", "ga-b"}, TierMode: beads.TierBoth, Status: "closed"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d beads, want 2", len(got))
+	}
+	const want = `list --json --status=closed --all --include-infra --include-gates --include-templates --limit 0 --id ga-a,ga-b`
+	if len(runner.lists) != 1 || runner.lists[0] != want {
+		t.Fatalf("bd list argv = %q, want exactly [%q]", runner.lists, want)
+	}
+}
+
+// TestBdStoreListChunksIDsAt500 pins the argv-size guard: 500 ids are one bd
+// list, 501 are two, every id is sent exactly once, and the merged result is
+// the whole requested set.
+func TestBdStoreListChunksIDsAt500(t *testing.T) {
+	for _, tc := range []struct{ n, calls int }{{1, 1}, {500, 1}, {501, 2}, {1000, 2}, {1001, 3}} {
+		t.Run(fmt.Sprintf("%d-ids", tc.n), func(t *testing.T) {
+			runner := &idListRunner{status: "closed"}
+			s := beads.NewBdStore("/city", runner.run)
+			ids := idListIDs(tc.n)
+			got, err := s.List(beads.ListQuery{IDs: ids, Status: "closed"})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(runner.lists) != tc.calls {
+				t.Fatalf("%d ids made %d bd list calls, want %d", tc.n, len(runner.lists), tc.calls)
+			}
+			sent := map[string]int{}
+			for _, argv := range runner.lists {
+				chunk := askedIDs(argv)
+				if len(chunk) == 0 || len(chunk) > 500 {
+					t.Fatalf("a chunk carried %d ids, want 1..500", len(chunk))
+				}
+				for _, id := range chunk {
+					sent[id]++
+				}
+			}
+			if len(sent) != tc.n {
+				t.Fatalf("%d distinct ids sent, want %d", len(sent), tc.n)
+			}
+			for id, n := range sent {
+				if n != 1 {
+					t.Fatalf("id %s sent %d times, want once", id, n)
+				}
+			}
+			if len(got) != tc.n {
+				t.Fatalf("merged result has %d beads, want %d", len(got), tc.n)
+			}
+		})
+	}
+}
+
+// TestBdStoreListMergesChunksBeforeLimitAndDedupes pins the merge order: chunk
+// results are deduplicated by id and only then does the caller's Limit apply,
+// once, to the merged set. Each chunk is asked for --limit 0.
+func TestBdStoreListMergesChunksBeforeLimitAndDedupes(t *testing.T) {
+	ids := idListIDs(501)
+	t.Run("dedup", func(t *testing.T) {
+		// ids[0] comes back from both chunks.
+		runner := &idListRunner{status: "closed", alsoReturn: []string{ids[0]}}
+		s := beads.NewBdStore("/city", runner.run)
+		got, err := s.List(beads.ListQuery{IDs: ids, Status: "closed"})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		seen := map[string]bool{}
+		for _, b := range got {
+			if seen[b.ID] {
+				t.Fatalf("id %s returned twice: chunk results were not deduplicated", b.ID)
+			}
+			seen[b.ID] = true
+		}
+		if len(got) != 501 {
+			t.Fatalf("got %d beads, want 501", len(got))
+		}
+	})
+	t.Run("limit-once", func(t *testing.T) {
+		runner := &idListRunner{status: "closed"}
+		s := beads.NewBdStore("/city", runner.run)
+		got, err := s.List(beads.ListQuery{IDs: ids, Status: "closed", Limit: 7})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 7 {
+			t.Fatalf("Limit 7 over two chunks returned %d beads, want 7 (applied once to the merged set)", len(got))
+		}
+		for _, argv := range runner.lists {
+			if !strings.Contains(argv, " --limit 0 ") {
+				t.Fatalf("chunk argv %q must ask bd for --limit 0", argv)
+			}
+		}
+	})
+}
+
+// TestBdStoreListIDsParityWithGoSideFilter pins that pushing ids to bd changes
+// nothing a caller can see: for IDs combined with Status, IncludeClosed and
+// TierBoth, the result is what the old Go-side filter gave. bd also returns a
+// row nobody asked for (ga-z); the residual filter still drops it. The TierBoth
+// ephemeral leg is untouched and still unions in.
+func TestBdStoreListIDsParityWithGoSideFilter(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query beads.ListQuery
+		want  []string
+	}{
+		{"status-closed", beads.ListQuery{IDs: []string{"ga-a", "ga-b"}, Status: "closed"}, []string{"ga-a", "ga-b"}},
+		{"include-closed", beads.ListQuery{IDs: []string{"ga-a", "ga-b"}, IncludeClosed: true}, []string{"ga-a", "ga-b"}},
+		{"tier-both", beads.ListQuery{IDs: []string{"ga-a", "ga-b", "ga-w"}, Status: "closed", TierMode: beads.TierBoth}, []string{"ga-a", "ga-b", "ga-w"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &idListRunner{status: "closed", alsoReturn: []string{"ga-z"}, ephemeral: []string{"ga-w"}}
+			s := beads.NewBdStore("/city", runner.run)
+			got, err := s.List(tc.query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			have := make([]string, 0, len(got))
+			for _, b := range got {
+				have = append(have, b.ID)
+			}
+			sort.Strings(have)
+			if !reflect.DeepEqual(have, tc.want) {
+				t.Fatalf("ids = %v, want %v (unrequested ga-z must be dropped)", have, tc.want)
+			}
+		})
 	}
 }
 

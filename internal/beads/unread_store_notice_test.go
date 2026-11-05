@@ -920,3 +920,52 @@ func TestCachingStoreWitnessesItsOwnCache(t *testing.T) {
 		t.Fatal("the cache reported no evidence while holding a bead of its own")
 	}
 }
+
+// TestIDsFilteredReadsNeitherLatchNorNoticeNorClear pins the unread-store guard
+// against List{IDs} now being a bd-side filtered read: a zero-row answer to it
+// is a statement about the ids, not about the ledger, so it must not latch the
+// scope as populated, must not raise the notice (even with AllowScan set), and
+// must not clear a latch an earlier read already set.
+func TestIDsFilteredReadsNeitherLatchNorNoticeNorClear(t *testing.T) {
+	idReads := map[string]beads.ListQuery{
+		"ids":            {IDs: []string{"jc-x"}, Status: "closed", TierMode: beads.TierBoth},
+		"ids-allow-scan": {IDs: []string{"jc-x"}, AllowScan: true},
+	}
+	for name, q := range idReads {
+		t.Run(name+"/fresh-scope", func(t *testing.T) {
+			var notices bytes.Buffer
+			s := beads.NewBdStore(scopeWithUnreadDatabase(t), newRecordingRunner(nil).run, beads.WithBdStoreNoticeSink(&notices))
+			if _, err := s.List(q); err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if s.SawRows() {
+				t.Fatal("a zero-row ids read latched the scope as populated")
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("a filtered ids read raised the unread-store notice: %q", notices.String())
+			}
+		})
+		t.Run(name+"/populated-scope", func(t *testing.T) {
+			var notices bytes.Buffer
+			runner := newRecordingRunner(map[string]string{
+				`bd list --json --include-infra --include-gates --limit 0`: rowJSON,
+			})
+			s := beads.NewBdStore(scopeWithUnreadDatabase(t), runner.run, beads.WithBdStoreNoticeSink(&notices))
+			if _, err := s.List(beads.ListQuery{AllowScan: true}); err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if !s.SawRows() {
+				t.Fatal("fixture: the unfiltered read should have latched the scope")
+			}
+			if _, err := s.List(q); err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if !s.SawRows() {
+				t.Fatal("a zero-row ids read cleared the populated-store latch")
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("a populated store printed the unread-store notice: %q", notices.String())
+			}
+		})
+	}
+}
