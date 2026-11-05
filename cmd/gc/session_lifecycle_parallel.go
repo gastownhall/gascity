@@ -1303,6 +1303,9 @@ func buildPreparedStartWithTranscript(
 	// skills, MCP projection) against the pre-override directory. Retarget
 	// those already-rendered strings so scaffold staging lands next to the
 	// session it actually launches into, not the directory templating assumed.
+	if err := validateTaskWorkDirOverride(candidate, cityPath, cfg, preOverrideWorkDir, agentCfg.WorkDir); err != nil {
+		return nil, candidate.info, err
+	}
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
@@ -1578,6 +1581,63 @@ func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath stri
 	}
 	return fmt.Errorf("pool session %s for concrete alias %s resolved template work_dir %q; want concrete work_dir %q",
 		candidate.name(), concretePoolPreparedIdentity(candidate, cfg), templateDir, concreteDir)
+}
+
+// validateTaskWorkDirOverride refuses a launch whose work_dir override resolves
+// to another configured agent's role work_dir. An override is the work_dir a
+// bead or the session record supplies in place of the candidate's configured
+// one (preOverrideWorkDir); a per-bead worktree is expected to be a fresh
+// directory, so one that lands exactly on a different agent's role directory
+// would run this session inside that agent's checkout. Only an override is
+// checked: the candidate's own configured directory, and directories two
+// agents share by configuration, belong to config-time validation. Matching is
+// exact path equality after resolution (a worktree nested under a role
+// directory is not that directory), and the candidate's own template is never
+// the "other" agent. A bounded pool (max_active_sessions > 1) owns its template
+// directory and one directory per instance up to the bound.
+func validateTaskWorkDirOverride(candidate startCandidate, cityPath string, cfg *config.City, preOverrideWorkDir, workDir string) error {
+	if cfg == nil || strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+	if samePreparedWorkDirPath(resolved, resolveWorkDirAgainstCity(cityPath, preOverrideWorkDir)) {
+		return nil
+	}
+	own := findAgentByTemplate(cfg, strings.TrimSpace(candidate.logicalTemplate(cfg)))
+	cityName := preparedStartCityName(cityPath, cfg)
+	for i := range cfg.Agents {
+		other := &cfg.Agents[i]
+		if own != nil && other.QualifiedName() == own.QualifiedName() {
+			continue
+		}
+		for _, identity := range agentRoleWorkDirIdentities(other) {
+			// An agent whose work_dir cannot be resolved has no role directory to
+			// protect here; config validation reports that error.
+			roleDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, identity, *other, cfg.Rigs)
+			if err != nil || !samePreparedWorkDirPath(resolved, roleDir) {
+				continue
+			}
+			return fmt.Errorf("session %s: work_dir override %q is the role work_dir of agent %s; refusing to launch in another agent's role directory",
+				candidate.name(), resolved, other.QualifiedName())
+		}
+	}
+	return nil
+}
+
+// agentRoleWorkDirIdentities lists the identities whose resolved work_dir is a
+// role directory of a: its own qualified name and, for a bounded pool, each
+// instance up to max_active_sessions. Unbounded and namepool-named instances
+// are not enumerated.
+func agentRoleWorkDirIdentities(a *config.Agent) []string {
+	identities := []string{a.QualifiedName()}
+	limit := a.EffectiveMaxActiveSessions()
+	if limit == nil || *limit <= 1 || !a.SupportsInstanceExpansion() {
+		return identities
+	}
+	for n := 1; n <= *limit; n++ {
+		identities = append(identities, a.QualifiedInstanceName(fmt.Sprintf("%s-%d", a.Name, n)))
+	}
+	return identities
 }
 
 func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg *config.City) (templateDir, concreteDir string, ok bool) {
