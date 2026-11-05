@@ -145,6 +145,17 @@ an operator attestation precisely because no process can verify it, and
 preflight says so rather than letting a clean report read as broader than it
 is.
 
+A split can also release maintenance a large work store was starving. The core
+reaper runs its steps in order under one run budget, and on a work store
+holding many infrastructure rows the early steps can spend it every run. Its
+later steps, such as auto-closing stale issues (step 5), then never run. Once
+the split moves those rows out, the first reaper run after it reaches those
+steps and acts on everything that was eligible all along: one city closed 98
+stale work beads in a single run. Before the window, look at the reaper's
+recent `order.skipped` events and its summary's `budget_skipped:` field, which
+names each `<scope>@<step>` the budget kept from running. If later steps have
+been skipped, expect that burst, and decide beforehand whether to let it run.
+
 ## Step 4: run the migration
 
 ```
@@ -232,7 +243,7 @@ What the command does, in order:
    relic legs and move with `gc storage migrate --from-rigs` once the binding
    has converged; the success message names every rig still awaiting that.
 6. Copies every infrastructure bead with its id and within-class dependency
-   topology preserved.
+   topology preserved, and every hold on it (see **Holds** below).
 7. Closes the destination, reopens it, and proves field-level equality against
    the bytes on disk — not against the connection that wrote them.
 8. Records a proven-copy manifest, and only then the convergence marker.
@@ -240,6 +251,30 @@ What the command does, in order:
    dependency edge touching it and that edge's payload, is first written to
    `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
    and proven equal to the rows it records; only then is a row removed.
+
+**Holds.** A bead parked in the work store stays parked in the binding. An
+open infrastructure bead with a `blocks` edge onto an unfinished work bead (a
+parked `mol-dog` wisp blocked on an open work bead, say) waits in the binding on
+a cross-store gate: a `gate` bead in the binding that names the work bead, which
+the controller's gate lane closes once the work bead closes. The migrate output
+names each one. A hold the binding cannot express makes the migration refuse,
+before anything is copied, naming each bead and its fix; `gc storage preflight`
+reports the same refusal under `holds`:
+
+- **an undated deferral** (`bd` status `deferred` with no future
+  `defer_until`): give the bead a dated deferral, `bd defer <id> --until
+  <date>`, which the copy carries as `defer_until`, or undefer it;
+- **any other status `bd` parks a bead with** (`blocked`, `pinned`, `hooked`,
+  or a custom status): the binding stores only `open`, `in_progress` and
+  `closed`, and the bead would arrive `open` and ready. Keep it parked with a
+  dated deferral (`bd defer <id> --until <date>`), release it (`bd update <id>
+  --status open`), or close it;
+- **a `waits-for` or `conditional-blocks` edge onto unfinished work**: a
+  cross-store gate encodes only `blocks`. Finish the work bead, close the
+  infrastructure bead, or replace the edge with a `blocks` edge.
+
+An infrastructure bead blocked on open work needs no manual deferral before the
+migration.
 
 **What the backup holds, and what it does not.** The backup records each bead
 as gc models it: id, title, status, type, description, priority, assignee,
@@ -249,7 +284,8 @@ payload. That is exactly the set of fields the copy carried into the binding
 and the equality stage proved. It does **not** hold the fields only `bd` models:
 notes, comments, close reason and closed-at, design, acceptance criteria, the
 event history, and the indefinitely-deferred state. Those were never copied
-into the binding either. On a native-Dolt work store each removal is a Dolt
+into the binding either (an open bead in the indefinitely-deferred state is
+refused, see **Holds**). On a native-Dolt work store each removal is a Dolt
 commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
 before the clear) is the full-fidelity backstop for them.
 
@@ -337,15 +373,27 @@ blocking is not expressible on a split city yet (ga-2orlf); the migration does
 not refuse over it, because refusing would leave a city that boot also refuses
 with no way forward. Instead:
 
+- `gc storage preflight` lists every such edge under `cross-store edges`
+  before the window, as a note that does not block;
 - the migrate output lists every such edge as **AT RISK** before the first row
   is removed;
-- every edge the store then refuses is recorded in
+- every edge the store then refuses is recorded on its work bead, as a
+  `dropped` entry in `gc.migrated_cross_edges` (the shape `--from-rigs` uses:
+  `dir`, `type`, `other`, `other_status_at_import`, `payload`, `action`), so
+  `gc bd show <id>` still names the bead a bug was discovered from;
+- every edge the store then refuses is also recorded in
   `.gc/storage-infra-cleared.json`, listed under `lost cross-store edges` by
   `gc storage status`, and carried as `lost_cross_edges` on every
   `storage.binding.*` event that reads the note;
 - every one stays in the backup (`dependents` on the moved bead's entry).
 
 A file or SQLite work store keeps them.
+
+On a work store served by the city's managed Dolt server, the clear's
+deletes stay in the database's Dolt history, and the migrate output ends with
+a reminder to run `gc dolt compact`. Compaction reclaims that space and also
+ends `AS OF` recovery from before the clear, so run it only once you no longer
+need that backstop. The migration never compacts on its own.
 
 The command is idempotent. Run it again on a converged city and it re-proves
 convergence and finishes any clear that did not complete — including the

@@ -89,6 +89,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -170,6 +171,9 @@ type infraClearResult struct {
 	// LostCrossEdges is every cross-store edge any run of this city's clears
 	// could not keep, as recorded in the cleared note.
 	LostCrossEdges []string
+	// Recorded counts this run's unrestorable edges recorded on their work
+	// beads (gc.migrated_cross_edges).
+	Recorded int
 }
 
 // infraUnprovenSourceRows is the clear's refusal for work-store infrastructure
@@ -491,12 +495,40 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		}
 	}
 	result.Released = release
+	dropped := map[string][]infraBackupEdge{}
 	for _, edge := range keep {
 		if err := infraRestoreKeptEdge(source, edge); err != nil {
 			result.Unrestorable = append(result.Unrestorable, fmt.Sprintf("%s (%v)", edge, err))
+			dropped[edge.IssueID] = append(dropped[edge.IssueID], edge)
 			continue
 		}
 		result.Kept = append(result.Kept, edge)
+	}
+	// Each edge the work store refused is recorded on its work bead, in the
+	// rig importer's shape, so the bead keeps its provenance (ga-4tnypl). One
+	// metadata write per work bead; a resumed run adds nothing twice.
+	movedStatus := make(map[string]string, len(merged))
+	for _, entry := range merged {
+		movedStatus[entry.Bead.ID] = entry.Bead.Status
+	}
+	for _, workID := range sortedMapKeys(dropped) {
+		work, err := source.Get(workID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return result, fmt.Errorf("reading %s to record the cross-store edges the work store dropped: %w", workID, err)
+		}
+		value, changed, err := mergeCrossEdgeRecords(work.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], infraDroppedCrossEdgeRecords(dropped[workID], movedStatus))
+		if err != nil {
+			return result, fmt.Errorf("recording the cross-store edges the work store dropped on %s: %w", workID, err)
+		}
+		if changed {
+			if err := source.SetMetadata(workID, beadmeta.MigratedCrossEdgesMetadataKey, value); err != nil {
+				return result, fmt.Errorf("recording the cross-store edges the work store dropped on %s: %w", workID, err)
+			}
+		}
+		result.Recorded += len(dropped[workID])
 	}
 
 	after, err := readInfraSnapshotAt(source, manifest.Generation)
@@ -890,7 +922,8 @@ func verifyInfraRetainedBackupAt(path string, want []infraBackupEntry) error {
 }
 
 // infraBackupSourceStore serves a retained-source backup as a migration
-// source: the rows and their within-backup edges in a MemStore, plus the edge
+// source: the rows, their within-backup edges and their blocking edges onto
+// work in a MemStore, plus the edge
 // payloads the backup recorded, so the copy carries them exactly as it would
 // from the work store.
 type infraBackupSourceStore struct {
@@ -923,7 +956,10 @@ func openInfraBackupSource(target infraBindingTarget) (beads.Store, error) {
 	for _, e := range entries {
 		rows = append(rows, e.Bead)
 		for _, edge := range e.Deps {
-			if !held[edge.DependsOnID] {
+			// An edge onto a bead outside the backup is a hold on work the copy
+			// carries as a cross-store gate (infra_class_holds.go); the rest
+			// stay out, as the copy leaves them.
+			if !held[edge.DependsOnID] && !beads.IsReadyBlockingDependencyType(edge.Type) {
 				continue
 			}
 			deps = append(deps, edge.dep())
@@ -948,7 +984,21 @@ func describeInfraClear(result infraClearResult) string {
 	if len(result.Kept) > 0 {
 		fmt.Fprintf(&b, "; %d cross-store edge(s) kept", len(result.Kept))
 	}
+	if result.Recorded > 0 {
+		fmt.Fprintf(&b, "; %d dropped cross-store edge(s) recorded on their work bead(s) (%s)", result.Recorded, beadmeta.MigratedCrossEdgesMetadataKey)
+	}
 	return b.String()
+}
+
+// infraDroppedCrossEdgeRecords is the gc.migrated_cross_edges entry for each
+// edge from a work bead into a moved bead that the work store refused. status
+// is each moved bead's status at the clear.
+func infraDroppedCrossEdgeRecords(edges []infraBackupEdge, status map[string]string) []rigCrossEdgeRecord {
+	out := make([]rigCrossEdgeRecord, 0, len(edges))
+	for _, e := range edges {
+		out = append(out, rigCrossEdgeRecord{Dir: "out", Type: e.Type, Other: e.DependsOnID, OtherStatus: status[e.DependsOnID], Payload: e.Payload, Action: rigEdgeDropped})
+	}
+	return out
 }
 
 // infraClearedNote is the city-side record that this city's work store was

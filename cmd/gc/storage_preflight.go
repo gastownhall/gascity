@@ -58,9 +58,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -232,11 +234,18 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
 	rows, allIDs, listErr := readInfraSnapshotWithIDs(source, coordclass.CurrentGeneration)
-	var edgeErr error
+	var edgeErr, holdsErr error
+	var gates []infraCopyGate
+	var plan infraCopyPlan
 	if listErr == nil {
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
-		_, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		plan, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		// The same plan the migration runs, so a hold it would refuse is named
+		// before the window rather than inside it.
+		if edgeErr == nil {
+			gates, holdsErr = planInfraCopyHolds(plan, source, time.Now())
+		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
 		fmt.Fprintf(stderr, "%s: closing the work store: %v\n", storagePreflightLogPrefix, closeErr) //nolint:errcheck // best-effort stderr
@@ -249,6 +258,19 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "edge payloads", edgeErr)
 	}
 	preflightPass(stdout, "edge payloads", "the work store can report the payload on every edge the copy would re-add")
+	if holdsErr != nil {
+		return preflightBlock(stdout, "holds", holdsErr)
+	}
+	preflightPass(stdout, "holds", fmt.Sprintf("every hold on a bead the copy carries crosses; %d bead(s) blocked on open work would wait on a cross-store gate", len(gates)))
+	// Informational: the clear records each edge it drops on its work bead.
+	if atRisk := infraCrossEdgesAtRisk(plan); len(atRisk) > 0 {
+		preflightNote(stdout, "cross-store edges", fmt.Sprintf("%d edge(s) from work beads into beads the copy moves: a bd or native-Dolt work store cannot keep an edge onto a bead it no longer holds, so the clear drops each and records it on its work bead (%s):", len(atRisk), beadmeta.MigratedCrossEdgesMetadataKey))
+		for _, edge := range atRisk {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
+		}
+	} else {
+		preflightPass(stdout, "cross-store edges", "no work bead links to a bead the copy moves")
+	}
 
 	// 7. What the destination already holds. Read-only: the database is opened
 	// only if it is already there, because opening creates it.

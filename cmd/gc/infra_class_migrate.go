@@ -1327,7 +1327,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		return fail(fmt.Errorf("controller PID %d is live on this city and is still writing infrastructure beads to the work store; the copy cannot be proven against a source under mutation. Stop it (gc stop) and start again", pid))
 	}
 
-	var source beads.Store
+	var source, work beads.Store
 	// The classifier generation the new manifest records. A copy out of the
 	// work store selects with the current classifier. The backup holds exactly
 	// the rows the clear selected under the manifest being replaced, so a
@@ -1348,12 +1348,20 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		if err != nil {
 			return fail(fmt.Errorf("opening the retained-source backup: %w", err))
 		}
+		// The work beads a backed-up row waits on stay in the work store, which
+		// is where planInfraCopyHolds reads whether they are finished.
+		work, err = openInfraMigrationSource(cityPath)
+		if err != nil {
+			return fail(fmt.Errorf("opening work store: %w", err))
+		}
+		defer closeBeadStoreHandle(work) //nolint:errcheck // best-effort close
 	} else {
 		source, err = openInfraMigrationSource(cityPath)
 		if err != nil {
 			return fail(fmt.Errorf("opening work store: %w", err))
 		}
 		defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
+		work = source
 	}
 
 	// A stale binding's re-copy records itself before it creates the
@@ -1406,6 +1414,12 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := infraDestinationEdgePayloadRefusal(writer, plan.carrying); err != nil {
 		return fail(err)
 	}
+	// Every hold on a carried bead crosses, or the copy refuses before the
+	// destination is touched (infra_class_holds.go).
+	gates, err := planInfraCopyHolds(plan, work, time.Now())
+	if err != nil {
+		return fail(err)
+	}
 	if err := infraEngineCrashPoint("plan"); err != nil {
 		return fail(err)
 	}
@@ -1423,6 +1437,10 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err != nil {
 		return paused(err)
 	}
+	gates, err = mintInfraCopyGates(writer, gates)
+	if err != nil {
+		return fail(err)
+	}
 	// Equality is proven against the database, not against the connection that
 	// just wrote it. Closing the writer first is what makes the proof about
 	// durable bytes: a handle that is still open can answer out of state the
@@ -1431,7 +1449,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		return fail(fmt.Errorf("closing binding %q at %s after the copy: %w", target.Binding, target.Database, err))
 	}
 	writer = nil
-	proven, err := verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(target) }, source)
+	proven, err := verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(target) }, source, gates)
 	if err != nil {
 		return fail(fmt.Errorf("equality check: %w", err))
 	}
@@ -1468,6 +1486,9 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
 		logPrefix, target.Database, imported)
+	for _, g := range gates {
+		fmt.Fprintf(stderr, "%s: %s waits on open work %s through cross-store gate %s\n", logPrefix, g.Owner.ID, g.Blocker, g.ID) //nolint:errcheck // best-effort stderr
+	}
 	// The manifest's size rather than the import count: the manifest is what
 	// every later verdict re-reads, so reporting anything else here would make
 	// the cutover's own event disagree with every boot that follows it.
@@ -1499,9 +1520,22 @@ func clearInfraRetainedCopiesReport(cityPath string, target infraBindingTarget, 
 	}
 	fmt.Fprintf(stderr, "%s: %s\n", logPrefix, describeInfraClear(result)) //nolint:errcheck // best-effort stderr
 	for _, edge := range result.Unrestorable {
-		fmt.Fprintf(stderr, "%s: WARNING: cross-store edge %s could not be kept: the work store refuses an edge to a bead it no longer holds. A blocking edge no longer holds its work bead back; a tracks or related edge no longer links the two. It is recorded in %s and listed by `%s`\n", logPrefix, edge, result.Backup, storageStatusInstruction()) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: WARNING: cross-store edge %s could not be kept: the work store refuses an edge to a bead it no longer holds. A blocking edge no longer holds its work bead back; a tracks or related edge no longer links the two. It is recorded on its work bead (%s), in %s, and listed by `%s`\n", logPrefix, edge, beadmeta.MigratedCrossEdgesMetadataKey, result.Backup, storageStatusInstruction()) //nolint:errcheck // best-effort stderr
+	}
+	// Removing the slice is history a Dolt work store keeps (ga-3xxr0o).
+	// Compaction reclaims it and ends AS OF recovery from before the clear,
+	// so it is the operator's call, never automatic.
+	if result.Cleared > 0 && infraWorkStoreIsManagedDolt(cityPath) {
+		fmt.Fprintf(stderr, "%s: the work store's Dolt history still holds the %d cleared row(s); once you no longer need AS OF recovery from before the clear, run `gc dolt compact` to reclaim it\n", logPrefix, result.Cleared) //nolint:errcheck // best-effort stderr
 	}
 	return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: provenBeads, Clear: result, LostCrossEdges: result.LostCrossEdges}
+}
+
+// infraWorkStoreIsManagedDolt reports whether the city's work store lives in
+// the city's managed Dolt server, the store `gc dolt compact` compacts. Tests
+// replace it.
+var infraWorkStoreIsManagedDolt = func(cityPath string) bool {
+	return scopeStoreLivesInTheCitysManagedDolt(cityPath, cityPath)
 }
 
 // clearRetainedInfraCopiesFn is the clear the operator command runs. Tests
@@ -2578,7 +2612,7 @@ func infraMigrationRow(b beads.Bead) beads.Bead {
 // could answer out of state the file does not carry. Taking a beads.Store would
 // make handing the writer back in a one-line refactor away, and the resulting
 // proof would look identical while proving something weaker.
-func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.Store) ([]string, error) {
+func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.Store, gates []infraCopyGate) ([]string, error) {
 	rows, err := readInfraSnapshot(source)
 	if err != nil {
 		return nil, err
@@ -2603,14 +2637,21 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		return nil, fmt.Errorf("listing binding: %w", err)
 	}
 	held := make(map[string]beads.Bead, len(copied))
+	// The cross-store gates the copy minted are the binding's own rows, proven
+	// against the plan rather than the source (infra_class_holds.go).
+	gateIDs := make(map[string]bool, len(gates))
+	for _, g := range gates {
+		gateIDs[g.ID] = true
+	}
+	gatesOf := infraCopyGatesByOwner(gates)
 	for _, b := range copied {
-		if !infraIDs[b.ID] {
+		if !infraIDs[b.ID] && !gateIDs[b.ID] {
 			return nil, fmt.Errorf("binding holds %s, which the work store's infrastructure slice does not", b.ID)
 		}
 		held[b.ID] = b
 	}
-	if len(copied) != len(rows) {
-		return nil, fmt.Errorf("binding holds %d beads, want %d", len(copied), len(rows))
+	if len(copied) != len(rows)+len(gates) {
+		return nil, fmt.Errorf("binding holds %d beads, want %d (%d copied, %d cross-store gate(s))", len(copied), len(rows)+len(gates), len(rows), len(gates))
 	}
 	for _, want := range rows {
 		got, ok := held[want.ID]
@@ -2634,6 +2675,16 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 	gotDeps, err := readInfraDownEdges(dstLister, destination, proven)
 	if err != nil {
 		return nil, fmt.Errorf("listing copied deps: %w", err)
+	}
+	for _, g := range gates {
+		if err := verifyInfraCopyGate(held[g.ID], g); err != nil {
+			return nil, err
+		}
+	}
+	for id, gateIDs := range gatesOf {
+		if gotDeps[id], err = withoutInfraCopyGateEdges(id, gotDeps[id], gateIDs); err != nil {
+			return nil, err
+		}
 	}
 	for _, id := range proven {
 		if diff := infraDepDifference(id, wantDeps[id], gotDeps[id], infraIDs); diff != "" {

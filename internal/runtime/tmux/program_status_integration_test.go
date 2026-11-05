@@ -96,13 +96,15 @@ func startProgramSession(t *testing.T, companion, emitter string, mode runtime.P
 
 // programScratchKind names the scratch server of a contract case: heal for
 // the heal cases (PS-013, PS-014), hold for the mid-turn hold's case
-// (PS-015) and tests, arm for the rest.
+// (PS-015) and tests, pend for the pending read's tests, arm for the rest.
 func programScratchKind(t *testing.T) string {
 	switch {
 	case strings.Contains(t.Name(), "/PS-013_") || strings.Contains(t.Name(), "/PS-014_"):
 		return "heal"
 	case strings.Contains(t.Name(), "/PS-015_") || strings.HasPrefix(t.Name(), "TestHeld"):
 		return "hold"
+	case strings.HasPrefix(t.Name(), "TestPending"):
+		return "pend"
 	}
 	return "arm"
 }

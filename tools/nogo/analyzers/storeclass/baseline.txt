@@ -993,6 +993,7 @@ cmd/gc/idle_nudge.go	poolContinuationBackstop.reserve	raw-param	1
 cmd/gc/idle_nudge.go	writeContinuationClaimMarker	raw-param	1
 cmd/gc/idle_nudge.go	writeIdleClaimMarker	raw-param	1
 cmd/gc/infra_class_clear.go	infraRestoreKeptEdge	cap-assert	1
+cmd/gc/infra_class_holds.go	mintInfraCopyGates	mint	1
 cmd/gc/infra_class_migrate.go	infraCopyDepEdge	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraDestinationEdgePayloadRefusal	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraReadEdgePayload	cap-assert	1
@@ -1068,7 +1069,6 @@ cmd/gc/nudge_dispatcher.go	dispatchAllQueuedNudges	mint	1
 cmd/gc/nudge_dispatcher.go	dispatchAllQueuedNudges	raw-param	2
 cmd/gc/nudge_dispatcher.go	dispatchQueuedNudges	raw-param	2
 cmd/gc/nudge_file_queue.go	enqueueQueuedNudgeWithStoreAndClock	unwrap	2
-cmd/gc/nudge_file_queue.go	fileNudgeQueue.importMigrated	unwrap	1
 cmd/gc/nudge_file_queue.go	nudgeMaintenanceStore	raw-field	1
 cmd/gc/nudge_file_queue.go	nudgeMaintenanceStore.ensureOpen	unwrap	1
 cmd/gc/nudge_shadow_debts.go	payAndConfirmNudgeShadowDebtsBy	unwrap	1

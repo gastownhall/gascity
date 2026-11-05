@@ -586,7 +586,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
-		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, cityPath: p.CityPath, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publishedRev:            p.ConfigRev,
@@ -2972,7 +2972,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
 		}
-		resume, err := cr.beforeProviderSwap(ctx, nextCfg)
+		resume, err := cr.beforeProviderSwap(ctx, nextCfg, nextSp)
 		defer resume() // after the swap publishes, or the reload aborts
 		if err != nil {
 			return swapFailed(fmt.Errorf("provider swap: %w", err))
