@@ -43,6 +43,7 @@ go_test(
         "cycle_test.go",
         "sling_attached_hint_test.go",
         "sling_attachment_test.go",
+        "sling_base_branch_test.go",
         "sling_child_outcome_test.go",
         "sling_convoy_reuse_test.go",
         "sling_core_test.go",

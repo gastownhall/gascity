@@ -808,6 +808,8 @@ func (cliBranchResolver) DefaultBranch(dir string) string {
 	return defaultBranchFor(dir)
 }
 
+func (cliBranchResolver) BaseRefMissing(string, string) bool { return false }
+
 // cliNotifier implements sling.Notifier using IPC.
 type cliNotifier struct{}
 

@@ -42,6 +42,9 @@ func (g *Git) BranchExists(branch string) (bool, error) {
 	return false, fmt.Errorf("probing branch %q: %w", branch, err)
 }
 
+// BaseRefMissing is a stub.
+func (g *Git) BaseRefMissing(string) bool { return false }
+
 // RevParseVerifyCommit resolves ref to a full commit SHA, failing when the
 // ref does not exist or does not point at a commit. The ref is resolved
 // verbatim against the local repository — no remote fallback — so an

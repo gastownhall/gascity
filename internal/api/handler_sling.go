@@ -595,6 +595,8 @@ func (r apiBranchResolver) DefaultBranch(dir string) string {
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"))
 }
 
+func (r apiBranchResolver) BaseRefMissing(string, string) bool { return false }
+
 // apiNotifier implements sling.Notifier for the API context.
 type apiNotifier struct {
 	state State

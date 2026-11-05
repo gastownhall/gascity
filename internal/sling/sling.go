@@ -97,9 +97,14 @@ type AgentResolver interface {
 	ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool)
 }
 
-// BranchResolver resolves the default branch for a directory.
+// BranchResolver resolves the default branch for a directory and checks the
+// refs a sling hands to a formula as base_branch.
 type BranchResolver interface {
 	DefaultBranch(dir string) string
+	// BaseRefMissing reports true only when dir is a git repository in which
+	// ref resolves to no commit. Anything it cannot decide (dir is not a
+	// repository, git is unavailable) reports false.
+	BaseRefMissing(dir, ref string) bool
 }
 
 // Notifier sends wake notifications to the controller and control

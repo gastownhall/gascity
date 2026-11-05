@@ -5567,6 +5567,8 @@ type fixedBranchResolver struct{ branch string }
 
 func (r fixedBranchResolver) DefaultBranch(string) string { return r.branch }
 
+func (r fixedBranchResolver) BaseRefMissing(string, string) bool { return false }
+
 func TestSlingFormulaTargetBranch_PrefersBeadMetadata(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},

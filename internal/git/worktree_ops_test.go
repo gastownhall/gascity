@@ -308,3 +308,41 @@ func TestIsHexObjectIDAcceptsBothObjectFormats(t *testing.T) {
 		}
 	}
 }
+
+// BaseRefMissing is the sling-time base_branch check, so it must refuse only
+// when it can prove the ref is absent: a local branch, a remote-tracking ref
+// (bare name resolved as origin/<name>, or a full "remote/branch" ref) and a
+// directory it cannot read as a repository are all "not missing".
+func TestBaseRefMissing(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	local, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	// A remote-tracking ref for a branch that exists nowhere locally.
+	runGit(t, dir, "update-ref", "refs/remotes/origin/only-on-origin", "HEAD")
+	runGit(t, dir, "update-ref", "refs/remotes/headfork/restack/foo", "HEAD")
+
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"local branch", local, false},
+		{"bare name found as origin/<name>", "only-on-origin", false},
+		{"full remote-tracking ref", "headfork/restack/foo", false},
+		{"unknown ref", "no-such-base", true},
+		{"typo of a real ref", local + "x", true},
+	}
+	for _, tt := range tests {
+		if got := g.BaseRefMissing(tt.ref); got != tt.want {
+			t.Errorf("%s: BaseRefMissing(%q) = %v, want %v", tt.name, tt.ref, got, tt.want)
+		}
+	}
+
+	// Inconclusive is not "missing": a non-repository cannot prove anything.
+	if New(t.TempDir()).BaseRefMissing("main") {
+		t.Error("BaseRefMissing in a non-repository = true, want false (cannot decide)")
+	}
+}
