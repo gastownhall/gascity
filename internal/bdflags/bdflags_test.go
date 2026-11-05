@@ -497,3 +497,145 @@ func TestScanUnknownFlagsAcceptsBdHiddenAliases(t *testing.T) {
 		}
 	}
 }
+
+// TestScanUnknownFlagsProseAfterPositionalDoesNotBleedIntoOtherCommands is the
+// cross-command misattribution case (ga-w7ky4w mechanism 3): a sentence that
+// merely contains the words "bd update" opens an invocation, and every later
+// non-dash word used to be skipped as a positional, so the unrelated
+// "gh pr merge --auto" at the end of the line was checked against update's
+// flags. "update" takes one leading id; the second bare word ends the
+// invocation.
+func TestScanUnknownFlagsProseAfterPositionalDoesNotBleedIntoOtherCommands(t *testing.T) {
+	cases := []string{
+		"The builder should run bd update before you close it, then gh pr merge --auto when green.",
+		"run `bd update` before you close it, then `gh pr merge --auto` when green",
+		"gc bd show <id> and then gh pr merge --auto",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings (prose ended the invocation)", line, findings)
+		}
+	}
+}
+
+// TestScanUnknownFlagsWarningProseAboutFlagsIsNotAnInvocation is the
+// self-referential warning-prose case (ga-w7ky4w mechanism 4): a sentence
+// about a subcommand's missing flags carries the same "bd create ... --rig"
+// token pattern as an invocation. "create" takes one leading title, so the
+// second bare word ("no") ends the invocation before "--rig" is reached. The
+// backticked form also covers the mangled "--rig`/`--prefix" token that
+// tokenize leaves behind.
+func TestScanUnknownFlagsWarningProseAboutFlagsIsNotAnInvocation(t *testing.T) {
+	cases := []string{
+		"bd create has no --rig/--prefix flag.",
+		"`bd create` has no `--rig`/`--prefix` flag.",
+		"Note: bd create has no --rig flag, so use gc bd --rig <name> create instead.",
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings (prose about flags, not an invocation)", line, findings)
+		}
+	}
+}
+
+// TestScanUnknownFlagsPositionalBudgetEndsInvocation pins the bound itself:
+// once a subcommand has taken its leading positionals, a further bare word
+// closes the invocation and flags after it are no longer attributed to it.
+func TestScanUnknownFlagsPositionalBudgetEndsInvocation(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"list takes no positional", "bd list foo --bogus"},
+		{"ready takes no positional", "bd ready foo --bogus"},
+		{"update takes one id", "bd update <id> extra --bogus"},
+		{"create takes one title", "bd create title extra --bogus"},
+		{"dep add takes two ids", "bd dep add <a> <b> <c> --bogus"},
+	}
+	for _, tc := range cases {
+		if findings := ScanUnknownFlags([]byte(tc.line)); len(findings) != 0 {
+			t.Errorf("%s: ScanUnknownFlags(%q) = %v, want no findings", tc.name, tc.line, findings)
+		}
+	}
+}
+
+// TestScanUnknownFlagsStillReportsTyposWithinPositionalBudget guards the other
+// side of the bound: a real typo after the subcommand's own positionals (or
+// none) must keep being reported, or the bound has become a way to hide them.
+func TestScanUnknownFlagsStillReportsTyposWithinPositionalBudget(t *testing.T) {
+	cases := []struct {
+		line    string
+		wantSub string
+		want    string
+	}{
+		{"bd update <id> --asignee bob", "update", "--asignee"},
+		{`bd create "$t" --lable needs-architecture --json`, "create", "--lable"},
+		{"bd dep add <a> <b> --bogus", "dep add", "--bogus"},
+		{"bd list --bogus", "list", "--bogus"},
+		{"bd ready --bogus", "ready", "--bogus"},
+		{"gc bd close <id> --reasn done", "close", "--reasn"},
+		{"bd mol pour mol-x --asignee builder", "mol pour", "--asignee"},
+	}
+	for _, tc := range cases {
+		findings := ScanUnknownFlags([]byte(tc.line))
+		if len(findings) != 1 || findings[0].Flag != tc.want || findings[0].Subcommand != tc.wantSub {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding %s on %q", tc.line, findings, tc.want, tc.wantSub)
+		}
+	}
+}
+
+// TestScanUnknownFlagsKeepsScanningAfterInvocationEnds checks that ending an
+// invocation hands the line back to the outer scan rather than abandoning it:
+// a real invocation later on the same line is still validated.
+func TestScanUnknownFlagsKeepsScanningAfterInvocationEnds(t *testing.T) {
+	line := "Run bd update before you close it, then run bd list --bogus"
+	findings := ScanUnknownFlags([]byte(line))
+	if len(findings) != 1 || findings[0].Flag != "--bogus" || findings[0].Subcommand != "list" {
+		t.Fatalf("ScanUnknownFlags(%q) = %v, want exactly one finding --bogus on list", line, findings)
+	}
+}
+
+// positionalBudgets is each manifest subcommand's leading-positional budget,
+// taken from its `bd <sub> --help` Usage line. Variadic [id...] subcommands
+// (update, close, reopen, delete, show, mol burn, dep list) are bounded at one
+// id on purpose: an open-ended budget would let prose after "bd update"
+// absorb every following word, which is the bleed the budget exists to stop.
+var positionalBudgets = map[string]int{
+	"create": 1,                                                  // bd create [title]
+	"update": 1, "close": 1, "reopen": 1, "delete": 1, "show": 1, // [id...]
+	"ready": 0, "list": 0, // flags only
+	"mol current": 1, "mol pour": 1, "mol wisp": 1, "mol burn": 1,
+	"gate check": 0, "gate list": 1,
+	"dep add": 2, "dep list": 1, "dep remove": 2,
+}
+
+// TestScanUnknownFlagsPositionalBudgetPerSubcommand drives every manifest
+// subcommand through the scanner: a typo after exactly its budget of bare
+// words is reported, and the same typo after one word more is not, because
+// the invocation ended. It fails when a subcommand is added to the flag
+// manifest without deciding its budget here, so the decision is never skipped.
+func TestScanUnknownFlagsPositionalBudgetPerSubcommand(t *testing.T) {
+	bare := func(n int) string {
+		words := ""
+		for i := 1; i <= n; i++ {
+			words += " arg" + string(rune('0'+i))
+		}
+		return words
+	}
+	for _, sub := range Subcommands() {
+		if _, ok := positionalBudgets[sub]; !ok {
+			t.Errorf("manifest subcommand %q has no entry in positionalBudgets", sub)
+		}
+	}
+	for sub, n := range positionalBudgets {
+		within := "bd " + sub + bare(n) + " --bogus"
+		findings := ScanUnknownFlags([]byte(within))
+		if len(findings) != 1 || findings[0].Flag != "--bogus" || findings[0].Subcommand != sub {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly one finding --bogus on %q (%d positionals is within budget)", within, findings, sub, n)
+		}
+		over := "bd " + sub + bare(n+1) + " --bogus"
+		if findings := ScanUnknownFlags([]byte(over)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings (%d positionals exceeds the budget of %d)", over, findings, n+1, n)
+		}
+	}
+}
