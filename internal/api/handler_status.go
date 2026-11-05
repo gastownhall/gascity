@@ -1118,7 +1118,7 @@ func statusStoreWorkCountsFor(
 // preferring the hydration-free Counter path and falling back to List only
 // when Count explicitly reports that the query shape is unsupported.
 func statusStoredWorkCounts(ctx context.Context, state State, store beads.Store) (workCounts, error) {
-	if counter, ok := store.(beads.Counter); ok {
+	if counter, ok := beads.As[beads.Counter](store); ok {
 		wc, err := statusCountWork(ctx, counter)
 		if err == nil || !errors.Is(err, beads.ErrCountUnsupported) {
 			return wc, err
@@ -1231,7 +1231,7 @@ func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.S
 		return nil, err
 	}
 	var capabilityErr error
-	if reader, ok := store.(beads.ContextReadyReader); ok {
+	if reader, ok := beads.As[beads.ContextReadyReader](store); ok {
 		rows, err := reader.ReadyContext(reqCtx)
 		if !errors.Is(err, beads.ErrReadyContextUnsupported) {
 			return rows, statusReadyError(err)

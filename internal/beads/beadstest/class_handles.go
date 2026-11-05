@@ -104,6 +104,9 @@ var capabilityProbes = []capabilityProbe{
 	probe[*beads.CachingStore]("*CachingStore"),
 	probe[beads.ChildrenBatchLister]("ChildrenBatchLister"),
 	probe[beads.AtomicTxStore]("AtomicTxStore"),
+	probe[beads.CacheStatsReporter]("CacheStatsReporter"),
+	probe[beads.CacheLivenessReporter]("CacheLivenessReporter"),
+	probe[beads.CachedLister]("CachedLister"),
 }
 
 // RunClassHandleCapabilityConformance checks, for a store from newStore, that

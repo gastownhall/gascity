@@ -166,8 +166,11 @@ func TestHandleStatusWorkCountsUseCounterStores(t *testing.T) {
 		counts:        map[string]int{"open": 2, "in_progress": 1, "ready": 99},
 		listForbidden: true,
 	}
+	// The work lives in the rig; the city's work store is empty. Production's
+	// BeadStores carries the city too, and status counts its persisted rows,
+	// so a city store over the rig's rows would count them twice.
 	state.stores["myrig"] = counter
-	state.cityBeadStore = store
+	state.cityBeadStore = beads.NewMemStore()
 
 	resp := getStatus(t, state)
 
@@ -191,12 +194,15 @@ func TestHandleStatusCounterUnsupportedFallsBackToList(t *testing.T) {
 	if _, err := mem.Create(beads.Bead{Type: "task", Title: "open work"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	state.stores["myrig"] = &counterBeadStore{
+	counter := &counterBeadStore{
 		Store:    mem,
 		t:        t,
 		countErr: beads.ErrCountUnsupported,
 	}
-	state.cityBeadStore = mem
+	// The work lives in the rig; the city's work store is empty (see
+	// TestHandleStatusWorkCountsUseCounterStores).
+	state.stores["myrig"] = counter
+	state.cityBeadStore = beads.NewMemStore()
 
 	resp := getStatus(t, state)
 

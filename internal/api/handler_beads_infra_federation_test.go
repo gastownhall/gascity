@@ -348,12 +348,26 @@ func TestBeadReadyWorkStoresDownButGraphUpIsPartial200(t *testing.T) {
 	}
 }
 
+// rigsOnlyBeadStoresState is a legacy city whose BeadStores leaves the city
+// store out, a shape production never serves (controllerState.BeadStores
+// carries the city under its name, and so does fakeState): it isolates the
+// list's graph arm, so a leg that arm minted at the city store is the only way
+// a city bead can reach the response.
+type rigsOnlyBeadStoresState struct{ *fakeState }
+
+func (s rigsOnlyBeadStoresState) BeadStores() map[string]beads.Store {
+	stores := s.fakeState.BeadStores()
+	delete(stores, s.cityName)
+	return stores
+}
+
 // TestBeadListLegacyCityDoesNotSmuggleCityStore is the mutation-killer for the
 // list arm's `graph != CityBeadStore()` identity guard. It pins the byte-identity
 // property directly: on a legacy city the graph arm must not change WHICH stores
 // the fan-out reads. Here BeadStores() deliberately does not carry the city
-// store, so an unguarded arm would mint a synthetic leg pointing at it and the
-// city's beads would appear in a response that never contained them.
+// store (rigsOnlyBeadStoresState), so an unguarded arm would mint a synthetic
+// leg pointing at it and the city's beads would appear in a response that never
+// contained them.
 func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 	fs := newLegacyFederationState(t)
 	cityBead, err := fs.cityBeadStore.Create(beads.Bead{Type: "task", Title: "city work"})
@@ -365,7 +379,16 @@ func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 		t.Fatalf("seed rig work: %v", err)
 	}
 
-	body := getListBody(t, fs, "/beads")
+	state := rigsOnlyBeadStoresState{fs}
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, state).ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/beads"), nil))
+	if rec.Code != 200 {
+		t.Fatalf("GET /beads status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	var body listBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /beads: %v", err)
+	}
 	if !bodyContainsBeadID(body.Items, rigBead.ID) {
 		t.Fatalf("list items = %+v, want the rig bead %q", body.Items, rigBead.ID)
 	}
