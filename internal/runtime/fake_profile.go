@@ -140,7 +140,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
-		return k8sProfile{core, b, b, timed}
+		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
 	case ProfileSSH:
@@ -157,6 +157,7 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
+	sharedListingTrait struct{}                  // k8s lists every gc-agent pod in its namespace
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
 	steerTrait         struct{ m SteerMode }
@@ -180,6 +181,8 @@ func (localTranscriptTrait) LocalTranscripts() bool { return true }
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
+
+func (sharedListingTrait) ListRunningShared() bool { return true }
 
 // profileCapabilities are each backend's static capabilities; subprocess
 // has none. exec's come from its script's handshake: the profile is a pack
@@ -288,6 +291,7 @@ type (
 		ListingAttestation
 		RelaunchProvider
 		sleepTrait
+		sharedListingTrait
 	}
 	execProfile struct {
 		Provider

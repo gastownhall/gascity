@@ -31,6 +31,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"ProgramStatusShadowProvider": {"deliberate", "the shadow sink is read on the routed leaf with its reading (runtime.ProgramStatusShadowFor)", ""},
 		"TurnRunningProvider":         {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
 		"V2ReadinessReporter":         {"deliberate", "v2 readiness is a leaf's handshake, judged per leaf (PAR-EXEC C0.8 walks inventoryLeaves)", ""},
+		"SharedListing":               {"deliberate", "runtime.ListRunningShared walks Backends to every leaf (gc stop's confirmation, cmd/gc/cmd_stop.go)", ""},
 	},
 	"hybrid": {
 		"FreshByConstruction":         {"deliberate", "as auto's", ""},
@@ -41,6 +42,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"InventoryGate":               {"deliberate", "as auto's", ""},
 		"InventoryLister":             {"deliberate", "as auto's", ""},
 		"InventoryProvider":           {"deliberate", "as auto's", ""},
+		"SharedListing":               {"deliberate", "as auto's", ""},
 		"LocalTranscriptProvider":     {"deliberate", "as auto's", ""},
 		"ProgramCaptureHealer":        {"deliberate", "as auto's", ""},
 		"ProgramStatusHoldProvider":   {"deliberate", "as auto's", ""},
