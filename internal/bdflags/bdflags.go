@@ -45,11 +45,15 @@ var globalBoolFlags = map[string]bool{
 
 // valueFlagsBySub holds each subcommand's value-consuming flags (beyond the
 // global set), keyed by subcommand: a single word ("update") or, for
-// compound bd subcommands, "parent child" ("mol pour"). The key set here
-// defines every subcommand this package knows about — see Known/Subcommands.
+// compound bd subcommands, "parent child" ("mol pour") or, where a compound
+// subcommand has children of its own with distinct flags, "parent child
+// grandchild" ("mol wisp gc"). The key set here defines every subcommand this
+// package knows about — see Known/Subcommands.
 //
 // Sourced from `bd <sub> --help` (bd 1.3.4, 2026-11-04, and bd 1.3.0
 // Enterprise, 2026-10-26: TestBdFlagManifestCurrent passes against both).
+// The "mol wisp gc" and "mol wisp list" keys are sourced from bd 1.3.2,
+// 2026-11-04 (the bd on the build host that day).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -144,6 +148,12 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"mol wisp": {
 		"--var": true,
 	},
+	"mol wisp gc": {
+		"--age": true, "--exclude-type": true,
+	},
+	"mol wisp list": {
+		"--type": true,
+	},
 	"mol burn": {},
 	"gate check": {
 		"-l": true, "--limit": true, "-t": true, "--type": true,
@@ -211,6 +221,12 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"mol wisp": {
 		"--dry-run": true, "--root-only": true,
+	},
+	"mol wisp gc": {
+		"--all": true, "--closed": true, "--dry-run": true, "-f": true, "--force": true,
+	},
+	"mol wisp list": {
+		"--all": true,
 	},
 	"mol burn": {
 		"--dry-run": true, "--force": true,

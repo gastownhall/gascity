@@ -245,11 +245,17 @@ func bdSubcommandStart(tokens []string, i int) (start int, viaGC bool) {
 }
 
 // matchSubcommand returns the longest known subcommand key starting at
-// token index i, preferring the two-token compound form (e.g. "mol pour")
-// over the single-token form (e.g. "update").
+// token index i, preferring the three-token compound form (e.g. "mol wisp
+// gc"), then the two-token form (e.g. "mol pour"), over the single-token form
+// (e.g. "update").
 func matchSubcommand(tokens []string, i int) (key string, consumed int, ok bool) {
 	if i >= len(tokens) {
 		return "", 0, false
+	}
+	if i+2 < len(tokens) {
+		if three := tokens[i] + " " + tokens[i+1] + " " + tokens[i+2]; Known(three) {
+			return three, 3, true
+		}
 	}
 	if i+1 < len(tokens) {
 		if two := tokens[i] + " " + tokens[i+1]; Known(two) {
