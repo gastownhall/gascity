@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -152,7 +155,7 @@ func TestStorageSnapshotBindingUnderALiveWriter(t *testing.T) {
 	}()
 	// Let the writer get going, so the WAL is live when the copy starts.
 	for writes.Load() < 5 {
-		time.Sleep(time.Millisecond)
+		runtime.Gosched()
 	}
 	code, stdout, stderr := city.snapshot(t, snapshotOptions{Binding: true})
 	stop.Store(true)
@@ -771,9 +774,13 @@ func TestStorageSnapshotsLiveUnderDotGC(t *testing.T) {
 	}
 }
 
-// storageSnapshotKillHelperEnv carries the child's city, binding, archive,
-// kill point and ready file, tab-separated.
-const storageSnapshotKillHelperEnv = "GC_TEST_STORAGE_SNAPSHOT_KILL_HELPER"
+// storageSnapshotKillHelperEnv carries the child's city, binding, archive and
+// kill point, tab-separated. The child prints storageSnapshotKillReady when it
+// reaches the kill point.
+const (
+	storageSnapshotKillHelperEnv = "GC_TEST_STORAGE_SNAPSHOT_KILL_HELPER"
+	storageSnapshotKillReady     = "storage-snapshot-kill-point-reached"
+)
 
 // TestStorageSnapshotKillHelper is the child of
 // TestStorageSnapshotSurvivesSIGKILL: it snapshots the binding and, at the
@@ -784,10 +791,10 @@ func TestStorageSnapshotKillHelper(t *testing.T) {
 		t.Skip("run by TestStorageSnapshotSurvivesSIGKILL")
 	}
 	f := strings.Split(spec, "\t")
-	cityPath, bindingPath, to, killAt, ready := f[0], f[1], f[2], f[3], f[4]
+	cityPath, bindingPath, to, killAt := f[0], f[1], f[2], f[3]
 	storageSnapshotStep = func(step string) error {
 		if step == killAt {
-			_ = os.WriteFile(ready, []byte(step), 0o644)
+			fmt.Fprintln(os.Stdout, storageSnapshotKillReady) //nolint:errcheck // the parent reads it
 			select {}
 		}
 		return nil
@@ -809,26 +816,32 @@ func TestStorageSnapshotSurvivesSIGKILL(t *testing.T) {
 	for _, killAt := range []string{"binding copied", "stored binding", "before manifest"} {
 		t.Run(killAt, func(t *testing.T) {
 			city := newSnapshotCity(t)
-			ready := filepath.Join(t.TempDir(), "ready")
 			bindingPath := city.request.Cfg.Storage.Bindings["infra"].Path
 			cmd := exec.Command(os.Args[0], "-test.run=^TestStorageSnapshotKillHelper$", "-test.count=1")
-			cmd.Env = append(os.Environ(), storageSnapshotKillHelperEnv+"="+strings.Join([]string{city.request.CityPath, bindingPath, city.to, killAt, ready}, "\t"))
-			var out bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &out, &out
+			cmd.Env = append(os.Environ(), storageSnapshotKillHelperEnv+"="+strings.Join([]string{city.request.CityPath, bindingPath, city.to, killAt}, "\t"))
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(60 * time.Second)
-			for {
-				if _, err := os.Stat(ready); err == nil {
+			// The child prints the ready line at the kill point and then
+			// blocks; a child that exits first closes the pipe instead.
+			reached := false
+			var seen strings.Builder
+			for scanner := bufio.NewScanner(stdout); scanner.Scan(); {
+				seen.WriteString(scanner.Text() + "\n")
+				if scanner.Text() == storageSnapshotKillReady {
+					reached = true
 					break
 				}
-				if time.Now().After(deadline) {
-					_ = cmd.Process.Kill()
-					_ = cmd.Wait()
-					t.Fatalf("the child never reached %q: %s", killAt, out.String())
-				}
-				time.Sleep(20 * time.Millisecond)
+			}
+			if !reached {
+				_ = cmd.Wait()
+				t.Fatalf("the child never reached %q:\n%s%s", killAt, seen.String(), stderr.String())
 			}
 			if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
 				t.Fatal(err)
@@ -839,8 +852,8 @@ func TestStorageSnapshotSurvivesSIGKILL(t *testing.T) {
 			if len(ids) != 1 {
 				t.Fatalf("after the kill: %v", ids)
 			}
-			var stdout, stderr bytes.Buffer
-			if code := doStorageSnapshotVerify(context.Background(), city.to, ids[0], "gc storage snapshot", &stdout, &stderr); code == 0 {
+			var verifyOut, verifyErr bytes.Buffer
+			if code := doStorageSnapshotVerify(context.Background(), city.to, ids[0], "gc storage snapshot", &verifyOut, &verifyErr); code == 0 {
 				t.Fatal("a snapshot killed before its manifest verifies")
 			}
 			if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
