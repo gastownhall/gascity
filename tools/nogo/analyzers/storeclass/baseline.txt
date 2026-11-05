@@ -369,7 +369,6 @@ cmd/gc/class_store_emit.go	emittingClassStore.AdvanceSequenceFloor	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.ApplyGraphPlanWithStorage	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.AtomicTx	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.Claim	cap-assert	1
-cmd/gc/class_store_emit.go	emittingClassStore.CompareAndSetMetadataKey	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.ConditionalWritesModeSource	raw-result	1
 cmd/gc/class_store_emit.go	emittingClassStore.Count	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.CreateWithForeignID	cap-assert	1

@@ -415,14 +415,16 @@ type AssignmentGuardedUpdater interface {
 
 // AssignmentGuardedUpdaterFor returns the guarded-update capability of store,
 // following declared conditional-writes resolution targets exactly as
-// MetadataCASWriterFor does. Like ConditionalWriterForTarget it applies no
-// rollout mode.
+// MetadataCASWriterFor does, including the route-clearing gate on a walk that
+// crossed the decorator. Like ConditionalWriterForTarget it applies no rollout
+// mode.
 func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
 	if store == nil {
 		return nil, false
 	}
-	updater, ok := followConditionalWritesResolveTarget(store).(AssignmentGuardedUpdater)
-	return updater, ok
+	target, gate := followResolveTargetThroughGate(store)
+	updater, ok := target.(AssignmentGuardedUpdater)
+	return gate.gateAssignmentUpdater(updater), ok
 }
 
 // ConditionalWriter is implemented by stores that can apply a write only when
@@ -637,12 +639,15 @@ func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 // destructive delete or an ownership release. A writer it returns can still
 // answer ErrConditionalWriteUnsupported at call time (BdStore without
 // --if-revision, a legacy SQLite layout), and the caller decides what that
-// means.
+// means. A walk that crosses the route-clearing decorator returns the gated
+// writer, as MetadataCASWriterFor does.
 func ConditionalWriterForTarget(store Store) (ConditionalWriter, bool) {
 	if store == nil {
 		return nil, false
 	}
-	return ConditionalWriterFor(followConditionalWritesResolveTarget(store))
+	target, gate := followResolveTargetThroughGate(store)
+	writer, ok := ConditionalWriterFor(target)
+	return gate.gateConditionalWriter(writer), ok
 }
 
 // PreconditionFailedError reports that a conditional write was rejected because

@@ -288,6 +288,11 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/route_recovery_lane.go",
+		line:   1033,
+		reason: "write to a pre-existing, long-lived, flap-tracked bead (routeRecoveryLane restoreRoute, via the metadata CAS); gated at the capability seam: MetadataCASWriterFor returns the route-clearing gate's wrapper for a store behind the decorator, so a landed swap clears the previous executor's stamps (pinned by TestRouteClearSeam_GenuineRerouteThroughCapabilityClearsStamps and TestRouteRecoveryLaneRestoreToANewExecutorClearsStaleStamps)",
+	},
+	{
+		path:   "cmd/gc/route_recovery_lane.go",
 		line:   1065,
 		reason: "write to a pre-existing, long-lived, flap-tracked bead (routeRecoveryLane restore path, via SetMetadataBatch); resolves to Root #1 (controller-managed) or Root #7 (standalone), not an independent root -- see block comment above; wrap those roots in GREEN phase",
 	},

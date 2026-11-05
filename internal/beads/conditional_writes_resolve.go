@@ -197,6 +197,13 @@ type conditionalWritesLiveness interface {
 // itself remains unforgeable: a wrapper can only point resolution at a store,
 // never supply a mode, and only internal/beads types can carry a stamp.
 // Following is bounded (cycle-safe); a nil target terminates on the wrapper.
+//
+// A walk that crosses the route-clearing decorator (WithRouteChangeClearing)
+// is not transparent: the capabilities that can write gc.routed_to
+// (ConditionalWriter, MetadataCASWriter, AssignmentGuardedUpdater) come back
+// wrapped so a landed re-route clears the executor-identity stamps
+// (route_clear_gate.go). The mode, liveness, probe and degrade latch still
+// come from the terminal store.
 type ConditionalWritesResolveTargeter interface {
 	ConditionalWritesResolveTarget() Store
 }
@@ -236,18 +243,8 @@ const conditionalWritesMaxResolveDepth = 8
 // followConditionalWritesResolveTarget walks wrapper-declared resolution
 // targets to the innermost store the seam should operate on.
 func followConditionalWritesResolveTarget(store Store) Store {
-	for range conditionalWritesMaxResolveDepth {
-		targeter, ok := store.(ConditionalWritesResolveTargeter)
-		if !ok {
-			return store
-		}
-		target := targeter.ConditionalWritesResolveTarget()
-		if target == nil || target == store {
-			return store
-		}
-		store = target
-	}
-	return store
+	terminal, _ := followResolveTargetThroughGate(store)
+	return terminal
 }
 
 // idPrefixMaxHops bounds IDPrefixFor's walk through declared resolve targets.
@@ -343,8 +340,9 @@ func IsConditionalWritesRequired(err error) bool {
 // the wrapper's.
 func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic, error) {
 	src, sourced := store, false
+	var routeGate *routeChangeClearingStore
 	if store != nil {
-		store = followConditionalWritesResolveTarget(store)
+		store, routeGate = followResolveTargetThroughGate(store)
 		src, sourced = conditionalWritesModeSource(store)
 	}
 	mode := gate.ModeUnset
@@ -384,7 +382,7 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 			// happens: require still fails closed, auto degrades loudly.
 			return refuseOrDegrade(src, mode, "store did not yield a conditional writer")
 		}
-		return writer, nil, nil
+		return routeGate.gateConditionalWriter(writer), nil, nil
 	case gate.DegradeLoud:
 		w, diag, degradeErr := refuseOrDegrade(src, mode, reason)
 		if hasCarrier {

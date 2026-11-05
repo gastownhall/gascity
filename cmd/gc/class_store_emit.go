@@ -754,11 +754,12 @@ func (s *emittingClassStore) DeleteIfMatch(id string, revision int64) error {
 
 // CompareAndSetMetadataKey emits only when the swap actually happened: a
 // refused compare changed nothing, and a row saying otherwise would make every
-// fold disagree with the store.
+// fold disagree with the store. It resolves the swap with beads.MetadataCASWriterFor,
+// which looks through the route-clearing decorator the CLI funnel wraps the
+// engine in and hands back the gated writer, so a gc.routed_to swap clears the
+// previous executor's stamps before this wrapper emits.
 func (s *emittingClassStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
-	swapper, ok := s.Store.(interface {
-		CompareAndSetMetadataKey(string, string, string, string) (bool, error)
-	})
+	swapper, ok := beads.MetadataCASWriterFor(s.Store)
 	if !ok {
 		return false, beads.ErrConditionalWriteUnsupported
 	}

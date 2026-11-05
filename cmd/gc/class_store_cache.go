@@ -22,11 +22,15 @@ package main
 // boot's route-change-clearing decorator, held to the engines' method sets so
 // the cache still finds every capability it discovers through its backing,
 // the ready projection included
-// (TestRouteClearCarriesEveryBindingEngineCapability). The rows carry the
-// cache actors (cache-local for a write, cache-reconcile for what a scan
-// infers), the ones the work ledger's cache stamps on the identical write on
-// a city that relocates nothing, so a split city's events poke, enqueue and
-// fold exactly as a single-store city's do.
+// (TestRouteClearCarriesEveryBindingEngineCapability). The cache's own
+// conditional writers (UpdateIfMatch, CompareAndSetMetadataKey,
+// UpdateIfAssignment) resolve through that decorator and come back gated, so a
+// gc.routed_to write that lands through one clears the previous executor's
+// stamps as an unconditional write does (internal/beads/route_clear_gate.go).
+// The rows carry the cache actors (cache-local for a write, cache-reconcile
+// for what a scan infers), the ones the work ledger's cache stamps on the
+// identical write on a city that relocates nothing, so a split city's events
+// poke, enqueue and fold exactly as a single-store city's do.
 //
 // # Freshness
 //

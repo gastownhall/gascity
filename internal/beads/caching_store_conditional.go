@@ -191,7 +191,7 @@ func (c *CachingStore) conditionalWritesStoreOpen() error {
 // through only to a writer that guards them; otherwise they are refused here,
 // before the backing or the cache is touched.
 func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	writer, ok := ConditionalWriterFor(c.conditionalBacking())
+	writer, ok := ConditionalWriterForTarget(c.backing)
 	if err := validateConditionalUpdateOpts(opts, ok && conditionalLabelsGuarded(writer)); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -312,13 +312,17 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // stale value through the cache and re-loses until an unrelated reconcile.
 func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
 	// Resolve the NARROW capability, not ConditionalWriter: a backing that can
-	// do value-CAS but cannot soundly fence on a revision (NativeDoltStore)
-	// declares MetadataCASWriter only, and every ConditionalWriter satisfies
-	// MetadataCASWriter anyway, so this widens the backings that forward
-	// without changing behavior for fully capable ones. The trio above keeps
-	// resolving through ConditionalWriterFor — a narrow backing must not
-	// unlock a revision fence it cannot honor.
-	writer, ok := MetadataCASWriterFor(c.conditionalBacking())
+	// do value-CAS but offers no revision fence declares MetadataCASWriter
+	// only, and every ConditionalWriter satisfies MetadataCASWriter anyway, so
+	// this widens the backings that forward without changing behavior for fully
+	// capable ones. CloseIfMatch and DeleteIfMatch resolve ConditionalWriter,
+	// so a narrow backing never unlocks a revision fence it cannot honor.
+	//
+	// The resolution starts at c.backing rather than conditionalBacking(): a
+	// backing that is, or sits behind, the route-clearing decorator hands back
+	// the gated writer, so a gc.routed_to swap clears the previous executor's
+	// stamps before the refetch below reads the row.
+	writer, ok := MetadataCASWriterFor(c.backing)
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
 	}

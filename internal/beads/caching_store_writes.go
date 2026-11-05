@@ -103,7 +103,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 // row exactly as Update does. A rejected guard proves the cached row stale,
 // so it is evicted and the next read fetches it again.
 func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error) {
-	updater, ok := AssignmentGuardedUpdaterFor(c.conditionalBacking())
+	updater, ok := AssignmentGuardedUpdaterFor(c.backing)
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
 	}

@@ -112,17 +112,20 @@ type MetadataCASWriterHandleProvider interface {
 // participates only by declaring its target.
 //
 // This is a pure capability lookup and applies no operator policy — see the
-// file comment for why the narrow CAS is not mode-gated.
+// file comment for why the narrow CAS is not mode-gated. A walk that crosses
+// the route-clearing decorator returns the gated writer: a landed gc.routed_to
+// swap clears the previous executor's stamps (route_clear_gate.go).
 func MetadataCASWriterFor(store Store) (MetadataCASWriter, bool) {
 	if store == nil {
 		return nil, false
 	}
-	store = followConditionalWritesResolveTarget(store)
+	store, gate := followResolveTargetThroughGate(store)
 	if writer, ok := store.(MetadataCASWriter); ok {
-		return writer, true
+		return gate.gateMetadataCAS(writer), true
 	}
 	if provider, ok := store.(MetadataCASWriterHandleProvider); ok {
-		return provider.MetadataCASWriterHandle()
+		writer, ok := provider.MetadataCASWriterHandle()
+		return gate.gateMetadataCAS(writer), ok
 	}
 	return nil, false
 }

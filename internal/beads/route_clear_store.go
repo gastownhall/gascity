@@ -30,6 +30,13 @@ type RouteNormalizerFunc func(string) string
 // The clear itself is a single SetMetadataBatch call straight to the backing
 // store, bypassing this decorator, so it can never recursively re-trigger
 // the gate.
+//
+// A gc.routed_to write made through a conditional capability (the metadata
+// CAS, the revision-fenced UpdateIfMatch, the assignment-guarded
+// UpdateIfAssignment) does not call the methods below: the capability
+// resolvers look through this decorator to the engine. They return a gated
+// wrapper for such a walk instead, which runs clearIfGenuine after a landed
+// gc.routed_to write (route_clear_gate.go).
 type routeChangeClearingStore struct {
 	Store
 	normalizer RouteNormalizerFunc
@@ -408,21 +415,25 @@ func (w *routeChangeClearingStore) NamespaceCensusHandle() (NamespaceCensus, boo
 
 // ConditionalWriterHandle exposes the backing store's conditional-write
 // capability to callers that discover it directly (ConditionalWriterFor), such
-// as the one-shot emitter's revision-fenced deletes, without claiming it
-// globally. The production resolver (ResolveConditionalWriter) never asks this
-// decorator: it follows ConditionalWritesResolveTarget to the terminal store
-// first, so rollout-mode gating is unchanged. Conditional writes are not
-// intercepted by the route-clearing gate; they reach the backing directly, as
-// they do through that resolver.
+// as the one-shot emitter's revision-fenced writes, without claiming it
+// globally. The writer is gated: a gc.routed_to write that lands through it
+// clears the executor-identity stamps as this decorator's own writes do, and
+// every other write passes straight through (route_clear_gate.go). The
+// production resolver (ResolveConditionalWriter) does not ask this decorator:
+// it follows ConditionalWritesResolveTarget to the terminal store first, so
+// rollout-mode gating is unchanged, and returns the same gated writer for a
+// walk that crossed it.
 func (w *routeChangeClearingStore) ConditionalWriterHandle() (ConditionalWriter, bool) {
-	return ConditionalWriterFor(w.Store)
+	writer, ok := ConditionalWriterFor(w.Store)
+	return w.gateConditionalWriter(writer), ok
 }
 
 // MetadataCASWriterHandle exposes the backing store's metadata compare-and-set
-// (MetadataCASWriterFor) for the same reason, and with the same bypass of the
-// route-clearing gate, as ConditionalWriterHandle above.
+// (MetadataCASWriterFor) for the same reason, and behind the same gate, as
+// ConditionalWriterHandle above.
 func (w *routeChangeClearingStore) MetadataCASWriterHandle() (MetadataCASWriter, bool) {
-	return MetadataCASWriterFor(w.Store)
+	writer, ok := MetadataCASWriterFor(w.Store)
+	return w.gateMetadataCAS(writer), ok
 }
 
 // SetMetadata clears the rerouted bead's (and its molecule root's) executor-
