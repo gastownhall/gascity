@@ -1,0 +1,226 @@
+name: Security Scan
+
+# A weekly dependency scan for what the other scanners do not see.
+#
+# GitHub's dependency graph does not read every lockfile here: the gc-mcp-mail
+# Python lock (.github/requirements/mcp-agent-mail.txt) is not a name it
+# recognizes, and advisories that exist only in the Go vulnerability database
+# (GO-* ids with no GHSA) never become Dependabot alerts. govulncheck.yml
+# already scans the root Go module daily; this workflow covers the rest:
+#
+#   osv-scanner   every lockfile and go.mod in the tree, plus the lockfiles
+#                 named below that its filename matching misses. SARIF goes
+#                 to code scanning under the "osv-scanner" category.
+#   govulncheck   every Go module except the root one (govulncheck.yml owns
+#                 that; scanning it here too would raise each alert twice).
+#                 SARIF goes to code scanning under "govulncheck-<module>".
+#
+# Both jobs then run .github/workflows/scripts/security_scan_gate.py, which
+# fails the job on a HIGH/CRITICAL osv-scanner finding or a reachable (called)
+# govulncheck finding that osv-scanner.toml does not accept. osv-scanner.toml
+# mirrors the waivers in .trivyignore.yaml, with the same expiry dates, so the
+# scan does not flap on risks the repo has already accepted, and it turns red
+# again on the day a waiver lapses.
+#
+# Weekly, because Dependabot and govulncheck.yml already watch the common
+# paths daily; this run catches the paths they cannot read. Pull requests run
+# it only when they change the scan itself.
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/security-scan.yml"
+      - ".github/workflows/scripts/security_scan_gate.py"
+      - "osv-scanner.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-scan-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned so a scanner release cannot change the verdict without a reviewed
+  # commit; both still fetch their vulnerability databases fresh on every run.
+  OSV_SCANNER_VERSION: "v2.7.0"
+  OSV_SCANNER_SHA256: "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b"
+  GOVULNCHECK_VERSION: "v1.7.0"
+
+jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
+  osv-scanner:
+    name: Lockfile vulnerabilities (osv-scanner)
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        run: |
+          set -euo pipefail
+          bin_dir="${RUNNER_TEMP}/osv-scanner-bin"
+          mkdir -p "$bin_dir"
+          curl -fsSL --retry 3 -o "$bin_dir/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $bin_dir/osv-scanner" | sha256sum -c -
+          chmod +x "$bin_dir/osv-scanner"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Scan lockfiles
+        run: |
+          set -euo pipefail
+          mkdir -p security-scan
+          # -r . finds every lockfile osv-scanner recognizes by name. Each -L
+          # adds one it does not (TestSecurityScanNamesEveryHashedRequirementsLock
+          # keeps this list complete). --no-call-analysis keeps the Go rows at
+          # module level: reachability is govulncheck's job, and this keeps the
+          # verdict independent of whichever Go toolchain the runner has.
+          scan() {
+            osv-scanner scan source -r . \
+              -L requirements.txt:.github/requirements/mcp-agent-mail.txt \
+              --config osv-scanner.toml \
+              --no-call-analysis=all \
+              "$@"
+          }
+          # Exit 1 means "found vulnerabilities", which the gate below judges;
+          # anything else means the scan itself did not complete.
+          for format in json sarif; do
+            status=0
+            scan --format "$format" --output-file "security-scan/osv-scanner.$format" || status=$?
+            if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+              echo "::error::osv-scanner --format $format exited $status: the scan did not complete"
+              exit "$status"
+            fi
+          done
+
+      - name: Upload SARIF results
+        # Forks do not get security-events: write, so skip rather than fail there.
+        if: ${{ always() && hashFiles('security-scan/osv-scanner.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: security-scan/osv-scanner.sarif
+          category: osv-scanner
+
+      - name: Upload scan reports
+        if: ${{ always() && hashFiles('security-scan/*') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: osv-scanner-reports
+          path: security-scan/
+          retention-days: 14
+
+      - name: Gate on unaccepted HIGH/CRITICAL findings
+        run: |
+          python3 .github/workflows/scripts/security_scan_gate.py \
+            --allowlist osv-scanner.toml \
+            --osv security-scan/osv-scanner.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+  govulncheck:
+    name: Go module vulnerabilities (${{ matrix.module }})
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every Go module but the root one, which govulncheck.yml scans daily
+        # (TestSecurityScanCoversEveryGoModule keeps this list complete).
+        module:
+          - tools/nogo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          # The module's own go directive: govulncheck reports stdlib findings
+          # for the toolchain it runs under, and a binary built with an older
+          # toolchain than the module needs analyses nothing.
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+
+      # The go-mod-download action warms only the root module's cache, so
+      # run its retried download script in this module instead: govulncheck
+      # then finds every module locally.
+      - name: Download Go modules (retried)
+        working-directory: ${{ matrix.module }}
+        run: '"$GITHUB_WORKSPACE/.github/scripts/go-mod-download-retry.sh"'
+
+      - name: Install govulncheck
+        run: |
+          set -euo pipefail
+          bin_dir="${RUNNER_TEMP}/govulncheck-bin"
+          mkdir -p "$bin_dir"
+          GOBIN="$bin_dir" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Scan module
+        id: scan
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          out="security-scan"
+          mkdir -p "$out"
+          # Both formats always exit 0; the gate below reads the JSON stream.
+          govulncheck -C "$MODULE" -format json ./... > "$out/govulncheck.json"
+          govulncheck -C "$MODULE" -format sarif ./... > "$out/govulncheck.sarif"
+          echo "artifact=govulncheck-$(echo "$MODULE" | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SARIF results
+        if: ${{ always() && hashFiles('security-scan/govulncheck.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: security-scan/govulncheck.sarif
+          category: govulncheck-${{ matrix.module }}
+
+      - name: Upload scan reports
+        if: ${{ always() && steps.scan.outputs.artifact != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.scan.outputs.artifact }}
+          path: security-scan/
+          retention-days: 14
+
+      - name: Gate on unaccepted reachable findings
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          python3 .github/workflows/scripts/security_scan_gate.py \
+            --allowlist osv-scanner.toml \
+            --govulncheck "$MODULE=security-scan/govulncheck.json" \
+            --summary "$GITHUB_STEP_SUMMARY"

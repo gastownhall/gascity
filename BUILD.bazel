@@ -116,6 +116,19 @@ py_test(
     main = ".github/workflows/scripts/test_ci_suite_coverage.py",
 )
 
+# .github/workflows/scripts/security_scan_gate.py: security-scan.yml's verdict
+# over the osv-scanner and govulncheck reports, against osv-scanner.toml.
+py_test(
+    name = "security_scan_gate_test",
+    size = "small",
+    srcs = [
+        ".github/workflows/scripts/security_scan_gate.py",
+        ".github/workflows/scripts/test_security_scan_gate.py",
+    ],
+    imports = [".github/workflows/scripts"],
+    main = ".github/workflows/scripts/test_security_scan_gate.py",
+)
+
 go_library(
     name = "gascity",
     srcs = ["schemas_embed.go"],
@@ -289,6 +302,7 @@ filegroup(
         ":deps.env",
         ":go.mod",
         ":go.sum",
+        ":osv-scanner.toml",
         ":root_extras",
     ] + glob([
         ".github/**",
