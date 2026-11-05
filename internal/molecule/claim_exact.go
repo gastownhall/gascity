@@ -26,6 +26,7 @@ type ClaimExactPreconditions struct {
 	Assignee          *string
 	RoutedTo          *string
 	RootBeadID        *string
+	StepID            *string
 	ContinuationGroup *string
 }
 
@@ -179,6 +180,9 @@ func claimExactPreconditionsMatch(b beads.Bead, want ClaimExactPreconditions) bo
 		return false
 	}
 	if want.RootBeadID != nil && b.Metadata[beadmeta.RootBeadIDMetadataKey] != *want.RootBeadID {
+		return false
+	}
+	if want.StepID != nil && b.Metadata[beadmeta.StepIDMetadataKey] != *want.StepID {
 		return false
 	}
 	if want.ContinuationGroup != nil && b.Metadata[beadmeta.ContinuationGroupMetadataKey] != *want.ContinuationGroup {

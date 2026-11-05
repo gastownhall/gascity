@@ -2528,6 +2528,7 @@ func hookClaimExactThroughStore(get func(string) (beads.Bead, error), writer bea
 	want := molecule.ClaimExactPreconditions{
 		Status: stringPtr(candidate.Status), Assignee: stringPtr(candidate.Assignee),
 		RootBeadID:        stringPtr(meta[beadmeta.RootBeadIDMetadataKey]),
+		StepID:            stringPtr(meta[beadmeta.StepIDMetadataKey]),
 		RoutedTo:          stringPtr(meta[beadmeta.RoutedToMetadataKey]),
 		ContinuationGroup: stringPtr(meta[beadmeta.ContinuationGroupMetadataKey]),
 	}

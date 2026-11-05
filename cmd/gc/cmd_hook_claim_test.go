@@ -89,6 +89,27 @@ func TestHookClaimExactFencesObservedAssignee(t *testing.T) {
 	}
 }
 
+func TestHookClaimExactFencesObservedStepID(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate, err := store.Create(beads.Bead{Title: "step", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(candidate.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.StepIDMetadataKey: "test"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := hookClaimExactThroughStore(store.Get, store, candidate, "worker", "session-1")
+	if err != nil || ok {
+		t.Fatalf("stale-step claim = (ok=%v, err=%v), want refusal", ok, err)
+	}
+	if got.Metadata[beadmeta.StepIDMetadataKey] != "test" || got.Assignee != "" || got.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+		t.Fatalf("stale claim changed canonical bead: %+v", got)
+	}
+}
+
 func TestHookClaimSelectsExactForGraphSteps(t *testing.T) {
 	candidate := beads.Bead{ID: "step-1", Status: "open", Metadata: map[string]string{
 		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build",
