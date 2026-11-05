@@ -1222,6 +1222,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc bd release-if-current` exits 1 for a bead its store does not hold.**
+  It printed `skipped` with exit 0 whenever nothing was released, including
+  when the store it ran against held no such bead, and the core orphan-sweep
+  order reads `skipped` as "someone else holds it". The bead is now read back
+  from that store before the verdict: a bead the store does not hold exits 1,
+  as does a failed read-back, and a bead it holds under another assignee or
+  status still prints `skipped` with exit 0.
+
 - **`gc lint` no longer flags bd's hidden flag aliases as unknown.** The bd
   flag tables now list `bd create`'s `--label`, `--body`, `-m`/`--message`
   and `--description-file`, `bd update`'s `--body`, `-m`/`--message`,
