@@ -1059,6 +1059,25 @@ manifest pin above). Bumping it is a one-line PR titled
 `chore(rbe): bump rbe-worker to <sha8> (<subject>)`:
 
 1. Merge the change into rbe-worker's main.
+1a. Canary it on real pool VMs before the bump, by hand (never the pool
+   scalers: a dispatch by `bazel-allocator[bot]` with the input is
+   refused). Dispatch a pool workflow on main with the new commit as
+   `rbe_worker_sha`:
+
+   ```
+   gh workflow run rbe-worker-pool.yml -R gastownhall/gascity -f rbe_worker_sha=<sha> -f idle_minutes=10 -f max_minutes=30
+   gh workflow run rbe-fork-pool.yml -R gastownhall/gascity -f rbe_worker_sha=<sha> -f idle_minutes=10 -f max_minutes=30
+   ```
+
+   The run is named `(canary, idle Nm) rbe-worker <sha>`, so the scalers
+   count it as neither floor nor burst, and its `max_minutes` is capped at 60.
+   The fetch takes the commit only if it is on rbe-worker main's first-parent
+   line and descends from the pin. Before any of its code runs, H5
+   (`h5.sh pin..sha`) checks every commit in between is signed, merged and
+   verified. A canary worker serves real actions like any other. Look for
+   `isolation: probe`, `worker ... started` and `rbe-first-exec: ... actions=N`
+   with N above 0, and for no `isolation:` failure. Empty `rbe_worker_sha`
+   (the default) is the pin.
 2. Change the 40-hex sha in `.github/actions/rbe-worker/pin` to the new
    commit. Use rbe-worker's `bin/bump-summary OLD NEW` output as the PR
    body: the compare URL, the commit list, and whether the bump touches the
