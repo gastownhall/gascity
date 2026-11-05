@@ -674,7 +674,8 @@ func TestProxyProcessTickRetriesPublicationRefreshWithoutLosingCurrentURL(t *tes
   }
 ]`)
 
-	mgr.Tick(context.Background(), time.Now().UTC())
+	firstTick := time.Now().UTC()
+	mgr.Tick(context.Background(), firstTick)
 	status, ok := mgr.Get("bridge")
 	if !ok {
 		t.Fatal("service status missing after failed tick")
@@ -686,7 +687,7 @@ func TestProxyProcessTickRetriesPublicationRefreshWithoutLosingCurrentURL(t *tes
 		t.Fatalf("PublicationState = %q, want published after failed restart", status.PublicationState)
 	}
 
-	mgr.Tick(context.Background(), time.Now().UTC())
+	mgr.Tick(context.Background(), firstTick.Add(proxyProcessRestartBackoff))
 	second := loadEnv()
 	if second["GC_SERVICE_PUBLIC_URL"] == first["GC_SERVICE_PUBLIC_URL"] {
 		t.Fatalf("GC_SERVICE_PUBLIC_URL did not change after retry: %q", second["GC_SERVICE_PUBLIC_URL"])

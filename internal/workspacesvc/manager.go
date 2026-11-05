@@ -52,6 +52,13 @@ type entry struct {
 	// endpoint not yet reachable at boot) leaves the service permanently
 	// dead until manual Restart. See gastownhall/gascity#1774.
 	nextConstructionRetry time.Time
+	// constructFailures counts consecutive failed constructions of inst.
+	constructFailures int
+	// nextRefreshRetry is the earliest time Tick may re-attempt a
+	// publication refresh of a live inst; refreshFailures counts the
+	// consecutive failed refreshes behind it.
+	nextRefreshRetry time.Time
+	refreshFailures  int
 }
 
 type closeTarget struct {

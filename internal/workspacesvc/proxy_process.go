@@ -57,8 +57,11 @@ type proxyProcessInstance struct {
 	cmd         *exec.Cmd
 	doneCh      chan struct{}
 	nextRestart time.Time
-	closed      bool
-	status      Status
+	// restartFailures counts consecutive failed starts of this instance's
+	// process.
+	restartFailures int
+	closed          bool
+	status          Status
 }
 
 func newProxyProcessInstance(rt RuntimeContext, svc config.Service, publication Status) (Instance, error) {
@@ -257,21 +260,8 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		err := cmd.Wait()
 		_ = logFile.Close()
 
-		p.mu.Lock()
 		defer close(doneCh)
-		defer p.mu.Unlock()
-		if p.cmd != cmd {
-			return
-		}
-		p.cmd = nil
-		if p.closed {
-			return
-		}
-		p.status.State = "degraded"
-		p.status.LocalState = "degraded"
-		p.status.Reason = processExitReason(err)
-		p.status.UpdatedAt = time.Now().UTC()
-		p.nextRestart = time.Now().UTC().Add(proxyProcessRestartBackoff)
+		p.recordExit(cmd, err)
 	}(cmd, logFile, doneCh)
 
 	if err := p.waitReady(readyBy); err != nil {
@@ -290,6 +280,26 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 	}
 	p.mu.Unlock()
 	return nil
+}
+
+// recordExit records that cmd exited with waitErr: it clears the exited
+// process and marks the service degraded. A stale cmd, or an instance that is
+// already closed, is left alone apart from clearing the process.
+func (p *proxyProcessInstance) recordExit(cmd *exec.Cmd, waitErr error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd != cmd {
+		return
+	}
+	p.cmd = nil
+	if p.closed {
+		return
+	}
+	p.status.State = "degraded"
+	p.status.LocalState = "degraded"
+	p.status.Reason = processExitReason(waitErr)
+	p.status.UpdatedAt = time.Now().UTC()
+	p.nextRestart = time.Now().UTC().Add(proxyProcessRestartBackoff)
 }
 
 func (p *proxyProcessInstance) waitReady(deadline time.Time) error {
