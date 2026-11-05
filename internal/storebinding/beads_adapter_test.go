@@ -457,3 +457,35 @@ func TestBeadsOrdersAdapterIgnoresAForgedGraphRunLabel(t *testing.T) {
 		t.Fatalf("LastRun() = %v, %v; want the root's %v", got, err, t0)
 	}
 }
+
+// The graph adapter's metadata compare-and-set resolves its writer through
+// beads.MetadataCASWriterFor. Over a store carrying the route-clearing
+// decorator, a gc.routed_to re-route has to clear the previous executor's
+// stamps like the decorator's own writes do (ga-l69b9m).
+func TestBeadsGraphAdapterRoutedToCASClearsStampsThroughTheDecorator(t *testing.T) {
+	engine := beads.NewMemStore()
+	created, err := engine.Create(beads.Bead{Title: "stamped", Metadata: map[string]string{
+		"gc.routed_to":    "gascity/old-executor",
+		"gc.session_name": "gascity--old-executor",
+		"gc.work_dir":     "worktrees/old-executor",
+		"work_dir":        "worktrees/old-executor-legacy",
+	}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	graph := &beadsGraphAdapter{store: beads.WithRouteChangeClearing(engine, func(target string) string { return target })}
+
+	swapped, err := graph.CompareAndSetMetadataKey(created.ID, "gc.routed_to", "gascity/old-executor", "gascity/new-executor")
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want a landed swap", swapped, err)
+	}
+	got, err := engine.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, key := range []string{"gc.session_name", "gc.work_dir", "work_dir"} {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s = %q after the re-route, want it cleared", key, got.Metadata[key])
+		}
+	}
+}

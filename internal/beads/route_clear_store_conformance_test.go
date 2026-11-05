@@ -124,11 +124,16 @@ func TestRoutedToMetadataWriteSitesAreWrappedOrAllowlisted(t *testing.T) {
 	}
 }
 
-// routedToPatterns are the three line-level regexes that flag a candidate
+// routedToPatterns are the four line-level regexes that flag a candidate
 // non-test write call site for beadmeta.RoutedToMetadataKey.
 var routedToPatterns = []*regexp.Regexp{
 	// Direct Store-method calls -- unambiguous writes.
 	regexp.MustCompile(`\.SetMetadata(Batch)?\(.*beadmeta\.RoutedToMetadataKey`),
+	// Single-key metadata compare-and-set. The CAS capability is resolved
+	// past the route-clearing decorator, so a CAS onto gc.routed_to reaches
+	// the engine without passing the decorator's own gate; every such site
+	// is reviewed here.
+	regexp.MustCompile(`\.(CompareAndSetMetadataKey|ApplyMetadataCAS)\(.*beadmeta\.RoutedToMetadataKey`),
 	// Composite-literal map-key position. NOT unambiguous: matches both
 	// write-shaped structs (UpdateOpts.Metadata, Bead.Metadata) and
 	// read/filter-shaped structs (ListQuery.Metadata). Every match is
@@ -136,6 +141,41 @@ var routedToPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`beadmeta\.RoutedToMetadataKey\s*:`),
 	// Map-index assignment, dotted or bare receiver, excluding == / !=.
 	regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_.]*\[beadmeta\.RoutedToMetadataKey\]\s*=[^=]`),
+}
+
+// TestRoutedToPatternsClassifyLines pins what each scan pattern does and does
+// not flag, so a regex edit cannot silently narrow the tripwire.
+func TestRoutedToPatternsClassifyLines(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"SetMetadata", `store.SetMetadata(id, beadmeta.RoutedToMetadataKey, target)`, true},
+		{"SetMetadataBatch", `s.SetMetadataBatch(id, map[string]string{beadmeta.RoutedToMetadataKey: t})`, true},
+		{"CAS method", `swapped, err := writer.CompareAndSetMetadataKey(live.ID, beadmeta.RoutedToMetadataKey, "", route)`, true},
+		{"ApplyMetadataCAS", `out, err := beads.ApplyMetadataCAS(store, id, beadmeta.RoutedToMetadataKey, old, next)`, true},
+		{"CAS on another key", `ok, err := w.CompareAndSetMetadataKey(id, beadmeta.SessionNameMetadataKey, "", name)`, false},
+		{"ApplyMetadataCAS on another key", `beads.ApplyMetadataCAS(store, id, "gc.lease", "", owner)`, false},
+		{"composite literal", `Metadata: map[string]string{beadmeta.RoutedToMetadataKey: pool}`, true},
+		{"map assignment", `md[beadmeta.RoutedToMetadataKey] = route`, true},
+		{"map comparison", `if md[beadmeta.RoutedToMetadataKey] == route {`, false},
+		{"read", `route := bead.Metadata[beadmeta.RoutedToMetadataKey]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := false
+			for _, p := range routedToPatterns {
+				if p.MatchString(tc.line) {
+					got = true
+					break
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("patterns flag %q = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
 }
 
 type routedToSite struct {

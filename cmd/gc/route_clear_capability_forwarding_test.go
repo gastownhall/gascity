@@ -407,8 +407,11 @@ var routeClearOmittedEngineCapabilities = map[string]func(beads.Store) bool{
 	// Resolved through ConditionalWritesResolveTarget to the terminal engine.
 	"CloseWithMetadataIfMatch":      atomicCloserDiscovery,
 	"AtomicConditionalCloserHandle": atomicCloserDiscovery,
-	// The revision-fenced writers are discovered through handles that delegate
-	// to the backing; the route-clearing gate does not intercept them.
+	// The revision-fenced writers are discovered through handles that return the
+	// route-clearing gate's wrapper over the backing's writer: UpdateIfMatch and
+	// CompareAndSetMetadataKey run the clear after a gc.routed_to write lands
+	// (TestRouteClearSeam_*), CloseIfMatch and DeleteIfMatch pass straight
+	// through because neither can re-route a bead.
 	"UpdateIfMatch": conditionalWriterDiscovery,
 	"CloseIfMatch":  conditionalWriterDiscovery,
 	"DeleteIfMatch": conditionalWriterDiscovery,
