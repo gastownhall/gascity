@@ -131,6 +131,39 @@ func TestConfirmControllerStopForStop(t *testing.T) {
 	}
 }
 
+// slowLastListProvider answers its first listing at once and every later
+// one after delay, all listing the same survivor.
+type slowLastListProvider struct {
+	*runtime.Fake
+	calls *atomic.Int32
+	delay time.Duration
+}
+
+func (p slowLastListProvider) ListRunning(prefix string) ([]string, error) {
+	if p.calls.Add(1) > 1 {
+		time.Sleep(p.delay)
+	}
+	return p.Fake.ListRunning(prefix)
+}
+
+// Kills reporting a runtime that answers as wedged because the poll slept
+// into the deadline: the final listing starts with almost no time left and
+// answers well within one poll interval, so the stop names the survivor
+// instead of saying the runtime did not answer a listing.
+func TestConfirmControllerStopGivesTheFinalListingAPollIntervalToAnswer(t *testing.T) {
+	var calls atomic.Int32
+	sp := slowLastListProvider{Fake: runningFake(t, "worker-1"), calls: &calls, delay: 125 * time.Millisecond}
+	stopProbeProvider(t, sp, 300*time.Millisecond)
+	stopVerifyPollInterval = 250 * time.Millisecond
+	var stderr lockedBuffer
+	if got := confirmControllerStopForStop(&config.City{}, t.TempDir(), &stderr); got {
+		t.Fatalf("confirmed a stop with worker-1 still running (stderr %q)", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "worker-1 still running") {
+		t.Fatalf("stderr %q, want the survivor worker-1 named, not a wedged listing", stderr.String())
+	}
+}
+
 // Kills the standalone controller path reporting success over survivors: a
 // controller acknowledges the stop, but a session is still listed, so gc
 // stop exits non-zero, names it, and leaves the bead store up for it; with
