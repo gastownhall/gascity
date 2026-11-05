@@ -595,7 +595,8 @@ var errNoIdleSnapshot = errors.New("its runtime takes no idle snapshot of it")
 // one that failed, read indeterminate or unsupported, or went unanswered,
 // ErrObservationOutstanding included, which a locked read gets at once while
 // one an earlier check left wedged is still out. A locked Claude check can also
-// establish a waiting turn from a current native-bound approval: its widget
+// establish a waiting turn from a current native-bound approval or question:
+// its widget
 // covers the composer without a busy spinner, so its idle scan is deliberately
 // indeterminate. That evidence permits the existing interrupt's cancellation,
 // never text or an approval answer.
@@ -611,9 +612,21 @@ func (h *SessionHandle) readsIdle(ctx context.Context, plan turnPlan) (bool, err
 			if err != nil || !supported || pending == nil {
 				return false, err
 			}
-			return pending.Kind == "approval" && pending.RequestID != "" &&
-				pending.Metadata["request_identity"] == "native_invocation" &&
-				pending.Metadata["response_unavailable"] == "", nil
+			if pending.RequestID == "" || pending.Metadata["response_unavailable"] != "" {
+				return false, nil
+			}
+			switch pending.Kind {
+			case "approval":
+				return pending.Metadata["request_identity"] == "native_invocation", nil
+			case "question":
+				// The tmux question projection advertises answer only after
+				// binding the visible question to its native invocation.
+				return pending.Metadata["source"] == "tmux" &&
+					pending.Metadata["answer_action"] == "answer" &&
+					pending.Metadata["answer_unavailable"] == "", nil
+			default:
+				return false, nil
+			}
 		})
 		if pendingErr == nil && waiting {
 			return false, nil

@@ -1321,7 +1321,10 @@ func TestTurnInterruptClaudeApprovalWitnessRefusesUnknownOrChangedTarget(t *test
 		{name: "visible content only", pending: &runtime.PendingInteraction{RequestID: "tmux-visible", Kind: "approval", Metadata: map[string]string{"request_identity": "visible_content"}}, idleErr: runtime.ErrIdleIndeterminate},
 		{name: "missing occurrence identity", pending: &runtime.PendingInteraction{Kind: "approval", Metadata: map[string]string{"request_identity": "native_invocation"}}, idleErr: runtime.ErrIdleIndeterminate},
 		{name: "contradictory unavailable binding", pending: &runtime.PendingInteraction{RequestID: "tmux-native", Kind: "approval", Metadata: map[string]string{"request_identity": "native_invocation", "response_unavailable": "native invocation unresolved"}}, idleErr: runtime.ErrIdleIndeterminate},
-		{name: "another interaction kind", pending: &runtime.PendingInteraction{RequestID: "tmux-question", Kind: "question", Metadata: map[string]string{"request_identity": "native_invocation"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "question without native answer binding", pending: &runtime.PendingInteraction{RequestID: "tmux-question", Kind: "question", Metadata: map[string]string{"request_identity": "native_invocation"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "question binding unavailable", pending: &runtime.PendingInteraction{RequestID: "tmux-question", Kind: "question", Metadata: map[string]string{"source": "tmux", "answer_action": "answer", "answer_unavailable": "native identity unresolved"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "question missing occurrence", pending: &runtime.PendingInteraction{Kind: "question", Metadata: map[string]string{"source": "tmux", "answer_action": "answer"}}, idleErr: runtime.ErrIdleIndeterminate},
+		{name: "question from unknown projection", pending: &runtime.PendingInteraction{RequestID: "question", Kind: "question", Metadata: map[string]string{"answer_action": "answer"}}, idleErr: runtime.ErrIdleIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, idle := nativeApprovalTurn(t, tc.pending, tc.pendingErr, tc.idleErr)
@@ -1347,6 +1350,49 @@ func TestTurnInterruptClaudeApprovalWitnessRefusesUnknownOrChangedTarget(t *test
 			t.Fatalf("an approval on another turn sent %v", got)
 		}
 	})
+}
+
+func TestTurnInterruptNativeClaudeQuestionReachesRuntimeInterrupt(t *testing.T) {
+	for _, staleFence := range []bool{false, true} {
+		t.Run(map[bool]string{false: "current incarnation", true: "stale incarnation"}[staleFence], func(t *testing.T) {
+			pending := &runtime.PendingInteraction{
+				RequestID: "tmux-native-question", Kind: "question",
+				Metadata: map[string]string{"source": "tmux", "answer_action": "answer", "multi_select": "true"},
+			}
+			s, idle := nativeApprovalTurn(t, pending, nil, runtime.ErrIdleIndeterminate)
+			fence, ok := sessionpkg.InputFenceFor(s.info)
+			if !ok {
+				t.Fatal("session names no incarnation")
+			}
+			if staleFence {
+				fence.Token = "previous-incarnation-token"
+			}
+			idle.Calls = nil
+			err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1, Fence: fence})
+			sent := sentInputs(idle.Fake, s.info.SessionName)
+			if staleFence {
+				var miss *runtime.FenceMismatchError
+				if !errors.As(err, &miss) || len(sent) != 0 {
+					t.Fatalf("stale incarnation = %v, sent %v; want fenced refusal and no input", err, sent)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Interrupt while the exact native question is waiting = %v", err)
+			}
+			if !slices.Equal(sent, []string{"Interrupt", "ClearInput"}) {
+				t.Fatalf("sent %v, want one runtime interrupt then settled input clear", sent)
+			}
+			if call := lastCall(idle.SnapshotCalls(), "Interrupt"); call == nil || call.Fence != fence {
+				t.Fatalf("runtime interrupt %+v, want incarnation fence %+v", call, fence)
+			}
+			for _, call := range idle.SnapshotCalls() {
+				if call.Method == "Respond" || call.Method == "Nudge" || call.Method == "NudgeNow" || call.Method == "SendKeys" {
+					t.Fatalf("stopping the question answered it or sent an extra key: %+v", call)
+				}
+			}
+		})
+	}
 }
 
 func nativeApprovalTurn(t *testing.T, pending *runtime.PendingInteraction, pendingErr, idleErr error) (turnSession, idleScript) {
