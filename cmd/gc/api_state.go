@@ -106,6 +106,7 @@ type controllerState struct {
 	sp            runtime.Provider
 	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
+	rigStoresGen  uint64      // names beadStores for the store epoch; bumped wherever beadStores is replaced
 	cityBeadStore beads.Store // city-level store for session beads
 	// stores is the class handles over cityBeadStore and storageRoutes,
 	// re-minted when they change (city_stores.go).
@@ -368,6 +369,7 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: beads.native_transport=\"off\": city %q will never open a native bead store; always BdStore\n", cityName)
 	}
 	cs.beadStores = cs.buildStores(cfg)
+	cs.rigStoresGen++
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
@@ -1650,6 +1652,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
+	cs.rigStoresGen++ // the store epoch keys on it (city_stores.go)
 	if cityStore != nil {
 		oldCityStore = cs.cityBeadStore
 		cs.cityBeadStore = cityStore

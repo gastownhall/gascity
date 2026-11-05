@@ -575,7 +575,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 		// own rows.
 		err = beads.RelicRead(func() error {
 			var listErr error
-			if cached, ok := info.store.(cachedListStore); ok {
+			if cached, ok := beads.As[beads.CachedLister](info.store); ok {
 				var cacheOK bool
 				rows, cacheOK = cached.CachedList(query)
 				if !cacheOK {
