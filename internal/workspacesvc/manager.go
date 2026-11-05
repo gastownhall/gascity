@@ -143,9 +143,16 @@ func (m *Manager) Reload() error {
 			}
 			// Recreate proxy processes when publication context changes so the
 			// child process sees updated GC_SERVICE_PUBLIC_URL metadata.
+			// Reload is new information, so it always attempts the recreate,
+			// whatever the refresh window says; the outcome still feeds it.
 			restarted, err := newProxyProcessInstance(m.rt, svc, base)
 			if err != nil {
-				log.Printf("workspacesvc: refresh proxy process %s on reload: %v", svc.Name, err)
+				m.mu.Lock()
+				existing.refreshFailures++
+				existing.nextRefreshRetry = now.Add(spawnBackoffDelay(existing.refreshFailures))
+				failures, retryAt := existing.refreshFailures, existing.nextRefreshRetry
+				m.mu.Unlock()
+				logSpawnFailure(svc.Name, "refresh proxy process on reload", err, failures, retryAt)
 				next[svc.Name] = existing
 				reused[svc.Name] = true
 				continue
@@ -183,7 +190,13 @@ func (m *Manager) Reload() error {
 				base.Reason = err.Error()
 				// Schedule a Tick retry rather than leaving the entry
 				// permanently nil-inst (gastownhall/gascity#1774).
-				next[svc.Name] = &entry{spec: svc, status: base, nextConstructionRetry: now.Add(proxyProcessRestartBackoff)}
+				next[svc.Name] = &entry{
+					spec:                  svc,
+					status:                base,
+					constructFailures:     1,
+					nextConstructionRetry: now.Add(spawnBackoffDelay(1)),
+				}
+				logSpawnFailure(svc.Name, "construct proxy process on reload", err, 1, next[svc.Name].nextConstructionRetry)
 				continue
 			}
 			base = mergeStatus(base, inst.Status())
@@ -247,15 +260,21 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 			base := baseStatus(m.rt.Config(), m.rt.PublicationConfig(), refs, e.spec, now)
 			inst, err := newProxyProcessInstance(m.rt, e.spec, base)
 			if err != nil {
+				failures, retryAt := 0, time.Time{}
 				m.mu.Lock()
 				if cur, ok := m.entries[e.spec.Name]; ok && cur.inst == nil {
 					base.State = "degraded"
 					base.LocalState = "config_error"
 					base.Reason = err.Error()
 					cur.status = base
-					cur.nextConstructionRetry = now.Add(proxyProcessRestartBackoff)
+					cur.constructFailures++
+					cur.nextConstructionRetry = now.Add(spawnBackoffDelay(cur.constructFailures))
+					failures, retryAt = cur.constructFailures, cur.nextConstructionRetry
 				}
 				m.mu.Unlock()
+				if failures > 0 {
+					logSpawnFailure(e.spec.Name, "retry proxy process construction", err, failures, retryAt)
+				}
 				continue
 			}
 			m.mu.Lock()
@@ -264,6 +283,9 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 				cur.inst = inst
 				cur.status = mergeStatus(base, inst.Status())
 				cur.nextConstructionRetry = time.Time{}
+				cur.constructFailures = 0
+				cur.nextRefreshRetry = time.Time{}
+				cur.refreshFailures = 0
 			}
 			m.mu.Unlock()
 			if !ok || cur.inst != inst {
@@ -278,9 +300,20 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 		}
 		base := baseStatus(m.rt.Config(), m.rt.PublicationConfig(), refs, e.spec, now)
 		if proxyProcessPublicationContextChanged(e.status, base) {
+			if !e.nextRefreshRetry.IsZero() && now.Before(e.nextRefreshRetry) {
+				continue
+			}
 			restarted, err := newProxyProcessInstance(m.rt, e.spec, base)
 			if err != nil {
-				log.Printf("workspacesvc: refresh proxy process %s on tick: %v", e.spec.Name, err)
+				failures, retryAt := 0, time.Time{}
+				m.mu.Lock()
+				if cur, ok := m.entries[e.spec.Name]; ok && cur.inst == e.inst {
+					cur.refreshFailures++
+					cur.nextRefreshRetry = now.Add(spawnBackoffDelay(cur.refreshFailures))
+					failures, retryAt = cur.refreshFailures, cur.nextRefreshRetry
+				}
+				m.mu.Unlock()
+				logSpawnFailure(e.spec.Name, "refresh proxy process on tick", err, failures, retryAt)
 				continue
 			}
 			old := e.inst
@@ -289,6 +322,8 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 			if cur, ok := m.entries[e.spec.Name]; ok && cur.inst == old {
 				cur.inst = restarted
 				cur.status = mergeStatus(base, restarted.Status())
+				cur.nextRefreshRetry = time.Time{}
+				cur.refreshFailures = 0
 				swapped = true
 			}
 			m.mu.Unlock()
@@ -308,6 +343,10 @@ func (m *Manager) Tick(ctx context.Context, now time.Time) {
 		m.mu.Lock()
 		if cur, ok := m.entries[e.spec.Name]; ok {
 			cur.status = status
+			// The publication context no longer differs, so a refresh window
+			// armed for an earlier change must not delay the next one.
+			cur.nextRefreshRetry = time.Time{}
+			cur.refreshFailures = 0
 		}
 		m.mu.Unlock()
 	}
@@ -441,6 +480,8 @@ func (m *Manager) Restart(name string) error {
 		m.mu.Lock()
 		e.inst = nil
 		e.status = base
+		e.constructFailures++
+		e.nextConstructionRetry = now.Add(spawnBackoffDelay(e.constructFailures))
 		m.mu.Unlock()
 		return fmt.Errorf("restart service %q: %w", name, err)
 	}
@@ -465,6 +506,8 @@ func (m *Manager) Restart(name string) error {
 		m.mu.Lock()
 		e.inst = nil
 		e.status = base
+		e.constructFailures++
+		e.nextConstructionRetry = now.Add(spawnBackoffDelay(e.constructFailures))
 		m.mu.Unlock()
 		return fmt.Errorf("restart service %q: %w", name, err)
 	}
@@ -473,6 +516,10 @@ func (m *Manager) Restart(name string) error {
 	m.mu.Lock()
 	e.inst = newInst
 	e.status = base
+	e.constructFailures = 0
+	e.nextConstructionRetry = time.Time{}
+	e.refreshFailures = 0
+	e.nextRefreshRetry = time.Time{}
 	m.mu.Unlock()
 	return nil
 }

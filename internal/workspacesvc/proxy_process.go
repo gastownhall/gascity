@@ -57,8 +57,9 @@ type proxyProcessInstance struct {
 	cmd         *exec.Cmd
 	doneCh      chan struct{}
 	nextRestart time.Time
-	// restartFailures counts consecutive failed starts of this instance's
-	// process.
+	// restartFailures counts the consecutive failed starts behind nextRestart:
+	// Tick increments it per failed restart, a crash after ready sets it to
+	// one, and reaching ready clears it. Guarded by mu.
 	restartFailures int
 	closed          bool
 	status          Status
@@ -161,8 +162,11 @@ func (p *proxyProcessInstance) Tick(_ context.Context, now time.Time) {
 			p.status.LocalState = "degraded"
 			p.status.Reason = err.Error()
 			p.status.UpdatedAt = now
-			p.nextRestart = now.Add(proxyProcessRestartBackoff)
+			p.restartFailures++
+			p.nextRestart = now.Add(spawnBackoffDelay(p.restartFailures))
+			failures, retryAt := p.restartFailures, p.nextRestart
 			p.mu.Unlock()
+			logSpawnFailure(p.svc.Name, "restart proxy process", err, failures, retryAt)
 		}
 		return
 	}
@@ -277,14 +281,21 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		p.status.LocalState = "ready"
 		p.status.Reason = ""
 		p.status.UpdatedAt = time.Now().UTC()
+		p.restartFailures = 0
 	}
 	p.mu.Unlock()
 	return nil
 }
 
 // recordExit records that cmd exited with waitErr: it clears the exited
-// process and marks the service degraded. A stale cmd, or an instance that is
-// already closed, is left alone apart from clearing the process.
+// process and marks the service degraded. A stale cmd leaves the instance
+// alone, and a closed instance only loses the process.
+//
+// The exit owns the restart window unless the start is still waiting on the
+// process: a crash of a running service (ready, or degraded by a failed health
+// check) starts the count at one. An exit while still starting belongs to the
+// start, and whoever ran it (Tick, or the manager) already counts the failure,
+// so counting it here too would double it.
 func (p *proxyProcessInstance) recordExit(cmd *exec.Cmd, waitErr error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -295,11 +306,16 @@ func (p *proxyProcessInstance) recordExit(cmd *exec.Cmd, waitErr error) {
 	if p.closed {
 		return
 	}
+	duringStart := p.status.LocalState == "starting"
+	now := time.Now().UTC()
 	p.status.State = "degraded"
 	p.status.LocalState = "degraded"
 	p.status.Reason = processExitReason(waitErr)
-	p.status.UpdatedAt = time.Now().UTC()
-	p.nextRestart = time.Now().UTC().Add(proxyProcessRestartBackoff)
+	p.status.UpdatedAt = now
+	if !duringStart {
+		p.restartFailures = 1
+		p.nextRestart = now.Add(spawnBackoffDelay(p.restartFailures))
+	}
 }
 
 func (p *proxyProcessInstance) waitReady(deadline time.Time) error {
