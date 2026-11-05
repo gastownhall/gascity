@@ -68,8 +68,10 @@ any other store directory (the directory holding beads.sqlite).
 With --id-floor it raises the city WORK store's bd id floor instead: it sets
 min_hash_length one past the longest hash suffix among the ids the city's
 copy manifest records as carried into the binding (those of the work store's
-own prefix), and max_hash_length with it when needed, so bd can never mint a
-carried id again after the clear removed it. It never lowers either, so a
+own prefix whose suffix bd could have minted: base36, 3 to 8 characters), and
+max_hash_length with it when needed, so bd can never mint a carried id again
+after the clear removed it. Neither is set above 8, the longest suffix bd
+mints. It never lowers either, so a
 second run changes nothing. It holds the controller lock and refuses while
 the city runs, like every writing storage verb. A file store needs no floor
 and a generic exec store cannot take one; both are reported and skipped. On a

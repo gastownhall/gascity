@@ -278,11 +278,7 @@ func plannedInfraCopy(t *testing.T, source beads.Store) infraCopyPlan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := make(map[string]bool, len(all))
-	for id := range all {
-		ids[id] = true
-	}
-	plan, err := infraSourceEdgePayloadRefusal(source, rows, ids)
+	plan, err := infraSourceEdgePayloadRefusal(source, rows, infraRowIDs(all))
 	if err != nil {
 		t.Fatal(err)
 	}

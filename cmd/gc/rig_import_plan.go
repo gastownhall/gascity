@@ -439,11 +439,17 @@ func rigImportRow(b beads.Bead, rig string, records []rigCrossEdgeRecord) beads.
 // wisp ids included (bd mints wisp suffixes under the same length bounds), so
 // a short id the rig mints later can never re-mint an imported one (the
 // mc-wisp-jkl id-reuse defect, moved to rigs). Zero means no id needs it.
+//
+// Only a suffix bd could have minted counts (bdHashShaped): a cross-store
+// gate's "xsg-<12 hex>" or a hand-named id is not one bd will mint again.
+// The floor never passes bdMaxMintedHashLength, the longest suffix bd mints:
+// bd's CLI and native minting ignore a higher one, and a hosted `bd serve`
+// pads every id it mints to it with zeros.
 func rigImportHashFloor(ids []string) int {
 	longest := 0
 	for _, id := range ids {
 		suffix := rigIDHashSuffix(id)
-		if suffix == "" {
+		if !bdHashShaped(suffix) {
 			continue
 		}
 		if n := len(suffix); n > longest {
@@ -453,7 +459,25 @@ func rigImportHashFloor(ids []string) int {
 	if longest == 0 {
 		return 0
 	}
-	return longest + 1
+	return min(longest+1, bdMaxMintedHashLength)
+}
+
+// bdMaxMintedHashLength is the longest hash suffix bd mints, and so the
+// highest id floor worth setting.
+const bdMaxMintedHashLength = 8
+
+// bdHashShaped reports whether suffix is one bd mints: base36, 3 to
+// bdMaxMintedHashLength characters.
+func bdHashShaped(suffix string) bool {
+	if len(suffix) < 3 || len(suffix) > bdMaxMintedHashLength {
+		return false
+	}
+	for _, r := range suffix {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // rigIDHashSuffix returns the hash segment of a bd id ("gp-k0nvi" -> "k0nvi",

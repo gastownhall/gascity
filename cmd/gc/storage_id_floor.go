@@ -45,11 +45,13 @@ func cityIDFloor(ids []string, prefix string) int {
 
 // raiseBdHashFloor raises min_hash_length to floor, never lowering it, and
 // max_hash_length with it when the floor is above it (bd sizes ids between
-// the two). It returns the floor in force, 0 when floor is 0.
+// the two). Neither is raised past bdMaxMintedHashLength. It returns the
+// floor in force, 0 when floor is 0.
 func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
 	if floor == 0 || conf == nil {
 		return 0, nil
 	}
+	floor = min(floor, bdMaxMintedHashLength)
 	current, err := conf.ConfigGet(bdMinHashLengthKey)
 	if err != nil {
 		return 0, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)

@@ -294,6 +294,7 @@ func TestTheClearBoundaryCheckFollowsTheSharedPlan(t *testing.T) {
 		work     string // the dependent's status in the work store
 		copy     *beads.Bead
 		detached bool // an earlier run already removed the edge
+		another  bool // the dependent still holds another edge
 		refuse   bool
 	}{
 		{name: "blocks on an open copy", kind: "blocks", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
@@ -310,6 +311,7 @@ func TestTheClearBoundaryCheckFollowsTheSharedPlan(t *testing.T) {
 		{name: "parent-child, both open", kind: "parent-child", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
 		{name: "related, both open", kind: "related", work: "open", copy: &beads.Bead{Status: "open"}},
 		{name: "blocks on an open copy, already detached", kind: "blocks", work: "open", copy: &beads.Bead{Status: "open"}, detached: true},
+		{name: "already detached, the dependent still holding another edge", kind: "blocks", work: "open", copy: &beads.Bead{Status: "open"}, detached: true, another: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := beads.NewMemStore()
@@ -323,6 +325,12 @@ func TestTheClearBoundaryCheckFollowsTheSharedPlan(t *testing.T) {
 			}
 			if !tc.detached {
 				if err := source.DepAdd(w.ID, d.ID, tc.kind); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.another {
+				other := mustCreateInfraBead(t, source, beads.Bead{Title: "other work", Type: "task"})
+				if err := source.DepAdd(w.ID, other.ID, "blocks"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -828,5 +836,132 @@ func TestTheClearRefusesAnEdgeItsBackupDoesNotRecord(t *testing.T) {
 	}
 	if deps, err := source.DepList(late.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != moved.ID {
 		t.Fatalf("%s deps = %+v (%v); the unrecorded edge must survive the refusal", late.ID, deps, err)
+	}
+}
+
+// TestTheBackupRecordsWhatTheCopyDidWithEachOwnEdge: the clear's backup marks
+// each edge a removed row held with what the copy did with it: copied onto
+// another moved row, gated onto open work, copied-external, dropped onto
+// closed work. (Edges onto the row from rows that stay are marked dropped,
+// TestTheClearRefusesAnOpenCrossStoreBlockerAndDropsTheRest.)
+func TestTheBackupRecordsWhatTheCopyDidWithEachOwnEdge(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	source := stubInfraMigrationSource(t)
+	wisp := func(title string) beads.Bead {
+		return mustCreateInfraBead(t, source, beads.Bead{Title: title, Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	}
+	owner, sibling := wisp("owner"), wisp("sibling")
+	openWork := mustCreateInfraBead(t, source, beads.Bead{Title: "open work", Type: "task"})
+	doneWork := mustCreateInfraBead(t, source, beads.Bead{Title: "finished work", Type: "task"})
+	if err := source.Close(doneWork.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []beads.Dep{
+		{IssueID: owner.ID, DependsOnID: sibling.ID, Type: "blocks"},
+		{IssueID: owner.ID, DependsOnID: openWork.ID, Type: "blocks"},
+		{IssueID: owner.ID, DependsOnID: "external:ga:deploy", Type: "blocks"},
+		{IssueID: owner.ID, DependsOnID: doneWork.ID, Type: "related"},
+	} {
+		if err := source.DepAdd(e.IssueID, e.DependsOnID, e.Type); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
+	}
+	backup, _, err := readInfraRetainedBackup(mustResolveInfraTarget(t, cityPath, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, e := range backup {
+		if e.Bead.ID == owner.ID {
+			for _, d := range e.Deps {
+				got[d.DependsOnID] = d.Disposition
+			}
+		}
+	}
+	want := map[string]string{sibling.ID: rigEdgeCopied, openWork.ID: rigEdgeGated, "external:ga:deploy": rigEdgeExternal, doneWork.ID: rigEdgeDropped}
+	for target, disposition := range want {
+		if got[target] != disposition {
+			t.Errorf("the backup marks %s -> %s %q, want %q (all: %v)", owner.ID, target, got[target], disposition, got)
+		}
+	}
+}
+
+// TestALaterClearMarksAnEdgeOntoAnEarlierClearedRowCopied: a clear session
+// after the one that removed a row marks an edge onto that row copied (the
+// manifest carried it), not dropped: the edge is in the binding.
+func TestALaterClearMarksAnEdgeOntoAnEarlierClearedRowCopied(t *testing.T) {
+	entry := infraBackupEntry{
+		Bead: beads.Bead{ID: "mc-new"},
+		Deps: []infraBackupEdge{
+			{IssueID: "mc-new", DependsOnID: "mc-earlier", Type: "blocks"},
+			{IssueID: "mc-new", DependsOnID: "mc-work", Type: "related"},
+		},
+	}
+	got := withInfraClearDispositions(entry, map[string]bool{"mc-new": true}, map[string]bool{"mc-new": true, "mc-earlier": true}, nil)
+	if got.Deps[0].Disposition != rigEdgeCopied || got.Deps[1].Disposition != rigEdgeDropped {
+		t.Fatalf("dispositions = %q, %q; want copied onto the earlier-cleared row, dropped onto work", got.Deps[0].Disposition, got.Deps[1].Disposition)
+	}
+}
+
+// TestTheReCopyFromTheBackupPlansNonBlockingBoundaryEdges: the backup source
+// serves every edge a row held, so the re-copy plans a non-blocking boundary
+// edge as the copy did, dropped and recorded on its row, where it used to
+// leave it out unrecorded.
+func TestTheReCopyFromTheBackupPlansNonBlockingBoundaryEdges(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	source := stubInfraMigrationSource(t)
+	moved := mustCreateInfraBead(t, source, beads.Bead{Title: "wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work", Type: "task"})
+	if err := source.DepAdd(moved.ID, work.ID, "related"); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+	if err := os.RemoveAll(target.Dir); err != nil {
+		t.Fatal(err)
+	}
+	log.Reset()
+	if got := runInfraClassMigrationFrom(cityPath, target, infraMigrationFromBackup, "gc storage migrate", &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("re-copy = %s: %s", got.Outcome, log.String())
+	}
+	binding := openMigratedDestination(t, target)
+	row, err := binding.Get(moved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recs []rigCrossEdgeRecord
+	if err := json.Unmarshal([]byte(row.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]), &recs); err != nil {
+		t.Fatalf("%s's record %q: %v", moved.ID, row.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], err)
+	}
+	if len(recs) != 1 || recs[0].Other != work.ID || recs[0].Type != "related" || recs[0].Action != rigEdgeDropped {
+		t.Fatalf("%s's re-copied record = %+v, want the related edge onto %s dropped", moved.ID, recs, work.ID)
+	}
+}
+
+// TestInfraEdgeLiveAsksForTheEdgeNotTheDependent: a dependent that still has
+// another edge does not make an edge an earlier run already removed live.
+func TestInfraEdgeLiveAsksForTheEdgeNotTheDependent(t *testing.T) {
+	store := beads.NewMemStore()
+	w := mustCreateInfraBead(t, store, beads.Bead{Title: "work", Type: "task"})
+	other := mustCreateInfraBead(t, store, beads.Bead{Title: "other", Type: "task"})
+	if err := store.DepAdd(w.ID, other.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := infraEdgeLive(store, w.ID, "mc-detached"); err != nil || live {
+		t.Fatalf("infraEdgeLive(%s, detached) = %v (%v), want false though %s still has an edge", w.ID, live, err, w.ID)
+	}
+	if live, err := infraEdgeLive(store, w.ID, other.ID); err != nil || !live {
+		t.Fatalf("infraEdgeLive(%s, %s) = %v (%v), want true", w.ID, other.ID, live, err)
 	}
 }

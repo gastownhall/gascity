@@ -114,8 +114,11 @@ type infraBackupEdge struct {
 	Type        string `json:"type"`
 	Payload     string `json:"payload,omitempty"`
 	Carried     bool   `json:"carried,omitempty"`
-	// Disposition is what a rig import did with the edge (rig_import.go):
-	// copied, gated or dropped. The city clear leaves it empty.
+	// Disposition is what the migration did with the edge: copied, gated,
+	// copied-external or dropped. The rig import sets it from its plan
+	// (rig_import.go), the city clear from its session, the manifest and the
+	// binding's record (withInfraClearDispositions). A backup written by an
+	// earlier build leaves it empty.
 	Disposition string `json:"disposition,omitempty"`
 }
 
@@ -244,10 +247,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	if err != nil {
 		return result, err
 	}
-	allIDs := make(map[string]bool, len(all))
-	for id := range all {
-		allIDs[id] = true
-	}
+	allIDs := infraRowIDs(all)
 	if present, err := infraPathExists(target.RetainedBackupPath()); err != nil {
 		return result, fmt.Errorf("reading the retained-source backup: %w", err)
 	} else if present {
@@ -372,7 +372,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 			entries = append(entries, prior)
 			continue
 		}
-		entries = append(entries, withInfraClearDispositions(read[b.ID], session, held))
+		entries = append(entries, withInfraClearDispositions(read[b.ID], session, manifest.IDs, held))
 	}
 	merged := mergeInfraBackupEntries(previous, entries)
 	if len(entries) > 0 {
@@ -686,7 +686,6 @@ func infraClearBoundaryRefusals(source infraEdgeLister, entries []infraBackupEnt
 		Snap:       snap,
 		Moves:      func(b beads.Bead) bool { return moved[b.ID] || moves(b) },
 		Moved:      moved,
-		InBinding:  moved,
 		WorkNoun:   "work",
 		SourceNoun: "the work store",
 	})
@@ -720,12 +719,13 @@ func infraEdgeLive(source infraEdgeLister, from, to string) (bool, error) {
 }
 
 // withInfraClearDispositions marks each edge of a fresh backup entry with what
-// the city migration did with it (infraBackupEdge.Disposition): an edge
-// between two removed rows was copied; an edge onto the row from a row that
-// stays is dropped by this clear; the row's own edge out of the session is
-// what its binding copy's gc.migrated_cross_edges record says (gated,
-// copied-external, dropped), dropped when it says nothing.
-func withInfraClearDispositions(entry infraBackupEntry, session map[string]bool, held map[string]beads.Bead) infraBackupEntry {
+// the city migration did with it (infraBackupEdge.Disposition): an edge onto
+// a row the copy carried (this session's, or one an earlier session already
+// removed) was copied; an edge onto the row from a row that stays is dropped
+// by this clear; any other edge of the row is what its binding copy's
+// gc.migrated_cross_edges record says (gated, copied-external, dropped),
+// dropped when it says nothing.
+func withInfraClearDispositions(entry infraBackupEntry, session, carried map[string]bool, held map[string]beads.Bead) infraBackupEntry {
 	recorded := map[string]string{}
 	if raw := strings.TrimSpace(held[entry.Bead.ID].Metadata[beadmeta.MigratedCrossEdgesMetadataKey]); raw != "" {
 		var recs []rigCrossEdgeRecord
@@ -740,7 +740,7 @@ func withInfraClearDispositions(entry infraBackupEntry, session map[string]bool,
 	deps := make([]infraBackupEdge, 0, len(entry.Deps))
 	for _, e := range entry.Deps {
 		switch {
-		case session[e.DependsOnID]:
+		case session[e.DependsOnID] || carried[e.DependsOnID]:
 			e.Disposition = rigEdgeCopied
 		case recorded[e.DependsOnID] != "":
 			e.Disposition = recorded[e.DependsOnID]
@@ -983,8 +983,8 @@ func verifyInfraRetainedBackupAt(path string, want []infraBackupEntry) error {
 }
 
 // infraBackupSourceStore serves a retained-source backup as a migration
-// source: the rows, their within-backup edges and their blocking edges onto
-// work in a MemStore, plus the edge
+// source: the rows and every edge each row held (the boundary ones included,
+// which the re-copy plans as the copy did) in a MemStore, plus the edge
 // payloads the backup recorded, so the copy carries them exactly as it would
 // from the work store.
 type infraBackupSourceStore struct {

@@ -60,7 +60,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -238,14 +237,12 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	}
 	rows, all, listErr := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
 	var edgeErr, holdsErr, literalErr error
+	var unheldExternal, unheldUnread []string
 	var plan infraCopyPlan
 	var literals []string
 	var literalRows int
 	if listErr == nil {
-		allIDs := make(map[string]bool, len(all))
-		for id := range all {
-			allIDs[id] = true
-		}
+		allIDs := infraRowIDs(all)
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
 		plan, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
@@ -253,10 +250,10 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		// before the window rather than inside it: the cross-boundary plan's
 		// edge holds (D9) and the status holds.
 		if edgeErr == nil {
-			holdsErr = planInfraCityBoundary(request.CityPath, request.Cfg, &plan, all, false)
+			holdsErr = infraCopyHoldsRefusal(request.CityPath, request.Cfg, &plan, all, false)
 		}
 		if edgeErr == nil && holdsErr == nil {
-			holdsErr = infraCopyParkedRefusal(plan, time.Now())
+			unheldExternal, unheldUnread = infraUnheldExternalBlockers(request.CityPath, request.Cfg, plan, all)
 		}
 		// The open work rows' edges, as doctor's dangling-edge scan reads them.
 		moved := make(map[string]bool, len(rows))
@@ -297,6 +294,18 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "holds", holdsErr)
 	}
 	preflightPass(stdout, "holds", fmt.Sprintf("every hold on a bead the copy carries crosses; %d bead(s) blocked on open work would wait on a cross-store gate", len(plan.boundary.Gates)))
+	// Informational: an external: reference is carried as it is, and a split
+	// city's readers enforce it, so a moved row waiting on one whose bead no
+	// store holds arrives blocked until something holds and closes it.
+	if len(unheldExternal) > 0 {
+		preflightNote(stdout, "external refs", fmt.Sprintf("%d open bead(s) the copy moves wait on an external: reference whose bead no store holds; the copy carries the edge and the split city enforces it, so each stays blocked until a store holds that bead and it closes:", len(unheldExternal)))
+		for _, line := range unheldExternal {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
+		}
+		if len(unheldUnread) > 0 {
+			fmt.Fprintf(stdout, "%sstores not read: %s\n", preflightDetailIndent, strings.Join(unheldUnread, "; ")) //nolint:errcheck // best-effort stdout
+		}
+	}
 	// Informational: the clear drops each edge from a work bead onto a bead
 	// the copy moves (it re-adds none) and records it on its work bead.
 	if atRisk := infraCrossEdgesAtRisk(plan); len(atRisk) > 0 {

@@ -54,7 +54,11 @@ func TestCityIDFloorIsOnePastTheLongestOwnSuffix(t *testing.T) {
 		{name: "only another prefix", ids: []string{"gp-k0nvi1x", "gcg-12"}, want: 0},
 		{name: "MC's shape", ids: []string{"mc-abc", "mc-wisp-4m43", "mc-wisp-k0nvi", "mc-q1w2e3", "mc-wisp-d0j-satellite-dup", "gp-k0nvi1x9"}, want: 7},
 		{name: "a child id counts its parent's hash", ids: []string{"mc-ab12.3"}, want: 5},
-		{name: "a longer suffix under another prefix is ignored", ids: []string{"mc-ab", "mcx-abcdefgh"}, want: 3},
+		{name: "a longer suffix under another prefix is ignored", ids: []string{"mc-abc", "mcx-abcdefgh"}, want: 4},
+		{name: "a cross-store gate id is not a bd hash", ids: []string{"mc-xsg-ddb51ee0b716", "mc-q1w2"}, want: 5},
+		{name: "only gate ids", ids: []string{"mc-xsg-ddb51ee0b716", "mc-xsg-0a1b2c3d4e5f"}, want: 0},
+		{name: "a suffix bd never mints (too short, upper case, punctuation)", ids: []string{"mc-ab", "mc-ABCD", "mc-ab_cd"}, want: 0},
+		{name: "an 8-character suffix: the floor stops at bd's cap", ids: []string{"mc-abcdefgh"}, want: 8},
 	} {
 		if got := cityIDFloor(tc.ids, "mc"); got != tc.want {
 			t.Errorf("%s: cityIDFloor(%v) = %d, want %d", tc.name, tc.ids, got, tc.want)
@@ -127,22 +131,22 @@ func TestReserveCityIDsWithNothingCarriedWritesNothing(t *testing.T) {
 // min_hash_length (and max_hash_length, when the floor passes bd's default
 // ceiling); a second run writes nothing; a floor already higher is kept.
 func TestReserveCityIDsRaisesNeverLowersAndIsIdempotent(t *testing.T) {
-	carried := []string{"mc-abc", "mc-wisp-abcdefgh"} // floor 9, above bd's default max of 8
-	conf := &fakeHashConfig{values: map[string]string{}}
+	carried := []string{"mc-abc", "mc-wisp-abcdefg"} // floor 8, above the max of 6 this store sets
+	conf := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "6"}}
 	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
 	got, err := reserveCityIDs("/city", carried)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Floor != 9 || got.Before != 0 || strings.Join(conf.sets, ",") != "min_hash_length=9,max_hash_length=9" {
-		t.Fatalf("first run = %+v, writes %v; want min and max raised to 9", got, conf.sets)
+	if got.Floor != 8 || got.Before != 0 || strings.Join(conf.sets, ",") != "min_hash_length=8,max_hash_length=8" {
+		t.Fatalf("first run = %+v, writes %v; want min and max raised to 8", got, conf.sets)
 	}
 	conf.sets = nil
 	got, err = reserveCityIDs("/city", carried)
-	if err != nil || len(conf.sets) != 0 || got.Floor != 9 || got.Before != 9 {
+	if err != nil || len(conf.sets) != 0 || got.Floor != 8 || got.Before != 8 {
 		t.Fatalf("second run = %+v (%v), writes %v; want none", got, err, conf.sets)
 	}
-	if !strings.Contains(got.String(), "already 9") {
+	if !strings.Contains(got.String(), "already 8") {
 		t.Fatalf("second run says %q", got)
 	}
 	higher := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "12", bdMaxHashLengthKey: "14"}}
@@ -150,6 +154,27 @@ func TestReserveCityIDsRaisesNeverLowersAndIsIdempotent(t *testing.T) {
 	got, err = reserveCityIDs("/city", carried)
 	if err != nil || len(higher.sets) != 0 || got.Floor != 12 {
 		t.Fatalf("a higher floor = %+v (%v), writes %v; want it kept, nothing written", got, err, higher.sets)
+	}
+}
+
+// TestTheFloorNeverPassesBdsCap: carried cross-store gate ids (graph rows
+// whose suffix is 12 hex characters) do not lift the floor, and no floor or
+// max_hash_length passes the 8 characters bd mints: bd's CLI and native
+// minting ignore more, and a hosted `bd serve` pads every id to it with
+// zeros. The helper is S4b's too.
+func TestTheFloorNeverPassesBdsCap(t *testing.T) {
+	conf := &fakeHashConfig{values: map[string]string{}}
+	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
+	got, err := reserveCityIDs("/city", []string{"mc-xsg-ddb51ee0b716", "mc-wisp-xsg-ab12cd34ef56", "mc-q1w2e3"})
+	if err != nil || got.Floor != 7 || strings.Join(conf.sets, ",") != "min_hash_length=7" {
+		t.Fatalf("reserve = %+v (%v), writes %v; want min_hash_length 7 from the one bd id, the gates ignored", got, err, conf.sets)
+	}
+	if rig := rigImportHashFloor([]string{"gp-xsg-ddb51ee0b716", "gp-abcdefgh"}); rig != 8 {
+		t.Fatalf("the rig floor = %d, want bd's cap of 8", rig)
+	}
+	capped := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "4"}}
+	if floor, err := raiseBdHashFloor(capped, 13); err != nil || floor != 8 || strings.Join(capped.sets, ",") != "min_hash_length=8,max_hash_length=8" {
+		t.Fatalf("raise to 13 = %d (%v), writes %v; want both capped at 8", floor, err, capped.sets)
 	}
 }
 
@@ -399,5 +424,33 @@ func TestRepairSequenceIDFloorIsIdempotentUnderTheLock(t *testing.T) {
 	}
 	if code, _, errOut := run(); code == 0 || !strings.Contains(errOut, "records no copy manifest") {
 		t.Fatalf("a run with no manifest = %d: %s", code, errOut)
+	}
+}
+
+// TestAConvergedRerunAppliesTheFloor: a city an earlier build converged and
+// cleared without a floor gets one from the next `gc storage migrate`, which
+// otherwise has nothing to do; a floor that cannot be set fails that rerun.
+func TestAConvergedRerunAppliesTheFloor(t *testing.T) {
+	conf := &fakeHashConfig{values: map[string]string{}}
+	request, _ := floorCity(t, conf)
+	stubCityHashConfig(t, cityHashConfig{Skipped: "a build without the floor"})
+	if code, stderr := migrateFor(t, request); code != 0 {
+		t.Fatalf("the cutover = %d: %s", code, stderr)
+	}
+	if len(conf.sets) != 0 {
+		t.Fatalf("precondition: the cutover set %v", conf.sets)
+	}
+	conf.setErr = errors.New("bd config set: refused")
+	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
+	if code, stderr := migrateFor(t, request); code == 0 || !strings.Contains(stderr, "its work store's id floor could not be set") {
+		t.Fatalf("a converged rerun whose floor failed = %d: %s", code, stderr)
+	}
+	conf.setErr = nil
+	if code, stderr := migrateFor(t, request); code != 0 || conf.values[bdMinHashLengthKey] != "7" {
+		t.Fatalf("a converged rerun = %d, min_hash_length %q: %s", code, conf.values[bdMinHashLengthKey], stderr)
+	}
+	conf.sets = nil
+	if code, stderr := migrateFor(t, request); code != 0 || len(conf.sets) != 0 {
+		t.Fatalf("a second converged rerun = %d, writes %v: %s", code, conf.sets, stderr)
 	}
 }

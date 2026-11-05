@@ -17,6 +17,13 @@ package main
 //     refuses. A work store has no gate pattern.
 //   - tracks or parent-child with both ends open, either direction: refuses.
 //     These are membership edges live code reads (drain-unit convoys).
+//   - An "external:" reference a moved row holds is copied as it is, and
+//     recorded (copied-external). It names no row in either store, so it
+//     crosses no boundary; on a split city the readers enforce it
+//     (beads.ExternalBlockerTarget): an "external:<id>" blocker holds its
+//     dependent until some store holds <id> and it closes, and a capability
+//     reference never blocks. `gc storage preflight` names an open row
+//     waiting on one whose bead no store holds.
 //   - Every other boundary edge is dropped and recorded on the moved row
 //     (gc.migrated_cross_edges).
 //
@@ -55,10 +62,13 @@ type crossBoundaryInput struct {
 	// Moved are the rows this run copies into the binding.
 	Moved map[string]bool
 	// InBinding are the rows that are, or will be, binding rows: Moved plus
-	// what earlier runs carried.
+	// what earlier runs carried. Held is what the binding holds under the ids
+	// the plan asks about. Both are the rig import's alone: the city copy and
+	// its clear move into a binding that holds nothing else (prepare refuses
+	// a populated one, and a gate is the copy's own), so for them nothing is
+	// in the binding but Moved, and both stay nil.
 	InBinding map[string]bool
-	// Held is what the binding holds under the ids the plan asks about.
-	Held map[string]beads.Bead
+	Held      map[string]beads.Bead
 	// Elsewhere holds every copy, in a store other than the source and the
 	// binding, of a blocker an open moved row waits on that neither holds.
 	Elsewhere map[string][]beads.Bead

@@ -249,7 +249,10 @@ What the command does, in order:
 8. Records a proven-copy manifest, and only then the convergence marker.
    Before the clear it raises the work store's bd `min_hash_length` one past
    the longest hash suffix among the carried ids of the store's own prefix
-   (never lowering it, and raising `max_hash_length` with it when needed), so
+   (only suffixes bd mints count: base36, 3 to 8 characters, so a cross-store
+   gate's `xsg-` id does not; neither setting goes above 8, the longest suffix
+   bd mints; it never lowers either, and raises `max_hash_length` with it when
+   needed), so
    bd can never mint a carried id again once the clear removes it. A file
    store needs no floor and a generic exec store cannot take one; both are
    reported. A hosted bd store that refuses the write stops the run before the
@@ -269,8 +272,15 @@ infrastructure bead with a `blocks` edge onto an unfinished work bead (a parked
 rig store holds, waits in the binding on a cross-store gate: a `gate` bead in
 the binding that names the blocker, which the controller's gate lane closes
 once the blocker closes. The migrate output names each one, and the manifest
-lists it (`#gc:gate`). Every other edge between a moved bead and one that stays
-is dropped and recorded on the moved bead (`gc.migrated_cross_edges`). A hold
+lists it (`#gc:gate`). An `external:` reference a moved bead holds is carried
+as it is, and the split city enforces it: an `external:<id>` blocker holds its
+bead until some store holds `<id>` and it closes, and an
+`external:<rig>:<capability>` reference never blocks. `gc storage preflight`
+names, under `external refs`, every open bead the copy moves that waits on an
+`external:<id>` whose bead no store holds: it arrives blocked, so close or
+re-point the edge first if it should not wait. Every other edge between a
+moved bead and one that stays is dropped and recorded on the moved bead
+(`gc.migrated_cross_edges`). A hold
 the binding cannot express makes the migration refuse, before anything is
 copied, naming each bead and its fix; `gc storage preflight` reports the same
 refusal under `holds`:

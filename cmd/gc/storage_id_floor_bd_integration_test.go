@@ -109,3 +109,80 @@ func TestTheCityFloorHoldsOnARealBdStore(t *testing.T) {
 		t.Fatalf("a second reservation = %+v (%v), want the floor already in force", again, err)
 	}
 }
+
+// TestTheDefaultFloorOpenerReachesARealBdCity runs the floor through the
+// production surface (defaultCityHashConfigOpener): a bd city initialized on
+// disk, its prefix read from its own config, the bd runner gc builds for the
+// scope. A second reservation writes nothing.
+func TestTheDefaultFloorOpenerReachesARealBdCity(t *testing.T) {
+	bdPath, err := findPreferredBinary("bd", strings.TrimSpace(os.Getenv("GC_TEST_BD_BIN")))
+	if err != nil {
+		t.Skip("bd not found (set GC_TEST_BD_BIN or install bd)")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not found")
+	}
+	root := t.TempDir()
+	home, city := filepath.Join(root, "home"), filepath.Join(root, "city")
+	for _, d := range []string{home, city} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeTestGitIdentity(home); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestDoltIdentity(home); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"HOME":               home,
+		"XDG_CONFIG_HOME":    filepath.Join(home, ".config"),
+		"GIT_CONFIG_GLOBAL":  filepath.Join(home, ".gitconfig"),
+		"BD_BIN":             bdPath,
+		"BEADS_DIR":          filepath.Join(city, ".beads"),
+		"BD_NON_INTERACTIVE": "1",
+		"BD_BACKUP_ENABLED":  "false",
+		"BD_EXPORT_AUTO":     "false",
+		"BEADS_ACTOR":        "gc-test",
+	}
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	run := beads.ExecCommandRunnerWithEnvWithoutAmbientBeads(env)
+	must := func(name string, args ...string) string {
+		t.Helper()
+		out, err := run(city, name, args...)
+		if err != nil {
+			t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	must("git", "init", "-q", ".")
+	must("bd", "init", "-p", "mc", "--quiet", "--skip-hooks")
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"mc\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prev := cityHashConfigOpener
+	cityHashConfigOpener = defaultCityHashConfigOpener
+	t.Cleanup(func() { cityHashConfigOpener = prev })
+
+	carried := []string{"mc-a1b2c", "mc-wisp-xy9", "mc-xsg-ddb51ee0b716"}
+	got, err := reserveCityIDs(city, carried)
+	if err != nil {
+		t.Fatalf("the default surface's reservation: %v", err)
+	}
+	if got.Skipped != "" || got.Floor != 6 {
+		t.Fatalf("reserved %+v, want the floor 6 set on the bd city", got)
+	}
+	if v := strings.TrimSpace(must("bd", "config", "get", bdMinHashLengthKey)); !strings.Contains(v, "6") {
+		t.Fatalf("bd reads %s = %q, want 6", bdMinHashLengthKey, v)
+	}
+	again, err := reserveCityIDs(city, carried)
+	if err != nil || again.Before != 6 {
+		t.Fatalf("a second reservation = %+v (%v), want the floor already in force", again, err)
+	}
+	if id := parseCreatedBeadID(t, must("bd", "create", "--json", "minted", "-t", "task")); len(rigIDHashSuffix(id)) < 6 {
+		t.Fatalf("bd minted %s under the floor 6", id)
+	}
+}
