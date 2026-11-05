@@ -4238,14 +4238,7 @@ func TestPackCommandScopeAndLeafArguments(t *testing.T) {
 	t.Setenv("GC_RIG", "")
 	city := setupPackExitCity(t)
 	t.Setenv("GC_CITY_PATH", city)
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(city); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Chdir(city)
 	script := "#!/bin/sh\nprintf 'city=<%s> path=<%s> rig=<%s> args:' \"$GC_CITY\" \"$GC_CITY_PATH\" \"$GC_RIG\"\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nprintf '\\n'\n"
 	for _, command := range [][]string{{"hello"}, {"repo", "sync"}} {
 		path := filepath.Join(append([]string{city, "commands"}, command...)...)
