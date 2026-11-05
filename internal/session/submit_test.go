@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -1509,6 +1510,41 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 }
 
+// TestSubmitInterruptNowRestartFallbackQueuesOnBusyReplacement pins the
+// restart fallback's answer to a replacement runtime that defers the message
+// because a turn is already running there (runtime.ErrSessionBusy, nothing
+// typed): the outgoing turn is gone, so the message is queued, never
+// dropped, as a plain send queues it.
+func TestSubmitInterruptNowRestartFallbackQueuesOnBusyReplacement(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+	sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: a turn is running", runtime.ErrSessionBusy)}
+
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now) with a busy replacement: %v, want the message queued", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(interrupt_now) with a busy replacement did not queue the message")
+	}
+	var sawStop bool
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+	}
+	if !sawStop {
+		t.Fatalf("calls = %#v, want the restart fallback's Stop", sp.Calls)
+	}
+}
+
 // TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer pins the restart
 // fallback as a cleanup of the outgoing incarnation: replacement only needs
 // that session gone, so tmux's ErrNoServer answer from the fallback stop must
@@ -2311,7 +2347,7 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2371,7 +2407,7 @@ func TestSendQueuesWhenTheRuntimeDefersABusySession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &busyNudgeProvider{Fake: runtime.NewFake()}
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2408,7 +2444,7 @@ func TestSubmitDefaultCodexQueuesWhenTheRuntimeDefersABusyTurn(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2467,7 +2503,7 @@ func TestSendPathsQueueOverACrashedAgent(t *testing.T) {
 		store := beads.NewMemStore()
 		sp := runtime.NewFake()
 		cityPath := t.TempDir()
-		mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -2569,7 +2605,7 @@ func (f emptyNamesDeadFake) ProcessAlive(name string, processNames []string) boo
 func TestSendWithoutProcessNamesReadsAlive(t *testing.T) {
 	store := beads.NewMemStore()
 	fake := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -2613,7 +2649,7 @@ func crashedBehindStaleCache(t *testing.T, provider string, freshErr error) (*Ma
 	fake := runtime.NewFake()
 	cityPath := t.TempDir()
 	sp := &staleCacheFake{Fake: fake}
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(store), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

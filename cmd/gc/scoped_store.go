@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // scopedBdStoreForCity returns a throwaway BdStore for cityPath whose bd
@@ -155,11 +156,19 @@ func beadPolicyConfig(store beads.Store) (*config.City, bool) {
 // backed store: cancellation kills the backend bd subprocess instead of
 // abandoning it past ctx's deadline. Returns (nil, nil) when existing is
 // not bd-CLI backed — callers should keep reading through existing
-// directly in that case (gascity ga-cdmx6x).
+// directly in that case (gascity ga-cdmx6x). Under the split-strict gate an
+// existing that is one of the gate's views is cloned from the store under the
+// view, and the clone is returned behind the same side of the same projection.
 func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, existing beads.Store) (beads.Store, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Under the split-strict gate existing may be one of the gate's views,
+	// which hides the bd backing: rebuild from the store under the view and
+	// put the clone back behind the same side, so its reads stay policed and
+	// its child stays ctx-bound (ga-ylpbsy.94.1). splitStrictSeam is nil in
+	// production, where this returns existing unchanged.
+	existing, regate := storeref.Unview(splitStrictSeam, existing)
 	bs, ok := bdStoreBacking(existing)
 	if !ok {
 		return nil, nil
@@ -179,7 +188,7 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	if policyWrapped {
 		scoped = wrapStoreWithBeadPolicies(scoped, policyCfg)
 	}
-	return scoped, nil
+	return regate(scoped), nil
 }
 
 // isNilProxiedStoreView reports whether view is an interface holding a nil

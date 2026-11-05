@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -434,7 +435,7 @@ func createSuspensionTestConvoy(t *testing.T, store beads.Store) beads.Bead {
 	if err != nil {
 		t.Fatalf("create convoy: %v", err)
 	}
-	if err := convoycore.TrackItem(store, convoy.ID, createSuspensionTestTask(t, store).ID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, createSuspensionTestTask(t, store).ID); err != nil {
 		t.Fatalf("track task: %v", err)
 	}
 	return convoy

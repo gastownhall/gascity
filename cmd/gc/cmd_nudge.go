@@ -47,22 +47,6 @@ const (
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
 
-	// queuedNudgeStarvedAfter is how long a queued item waits on a session
-	// whose activity clock never quiets before the delivery carrying it
-	// stops waiting on that clock (ga-atd7r2): a session that stays
-	// continuously busy — a repainting idle TUI, or back-to-back turns —
-	// otherwise starves its queue, because the quiescence gate never
-	// clears for it. It sits above the #5317 busy-skip fixture (1 minute),
-	// so a fresh busy deferral still reads as a quiet-session courtesy
-	// skip, not a starvation.
-	queuedNudgeStarvedAfter = 2 * time.Minute
-
-	// queuedNudgeTurnLookTimeout bounds the protocol turn read a starved
-	// queue takes before it goes (starvedQueuedNudgeDelivery): t3bridge
-	// answers it over the network, and the dispatcher runs on the
-	// controller's loop.
-	queuedNudgeTurnLookTimeout = 5 * time.Second
-
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
 	// maintenance (expiring/pruning stale entries) while holding the
@@ -355,6 +339,19 @@ func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Show queued and dead-letter nudges for a session",
 		Long: `Show queued and dead-letter nudges for a session.
 
+Lists the legacy nudge queue's items and the session's conversation-lane
+operations (messages and notices the controller's lane host delivers) in one
+view: a lane operation's ID is its op ID, pending until the lane takes it, in
+flight while it is delivered, and dead for an hour after it closes failed or
+skipped. Dead operations are looked up among the session's 50 most recently
+created closed lane messages: an older message is not listed as dead even
+when it closed last.
+
+When the session's lane operations cannot all be read (the op store does not
+open or answer, or an op row does not decode), it names what it could not
+read on stderr and exits 1: the text view still lists the rest, and --json
+prints the failure record instead of a partial result.
+
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -374,7 +371,7 @@ func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "drain [session]",
 		Short:  "Deliver queued nudges for a session",
-		Long:   "Deliver queued nudges for a session. Used by runtime hooks.",
+		Long:   "Deliver queued nudges for a session. Used by runtime hooks with --inject; the plain form is deprecated and is removed with legacy delivery.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -426,6 +423,12 @@ rather than disappearing silently. Find IDs with "gc nudge status".
 Dropping an in-flight nudge dead-letters it even if it was already
 injected into the session but not yet acked.
 
+A conversation-lane message's op ID cancels the message as the operator:
+one the lane has not taken is dropped, and one being delivered reports
+cancel_requested, the lane's outcome saying whether the cancel won. A lane
+ID that cannot be canceled fails on its own: the other IDs are still
+dropped.
+
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.`,
 		Args: cobra.MinimumNArgs(1),
@@ -459,11 +462,26 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	now := time.Now()
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// A lane read that fails fails the command, as a queue read does. With
+	// --json it writes no result, whose ok promises the whole view, so the
+	// caller gets the failure record; the text view still lists what was
+	// read.
+	lanePending, laneInFlight, laneDead, laneErr := laneNudgeStatusItems(target, now)
+	if laneErr != nil {
+		fmt.Fprintf(stderr, "gc nudge status: conversation-lane ops not all read: %v\n", laneErr) //nolint:errcheck
+		if jsonOutput {
+			return 1
+		}
+	}
+	pending = append(pending, lanePending...)
+	inFlight = append(inFlight, laneInFlight...)
+	dead = append(dead, laneDead...)
 
 	// City-wide (not agent-scoped) skip-reason totals from the supervisor
 	// dispatch tick, read directly off the persisted queue state — a raw
@@ -532,6 +550,9 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		for _, reason := range sortedNudgeDispatchSkipReasons(dispatchSkips) {
 			_, _ = fmt.Fprintf(stdout, "  %s=%d\n", reason, dispatchSkips[reason])
 		}
+	}
+	if laneErr != nil {
+		return 1
 	}
 	return 0
 }
@@ -613,6 +634,7 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	laneResults := dropLaneNudges(cityPath, ids, statuses)
 
 	var droppable []string
 	for _, id := range ids {
@@ -646,6 +668,20 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	exit := 0
 	results := make([]nudgeDropResult, 0, len(ids))
 	for _, id := range ids {
+		if res, lane := laneResults[id]; lane {
+			results = append(results, res)
+			switch {
+			case !res.OK:
+				exit = 1
+				fmt.Fprintf(stderr, "gc nudge drop %s: %s\n", id, res.Error) //nolint:errcheck
+			case jsonOutput:
+			case res.Outcome == "cancel_requested":
+				fmt.Fprintf(stdout, "Cancel requested for nudge %s (it is being delivered)\n", id) //nolint:errcheck
+			default:
+				fmt.Fprintf(stdout, "Dropped nudge %s\n", id) //nolint:errcheck
+			}
+			continue
+		}
 		switch statuses[id] {
 		case nudgeDropStatusDroppable:
 			if !dropped[id] {
@@ -684,6 +720,10 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	return exit
 }
 
+// nudgeDrainPlainDeprecation is the warning gc nudge drain without --inject
+// prints: only the hook's --inject form outlives legacy delivery.
+const nudgeDrainPlainDeprecation = "gc nudge drain: warning: drain without --inject is deprecated and is removed with legacy delivery in a future release; the conversation lane host and the prompt hook (gc nudge drain --inject) deliver queued messages"
+
 // classifyQueuedNudgeIDs reports, for each of the given IDs, whether it is
 // currently droppable (pending or in-flight), already dead-lettered, or not
 // found in the queue at all. The lookup runs the same maintenance every other
@@ -717,6 +757,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// non-inject form is the human-facing one and is untouched (#5304).
 	if inject && len(args) == 0 && !hookHasManagedIdentity() {
 		return 0
+	}
+	if !inject {
+		fmt.Fprintln(stderr, nudgeDrainPlainDeprecation) //nolint:errcheck // best-effort stderr
 	}
 	// On every prompt, emit a live clock (operator-local + UTC + epoch) and
 	// the agent's active formula step (if any) as UserPromptSubmit hook context.
@@ -1503,6 +1546,10 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
 	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerFamily() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
+			// This busy pre-read stands in for the worker's (which records
+			// its own when it runs): under the shadow switch it is recorded
+			// beside the record (wait_idle_preread).
+			runtime.ShadowCompareIdle(sp, target.sessionName, target.sessionID, target.providerFamily(), runtime.ProgramPointWaitIdlePreread, runtime.ProgramVerdictBusy)
 			return queueSessionNudgeWithWorker(target, store, sp, message, worker.NudgeUndeliveredNoIdleBoundary)
 		}
 	}
@@ -2464,6 +2511,7 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 		sessionName:       f.sessionName,
 	}
 	target.agent = parseNudgeAgentIdentity(identity)
+	resolvedByAgent := false
 	for _, candidate := range []string{f.agentName, f.template, f.commonName} {
 		if candidate == "" {
 			continue
@@ -2485,8 +2533,21 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 				}
 			}
 			target.resolved = resolved
+			resolvedByAgent = true
 		}
 		break
+	}
+	if !resolvedByAgent {
+		// No agent resolves the provider, as none does for a provider
+		// session (API or dashboard kind=provider): its starts resolve it by
+		// name (resolveWorkerRuntimeProviderWithConfigAndMetadata), and its
+		// pane is armed with that provider's program-status declaration,
+		// which the starved bypass's holds read (programHoldDeclared,
+		// holdMidTurnWithoutRecord). Only the declaration is taken: the
+		// target's process names and family read as without it.
+		if byName := resolveProviderByName(cfg, f.provider, f.template); byName != nil {
+			target.resolved.ProgramStatus = byName.ProgramStatus
+		}
 	}
 	if target.identity == "" {
 		target.identity = target.agent.QualifiedName()
@@ -2763,7 +2824,7 @@ type queuedNudgeGate struct {
 // quiet opened sends any delivery on the default path. A gate a starvation
 // opened sends only a delivery that has starved itself, so a younger delivery
 // never goes on an older one's starvation, and looks at the leaf's turn again
-// first (starvedQueuedNudgeDelivery): its own look came before the claim and
+// first (starvedQueuedNudgeBypass): its own look came before the claim and
 // its bookkeeping, and a turn that started since holds the delivery, as one
 // running then held the pass. A look that fails holds it too, and err says
 // why.
@@ -2774,7 +2835,7 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 	if !queuedNudgeDeliveryStarved(delivery, g.starvedAsOf) {
 		return "", false, nil
 	}
-	how, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	how, hold, err := starvedQueuedNudgeBypass(target, sp, time.Now())
 	if err != nil {
 		return "", false, fmt.Errorf("holding the claimed starved delivery for %s: %w", target.agentKey(), err)
 	}
@@ -2788,8 +2849,10 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 // any quiescence window, so the gate never clears. Once the delivery the pass
 // would make has starved as of now (queuedNudgeStarvedForTarget), the gate
 // stops waiting on that clock and asks the leaf's turn instead
-// (starvedQueuedNudgeDelivery): a turn running holds the pass before it
-// claims, and admit asks again before it sends.
+// (starvedQueuedNudgeBypass): a turn running, on the screen or, for a
+// provider declaring hold_mid_turn under the switch on, in the program's
+// own record, holds the pass before it claims, and admit asks again before
+// it sends.
 func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, now time.Time) (queuedNudgeGate, error) {
 	if pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return queuedNudgeGate{open: true}, nil
@@ -2798,7 +2861,7 @@ func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time
 	if err != nil || !starved {
 		return queuedNudgeGate{}, err
 	}
-	_, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	_, hold, err := starvedQueuedNudgeBypass(target, sp, now)
 	if err != nil {
 		return queuedNudgeGate{}, fmt.Errorf("holding the starved queue for %s: %w", target.agentKey(), err)
 	}
@@ -2846,44 +2909,6 @@ func queuedNudgeDeliveryStarved(delivery []queuedNudge, now time.Time) bool {
 		}
 	}
 	return false
-}
-
-// starvedQueuedNudgeDelivery is how a starved queue goes to sp's session
-// name, one its activity clock calls busy (queuedNudgeStarvedForTarget),
-// decided by one look at the turn of the backend serving it
-// (runtime.ResolveBackend). hold reports that a turn runs. A look that fails
-// is never an idle reading: it holds too, and err says why.
-//
-//   - A leaf that reads its turn on the screen (runtime.TurnRunningProvider)
-//     and sees none delivers immediately: the idle question the default path
-//     would wait out is already answered.
-//   - A leaf that reports its turn by protocol (runtime.TurnFenceProvider:
-//     ACP, t3bridge) and has none in progress takes the default path. Sent
-//     into a running turn, ACP's nudge would hold the dispatch for its whole
-//     busy wait (nudge_busy_timeout), and t3bridge's would start a second
-//     turn.
-//   - A leaf with neither reading takes the default path unread, as the open
-//     gate would send it: holding it would leave the starvation in place.
-func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery worker.NudgeDelivery, hold bool, err error) {
-	if tr, ok := runtime.TurnRunningFor(sp, name); ok {
-		running, err := tr.TurnRunning(name)
-		if err != nil {
-			return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
-		}
-		return worker.NudgeDeliveryImmediate, running, nil
-	}
-	leaf, _, _ := runtime.ResolveBackend(sp, name)
-	tf, ok := leaf.(runtime.TurnFenceProvider)
-	if !ok {
-		return worker.NudgeDeliveryDefault, false, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), queuedNudgeTurnLookTimeout)
-	defer cancel()
-	turn, err := tf.ObserveTurn(ctx, name)
-	if err != nil {
-		return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
-	}
-	return worker.NudgeDeliveryDefault, turn.Active(), nil
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 type listQueryCaptureStore struct {
@@ -199,7 +200,7 @@ func TestMarkTerminalUsesBoundedNudgeLookup(t *testing.T) {
 	}
 	store := &listQueryCaptureStore{Store: mem}
 
-	if err := markTerminal(store, "nudge-123", time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if err := markTerminal(beadstest.Nudges(store), "nudge-123", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		t.Fatalf("markTerminal: %v", err)
 	}
 
@@ -222,7 +223,7 @@ func TestMarkTerminalUsesBoundedNudgeLookup(t *testing.T) {
 }
 
 func TestTerminalNudgeBeads_AllowsExactLookupLimit(t *testing.T) {
-	items, err := terminalNudgeBeads(nudgeExactLimitStore{Store: beads.NewMemStore()}, "nudge-123")
+	items, err := terminalNudgeBeads(beadstest.Nudges(nudgeExactLimitStore{Store: beads.NewMemStore()}), "nudge-123")
 	if err != nil {
 		t.Fatalf("terminalNudgeBeads: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestMarkTerminalTerminalizesVisibleOpenNudgeWhenLookupCaps(t *testing.T) {
 		visible = append(visible, item)
 	}
 
-	if err := markTerminal(mem, "nudge-123", time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if err := markTerminal(beadstest.Nudges(mem), "nudge-123", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		t.Fatalf("markTerminal: %v", err)
 	}
 
@@ -289,7 +290,7 @@ func TestWithdrawWaitNudges_TerminalizesOutsideQueueLock(t *testing.T) {
 	}
 	store := queueLockDetectStore{MemStore: mem, cityPath: cityPath}
 
-	if err := WithdrawWaitNudges(store, cityPath, []string{item.ID}); err != nil {
+	if err := WithdrawWaitNudges(beadstest.Nudges(store), cityPath, []string{item.ID}); err != nil {
 		t.Fatalf("WithdrawWaitNudges: %v", err)
 	}
 	state, err := LoadState(cityPath)
@@ -332,7 +333,7 @@ func TestWithdrawWaitNudges_LeavesQueueIntactOnMarkTerminalFailure(t *testing.T)
 		t.Fatalf("create nudge bead: %v", err)
 	}
 
-	err := WithdrawWaitNudges(nudgeMarkFailStore{MemStore: mem}, cityPath, []string{item.ID})
+	err := WithdrawWaitNudges(beadstest.Nudges(nudgeMarkFailStore{MemStore: mem}), cityPath, []string{item.ID})
 	if err == nil || !strings.Contains(err.Error(), "mark terminal failed") {
 		t.Fatalf("WithdrawWaitNudges error = %v, want mark terminal failed", err)
 	}
@@ -389,7 +390,7 @@ func TestWithdrawWaitNudges_RemovesTerminalizedSiblingsOnLaterFailure(t *testing
 		t.Fatalf("seed queue state: %v", err)
 	}
 
-	err = WithdrawWaitNudges(nudgeSelectiveMarkFailStore{MemStore: mem, failID: badNudge.ID}, cityPath, []string{goodItem.ID, badItem.ID})
+	err = WithdrawWaitNudges(beadstest.Nudges(nudgeSelectiveMarkFailStore{MemStore: mem, failID: badNudge.ID}), cityPath, []string{goodItem.ID, badItem.ID})
 	if err == nil || !strings.Contains(err.Error(), "mark terminal failed") {
 		t.Fatalf("WithdrawWaitNudges error = %v, want mark terminal failed", err)
 	}
@@ -442,7 +443,7 @@ func TestWithdrawWaitNudges_KeepsReenqueuedSameIDItem(t *testing.T) {
 		nudgeID:  item.ID,
 	}
 
-	if err := WithdrawWaitNudges(store, cityPath, []string{item.ID}); err != nil {
+	if err := WithdrawWaitNudges(beadstest.Nudges(store), cityPath, []string{item.ID}); err != nil {
 		t.Fatalf("WithdrawWaitNudges: %v", err)
 	}
 
@@ -493,7 +494,7 @@ func TestWithdrawWaitNudges_KeepsSameIDReenqueueBeforeTerminalLookup(t *testing.
 		nudgeID:  item.ID,
 	}
 
-	if err := WithdrawWaitNudges(store, cityPath, []string{item.ID}); err != nil {
+	if err := WithdrawWaitNudges(beadstest.Nudges(store), cityPath, []string{item.ID}); err != nil {
 		t.Fatalf("WithdrawWaitNudges: %v", err)
 	}
 

@@ -13236,7 +13236,7 @@ func TestControlDispatcherRouteRepairAgreesWithTheMinter(t *testing.T) {
 		if !scoped {
 			t.Fatalf("ScopeRigContext(%q) not scoped", tc.root)
 		}
-		minted, err := graphroute.ControlDispatcherBinding(nil, "test-city", cfg, rigContext, deps)
+		minted, err := graphroute.ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, rigContext, deps)
 		if err != nil {
 			t.Fatalf("ControlDispatcherBinding(%q): %v", tc.root, err)
 		}

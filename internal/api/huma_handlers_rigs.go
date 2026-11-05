@@ -47,6 +47,11 @@ var (
 )
 
 // humaHandleRigList is the Huma-typed handler for GET /v0/rigs.
+//
+// It reports no cache age (X-GC-Cache-Age-S is 0): the rows come from config,
+// the suspension state and runtime probes, not from the bead cache, so the
+// cache's age says nothing about them. The session snapshot a pool seat's
+// lookup may read only names the session to probe.
 func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*ListOutput[rigResponse], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -64,9 +69,10 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	wantGit := input.Git
 
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
+	pools := newRequestSessionListing(sp)
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		resp := s.buildRigResponse(cfg, rig, sp, runtimeSessions, cityName, s.state.CityPath())
+		resp := s.buildRigResponse(cfg, rig, sp, pools, runtimeSessions, cityName, s.state.CityPath())
 		if wantGit {
 			resp.Git = fetchGitStatus(rig.Path)
 		}
@@ -74,8 +80,7 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	}
 	partialErrors := runtimeSessions.partialErrors()
 	return &ListOutput[rigResponse]{
-		Index:     index,
-		CacheAgeS: cacheAgeSeconds(store),
+		Index: index,
 		Body: ListBody[rigResponse]{
 			Items:         rigs,
 			Total:         len(rigs),
@@ -97,7 +102,7 @@ func (s *Server) humaHandleRigGet(ctx context.Context, input *RigGetInput) (*Ind
 		if rig.Name == name {
 			cityName := s.state.CityName()
 			runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
-			resp := s.buildRigResponse(cfg, rig, sp, runtimeSessions, cityName, s.state.CityPath())
+			resp := s.buildRigResponse(cfg, rig, sp, newRequestSessionListing(sp), runtimeSessions, cityName, s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}

@@ -106,7 +106,7 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
 	}
-	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
+	manager := sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: cfg.Store}, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
 }
 
@@ -285,12 +285,13 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 		return nil, sessionpkg.ErrSessionNotFound
 	}
 	if f.store != nil {
-		if id, err := sessionpkg.ResolveSessionIDByExactID(f.store, target); err == nil {
+		sessions := beads.SessionStore{Store: f.store}
+		if id, err := sessionpkg.ResolveSessionIDByExactID(sessions, target); err == nil {
 			return f.SessionByID(id)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err
 		}
-		if id, err := sessionpkg.ResolveSessionID(f.store, target); err == nil {
+		if id, err := sessionpkg.ResolveSessionID(sessions, target); err == nil {
 			return f.SessionByID(id)
 		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return nil, err

@@ -4173,7 +4173,7 @@ export type SessionProgramStatusShadowPayload = {
     /**
      * The decision point.
      */
-    point: 'wait_for_idle' | 'typing_gate' | 'submit_confirm' | 'escape_resend' | 'readiness' | 'startup_ladder' | 'interrupt_settle' | 'pending' | 'wait_idle_preread' | 'execution_backstop' | 'claim_nudge_hold' | 'work_ladder' | 'proved_idle' | 'queued_delivery' | 'drain_reminder' | 'observation';
+    point: 'wait_for_idle' | 'typing_gate' | 'submit_confirm' | 'escape_resend' | 'readiness' | 'startup_ladder' | 'interrupt_settle' | 'pending' | 'wait_idle_preread' | 'execution_backstop' | 'claim_nudge_hold' | 'work_ladder' | 'proved_idle' | 'queued_delivery' | 'drain_reminder' | 'observation' | 'starved_bypass';
     /**
      * What the program-status record would decide.
      */
@@ -4281,6 +4281,10 @@ export type SessionResponse = {
      */
     activity_source?: 'program' | 'transcript';
     agent_kind?: string;
+    /**
+     * The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
+     */
+    agent_name?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -4318,10 +4322,22 @@ export type SessionResponse = {
     template: string;
     title: string;
     /**
+     * How gc drives the session runtime, for example tmux or acp. Empty when unknown.
+     */
+    transport?: string;
+    /**
      * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row.
      */
     turn?: SessionTurn;
+    /**
+     * Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.
+     */
+    wake_reasons?: Array<string> | null;
     work_dir?: string;
+    /**
+     * The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.
+     */
+    worker_dir?: string;
 };
 
 export type SessionStopBody = {
@@ -21544,6 +21560,10 @@ export type GetV0CityByCityNameSessionsData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.
+         */
+        wake_reasons?: boolean;
     };
     url: '/v0/city/{cityName}/sessions';
 };
@@ -21731,6 +21751,10 @@ export type GetV0CityByCityNameStatusData = {
          * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
          */
         lite?: boolean;
+        /**
+         * When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+         */
+        fresh?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };

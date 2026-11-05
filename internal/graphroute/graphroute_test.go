@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/session"
@@ -113,7 +114,7 @@ func TestApplyGraphRouting_LegacyStampsRoutedTo(t *testing.T) {
 		},
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", beads.SessionStore{}, "city", &config.City{}, Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error for legacy recipe: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestApplyGraphRouting_LegacyNilAgent(t *testing.T) {
 			{ID: "mol-legacy.step1", Metadata: map[string]string{}},
 		},
 	}
-	err := ApplyGraphRouting(r, nil, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	err := ApplyGraphRouting(r, nil, "worker", nil, "", "", "", "", beads.SessionStore{}, "city", &config.City{}, Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestApplyGraphRouting_LegacyAttachmentKeepsRoutingOnSourceBeadOnly(t *testi
 		},
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	err := ApplyGraphRouting(r, &a, "worker", nil, "source-1", "", "", "", nil, "city", &config.City{}, Deps{})
+	err := ApplyGraphRouting(r, &a, "worker", nil, "source-1", "", "", "", beads.SessionStore{}, "city", &config.City{}, Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +173,7 @@ func TestApplyGraphRouting_LegacyNilCfg(t *testing.T) {
 			{ID: "step1", Metadata: map[string]string{}},
 		},
 	}
-	err := ApplyGraphRouting(r, nil, "worker", nil, "", "", "", "", nil, "city", nil, Deps{})
+	err := ApplyGraphRouting(r, nil, "worker", nil, "", "", "", "", beads.SessionStore{}, "city", nil, Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -192,7 +193,7 @@ func TestApplyGraphRouting_LegacyOverwritesExistingRouting(t *testing.T) {
 		},
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", beads.SessionStore{}, "city", &config.City{}, Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestApplyGraphRouting_LegacySkipsWorkflowKinds(t *testing.T) {
 		},
 	}
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", nil, "city", &config.City{}, Deps{})
+	err := ApplyGraphRouting(r, &a, "worker", nil, "", "", "", "", beads.SessionStore{}, "city", &config.City{}, Deps{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -260,7 +261,7 @@ func TestDecorateGraphWorkflowRecipe_SetsRootMetadata(t *testing.T) {
 		},
 	}
 	deps := Deps{Resolver: testAgentResolver{}}
-	err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", nil, "test-city", cfg, deps)
+	err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", beads.SessionStore{}, "test-city", cfg, deps)
 	if err != nil {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestDecorateGraphWorkflowRecipe_ControlRouteUsesOwningStoreScope(t *testing
 		"rig:fixture",
 		"city-worker",
 		"test-city--city-worker",
-		nil,
+		beads.SessionStore{},
 		"test-city",
 		cfg,
 		Deps{Resolver: testAgentResolver{}},
@@ -385,7 +386,7 @@ func TestDecorateGraphWorkflowRecipe_RigScopeDoesNotRetargetUnscopedControlRoute
 		"", // An unscoped root store must keep the city control dispatcher.
 		"city-worker",
 		"test-city--city-worker",
-		nil,
+		beads.SessionStore{},
 		"test-city",
 		cfg,
 		Deps{Resolver: testAgentResolver{}},
@@ -448,7 +449,7 @@ func TestDecorateGraphWorkflowRecipe_OwningStoreDoesNotRetargetExplicitWorkerSte
 		"rig:fixture",
 		"city-worker",
 		"",
-		nil,
+		beads.SessionStore{},
 		"test-city",
 		cfg,
 		Deps{Resolver: rigAwareDispatcherResolver{}},
@@ -491,7 +492,7 @@ func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
 		},
 	}
 	deps := Deps{Resolver: testAgentResolver{}}
-	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", nil, "test-city", cfg, deps); err != nil {
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "mayor", "test--mayor", beads.SessionStore{}, "test-city", cfg, deps); err != nil {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
 	root := r.Steps[0]
@@ -501,7 +502,7 @@ func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
 }
 
 func TestDecorateGraphWorkflowRecipe_NilRecipe(t *testing.T) {
-	err := DecorateGraphWorkflowRecipe(nil, nil, "", "", "", "", "", "", nil, "", nil, Deps{})
+	err := DecorateGraphWorkflowRecipe(nil, nil, "", "", "", "", "", "", beads.SessionStore{}, "", nil, Deps{})
 	if err == nil {
 		t.Error("expected error for nil recipe")
 	}
@@ -561,7 +562,7 @@ on_exhausted = "hard_fail"
 	}}
 	deps := Deps{Resolver: testAgentResolver{}}
 	a := cfg.Agents[0]
-	err = ApplyGraphRouting(recipe, &a, a.QualifiedName(), nil, "", "", "", "", nil, "test-city", cfg, deps)
+	err = ApplyGraphRouting(recipe, &a, a.QualifiedName(), nil, "", "", "", "", beads.SessionStore{}, "test-city", cfg, deps)
 	if err != nil {
 		t.Fatalf("ApplyGraphRouting: %v", err)
 	}
@@ -687,7 +688,7 @@ func TestResolveGraphStepBinding_CycleDetection(t *testing.T) {
 	resolving := make(map[string]bool)
 	fallback := GraphRouteBinding{QualifiedName: "default"}
 
-	_, err := ResolveGraphStepBinding("A", stepByID, nil, depsByStep, cache, resolving, fallback, "", nil, "", nil, Deps{})
+	_, err := ResolveGraphStepBinding("A", stepByID, nil, depsByStep, cache, resolving, fallback, "", beads.SessionStore{}, "", nil, Deps{})
 	if err == nil {
 		t.Error("expected cycle detection error")
 	}
@@ -713,7 +714,7 @@ func TestResolveGraphStepBinding_AssigneeTemplateTargetRejected(t *testing.T) {
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 
-	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beadstest.Sessions(beads.NewMemStore()), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
 	if err == nil {
 		t.Fatal("ResolveGraphStepBinding unexpectedly succeeded for template assignee")
 	}
@@ -750,12 +751,12 @@ func TestResolveGraphStepBinding_AssigneeDirectResolverBeatsTemplateTarget(t *te
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 	called := false
-	direct := func(beads.Store, string, string, *config.City, string, string) (string, bool, error) {
+	direct := func(beads.SessionStore, string, string, *config.City, string, string) (string, bool, error) {
 		called = true
 		return "materialized-worker", true, nil
 	}
 
-	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", store, cfg.Workspace.Name, cfg, Deps{
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beadstest.Sessions(store), cfg.Workspace.Name, cfg, Deps{
 		Resolver:              testAgentResolver{},
 		DirectSessionResolver: direct,
 	})
@@ -799,7 +800,7 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 
-	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", store, cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beadstest.Sessions(store), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ResolveGraphStepBinding: %v", err)
 	}
@@ -830,7 +831,7 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesMetadataOnlyRoute(t *
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 
-	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beadstest.Sessions(beads.NewMemStore()), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ResolveGraphStepBinding: %v", err)
 	}
@@ -867,7 +868,7 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolIgnoresMissingSessionName
 	cache := make(map[string]GraphRouteBinding)
 	resolving := make(map[string]bool)
 
-	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beadstest.Sessions(beads.NewMemStore()), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ResolveGraphStepBinding: %v", err)
 	}
@@ -880,7 +881,7 @@ func TestResolveGraphStepBinding_CanonicalSingletonPoolIgnoresMissingSessionName
 }
 
 func TestControlDispatcherBinding_NilConfig(t *testing.T) {
-	_, err := ControlDispatcherBinding(nil, "city", nil, "", Deps{})
+	_, err := ControlDispatcherBinding(beads.SessionStore{}, "city", nil, "", Deps{})
 	if err == nil {
 		t.Error("expected error for nil config")
 	}
@@ -888,7 +889,7 @@ func TestControlDispatcherBinding_NilConfig(t *testing.T) {
 
 func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	cfg := &config.City{}
-	_, err := ControlDispatcherBinding(nil, "city", cfg, "", Deps{})
+	_, err := ControlDispatcherBinding(beads.SessionStore{}, "city", cfg, "", Deps{})
 	if err == nil {
 		t.Error("expected error for nil resolver")
 	}
@@ -900,7 +901,7 @@ func TestControlDispatcherBinding_ConfiguredDispatcherUsesCanonicalQueue(t *test
 		Dir:  "gascity",
 	}}}
 
-	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
+	binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ControlDispatcherBinding: %v", err)
 	}
@@ -949,7 +950,7 @@ func TestControlDispatcherBinding_UsesDispatcherForGraphScope(t *testing.T) {
 		{name: "rig", rigContext: "fixture", want: "fixture/core.control-dispatcher"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			binding, err := ControlDispatcherBinding(nil, "test-city", cfg, tt.rigContext, Deps{Resolver: noMatchAgentResolver{}})
+			binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, tt.rigContext, Deps{Resolver: noMatchAgentResolver{}})
 			if err != nil {
 				t.Fatalf("ControlDispatcherBinding: %v", err)
 			}
@@ -985,7 +986,7 @@ func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
 		t.Fatalf("precondition: bound core.control-dispatcher should NOT match bare %q", config.ControlDispatcherAgentName)
 	}
 
-	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "", Deps{Resolver: noMatchAgentResolver{}})
+	binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "", Deps{Resolver: noMatchAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ControlDispatcherBinding(city): %v", err)
 	}
@@ -996,7 +997,7 @@ func TestControlDispatcherBinding_CityOnlyBoundDispatcher(t *testing.T) {
 		t.Fatalf("MetadataOnly = false, want true")
 	}
 
-	if _, err := ControlDispatcherBinding(nil, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}}); err == nil {
+	if _, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}}); err == nil {
 		t.Fatal("ControlDispatcherBinding(rig) error = nil, want missing rig dispatcher error")
 	}
 }
@@ -1014,7 +1015,7 @@ func TestControlDispatcherBinding_RigScopedDeterministicDispatcher(t *testing.T)
 		MaxActiveSessions: &maxActive,
 	}}}
 
-	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}})
+	binding, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "fixture", Deps{Resolver: noMatchAgentResolver{}})
 	if err != nil {
 		t.Fatalf("ControlDispatcherBinding: %v", err)
 	}
@@ -1168,7 +1169,7 @@ func (rigAwareDispatcherResolver) ResolveAgent(cfg *config.City, name, rigContex
 
 func TestControlDispatcherBinding_PlainCityDispatcherDoesNotSatisfyRigScope(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "control-dispatcher"}}}
-	_, err := ControlDispatcherBinding(nil, "test-city", cfg, "gc-contrib", Deps{Resolver: rigAwareDispatcherResolver{}})
+	_, err := ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, "gc-contrib", Deps{Resolver: rigAwareDispatcherResolver{}})
 	if err == nil {
 		t.Fatal("ControlDispatcherBinding error = nil, want missing rig dispatcher error")
 	}
@@ -1406,7 +1407,7 @@ func TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn(t *testing.T) {
 
 	err := DecorateGraphWorkflowRecipe(
 		recipe, nil, "", "city", "test-city", "city:test",
-		"polecat", "", nil, "test-city", cfg, Deps{Resolver: testAgentResolver{}},
+		"polecat", "", beads.SessionStore{}, "test-city", cfg, Deps{Resolver: testAgentResolver{}},
 	)
 	if err != nil {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
@@ -1517,7 +1518,7 @@ func TestApplyGraphRouting_OneShotPoolLeavesExecutableStepsIndependent(t *testin
 		},
 	}
 
-	if err := ApplyGraphRouting(recipe, &cfg.Agents[0], "worker", nil, "", "", "", "", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
+	if err := ApplyGraphRouting(recipe, &cfg.Agents[0], "worker", nil, "", "", "", "", beadstest.Sessions(beads.NewMemStore()), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
 		t.Fatalf("ApplyGraphRouting: %v", err)
 	}
 
@@ -1571,7 +1572,7 @@ func TestApplyGraphRouting_PersistentPoolPreservesDeclaredContinuationGroup(t *t
 		},
 	}
 
-	if err := ApplyGraphRouting(recipe, &cfg.Agents[0], "worker", nil, "", "", "", "", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
+	if err := ApplyGraphRouting(recipe, &cfg.Agents[0], "worker", nil, "", "", "", "", beadstest.Sessions(beads.NewMemStore()), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
 		t.Fatalf("ApplyGraphRouting: %v", err)
 	}
 
@@ -1630,7 +1631,7 @@ func TestDecorateGraphWorkflowRecipe_PerStepOneShotPoolTargetLeavesStepIndepende
 		},
 	}
 
-	if err := DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, nil, "", "", "", "", GraphRouteBinding{}, beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
+	if err := DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, nil, "", "", "", "", GraphRouteBinding{}, beadstest.Sessions(beads.NewMemStore()), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}}); err != nil {
 		t.Fatalf("DecorateGraphWorkflowRecipeWithDefaultBinding: %v", err)
 	}
 

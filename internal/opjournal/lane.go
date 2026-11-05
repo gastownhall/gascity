@@ -107,6 +107,13 @@ type ConversationView struct {
 	Dormant bool
 	// ContentHold holds normal-precedence content (D21).
 	ContentHold bool
+	// ContentSince is when the oldest content candidate the pass read
+	// became deliverable: its creation, or its not_before when later. The
+	// lane sets it on the view it hands Executor.Probe, zero when no
+	// content is a candidate; a host leaves it zero. An executor whose
+	// boundary waits on the runtime's activity reads how long content has
+	// waited on it from this (the busy session's starvation rule).
+	ContentSince time.Time
 }
 
 // Caps are a runtime's capabilities, static per runtime and provider family
@@ -667,7 +674,9 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		}
 		// Every attempt probes: a probe answers for the state its attempt
 		// read, and an attempt after a lost race read a moved state.
-		probe, err := exec.Probe(ctx, conv)
+		pconv := conv
+		pconv.ContentSince = rp.contentSince()
+		probe, err := exec.Probe(ctx, pconv)
 		if err == nil {
 			err = probe.Caps.validate()
 		}

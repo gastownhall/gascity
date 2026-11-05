@@ -183,7 +183,7 @@ func (g *foreignClaimGate) hasLocalRecord(identity string) bool {
 	if g.lookupsStopped {
 		return false
 	}
-	found, err := session.HasRecordAnsweringTo(g.sessionStore.Store, identity)
+	found, err := session.HasRecordAnsweringTo(g.sessionStore, identity)
 	if err != nil {
 		if g.lookupErr == nil {
 			g.lookupErr = err

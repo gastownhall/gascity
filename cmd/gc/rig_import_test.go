@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -545,7 +546,7 @@ func TestRigImportReleasesAndRetiresItsGatesThroughTheS3bLane(t *testing.T) {
 		}
 		return len(gates) == 1
 	}
-	if _, err := dispatch.ReleaseCrossStoreGates(binding, resolve); err != nil {
+	if _, err := dispatch.ReleaseCrossStoreGates(beadstest.Graph(binding), resolve); err != nil {
 		t.Fatal(err)
 	}
 	if !gateOpen() {
@@ -554,7 +555,7 @@ func TestRigImportReleasesAndRetiresItsGatesThroughTheS3bLane(t *testing.T) {
 	if err := rig.Close("gp-w1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dispatch.ReleaseCrossStoreGates(binding, resolve); err != nil {
+	if _, err := dispatch.ReleaseCrossStoreGates(beadstest.Graph(binding), resolve); err != nil {
 		t.Fatal(err)
 	}
 	if gateOpen() {

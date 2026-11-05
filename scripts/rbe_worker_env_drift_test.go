@@ -587,7 +587,8 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			upload := worker.Steps[upAt].Name
 
 			await := wf.Jobs["await-drift"]
-			if await.Needs != nil || await.If != defaultBranch || await.RunsOn != "ubuntu-latest" {
+			// Never on a canary run (rbe_worker_sha; TestRBEPoolCanaryInput).
+			if await.Needs != nil || await.If != defaultBranch+" && inputs.rbe_worker_sha == ''" || await.RunsOn != "ubuntu-latest" {
 				t.Errorf("await-drift needs %v if %q runs-on %q, want beside the worker on ubuntu-latest", await.Needs, await.If, await.RunsOn)
 			}
 			if len(await.Permissions) != 2 || await.Permissions["contents"] != "read" || await.Permissions["actions"] != "read" {

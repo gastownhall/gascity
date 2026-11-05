@@ -14,12 +14,13 @@ import (
 )
 
 func declaredBinding() ProgramStatusBinding {
-	relay := true
+	relay, hold := true, true
 	return ProgramStatusBinding{
-		Protocol: ProgramStatusProtocolOSC7501,
-		App:      "codex",
-		Relay:    &relay,
-		Env:      map[string]string{"PI_PROGRAM_STATUS": "1", "WITHHELD": ""},
+		Protocol:    ProgramStatusProtocolOSC7501,
+		App:         "codex",
+		Relay:       &relay,
+		HoldMidTurn: &hold,
+		Env:         map[string]string{"PI_PROGRAM_STATUS": "1", "WITHHELD": ""},
 	}
 }
 
@@ -42,12 +43,19 @@ func TestProgramStatusArmDerivation(t *testing.T) {
 		{name: "unknown mode disarms", binding: declared, mode: "bogus"},
 		{
 			name: "shadow arms", binding: declared, mode: runtime.ProgramStatusShadow, wantArmed: true,
-			wantArm: runtime.ProgramStatusArm{Capture: true, App: "codex", Relay: true},
+			wantArm: runtime.ProgramStatusArm{Capture: true, App: "codex", Relay: true, HoldMidTurn: true},
 			wantEnv: map[string]string{"PI_PROGRAM_STATUS": "1", "WITHHELD": ""},
 		},
 		{
-			name: "on arms without relay", binding: ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501}, mode: runtime.ProgramStatusOn, wantArmed: true,
+			name: "on arms without relay or hold", binding: ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501}, mode: runtime.ProgramStatusOn, wantArmed: true,
 			wantArm: runtime.ProgramStatusArm{Capture: true},
+		},
+		{
+			name: "explicit hold false", binding: ProgramStatusBinding{Protocol: ProgramStatusProtocolOSC7501, HoldMidTurn: boolPtr(false)}, mode: runtime.ProgramStatusOn, wantArmed: true,
+			wantArm: runtime.ProgramStatusArm{Capture: true},
+		},
+		{
+			name: "hold without a declaration arms nothing", binding: ProgramStatusBinding{HoldMidTurn: boolPtr(true)}, mode: runtime.ProgramStatusOn,
 		},
 	}
 	for _, tc := range cases {
@@ -203,13 +211,15 @@ command = "pi"
 protocol = "osc7501"
 app = "pi"
 relay = true
+hold_mid_turn = true
 env = { PI_PROGRAM_STATUS = "1" }
 `))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	got := cfg.Providers["pi"].ProgramStatus
-	if got.Protocol != "osc7501" || got.App != "pi" || got.Relay == nil || !*got.Relay || got.Env["PI_PROGRAM_STATUS"] != "1" {
+	if got.Protocol != "osc7501" || got.App != "pi" || got.Relay == nil || !*got.Relay || got.Env["PI_PROGRAM_STATUS"] != "1" ||
+		got.HoldMidTurn == nil || !*got.HoldMidTurn {
 		t.Fatalf("binding = %+v", got)
 	}
 }
@@ -231,6 +241,18 @@ func TestMergeProviderOverBuiltinMergesProgramStatus(t *testing.T) {
 	if ps.Protocol != ProgramStatusProtocolOSC7501 || ps.App != "claude-code" {
 		t.Errorf("scalars not inherited: %+v", ps)
 	}
+	if ps.HoldMidTurn != nil {
+		t.Errorf("hold_mid_turn = %v, want unset (neither layer sets it)", *ps.HoldMidTurn)
+	}
+	base.ProgramStatus.HoldMidTurn = &relayTrue
+	if held := MergeProviderOverBuiltin(base, child).ProgramStatus.HoldMidTurn; held == nil || !*held {
+		t.Errorf("hold_mid_turn = %v, want the base's true inherited", held)
+	}
+	unheld := MergeProviderOverBuiltin(base, ProviderSpec{ProgramStatus: ProgramStatusBinding{HoldMidTurn: &relayFalse}}).ProgramStatus.HoldMidTurn
+	if unheld == nil || *unheld {
+		t.Errorf("hold_mid_turn = %v, want the child's explicit false", unheld)
+	}
+	base.ProgramStatus.HoldMidTurn = nil
 	if ps.Relay == nil || *ps.Relay {
 		t.Errorf("relay = %v, want explicit false override", ps.Relay)
 	}
@@ -295,7 +317,8 @@ func TestDeepCopyProgramStatusBinding(t *testing.T) {
 	dup := deepCopyProviderSpec(spec)
 	dup.ProgramStatus.Env["PI_PROGRAM_STATUS"] = "x"
 	*dup.ProgramStatus.Relay = false
-	if spec.ProgramStatus.Env["PI_PROGRAM_STATUS"] != "1" || !*spec.ProgramStatus.Relay {
+	*dup.ProgramStatus.HoldMidTurn = false
+	if spec.ProgramStatus.Env["PI_PROGRAM_STATUS"] != "1" || !*spec.ProgramStatus.Relay || !*spec.ProgramStatus.HoldMidTurn {
 		t.Error("deepCopyProviderSpec aliases the program_status binding")
 	}
 
@@ -303,7 +326,8 @@ func TestDeepCopyProgramStatusBinding(t *testing.T) {
 	rdup := deepCopyResolvedProvider(r)
 	rdup.ProgramStatus.Env["PI_PROGRAM_STATUS"] = "x"
 	*rdup.ProgramStatus.Relay = false
-	if r.ProgramStatus.Env["PI_PROGRAM_STATUS"] != "1" || !*r.ProgramStatus.Relay {
+	*rdup.ProgramStatus.HoldMidTurn = false
+	if r.ProgramStatus.Env["PI_PROGRAM_STATUS"] != "1" || !*r.ProgramStatus.Relay || !*r.ProgramStatus.HoldMidTurn {
 		t.Error("deepCopyResolvedProvider aliases the program_status binding")
 	}
 }
@@ -327,6 +351,7 @@ env = { A = "1" }
 	fs.Files["/city/frag.toml"] = []byte(`
 [providers.p.program_status]
 relay = true
+hold_mid_turn = true
 env = { B = "2" }
 `)
 	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
@@ -339,6 +364,9 @@ env = { B = "2" }
 	}
 	if ps.Relay == nil || !*ps.Relay {
 		t.Errorf("relay = %v, want fragment true", ps.Relay)
+	}
+	if ps.HoldMidTurn == nil || !*ps.HoldMidTurn {
+		t.Errorf("hold_mid_turn = %v, want fragment true", ps.HoldMidTurn)
 	}
 	if !maps.Equal(ps.Env, map[string]string{"A": "1", "B": "2"}) {
 		t.Errorf("env = %v, want per-key merge", ps.Env)
@@ -391,7 +419,7 @@ func TestProgramStatusKeysAreKnownTOMLKeys(t *testing.T) {
 	for _, k := range knownTOMLKeys() {
 		known[k] = true
 	}
-	for _, k := range []string{"program_status", "protocol", "app", "relay"} {
+	for _, k := range []string{"program_status", "protocol", "app", "relay", "hold_mid_turn"} {
 		if !known[k] {
 			t.Errorf("knownTOMLKeys missing %q", k)
 		}
@@ -400,7 +428,7 @@ func TestProgramStatusKeysAreKnownTOMLKeys(t *testing.T) {
 
 func TestProgramStatusBindingDecodesWithoutUndecodedKeys(t *testing.T) {
 	var spec ProviderSpec
-	md, err := toml.Decode("[program_status]\nprotocol = \"osc7501\"\napp = \"a\"\nrelay = false\nenv = { K = \"v\" }\n", &spec)
+	md, err := toml.Decode("[program_status]\nprotocol = \"osc7501\"\napp = \"a\"\nrelay = false\nhold_mid_turn = true\nenv = { K = \"v\" }\n", &spec)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -411,18 +439,20 @@ func TestProgramStatusBindingDecodesWithoutUndecodedKeys(t *testing.T) {
 
 func TestProviderSpecFromWorkerCarriesProgramStatus(t *testing.T) {
 	spec := providerSpecFromWorker(workerbuiltin.BuiltinProviderSpec{
-		Command:               "agent",
-		ProgramStatusProtocol: ProgramStatusProtocolOSC7501,
-		ProgramStatusApp:      "agent",
-		ProgramStatusRelay:    true,
-		ProgramStatusEnv:      map[string]string{"K": "v"},
+		Command:                  "agent",
+		ProgramStatusProtocol:    ProgramStatusProtocolOSC7501,
+		ProgramStatusApp:         "agent",
+		ProgramStatusRelay:       true,
+		ProgramStatusHoldMidTurn: true,
+		ProgramStatusEnv:         map[string]string{"K": "v"},
 	})
 	ps := spec.ProgramStatus
-	if ps.Protocol != ProgramStatusProtocolOSC7501 || ps.App != "agent" || ps.Relay == nil || !*ps.Relay || ps.Env["K"] != "v" {
+	if ps.Protocol != ProgramStatusProtocolOSC7501 || ps.App != "agent" || ps.Relay == nil || !*ps.Relay || ps.Env["K"] != "v" ||
+		ps.HoldMidTurn == nil || !*ps.HoldMidTurn {
 		t.Fatalf("binding = %+v", ps)
 	}
 	undeclared := providerSpecFromWorker(workerbuiltin.BuiltinProviderSpec{Command: "agent"})
-	if undeclared.ProgramStatus.Relay != nil || undeclared.ProgramStatus.Env != nil || undeclared.ProgramStatus.Declared() {
+	if undeclared.ProgramStatus.Relay != nil || undeclared.ProgramStatus.HoldMidTurn != nil || undeclared.ProgramStatus.Env != nil || undeclared.ProgramStatus.Declared() {
 		t.Fatalf("undeclared builtin produced binding %+v", undeclared.ProgramStatus)
 	}
 }

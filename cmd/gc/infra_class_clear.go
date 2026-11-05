@@ -89,6 +89,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -170,6 +171,9 @@ type infraClearResult struct {
 	// LostCrossEdges is every cross-store edge any run of this city's clears
 	// could not keep, as recorded in the cleared note.
 	LostCrossEdges []string
+	// Recorded counts this run's unrestorable edges recorded on their work
+	// beads (gc.migrated_cross_edges).
+	Recorded int
 }
 
 // infraUnprovenSourceRows is the clear's refusal for work-store infrastructure
@@ -242,7 +246,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
-	rows, err := readInfraSnapshotAt(source, manifest.Generation)
+	rows, allIDs, err := readInfraSnapshotWithIDs(source, manifest.Generation)
 	if err != nil {
 		return result, err
 	}
@@ -328,17 +332,49 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 			}
 		}
 	}
+	// Each row's edges and their payloads: in batches over every row the work
+	// store holds when it lists edges so (a row's dependents are the down
+	// edges of whatever holds them), otherwise both directions row by row.
+	var fresh []beads.Bead
+	for _, b := range retained {
+		if _, ok := sessionBackup[b.ID]; !ok {
+			fresh = append(fresh, b)
+		}
+	}
+	read := make(map[string]infraBackupEntry, len(fresh))
+	if batch, ok := beads.As[beads.DependencyBatchLister](source); ok && len(fresh) > 0 {
+		down, err := readInfraDownEdges(batch, source, sortedMapKeys(allIDs))
+		if err != nil {
+			return result, err
+		}
+		payloads := map[beads.DepPair]string{}
+		if _, blind := beads.DepMetadataAbsent(source); !blind {
+			reader, _ := beads.As[beads.DepMetadataReader](source)
+			batchReader, _ := beads.As[beads.DepMetadataBatchReader](source)
+			wanted := infraBackupEdgeFilter(fresh, retainedIDs)
+			if payloads, err = readInfraPayloads(batchReader, reader, down, wanted); err != nil {
+				return result, err
+			}
+		}
+		for _, entry := range infraBackupEntriesFrom(fresh, down, payloads, retainedIDs) {
+			read[entry.Bead.ID] = entry
+		}
+	} else {
+		for _, b := range fresh {
+			entry, err := infraBackupEntryFor(source, b, retainedIDs)
+			if err != nil {
+				return result, err
+			}
+			read[b.ID] = entry
+		}
+	}
 	entries := make([]infraBackupEntry, 0, len(retained))
 	for _, b := range retained {
 		if prior, ok := sessionBackup[b.ID]; ok {
 			entries = append(entries, prior)
 			continue
 		}
-		entry, err := infraBackupEntryFor(source, b, retainedIDs)
-		if err != nil {
-			return result, err
-		}
-		entries = append(entries, entry)
+		entries = append(entries, read[b.ID])
 	}
 	merged := mergeInfraBackupEntries(previous, entries)
 	if len(entries) > 0 {
@@ -377,26 +413,81 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	// store can no longer stand in for the binding, a binding root that later
 	// reads as empty must not be mistaken for a city with nothing to move, and
 	// a run killed from here on is resumed from the session it names.
+	//
+	// Pending is written once, whole, and does not shrink as chunks go (the
+	// design's §3.3 had it shrink per chunk; that is wrong). A resumed run
+	// takes its session from Pending, and the session is what the plan above
+	// is decided over: the kept cross edges into a row an earlier chunk
+	// already removed are re-added only after the delete loop, and only a
+	// session that still names that row finds them in its backup entry. A
+	// Pending that dropped the row would resume without them, and on a
+	// cascading or bd-like store those edges would be gone for good, with no
+	// warning (TestReviewCrashResumeKeepsOpenBlockerEdgeOnCascadingBackend).
+	// The same session tells a removed row's leftover internal edges from an
+	// edge its backup does not record.
 	pending := sortedMapKeys(session)
 	note = infraClearedNote{Binding: target.Binding, Database: target.Database, Backup: target.RetainedBackupPath(), Pending: pending, LostCrossEdges: note.LostCrossEdges}
 	if err := writeInfraClearedNote(cityPath, note); err != nil {
 		return result, err
 	}
 
-	for _, entry := range entries {
-		id := entry.Bead.ID
-		if err := infraClearBeforeDelete(id); err != nil {
-			return result, err
-		}
-		for _, edge := range entry.Deps {
-			if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return result, fmt.Errorf("removing dep %s from the work store: %w", edge, err)
+	// The rows go in chunks, and every row is detached before it goes: each
+	// edge touching it is removed and the remainder proven empty
+	// (detachInfraClearedRow), so a native-Dolt or bd delete has no neighbor
+	// whose text it would rewrite (#8786). A store that deletes in batches
+	// has the whole chunk detached and then removed in one call, one commit
+	// on Dolt; any other has each row detached and deleted in turn. The budget is checked between chunks; a paused
+	// clear leaves the note pending, and the same command finishes it from
+	// the session the note names. A wrapper that forwards DeleteBatch over a
+	// store without it reports beads.ErrBatchDeleteUnsupported, and the rows
+	// then go one by one.
+	deleter, canBatch := beads.As[beads.BatchDeleter](source)
+	err = runInfraBatches(infraEngineClockFor(cityPath), "clearing", len(entries), infraClearChunk, func(start, end int) error {
+		chunk := entries[start:end]
+		if !canBatch {
+			for i, entry := range chunk {
+				if err := infraClearBeforeDelete(entry.Bead.ID); err != nil {
+					return err
+				}
+				if err := detachInfraClearedRow(source, chunk[i:i+1], session, allIDs); err != nil {
+					return err
+				}
+				if err := source.Delete(entry.Bead.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing the retained copy %s from the work store: %w", entry.Bead.ID, err)
+				}
+				result.Cleared++
 			}
+			return nil
 		}
-		if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return result, fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
+		ids := make([]string, 0, len(chunk))
+		for _, entry := range chunk {
+			if err := infraClearBeforeDelete(entry.Bead.ID); err != nil {
+				return err
+			}
+			ids = append(ids, entry.Bead.ID)
 		}
-		result.Cleared++
+		if err := detachInfraClearedRow(source, chunk, session, allIDs); err != nil {
+			return err
+		}
+		err := deleter.DeleteBatch(ids)
+		if errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			canBatch = false
+			for _, id := range ids {
+				if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
+				}
+				result.Cleared++
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("removing %d retained cop(ies) from the work store: %w", len(ids), err)
+		}
+		result.Cleared += len(ids)
+		return nil
+	})
+	if err != nil {
+		return result, err
 	}
 	for _, edge := range release {
 		if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
@@ -404,12 +495,40 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		}
 	}
 	result.Released = release
+	dropped := map[string][]infraBackupEdge{}
 	for _, edge := range keep {
 		if err := infraRestoreKeptEdge(source, edge); err != nil {
 			result.Unrestorable = append(result.Unrestorable, fmt.Sprintf("%s (%v)", edge, err))
+			dropped[edge.IssueID] = append(dropped[edge.IssueID], edge)
 			continue
 		}
 		result.Kept = append(result.Kept, edge)
+	}
+	// Each edge the work store refused is recorded on its work bead, in the
+	// rig importer's shape, so the bead keeps its provenance (ga-4tnypl). One
+	// metadata write per work bead; a resumed run adds nothing twice.
+	movedStatus := make(map[string]string, len(merged))
+	for _, entry := range merged {
+		movedStatus[entry.Bead.ID] = entry.Bead.Status
+	}
+	for _, workID := range sortedMapKeys(dropped) {
+		work, err := source.Get(workID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return result, fmt.Errorf("reading %s to record the cross-store edges the work store dropped: %w", workID, err)
+		}
+		value, changed, err := mergeCrossEdgeRecords(work.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], infraDroppedCrossEdgeRecords(dropped[workID], movedStatus))
+		if err != nil {
+			return result, fmt.Errorf("recording the cross-store edges the work store dropped on %s: %w", workID, err)
+		}
+		if changed {
+			if err := source.SetMetadata(workID, beadmeta.MigratedCrossEdgesMetadataKey, value); err != nil {
+				return result, fmt.Errorf("recording the cross-store edges the work store dropped on %s: %w", workID, err)
+			}
+		}
+		result.Recorded += len(dropped[workID])
 	}
 
 	after, err := readInfraSnapshotAt(source, manifest.Generation)
@@ -435,6 +554,82 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	result.LostCrossEdges = note.LostCrossEdges
 	return result, nil
+}
+
+// detachInfraClearedRow removes every edge touching a chunk of rows before
+// they are deleted, so the delete has no neighbor to follow. A native-Dolt or
+// bd work store's delete rewrites each linked neighbor's mention of the
+// deleted id to "[deleted:<id>]" (ga-w4p3pw); the rows are moved, not deleted,
+// and a work bead that cites one must keep its text. Each row's own edges and
+// its dependents outside the session are in its backup entry; a dependent
+// inside the session is a row this clear also removes, whose edge its own
+// entry records. The kept cross edges are re-added after the delete loop
+// (infraRestoreKeptEdge). An edge the backup does not record refuses the
+// delete rather than lose it. listed is every row the work store's list
+// returned, which the batched backup read the dependents from.
+//
+// The edges go in beads.DepBatchRemover calls of infraDetachEdgeBatch, one
+// commit each on Dolt, where the store has one: DepRemove commits once per
+// edge. On native Dolt that
+// halves the cost (measured on a loaded host: about 130 ms an edge one by
+// one, 60 ms in one transaction, where the library re-derives the blocked
+// state the edge touched). The remainder is then read row by row, and the
+// session-internal edges it finds go in further calls.
+func detachInfraClearedRow(source beads.Store, chunk []infraBackupEntry, session, listed map[string]bool) error {
+	batch, canBatch := beads.As[beads.DepBatchRemover](source)
+	remove := func(pairs []beads.DepPair) error {
+		for start := 0; start < len(pairs); start += infraDetachEdgeBatch {
+			sub := pairs[start:min(start+infraDetachEdgeBatch, len(pairs))]
+			if canBatch {
+				err := batch.DepRemoveBatch(sub)
+				if !errors.Is(err, beads.ErrDepRemoveBatchUnsupported) {
+					if err != nil {
+						return fmt.Errorf("removing %d dep(s) of the retained copies from the work store: %w", len(sub), err)
+					}
+					continue
+				}
+				canBatch = false
+			}
+			for _, p := range sub {
+				if err := source.DepRemove(p.IssueID, p.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing dep %s -> %s from the work store: %w", p.IssueID, p.DependsOnID, err)
+				}
+			}
+		}
+		return nil
+	}
+	var recorded []beads.DepPair
+	for _, entry := range chunk {
+		for _, edges := range [][]infraBackupEdge{entry.Deps, entry.Dependents} {
+			for _, edge := range edges {
+				recorded = append(recorded, beads.DepPair{IssueID: edge.IssueID, DependsOnID: edge.DependsOnID})
+			}
+		}
+	}
+	if err := remove(recorded); err != nil {
+		return err
+	}
+	var internal []beads.DepPair
+	for _, entry := range chunk {
+		id := entry.Bead.ID
+		for _, dir := range []string{"down", "up"} {
+			live, err := source.DepList(id, dir)
+			if err != nil {
+				return fmt.Errorf("listing the remaining edges of %s: %w", id, err)
+			}
+			for _, d := range live {
+				if dir == "up" && session[d.IssueID] {
+					internal = append(internal, beads.DepPair{IssueID: d.IssueID, DependsOnID: d.DependsOnID})
+					continue
+				}
+				if dir == "up" && !listed[d.IssueID] {
+					return fmt.Errorf("removing the retained copy %s from the work store: %s depends on it -[%s]->, and the work store's list does not return %s (a row whose metadata does not parse is left out of the list), so the backup could not record the edge; deleting %s would drop it and rewrite the text of %s. Repair or remove %s, then run the command again. The row stays in the work store", id, d.IssueID, d.Type, d.IssueID, id, d.IssueID, d.IssueID)
+				}
+				return fmt.Errorf("removing the retained copy %s from the work store: it still has the edge %s -[%s]-> %s, which its backup entry does not record; deleting it would drop the edge and rewrite the text of %s. The row stays in the work store", id, d.IssueID, d.Type, d.DependsOnID, d.IssueID)
+			}
+		}
+	}
+	return remove(internal)
 }
 
 // announceInfraCrossEdges prints, before any row is removed, every edge from a
@@ -727,7 +922,8 @@ func verifyInfraRetainedBackupAt(path string, want []infraBackupEntry) error {
 }
 
 // infraBackupSourceStore serves a retained-source backup as a migration
-// source: the rows and their within-backup edges in a MemStore, plus the edge
+// source: the rows, their within-backup edges and their blocking edges onto
+// work in a MemStore, plus the edge
 // payloads the backup recorded, so the copy carries them exactly as it would
 // from the work store.
 type infraBackupSourceStore struct {
@@ -760,7 +956,10 @@ func openInfraBackupSource(target infraBindingTarget) (beads.Store, error) {
 	for _, e := range entries {
 		rows = append(rows, e.Bead)
 		for _, edge := range e.Deps {
-			if !held[edge.DependsOnID] {
+			// An edge onto a bead outside the backup is a hold on work the copy
+			// carries as a cross-store gate (infra_class_holds.go); the rest
+			// stay out, as the copy leaves them.
+			if !held[edge.DependsOnID] && !beads.IsReadyBlockingDependencyType(edge.Type) {
 				continue
 			}
 			deps = append(deps, edge.dep())
@@ -785,7 +984,21 @@ func describeInfraClear(result infraClearResult) string {
 	if len(result.Kept) > 0 {
 		fmt.Fprintf(&b, "; %d cross-store edge(s) kept", len(result.Kept))
 	}
+	if result.Recorded > 0 {
+		fmt.Fprintf(&b, "; %d dropped cross-store edge(s) recorded on their work bead(s) (%s)", result.Recorded, beadmeta.MigratedCrossEdgesMetadataKey)
+	}
 	return b.String()
+}
+
+// infraDroppedCrossEdgeRecords is the gc.migrated_cross_edges entry for each
+// edge from a work bead into a moved bead that the work store refused. status
+// is each moved bead's status at the clear.
+func infraDroppedCrossEdgeRecords(edges []infraBackupEdge, status map[string]string) []rigCrossEdgeRecord {
+	out := make([]rigCrossEdgeRecord, 0, len(edges))
+	for _, e := range edges {
+		out = append(out, rigCrossEdgeRecord{Dir: "out", Type: e.Type, Other: e.DependsOnID, OtherStatus: status[e.DependsOnID], Payload: e.Payload, Action: rigEdgeDropped})
+	}
+	return out
 }
 
 // infraClearedNote is the city-side record that this city's work store was

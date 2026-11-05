@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -45,13 +46,13 @@ func TestClientSuspendCity(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotBody map[string]any
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -71,13 +72,13 @@ func TestClientSuspendCity(t *testing.T) {
 
 func TestClientWaitForEventRequestsReplayCursorForCityStream(t *testing.T) {
 	seen := make(chan url.Values, 1)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/events/stream" {
 			t.Fatalf("path = %q, want /v0/city/alpha/events/stream", r.URL.Path)
 		}
 		seen <- r.URL.Query()
 		w.Header().Set("Content-Type", "text/event-stream")
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -99,13 +100,13 @@ func TestClientWaitForEventSupervisorStreamCursorHandling(t *testing.T) {
 	//     supervisor returns when no provider existed at capture — is forwarded
 	//     verbatim so an async caller still catches its result.
 	seen := make(chan url.Values, 1)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/events/stream" {
 			t.Errorf("path = %q, want /v0/events/stream", r.URL.Path)
 		}
 		seen <- r.URL.Query()
 		w.Header().Set("Content-Type", "text/event-stream")
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -123,13 +124,13 @@ func TestClientWaitForEventSupervisorStreamCursorHandling(t *testing.T) {
 
 func TestClientWaitForEventUsesAcceptedCursorForCityStream(t *testing.T) {
 	seen := make(chan url.Values, 1)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/events/stream" {
 			t.Fatalf("path = %q, want /v0/city/alpha/events/stream", r.URL.Path)
 		}
 		seen <- r.URL.Query()
 		w.Header().Set("Content-Type", "text/event-stream")
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -143,13 +144,13 @@ func TestClientWaitForEventUsesAcceptedCursorForCityStream(t *testing.T) {
 
 func TestClientWaitForEventUsesAcceptedCursorForSupervisorStream(t *testing.T) {
 	seen := make(chan url.Values, 1)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/events/stream" {
 			t.Fatalf("path = %q, want /v0/events/stream", r.URL.Path)
 		}
 		seen <- r.URL.Query()
 		w.Header().Set("Content-Type", "text/event-stream")
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -162,9 +163,9 @@ func TestClientWaitForEventUsesAcceptedCursorForSupervisorStream(t *testing.T) {
 }
 
 func TestClientWaitForEventReportsNonOKSSEStatus(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"detail":"stream unavailable"}`, http.StatusServiceUnavailable)
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -179,10 +180,10 @@ func TestClientWaitForEventReportsNonOKSSEStatus(t *testing.T) {
 
 func TestClientWaitForEventReportsScannerError(t *testing.T) {
 	largePayload := strings.Repeat("x", 5*1024*1024)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: " + largePayload + "\n\n"))
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -199,10 +200,10 @@ func TestClientWaitForEventHandlesMultiLineDataFrames(t *testing.T) {
 	frame := "event: tagged_event\n" +
 		`data: {"type":"request.result.session.message","payload":` + "\n" +
 		`data: {"request_id":"req-1","session_id":"gc-1"}}` + "\n\n"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(frame))
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -218,10 +219,10 @@ func TestClientWaitForEventHandlesMultiLineDataFrames(t *testing.T) {
 func TestClientWaitForEventHandlesEventFieldWithoutSpace(t *testing.T) {
 	frame := "event:tagged_event\n" +
 		`data: {"type":"request.result.session.message","payload":{"request_id":"req-1","session_id":"gc-1"}}` + "\n\n"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(frame))
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -236,10 +237,10 @@ func TestClientWaitForEventHandlesEventFieldWithoutSpace(t *testing.T) {
 
 func TestClientWaitForEventReportsMalformedMatchingSuccessPayload(t *testing.T) {
 	frame := `data: {"type":"request.result.session.message","payload":"not an object"}` + "\n\n"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(frame))
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -254,10 +255,10 @@ func TestClientWaitForEventReportsMalformedMatchingSuccessPayload(t *testing.T) 
 
 func TestClientWaitForEventReportsMalformedRequestFailedPayload(t *testing.T) {
 	frame := `data: {"type":"request.failed","payload":"not an object"}` + "\n\n"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(frame))
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -271,10 +272,10 @@ func TestClientWaitForEventReportsMalformedRequestFailedPayload(t *testing.T) {
 }
 
 func TestClientWaitForEventHonorsContextCancellation(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		<-r.Context().Done()
-	}))
+	})))
 	defer ts.Close()
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -288,11 +289,11 @@ func TestClientWaitForEventHonorsContextCancellation(t *testing.T) {
 
 func TestClientResumeCity(t *testing.T) {
 	var gotBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -306,12 +307,12 @@ func TestClientResumeCity(t *testing.T) {
 
 func TestClientSuspendAgent(t *testing.T) {
 	var gotMethod, gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -329,11 +330,11 @@ func TestClientSuspendAgent(t *testing.T) {
 
 func TestClientResumeAgent(t *testing.T) {
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -347,11 +348,11 @@ func TestClientResumeAgent(t *testing.T) {
 
 func TestClientSuspendRig(t *testing.T) {
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -365,11 +366,11 @@ func TestClientSuspendRig(t *testing.T) {
 
 func TestClientResumeRig(t *testing.T) {
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -386,7 +387,7 @@ func TestClientErrorResponse(t *testing.T) {
 	// generated client decodes the body into a typed ErrorModel and the
 	// adapter reads the Detail field directly — there's no hand-written
 	// JSON parsing or legacy format fallback anywhere in the path.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -394,7 +395,7 @@ func TestClientErrorResponse(t *testing.T) {
 			"status": http.StatusNotFound,
 			"detail": "not_found: agent 'nope' not found",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -409,11 +410,11 @@ func TestClientErrorResponse(t *testing.T) {
 
 func TestClientQualifiedAgentName(t *testing.T) {
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -433,7 +434,7 @@ func TestClientQualifiedAgentName(t *testing.T) {
 // server's not-found detail as an error.
 func TestClientGetAgent(t *testing.T) {
 	var gotPaths []string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPaths = append(gotPaths, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
 		case "/v0/city/alpha/agent/overseer":
@@ -447,7 +448,7 @@ func TestClientGetAgent(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"title":"Agent Not Found","status":404,"detail":"agent myrig/nope not found"}`))
 		}
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -487,7 +488,7 @@ func TestClientConnError(t *testing.T) {
 }
 
 func TestClientAPIErrorNotConnError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -495,7 +496,7 @@ func TestClientAPIErrorNotConnError(t *testing.T) {
 			"status": http.StatusBadRequest,
 			"detail": "bad_request: malformed payload",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -511,7 +512,7 @@ func TestClientAPIErrorNotConnError(t *testing.T) {
 func TestClientReadOnlyFallback(t *testing.T) {
 	// Server returns 403 Problem Details with a `read_only:` prefix in
 	// detail — should trigger ShouldFallback.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -519,7 +520,7 @@ func TestClientReadOnlyFallback(t *testing.T) {
 			"status": http.StatusForbidden,
 			"detail": "read_only: mutations disabled: server bound to non-localhost address",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -550,7 +551,7 @@ func TestClientCacheNotLiveFallback(t *testing.T) {
 	// Server returns 503 Problem Details with a `cache_not_live:` prefix.
 	// Read-path routing must classify this as fallbackable so the CLI lands
 	// on raw bd while the supervisor cache is priming or reconciling.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -558,7 +559,7 @@ func TestClientCacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming or reconciling; retry via fallback",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -580,7 +581,7 @@ func TestClientGenericFiveHundredNoFallbackByDefault(t *testing.T) {
 	// transport/5xx-style fallback via IsConnError semantics. This test
 	// documents the boundary: apiErrorFromResponse only classifies
 	// specific prefixes; other 5xx surface as generic errors.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -588,7 +589,7 @@ func TestClientGenericFiveHundredNoFallbackByDefault(t *testing.T) {
 			"status": http.StatusInternalServerError,
 			"detail": "internal: something exploded",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -603,7 +604,7 @@ func TestClientGenericFiveHundredNoFallbackByDefault(t *testing.T) {
 
 func TestClientBusinessErrorNoFallback(t *testing.T) {
 	// A 404 not_found is a business error — should NOT trigger fallback.
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -611,7 +612,7 @@ func TestClientBusinessErrorNoFallback(t *testing.T) {
 			"status": http.StatusNotFound,
 			"detail": "not_found: agent 'nope' not found",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -631,7 +632,7 @@ func TestClientBusinessErrorNoFallback(t *testing.T) {
 // would lose the detail and surface a bare status. GetBead (404) and ListBeads
 // (503) exercise two different per-status fields.
 func TestClientEnumeratedErrorResponseCarriesProblemDetail(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		if r.URL.Path == "/v0/city/alpha/beads" {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -652,7 +653,7 @@ func TestClientEnumeratedErrorResponseCarriesProblemDetail(t *testing.T) {
 			"status": http.StatusNotFound,
 			"detail": "bead bd-x not found",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -675,12 +676,12 @@ func TestClientEnumeratedErrorResponseCarriesProblemDetail(t *testing.T) {
 
 func TestClientRestartRig(t *testing.T) {
 	var gotMethod, gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -696,7 +697,7 @@ func TestClientRestartRig(t *testing.T) {
 }
 
 func TestClientListServices(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/services" {
 			t.Fatalf("path = %q, want /v0/city/alpha/services", r.URL.Path)
 		}
@@ -713,7 +714,7 @@ func TestClientListServices(t *testing.T) {
 			}},
 			"total": 1,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -727,7 +728,7 @@ func TestClientListServices(t *testing.T) {
 }
 
 func TestClientGetService(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/service/healthz" {
 			t.Fatalf("path = %q, want /v0/city/alpha/service/healthz", r.URL.Path)
 		}
@@ -741,7 +742,7 @@ func TestClientGetService(t *testing.T) {
 			LocalState:       "ready",
 			PublicationState: "private",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -755,7 +756,7 @@ func TestClientGetService(t *testing.T) {
 }
 
 func TestClientListCities(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/cities" {
 			t.Fatalf("path = %q, want /v0/cities", r.URL.Path)
 		}
@@ -768,7 +769,7 @@ func TestClientListCities(t *testing.T) {
 			}},
 			"total": 1,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewClient(ts.URL)
@@ -783,14 +784,14 @@ func TestClientListCities(t *testing.T) {
 
 func TestCityScopedClientRewritesPaths(t *testing.T) {
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"items": []workspacesvc.Status{},
 			"total": 0,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "bright-lights")
@@ -804,11 +805,11 @@ func TestCityScopedClientRewritesPaths(t *testing.T) {
 
 func TestClientKillSession(t *testing.T) {
 	var gotPath string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -826,7 +827,7 @@ func TestClientSendSessionMessageWaitsForResultEvent(t *testing.T) {
 	}
 	var gotHeader string
 	var sawPost bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/messages":
 			gotHeader = r.Header.Get("X-GC-Request")
@@ -851,7 +852,7 @@ func TestClientSendSessionMessageWaitsForResultEvent(t *testing.T) {
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -867,7 +868,7 @@ func TestClientSendSessionMessageWaitsForResultEvent(t *testing.T) {
 }
 
 func TestClientListRigs(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/rigs" {
 			t.Fatalf("path = %q, want /v0/city/alpha/rigs", r.URL.Path)
 		}
@@ -881,7 +882,7 @@ func TestClientListRigs(t *testing.T) {
 			},
 			"total": 2,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -904,7 +905,7 @@ func TestClientListRigs(t *testing.T) {
 }
 
 func TestClientSendSessionMessageReportsAsyncFailure(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/messages":
 			w.Header().Set("Content-Type", "application/json")
@@ -920,7 +921,7 @@ func TestClientSendSessionMessageReportsAsyncFailure(t *testing.T) {
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -940,7 +941,7 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 		Resume  bool   `json:"resume"`
 	}
 	var sawPost bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/submit":
 			sawPost = true
@@ -966,7 +967,7 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -990,7 +991,7 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 }
 
 func TestClientSubmitSessionReportsAsyncFailure(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-123/submit":
 			w.Header().Set("Content-Type", "application/json")
@@ -1006,7 +1007,7 @@ func TestClientSubmitSessionReportsAsyncFailure(t *testing.T) {
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1020,7 +1021,7 @@ func TestClientSubmitSessionReportsAsyncFailure(t *testing.T) {
 }
 
 func TestClientListRigs_CacheNotLiveFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1028,7 +1029,7 @@ func TestClientListRigs_CacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1044,7 +1045,7 @@ func TestClientListRigs_CacheNotLiveFallback(t *testing.T) {
 func TestClientListRigs_ConnErrorFallback(t *testing.T) {
 	// Pointing at a closed listener produces a transport-level error
 	// classified as fallbackable by ShouldFallback.
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1058,7 +1059,7 @@ func TestClientListRigs_ConnErrorFallback(t *testing.T) {
 }
 
 func TestClientListSessions(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/sessions" {
 			t.Fatalf("path = %q, want /v0/city/alpha/sessions", r.URL.Path)
 		}
@@ -1087,6 +1088,7 @@ func TestClientListSessions(t *testing.T) {
 						"template":     "mayor",
 						"state":        "active",
 						"title":        "Overseer",
+						"agent_name":   "mayor",
 						"session_name": "mayor",
 						"provider":     "claude",
 						"created_at":   "2026-04-23T10:00:00Z",
@@ -1108,6 +1110,7 @@ func TestClientListSessions(t *testing.T) {
 						"template":     "polecat",
 						"state":        "active",
 						"title":        "Worker",
+						"agent_name":   "polecat",
 						"session_name": "polecat",
 						"provider":     "claude",
 						"created_at":   "2026-04-23T09:00:00Z",
@@ -1123,19 +1126,19 @@ func TestClientListSessions(t *testing.T) {
 			t.Errorf("unexpected extra page request, cursor = %q", cursor)
 			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 2}) //nolint:errcheck
 		}
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListSessions("active", "mayor", false)
+	got, err := c.ListSessions(ListSessionsOpts{State: "active", Template: "mayor"})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(got.Body) != 2 {
-		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body))
+	if len(got.Body.Sessions) != 2 {
+		t.Fatalf("items = %d, want 2 (both pages merged)", len(got.Body.Sessions))
 	}
-	if got.Body[0].ID != "gc-abc" || got.Body[1].ID != "gc-def" {
-		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body[0].ID, got.Body[1].ID)
+	if got.Body.Sessions[0].ID != "gc-abc" || got.Body.Sessions[1].ID != "gc-def" {
+		t.Errorf("merged ids = %q,%q; want gc-abc,gc-def", got.Body.Sessions[0].ID, got.Body.Sessions[1].ID)
 	}
 	if got.AgeSeconds != 2.5 {
 		t.Errorf("AgeSeconds = %v, want 2.5 (first page's age)", got.AgeSeconds)
@@ -1143,7 +1146,7 @@ func TestClientListSessions(t *testing.T) {
 }
 
 func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1151,11 +1154,11 @@ func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListSessions("", "", false)
+	_, err := c.ListSessions(ListSessionsOpts{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1165,7 +1168,7 @@ func TestClientListSessions_CacheNotLiveFallback(t *testing.T) {
 }
 
 func TestClientGetSession(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/session/mayor" {
 			t.Fatalf("path = %q, want /v0/city/alpha/session/mayor", r.URL.Path)
 		}
@@ -1189,7 +1192,7 @@ func TestClientGetSession(t *testing.T) {
 			"running":      true,
 			"last_output":  "hello\n",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1206,7 +1209,7 @@ func TestClientGetSession(t *testing.T) {
 }
 
 func TestClientListConvoys(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/convoys" {
 			t.Fatalf("path = %q, want /v0/city/alpha/convoys", r.URL.Path)
 		}
@@ -1218,7 +1221,7 @@ func TestClientListConvoys(t *testing.T) {
 			},
 			"total": 1,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1238,7 +1241,7 @@ func TestClientListConvoys(t *testing.T) {
 }
 
 func TestClientListConvoys_CacheNotLiveFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1246,7 +1249,7 @@ func TestClientListConvoys_CacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1260,7 +1263,7 @@ func TestClientListConvoys_CacheNotLiveFallback(t *testing.T) {
 }
 
 func TestClientListConvoys_ConnErrorFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1281,7 +1284,7 @@ func TestClientListConvoys_ConnErrorFallback(t *testing.T) {
 func TestClientListConvoysFollowsNextCursor(t *testing.T) {
 	const total, pageSize = 250, 100
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&reqs, 1)
 		if r.URL.Path != "/v0/city/alpha/convoys" {
 			t.Errorf("path = %q, want /v0/city/alpha/convoys", r.URL.Path)
@@ -1311,7 +1314,7 @@ func TestClientListConvoysFollowsNextCursor(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1339,14 +1342,14 @@ func TestClientListConvoysFollowsNextCursor(t *testing.T) {
 // advances next_cursor makes ListConvoys fail loudly instead of spinning.
 func TestClientListConvoysRepeatedCursorErrors(t *testing.T) {
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&reqs, 1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items":       []map[string]any{{"id": "gc-1", "title": "c", "issue_type": "convoy", "status": "open"}},
 			"next_cursor": "stuck",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1376,14 +1379,14 @@ func TestClientListConvoysKeepsDistinctConvoysThatShareAnID(t *testing.T) {
 		"labels": []string{"owned"}, "metadata": map[string]string{"target": "main"},
 	}
 	laterRigConvoy := map[string]any{"id": "gc-1", "title": "another rig's convoy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T07:00:00Z"}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := map[string]any{"items": []map[string]any{cityConvoy, rigConvoy, sharedLedger, sharedLedger}, "next_cursor": "page-2"}
 		if r.URL.Query().Get("cursor") == "page-2" {
 			body = map[string]any{"items": []map[string]any{sharedLedger, laterRigConvoy}}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
-	}))
+	})))
 	defer ts.Close()
 	c := NewCityScopedClient(ts.URL, "alpha")
 
@@ -1412,7 +1415,7 @@ func TestClientListConvoysKeepsDistinctConvoysThatShareAnID(t *testing.T) {
 }
 
 func TestClientGetConvoy(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/convoy/gc-1" {
 			t.Fatalf("path = %q, want /v0/city/alpha/convoy/gc-1", r.URL.Path)
 		}
@@ -1423,7 +1426,7 @@ func TestClientGetConvoy(t *testing.T) {
 			"children": []map[string]any{{"id": "gc-2", "title": "task a", "issue_type": "task", "status": "closed", "created_at": "2026-04-23T10:00:00Z"}},
 			"progress": map[string]any{"total": 1, "closed": 1},
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1446,7 +1449,7 @@ func TestClientGetConvoy(t *testing.T) {
 }
 
 func TestClientCheckConvoy(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/convoy/gc-1/check" {
 			t.Fatalf("path = %q, want /v0/city/alpha/convoy/gc-1/check", r.URL.Path)
 		}
@@ -1458,7 +1461,7 @@ func TestClientCheckConvoy(t *testing.T) {
 			"closed":    2,
 			"complete":  true,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1500,9 +1503,59 @@ func TestCacheAgeFromResponse(t *testing.T) {
 	}
 }
 
+func TestCacheRefreshFromResponse(t *testing.T) {
+	cases := []struct {
+		name, interval, state string
+		want                  CacheRefresh
+	}{
+		{"absent", "", "", CacheRefresh{}},
+		{"scheduled", "30", "scheduled", CacheRefresh{IntervalS: 30, State: CacheRefreshScheduled}},
+		{"paused", "60", "paused", CacheRefresh{IntervalS: 60, State: CacheRefreshPaused}},
+		{"failing", "120", "failing", CacheRefresh{IntervalS: 120, State: CacheRefreshFailing}},
+		{"rebuilding", "0", "rebuilding", CacheRefresh{State: CacheRefreshRebuilding}},
+		{"unknown state reads as unreported", "30", "bogus", CacheRefresh{IntervalS: 30}},
+		{"negative interval", "-1", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+		{"non-numeric interval", "abc", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+		{"NaN interval", "NaN", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+		{"infinite interval", "+Inf", "scheduled", CacheRefresh{State: CacheRefreshScheduled}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &http.Response{Header: http.Header{}}
+			if tc.interval != "" {
+				r.Header.Set("X-GC-Cache-Refresh-Interval-S", tc.interval)
+			}
+			if tc.state != "" {
+				r.Header.Set("X-GC-Cache-Refresh", tc.state)
+			}
+			if got := cacheRefreshFromResponse(r); got != tc.want {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	if got := cacheRefreshFromResponse(nil); got != (CacheRefresh{}) {
+		t.Errorf("nil response: got %+v, want the zero value", got)
+	}
+}
+
+func TestCachedReadOf(t *testing.T) {
+	r := &http.Response{Header: http.Header{}}
+	r.Header.Set("X-GC-Cache-Age-S", "75")
+	r.Header.Set("X-GC-Cache-Refresh-Interval-S", "30")
+	r.Header.Set("X-GC-Cache-Refresh", "failing")
+	got := cachedReadOf("body", r)
+	want := CachedRead[string]{Body: "body", AgeSeconds: 75, Refresh: CacheRefresh{IntervalS: 30, State: CacheRefreshFailing}}
+	if got != want {
+		t.Errorf("cachedReadOf = %+v, want %+v", got, want)
+	}
+	if got := cachedReadOf(7, nil); got != (CachedRead[int]{Body: 7}) {
+		t.Errorf("cachedReadOf(nil response) = %+v, want only the body", got)
+	}
+}
+
 func TestClientListMailInbox(t *testing.T) {
 	var gotQuery string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/mail" {
 			t.Fatalf("path = %q, want /v0/city/alpha/mail", r.URL.Path)
 		}
@@ -1517,7 +1570,7 @@ func TestClientListMailInbox(t *testing.T) {
 			"partial":        true,
 			"partial_errors": []string{"mail provider slow: store_slow: mail read timed out after 8s"},
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1543,7 +1596,7 @@ func TestClientListMailInbox(t *testing.T) {
 }
 
 func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1551,7 +1604,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1565,7 +1618,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 }
 
 func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1573,7 +1626,7 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "store_slow: mail read timed out after 8s",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1593,7 +1646,7 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 }
 
 func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1607,7 +1660,7 @@ func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
 }
 
 func TestClientGetMail(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/mail/msg-1" {
 			t.Fatalf("path = %q, want /v0/city/alpha/mail/msg-1", r.URL.Path)
 		}
@@ -1622,7 +1675,7 @@ func TestClientGetMail(t *testing.T) {
 			"created_at": "2026-04-23T10:00:00Z",
 			"read":       true,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1639,7 +1692,7 @@ func TestClientGetMail(t *testing.T) {
 }
 
 func TestClientGetMail_CacheNotLiveFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1647,7 +1700,7 @@ func TestClientGetMail_CacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1661,7 +1714,7 @@ func TestClientGetMail_CacheNotLiveFallback(t *testing.T) {
 }
 
 func TestClientGetMail_StoreSlowDoesNotFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1669,7 +1722,7 @@ func TestClientGetMail_StoreSlowDoesNotFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "store_slow: mail read timed out after 8s",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1689,7 +1742,7 @@ func TestClientGetMail_StoreSlowDoesNotFallback(t *testing.T) {
 }
 
 func TestClientGetMail_ConnErrorFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1704,7 +1757,7 @@ func TestClientGetMail_ConnErrorFallback(t *testing.T) {
 
 func TestClientCountMail(t *testing.T) {
 	var gotQuery string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/mail/count" {
 			t.Fatalf("path = %q, want /v0/city/alpha/mail/count", r.URL.Path)
 		}
@@ -1712,7 +1765,7 @@ func TestClientCountMail(t *testing.T) {
 		w.Header().Set("X-GC-Cache-Age-S", "1")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"total": 5, "unread": 2}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1732,7 +1785,7 @@ func TestClientCountMail(t *testing.T) {
 }
 
 func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1740,7 +1793,7 @@ func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "cache_not_live: supervisor cache is priming",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1754,7 +1807,7 @@ func TestClientCountMail_CacheNotLiveFallback(t *testing.T) {
 }
 
 func TestClientCountMail_StoreSlowDoesNotFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -1762,7 +1815,7 @@ func TestClientCountMail_StoreSlowDoesNotFallback(t *testing.T) {
 			"status": http.StatusServiceUnavailable,
 			"detail": "store_slow: mail read timed out after 8s",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1782,7 +1835,7 @@ func TestClientCountMail_StoreSlowDoesNotFallback(t *testing.T) {
 }
 
 func TestClientCountMail_ConnErrorFallback(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1797,11 +1850,11 @@ func TestClientCountMail_ConnErrorFallback(t *testing.T) {
 
 func TestClientCSRFHeader(t *testing.T) {
 	var gotHeader string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeader = r.Header.Get("X-GC-Request")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1816,7 +1869,7 @@ func TestClientCSRFHeader(t *testing.T) {
 // page-default (50) silently truncated a larger city to the first page.
 func TestListBeadsFollowsNextCursor(t *testing.T) {
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&reqs, 1)
 		if got := r.URL.Query().Get("limit"); got != "1000" {
 			t.Errorf("page limit = %q, want 1000", got)
@@ -1825,8 +1878,12 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 		switch r.URL.Query().Get("cursor") {
 		case "":
 			id, next = "ga-1", "c1"
+			w.Header().Set("X-GC-Cache-Refresh-Interval-S", "30")
+			w.Header().Set("X-GC-Cache-Refresh", "paused")
 		case "c1":
 			id, next = "ga-2", "c2"
+			w.Header().Set("X-GC-Cache-Refresh-Interval-S", "120")
+			w.Header().Set("X-GC-Cache-Refresh", "failing")
 		case "c2":
 			id, next = "ga-3", ""
 		default:
@@ -1838,7 +1895,7 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1855,13 +1912,16 @@ func TestListBeadsFollowsNextCursor(t *testing.T) {
 	if n := atomic.LoadInt32(&reqs); n != 3 {
 		t.Fatalf("requests = %d, want 3", n)
 	}
+	if want := (CacheRefresh{IntervalS: 30, State: CacheRefreshPaused}); res.Refresh != want {
+		t.Fatalf("Refresh = %+v, want page 1's %+v", res.Refresh, want)
+	}
 }
 
 // TestListBeadsHonorsLimitBound proves a positive Limit is a total bound: the
 // loop stops once reached without fetching the advertised next page.
 func TestListBeadsHonorsLimitBound(t *testing.T) {
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&reqs, 1)
 		if got := r.URL.Query().Get("limit"); got != "2" {
 			t.Errorf("limit = %q, want 2", got)
@@ -1874,7 +1934,7 @@ func TestListBeadsHonorsLimitBound(t *testing.T) {
 			},
 			"next_cursor": "c1",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1894,14 +1954,14 @@ func TestListBeadsHonorsLimitBound(t *testing.T) {
 // same next_cursor forever makes ListBeads fail loudly instead of hanging.
 func TestListBeadsNonAdvancingCursorErrors(t *testing.T) {
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&reqs, 1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items":       []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}},
 			"next_cursor": "stuck",
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1919,7 +1979,7 @@ func TestListBeadsNonAdvancingCursorErrors(t *testing.T) {
 // alternates two cursors forever must still be bounded, not spun indefinitely.
 func TestListBeadsCursorCycleErrors(t *testing.T) {
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&reqs, 1)
 		next := "a"
 		switch r.URL.Query().Get("cursor") {
@@ -1933,7 +1993,7 @@ func TestListBeadsCursorCycleErrors(t *testing.T) {
 			"items":       []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}},
 			"next_cursor": next,
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1953,10 +2013,10 @@ func TestListBeadsCursorCycleErrors(t *testing.T) {
 // local target (and `"beads": []` in a remote target's envelope), not `null`. A
 // nil []beads.Bead marshals to JSON null, which diverges from the direct-bd lane.
 func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -1982,7 +2042,7 @@ func TestListBeadsEmptyResultIsNonNilSlice(t *testing.T) {
 // TestListBeadsDedupesAcrossPages proves a bead re-appearing at a page boundary
 // (a write shifted the non-snapshot offset window) is returned once, not twice.
 func TestListBeadsDedupesAcrossPages(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var items []map[string]any
 		var next string
@@ -2004,7 +2064,7 @@ func TestListBeadsDedupesAcrossPages(t *testing.T) {
 			body["next_cursor"] = next
 		}
 		_ = json.NewEncoder(w).Encode(body)
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -2060,7 +2120,7 @@ func TestListBeadsParams(t *testing.T) {
 // (cursors never repeat) and opts.Limit cannot break (dedup keeps `all` empty).
 func TestDrainBeadPagesHardPageCap(t *testing.T) {
 	var reqs int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := atomic.AddInt32(&reqs, 1)
 		w.Header().Set("Content-Type", "application/json")
 		// A distinct, strictly-longer cursor each page, and never any items.
@@ -2068,7 +2128,7 @@ func TestDrainBeadPagesHardPageCap(t *testing.T) {
 			"items":       []map[string]any{},
 			"next_cursor": strings.Repeat("a", int(n)),
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
@@ -2096,7 +2156,7 @@ func TestClientListConvoysPartialAnswerIsAnError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var page atomic.Int32
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				n := int(page.Add(1)) - 1
 				body := map[string]any{
 					"items": []map[string]any{{"id": fmt.Sprintf("gc-%d", n+1), "title": "c", "issue_type": "convoy", "status": "open"}},
@@ -2111,7 +2171,7 @@ func TestClientListConvoysPartialAnswerIsAnError(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(body)
-			}))
+			})))
 			defer ts.Close()
 
 			c := NewCityScopedClient(ts.URL, "alpha")
@@ -2136,7 +2196,7 @@ func TestClientListConvoysPartialAnswerIsAnError(t *testing.T) {
 // leg). A caller that prints the list as the city's answer must see it.
 func TestListBeadsReportsPartialAcrossPages(t *testing.T) {
 	t.Run("partial", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			body := map[string]any{"partial": true}
 			switch r.URL.Query().Get("cursor") {
@@ -2149,7 +2209,7 @@ func TestListBeadsReportsPartialAcrossPages(t *testing.T) {
 				body["partial_errors"] = []string{"rig omega: boom", "rig zeta: gone"}
 			}
 			_ = json.NewEncoder(w).Encode(body)
-		}))
+		})))
 		defer ts.Close()
 
 		res, err := NewCityScopedClient(ts.URL, "alpha").ListBeads(ListBeadsOpts{})
@@ -2168,12 +2228,12 @@ func TestListBeadsReportsPartialAcrossPages(t *testing.T) {
 		}
 	})
 	t.Run("complete", func(t *testing.T) {
-		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]any{{"id": "ga-1", "title": "t", "issue_type": "task", "status": "open"}},
 			})
-		}))
+		})))
 		defer ts.Close()
 
 		res, err := NewCityScopedClient(ts.URL, "alpha").ListBeads(ListBeadsOpts{})
@@ -2189,14 +2249,14 @@ func TestListBeadsReportsPartialAcrossPages(t *testing.T) {
 // TestListWaitsViaBeadsCarriesPartial proves the legacy gc wait list rung
 // reports a degraded generic-beads read the same way the typed rung does.
 func TestListWaitsViaBeadsCarriesPartial(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items":          []map[string]any{},
 			"partial":        true,
 			"partial_errors": []string{"rig x: down"},
 		})
-	}))
+	})))
 	defer ts.Close()
 
 	res, err := NewCityScopedClient(ts.URL, "alpha").ListWaitsViaBeads()

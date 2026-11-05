@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -38,6 +39,117 @@ const (
 	managedMimoCodeHookVersion = 4
 	managedOmpHookVersion      = 2
 )
+
+// hookSource is a managed hook file in the normalized form its upgrade markers
+// are matched against. An upgrade predicate builds one per file and checks
+// every marker against it, so a check normalizes the file once, however many
+// markers it tests; overlay staging runs the predicates on every reconcile tick.
+type hookSource struct {
+	normalized string
+}
+
+func newHookSource(content string) hookSource {
+	return hookSource{normalized: normalizeHookSource(content)}
+}
+
+// hookContains reports whether a managed hook file contains a marker, with the
+// marker normalized the same way as the file.
+//
+// The markers decide whether an installed hook file is current or gets
+// replaced, so layout must not change the verdict: a re-wrapped call or a
+// reflowed header comment leaves a current file current (#5555).
+// Normalization drops whitespace outside string literals, a trailing comma
+// before a closing bracket, and comment delimiters along with every * inside a
+// block comment, keeping the rest of the comment text so the identity marker
+// still matches. Whitespace inside string literals is kept, so distinct
+// literals never collapse into each other. Other rewrites a formatter can make,
+// such as dropping semicolons or switching quote style, are not normalized.
+func hookContains(src hookSource, marker string) bool {
+	return strings.Contains(src.normalized, normalizeHookSource(marker))
+}
+
+func normalizeHookSource(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	runes := []rune(s)
+	var quote rune
+	escaped := false
+	pendingComma := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		// Comment text is kept (the managed-file identity marker lives in a
+		// comment) but its punctuation is inert: an apostrophe in prose such as
+		// "OpenCode's plugin API" must not open a string literal, and the "//"
+		// or "/*" delimiters are formatting a reflow can move.
+		if inLineComment {
+			if r == '\n' {
+				inLineComment = false
+			} else if !unicode.IsSpace(r) {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if inBlockComment {
+			if r == '*' && i+1 < len(runes) && runes[i+1] == '/' {
+				inBlockComment = false
+				i++
+			} else if !unicode.IsSpace(r) && r != '*' {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if quote != 0 {
+			b.WriteRune(r)
+			switch {
+			case escaped:
+				escaped = false
+			case r == '\\':
+				escaped = true
+			case r == quote:
+				quote = 0
+			}
+			continue
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if r == '/' && i+1 < len(runes) && runes[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+		if r == '/' && i+1 < len(runes) && runes[i+1] == '*' {
+			inBlockComment = true
+			i++
+			continue
+		}
+		if r == ',' {
+			// Hold it: a formatter's trailing comma before a closing bracket
+			// is not part of the source's meaning.
+			pendingComma = true
+			continue
+		}
+		if pendingComma {
+			pendingComma = false
+			if r != ')' && r != ']' && r != '}' {
+				b.WriteRune(',')
+			}
+		}
+		if r == '"' || r == '\'' || r == '`' {
+			quote = r
+		}
+		b.WriteRune(r)
+	}
+	if pendingComma {
+		b.WriteRune(',')
+	}
+	return b.String()
+}
 
 var (
 	piHookVersionPattern       = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
@@ -332,21 +444,22 @@ func cursorHookLegacyVariants(desired []byte) [][]byte {
 
 func piHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for Pi Coding Agent") {
+	src := newHookSource(content)
+	if !hookContains(src, "Gas City hooks for Pi Coding Agent") {
 		return false
 	}
 	if piHookVersion(content) < managedPiHookVersion ||
-		!strings.Contains(content, "gc prime --hook") ||
-		!strings.Contains(content, "gc hook --inject") ||
-		!strings.Contains(content, "gc handoff --auto") ||
-		!strings.Contains(content, "mirrorTempCounter") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
-		!strings.Contains(content, "GC_MANAGED_SESSION_HOOK") ||
-		!strings.Contains(content, "GC_HOOK_EVENT_NAME") ||
-		!strings.Contains(content, "pendingPrimeContext") ||
-		!strings.Contains(content, `process.env.GC_BIN || "gc"`) ||
-		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
+		!hookContains(src, "gc prime --hook") ||
+		!hookContains(src, "gc hook --inject") ||
+		!hookContains(src, "gc handoff --auto") ||
+		!hookContains(src, "mirrorTempCounter") ||
+		!hookContains(src, "GC_PROVIDER_SESSION_ID") ||
+		!hookContains(src, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(src, "GC_MANAGED_SESSION_HOOK") ||
+		!hookContains(src, "GC_HOOK_EVENT_NAME") ||
+		!hookContains(src, "pendingPrimeContext") ||
+		!hookContains(src, `process.env.GC_BIN || "gc"`) ||
+		!hookContains(src, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -356,7 +469,7 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		`"session.deleted"`,
 		`"experimental.chat.system.transform"`,
 	} {
-		if strings.Contains(content, marker) {
+		if hookContains(src, marker) {
 			return true
 		}
 	}
@@ -377,34 +490,35 @@ func piHookVersion(content string) int {
 
 func opencodeHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for OpenCode.") {
+	src := newHookSource(content)
+	if !hookContains(src, "Gas City hooks for OpenCode.") {
 		return false
 	}
 	if opencodeHookVersion(content) < managedOpenCodeHookVersion ||
-		!strings.Contains(content, `process.env.GC_BIN || "gc"`) ||
-		!strings.Contains(content, `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`) ||
-		!strings.Contains(content, `"experimental.session.compacting"`) ||
-		!strings.Contains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
-		!strings.Contains(content, "output.context.push(handoff)") ||
-		!strings.Contains(content, "logRunFailure") ||
-		!strings.Contains(content, "logRunStderr(stderr);") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(src, `process.env.GC_BIN || "gc"`) ||
+		!hookContains(src, `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`) ||
+		!hookContains(src, `"experimental.session.compacting"`) ||
+		!hookContains(src, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
+		!hookContains(src, "output.context.push(handoff)") ||
+		!hookContains(src, "logRunFailure") ||
+		!hookContains(src, "logRunStderr(stderr);") ||
+		!hookContains(src, "GC_PROVIDER_SESSION_ID") ||
+		!hookContains(src, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
-		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		!hookContains(src, "pending.child.stdin?.end();") ||
 		// Per-turn text must trail the stable system entries, not share
 		// system[0] with the prime, or the prompt-cache prefix ends at the
 		// prime on every turn (#5732).
-		!strings.Contains(content, "appendVolatileSystem") ||
+		!hookContains(src, "appendVolatileSystem") ||
 		// Consumptive queue draining must be scoped to a turn (#5552) and,
 		// because OpenCode instantiates one plugin per directory, the turn
 		// state must be keyed by session so a subagent's user message does
 		// not reopen the parent's turn.
-		!strings.Contains(content, "const turns = new Map()") ||
+		!hookContains(src, "const turns = new Map()") ||
 		// A turn opens on a user-message id the session has not seen, not
 		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
 		// an id-order gate stops opening turns (#6629).
-		!strings.Contains(content, "state.userMessageIDs.has(messageID)") {
+		!hookContains(src, "state.userMessageIDs.has(messageID)") {
 		return true
 	}
 	for _, marker := range []string{
@@ -412,7 +526,7 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		`"session", "reset"`,
 		`"session.deleted"`,
 	} {
-		if strings.Contains(content, marker) {
+		if hookContains(src, marker) {
 			return true
 		}
 	}
@@ -436,22 +550,23 @@ func opencodeHookVersion(content string) int {
 // Files without the managed header are user-authored and never upgraded.
 func mimocodeHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for MiMo Code.") {
+	src := newHookSource(content)
+	if !hookContains(src, "Gas City hooks for MiMo Code.") {
 		return false
 	}
 	return mimocodeHookVersion(content) < managedMimoCodeHookVersion ||
 		// The child's stdin must be closed or gc blocks on it (#5562).
-		!strings.Contains(content, "pending.child.stdin?.end();") ||
+		!hookContains(src, "pending.child.stdin?.end();") ||
 		// Per-turn text must trail the stable system entries, not share
 		// system[0] with the prime (#5732). A version-only check would keep
 		// a same-numbered plugin with a different body.
-		!strings.Contains(content, "appendVolatileSystem") ||
+		!hookContains(src, "appendVolatileSystem") ||
 		// Turn state must be keyed by session; the plugin instance is shared
 		// by every session in the directory (same shape as OpenCode).
-		!strings.Contains(content, "const turns = new Map()") ||
+		!hookContains(src, "const turns = new Map()") ||
 		// A turn opens on an unseen user-message id, not a higher one
 		// (#6629, same shape as OpenCode).
-		!strings.Contains(content, "state.userMessageIDs.has(messageID)")
+		!hookContains(src, "state.userMessageIDs.has(messageID)")
 }
 
 func mimocodeHookVersion(content string) int {
@@ -468,18 +583,19 @@ func mimocodeHookVersion(content string) int {
 
 func ompHookNeedsUpgrade(existing []byte) bool {
 	content := string(existing)
-	if !strings.Contains(content, "Gas City hooks for Oh My Pi (OMP).") {
+	src := newHookSource(content)
+	if !hookContains(src, "Gas City hooks for Oh My Pi (OMP).") {
 		return false
 	}
 	if ompHookVersion(content) < managedOmpHookVersion ||
-		!strings.Contains(content, "gascityOmpExtension") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
-		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
-		!strings.Contains(content, `pi.on("session_start"`) ||
-		!strings.Contains(content, `pi.on("session_compact"`) ||
-		!strings.Contains(content, `pi.on("before_agent_start"`) ||
-		!strings.Contains(content, "logRunFailure") ||
-		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
+		!hookContains(src, "gascityOmpExtension") ||
+		!hookContains(src, "GC_PROVIDER_SESSION_ID") ||
+		!hookContains(src, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(src, `pi.on("session_start"`) ||
+		!hookContains(src, `pi.on("session_compact"`) ||
+		!hookContains(src, `pi.on("before_agent_start"`) ||
+		!hookContains(src, "logRunFailure") ||
+		!hookContains(src, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -488,7 +604,7 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 		`"session.compacted"`,
 		`"experimental.chat.system.transform"`,
 	} {
-		if strings.Contains(content, marker) {
+		if hookContains(src, marker) {
 			return true
 		}
 	}

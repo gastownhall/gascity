@@ -55,6 +55,9 @@ var Default = Config{
 		beads + ".MailStore",
 		beads + ".OrdersStore",
 		beads + ".NudgesStore",
+		// T5a: a molecule's store, graph or work class, built only from those
+		// handles (beads.GraphMolecule, beads.WorkMolecule).
+		beads + ".MoleculeTarget",
 	},
 	UnwrapMethods: []string{"Raw", "ConditionalWritesResolveTarget"},
 	AsFuncs:       []string{beads + ".As"},
@@ -112,6 +115,7 @@ var Default = Config{
 		{Package: "cmd/gc", File: "city_stores.go", Rules: append([]Rule{Mint}, rawRules...), Reason: "the router's cmd/gc plane: builds each holder's topology from the opened routes and mints its storeref.Stores (T2); counted in allowed.txt"},
 		{Package: "cmd/gc", File: "storage_boot.go", Reason: "storage-class routing at boot: opens and holds the physical engines the router later wraps"},
 		{Package: "cmd/gc", File: "infra_class_migrate.go", Rules: rawRules, Reason: "the storage-class migration: copies a class's rows between physical stores, raw by nature (S5)"},
+		{Package: "cmd/gc", File: "infra_class_holds.go", Rules: rawRules, Reason: "the migration's holds: reads a carried row's blockers in the work store and mints its cross-store gates in the binding, both physical stores"},
 		{Package: "cmd/gc", File: "infra_class_clear.go", Rules: rawRules, Reason: "the migration's clear: deletes migrated rows from the source physical store"},
 		{Package: "cmd/gc", File: "infra_class_recover.go", Rules: rawRules, Reason: "the stranded-write recovery: moves rows between physical stores"},
 		{Package: "cmd/gc", File: "infra_class_recover_held.go", Rules: rawRules, Reason: "the stranded-write recovery for held rows: moves rows between physical stores"},
@@ -120,6 +124,18 @@ var Default = Config{
 	// Sealed packages have no baseline rows: a phase ends by adding its
 	// package here, and the list only grows (TestSealedOnlyGrows).
 	Sealed: []string{
+		"internal/convoy",
+		"internal/executionevent",
+		"internal/extmsg",
+		"internal/graphroute",
+		"internal/graphv2",
+		"internal/mail",
+		"internal/mail/beadmail",
+		"internal/molecule",
+		"internal/nudgequeue",
+		"internal/opjournal",
+		"internal/session",
+		"internal/sourceworkflow",
 		"internal/workladder",
 	},
 	LoadBaseline: LoadBaselineFromEnv,

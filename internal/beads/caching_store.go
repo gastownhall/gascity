@@ -468,6 +468,9 @@ type CacheStats struct {
 	CadenceDriver string
 	// ReconcileRequests counts RequestReconcile calls.
 	ReconcileRequests int64
+	// ReconcilePaused reports that the cache's reconcile gate (WithReconcileGate)
+	// was closed when Stats ran, so its periodic re-scans are skipped until it opens.
+	ReconcilePaused bool
 }
 
 const (
@@ -617,7 +620,8 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 // the cache resumes reconciling as soon as allowed answers true again. A
 // caller whose backing store must not be touched for a while (its scope is
 // quiescent) uses this to stop the loop's full scans without rebuilding the
-// cache.
+// cache. Stats also calls allowed, so it must be safe for concurrent use, must
+// not block, and must not call back into the cache.
 func WithReconcileGate(allowed func() bool) CachingStoreOption {
 	return func(c *CachingStore) {
 		c.reconcileGate = allowed
@@ -1985,10 +1989,15 @@ func (c *CachingStore) Stopped() <-chan struct{} {
 
 // Stats returns current cache statistics.
 func (c *CachingStore) Stats() CacheStats {
+	// The gate is immutable after construction; ask it outside c.mu so it can
+	// never deadlock against the cache.
+	paused := c.reconcileGate != nil && !c.reconcileGate()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	s := c.stats
+	s.ReconcilePaused = paused
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"

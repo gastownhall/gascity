@@ -39,7 +39,9 @@ var contractCoverage = map[string]classification{
 
 	// --- Optional error-bearing capabilities (deferred: in-process provider
 	// interfaces that the exec provider does not implement over the wire) ---
-	"ObserveLivenessWithError_StoppedIsAbsent": {Deferred: "optional capability; no error-bearing liveness op on the wire yet"},
+	"ObserveLivenessWithError_StoppedIsAbsent": {Code: ReqObserveAbsentAfterStop},
+	"Start_FreshOnlyRefusesAHeldName":          {Code: ReqObserveFreshOnlyRefuses},
+	"ListRunning_AttestedAfterStartAndStop":    {Code: ReqObserveInventoryComplete},
 	"IsAttachedWithError_UnattachedSession":    {Deferred: "optional capability; no error-bearing attachment op on the wire"},
 	"IsAttachedWithError_MissingSession":       {Deferred: "optional capability; no error-bearing attachment op on the wire"},
 
@@ -88,6 +90,28 @@ var contractCoverage = map[string]classification{
 	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
 	"FencedInput_MismatchedFenceRefusesEveryInput": {Deferred: "optional in-process capability; RPP has no fenced-input op"},
 	"FencedInput_AbsentSessionRefuses":             {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+}
+
+// wireOnlyCodes are the observe group's requirements that no
+// runtime.Provider method backs: the `observe`, `inventory` and
+// `kill-object` wire shapes (an exec pack's own ops, which the exec
+// provider maps), the attach answer's exact form, the fault and city-scope
+// tokens and the probe latency. The rest of the group (absent after stop,
+// FreshOnly, the attested listing) back RunProviderTests cases.
+var wireOnlyCodes = map[Code]bool{
+	ReqObserveDeclaredOpsRespond:   true,
+	ReqObserveAbsentNeverStarted:   true,
+	ReqObserveRunningWithIdentity:  true,
+	ReqObserveObjectStable:         true,
+	ReqObserveAgentLiveness:        true,
+	ReqObserveMetaIsIdentity:       true,
+	ReqObserveKillObjectExact:      true,
+	ReqObserveAttachedIsStrict:     true,
+	ReqObserveFaultsReadUnknown:    true,
+	ReqObserveWithinBound:          true,
+	ReqObserveCityScoped:           true,
+	ReqObserveInventoryHasActivity: true,
+	ReqObservePeekNoScreen:         true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this
@@ -168,6 +192,11 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 		}
 	}
 	for _, req := range catalog {
+		if wireOnlyCodes[req.Code] {
+			// The observe group's wire shapes, tokens and latency, which no
+			// runtime.Provider method backs; see wireOnlyCodes.
+			continue
+		}
 		if req.Group == GroupProtocol || req.Group == GroupConnection || req.Group == GroupProvision {
 			// Wire-only groups: no runtime.Provider method to contract-test.
 			// protocol is the handshake; connection (exec) is the slim wire

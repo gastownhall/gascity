@@ -121,6 +121,29 @@ read_federated_claims() {
     return 1
 }
 
+# append_scope_rows tags every row of a bead listing with the scope it came
+# from ("" for HQ, else the rig name) and appends it to $TMP. The scope decides
+# which store a claim is released in, so a listing that cannot be tagged (text
+# that does not parse, or JSON that is not an array) is dropped for this pass
+# (its claims kept) rather than stopping the sweep of every other scope. A
+# third argument "federated" marks the rows as the federated read's
+# (read_federated_claims): that read names no scope, so a row a scope read also
+# listed is judged under that scope's tag (Step 1c).
+append_scope_rows() {
+    local scope="$1"
+    local listing="$2"
+    local federated="false"
+    local tagged
+    [ "${3:-}" = federated ] && federated="true"
+    if ! tagged=$(jq -c --arg scope "$scope" --argjson federated "$federated" '
+        if type == "array" then map(if type == "object" then . + {_gc_scope: $scope} + (if $federated then {_gc_federated: true} else {} end) else . end) else error("not a listing") end
+    ' "$listing" 2>/dev/null); then
+        echo "orphan-sweep: could not read the in-progress listing of ${scope:-HQ}; its claims are kept this pass" >&2
+        return 0
+    fi
+    [ -z "$tagged" ] || printf '%s\n' "$tagged" >>"$TMP"
+}
+
 append_hq_scope() {
     local bead_fetch_tmp
     local federated_tmp
@@ -136,13 +159,14 @@ append_hq_scope() {
     gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
     # The city's scope also stages the claims only the federated reader
     # returns, between the same two liveness reads. Its rows overlap the scope
-    # reads' rows; the first row staged for an id wins (Step 1c).
+    # reads' rows; a scope read's row for an id wins (Step 1c).
     read_federated_claims "$federated_tmp" || true
     append_session_list gc session list --json || {
         rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" "$federated_tmp" >>"$TMP"
+    append_scope_rows "" "$bead_fetch_tmp"
+    append_scope_rows "" "$federated_tmp" federated
     rm -f "$bead_fetch_tmp" "$federated_tmp"
 }
 
@@ -159,7 +183,7 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
+    append_scope_rows "$rig" "$bead_fetch_tmp"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -185,7 +209,11 @@ if [ -n "$FEDERATED_READ_ERROR" ]; then
     order_outcome_scope_skipped "every store (gc ready)" "$FEDERATED_READ_ERROR; only the claims gc bd list returned scope by scope were considered"
 fi
 
-IN_PROGRESS=$(jq -c -s 'add // [] | reduce .[] as $b ({seen: {}, out: []};
+# A scope read's row for an id wins over the federated read's, so a rig's claim
+# keeps the rig scope its release needs.
+IN_PROGRESS=$(jq -c -s 'add // []
+    | map(select((type == "object" and ._gc_federated == true) | not)) + map(select(type == "object" and ._gc_federated == true))
+    | reduce .[] as $b ({seen: {}, out: []};
     ($b.id // "") as $id
     | if $id != "" and .seen[$id] then . else .seen[$id] = true | .out += [$b] end) | .out' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
 if [ "$IN_PROGRESS" = "[]" ]; then
@@ -217,9 +245,10 @@ fi
 # it cannot see bead-only fields such as configured_named_identity or
 # alias_history unless the CLI starts exporting them.
 #
-# The default CLI path already omits closed sessions. The closed/state guards
-# below keep explicit or future session-list producers from making terminal
-# rows live while preserving any non-closed row the CLI reports.
+# The default CLI path already omits closed sessions. On every route, a row
+# from --state closed or --state all carries state "closed" and closed true;
+# the closed/state guards below keep such rows from counting as live while
+# preserving any non-closed row the CLI reports.
 #
 # This shell sweep ran without a live-session guard before ga-nvx: an ephemeral
 # assignee whose template-stripped form did not match any agent name was
@@ -405,13 +434,22 @@ session_bead_shows_live_assignment() {
     return 1
 }
 
+# reset_orphan_if_current releases bead_id from expected_assignee in the store
+# the claim was listed from: scope is "" for HQ, else the rig. A rig claim's
+# release names the rig with --rig, so it runs in that rig's store whatever
+# the prefixes of its arguments say.
 reset_orphan_if_current() {
     local bead_id="$1"
     local expected_assignee="$2"
+    local scope="${3:-}"
     local reset_output
     local reset_state
+    local -a scope_args=()
+    if [ -n "$scope" ]; then
+        scope_args=(--rig "$scope")
+    fi
 
-    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
+    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" ${scope_args[@]+"${scope_args[@]}"} 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
@@ -421,7 +459,7 @@ reset_orphan_if_current() {
             # --append-notes whole (notes have no representation in the class
             # store contract), while every store serves --set-metadata. The
             # value is text, so bd and the class store both keep a string.
-            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" ${scope_args[@]+"${scope_args[@]}"} >/dev/null 2>&1; then
                 echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
             fi
             return 0
@@ -633,25 +671,51 @@ record_protected_claim() {
 }
 
 # protected_claims_json groups the spool by identity, sorted, with each
-# identity's gate reason when the gate gave one.
+# identity's reasons (the gate's, or why its row was never asked about) when
+# there are any.
 protected_claims_json() {
     jq -R -s -c --arg reasons "$GATE_REASONS" '
-        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
+        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], reason: (.[1] // "")})
+            | group_by(.identity) | map({key: .[0].identity, value: (map(.reason) | map(select(. != "")) | unique | join("; "))}) | from_entries) as $why
         | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], bead: (.[1] // "")})
         | group_by(.identity)
         | map({identity: .[0].identity, beads: map(.bead), reason: ($why[.[0].identity] // "")})
     ' <<<"$PROTECTED_ROWS"
 }
 
-# The claims to consider, one "<bead>\t<assignee>" row each: those whose
-# holder neither the roster nor a live session recognizes. Each claim is
-# classified once, here; a recognized holder's claim is never released, so it
-# needs no gate answer and no probe.
-CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null) || CLAIM_ROWS=""
+# A row carries its scope through the tab-separated claim rows as a token,
+# "hq" for HQ and "rig:<name>" for a rig, so the field is never empty (read
+# collapses empty tab-separated fields). token_scope turns a token back into
+# the scope.
+token_scope() {
+    case "$1" in
+        rig:*) printf '%s' "${1#rig:}" ;;
+        *) printf '' ;;
+    esac
+}
+
+# The claims to consider, one "<bead>\t<scope token>\t<assignee>" row each:
+# those whose holder neither the roster nor a live session recognizes. Each
+# claim is classified once, here; a recognized holder's claim is never
+# released, so it needs no gate answer and no probe. A row without a scope tag
+# is skipped: there is no telling which store it would be released in.
+#
+# The rows are re-read line by line, so a bead id or assignee carrying a tab,
+# newline or carriage return could forge a row of its own: an assignee
+# "x\n<bead>\thq\t<agent>" would name another claim under another holder.
+# Such a row gets the scope token "untrusted" and that text replaced by
+# spaces: it is never asked about or released, only protected and named.
+CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[]
+    | select(type == "object" and (._gc_scope | type) == "string")
+    | select(.assignee != null and .assignee != "")
+    | ([.id, .assignee] | map(tostring | test("[\\t\\n\\r]")) | any) as $untrusted
+    | "\(.id | tostring | gsub("[\\t\\n\\r]"; " "))\t\(if $untrusted then "untrusted" elif ._gc_scope == "" then "hq" else "rig:" + ._gc_scope end)\t\(.assignee | tostring | gsub("[\\t\\n\\r]"; " "))"' 2>/dev/null) || CLAIM_ROWS=""
 UNRECOGNIZED_ROWS=""
 if [ -n "$CLAIM_ROWS" ]; then
-    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _assignee; do
-        is_known_agent "$_assignee" || printf '%s\t%s\n' "$_bead" "$_assignee"
+    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _scope _assignee; do
+        if [ "$_scope" = untrusted ] || ! is_known_agent "$_assignee"; then
+            printf '%s\t%s\t%s\n' "$_bead" "$_scope" "$_assignee"
+        fi
     done <<<"$CLAIM_ROWS")
 fi
 
@@ -662,7 +726,8 @@ UNRECOGNIZED=()
 if [ -n "$UNRECOGNIZED_ROWS" ]; then
     while IFS= read -r _identity; do
         [ -n "$_identity" ] && UNRECOGNIZED+=("$_identity")
-    done < <(while IFS=$'\t' read -r _bead _assignee; do
+    done < <(while IFS=$'\t' read -r _bead _scope _assignee; do
+        [ "$_scope" = untrusted ] && continue
         printf '%s\n' "$_assignee"
     done <<<"$UNRECOGNIZED_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
 fi
@@ -685,7 +750,13 @@ UNVERIFIABLE=0
 FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
-while IFS=$'\t' read -r bead_id assignee; do
+while IFS=$'\t' read -r bead_id scope_tok assignee; do
+    if [ "$scope_tok" = untrusted ]; then
+        gate_record_reason "$assignee" "its bead id or assignee contains a tab or line break; never asked about or released"
+        record_protected_claim "$assignee" "$bead_id"
+        continue
+    fi
+    scope=$(token_scope "$scope_tok")
     claim_gate_verdict "$assignee"
     if [ "$GATE_VERDICT" != "local" ]; then
         record_protected_claim "$assignee" "$bead_id"
@@ -709,7 +780,7 @@ while IFS=$'\t' read -r bead_id assignee; do
             continue
         fi
     fi
-    if reset_orphan_if_current "$bead_id" "$assignee"; then
+    if reset_orphan_if_current "$bead_id" "$assignee" "$scope"; then
         ORPHANED=$((ORPHANED + 1))
     else
         reset_status=$?

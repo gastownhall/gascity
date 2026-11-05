@@ -9,7 +9,6 @@ import (
 	"io"
 	"maps"
 	"math"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -212,15 +211,16 @@ func bdDepsEndpoints(values []string) []string {
 // (beads.MetadataReadings). A write is judged under every reading: the bd CLI
 // reads a JSON null on gc.root_bead_id as "", but a native Dolt store reads it
 // as the text "null", a graph marker. bd reads a file only for a value that
-// starts with "@"; gc also judges the file a space-padded "@" names, which bd
-// rejects as JSON, but hands bd no copy of it.
+// starts with "@", and reads the path after it as written, spaces included;
+// gc also judges the file a space-padded "@" names, which bd rejects as JSON,
+// but hands bd no copy of it.
 func (in bdClassGuardInput) bdMetadataReadings(value string) ([]map[string]string, string) {
 	body := []byte(value)
 	if path, isFile := strings.CutPrefix(strings.TrimSpace(value), "@"); isFile {
 		var data []byte
 		var err error
-		if strings.HasPrefix(value, "@") {
-			data, err = in.readJudgedFile("--metadata", "@", path)
+		if exact, ok := strings.CutPrefix(value, "@"); ok {
+			data, err = in.readJudgedFile("--metadata", "@", exact)
 		} else {
 			data, err = in.readScopeFile(path)
 		}
@@ -689,7 +689,7 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	}
 	// bd re-opens a named source, so it is handed a private copy of exactly
 	// the rows judged (bd_split_judged_files.go).
-	name, err := bdWriteJudgedCopy(body, "gc-bd-import-work-*.jsonl")
+	copyPath, remove, err := bdWriteJudgedCopy(body, source)
 	if err != nil {
 		return in.refuse("gc bd import: refused: could not write the judged copy of %s: %v. Nothing was written.", source, err)
 	}
@@ -699,16 +699,16 @@ func judgeBdImport(in bdClassGuardInput) bdClassGuard {
 	var redirected []string
 	var ok bool
 	if len(in.args.positionals) == 0 {
-		redirected, ok = bdRepointFlag(in.inv, args, "--input", name)
+		redirected, ok = bdRepointFlag(in.inv, args, "--input", copyPath)
 	} else {
-		redirected, ok = bdRepointPositional(in.inv, args, source, name)
+		redirected, ok = bdRepointPositional(in.inv, args, source, copyPath)
 	}
 	if !ok {
-		_ = os.Remove(name)
+		remove()
 		return in.refuse("gc bd import: refused on this split city: gc could not point bd at the judged copy of %s (spell the source as a plain argument or --input <file>). Nothing was written.", source)
 	}
 	out.args = redirected
-	out.cleanup = func() { _ = os.Remove(name) }
+	out.cleanup = remove
 	return out
 }
 

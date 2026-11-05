@@ -705,3 +705,57 @@ func TestConfigPatchCountsServeRawConfigPatchesClearedByComposition(t *testing.T
 		t.Errorf("GET /config/explain patches = %+v, want %+v", explain.Patches, want)
 	}
 }
+
+func TestHandleConfigValidate_WarnsThatRigFederationIsNotEnforced(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Rigs[0].Federation = config.RigFederationRig
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Valid    bool     `json:"valid"`
+		Errors   []string `json:"errors"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode validate response: %v", err)
+	}
+	if !resp.Valid {
+		t.Fatalf("valid = false, errors = %v; a guarded rig with its own directory is valid", resp.Errors)
+	}
+	found := false
+	for _, warning := range resp.Warnings {
+		if strings.Contains(warning, `rig "myrig"`) && strings.Contains(warning, "NOT protected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want the not-enforced warning for rig myrig", resp.Warnings)
+	}
+}
+
+func TestHandleConfigValidate_RefusesGuardedRigSharingADirectory(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Rigs[0].Federation = config.RigFederationRig
+	fs.cfg.Rigs = append(fs.cfg.Rigs, config.Rig{Name: "other", Path: fs.cfg.Rigs[0].Path, Prefix: "ot"})
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var resp struct {
+		Valid  bool     `json:"valid"`
+		Errors []string `json:"errors"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode validate response: %v", err)
+	}
+	if resp.Valid || len(resp.Errors) == 0 || !strings.Contains(strings.Join(resp.Errors, "\n"), "needs its own store directory") {
+		t.Fatalf("response = %+v, want the shared-directory error", resp)
+	}
+}

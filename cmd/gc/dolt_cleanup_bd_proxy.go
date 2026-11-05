@@ -33,6 +33,12 @@ import (
 // decoder and unprotect a live proxy over a field the reaper never consults.
 const bdProxyConfigFileName = proxyendpoint.ConfigFileName
 
+// bdProxyRuntimeConfigFileName is the --config a port-moved bd Dolt child runs
+// from (bd >= v1.3.3, beads#7184). It sits in the same proxy root as
+// config.yaml and is held to exactly the same live-proxy proof: the file name
+// alone is never trusted.
+const bdProxyRuntimeConfigFileName = proxyendpoint.RuntimeConfigFileName
+
 // bdProxyPIDAlive and bdProxyProcessArgv are the process-table reads that
 // decide whether a proxy.pid record still describes bd's proxy. Both are
 // injectable so reaper tests can drive every branch from a fabricated process
@@ -84,11 +90,22 @@ var (
 // (proxiedScopeProviderRoot) would answer a question the reaper never asks: it
 // classifies processes, and a shared root has one process, not one per scope.
 //
+// Since bd v1.3.3 (beads#7184) the child can also run from
+// <root>/proxy-child.runtime-config.yaml: when another process takes the
+// Beads-chosen Dolt port before dolt binds it, the proxy relaunches dolt on a
+// free port from that copy. It is the same root and the same live proxy, so
+// it gets the same proof and the same protection. Before this was accepted, a
+// port-moved child under a test temp root fell through to the allowlist and
+// was reaped while its proxy was serving.
+//
 // Uncovered: a config_path override that puts config.yaml somewhere other than
 // the proxy root — bd allows it, and gc then sees no proxy.pid sibling and
 // falls through to the ordinary rules.
 func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
-	if configPath == "" || filepath.Base(configPath) != bdProxyConfigFileName {
+	if configPath == "" {
+		return 0, false
+	}
+	if base := filepath.Base(configPath); base != bdProxyConfigFileName && base != bdProxyRuntimeConfigFileName {
 		return 0, false
 	}
 	root := filepath.Dir(filepath.Clean(configPath))

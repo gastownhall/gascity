@@ -97,11 +97,12 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 	return out
 }
 
-// orphanCandidates keeps the roots reparented to init or subreaperPID.
-func orphanCandidates(roots []runtime.LiveRuntime, subreaperPID int) []runtime.LiveRuntime {
+// orphanCandidates keeps the roots reparented to launchd. Darwin has no user
+// subreaper, so only the plain ppid == 1 rule applies.
+func orphanCandidates(roots []runtime.LiveRuntime) []runtime.LiveRuntime {
 	out := roots[:0]
 	for _, r := range roots {
-		if OrphanCandidate(r.PPID, subreaperPID) {
+		if OrphanCandidate(r.PPID, 0) {
 			out = append(out, r)
 		}
 	}

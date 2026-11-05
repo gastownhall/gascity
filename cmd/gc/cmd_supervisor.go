@@ -2319,7 +2319,7 @@ func startOneCity(
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
 	var reconcilerBoot strings.Builder
-	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, path, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
 	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
@@ -2361,6 +2361,11 @@ func startOneCity(
 			lock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 		}
 	}()
+	// This process may have resolved the city through the one-shot funnel on
+	// an earlier boot, or while it was stopped and before a `gc storage
+	// migrate`. The pre-registration reads below (the provider snapshot, the
+	// v2 boot census) must not answer from that memo.
+	retireCityFunnelForBoot(path)
 
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
@@ -2956,6 +2961,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	// Validate rigs.
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		return fmt.Errorf("validate rigs: %w", err)
+	}
+	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
+		return fmt.Errorf("validate rigs: %w", err)
+	}
+	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': warning: %s\n", cityName, w) //nolint:errcheck // best-effort stderr
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)

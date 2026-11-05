@@ -59,8 +59,9 @@ func apiClient(cityPath string) *api.Client {
 // expensive: maintenance commands have no local fallback at all, and
 // `gc status`'s local fallback re-opens the full local bead/dolt store and
 // rescans event archives to rebuild store health — far more expensive than
-// the supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
-// ~0.35s warm API). Where apiClient returns nil for its caller's local
+// the supervisor's answer from its warm caches (ra-r9hm6v: ~9.5s local CPU
+// vs ~0.35s for a saved response, and ~3.65s for the build `gc status`
+// waits for, #5028). Where apiClient returns nil for its caller's local
 // fallback, it routes to the supervisor-managed client instead in two shapes:
 // a supervisor-hosted city whose supervisor requires grants (these callers
 // handle a refusal as they handle any other API error), and a live controller
@@ -92,23 +93,6 @@ func supervisorFallthroughMutationAPIClient(cityPath string) (*api.Client, strin
 	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisorMutation)
 }
 
-// localWhenSupervisorHostedAPIClient resolves an API client the way apiClient
-// does, for a read whose local path renders the command's own JSON contract
-// from on-disk state, except that a supervisor-hosted city gets nil with
-// reason "supervisor-hosted", so its caller reads locally. `gc session list`
-// is that read: its local rows carry the fields
-// schemas/session/list/result.schema.json defines (agent_name, closed, the
-// summary), which the API's session rows do not, and the API fills each active
-// session's active bead by reading every rig store, a suspended rig's
-// included. Pool-slot lookups parse agent_name, and the core orphan-sweep
-// order lists sessions in cities whose rigs may be suspended.
-func localWhenSupervisorHostedAPIClient(cityPath string) (*api.Client, string) {
-	if c := routeAPIClient(cityPath, apiRouteLocalWhenSupervisorHosted); c != nil {
-		return c, ""
-	}
-	return nil, routeFallbackReason(cityPath, apiRouteLocalWhenSupervisorHosted)
-}
-
 // apiRoute selects how routeAPIClient routes the shapes in which its callers
 // differ.
 type apiRoute int
@@ -120,9 +104,6 @@ const (
 	// supervisor-managed client in the shapes where apiClient returns nil for
 	// its caller's local fallback.
 	apiRoutePreferSupervisor
-	// apiRouteLocalWhenSupervisorHosted is localWhenSupervisorHostedAPIClient's
-	// routing: nil for a supervisor-hosted city.
-	apiRouteLocalWhenSupervisorHosted
 	// apiRoutePreferSupervisorMutation is
 	// supervisorFallthroughMutationAPIClient's routing: apiRoutePreferSupervisor,
 	// except nil for a supervisor-hosted city whose supervisor requires write
@@ -147,9 +128,8 @@ func supervisorRequiresGrantFor(route apiRoute) bool {
 }
 
 // routeAPIClient is the routing ladder apiClient,
-// supervisorFallthroughAPIClient, supervisorFallthroughMutationAPIClient and
-// localWhenSupervisorHostedAPIClient share; route selects which of them it
-// resolves for.
+// supervisorFallthroughAPIClient and supervisorFallthroughMutationAPIClient
+// share; route selects which of them it resolves for.
 func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -177,7 +157,7 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	case identity.HostingMode == controllerHostingSupervisor:
 		// The supervisor hosts the city in-process and serves it on its own
 		// port via city-scoped routes, ignoring [api] port.
-		if route == apiRouteLocalWhenSupervisorHosted || supervisorRequiresGrantFor(route) {
+		if supervisorRequiresGrantFor(route) {
 			return nil
 		}
 		return apiRouteSupervisorClientHook(cityPath)
@@ -239,10 +219,8 @@ func apiClientFallbackReason(cityPath string) string {
 }
 
 // routeFallbackReason returns the apiClientFallbackReason code for a nil from
-// routeAPIClient with the same route, or "supervisor-hosted" for a
-// supervisor-hosted city on localWhenSupervisorHostedAPIClient's route. A
-// supervisor-hosted city's [api] bind is never the reason: the supervisor
-// ignores that port.
+// routeAPIClient with the same route. A supervisor-hosted city's [api] bind is
+// never the reason: the supervisor ignores that port.
 func routeFallbackReason(cityPath string, route apiRoute) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"
@@ -252,9 +230,6 @@ func routeFallbackReason(cityPath string, route apiRoute) string {
 	case identity.PID == 0:
 		// No controller socket, and no supervisor-managed client either.
 	case identity.HostingMode == controllerHostingSupervisor:
-		if route == apiRouteLocalWhenSupervisorHosted {
-			return "supervisor-hosted"
-		}
 		if supervisorRequiresGrantFor(route) {
 			return "grant-required"
 		}
