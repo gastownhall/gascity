@@ -154,42 +154,42 @@ var routedToAllowlist = []routedToSite{
 	// WithRouteChangeClearing wrapped in during the GREEN phase. ---
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   5563,
+		line:   6579,
 		reason: "write to a pre-existing bead (canonicalize routed_to spelling on assignee-change repair pass); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   5623,
+		line:   6639,
 		reason: "write to a pre-existing bead (canonicalizeLegacyBoundUnassignedRoutedWork); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6434,
+		line:   7457,
 		reason: "write to a pre-existing bead (controlDispatcherRouteRepair.persist, repairControlDispatcherRoutesForStoreScope); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6461,
+		line:   7484,
 		reason: "in-memory mirror of the line-6210 persisted write (applyRouteRepairInMemory), applied only after the durable write at line 6210 already succeeded; same Root #5 -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/cmd_convoy_dispatch.go",
-		line:   2369,
+		line:   2718,
 		reason: "write to a pre-existing bead; Root #7 (cmd_convoy_dispatch.go openStoreAtForCity) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/cmd_github.go",
-		line:   328,
+		line:   340,
 		reason: "write to a pre-existing bead (refreshGitHubPRRepairBead refreshes route across GitHub re-evaluations of the same PR/head -- one of the flows Risk R1 names for e2e coverage); Root #7 (openGitHubPRRepairStore, transitively via cmd_convoy_dispatch.go per design sec 15) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/cmd_sling.go",
-		line:   771,
+		line:   853,
 		reason: "write to a pre-existing bead; Root #3 (cmd_sling.go slingDeps.Store) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/doctor_hold_label_routed_to.go",
-		line:   137,
+		line:   141,
 		reason: "write to a pre-existing bead; Root #6 (cmd_doctor.go openStoreForCity/storeFactory, shared by all doctor checks) -- wrap that root's store construction in GREEN phase",
 	},
 	{
@@ -199,13 +199,18 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/doctor_run_target_backfill.go",
-		line:   113,
+		line:   130,
 		reason: "write to a pre-existing bead; Root #6 (cmd_doctor.go openStoreForCity/storeFactory) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "internal/api/handler_sling.go",
-		line:   541,
+		line:   656,
 		reason: "write to a pre-existing bead; Root #4 (internal/api/handler_sling.go:534, API sling composition root per design sec 15) -- wrap that root's store construction in GREEN phase",
+	},
+	{
+		path:   "internal/sling/sling_core.go",
+		line:   1120,
+		reason: "write to a pre-existing bead (restampWorkBeadRouting restamps gc.execution_routed_to and clears gc.routed_to/gc.run_target through deps.Store.SetMetadataBatch); deps.Store is wrapped at both sling roots: Root #3 (cmd_sling.go slingDeps.Store, opened by openAuthoritativeStoreAtForCity, whose wrap is main.go WithRouteChangeClearing; gc sling is not an invocationStoreMemoCommands verb, so it is never handed the undecorated memo store) and Root #4 (handler_sling.go findSlingStore, whose CityBeadStore/BeadStore are policy-wrapped controller stores that wrapWithCachingStoreFeed re-decorates)",
 	},
 
 	// --- In scope: genuine reroute writes to pre-existing beads. RESOLVED
@@ -228,22 +233,22 @@ var routedToAllowlist = []routedToSite{
 	// four. ---
 	{
 		path:   "cmd/gc/demand_serve_predicate.go",
-		line:   314,
+		line:   362,
 		reason: "write to a pre-existing bead (collapseSlotSuffixedRoutedWork persists the base route for a live slot-suffix route -- the FR-2 pool-slot-suffix-collapse scenario the collapsingNormalizer unit test already covers as a normalized no-op); resolves to Root #1 (controller-managed) or Root #7 (standalone), not an independent root -- see block comment above; wrap those roots in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/detached_orphan_lane.go",
-		line:   430,
+		line:   453,
 		reason: "write to a pre-existing bead (restoreDetachedOrphanRoute); resolves to Root #1 (controller-managed) or Root #7 (standalone), not an independent root -- see block comment above; wrap those roots in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/pool_detached_orphan_sweep.go",
-		line:   136,
+		line:   143,
 		reason: "write to a pre-existing bead (sweepDetachedHandoffOrphansWithRouteStore); resolves to Root #1 (controller-managed) or Root #7 (standalone), not an independent root -- see block comment above; wrap those roots in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/route_recovery_lane.go",
-		line:   896,
+		line:   1065,
 		reason: "write to a pre-existing, long-lived, flap-tracked bead (routeRecoveryLane restore path, via SetMetadataBatch); resolves to Root #1 (controller-managed) or Root #7 (standalone), not an independent root -- see block comment above; wrap those roots in GREEN phase",
 	},
 
@@ -254,52 +259,52 @@ var routedToAllowlist = []routedToSite{
 	// prior bead -- and so no prior stamps -- can exist at mutation time. ---
 	{
 		path:   "cmd/gc/cmd_order.go",
-		line:   903,
+		line:   975,
 		reason: "creation-time-only: labels/routes the bead moments after molecule.Instantiate creates it, in the same call -- no prior stamps possible",
 	},
 	{
 		path:   "cmd/gc/cmd_github.go",
-		line:   377,
+		line:   389,
 		reason: "creation-time-only: githubPRRepairMetadata builds the metadata map passed directly to store.Create (cmd_github.go:293) -- no prior bead exists yet",
 	},
 	{
 		path:   "cmd/gc/order_dispatch.go",
-		line:   2433,
+		line:   2888,
 		reason: "creation-time-only: identical fresh-creation labeling pattern to cmd_order.go:903 -- no prior stamps possible",
 	},
 	{
 		path:   "internal/dispatch/control.go",
-		line:   1339,
+		line:   1581,
 		reason: "creation-time-only: applyAttemptStepRoute mutates *formula.RecipeStep.Metadata in-memory before molecule.Attach creates the retry-attempt bead (spawnNextAttempt) -- no prior bead exists yet",
 	},
 	{
 		path:   "internal/dispatch/control.go",
-		line:   1366,
+		line:   1608,
 		reason: "creation-time-only: same applyAttemptStepRoute pattern as line 1313 -- mutates *formula.RecipeStep.Metadata before molecule.Attach -- no prior bead exists yet",
 	},
 	{
 		path:   "internal/dispatch/control.go",
-		line:   1408,
+		line:   1650,
 		reason: "creation-time-only: applyAttemptControlStepRoute mutates *formula.RecipeStep.Metadata before molecule.Attach -- no prior bead exists yet",
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   201,
+		line:   195,
 		reason: "creation-time-only: mutates *formula.RecipeStep.Metadata before molecule.Instantiate/InstantiateFragment; routing is discarded entirely (not applied to the pre-existing bead) on the idempotent-resume path -- no prior stamps possible",
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   287,
+		line:   281,
 		reason: "creation-time-only: same ApplyGraphRouting pattern as line 201 -- no prior stamps possible",
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   652,
+		line:   646,
 		reason: "creation-time-only: same ApplyGraphRouting pattern as line 201 -- no prior stamps possible",
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   789,
+		line:   783,
 		reason: "creation-time-only: same ApplyGraphRouting pattern as line 201 -- no prior stamps possible",
 	},
 
@@ -310,12 +315,12 @@ var routedToAllowlist = []routedToSite{
 	// received live-executor stamps to clear. ---
 	{
 		path:   "cmd/gc/convergence_store.go",
-		line:   249,
+		line:   432,
 		reason: "deferred-activation: activateDeferredAssignees writes the first real gc.routed_to for a fenced wisp (molecule.DeferredRoutedToMetadataKey pending activation) via ActivateWisp; the wisp is not dispatchable before activation, so it never received live-executor stamps to clear -- same mechanism as internal/molecule/molecule.go:1486",
 	},
 	{
 		path:   "internal/molecule/molecule.go",
-		line:   1520,
+		line:   1572,
 		reason: "deferred-activation: deferredRoutingActivationUpdate writes the first real gc.routed_to for a bead fenced (type=\"gate\", real key deleted via deferBeadMetadataValue, not merely stale) since its own creation in the same Instantiate/InstantiateFragment call (fenceGraphWorkflowBead at molecule.go:993) or a crash-recovery re-activation of that same never-dispatched state (activateAttachCandidate). The bead is never dispatchable before activation, so it never received live-executor stamps to clear",
 	},
 
@@ -324,18 +329,13 @@ var routedToAllowlist = []routedToSite{
 	// read/query filter field, not a Store mutation. ---
 	{
 		path:   "cmd/gc/doctor_pool_idle_routed_work_check.go",
-		line:   164,
+		line:   248,
 		reason: "not a write: beads.ListQuery{Metadata: ...} filters a Live.List read by current gc.routed_to value -- ListQuery.Metadata is a query filter field (internal/beads/query.go), not a Store mutation",
 	},
 	{
-		path:   "cmd/gc/doctor_routed_to_checks.go",
-		line:   166,
-		reason: "not a write: store.List(beads.ListQuery{Metadata: ...}) inside collect(), which scans (reads) beads whose gc.routed_to names a bound alias -- the actual write for this check is line 105, already allow-listed under Root #6",
-	},
-	{
 		path:   "cmd/gc/wisp_step_inject.go",
-		line:   243,
-		reason: "not a write: resolveMoleculeRootViaRoutedBridge calls workStore.List(beads.ListQuery{Metadata: ...}) to find an already-routed bridge bead -- a pure lookup, no write anywhere in this function",
+		line:   485,
+		reason: "not a write: stepResolution.rootViaRoutedBridgeIn calls r.work.List(beads.ListQuery{Metadata: ...}) per assignee to find an already-routed bridge bead -- a pure lookup, no write anywhere in this function",
 	},
 }
 
