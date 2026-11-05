@@ -1298,14 +1298,14 @@ func buildPreparedStartWithTranscript(
 	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
 		return nil, candidate.info, err
 	}
+	if err := validateTaskWorkDirOverride(candidate, cityPath, cfg, preOverrideWorkDir, agentCfg.WorkDir); err != nil {
+		return nil, candidate.info, err
+	}
 	// The task work_dir override above can replace agentCfg.WorkDir after
 	// template resolution already rendered PreStart commands (materialize-
 	// skills, MCP projection) against the pre-override directory. Retarget
 	// those already-rendered strings so scaffold staging lands next to the
 	// session it actually launches into, not the directory templating assumed.
-	if err := validateTaskWorkDirOverride(candidate, cityPath, cfg, preOverrideWorkDir, agentCfg.WorkDir); err != nil {
-		return nil, candidate.info, err
-	}
 	agentCfg.PreStart = retargetPreStartWorkDir(agentCfg.PreStart, preOverrideWorkDir, agentCfg.WorkDir)
 	// Pre-flight stale-resume guard: if the bead carries a session_key whose
 	// keyed transcript is no longer on disk (provider session retention
