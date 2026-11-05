@@ -422,3 +422,173 @@ func TestIdleTracker_ContentClockFallsBackToActivityClock(t *testing.T) {
 		t.Fatalf("checkIdle did not fall back to the activity clock on a snapshot error")
 	}
 }
+
+// The progress-stall recycle needs its own continuous-idle anchor: the Claude
+// Code updater flash keeps the raw pane-activity clock fresh for a session that
+// is idle at its prompt (ga-g9n7ov), and the idle_timeout anchor exists only
+// for sessions with an idle timeout and is cleared when that timeout fires.
+
+func TestIdleTracker_ProgressIdleSinceTracksContinuousIdleRun(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	snap := newFakeIdleSnapshotProvider()
+	t0 := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	const name = "worker"
+
+	snap.idle[name] = true
+	if since, ok := it.progressIdleSince(name, snap, t0); !ok || !since.Equal(t0) {
+		t.Fatalf("first idle observation = (%v, %v), want (%v, true)", since, ok, t0)
+	}
+	if since, ok := it.progressIdleSince(name, snap, t0.Add(10*time.Minute)); !ok || !since.Equal(t0) {
+		t.Fatalf("second idle observation = (%v, %v), want the run to still start at %v", since, ok, t0)
+	}
+
+	snap.idle[name] = false
+	if _, ok := it.progressIdleSince(name, snap, t0.Add(20*time.Minute)); ok {
+		t.Fatal("a busy observation reported a continuous idle run")
+	}
+
+	snap.idle[name] = true
+	t3 := t0.Add(30 * time.Minute)
+	if since, ok := it.progressIdleSince(name, snap, t3); !ok || !since.Equal(t3) {
+		t.Fatalf("idle after busy = (%v, %v), want a fresh run starting at %v", since, ok, t3)
+	}
+}
+
+func TestIdleTracker_ProgressIdleSinceIndeterminateResetsAndErrorKeepsAnchor(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	snap := newFakeIdleSnapshotProvider()
+	t0 := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	const name = "worker"
+
+	snap.idle[name] = true
+	it.progressIdleSince(name, snap, t0)
+
+	snap.err[name] = errIdleSnapshotProbe
+	if _, ok := it.progressIdleSince(name, snap, t0.Add(10*time.Minute)); ok {
+		t.Fatal("an erroring snapshot reported a continuous idle run")
+	}
+	delete(snap.err, name)
+	if since, ok := it.progressIdleSince(name, snap, t0.Add(20*time.Minute)); !ok || !since.Equal(t0) {
+		t.Fatalf("after a transient error = (%v, %v), want the original run from %v", since, ok, t0)
+	}
+
+	snap.err[name] = runtime.ErrIdleIndeterminate
+	if _, ok := it.progressIdleSince(name, snap, t0.Add(30*time.Minute)); ok {
+		t.Fatal("an indeterminate snapshot reported a continuous idle run")
+	}
+	delete(snap.err, name)
+	t4 := t0.Add(40 * time.Minute)
+	if since, ok := it.progressIdleSince(name, snap, t4); !ok || !since.Equal(t4) {
+		t.Fatalf("after an indeterminate read = (%v, %v), want a fresh run from %v", since, ok, t4)
+	}
+}
+
+func TestIdleTracker_ProgressIdleSinceIsIndependentOfIdleTimeoutAnchor(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	snap := newFakeIdleSnapshotProvider()
+	t0 := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	const name = "worker"
+	snap.idle[name] = true
+
+	// No idle timeout registered: the anchor is kept anyway.
+	it.progressIdleSince(name, snap, t0)
+
+	// An idle_timeout firing clears its own anchor, not the progress one.
+	it.setTimeout(name, 10*time.Minute)
+	it.checkIdleByContent(name, snap, 10*time.Minute, t0)
+	if !it.checkIdleByContent(name, snap, 10*time.Minute, t0.Add(11*time.Minute)) {
+		t.Fatal("idle timeout did not fire; test setup is wrong")
+	}
+	if since, ok := it.progressIdleSince(name, snap, t0.Add(12*time.Minute)); !ok || !since.Equal(t0) {
+		t.Fatalf("after the idle timeout fired = (%v, %v), want the run still from %v", since, ok, t0)
+	}
+
+	it.clearIdleAnchor(name)
+	t3 := t0.Add(20 * time.Minute)
+	if since, ok := it.progressIdleSince(name, snap, t3); !ok || !since.Equal(t3) {
+		t.Fatalf("after clearIdleAnchor = (%v, %v), want a fresh run from %v", since, ok, t3)
+	}
+}
+
+func TestContentAwareLastActivity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	raw := now.Add(-time.Minute) // the updater flash just touched the pane
+	const name = "worker"
+
+	// primed returns a tracker whose idle run for name began 40m before now.
+	primed := func(snap *fakeIdleSnapshotProvider) *memoryIdleTracker {
+		it := newIdleTracker()
+		snap.idle[name] = true
+		it.progressIdleSince(name, snap, now.Add(-40*time.Minute))
+		return it
+	}
+
+	t.Run("claude non-acp idle uses the content anchor over a fresh raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		got := contentAwareLastActivity(primed(snap), name, "claude", "", snap, raw, now)
+		if want := now.Add(-40 * time.Minute); !got.Equal(want) {
+			t.Fatalf("got %v, want the idle anchor %v", got, want)
+		}
+	})
+	t.Run("a raw clock already older than the anchor wins", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		old := now.Add(-3 * time.Hour)
+		if got := contentAwareLastActivity(primed(snap), name, "claude", "", snap, old, now); !got.Equal(old) {
+			t.Fatalf("got %v, want the older raw activity %v", got, old)
+		}
+	})
+	t.Run("busy keeps the raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		it := primed(snap)
+		snap.idle[name] = false
+		if got := contentAwareLastActivity(it, name, "claude", "", snap, raw, now); !got.Equal(raw) {
+			t.Fatalf("got %v, want raw %v", got, raw)
+		}
+	})
+	t.Run("snapshot error keeps the raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		it := primed(snap)
+		snap.err[name] = errIdleSnapshotProbe
+		if got := contentAwareLastActivity(it, name, "claude", "", snap, raw, now); !got.Equal(raw) {
+			t.Fatalf("got %v, want raw %v", got, raw)
+		}
+	})
+	t.Run("acp keeps the raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		if got := contentAwareLastActivity(primed(snap), name, "claude", "acp", snap, raw, now); !got.Equal(raw) {
+			t.Fatalf("got %v, want raw %v", got, raw)
+		}
+	})
+	t.Run("non-claude keeps the raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		if got := contentAwareLastActivity(primed(snap), name, "codex", "", snap, raw, now); !got.Equal(raw) {
+			t.Fatalf("got %v, want raw %v", got, raw)
+		}
+	})
+	t.Run("a runtime without snapshots keeps the raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		if got := contentAwareLastActivity(primed(snap), name, "claude", "", runtime.NewFake(), raw, now); !got.Equal(raw) {
+			t.Fatalf("got %v, want raw %v", got, raw)
+		}
+	})
+	t.Run("a nil tracker keeps the raw clock", func(t *testing.T) {
+		snap := newFakeIdleSnapshotProvider()
+		if got := contentAwareLastActivity(nil, name, "claude", "", snap, raw, now); !got.Equal(raw) {
+			t.Fatalf("got %v, want raw %v", got, raw)
+		}
+	})
+}
+
+// progressIdleSince is part of the idleTracker interface; the scripted fake
+// the reconciler tests use reports no content-idle run.
+func (f *fakeIdleTracker) progressIdleSince(string, runtime.IdleSnapshotProvider, time.Time) (time.Time, bool) {
+	return time.Time{}, false
+}

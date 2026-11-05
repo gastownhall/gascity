@@ -661,3 +661,101 @@ func TestReconcileSessionBeads_ProgressStallRecyclesAboveFloorWorker(t *testing.
 		t.Fatalf("stderr = %q, want progress-stalled diagnostic", env.stderr.String())
 	}
 }
+
+// scriptedIdleSnapshotProvider is a runtime whose point-in-time idle snapshot
+// the test scripts per tick, as the tmux provider's pane scan would report it.
+type scriptedIdleSnapshotProvider struct {
+	*runtime.Fake
+	idle func() (bool, error)
+}
+
+func (p *scriptedIdleSnapshotProvider) SnapshotIdle(string) (bool, error) { return p.idle() }
+
+// runUpdaterFlashTicks drives the legacy reconciler every tick for total, with
+// the idle tracker the controller keeps across ticks. Each tick it reports the
+// session's raw pane activity as the Claude Code updater flash leaves it: the
+// pane is touched every flashEvery, so the raw clock is never older than that
+// however long the session has been idle at its prompt. It returns how long
+// after the first tick the progress-stall recycle first fired, or -1.
+func runUpdaterFlashTicks(t *testing.T, env *restartRequestTestEnv, session beads.Bead, sessionName string, idle func(elapsed time.Duration) (bool, error), tick, flashEvery, total time.Duration) time.Duration {
+	t.Helper()
+	env.setSessionMetadata(&session, map[string]string{"provider": "claude"})
+	it := newIdleTracker()
+	var elapsed time.Duration
+	sp := &scriptedIdleSnapshotProvider{Fake: env.sp, idle: func() (bool, error) { return idle(elapsed) }}
+	start := env.clk.Now()
+	lastFlash := start.Add(-time.Minute) // the turn that just ended
+	nextFlash := start.Add(flashEvery)
+	for ; elapsed <= total; elapsed += tick {
+		env.clk.Time = start.Add(elapsed)
+		for !env.clk.Now().Before(nextFlash) {
+			lastFlash = nextFlash
+			nextFlash = nextFlash.Add(flashEvery)
+		}
+		env.sp.SetActivity(sessionName, lastFlash)
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", session.ID, err)
+		}
+		poolDesired := map[string]int{"worker": 1}
+		_ = reconcileSessionBeadsAtPath(context.Background(), t.TempDir(), []beads.Bead{got}, env.desiredState,
+			configuredSessionNames(env.cfg, "", env.store), env.cfg, sp, env.store, nil, nil, nil, nil,
+			env.dt, poolDesired, false, nil, "", it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
+		if strings.Contains(env.stderr.String(), "progress-stalled") {
+			return elapsed
+		}
+	}
+	return -1
+}
+
+// A Claude session idle at its prompt is recycled once its content has been
+// idle past progress_stall_timeout, even though the updater flash touches the
+// pane every 29 minutes and keeps the raw activity clock fresh (ga-g9n7ov).
+func TestReconcileSessionBeads_ProgressStallRecyclesContentIdleClaudeDespiteUpdaterFlash(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+
+	got := runUpdaterFlashTicks(t, env, session, sessionName,
+		func(time.Duration) (bool, error) { return true, nil },
+		5*time.Minute, 29*time.Minute, 2*time.Hour)
+
+	if got < 0 {
+		t.Fatalf("no progress-stalled recycle in 2h of content-idle ticks; stderr = %q", env.stderr.String())
+	}
+	if got <= 30*time.Minute {
+		t.Fatalf("recycled after %s, want only once content was idle for more than the 30m threshold", got)
+	}
+	if got > 45*time.Minute {
+		t.Fatalf("recycled after %s, want within a few ticks of the 30m threshold", got)
+	}
+}
+
+// A busy observation resets the content-idle anchor: a session that worked at
+// 25m is not recycled until it has been idle for the full threshold again.
+func TestReconcileSessionBeads_ProgressStallBusyObservationResetsContentAnchor(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+
+	got := runUpdaterFlashTicks(t, env, session, sessionName,
+		func(elapsed time.Duration) (bool, error) { return elapsed != 25*time.Minute, nil },
+		5*time.Minute, 29*time.Minute, 2*time.Hour)
+
+	if got < 0 {
+		t.Fatalf("no progress-stalled recycle after the session went idle again; stderr = %q", env.stderr.String())
+	}
+	if got <= 55*time.Minute {
+		t.Fatalf("recycled after %s, want more than 30m after the busy observation at 25m", got)
+	}
+}
+
+// A snapshot error is unknown, not idle: with the raw clock held fresh by the
+// updater flash, the session is not recycled.
+func TestReconcileSessionBeads_ProgressStallSnapshotErrorDoesNotRecycle(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+
+	got := runUpdaterFlashTicks(t, env, session, sessionName,
+		func(time.Duration) (bool, error) { return false, errors.New("capture-pane failed") },
+		5*time.Minute, 29*time.Minute, 2*time.Hour)
+
+	if got >= 0 {
+		t.Fatalf("recycled after %s on an erroring snapshot; unknown must never recycle", got)
+	}
+}

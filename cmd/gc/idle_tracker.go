@@ -64,6 +64,10 @@ type idleTracker interface {
 	// a long-running controller.
 	clearIdleAnchor(sessionName string)
 
+	// progressIdleSince reports when the session's current continuous
+	// content-idle run began, for the progress-stall recycle.
+	progressIdleSince(sessionName string, snap runtime.IdleSnapshotProvider, now time.Time) (time.Time, bool)
+
 	// exemptTemplateFallbackForSession prevents one stable session from
 	// inheriting the template timeout. Used for mode="always" named sessions
 	// that share a template with pool siblings.
@@ -217,4 +221,12 @@ func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.
 // non-ACP transport for the same reason (gco-90ui).
 func idleTrackerContentClockApplies(provider, transport string) bool {
 	return transport != "acp" && provider == "claude"
+}
+
+func (m *memoryIdleTracker) progressIdleSince(string, runtime.IdleSnapshotProvider, time.Time) (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func contentAwareLastActivity(_ idleTracker, _, _, _ string, _ runtime.Provider, raw, _ time.Time) time.Time {
+	return raw
 }
