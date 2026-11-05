@@ -525,3 +525,101 @@ func TestInitStorageFlagRefusesAnUnknownValueBeforeScaffolding(t *testing.T) {
 		t.Errorf("the refused init created %s", cityPath)
 	}
 }
+
+// inventoryIsEnterprise reports whether a pinned inventory was dumped from an
+// Enterprise bd build (its build tags carry "enterprise").
+func inventoryIsEnterprise(inv *bdflags.Inventory) bool {
+	for _, tag := range strings.Split(inv.Provenance.BuildTags, ",") {
+		if strings.TrimSpace(tag) == "enterprise" {
+			return true
+		}
+	}
+	return false
+}
+
+// The split admission ruling (maintainer, 2026-11-05) over every pinned
+// inventory, not just stubbed ones: a bd whose tree matches a pinned
+// inventory gets the split, and the v1.3.2 floor applies only to OSS
+// builds. An Enterprise build below the floor is admitted, and an OSS build
+// below it is held single-store with the upgrade hint. The floor exempts a
+// sub-floor bd only when its version is the matched inventory's own version,
+// so pinning an OSS 1.3.0 or 1.3.1 tree would admit that release. This test
+// fails if that happens, and the floor would then need to tell Enterprise and
+// OSS apart some other way.
+func TestInitSplitFloorAppliesToOSSPinnedInventoriesOnly(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SESSION", "")
+	initStorageFakeBD(t)
+	sawEnterpriseBelowFloor := false
+	for _, inv := range bdflags.Inventories() {
+		t.Run(inv.Name, func(t *testing.T) {
+			stubInitBDVersion(t, "bd version "+inv.Version)
+			stubInitSplitBDJudge(t, inv.Name, nil)
+			belowFloor := compareVersions(inv.Version, initSplitBDMinVersion) < 0
+			enterprise := inventoryIsEnterprise(inv)
+			if belowFloor && enterprise {
+				sawEnterpriseBelowFloor = true
+			}
+			notice := splitBDFloorNotice()
+			if wantAdmit := enterprise || !belowFloor; wantAdmit {
+				if notice != "" {
+					t.Errorf("bd v%s matching %s (enterprise=%t) held single-store: %s", inv.Version, inv.Name, enterprise, notice)
+				}
+				return
+			}
+			if notice == "" {
+				t.Fatalf("OSS bd v%s matching pinned %s admitted to split; the v%s floor holds OSS releases below it single-store", inv.Version, inv.Name, initSplitBDMinVersion)
+			}
+			for _, want := range []string{"single-store", "upgrade bd", initSplitBDMinVersion} {
+				if !strings.Contains(notice, want) {
+					t.Errorf("notice %q does not mention %q", notice, want)
+				}
+			}
+		})
+	}
+	if !sawEnterpriseBelowFloor {
+		t.Errorf("no pinned Enterprise inventory below v%s; the ruling's Enterprise 1.3.0 case is no longer exercised", initSplitBDMinVersion)
+	}
+}
+
+// The ruling's three named cases, end to end through resolveInitStorage
+// against the real pinned inventories: the Enterprise 1.3.0 tree is admitted,
+// OSS 1.3.0 (no pinned tree) and OSS 1.3.1 (1.3.2's tree, below the floor)
+// start single-store with the upgrade hint, and OSS 1.3.2 is admitted.
+func TestResolveInitStorageSplitAdmissionRuling(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, inventory string
+		wantSplit                bool
+	}{
+		{name: "enterprise 1.3.0 pinned tree", version: "bd version 1.3.0 (Enterprise dev, Observer unknown; 77612097cec0: enterprise@77612097cec0)", inventory: "bd-1.3.0-enterprise-77612097cec0", wantSplit: true},
+		{name: "OSS 1.3.0", version: "bd version 1.3.0 (f45b249ce: HEAD@f45b249ce6b4)"},
+		{name: "OSS 1.3.1", version: "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)", inventory: "bd-1.3.2"},
+		{name: "OSS 1.3.2", version: "bd version 1.3.2 (9b65b9e19: HEAD@9b65b9e198ac)", inventory: "bd-1.3.2", wantSplit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_SESSION", "")
+			initStorageFakeBD(t)
+			stubInitBDVersion(t, tc.version)
+			stubInitSplitBDJudge(t, tc.inventory, nil)
+			storage, notice, err := resolveInitStorage(&config.City{}, t.TempDir(), initStorageSplit)
+			if err != nil {
+				t.Fatalf("resolveInitStorage: %v", err)
+			}
+			if tc.wantSplit {
+				if storage == nil || notice != "" {
+					t.Fatalf("storage=%+v notice=%q; want the born-split block and no notice", storage, notice)
+				}
+				return
+			}
+			if storage != nil {
+				t.Fatalf("storage = %+v; want single-store", storage)
+			}
+			for _, want := range []string{"single-store", "upgrade bd", "v" + initSplitBDMinVersion, "gc storage migrate"} {
+				if !strings.Contains(notice, want) {
+					t.Errorf("notice %q does not mention %q", notice, want)
+				}
+			}
+		})
+	}
+}

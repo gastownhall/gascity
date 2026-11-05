@@ -788,7 +788,11 @@ func TestRBEWorkerLegacyWorkflow(t *testing.T) {
 		}
 		return out
 	}
-	if got, want := dispatchInputs(wf.On), dispatchInputs(pool.On); len(got) == 0 || !reflect.DeepEqual(got, want) {
+	// Except the pool's rbe_worker_sha: a canary input for operators, which
+	// the scaler never sends and the legacy worker (the previous pin) lacks.
+	poolInputs := dispatchInputs(pool.On)
+	delete(poolInputs, "rbe_worker_sha")
+	if got, want := dispatchInputs(wf.On), poolInputs; len(got) == 0 || !reflect.DeepEqual(got, want) {
 		t.Errorf("workflow_dispatch inputs %v, want the pool workflow's %v", got, want)
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
