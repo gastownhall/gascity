@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -1313,5 +1315,38 @@ title = "Item {{convoy_id}} on {{subject}}"
 	}
 	if len(matches) != 0 {
 		t.Fatalf("input convoys = %+v, want none before validation succeeds", matches)
+	}
+}
+
+// TestCreateSingleItemInputConvoyStampsTargetID pins #8729's durable target
+// stamp: a synthetic input convoy names the bead it was poured for in its own
+// metadata, independent of the tracking edge, so a purge proof can later
+// resolve the recorded target even when the edge has cascaded away.
+func TestCreateSingleItemInputConvoyStampsTargetID(t *testing.T) {
+	mem := beads.NewMemStore()
+	target, err := mem.Create(beads.Bead{Title: "work item", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := CreateSingleItemInputConvoy(mem, target)
+	if err != nil {
+		t.Fatalf("CreateSingleItemInputConvoy: %v", err)
+	}
+	if got := created.Metadata[beadmeta.InputTargetIDMetadataKey]; got != target.ID {
+		t.Fatalf("input convoy %s gc.input_target_id = %q, want %q", created.ID, got, target.ID)
+	}
+	// The stamp must survive a fresh read of the stored row, and stay readable
+	// after the tracking edge itself is gone (a purged target can cascade the
+	// dep row away while the convoy row remains).
+	row, err := mem.Get(created.ID)
+	if err != nil {
+		t.Fatalf("reading back input convoy %s: %v", created.ID, err)
+	}
+	if err := mem.DepRemove(created.ID, target.ID); err != nil {
+		t.Fatalf("removing the tracking edge: %v", err)
+	}
+	if got := beadmeta.InputTargetIDs(row.Metadata); !reflect.DeepEqual(got, []string{target.ID}) {
+		t.Fatalf("InputTargetIDs after edge removal = %q, want [%s]", got, target.ID)
 	}
 }

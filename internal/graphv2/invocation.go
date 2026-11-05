@@ -445,6 +445,11 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 	}
 	metadata := map[string]string{
 		syntheticMetadataKey: "true",
+		// The target id is recorded on the convoy itself so it survives both
+		// the edge and the target row: purging the target can cascade the
+		// tracks dependency away, and this stamp is then the only record of
+		// what the convoy tracked (#8729).
+		beadmeta.InputTargetIDMetadataKey: target.ID,
 	}
 	created, err := store.Create(beads.Bead{
 		Title:    "input convoy for " + target.ID,

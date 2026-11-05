@@ -243,10 +243,18 @@ const (
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
-	InstantiatingMetadataKey             = "gc.instantiating"
-	IterationMetadataKey                 = "gc.iteration"
-	ItemRootKeyMetadataKey               = "gc.item_root_key"
-	KindMetadataKey                      = "gc.kind"
+	// InputTargetIDMetadataKey names, on a synthetic single-item input convoy,
+	// the bead the convoy was poured for. It records the target independent of
+	// the convoy's tracking edge, which a purge of the target can cascade away:
+	// at that point this stamp is the only durable record of what the convoy
+	// tracked, and the claim-time purge probe (#8729) reads it through
+	// InputTargetIDs to prove the recorded target is gone rather than let the
+	// workflow's steps be re-served forever.
+	InputTargetIDMetadataKey = "gc.input_target_id"
+	InstantiatingMetadataKey = "gc.instantiating"
+	IterationMetadataKey     = "gc.iteration"
+	ItemRootKeyMetadataKey   = "gc.item_root_key"
+	KindMetadataKey          = "gc.kind"
 	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in
@@ -675,6 +683,7 @@ var KnownMetadataKeys = []string{
 	IdempotencyKeyMetadataKey,
 	InitiatorMetadataKey,
 	InputConvoyIDMetadataKey,
+	InputTargetIDMetadataKey,
 	InstantiatingMetadataKey,
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
