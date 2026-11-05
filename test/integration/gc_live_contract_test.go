@@ -177,8 +177,8 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	if len(publicProviders.Items) == 0 {
 		t.Fatal("GET providers/public returned no providers")
 	}
-	liveContractJSON[map[string]any](t, baseURL, validator, http.MethodGet, cityBase+"/readiness?fresh=false", nil, http.StatusOK)
-	liveContractJSON[map[string]any](t, baseURL, validator, http.MethodGet, cityBase+"/provider-readiness?fresh=false", nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, validator, http.MethodGet, appendLiveContractDefaultQuery(cityBase+"/readiness", "/readiness", ""), nil, http.StatusOK)
+	liveContractJSON[map[string]any](t, baseURL, validator, http.MethodGet, appendLiveContractDefaultQuery(cityBase+"/provider-readiness", "/provider-readiness", ""), nil, http.StatusOK)
 	cfg := liveContractJSON[struct {
 		Agents []contractConfigAgent `json:"agents"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/config", nil, http.StatusOK)
@@ -1377,6 +1377,18 @@ func hasLiveContractUnboundPathParams(pathTemplate string) bool {
 	return false
 }
 
+// liveContractProbeFreeReadinessItem is the one readiness item whose probe
+// reads no credential file: probeZCode checks ZCODE_CJS / ZCODE_API_KEY in the
+// environment, stats a binary and runs `node --version`. The readiness routes
+// default to claude, codex and gemini (readiness adds github_cli), and
+// probeCodex reads <HOME>/.codex/auth.json from the supervisor's real HOME. The
+// live contract asserts only HTTP 200 plus OpenAPI shape, so it requests this
+// item alone -- ga-qnqmzy.2.
+const liveContractProbeFreeReadinessItem = "zcode"
+
+// appendLiveContractDefaultQuery appends the query a live-contract read of
+// pathTemplate needs to answer 200: required scope parameters, and the
+// readiness routes' probe narrowing.
 func appendLiveContractDefaultQuery(path, pathTemplate, rigName string) string {
 	query := url.Values{}
 	switch {
@@ -1387,8 +1399,12 @@ func appendLiveContractDefaultQuery(path, pathTemplate, rigName string) string {
 		query.Set("limit", "25")
 		query.Set("scope_kind", "rig")
 		query.Set("scope_ref", rigName)
-	case strings.HasSuffix(pathTemplate, "/readiness") || strings.HasSuffix(pathTemplate, "/provider-readiness"):
+	case strings.HasSuffix(pathTemplate, "/provider-readiness"):
 		query.Set("fresh", "false")
+		query.Set("providers", liveContractProbeFreeReadinessItem)
+	case strings.HasSuffix(pathTemplate, "/readiness"):
+		query.Set("fresh", "false")
+		query.Set("items", liveContractProbeFreeReadinessItem)
 	case strings.HasSuffix(pathTemplate, "/beads"):
 		query.Set("limit", "50")
 	case strings.HasSuffix(pathTemplate, "/mail"):

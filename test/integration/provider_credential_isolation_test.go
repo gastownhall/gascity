@@ -116,14 +116,22 @@ func TestIntegrationEnvFor_StripsProviderCredentialEnvVars(t *testing.T) {
 
 // TestIntegrationEnvFor_IsolatedHomesAreNeverTheRealHome proves the
 // CODEX_HOME/CLAUDE_CONFIG_DIR values integrationEnvFor sets can never
-// resolve to the real host's ~/.codex or ~/.claude. Both the codex and
-// claude CLIs read these env vars to locate their credential store, so this
-// is the concrete guarantee that a test/integration run cannot read or write
-// the operator's real provider credentials -- ga-5cokvb.1.
+// resolve to the real host's ~/.codex or ~/.claude. The codex and claude
+// CLIs read these env vars to locate their credential store, so a test
+// run's provider CLI subprocesses cannot read or write the operator's real
+// provider credentials through them -- ga-5cokvb.1.
+//
+// The guarantee is scoped to those provider CLIs. It is not a claim that a
+// test run never reads the operator's home: gc's own readiness probes
+// (probeCodex reads <HOME>/.codex/auth.json, for one) resolve their own home
+// and ignore CODEX_HOME, so a test that reaches a readiness handler can still
+// read through them. TestLiveContractReadinessRequestsAvoidCredentialProbes
+// keeps the live contract off those probes; reads elsewhere are tracked by
+// ga-qnqmzy.
 func TestIntegrationEnvFor_IsolatedHomesAreNeverTheRealHome(t *testing.T) {
-	realHome, err := os.UserHomeDir()
+	realHome, err := realHomeDir()
 	if err != nil {
-		t.Fatalf("os.UserHomeDir: %v", err)
+		t.Fatalf("realHomeDir: %v", err)
 	}
 	realCodexHome := filepath.Join(realHome, ".codex")
 	realClaudeConfigDir := filepath.Join(realHome, ".claude")
@@ -180,7 +188,7 @@ func TestLiveContractReadinessRequestsAvoidCredentialProbes(t *testing.T) {
 	// file under HOME. Every other supported item does (claude, codex, gemini,
 	// pi, antigravity, mimocode) or shells out to a credential-reading CLI
 	// (github_cli).
-	probeFree := map[string]bool{"zcode": true}
+	probeFree := map[string]bool{liveContractProbeFreeReadinessItem: true}
 
 	cases := []struct {
 		name         string
