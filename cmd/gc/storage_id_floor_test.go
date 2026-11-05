@@ -131,8 +131,8 @@ func TestReserveCityIDsWithNothingCarriedWritesNothing(t *testing.T) {
 // min_hash_length (and max_hash_length, when the floor passes bd's default
 // ceiling); a second run writes nothing; a floor already higher is kept.
 func TestReserveCityIDsRaisesNeverLowersAndIsIdempotent(t *testing.T) {
-	carried := []string{"mc-abc", "mc-wisp-abcdefg"} // floor 8, above the max of 6 this store sets
-	conf := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "6"}}
+	carried := []string{"mc-abc", "mc-wisp-abcdefg"} // floor 8, one above the max of 7 this store sets
+	conf := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "7"}}
 	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
 	got, err := reserveCityIDs("/city", carried)
 	if err != nil {
