@@ -14,12 +14,13 @@ import (
 
 // The acceptance suite runs gc with an isolated HOME under GC_HOME (see
 // NewEnv); only the real-provider tiers hand it the operator's own
-// (WithHostHome). bd and dolt see neither: every Env carries a tool home, and
-// each bd or dolt child is re-homed under it — through ToolList or ToolCommand
-// when the suite forks it, through LinkBeadsTooling's wrapper when gc finds it
-// on PATH or via BD_BIN. The one exception is a split-storage city, whose gc
-// bd refuses the wrapper: there gc runs the real bd (Env.WithRealBD) under
-// NewEnv's isolated HOME.
+// (WithHostHome). A bd or dolt the suite forks itself never sees either: it is
+// re-homed under the Env's tool home through ToolList or ToolCommand. A bd gc
+// forks is, by default, the real bd (Env.WithRealBD), because a split-storage
+// city's gc bd refuses a wrapper script; it resolves user-level state under
+// gc's isolated HOME, which is test-owned. An Env whose gc leaves that HOME
+// (WithHostHome, With("HOME")), or a test that asks (WithWrappedBD), runs bd
+// through LinkBeadsTooling's wrapper instead, re-homed under the tool home.
 // See package toolhome for what bd resolves from HOME and the incident this
 // guards against.
 
@@ -81,8 +82,9 @@ func toolCommand(t *testing.T, timeout time.Duration, bin string, args ...string
 }
 
 // LinkBeadsTooling puts this run's bd and dolt in dir for gc to find on PATH and
-// returns the bd it wrote, which is also what to hand gc as BD_BIN — except on
-// a split-storage city, whose gc bd refuses a wrapper script (Env.WithRealBD).
+// returns the bd it wrote, which is also what to hand gc as BD_BIN on a
+// wrapped Env (Env.WithWrappedBD). A split-storage city's gc bd refuses a
+// wrapper script, so a default Env runs the real bd (Env.WithRealBD).
 //
 // dolt is a symlink. bd is toolhome's wrapper around bdPath, re-homed under the
 // Env's tool home, because gc forks bd with the Env's real HOME. A failed

@@ -286,9 +286,10 @@ func classifyBDExecResult(parent, ctx context.Context, name string, timeout time
 //
 // bd's .beads/.env notices (isBdEnvFileNotice) go last, after whatever says
 // what failed, and do not count as stderr when choosing between the streams.
-// bd v1.3.3 prints one on every command for each key outside its .beads/.env
-// allowlist, and every rig `gc rig add` creates carries GT_ROOT there. If those
-// lines counted, a --json failure bd reports only on stdout (bd close, dep
+// bd v1.3.3 and later print one on every command for each key outside their
+// .beads/.env allowlist. v1.3.3 also refused the GT_ROOT line every rig `gc rig
+// add` creates carries there (v1.3.4 admits GT_ROOT again), and any other key a
+// user puts in that file still draws the notice. If those lines counted, a --json failure bd reports only on stdout (bd close, dep
 // list, label add) would lose its envelope: the error text would hold just the
 // notices, and the text classifiers (isBdNotFound, isBdTransientWriteError)
 // would stop recognizing it.

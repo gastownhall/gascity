@@ -68,6 +68,10 @@ func (splitStrictGate) ClassView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).ClassViewOf(store)
 }
 
+func (splitStrictGate) ViewFront(store beads.Store) (beads.Store, func(beads.Store) beads.Store, bool) {
+	return splittest.ViewFront(store)
+}
+
 // splitStrictTestsM runs the package's tests under every TestMain check and
 // keeps m.Run's code. It hands the checks splittest.GateChecksBase's answer,
 // which under the gate is 0, so each check reports only its own failure.

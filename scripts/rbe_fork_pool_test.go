@@ -70,8 +70,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			t.Errorf("workflow_dispatch input %s = %v, want a string defaulting to %q", name, in, def)
 		}
 	}
-	if len(inputs) != 3 || inputs["role"] == nil {
-		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends)", rbeSortedKeys(inputs))
+	// And rbe_worker_sha, the canary commit (by hand, never the scaler:
+	// TestRBEPoolCanaryInput), empty by default.
+	if c, _ := inputs["rbe_worker_sha"].(map[string]any); len(inputs) != 4 || inputs["role"] == nil || c == nil || c["default"] != "" || c["type"] != "string" {
+		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends) and rbe_worker_sha (empty)", rbeSortedKeys(inputs))
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
@@ -124,7 +126,7 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"WORKER_TIER":          "fork",
 			"WORKER_MODE":          "pool",
 			"POOL_IDLE_MINUTES":    "${{ inputs.idle_minutes }}",
-			"POOL_MAX_MINUTES":     "${{ inputs.max_minutes }}",
+			"POOL_MAX_MINUTES":     "${{ steps.canary.outputs.max_minutes || inputs.max_minutes }}", // capped for a canary
 			"WORKER_NAME":          "gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}",
 			"RBE_ACTION_ISOLATION": "1",
 			// The fetch step's outputs.
@@ -183,9 +185,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 }
 
-// rbe-west's pool scalers count floor workers by run name (infra
-// nativelink-cas/west oss-pool-scaler.py ROLE_TITLE, README "Pool scalers:
-// floor and burst roles"): each pool workflow takes input role, a choice of
+// The run name says a worker's role, for people (no scaler reads it):
+// each pool workflow takes input role, a choice of
 // burst (the default: CI pre-warm and hand dispatches) or floor, and puts it
 // and idle_minutes in run-name. The worker never reads role; idle_minutes is
 // what changes its behavior.
@@ -204,7 +205,13 @@ func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
 			t.Fatalf("parse %s: %v", tc.path, err)
 		}
-		if want := "${{ format('" + tc.name + " ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}"; wf.Name != tc.name || wf.RunName != want {
+		want := "${{ format('" + tc.name + " ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}"
+		if tc.path != rbeWorkerLegacyWorkflow {
+			// A canary (rbe_worker_sha) is named canary, never floor or
+			// burst, and names its commit (TestRBEPoolCanaryInput).
+			want = "${{ format('" + tc.name + " ({0}, idle {1}m){2}', inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}"
+		}
+		if wf.Name != tc.name || wf.RunName != want {
 			t.Errorf("%s: name %q run-name %q, want %q and %q", tc.path, wf.Name, wf.RunName, tc.name, want)
 		}
 		dispatch, _ := wf.On["workflow_dispatch"].(map[string]any)

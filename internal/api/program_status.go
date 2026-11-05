@@ -119,6 +119,34 @@ func observeProgram(ps runtime.ProgramStatus, transcriptActivity string) program
 	return obs
 }
 
+// shadowObservation records, under the program-status shadow switch the
+// API serves (published), the activity a session response reports from its
+// transcript beside the program's record (observation): in-turn is busy and
+// idle idle. A transcript that decides neither, an unknown activity
+// included, decided nothing and records nothing; an indeterminate would
+// count as a disagreement beside a valid record, and alternate with the
+// readings the session's other producers record, every change kept. The
+// leaf records only when the pair changes and only while it is shadowing
+// too; nothing in the response reads it. The agent reads record nothing:
+// an agent's activity is its session's transcript, read only for a claude
+// agent whose session file is unambiguous (canAttributeSession), and the
+// session reads cover every running session.
+func shadowObservation(published runtime.ProgramStatusMode, sp runtime.Provider, sessionName, sessionID, family, transcriptActivity string) {
+	if published != runtime.ProgramStatusShadow {
+		return
+	}
+	var scrape runtime.ProgramVerdict
+	switch transcriptActivity {
+	case activityInTurn:
+		scrape = runtime.ProgramVerdictBusy
+	case activityIdle:
+		scrape = runtime.ProgramVerdictIdle
+	default:
+		return
+	}
+	runtime.ShadowCompareIdle(sp, strings.TrimSpace(sessionName), sessionID, family, runtime.ProgramPointObservation, scrape)
+}
+
 // programStatusFrames tracks the program-status view a session stream last
 // sent, so the stream's poll sends a program_status frame only when the view
 // changes. The stream starts from unknown: a session whose status stays

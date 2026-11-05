@@ -23,23 +23,27 @@ var (
 
 // Pending delegates to the underlying Tmux instance. With the
 // program-status switch at shadow, a pending read is recorded beside the
-// program's own record (shadowPending); the answer is the parsers' alone.
+// program's own record read fresh with the parsers' capture
+// (pendingWithRecord, shadowPending); the answer is the parsers' alone.
 func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
-	pending, err := p.tm.Pending(name)
-	if err == nil && p.tm.shadowing() {
-		p.shadowPending(name, pending)
+	if !p.tm.shadowing() {
+		return p.tm.Pending(name)
+	}
+	pending, reading, ok, err := p.pendingWithRecord(name)
+	if err == nil && ok {
+		p.shadowPending(name, pending, reading)
 	}
 	return pending, err
 }
 
 // shadowPending records a pending read (pending): the parsers' verdict beside
-// the record's pending verdict from the state cache's reading, the reading a
+// the record's fresh pending verdict (runtime.ProgramFreshPendingVerdict) on
+// r, the record read fresh with the parsers' capture, the reading a
 // kind-only pending interaction would come from. The reading is taken before
 // Pending returns, so an answer its caller gives the dialog cannot reach it.
 // It records on change only (the sink filters).
-func (p *Provider) shadowPending(name string, pending *runtime.PendingInteraction) {
-	s, err := p.ProgramStatus(name)
-	if err != nil || s.Mode != runtime.ProgramStatusShadow {
+func (p *Provider) shadowPending(name string, pending *runtime.PendingInteraction, r runtime.ProgramPendingReading) {
+	if r.Status.Mode != runtime.ProgramStatusShadow {
 		return
 	}
 	now := time.Now()
@@ -48,7 +52,7 @@ func (p *Provider) shadowPending(name string, pending *runtime.PendingInteractio
 		scrape = runtime.ProgramVerdictPending
 	}
 	p.tm.shadowGo(func() {
-		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramPendingVerdict(s, time.Time{}, now), s, now, 0, false)
+		p.tm.shadowEmit(name, runtime.ProgramPointPending, scrape, runtime.ProgramFreshPendingVerdict(r, time.Time{}, now), r.Status, now, 0, false)
 	})
 }
 

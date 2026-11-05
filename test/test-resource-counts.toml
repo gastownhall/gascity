@@ -2470,6 +2470,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimecontract/screen_reference_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
 resource = "subprocess"
 calls = 1
@@ -3005,6 +3010,12 @@ calls = 1
 path = "scripts/test_slice_enroll_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "test/acceptance/beads_adopt_loopback_server_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "test/acceptance/beads_cli_contract_port_file_test.go"

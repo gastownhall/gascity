@@ -353,7 +353,10 @@ too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
-that assignee.
+that assignee. It is routed by the issue id, as "show" and "update" are; the
+assignee never selects the store. It prints "released" when it cleared the
+assignment and "skipped" when that store holds the bead under another
+assignee or status, and exits 1 when that store does not hold the bead.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. To write a JSONL
@@ -2597,10 +2600,12 @@ gc init --template gascity --default-provider claude \
 | `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
 | `--no-start` | bool |  | initialize files and imports without registering or starting the city |
+| `--prefix` | string |  | bead ID prefix for the new city (default: derived from the city name) |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--providers` | stringArray |  | readiness-aware providers to write to city.toml (repeatable or comma-separated) |
 | `--remote-stage` | string |  | with --from and --no-start: record this directory as a remote stage (a K8S pod or SSH host) of the controller city at this path; its infrastructure-class commands then refuse instead of creating a local binding |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
+| `--storage` | string |  | storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd &gt;= 1.3.2 or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes) |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
 
@@ -5236,8 +5241,11 @@ gc stop reports "City stopped." only when it could confirm that every
 session stopped. If it could not list the runtime's sessions completely,
 or could not check whether a session is still running, it names what it
 could not verify, still stops every session it did see, and exits
-non-zero; a supervisor registration is restored. Resolve the reported
-error and run gc stop again.
+non-zero; a supervisor registration is restored. When a controller
+handled the stop, gc stop lists the runtime afterwards: a session still
+running, or a runtime that does not answer the listing in time (a wedged
+server), is reported the same way. Resolve the reported error and run gc
+stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
@@ -5326,6 +5334,18 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
 
+--time-budget bounds the copy and the clear of --from-work and --from-backup;
+the rig import does not check it, so it is refused there. The run checks it
+between batches, never inside one, and when it is spent stops at the next
+boundary and exits 75, naming the phase and how far it got. Running the same
+command again continues: the copy keeps every row an earlier run copied that
+still equals its source (the work store, or the backup), and the clear resumes
+from the rows it had not yet removed. That holds for the re-copy of a binding
+whose database is gone too: before it creates the database it writes a record
+beside the marker (infra.recopying), and until its own marker lands the binding
+stays unconverged, so boot refuses it and the same command resumes it, whether
+the run paused, failed or was killed.
+
 ```
 gc storage migrate [flags]
 ```
@@ -5339,6 +5359,7 @@ gc storage migrate [flags]
 | `--from-rigs` | bool |  | import each rig's graph and infrastructure beads into the city binding |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
 | `--rig` | stringSlice |  | with --from-rigs, import only this rig (repeatable) |
+| `--time-budget` | duration | `30m0s` | stop the copy or the clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget) |
 
 ## gc storage preflight
 

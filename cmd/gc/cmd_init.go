@@ -89,6 +89,8 @@ type wizardConfig struct {
 	startCommand     string                // custom start command (workspace-level)
 	bootstrapProfile string                // hosted bootstrap profile, or "" for local defaults
 	hostedDolt       hostedDoltInitOptions // external/hosted Dolt ledger endpoint (disabled when zero)
+	storage          initStorageChoice     // --storage; "" means initStorageDefault
+	prefix           string                // --prefix; "" derives the bead prefix from the city name
 	err              error
 }
 
@@ -105,6 +107,8 @@ func canBootstrapExistingCity(wiz wizardConfig) bool {
 		len(wiz.providers) == 0 &&
 		wiz.startCommand == "" &&
 		wiz.bootstrapProfile == "" &&
+		wiz.storage != initStorageSplit &&
+		wiz.prefix == "" &&
 		wiz.err == nil
 }
 
@@ -335,6 +339,8 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var preserveExisting bool
 	var jsonOut bool
 	var noStart bool
+	var storageFlag string
+	var prefixFlag string
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
@@ -375,6 +381,16 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
 			}
+			storage, err := parseInitStorageChoice(storageFlag)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return err
+			}
+			prefix, err := parseInitPrefix(prefixFlag)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return err
+			}
 			mode := "default"
 			hostedEndpoint := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
 				Host:      doltHostFlag,
@@ -403,6 +419,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if flagMode != "" {
 				mode = flagMode
 			}
+			wiz.storage = storage
+			wiz.prefix = prefix
 			code := cmdInitWithPreparedWizardInternal(args, wiz, flagMode != "", nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut, noStart)
 			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, wiz.configName, wizardDefaultProvider(wiz), wizardProviders(wiz), bootstrapProfileFlag, mode, stdout)
 		},
@@ -430,7 +448,15 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
+	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes)")
+	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix for the new city (default: derived from the city name)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
+	// --from copies its source verbatim and never adds the split (a K8S pod
+	// inits with --from); --file's source config owns both settings.
+	for _, initFlag := range []string{"storage", "prefix"} {
+		cmd.MarkFlagsMutuallyExclusive(initFlag, "from")
+		cmd.MarkFlagsMutuallyExclusive(initFlag, "file")
+	}
 	cmd.MarkFlagsMutuallyExclusive("provider", "file")
 	cmd.MarkFlagsMutuallyExclusive("provider", "from")
 	cmd.MarkFlagsMutuallyExclusive("default-provider", "file")
@@ -544,6 +570,10 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 			return 1
 		}
 	}
+	if (prepared.storage == initStorageSplit || prepared.prefix != "") && cityCanResumeInitFS(fsys.OSFS{}, cityPath) {
+		fmt.Fprintf(stderr, "gc init: %s already exists; --storage=split and --prefix apply only to a new city\n", cityPath) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if handled, code := resumeExistingInitIfPossibleInternal(fsys.OSFS{}, cityPath, stdout, stderr, "gc init", true, skipProviderReadiness, noStart, prepared.hostedDolt); handled {
 		return code
 	}
@@ -563,6 +593,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 	default:
 		wiz = defaultWizardConfig()
 	}
+	wiz.storage, wiz.prefix = prepared.storage, prepared.prefix
 	if err := preflightInitSelectedProviders(wiz, skipProviderReadiness); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1437,12 +1468,25 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if wiz.prefix != "" {
+		cfg.Workspace.Prefix = wiz.prefix
+	}
+	storage, storageNotice, err := resolveInitStorage(&cfg, cityPath, wiz.storage)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if storageNotice != "" {
+		fmt.Fprintln(stderr, storageNotice) //nolint:errcheck // best-effort stderr
+	}
+	if storage != nil {
+		cfg.Storage = storage
+	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	// Today no wizard template declares [storage], so this cannot refuse; it
-	// is here for the day `gc init` writes a split (split-by-default), so the
-	// new city is never given a reserved prefix it would then be refused for.
-	// The city shape is built, and this runs, before the scaffold, so a
-	// refusal leaves nothing behind.
+	// A split city (--storage=split) may not carry a reserved bead prefix, so
+	// the new city is never given one it would then be refused for. The city
+	// shape is built, and this runs, before the scaffold, so a refusal leaves
+	// nothing behind.
 	if err := initReservedPrefixRefusal(fs, "", &cfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2037,8 +2081,8 @@ func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride s
 	return initReservedPrefixRefusal(fs, srcToml, src, resolveCityName(nameOverride, "", cityPath), src.Workspace.Prefix)
 }
 
-// initCityConfigHook lets a test shape the city a plain `gc init` builds (a
-// split template does not exist yet). Production leaves it a no-op.
+// initCityConfigHook lets a test shape the city a plain `gc init` builds
+// before its storage and prefix are resolved. Production leaves it a no-op.
 var initCityConfigHook = func(*config.City) {}
 
 // initReservedPrefixRefusal is the R10 check every city-creating init path

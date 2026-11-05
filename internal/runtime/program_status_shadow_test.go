@@ -33,12 +33,12 @@ func stale(st runtime.ProgramState) runtime.ProgramStatus {
 
 // Kills a token that strays from the payload's closed vocabulary: every
 // point and verdict is lower_snake_case, unique, and the point list has the
-// design's sixteen.
+// design's sixteen and the starved-queue bypass.
 func TestProgramStatusShadowTokensAreClosed(t *testing.T) {
 	token := regexp.MustCompile(`^[a-z]+(_[a-z]+)*$`)
 	points := runtime.ProgramStatusPoints()
-	if len(points) != 16 {
-		t.Fatalf("%d decision points, want the design's 16", len(points))
+	if len(points) != 17 {
+		t.Fatalf("%d decision points, want the design's 16 and starved_bypass", len(points))
 	}
 	seen := map[string]bool{}
 	for _, p := range points {
@@ -452,5 +452,113 @@ func TestShadowCallerRecords(t *testing.T) {
 	}
 	if !runtime.ShadowCallerRecords(runtime.WithShadowCallerRecords(t.Context())) {
 		t.Fatal("a marked context does not read as caller-recorded")
+	}
+}
+
+// shadowFake is a running fake session "s" whose agent pane reports a live
+// working root under the shadow switch; with sink set, its leaf shadows and
+// hands comparisons to the returned list.
+func shadowFake(t *testing.T, sink bool) (*runtime.Fake, *[]runtime.ProgramStatusComparison) {
+	t.Helper()
+	f := runtime.NewFake()
+	if err := f.Start(t.Context(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	row := armedRow()
+	row.Mode = runtime.ProgramStatusShadow
+	row.Record.Since = time.Now()
+	f.SetProgramPane("s", row)
+	got := &[]runtime.ProgramStatusComparison{}
+	if sink {
+		f.ProgramShadowSink = func(c runtime.ProgramStatusComparison) { *got = append(*got, c) }
+	}
+	return f, got
+}
+
+// Kills an idle comparison made outside the leaf (observation, the op
+// lane's pre-read) that records without a shadowing leaf, judges anything
+// but the record's idle verdict, or loses the decision's identity.
+func TestShadowCompareIdle(t *testing.T) {
+	f, got := shadowFake(t, true)
+	runtime.ShadowCompareIdle(auto.New(runtime.FullFake{Fake: f}, runtime.NewFake()), "s", "gc-1", "claude", runtime.ProgramPointObservation, runtime.ProgramVerdictIdle)
+	if len(*got) != 1 {
+		t.Fatalf("recorded %+v, want one comparison", *got)
+	}
+	c := (*got)[0]
+	if c.Point != runtime.ProgramPointObservation || c.Scrape != runtime.ProgramVerdictIdle || c.Program != runtime.ProgramVerdictBusy ||
+		c.SessionID != "gc-1" || c.Family != "claude" || c.Session != "s" || c.JudgedAt.IsZero() {
+		t.Fatalf("recorded %+v, want observation idle/busy for gc-1 (claude), judged when read", c)
+	}
+	off, offGot := shadowFake(t, false)
+	runtime.ShadowCompareIdle(runtime.FullFake{Fake: off}, "s", "gc-1", "claude", runtime.ProgramPointObservation, runtime.ProgramVerdictIdle)
+	if len(*offGot) != 0 || methodCalls(off, "ProgramStatus") != 0 {
+		t.Fatalf("a leaf that is not shadowing recorded %+v after %d reads", *offGot, methodCalls(off, "ProgramStatus"))
+	}
+}
+
+// Kills a sleep decision recorded beside a reading taken only once, recorded
+// twice, or recorded by a leaf that is not shadowing: the sample's first
+// reading is taken when the decision's reads begin, its second when the
+// decision is made, and a sample records one comparison at most.
+func TestShadowIdleSampleBracketsTheDecision(t *testing.T) {
+	f, got := shadowFake(t, true)
+	sample := runtime.BeginShadowIdleProof(runtime.FullFake{Fake: f}, "s")
+	if sample == nil {
+		t.Fatal("a shadowing leaf began no sample")
+	}
+	sample.Record(true)
+	sample.Record(false)
+	if len(*got) != 1 || (*got)[0].Point != runtime.ProgramPointProvedIdle || (*got)[0].Scrape != runtime.ProgramVerdictIdle || (*got)[0].Program != runtime.ProgramVerdictBusy {
+		t.Fatalf("recorded %+v, want one proved_idle idle/busy", *got)
+	}
+	if fresh := methodCalls(f, "ProgramStatusShadowRead"); fresh != 2 {
+		t.Fatalf("%d fresh reads, want one on each side of the decision", fresh)
+	}
+	off, offGot := shadowFake(t, false)
+	if s := runtime.BeginShadowIdleProof(runtime.FullFake{Fake: off}, "s"); s != nil {
+		t.Fatal("a leaf that is not shadowing began a sample")
+	}
+	var none *runtime.ShadowIdleSample
+	none.Record(true)
+	if len(*offGot) != 0 {
+		t.Fatalf("not shadowing recorded %+v", *offGot)
+	}
+}
+
+// idleWaitLeaf is a shadowing leaf that times idle waits itself.
+type idleWaitLeaf struct {
+	runtime.FullFake
+	waits []runtime.ProgramVerdict
+}
+
+func (l *idleWaitLeaf) ProgramStatusShadowIdleWait(_ string, _, _ time.Time, scrape runtime.ProgramVerdict) {
+	l.waits = append(l.waits, scrape)
+}
+
+// Kills an idle wait decided outside the leaf (the op lane's boundary) that
+// is not handed to a leaf that times it, that a leaf without timing records
+// other than untimed beside the record's idle verdict on a fresh reading, or
+// that records at all off shadow.
+func TestShadowWaitForIdle(t *testing.T) {
+	f, got := shadowFake(t, true)
+	started := time.Now().Add(-time.Minute)
+	runtime.ShadowWaitForIdle(runtime.FullFake{Fake: f}, "s", started, time.Now(), runtime.ProgramVerdictIdle)
+	if len(*got) != 1 || (*got)[0].Point != runtime.ProgramPointWaitForIdle || (*got)[0].Scrape != runtime.ProgramVerdictIdle ||
+		(*got)[0].Program != runtime.ProgramVerdictBusy || (*got)[0].Timed {
+		t.Fatalf("recorded %+v, want one untimed wait_for_idle idle/busy", *got)
+	}
+	if fresh := methodCalls(f, "ProgramStatusShadowRead"); fresh != 1 {
+		t.Fatalf("%d fresh reads, want one", fresh)
+	}
+	timed, timedGot := shadowFake(t, true)
+	leaf := &idleWaitLeaf{FullFake: runtime.FullFake{Fake: timed}}
+	runtime.ShadowWaitForIdle(leaf, "s", started, time.Now(), runtime.ProgramVerdictIdle)
+	if len(leaf.waits) != 1 || len(*timedGot) != 0 {
+		t.Fatalf("a timing leaf was handed %v and the sink got %+v; want the leaf to take the decision", leaf.waits, *timedGot)
+	}
+	off, offGot := shadowFake(t, false)
+	runtime.ShadowWaitForIdle(runtime.FullFake{Fake: off}, "s", started, time.Now(), runtime.ProgramVerdictIdle)
+	if len(*offGot) != 0 || methodCalls(off, "ProgramStatusShadowRead") != 0 {
+		t.Fatalf("not shadowing recorded %+v", *offGot)
 	}
 }
