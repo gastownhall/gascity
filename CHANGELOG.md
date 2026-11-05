@@ -1232,14 +1232,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binding is now gc's only when its port is one gc's managed-Dolt runtime
   record for the city names (`.gc/runtime/packs/dolt/dolt-state.json` or
   `dolt-provider-state.json`); a record gc cannot parse is an error naming
-  the file. The boot port sync (and the publication and `gc rig add` paths
-  that share it) no longer stamps endpoint keys into, writes, or removes the
-  port file of a bd-owned store, hosted or loopback; and `gc doctor`'s
-  `dolt-drift` check no longer reports such a store's own port file as
-  drift. Like every store gc does not serve, such a store does not get gc's
-  bead types on start: after adopting one, run
-  `gc doctor --fix --check custom-types:<rig>` once. A store an earlier gc
-  already stamped needs a one-time repair: restore its pre-adopt
+  the file. One rule still answers first: in a city gc has run Dolt for, a
+  store whose database already has a directory in the city's data dir
+  (`.beads/dolt/<database>`, which `gc rig remove` leaves in place) is gc's
+  whatever its port, so give a store you adopt from your own server a
+  database name gc does not keep there. The boot port sync (and the
+  publication and `gc rig add` paths that share it) no longer stamps
+  endpoint keys into, writes, or removes the port file of a bd-owned store,
+  hosted or loopback; and `gc doctor`'s `dolt-drift` check no longer reports
+  such a store's own port file as drift. Like every store gc does not serve,
+  such a store does not get gc's bead types on start: after adopting one,
+  run `gc doctor --fix --check custom-types:<rig>` once. A store an earlier
+  gc already stamped needs a one-time repair: restore its pre-adopt
   `.beads/config.yaml` (or drop the `gc.*` keys adopt appended), then adopt
   again.
 

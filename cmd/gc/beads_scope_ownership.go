@@ -364,6 +364,13 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 // This is the evidence that settles it without consulting the environment at
 // all.
 //
+// It answers before the port rule for a loopback binding too. bd's binding
+// keeps the port it was initialized against, so once gc's own server has moved
+// to another port, the port rule alone would read gc's own legacy store as
+// bd's. The cost is the converse: a store an operator binds to their own
+// loopback server under the name of a database gc keeps in the city's data
+// dir (one a removed rig left behind) is gc's.
+//
 // It takes TWO facts, and the conjunction is the whole point:
 //
 //  1. gc has published a Dolt runtime for the city, so the direct managed

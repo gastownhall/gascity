@@ -927,9 +927,11 @@ func validateSocketTarget(socket, host, port string) error {
 //     dolt sql-server an operator runs on this machine is spelled exactly like
 //     gc's own; such a binding is gc's only when its port is one gc recorded
 //     for the city's managed Dolt (cityRecordsManagedDoltPort).
-//   - config.yaml is not gc-authoritative. gc writes its endpoint keys into
-//     every scope it canonicalises; a scope carrying only bd's template (or no
-//     config at all) has never been claimed.
+//   - config.yaml carries no claim of gc's. gc stamps its endpoint origin into
+//     every scope it canonicalises, and a stamped config stays gc's even when
+//     it has drifted out of validity (scopeConfigClaimedByGC); a scope
+//     carrying only bd's template (or no config at all) has never been
+//     claimed.
 //
 // gc's runtime record is read last, and only for a loopback binding on a scope
 // gc never claimed, so a record gc cannot read fails only the classification
@@ -952,12 +954,9 @@ func ScopeCarriesBdOwnedDirectBinding(fs fsys.FS, cityRoot, scopeRoot, issuePref
 	if !bindingMayNameForeignServer(binding) {
 		return false, nil
 	}
-	resolved, err := ResolveScopeConfigState(fs, cityRoot, scopeRoot, issuePrefix)
-	if err != nil {
+	claimed, err := scopeConfigClaimedByGC(fs, cityRoot, scopeRoot, issuePrefix)
+	if err != nil || claimed {
 		return false, err
-	}
-	if resolved.Kind == ScopeConfigAuthoritative {
-		return false, nil
 	}
 	if !DoltHostIsLocal(binding.DoltHost) {
 		return true, nil
@@ -967,6 +966,28 @@ func ScopeCarriesBdOwnedDirectBinding(fs fsys.FS, cityRoot, scopeRoot, issuePref
 		return false, err
 	}
 	return !recorded, nil
+}
+
+// scopeConfigClaimedByGC reports whether a scope's config.yaml carries gc's
+// claim. gc.endpoint_origin is gc's own stamp, so a config carrying one is
+// claimed whether or not it still validates: an inherited_city mirror the
+// city's endpoint has moved away from is drift the boot sync re-mirrors, and
+// validating it here would fail the classification before that repair runs. A
+// config without the stamp is claimed when it resolves as authoritative, which
+// is how a legacy gc config carries its endpoint.
+func scopeConfigClaimedByGC(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (bool, error) {
+	cfg, ok, err := ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil || !ok {
+		return false, err
+	}
+	if cfg.EndpointOrigin != "" {
+		return true, nil
+	}
+	resolved, err := ResolveScopeConfigState(fs, cityRoot, scopeRoot, issuePrefix)
+	if err != nil {
+		return false, err
+	}
+	return resolved.Kind == ScopeConfigAuthoritative, nil
 }
 
 // bindingMayNameForeignServer reports whether a persisted binding can point at

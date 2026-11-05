@@ -782,6 +782,28 @@ func TestLoopbackRigOnAnUnrecordedPortOfALegacyCityIsBds(t *testing.T) {
 	assertScopeConfigCarriesNoGCEndpointOrigin(t, rig)
 }
 
+// The same rig, except its database has a directory in the city's managed data
+// dir. That fact answers before the port rule: it is what keeps gc's own legacy
+// store gc's once gc's server has moved off the port bd's binding recorded, and
+// it claims an operator's store adopted under that database's name just as
+// well.
+func TestLoopbackRigWhoseDatabaseIsInTheCitysDataDirIsGCsOnAnUnrecordedPort(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "fe")
+	rig := rigs["fe"]
+	seedCityDatabaseDir(t, city, "hq")
+	seedCityDatabaseDir(t, city, "fe")
+	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city)) // port 3307
+	writeBdOwnedDirectExternalRig(t, rig, "fe", "127.0.0.1", bdOwnedLoopbackPort)
+
+	got, err := scopeIsBdOwnedDirectExternal(city, rig)
+	if err != nil {
+		t.Fatalf("scopeIsBdOwnedDirectExternal: %v", err)
+	}
+	if got {
+		t.Fatalf("a loopback rig whose database is in the city's data dir classified as bd-owned")
+	}
+}
+
 func writeDoltRuntimePublicationFixtureOnPort(t *testing.T, cityPath, statePath string, port int) {
 	t.Helper()
 	if err := writeDoltRuntimeStateFile(statePath, doltRuntimeState{

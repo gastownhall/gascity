@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -268,5 +269,56 @@ func TestMalformedRecordIsNotReadWhenConfigDecides(t *testing.T) {
 	got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, city, "gc")
 	if err != nil || got {
 		t.Fatalf("ScopeCarriesBdOwnedDirectBinding() = %v, %v; want false, nil", got, err)
+	}
+}
+
+// gc.endpoint_origin is gc's own stamp, so a config carrying one is gc's claim
+// whether or not it still validates. Validity is the reconciler's question: an
+// inherited_city mirror the city's endpoint has moved away from is drift the
+// boot sync re-mirrors, and gc initializes such a rig with `bd init --server`
+// against the city's server, so its metadata.json carries bd's binding too.
+// Strict validation here would fail that rig's classification, and with it
+// every boot and port sync, before the repair runs.
+func TestGCStampedConfigIsGCsEvenWhenItDrifted(t *testing.T) {
+	fs := fsys.OSFS{}
+	for name, tc := range map[string]struct {
+		host     string
+		cityPort string
+		rigUser  string
+	}{
+		"loopback mirror of a dolt.user the city cleared": {host: "127.0.0.1", cityPort: "3307", rigUser: "stale-user"},
+		"hosted mirror of a dolt.user the city cleared":   {host: "db.example", cityPort: "3307", rigUser: "stale-user"},
+		"loopback mirror of a port the city moved off":    {host: "127.0.0.1", cityPort: "3308"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := t.TempDir()
+			rig := filepath.Join(city, "rigs", "fe")
+			cityConfig := "issue_prefix: gc\ngc.endpoint_origin: city_canonical\ngc.endpoint_status: verified\n" +
+				"dolt.host: " + tc.host + "\ndolt.port: " + tc.cityPort + "\n"
+			rigConfig := "issue_prefix: fe\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\n" +
+				"dolt.host: " + tc.host + "\ndolt.port: 3307\n"
+			if tc.rigUser != "" {
+				rigConfig += "dolt.user: " + tc.rigUser + "\n"
+			}
+			for scope, cfg := range map[string]string{city: cityConfig, rig: rigConfig} {
+				if err := fs.MkdirAll(filepath.Join(scope, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := fs.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(cfg), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeRawMetadata(t, fs, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+				`"dolt_server_host":"`+tc.host+`","dolt_server_port":3307,"dolt_database":"fe"}`)
+			var invalid *InvalidCanonicalConfigError
+			if _, err := ResolveScopeConfigState(fs, city, rig, "fe"); !errors.As(err, &invalid) {
+				t.Fatalf("fixture: ResolveScopeConfigState() error = %v, want the drifted mirror rejected", err)
+			}
+
+			got, err := ScopeCarriesBdOwnedDirectBinding(fs, city, rig, "fe")
+			if err != nil || got {
+				t.Fatalf("ScopeCarriesBdOwnedDirectBinding() = %v, %v; want false, nil", got, err)
+			}
+		})
 	}
 }
