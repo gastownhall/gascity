@@ -2045,6 +2045,35 @@
         ],
         "type": "object"
       },
+      "ControlCheckUnlaunchablePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "check_path": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "store_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "check_path",
+          "error"
+        ],
+        "type": "object"
+      },
       "ControlDispatcherScopeGapPayload": {
         "additionalProperties": false,
         "properties": {
@@ -3460,6 +3489,9 @@
           },
           {
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControlCheckUnlaunchablePayload"
           },
           {
             "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
@@ -9474,7 +9506,8 @@
               "proved_idle",
               "queued_delivery",
               "drain_reminder",
-              "observation"
+              "observation",
+              "starved_bypass"
             ],
             "type": "string"
           },
@@ -14803,6 +14836,7 @@
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
+            "control.check_unlaunchable": "#/components/schemas/TypedEventStreamEnvelopeControlCheckUnlaunchable",
             "control.dispatcher_scope_gap": "#/components/schemas/TypedEventStreamEnvelopeControlDispatcherScopeGap",
             "control.root_settle_failed": "#/components/schemas/TypedEventStreamEnvelopeControlRootSettleFailed",
             "control.stalled": "#/components/schemas/TypedEventStreamEnvelopeControlStalled",
@@ -14972,6 +15006,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlCheckUnlaunchable"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlDispatcherScopeGap"
@@ -16437,6 +16474,63 @@
         "title": "TypedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControlCheckUnlaunchable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlCheckUnlaunchablePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.check_unlaunchable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope control.check_unlaunchable",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeControlDispatcherScopeGap": {
         "additionalProperties": false,
         "properties": {
@@ -16943,6 +17037,7 @@
                 "controller.started",
                 "controller.stopped",
                 "control.stalled",
+                "control.check_unlaunchable",
                 "control.root_settle_failed",
                 "control.dispatcher_scope_gap",
                 "city.suspended",
@@ -22687,6 +22782,7 @@
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
+            "control.check_unlaunchable": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable",
             "control.dispatcher_scope_gap": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap",
             "control.root_settle_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlRootSettleFailed",
             "control.stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled",
@@ -22856,6 +22952,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap"
@@ -24401,6 +24500,67 @@
         "title": "TypedTaggedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlCheckUnlaunchablePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.check_unlaunchable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope control.check_unlaunchable",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap": {
         "additionalProperties": false,
         "properties": {
@@ -24938,6 +25098,7 @@
                 "controller.started",
                 "controller.stopped",
                 "control.stalled",
+                "control.check_unlaunchable",
                 "control.root_settle_failed",
                 "control.dispatcher_scope_gap",
                 "city.suspended",
@@ -57410,6 +57571,16 @@
             "name": "lite",
             "schema": {
               "description": "When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.",
+            "explode": false,
+            "in": "query",
+            "name": "fresh",
+            "schema": {
+              "description": "When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.",
               "type": "boolean"
             }
           }

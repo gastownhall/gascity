@@ -53,6 +53,10 @@ const (
 		`case "$mode" in corpse) echo live ;; zombie) if alive "$box"; then echo changed; else rm -rf "$box"; echo killed; fi ;; *) exit 1 ;; esac`
 )
 
+// goldenPeek prints a box's screen, its agent's command, and answers exit
+// 66 (no screen) when no box holds the name.
+const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box/cmd0"; echo`
+
 // goldenPrelude computes the city's state and the name's box, and the
 // helpers the observe.v1 bodies share: ident prints $box's identity, and
 // alive reports whether a box's agent (cmd0) is among its process names.
@@ -84,6 +88,7 @@ func Bodies() map[string]string {
 		"observe":           goldenObserve,
 		"inventory":         goldenInventory,
 		"kill-object":       goldenKillObject,
+		"peek":              goldenPeek,
 		"exec":              `sh -c "$(cat)"`,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able

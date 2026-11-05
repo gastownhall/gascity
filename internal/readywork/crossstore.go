@@ -296,29 +296,11 @@ func (cs *crossStore) blockedRows(ctx context.Context, own int, rows []beads.Bea
 	cs.mu.Lock()
 	for _, id := range pending {
 		for _, dep := range deps[id] {
-			if !beads.IsReadyBlockingDependencyType(dep.Type) || dep.DependsOnID == id {
-				continue
-			}
-			target, capability := beads.ExternalBlockerTarget(dep.DependsOnID)
-			switch {
-			case capability:
-				// Names no bead; bd never blocks on it, nor does gc.
-			case target != dep.DependsOnID, cs.stranded[legRow{own, id}]:
+			switch target, need := judgeEdge(leg, stranding, cs.stranded[legRow{own, id}], id, dep); need {
+			case edgeVerify:
 				verify = append(verify, edge{id, target})
-			case stranding && leg.ClassBinding && inAnyNamespace(target, leg.ReservedPrefixes):
-				// The binding judged a target in its own reserved namespace,
-				// which no other store holds.
-			case stranding && leg.ClassBinding:
-				// The binding judged its copy of a work-shaped target; the
-				// store the target was minted in may hold another.
-				verify = append(verify, edge{id, target})
-			case stranding, beads.BdIDPrefix(target) == beads.BdIDPrefix(id):
-				// The store judged its own copy: a stranding store every
-				// target it holds, bd a same-prefix one. A class binding may
-				// hold another (a migrated relic), checked below.
+			case edgeRelicCandidate:
 				relicCandidates = append(relicCandidates, edge{id, target})
-			default:
-				verify = append(verify, edge{id, target})
 			}
 		}
 	}
@@ -351,6 +333,92 @@ func (cs *crossStore) blockedRows(ctx context.Context, own int, rows []beads.Bea
 	}
 	cs.mu.Unlock()
 	return out, nil
+}
+
+// edgeNeed is what judging one edge of a served row takes under the
+// cross-store rule (judgeEdge).
+type edgeNeed int
+
+const (
+	// edgeNone: not a blocking edge, or a self edge.
+	edgeNone edgeNeed = iota
+	// edgeCapability: an "external:<rig>:<capability>" ref, which names no
+	// bead and never blocks, as in bd.
+	edgeCapability
+	// edgeOwnJudgment: a target in the serving class binding's own reserved
+	// namespace, which no other store holds, so the binding's own Ready
+	// judged the only copy.
+	edgeOwnJudgment
+	// edgeRelicCandidate: a target the serving store judged its own copy of,
+	// which a class binding may also hold (a migrated relic).
+	edgeRelicCandidate
+	// edgeVerify: a target the federation judges from every copy the legs
+	// hold.
+	edgeVerify
+)
+
+// judgeEdge returns the bead dep names, a ready-blocking edge of row id that
+// leg served, and what judging it takes. stranding says leg's store reads an
+// absent target as a blocker (strands); stranded says the row reached the
+// reader from leg's absent-blocker listing, whose targets its store judged
+// none of.
+func judgeEdge(leg Leg, stranding, stranded bool, id string, dep beads.Dep) (string, edgeNeed) {
+	if !beads.IsReadyBlockingDependencyType(dep.Type) || dep.DependsOnID == id {
+		return "", edgeNone
+	}
+	target, capability := beads.ExternalBlockerTarget(dep.DependsOnID)
+	switch {
+	case capability:
+		return "", edgeCapability
+	case target != dep.DependsOnID, stranded:
+		return target, edgeVerify
+	case stranding && leg.ClassBinding && inAnyNamespace(target, leg.ReservedPrefixes):
+		return target, edgeOwnJudgment
+	case stranding && leg.ClassBinding:
+		// The binding judged its copy of a work-shaped target; the store the
+		// target was minted in may hold another.
+		return target, edgeVerify
+	case stranding, beads.BdIDPrefix(target) == beads.BdIDPrefix(id):
+		// The store judged its own copy: a stranding store every target it
+		// holds, bd a same-prefix one. A class binding may hold another (a
+		// migrated relic).
+		return target, edgeRelicCandidate
+	default:
+		return target, edgeVerify
+	}
+}
+
+// OwnVerdictStands reports whether the cross-store rule settles row id of leg,
+// whose edges are deps, by leg's own ready verdict alone: leg is a class
+// binding whose store strands absent targets, and every blocking edge names a
+// target in its own reserved namespace, which no other store holds. The gate
+// (LegGate.Gate) then verifies nothing for the row and serves it exactly when
+// leg's own Ready does.
+//
+// held says which targets the caller's verdict judged. A reader standing in
+// for leg's Ready (a cache, whose readiness reads a target it does not hold
+// as no blocker) passes what it held; a target held reports false keeps the
+// row with the federation, as the store's own Ready strands it. A nil held is
+// the store's own verdict, which judged every target. A capability-ref edge
+// keeps the row with the federation too: the store strands the row behind it
+// and the gate serves the row from its absent-blocker listing.
+func OwnVerdictStands(leg Leg, id string, deps []beads.Dep, held func(id string) bool) bool {
+	if !leg.ClassBinding || leg.Store == nil || !strands(leg) {
+		return false
+	}
+	for _, dep := range deps {
+		target, need := judgeEdge(leg, true, false, id, dep)
+		switch need {
+		case edgeNone:
+		case edgeOwnJudgment:
+			if held != nil && !held(target) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func edgeTargets[E any](edges []E, target func(E) string) []string {

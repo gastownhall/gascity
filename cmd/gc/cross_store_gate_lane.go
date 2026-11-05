@@ -84,7 +84,7 @@ func (cr *CityRuntime) releaseCrossStoreGates() dispatch.CrossStoreGateReport {
 		// A quiescent city's stores are not touched; the gates wait for it.
 		return dispatch.CrossStoreGateReport{}
 	}
-	report, err := dispatch.ReleaseCrossStoreGates(graph, crossStoreBlockerResolver(graph, city, cfg, cr.rigBeadStores(), buildSuspendedRigPathsForCity(cfg, cr.cityPath))) // residency:allow — the work legs a gate's blocker may live in; see crossStoreBlockerResolver
+	report, err := dispatch.ReleaseCrossStoreGates(beads.GraphStore{Store: graph}, crossStoreBlockerResolver(graph, city, cfg, cr.rigBeadStores(), buildSuspendedRigPathsForCity(cfg, cr.cityPath))) // residency:allow — the work legs a gate's blocker may live in; see crossStoreBlockerResolver
 	if len(report.Released) > 0 {
 		fmt.Fprintf(cr.stdout, "Cross-store gates: released %d (%s); their drain items may run\n", len(report.Released), strings.Join(report.Released, " ")) //nolint:errcheck // best-effort stdout
 	}

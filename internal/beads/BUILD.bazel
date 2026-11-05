@@ -184,6 +184,7 @@ go_test(
         "guarded_batch_test.go",
         "hangbudget_linux_test.go",
         "hangbudget_test.go",
+        "helpers_through_handles_test.go",
         "list_revision_fidelity_test.go",
         "live_ready_test.go",
         "local_sidecar_test.go",
@@ -216,6 +217,8 @@ go_test(
         "native_dolt_store_count_refusal_test.go",
         "native_dolt_store_count_test.go",
         "native_dolt_store_dep_batch_test.go",
+        "native_dolt_store_dep_metadata_batch_integration_test.go",
+        "native_dolt_store_dep_remove_batch_test.go",
         "native_dolt_store_exact_batch_embedded_test.go",
         "native_dolt_store_exact_batch_test.go",
         "native_dolt_store_facade_integration_test.go",
@@ -280,6 +283,7 @@ go_test(
         "sqlite_sequence_floor_lock_test.go",
         "sqlite_sequence_test.go",
         "sqlite_store_atomic_close_test.go",
+        "sqlite_store_batch_copy_test.go",
         "sqlite_store_closed_test.go",
         "sqlite_store_conditional_capability_test.go",
         "sqlite_store_conformance_test.go",
@@ -314,7 +318,7 @@ go_test(
         "@com_github_steveyegge_beads//internal/types:drift_srcs",
     ] + select({
         "//:gotags_integration": [
-            "@bd_bin_v1_3_2//:bd",
+            "@bd_bin_v1_3_4//:bd",
             "@dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
@@ -324,7 +328,7 @@ go_test(
     # the pinned binaries first on PATH (internal/testenv).
     env = select({
         "//:gotags_integration": {
-            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_4//:bd) $(rootpath @dolt_bin_v2_6_0//:dolt-linux-amd64/bin/dolt)",
         },
         "//conditions:default": {},
     }),
@@ -468,18 +472,18 @@ go_variant_test(
 
 # The ReleaseIfCurrent CAS contract against a real bd
 # (`make test-bd-conditional-release-contract`): beads_test built with
-# -tags integration, with deps.env BD_CURRENT_REF's bd (the v1.3.2 tag,
-# @bd_bin_v1_3_2) first on PATH (GC_TEST_TOOL_PATHS, internal/testenv).
+# -tags integration, with deps.env BD_CURRENT_REF's bd (the v1.3.4 tag,
+# @bd_bin_v1_3_4) first on PATH (GC_TEST_TOOL_PATHS, internal/testenv).
 # GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
 # failure. The integration-packages lane also runs the row (without that
 # switch); this target is the strict cell, and runs for fork PRs too.
 go_variant_test(
     name = "bd_conditional_release_contract_test",
     args = ["-test.run=^TestBdStoreReleaseIfCurrentAgainstRealBd$$"],
-    data = ["@bd_bin_v1_3_2//:bd"],
+    data = ["@bd_bin_v1_3_4//:bd"],
     env = {
         "GC_REQUIRE_BD_CONDITIONAL_RELEASE": "1",
-        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_2//:bd)",
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_4//:bd)",
     },
     gotags = ["integration"],
     test = ":beads_test",

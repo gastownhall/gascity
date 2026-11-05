@@ -383,8 +383,8 @@ func newSplitE2ECity(t *testing.T, bdPath, doltPath string, bornSplit bool, preB
 	// the sessions resolving whatever `gc` sat beside it — a different build.
 	// Every city here is split at some point, and gc bd on a split city
 	// forwards only to bd's own binary, never the topology's tool-home
-	// wrapper (see WithRealBD).
-	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath).WithRealBD(bdPath), gcBin, filepath.Join(root, "gc-bin"))
+	// wrapper: TopologyEnv keeps NewEnv's real bd (see WithRealBD).
+	env := splitBinaryEnv(t, helpers.TopologyEnv(t, base, root, bdPath, doltPath), gcBin, filepath.Join(root, "gc-bin"))
 	preEnv := env
 	if preBin != "" {
 		// The pre-cutover binary keeps the isolated HOME too. v1.5.0-rc1
