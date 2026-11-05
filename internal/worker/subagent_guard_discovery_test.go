@@ -157,19 +157,22 @@ func TestInFlightBackgroundSubagents_DoesNotOpenCodexRollouts(t *testing.T) {
 			// Release a lookup that is blocked on a decoy, or its goroutine
 			// outlives the test. Opening the write end is what unblocks a reader.
 			t.Cleanup(func() {
-				deadline := time.Now().Add(10 * time.Second)
-				for time.Now().Before(deadline) {
+				tick := time.NewTicker(10 * time.Millisecond)
+				defer tick.Stop()
+				deadline := time.After(10 * time.Second)
+				for {
 					select {
 					case <-done:
 						return
-					default:
+					case <-deadline:
+						return
+					case <-tick.C:
 					}
 					for _, path := range fifos {
 						if w, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
 							_ = w.Close()
 						}
 					}
-					time.Sleep(10 * time.Millisecond)
 				}
 			})
 
