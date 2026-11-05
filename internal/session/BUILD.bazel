@@ -237,6 +237,7 @@ go_test(
         "testmanager_test.go",
         "transcript_acp_compose_test.go",
         "transcript_acp_test.go",
+        "transcript_claude_layout_test.go",
         "transcript_lookup_test.go",
         "transcript_meta_legacy_test.go",
         "turn_interrupt_mode_test.go",
