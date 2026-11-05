@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -516,5 +517,141 @@ printf '[{"id":"ga-plain"}]'
 	}
 	if len(got) != 1 || got[0].ID != "ga-plain" {
 		t.Fatalf("nextWorkflowServeBeads = %#v, want [{ga-plain}]", got)
+	}
+}
+
+// installRecordingFakeBd puts a `bd` on PATH that appends one line per
+// invocation to the returned log and answers an empty ready set. A control-ready
+// scan never shells out to bd, so the log must stay empty.
+func installRecordingFakeBd(t *testing.T) (invocations func() []string) {
+	t.Helper()
+	configureIsolatedRuntimeEnv(t)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	script := fmt.Sprintf("#!/bin/sh\necho \"$*\" >> %q\nprintf '[]'\n", logPath)
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+	return func() []string {
+		data, err := os.ReadFile(logPath)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("read fake bd log: %v", err)
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+}
+
+// TestControlReadyScanUnopenableStoreFailsLoudWithoutShelling pins the ruling
+// that deleted the shell reader: a scope whose ledger legs cannot be opened
+// fails the scan loudly. It must not degrade to a `bd ready` shell-out, which
+// is blind to the gc.work_outcome=blocked veto and so would release a control
+// bead whose blocker closed blocked.
+func TestControlReadyScanUnopenableStoreFailsLoudWithoutShelling(t *testing.T) {
+	invocations := installRecordingFakeBd(t)
+	openErr := errors.New("ledger cannot be opened")
+	installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
+		return nil, nil, openErr
+	})
+	dir := t.TempDir()
+	query := workflowServeControlReadyQueryForBeads(config.Agent{Name: config.ControlDispatcherAgentName}, config.BeadsConfig{})
+
+	queue, handled, err := tryControlReadyScan(query, dir, nil)
+	if !handled || len(queue) != 0 || !errors.Is(err, openErr) || !strings.Contains(err.Error(), dir) {
+		t.Errorf("tryControlReadyScan = (%d item(s), handled %t, err %v), want (0, true, an error wrapping the open error and naming %s)", len(queue), handled, err, dir)
+	}
+
+	got, err := nextWorkflowServeBeads(query, dir, nil)
+	if len(got) != 0 || !errors.Is(err, openErr) || !strings.Contains(err.Error(), dir) {
+		t.Errorf("nextWorkflowServeBeads = (%d item(s), err %v), want (0, an error wrapping the open error and naming %s)", len(got), err, dir)
+	}
+
+	if calls := invocations(); len(calls) != 0 {
+		t.Errorf("bd was invoked %d time(s): %q; the scan must never shell out to bd", len(calls), calls)
+	}
+}
+
+// TestControlReadyScanMalformedMarkerQueryFailsLoud pins that a query carrying
+// the control-ready marker but no target is an error, not a query to hand to
+// the shell: the scan owns every marker-prefixed work query, so one it cannot
+// parse must fail loudly instead of running its bd script.
+func TestControlReadyScanMalformedMarkerQueryFailsLoud(t *testing.T) {
+	invocations := installRecordingFakeBd(t)
+	dir := t.TempDir()
+	query := controlReadyQueryMarkerPrefix + " sh -c 'bd ready --json'"
+
+	queue, handled, err := tryControlReadyScan(query, dir, nil)
+	if queue != nil || !handled || err == nil {
+		t.Errorf("tryControlReadyScan = (%v, handled %t, err %v), want (nil, true, an error)", queue, handled, err)
+	}
+
+	got, err := nextWorkflowServeBeads(query, dir, nil)
+	if got != nil || err == nil {
+		t.Errorf("nextWorkflowServeBeads = (%v, err %v), want (nil, an error)", got, err)
+	}
+
+	if calls := invocations(); len(calls) != 0 {
+		t.Errorf("bd was invoked %d time(s): %q; a malformed marker query must not reach the shell", len(calls), calls)
+	}
+}
+
+// TestControlReadyScanHonorsTheWorkOutcomeVeto is the scan-level pin for the
+// gc.work_outcome=blocked veto: a control bead routed to the dispatcher whose
+// blocker closed blocked is not in the queue, while the same blocker closed
+// with another outcome releases it.
+func TestControlReadyScanHonorsTheWorkOutcomeVeto(t *testing.T) {
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
+	route := agentCfg.QualifiedName()
+
+	for _, tc := range []struct {
+		name        string
+		workOutcome string
+		wantQueued  bool
+	}{
+		{name: "blocked blocker vetoes its dependent", workOutcome: beadmeta.WorkOutcomeBlocked, wantQueued: false},
+		{name: "shipped blocker releases its dependent", workOutcome: beadmeta.WorkOutcomeShipped, wantQueued: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(store))
+
+			root, err := store.Create(beads.Bead{
+				Title:    "workflow",
+				Type:     "task",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+			})
+			if err != nil {
+				t.Fatalf("create workflow root: %v", err)
+			}
+			blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
+			if err != nil {
+				t.Fatalf("create blocker: %v", err)
+			}
+			dependent := newRoutedControlBead(t, store, root.ID, route)
+			if err := store.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatalf("add dependency: %v", err)
+			}
+			if err := store.SetMetadataBatch(blocker.ID, map[string]string{beadmeta.WorkOutcomeMetadataKey: tc.workOutcome}); err != nil {
+				t.Fatalf("set work outcome: %v", err)
+			}
+			if err := store.Close(blocker.ID); err != nil {
+				t.Fatalf("close blocker: %v", err)
+			}
+
+			queued := false
+			for _, id := range controlReadyScan(t, cityPath, agentCfg, config.BeadsConfig{}) {
+				if id == dependent.ID {
+					queued = true
+				}
+			}
+			if queued != tc.wantQueued {
+				t.Errorf("dependent queued = %t, want %t with the blocker closed gc.work_outcome=%s", queued, tc.wantQueued, tc.workOutcome)
+			}
+		})
 	}
 }
