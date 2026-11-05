@@ -314,6 +314,13 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(), citylayout.PackRuntimeEnv(cityPath, entry.PackName)...)
+	// The resolved scope supersedes an ambient rig from another city and
+	// carries root --rig to scripts without consuming the leaf's own argv.
+	rig := ""
+	if scope, err := resolveContext(); err == nil && filepath.Clean(scope.CityPath) == filepath.Clean(cityPath) {
+		rig = scope.RigName
+	}
+	cmd.Env = append(cmd.Env, "GC_RIG="+rig)
 	cmd.Env = append(cmd.Env,
 		"GC_PACK_DIR="+packDir,
 		"GC_PACK_NAME="+entry.PackName,

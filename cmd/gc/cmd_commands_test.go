@@ -930,17 +930,17 @@ func TestE1LoneDashIsTransparentToEagerLazyDiscovery(t *testing.T) {
 		{
 			name:      "before binding with city",
 			args:      []string{"-", "--city", cityB, "backstage", "hello", "payload"},
-			wantExact: "selected-hello args:<-><--city><" + cityB + "><payload>\n",
+			wantExact: "selected-hello args:<-><payload>\n",
 		},
 		{
 			name:      "between binding and leaf with city",
 			args:      []string{"backstage", "-", "--city", cityB, "hello", "payload"},
-			wantExact: "selected-hello args:<-><--city><" + cityB + "><payload>\n",
+			wantExact: "selected-hello args:<-><payload>\n",
 		},
 		{
 			name:      "between intermediate and leaf with rig",
 			args:      []string{"backstage", "repo", "-", "--rig", targetRig, "sync", "payload"},
-			wantExact: "selected-sync args:<-><--rig><" + targetRig + "><payload>\n",
+			wantExact: "selected-sync args:<-><payload>\n",
 		},
 		{
 			name:         "before binding group help",
@@ -1020,13 +1020,13 @@ func TestE1GlobalJSONControlDoesNotBlockScopedPackResolution(t *testing.T) {
 			name:       "city success after binding",
 			args:       []string{"backstage", "--json", "--city", cityB, "hello", "payload"},
 			wantCode:   0,
-			wantStdout: "selected-hello args:<--city><" + cityB + "><--json><payload>\n",
+			wantStdout: "selected-hello args:<--json><payload>\n",
 		},
 		{
 			name:       "rig success before binding",
 			args:       []string{"--json=1", "--rig", targetRig, "backstage", "hello", "payload"},
 			wantCode:   0,
-			wantStdout: "selected-hello args:<--rig><" + targetRig + "><--json=1><payload>\n",
+			wantStdout: "selected-hello args:<--json=1><payload>\n",
 		},
 		{
 			name:          "selected missing schema fails despite ambient schema",
@@ -2015,12 +2015,12 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 		{
 			name: "namespace city remains root owned",
 			args: []string{"backstage", "--city", cityB, "hello", "payload"},
-			want: "city-b-hello args:<--city><" + cityB + "><payload>\n",
+			want: "city-b-hello args:<payload>\n",
 		},
 		{
 			name: "intermediate rig remains root owned",
 			args: []string{"backstage", "repo", "--rig=" + targetRig, "sync", "payload"},
-			want: "city-b-sync args:<--rig=" + targetRig + "><payload>\n",
+			want: "city-b-sync args:<payload>\n",
 		},
 		{
 			name: "leaf city separate is child owned",
@@ -4228,4 +4228,59 @@ wait_timeout_seconds = 120
 			t.Errorf("env key %s appears %d times, want 1", key, n)
 		}
 	}
+}
+
+func TestPackCommandScopeAndLeafArguments(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	city := setupPackExitCity(t)
+	t.Setenv("GC_CITY_PATH", city)
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(city); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	script := "#!/bin/sh\nprintf 'city=<%s> path=<%s> rig=<%s> args:' \"$GC_CITY\" \"$GC_CITY_PATH\" \"$GC_RIG\"\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nprintf '\\n'\n"
+	for _, command := range [][]string{{"hello"}, {"repo", "sync"}} {
+		path := filepath.Join(append([]string{city, "commands"}, command...)...)
+		if err := os.WriteFile(filepath.Join(path, "run.sh"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		rig, tail string
+	}{
+		{"root helper scope", []string{"--city", city, "--rig", "scope-rig", "backstage", "hello", "payload"}, "scope-rig", "<payload>"},
+		{"false help and repeated scope", []string{"--city", city, "--rig=old", "backstage", "--help=false", "--rig", "scope-rig", "hello", "--rig=child"}, "scope-rig", "<--rig=child>"},
+		{"leaf helper input", []string{"--city", city, "backstage", "hello", "--rig", "input-rig"}, "", "<--rig><input-rig>"},
+		{"foundry leaf input", []string{"--city=" + city, "--rig=scope-rig", "backstage", "repo", "sync", "--rig", "input-rig"}, "scope-rig", "<--rig><input-rig>"},
+	} {
+		for _, scenario := range []string{"eager", "lazy"} {
+			t.Run(tc.name+"/"+scenario, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code := runPackCommandScenario(t, scenario, tc.args, &stdout, &stderr)
+				want := "city=<" + city + "> path=<" + city + "> rig=<" + tc.rig + "> args:" + tc.tail + "\n"
+				if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+					t.Fatalf("code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), want)
+				}
+			})
+		}
+	}
+	t.Run("explicit city clears ambient rig", func(t *testing.T) {
+		t.Setenv("GC_RIG", "other-city-rig")
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--city", city, "backstage", "hello", "--rig", "input-rig"}, &stdout, &stderr)
+		want := "city=<" + city + "> path=<" + city + "> rig=<> args:<--rig><input-rig>\n"
+		if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), want)
+		}
+	})
 }
