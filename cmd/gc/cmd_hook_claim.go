@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -957,7 +958,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
-		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(ctx, candidate, claimActor, false, opts, ops, dir, stderr) {
 			continue
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
@@ -1037,7 +1038,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// The race window: the workflow can stop between the pre-claim check
 		// and the CAS landing. Re-check the claim just won rather than hand the
 		// worker a step under a root that settled in between.
-		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, true, opts, ops, dir, stderr) {
 			continue
 		}
 		result := hookClaimJSONResult{
@@ -1151,7 +1152,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		// only link to its root is a non-blocking tracks edge, so a step under a
 		// failed or canceled root stays ready. This gate is what keeps it from
 		// minting a new obligation.
-		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, false, opts, ops, dir, stderr) {
 			continue
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
@@ -1211,7 +1212,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		// Re-check across the CAS, as the ready tier does.
-		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, true, opts, ops, dir, stderr) {
 			continue
 		}
 		result := hookClaimJSONResult{
@@ -1327,11 +1328,36 @@ func hookClaimWorkflowLinked(candidate beads.Bead) bool {
 // probe makes: one store hiccup must not idle every seat, and the claim CAS
 // that follows runs against the same store. A failed close still withholds the
 // bead; it stays visible to the next poll, which re-runs this gate.
-func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
-	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
+func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, minted bool, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	linked := hookClaimWorkflowLinked(candidate)
+	if (!linked && workflowRootIDForInputCheck(candidate) != candidate.ID) || ops.WorkflowStore == nil {
 		return false
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	if !linked {
+		root, err := store.Get(candidate.ID)
+		if err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
+				fmt.Fprintf(stderr, "gc hook --claim: standalone workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
+			}
+			return false
+		}
+		stopped := root.Status == "closed" ||
+			strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" ||
+			root.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeCanceled
+		if root.Metadata[beadmeta.InputLifecycleMetadataKey] == beadmeta.InputLifecycleGraph && stopped {
+			work := ops.WorkflowStore(ctx, dir, opts.Env, root.Metadata[beadmeta.InputConvoyIDMetadataKey], "")
+			closed, err := hookResumeGraphCancellation(store, beads.WorkStore{Store: work}, root, opts.IdentityCandidates, stderr)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook --claim: resuming cancellation of %s failed: %v\n", root.ID, err) //nolint:errcheck
+			}
+			if minted && !closed {
+				unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, "standalone cancellation withheld delivery; giving claim back", candidate, opts, ops, dir, hookStartedKeyFor(ops, dir, candidate.ID, hookClaimMinted), stderr)
+			}
+			return true
+		}
+		return false
+	}
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
 	if err != nil {
@@ -1356,6 +1382,39 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 	return true
 }
 
+// hookResumeGraphCancellation retries run-cancel with teardown preserved, returning whether the root is closed.
+func hookResumeGraphCancellation(store beads.Store, work beads.WorkStore, root beads.Bead, identities []string, stderr io.Writer) (bool, error) {
+	if root.Status == "closed" {
+		return true, nil
+	}
+	_, done, err := workflowExternalInputDone(store, work, root, identities)
+	if err != nil || !done {
+		if err == nil {
+			fmt.Fprintf(stderr, "gc hook --claim: withholding standalone workflow %s: waiting for terminal input or an API retry\n", root.ID) //nolint:errcheck
+		}
+		return false, err
+	}
+	target := beads.GraphMolecule(beads.GraphStore{Store: store})
+	tree, err := sourceworkflow.WorkflowTree(target, root.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, node := range tree { // Deepest first, like run-cancel; root last.
+		if node.Root.Status == "closed" {
+			continue
+		}
+		n, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(target, node.Root.ID, beadmeta.OutcomeCanceled,
+			sourceworkflow.RunCanceledCloseReason, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, molecule.TeardownTailExclusionFromMembers(node.Members))
+		if err != nil {
+			return false, err
+		}
+		if n > 0 {
+			fmt.Fprintf(stderr, "gc hook --claim: resumed cancellation of %s\n", node.Root.ID) //nolint:errcheck
+		}
+	}
+	return true, nil
+}
+
 // hookClaimStoppedAdoption runs the stop gate over a bead offered for
 // adoption, writing as the canonical holder when the readback named one.
 func hookClaimStoppedAdoption(bead beads.Bead, canonicalAssignee string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
@@ -1365,7 +1424,7 @@ func hookClaimStoppedAdoption(bead beads.Bead, canonicalAssignee string, opts ho
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
-	return hookClaimWorkflowStop(ctx, bead, actor, opts, ops, dir, stderr)
+	return hookClaimWorkflowStop(ctx, bead, actor, false, opts, ops, dir, stderr)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -2281,16 +2340,16 @@ func retireDoneWorkflowCandidates(candidates []beads.Bead, opts hookClaimOptions
 
 // hookSkipIfInputDone reports whether candidate belongs to a workflow whose
 // input convoy work is already terminal and, if so, retires that workflow
-// (root + open steps closed with gc.outcome=skipped). Lookup and close
-// failures are logged and treated as not-done so a store hiccup can never
-// suppress real work.
+// (root + open steps closed with gc.outcome=skipped). Invalid persisted policy
+// withholds work; other lookup and close failures are logged and treated as
+// not-done so a store hiccup cannot suppress real work.
 func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	rootID, done, err := ops.InputDone(ctx, dir, opts.Env, candidate, opts.IdentityCandidates)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: checking input convoy for %s: %v\n", candidate.ID, err) //nolint:errcheck
-		return false
+		return errors.Is(err, beadmeta.ErrInvalidInputLifecycle)
 	}
 	if !done {
 		return false
@@ -2304,7 +2363,7 @@ func hookSkipIfInputDone(candidate beads.Bead, opts hookClaimOptions, ops hookCl
 }
 
 // workflowInputDone resolves candidate to its workflow root (itself when it
-// carries gc.input_convoy_id, else via gc.root_bead_id) and reports whether
+// carries gc.input_convoy_id and no non-self gc.root_bead_id) and reports whether
 // every member the root's input convoy tracks is terminal, or non-terminal
 // but handed off to an assignee outside identityCandidates (no longer ours to
 // wait on). A member that is still unassigned, or still assigned to one of
@@ -2314,19 +2373,16 @@ func workflowInputDone(store beads.WorkStore, candidate beads.Bead, identityCand
 	return workflowInputDoneAcross(store, store, candidate, identityCandidates)
 }
 
-// workflowRootIDForInputCheck is the workflow root workflowInputDone resolves
-// candidate to: itself when it carries gc.input_convoy_id, else its
-// gc.root_bead_id. It returns "" for a candidate that is not part of a
-// workflow (no root, or its own root without an input convoy).
+// workflowRootIDForInputCheck prefers non-self root links; standalone roots need an input convoy.
 func workflowRootIDForInputCheck(candidate beads.Bead) string {
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID != "" && rootID != candidate.ID {
+		return rootID
+	}
 	if strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) != "" {
 		return candidate.ID
 	}
-	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-	if rootID == candidate.ID {
-		return ""
-	}
-	return rootID
+	return ""
 }
 
 // workflowInputDoneAcross is workflowInputDone with the workflow's two halves
@@ -2335,18 +2391,29 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
 func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	root := candidate
-	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
-		rootID := workflowRootIDForInputCheck(candidate)
-		if rootID == "" {
-			return "", false, nil
-		}
-		var err error
-		root, err = graph.Get(rootID)
-		if err != nil {
+	rootID := workflowRootIDForInputCheck(candidate)
+	if rootID == "" {
+		return "", false, nil
+	}
+	root, err := graph.Get(rootID)
+	if err != nil {
+		if rootID != candidate.ID {
 			return "", false, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
+		root = candidate // Launch-time policy/convoy survive a failed refresh.
 	}
+	policy, err := beadmeta.InputLifecycle(root.Metadata[beadmeta.InputLifecycleMetadataKey])
+	if err != nil {
+		return root.ID, false, fmt.Errorf("workflow root %s: %w", root.ID, err)
+	}
+	if policy == beadmeta.InputLifecycleGraph {
+		return root.ID, false, nil
+	}
+	return workflowExternalInputDone(graph, work, root, identityCandidates)
+}
+
+// workflowExternalInputDone classifies terminal/handoff input independently of lifecycle policy.
+func workflowExternalInputDone(graph beads.Store, work beads.WorkStore, root beads.Bead, identityCandidates []string) (string, bool, error) {
 	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	if convoyID == "" {
 		return root.ID, false, nil
