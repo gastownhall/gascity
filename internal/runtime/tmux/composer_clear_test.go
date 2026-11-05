@@ -340,6 +340,11 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		}
 		return "", nil
 	case "show-environment":
+		// A query without a key lists the session's environment. The
+		// unknown-variable response applies only to a missing named key.
+		if len(args) == 3 {
+			return "GC_PROVIDER=claude", nil
+		}
 		if slices.Contains(args, "GC_PROVIDER") {
 			return "GC_PROVIDER=claude", nil
 		}

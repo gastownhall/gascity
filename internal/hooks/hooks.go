@@ -801,7 +801,99 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 		}
 		return nil, claudeSettingsSourceNone, fmt.Errorf("merging Claude settings from %s: %w", overridePath, err)
 	}
+	merged, err = preserveClaudeApprovalHooks(base, upgradedOverride, merged)
+	if err != nil {
+		return nil, claudeSettingsSourceNone, err
+	}
 	return merged, sourceKind, nil
+}
+
+// preserveClaudeApprovalHooks preserves user Bash wrappers that the legacy
+// matcher-replacement merge would drop, while retaining one managed observer.
+// It changes no other matcher or event's merge semantics.
+func preserveClaudeApprovalHooks(base, override, merged []byte) ([]byte, error) {
+	var defaults, configured, result map[string]any
+	if err := json.Unmarshal(base, &defaults); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(override, &configured); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(merged, &result); err != nil {
+		return nil, err
+	}
+	defaultHooks, _ := defaults["hooks"].(map[string]any)
+	configuredHooks, _ := configured["hooks"].(map[string]any)
+	resultHooks, ok := result["hooks"].(map[string]any)
+	if !ok {
+		return nil, errors.New("native Claude approval hooks require a hooks object")
+	}
+	for _, event := range []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"} {
+		var managed map[string]any
+		defaultEntries, _ := defaultHooks[event].([]any)
+		for _, value := range defaultEntries {
+			entry, _ := value.(map[string]any)
+			if entry["matcher"] == "Bash" {
+				managed = entry
+				break
+			}
+		}
+		if managed == nil {
+			return nil, fmt.Errorf("missing managed Claude Bash observer for %s", event)
+		}
+		entries, ok := resultHooks[event].([]any)
+		if !ok {
+			return nil, fmt.Errorf("native Claude approval hooks require an array at hooks.%s", event)
+		}
+		configuredEntries, _ := configuredHooks[event].([]any)
+		var preserved []any
+		for _, value := range configuredEntries {
+			entry, _ := value.(map[string]any)
+			if entry["matcher"] == "Bash" {
+				preserved = append(preserved, value)
+			}
+		}
+		if len(preserved) > 0 {
+			var other []any
+			for _, value := range entries {
+				entry, _ := value.(map[string]any)
+				if entry["matcher"] != "Bash" {
+					other = append(other, value)
+				}
+			}
+			other = append(other, preserved...)
+			entries = other
+		}
+		managedInner := managed["hooks"].([]any)[0].(map[string]any)
+		managedBytes, _ := json.Marshal(managedInner)
+		count := 0
+		for _, value := range entries {
+			entry, _ := value.(map[string]any)
+			if entry["matcher"] != "Bash" {
+				continue
+			}
+			inner, _ := entry["hooks"].([]any)
+			for _, item := range inner {
+				hook, _ := item.(map[string]any)
+				if hook["command"] != managedInner["command"] {
+					continue
+				}
+				data, _ := json.Marshal(hook)
+				if len(entry) != 2 || !bytes.Equal(data, managedBytes) {
+					return nil, fmt.Errorf("preserving Claude native approval hook metadata at hooks.%s: managed observer cannot be safely changed", event)
+				}
+				count++
+			}
+		}
+		if count > 1 {
+			return nil, fmt.Errorf("duplicate managed Claude native approval observers at hooks.%s", event)
+		}
+		if count == 0 {
+			entries = append(entries, managed)
+		}
+		resultHooks[event] = entries
+	}
+	return json.MarshalIndent(result, "", "  ")
 }
 
 func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string, []byte, claudeSettingsSourceKind, error) {

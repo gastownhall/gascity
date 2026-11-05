@@ -34,3 +34,10 @@ and input pinning. Use composed config and canonical agent lookup; classify
 homes without creating unrelated directories. A shared document must be a fixed
 point for every selected profile. Refuse conflicts before publication, preserve
 operator inputs, and keep install_agent_hooks settings unchanged.
+
+Bash approval observations use native PreToolUse IDs and exact input under the
+same bounded pane fence. Completion callbacks clear only their own invocation;
+manual denial may have no completion callback. GC consumes the observation
+atomically with response input and before Stop cancellation, preserving unknown
+delivery as unavailable.
+Keep native history truthful and preserve unrelated/custom hooks on upgrade.

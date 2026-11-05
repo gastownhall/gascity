@@ -473,6 +473,9 @@ func (t *Tmux) ordinaryPaneInput(ctx context.Context, args []string) (string, er
 	if _, err := t.runCtxRaw(ctx, "set-option", "-p", "-t", in.target, bootstrapInputOption, "spent"); err != nil {
 		return "", err
 	}
+	if p := claudeApprovalInput(ctx); p != nil {
+		return t.ordinaryClaudeApprovalInput(ctx, args, p)
+	}
 	return t.runCtxRaw(ctx, args...)
 }
 

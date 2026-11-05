@@ -51,6 +51,16 @@
             "timeout": 8
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" internal observe-claude-approval",
+            "timeout": 8
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -63,6 +73,16 @@
             "timeout": 8
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" internal observe-claude-approval",
+            "timeout": 8
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [
@@ -72,6 +92,16 @@
           {
             "type": "command",
             "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" internal observe-claude-question",
+            "timeout": 8
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" internal observe-claude-approval",
             "timeout": 8
           }
         ]

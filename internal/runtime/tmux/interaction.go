@@ -158,6 +158,11 @@ type parsedApproval struct {
 	CommandWidth int
 	// NativeID names one unresolved provider invocation, independent of wrapping.
 	NativeID string
+	// NativeCommand keeps an occurrence stable while its consumed observation
+	// remains visible but unavailable; verification must still await its removal.
+	NativeCommand                                    string
+	NativeSessionID, NativePromptID, NativeToolUseID string
+	ClaudeProjection                                 *claudeApprovalProjection
 	// BindingError holds a managed native request whose authority is unavailable.
 	BindingError string
 	// Fingerprint, when set, stands in for Input in the request ID: a Codex
@@ -702,7 +707,11 @@ type approvalDedup struct {
 func approvalHash(a *parsedApproval) string {
 	subject := a.Input
 	if a.NativeID != "" {
-		subject = a.NativeID + "\x00" + a.Command
+		command := a.Command
+		if a.NativeCommand != "" {
+			command = a.NativeCommand
+		}
+		subject = a.NativeID + "\x00" + command
 	} else if a.Fingerprint != "" {
 		subject = a.Fingerprint
 	}
@@ -788,6 +797,17 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	metadata := map[string]string{"source": "tmux", "request_identity": "visible_content"}
 	if approval.NativeID != "" {
 		metadata["request_identity"] = "native_invocation"
+	}
+	if approval.NativeSessionID != "" {
+		metadata["native_session_id"] = approval.NativeSessionID
+		metadata["native_prompt_id"] = approval.NativePromptID
+		metadata["native_tool_use_id"] = approval.NativeToolUseID
+		metadata["native_observation_source"] = "transcript"
+	}
+	if p := approval.ClaudeProjection; p != nil {
+		metadata["native_observation_source"] = "claude_pre_tool_use"
+		metadata["native_observation_sha256"] = p.observationDigest()
+		metadata["native_observation_consumed"] = strconv.FormatBool(p.Consumed)
 	}
 	if approval.BindingError != "" {
 		metadata["request_identity"] = "unavailable"
@@ -884,6 +904,9 @@ func (t *Tmux) cancelClaudeDialog(ctx context.Context, name string) (handled boo
 		var dialog paneDialog
 		dialog, err = t.dialogInPane(target)
 		if err == nil && dialog.question == nil && (dialog.approval == nil || dialog.approval.Codex) {
+			if err := t.consumeClaudeApprovalsForStop(ctx, target); err != nil {
+				return true, err
+			}
 			return false, nil
 		}
 	}
@@ -892,6 +915,9 @@ func (t *Tmux) cancelClaudeDialog(ctx context.Context, name string) (handled boo
 			return true, absorbGone(ctx, err)
 		}
 		return false, fmt.Errorf("looking for a Claude dialog: %w", err)
+	}
+	if err := t.consumeClaudeApprovalsForStop(ctx, target); err != nil {
+		return true, err
 	}
 	t.cancelCopyModeIfParked(ctx, target)
 	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {
@@ -1102,7 +1128,7 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	// (approvalOptionKey), which tmux types as given, so unlike caller text it
 	// needs no runtime.TmuxLiteralArgs encoding (RUNTIME-CONTRACT-011).
 	// A key that found no session or no server typed nothing.
-	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
+	if _, err := t.runCtx(withClaudeApprovalInput(inputCtx(ctx), current.ClaudeProjection), "send-keys", "-t", target, "-l", key); err != nil {
 		switch {
 		case errors.Is(err, ErrSessionNotFound):
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
@@ -1154,7 +1180,12 @@ func (t *Tmux) respondCleared(target string, answered *parsedApproval) (bool, er
 	case err != nil:
 		return false, fmt.Errorf("verifying the answer: %w", err)
 	}
-	// Success once the prompt we answered is gone, even if the next tool
-	// call has already raised a different one.
+	// Losing invocation proof is not proof that the visible prompt cleared.
+	// A completion callback may retire its observation before the UI redraws.
+	if next != nil && next.BindingError != "" {
+		return false, nil
+	}
+	// Success once the prompt we answered is gone, even if the next proven
+	// native invocation has already raised a different one.
 	return next == nil || approvalHash(next) != approvalHash(answered), nil
 }

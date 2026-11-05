@@ -212,6 +212,7 @@ go_library(
         "cmd_init.go",
         "cmd_init_prompts.go",
         "cmd_internal_beads_credential.go",
+        "cmd_internal_claude_approval.go",
         "cmd_internal_claude_question.go",
         "cmd_internal_materialize_skills.go",
         "cmd_internal_project_mcp.go",

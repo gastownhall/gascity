@@ -94,6 +94,7 @@ func nativeApprovalCommandMatches(command string, rows []string, width int, firs
 
 type claudeApprovalInvocation struct {
 	id, prompt, command, description string
+	projection                       *claudeApprovalProjection
 }
 
 // bindClaudeApproval reads only the exact native conversation already resolved
@@ -130,7 +131,8 @@ func (t *Tmux) bindClaudeApproval(target string, approval *parsedApproval) error
 		return fmt.Errorf("%w: native Claude approval record is unavailable", runtime.ErrRuntimeUnavailable)
 	}
 	var pending []claudeApprovalInvocation
-	prompt := ""
+	completed := map[string]bool{}
+	prompt, latestSession := "", ""
 	for _, line := range strings.Split(tail, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -144,7 +146,7 @@ func (t *Tmux) bindClaudeApproval(target string, approval *parsedApproval) error
 		}
 		content := strings.TrimSpace(string(row.Message.Content))
 		if row.Type == "user" && !strings.HasPrefix(content, "[") {
-			pending, prompt = nil, row.PromptID
+			pending, prompt, latestSession = nil, row.PromptID, row.SessionID
 		}
 		if !strings.HasPrefix(content, "[") {
 			continue
@@ -163,13 +165,14 @@ func (t *Tmux) bindClaudeApproval(target string, approval *parsedApproval) error
 				if row.SessionID != expected || block.ID == "" || block.Input.Command == "" {
 					return fmt.Errorf("%w: native Claude approval identity disagrees with its runtime", runtime.ErrRuntimeUnavailable)
 				}
-				pending = append(pending, claudeApprovalInvocation{block.ID, prompt, block.Input.Command, block.Input.Description})
+				pending = append(pending, claudeApprovalInvocation{id: block.ID, prompt: prompt, command: block.Input.Command, description: block.Input.Description})
 			}
 			if row.Type == "user" && block.Type == "tool_result" {
 				if block.ToolUseID == "" {
 					return fmt.Errorf("%w: native Claude approval completion has no invocation identity", runtime.ErrRuntimeUnavailable)
 				}
 				result = true
+				completed[block.ToolUseID] = true
 				keep := pending[:0]
 				for _, call := range pending {
 					if call.id != block.ToolUseID {
@@ -180,7 +183,44 @@ func (t *Tmux) bindClaudeApproval(target string, approval *parsedApproval) error
 			}
 		}
 		if row.Type == "user" && !result {
-			pending, prompt = nil, row.PromptID
+			pending, prompt, latestSession = nil, row.PromptID, row.SessionID
+		}
+	}
+	// A callback may precede the assistant record, but it cannot establish the
+	// current native prompt. Anchor it to the canonical user record first.
+	if latestSession == expected && prompt != "" {
+		readProjections := t.claudeApprovalProjections
+		if readProjections == nil {
+			readProjections = t.readClaudeApprovalProjections
+		}
+		projections, err := readProjections(target)
+		if err != nil {
+			return fmt.Errorf("reading native Claude approval observations: %w", err)
+		}
+		for _, projection := range projections {
+			if projection.SessionID != expected || projection.PromptID != prompt || completed[projection.ToolUseID] {
+				continue
+			}
+			matched := false
+			for i := range pending {
+				call := &pending[i]
+				if call.id != projection.ToolUseID {
+					continue
+				}
+				if call.prompt != projection.PromptID || call.command != projection.Command || call.description != projection.Description {
+					return fmt.Errorf("%w: native Claude approval callback conflicts with its transcript", runtime.ErrRuntimeUnavailable)
+				}
+				observed := projection
+				call.projection = &observed
+				matched = true
+			}
+			if !matched {
+				observed := projection
+				pending = append(pending, claudeApprovalInvocation{
+					id: projection.ToolUseID, prompt: projection.PromptID,
+					command: projection.Command, description: projection.Description, projection: &observed,
+				})
+			}
 		}
 	}
 	var found *claudeApprovalInvocation
@@ -200,5 +240,11 @@ func (t *Tmux) bindClaudeApproval(target string, approval *parsedApproval) error
 	approval.Command, approval.Description = found.command, found.description
 	approval.Input = truncateApprovalInput(strings.TrimSuffix(found.command+"\n"+found.description, "\n"))
 	approval.NativeID = "claude-" + expected + "-" + found.prompt + "-" + found.id
+	approval.NativeCommand = found.command
+	approval.NativeSessionID, approval.NativePromptID, approval.NativeToolUseID = expected, found.prompt, found.id
+	approval.ClaudeProjection = found.projection
+	if found.projection != nil && found.projection.Consumed {
+		return fmt.Errorf("%w: native Claude approval invocation was already consumed", runtime.ErrRuntimeUnavailable)
+	}
 	return nil
 }

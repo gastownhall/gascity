@@ -680,6 +680,13 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 	if err == nil {
 		guarded, err = g.bootstrapGuardedInputArgs(t, in.target, guarded)
 	}
+	if p := claudeApprovalInput(ctx); err == nil && p != nil {
+		if p.FenceDigest != g.digest || guardPaneID(in.target) != g.verifiedPane() {
+			err = g.recordMiss(runtime.FenceFoundUnproven)
+		} else {
+			guarded, err = claudeApprovalGuardedInputArgs(in.target, p, guarded)
+		}
+	}
 	if err != nil {
 		t.deleteBufferBestEffort(buffer)
 		return "", err
@@ -715,6 +722,9 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 				// No session, or tmux evaluated the window's active pane: the
 				// agent pane is gone.
 				return "", g.recordMiss(runtime.FenceFoundAbsent)
+			}
+			if claudeApprovalInput(ctx) != nil && !r.Dead && r.Own() == g.digest {
+				return "", fmt.Errorf("%w: native approval observation was consumed or changed", runtime.ErrInteractionGone)
 			}
 			if g.bootstrap != nil && !r.Dead && r.Own() == g.digest {
 				return "", g.bootstrapRefusal()

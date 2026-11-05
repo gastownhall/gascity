@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestInternalMaterializeSkillsMaterializesClaude exercises the happy
@@ -906,5 +908,61 @@ func TestInternalMaterializeSkillsNonBestEffortFailsOnLoadCityConfigError(t *tes
 	var so, se bytes.Buffer
 	if code := run([]string{"internal", "materialize-skills", "--agent", "some-agent", "--workdir", t.TempDir()}, &so, &se); code == 0 {
 		t.Fatalf("missing city.toml without --best-effort: got exit 0, want non-zero; stderr=%q", se.String())
+	}
+}
+
+// The callback leaf must preserve the vendor's fail-closed exit contract. These
+// cases validate before any native tmux operation; no process or model is used.
+func TestInternalObserveClaudeApprovalCommandContract(t *testing.T) {
+	const privatePayload = "{CONSTRUCTED_PRIVATE_CALLBACK_DO_NOT_ECHO"
+	for _, test := range []struct {
+		name    string
+		managed bool
+		args    []string
+	}{
+		{name: "unmanaged no-op", args: []string{}},
+		{name: "managed malformed callback", managed: true, args: []string{}},
+		{name: "positional arguments rejected", managed: true, args: []string{"unexpected"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("TMUX", "")
+			t.Setenv("TMUX_PANE", "")
+			if test.managed {
+				t.Setenv(runtime.InstanceTokenEnv, "constructed-native-observer-token")
+				t.Setenv(runtime.RuntimeEpochEnv, "1")
+				t.Setenv(runtime.ContinuationEpochEnv, "1")
+				t.Setenv("GC_PROVIDER_SESSION_ID", "constructed-native-session")
+				t.Setenv("TMUX", "/never-used/native-observer,1234,0")
+				t.Setenv("TMUX_PANE", "%1")
+			}
+			var stdout, stderr bytes.Buffer
+			input := strings.NewReader(privatePayload)
+			command := newInternalObserveClaudeApprovalCmd(&stderr)
+			command.SetOut(&stdout)
+			command.SetErr(&stderr)
+			command.SetIn(input)
+			command.SetArgs(test.args)
+			command.SilenceUsage, command.SilenceErrors = true, true
+			err := command.Execute()
+			if stdout.Len() != 0 || strings.Contains(stderr.String(), privatePayload) || strings.Contains(stderr.String(), "constructed-native-observer-token") {
+				t.Fatal("native callback emitted stdout or echoed private input/environment")
+			}
+			switch {
+			case len(test.args) != 0:
+				if err == nil || input.Len() != len(privatePayload) || stderr.Len() != 0 {
+					t.Fatal("NoArgs did not reject before processing callback input")
+				}
+			case !test.managed:
+				if err != nil || stderr.Len() != 0 || input.Len() != len(privatePayload) {
+					t.Fatal("unmanaged callback was not a silent no-op")
+				}
+			default:
+				var exit *commandExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(stderr.String(), "gc native approval observation: invalid native approval callback JSON") || input.Len() != 0 {
+					t.Fatalf("managed malformed callback lost exit2 contract: error=%v stderr=%q", err, stderr.String())
+				}
+			}
+		})
 	}
 }

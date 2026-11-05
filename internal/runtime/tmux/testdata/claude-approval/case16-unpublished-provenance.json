@@ -1,0 +1,8 @@
+{
+  "fixture": "Actual closedcase16 GCAPI pane; equal-width private cwd/random-ID substitutions only. Native tail fixture retains actual user/attachment row order and identities but omits attachment contents; it is a redacted structural prefix, not a full native transcript. Root canonical-file metadata independently confirms zero assistant/Bash records.",
+  "constructed_callback": "Official PreToolUse schema; constructed invocation ID, explicitly not an actual case16 callback.",
+  "pane_export_sha256": "c0e670e3b28bc8adeb77d9de5b876ac664fec33bb4b8ff240f269afba036781c",
+  "raw_export_sha256": "c3f8804d8818191c2c54c11fb59340141f7ab64b152dfeaf26a2556a6a1d5a2c",
+  "pane_original_remote_sha256": "60ca8b11e7539984ede5f6128017e80f75b55bbbfd8130991149761fd632d9a1",
+  "raw_original_remote_sha256": "87b3a10f423c7c9812ac8ff94868543d4b589d8c56e90f70e5c960f481c4b415"
+}

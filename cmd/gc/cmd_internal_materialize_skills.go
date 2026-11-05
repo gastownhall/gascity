@@ -28,6 +28,7 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newInternalProjectMCPCmd(stdout, stderr))
 	cmd.AddCommand(newInternalBeadsCredentialCmd(stdout, stderr))
 	cmd.AddCommand(newInternalObserveClaudeQuestionCmd(stderr))
+	cmd.AddCommand(newInternalObserveClaudeApprovalCmd(stderr))
 	cmd.AddCommand(newInternalProgramStatusShadowReportCmd(stdout, stderr))
 	return cmd
 }

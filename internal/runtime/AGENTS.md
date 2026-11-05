@@ -37,3 +37,15 @@ Bind approvals only from the qualified single literal `exec_command` wrappers:
 never evaluate JavaScript or accept multiple calls, effects or unknown
 expressions. Preserve exact command, current native invocation, conversation
 ownership and input-fence checks before any approval action.
+
+## Native Claude approval observations
+
+A Bash PreToolUse callback may name an invocation before the native transcript
+flushes. Bind only its exact session, current native prompt, tool-use ID and
+command under the same pane/server/input fence; retain exact visible-row
+matching. Transcript/callback conflicts, completed calls and multiple matching
+invocations refuse. Consume the pane observation in the same guarded tmux command
+list as its response key, so Stop cannot cancel between consumption and input.
+Stop retires observations before cancellation; unknown delivery stays consumed
+across controller restart. A consumed visible approval is still pending for verification. Do not
+synthesize transcript messages or infer an invocation from PermissionRequest.

@@ -176,11 +176,24 @@ func TestInstallClaude(t *testing.T) {
 	}
 	for _, event := range []string{"PreToolUse", "PostToolUse", "PostToolUseFailure"} {
 		entries := claudeHookEntries(t, runtimeData, event)
-		if len(entries) != 1 || entries[0].Matcher != "AskUserQuestion" {
-			t.Fatalf("native question observation needs exactly one managed %s callback: %+v", event, entries)
+		if len(entries) != 2 {
+			t.Fatalf("native invocation observation needs exactly two managed %s callbacks: %+v", event, entries)
 		}
-		if !strings.Contains(claudeHookCommand(t, runtimeData, event), managedGCBinInvocation+" internal observe-claude-question") {
-			t.Fatalf("%s callback must use the launching binary", event)
+		seen := map[string]bool{}
+		for _, entry := range entries {
+			command := ""
+			switch entry.Matcher {
+			case "AskUserQuestion":
+				command = "observe-claude-question"
+			case "Bash":
+				command = "observe-claude-approval"
+			default:
+				t.Fatalf("unexpected managed native callback matcher: %s", entry.Matcher)
+			}
+			if seen[entry.Matcher] || len(entry.Hooks) != 1 || !strings.Contains(entry.Hooks[0].Command, managedGCBinInvocation+" internal "+command) {
+				t.Fatalf("%s must retain exactly one launching-binary callback for %s", event, entry.Matcher)
+			}
+			seen[entry.Matcher] = true
 		}
 	}
 	s := string(runtimeData)
@@ -3343,7 +3356,7 @@ func TestInstallClaudeAddsQuestionObservationPreservingCustomHooks(t *testing.T)
 		t.Fatal(err)
 	}
 	first := string(fs.Files["/city/.gc/settings.json"])
-	if strings.Count(first, "internal observe-claude-question") != 3 || !strings.Contains(first, "echo keep custom") {
+	if strings.Count(first, "internal observe-claude-question") != 3 || strings.Count(first, "internal observe-claude-approval") != 3 || !strings.Contains(first, "echo keep custom") {
 		t.Fatal("upgrade lost native question observation or custom hook")
 	}
 	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {

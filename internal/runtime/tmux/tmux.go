@@ -476,6 +476,7 @@ type Tmux struct {
 	// claudeQuestionTranscript is an exact native-record reader seam for tests.
 	claudeQuestionTranscript  func(string) (string, error)
 	claudeQuestionProjections func(string) ([]claudeQuestionProjection, error)
+	claudeApprovalProjections func(string) ([]claudeApprovalProjection, error)
 	cfg                       Config
 	exec                      executor
 	interactionDedup          *approvalDedup
@@ -622,7 +623,7 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 		if g := paneGuardFrom(ctx); g != nil {
 			return g.run(ctx, t, args)
 		}
-		return t.ordinaryPaneInput(context.Background(), args)
+		return t.ordinaryPaneInput(withClaudeApprovalInput(context.Background(), claudeApprovalInput(ctx)), args)
 	}
 	return t.runCtxRaw(ctx, args...)
 }
