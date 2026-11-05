@@ -341,6 +341,12 @@ func TestTheEqualityStageHoldsTheBindingToThePlannedGates(t *testing.T) {
 	if err != nil || len(gates) != 1 {
 		t.Fatalf("gates = %+v (%v)", gates, err)
 	}
+	if err := binding.Close(gates[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyInfraCopy(reopen, source, plan); err == nil || !strings.Contains(err.Error(), "is closed in the binding, want open") {
+		t.Fatalf("a closed gate = %v, want it refused: it no longer holds its owner", err)
+	}
 	if err := binding.Delete(gates[0].ID); err != nil {
 		t.Fatal(err)
 	}
