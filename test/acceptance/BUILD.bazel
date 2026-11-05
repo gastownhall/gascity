@@ -47,6 +47,7 @@ ACCEPTANCE_ENV = {
 # table. A test may appear under several targets, each running a disjoint
 # share of its subtests (SOLO_SUBTESTS).
 SOLO_TESTS = {
+    "beads_adopt_loopback_direct_external_test": "TestBeadsAdoptLoopbackServerStoreDirectExternalCity",
     "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
@@ -150,6 +151,7 @@ go_test(
     srcs = [
         "agent_env_test.go",
         "agent_suspend_test.go",
+        "beads_adopt_loopback_server_test.go",
         "beads_blocked_repair_test.go",
         "beads_cli_contract_home_isolation_test.go",
         "beads_cli_contract_port_file_test.go",

@@ -355,12 +355,21 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 // where this scope's beads actually are.
 //
 // The predicate above discriminates "bd's foreign upstream" from "gc's own
-// managed server" on the recorded host alone, compared against
-// managedCityHost(), which reads GC_DOLT_HOST from the live environment. A
-// gc-managed scope initialized under a non-loopback GC_DOLT_HOST records that
-// host verbatim, so a later boot with the variable unset or pointing elsewhere
-// compares unequal and reads gc's own server as foreign. This is the evidence
-// that settles it without consulting the environment at all.
+// managed server" by the recorded binding: a non-loopback host is compared
+// against managedCityHost(), which reads GC_DOLT_HOST from the live
+// environment, and a loopback one against the ports gc's runtime records for
+// the city. A gc-managed scope initialized under a non-loopback GC_DOLT_HOST
+// records that host verbatim, so a later boot with the variable unset or
+// pointing elsewhere compares unequal and reads gc's own server as foreign.
+// This is the evidence that settles it without consulting the environment at
+// all.
+//
+// It answers before the port rule for a loopback binding too. bd's binding
+// keeps the port it was initialized against, so once gc's own server has moved
+// to another port, the port rule alone would read gc's own legacy store as
+// bd's. The cost is the converse: a store an operator binds to their own
+// loopback server under the name of a database gc keeps in the city's data
+// dir (one a removed rig left behind) is gc's.
 //
 // It takes TWO facts, and the conjunction is the whole point:
 //

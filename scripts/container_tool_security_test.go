@@ -230,16 +230,26 @@ const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-re
 // the "name==version \" line uv writes. Names compare case-insensitively.
 func lockPinnedVersion(t *testing.T, lock, dist string) string {
 	t.Helper()
+	version, ok := lockPin(lock, dist)
+	if !ok {
+		t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
+	}
+	return version
+}
+
+// lockPin returns the version a hashed requirements lock pins for dist and
+// whether it pins dist at all, matching the "name==version \" line uv writes.
+// Names compare case-insensitively.
+func lockPin(lock, dist string) (string, bool) {
 	for _, line := range strings.Split(lock, "\n") {
 		name, rest, ok := strings.Cut(line, "==")
 		if !ok || !strings.EqualFold(name, dist) {
 			continue
 		}
 		version, _, _ := strings.Cut(rest, " ")
-		return version
+		return version, true
 	}
-	t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
-	return ""
+	return "", false
 }
 
 // releaseLine returns the first n numeric components of a dotted release.
