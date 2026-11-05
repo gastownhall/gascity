@@ -1836,6 +1836,46 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchSlowPassAdmitsProportionallyMoreOrders pins the stall
+// bound: when a pass starts several patrol intervals after the previous one,
+// the clock-driven budget scales with the elapsed intervals instead of
+// admitting the base count, so late orders are not starved by a slow cycle.
+func TestOrderDispatchSlowPassAdmitsProportionallyMoreOrders(t *testing.T) {
+	store := beads.NewMemStore()
+	var aa []orders.Order
+	for i := 0; i < 12; i++ {
+		aa = append(aa, orders.Order{
+			Name:     fmt.Sprintf("cooldown-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1ms",
+			Exec:     "true",
+		})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
+		return []byte("ok\n"), nil
+	}, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	m := ad.(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 2
+	iv := m.cfg.Daemon.PatrolIntervalDuration()
+
+	now := time.Now()
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+	if got := countOrderTrackingRuns(t, store); got != 2 {
+		t.Fatalf("tracking runs after on-time pass = %d, want 2", got)
+	}
+
+	// The next pass starts three intervals late: budget 2*3 = 6 more.
+	ad.dispatch(context.Background(), t.TempDir(), now.Add(3*iv))
+	ad.drain(context.Background())
+	if got := countOrderTrackingRuns(t, store); got != 8 {
+		t.Fatalf("tracking runs after 3-interval pass = %d, want 8", got)
+	}
+}
+
 func countOrderTrackingRuns(t *testing.T, store beads.Store) int {
 	t.Helper()
 	all, err := store.ListByLabel(labelOrderTracking, 0, beads.IncludeClosed, beads.WithBothTiers)

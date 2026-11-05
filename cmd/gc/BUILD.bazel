@@ -1787,6 +1787,7 @@ go_test(
         "order_dispatch_bench_test.go",
         "order_dispatch_close_race_test.go",
         "order_dispatch_condition_budget_test.go",
+        "order_dispatch_cursor_test.go",
         "order_dispatch_event_floor_test.go",
         "order_dispatch_gate_policy_test.go",
         "order_dispatch_gate_test.go",

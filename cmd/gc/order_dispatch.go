@@ -90,7 +90,10 @@ const (
 	// now), after which cachedLastRun remembers it across ticks and rebuilds.
 	orderTrackingHistoryIndexLimit   = 256
 	defaultMaxOrderDispatchesPerTick = 4
-	orderTrackingSweepCloseBudget    = 4
+	// maxOrderBudgetScale bounds how far a slow pass multiplies the per-pass
+	// dispatch budget, so a long stall cannot release an unbounded burst.
+	maxOrderBudgetScale           = 16
+	orderTrackingSweepCloseBudget = 4
 
 	// orderTrackingSweepWatchdogNotClosedInterval is how often the stale
 	// watchdog reads every not-closed tracking bead, rather than only the open
@@ -352,13 +355,16 @@ type memoryOrderDispatcher struct {
 	maxTimeout           time.Duration
 	maxDispatchesPerTick int
 	nextDispatchStart    int
-	cfg                  *config.City
-	cityName             string
-	cityPath             string
-	cacheMu              sync.Mutex
-	lastRunCache         map[string]time.Time
-	gateBackoffUntil     map[string]time.Time
-	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// lastDispatchPass is the start time of the previous dispatch pass; the
+	// elapsed time since it scales the per-pass budget (see passBudget).
+	lastDispatchPass    time.Time
+	cfg                 *config.City
+	cityName            string
+	cityPath            string
+	cacheMu             sync.Mutex
+	lastRunCache        map[string]time.Time
+	gateBackoffUntil    map[string]time.Time
+	openWorkSuppression map[string]orderOpenWorkSuppression
 	// inapplicableReported holds the orders this controller boot has already
 	// reported as inapplicable, so each is announced once rather than on every
 	// tick or webhook delivery. Created on first use (inapplicableReports) and
@@ -667,6 +673,33 @@ func (m *memoryOrderDispatcher) prefetchConditionResults(candidates []*orderDisp
 	wg.Wait()
 }
 
+// passBudget returns this pass's clock-driven dispatch budget. The configured
+// budget is per patrol interval; when passes run slower than that interval
+// (a pass has been measured at minutes), admitting only the base count per
+// pass makes late orders' latency unbounded. The budget therefore scales with
+// the whole intervals elapsed since the previous pass started, capped at
+// maxOrderBudgetScale. It records now as the previous pass start.
+func (m *memoryOrderDispatcher) passBudget(now time.Time) int {
+	base := m.maxDispatchesPerTick
+	prev := m.lastDispatchPass
+	m.lastDispatchPass = now
+	if base <= 0 || prev.IsZero() || m.cfg == nil {
+		return base
+	}
+	interval := m.cfg.Daemon.PatrolIntervalDuration()
+	if interval <= 0 {
+		return base
+	}
+	scale := int((now.Sub(prev) + interval - 1) / interval)
+	if scale < 1 {
+		scale = 1
+	}
+	if scale > maxOrderBudgetScale {
+		scale = maxOrderBudgetScale
+	}
+	return base * scale
+}
+
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
@@ -710,12 +743,21 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	if m.maxDispatchesPerTick > 0 {
 		start = m.nextDispatchStart % total
 	}
+	sinceLastPass := now.Sub(m.lastDispatchPass)
+	if m.lastDispatchPass.IsZero() {
+		sinceLastPass = 0
+	}
+	budget := m.passBudget(now)
+	passStart := time.Now()
+	defer func() {
+		m.logLatePass(sinceLastPass, budget, budgetSpent, total, time.Since(passStart))
+	}()
 	spendDispatchBudget := func(idx int) bool {
 		budgetSpent++
 		if m.maxDispatchesPerTick > 0 {
 			m.nextDispatchStart = (idx + 1) % total
 		}
-		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
+		return m.maxDispatchesPerTick > 0 && budgetSpent >= budget
 	}
 
 	// Phase 1: resolve and open-tracking-gate every order, in rotation order.
@@ -858,10 +900,27 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 		if spendDispatchBudget(cand.idx) {
-			m.logUnreachedCandidates(budgeted[i+1:])
+			m.logUnreachedCandidates(budgeted[i+1:], budget)
 			return
 		}
 	}
+}
+
+// logLatePass reports a pass that started more than one patrol interval after
+// its predecessor or that spent its whole budget, so an operator can tell a
+// slow supervisor cycle from a quiet one: sinceLast is the gap between pass
+// starts, admitted the clock-driven orders fired, and took this pass's own
+// duration. On-time passes with budget to spare stay silent.
+func (m *memoryOrderDispatcher) logLatePass(sinceLast time.Duration, budget, admitted, total int, took time.Duration) {
+	if m.cfg == nil || m.maxDispatchesPerTick <= 0 {
+		return
+	}
+	interval := m.cfg.Daemon.PatrolIntervalDuration()
+	if interval <= 0 || (sinceLast <= interval && admitted < budget) {
+		return
+	}
+	logDispatchError(m.stderr, "gc: order dispatch: pass since_last=%s budget=%d admitted=%d orders=%d took=%s",
+		sinceLast.Round(time.Second), budget, admitted, total, took.Round(time.Millisecond))
 }
 
 // dueConditionCandidate reports whether a candidate is a condition-triggered
@@ -902,7 +961,7 @@ const maxUnreachedOrderNames = 8
 // claims only what the tick already knows for free — that these orders were not
 // reached — and leaves the operator to judge whether the ones they expected to
 // fire are among them before reaching for orders.max_dispatches_per_tick.
-func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatchCandidate) {
+func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatchCandidate, budget int) {
 	if len(unreached) == 0 {
 		return
 	}
@@ -915,7 +974,7 @@ func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatc
 		names = append(names, cand.scoped)
 	}
 	logDispatchError(m.stderr, "gc: order dispatch: per-tick budget %d spent; the rotation did not reach %d more order(s) this tick (due-ness not evaluated): %s",
-		m.maxDispatchesPerTick, len(unreached), strings.Join(names, ", "))
+		budget, len(unreached), strings.Join(names, ", "))
 }
 
 // openWorkGateShut reports whether the wisp-aware open-work gate (#2921) is
@@ -1603,6 +1662,29 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 	for key, last := range prev.lastRunCache {
 		if existing, ok := m.lastRunCache[key]; !ok || last.After(existing) {
 			m.lastRunCache[key] = last
+		}
+	}
+}
+
+// carryDispatchCursorFrom resumes the per-tick dispatch rotation where prev
+// left off. The cursor is an index into the order list, which a reload
+// rebuilds (and may reorder or resize), so it is carried by the scoped name of
+// the order the rotation would start at next. Without it every reload restarts
+// at index 0 and orders late in the list are starved whenever reloads are
+// frequent relative to the rotation length. An order that no longer exists
+// leaves the cursor at its start, which is the pre-carry behavior.
+func (m *memoryOrderDispatcher) carryDispatchCursorFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil || len(prev.aa) == 0 || len(m.aa) == 0 {
+		return
+	}
+	if m.lastDispatchPass.IsZero() {
+		m.lastDispatchPass = prev.lastDispatchPass
+	}
+	next := prev.aa[prev.nextDispatchStart%len(prev.aa)].ScopedName()
+	for i := range m.aa {
+		if m.aa[i].ScopedName() == next {
+			m.nextDispatchStart = i
+			return
 		}
 	}
 }

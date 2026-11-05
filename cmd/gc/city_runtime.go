@@ -2124,6 +2124,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryOpenWorkSuppressionFrom(prev)
 			nextMem.carryEventFloorsFrom(prev)
 			nextMem.carryInapplicableReportsFrom(prev)
+			nextMem.carryDispatchCursorFrom(prev)
 		}
 	}
 	cr.od = next
