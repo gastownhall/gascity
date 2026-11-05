@@ -298,6 +298,20 @@ func withInfraCrossEdgeRecords(b beads.Bead, records []rigCrossEdgeRecord) beads
 	return b
 }
 
+// infraCrossEdgesAtRisk is every edge from a work bead into a row of the
+// plan, sorted: the clear drops each once the row is gone (it re-adds no
+// edge, D9) and records it on its work bead.
+func infraCrossEdgesAtRisk(plan infraCopyPlan) []infraBackupEdge {
+	var out []infraBackupEdge
+	for _, row := range plan.rows {
+		for _, d := range plan.up[row.ID] {
+			out = append(out, infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type})
+		}
+	}
+	sortInfraBackupEdges(out)
+	return out
+}
+
 // infraPrepared is what prepareInfraDestination left in the binding for the
 // copy to build on: the stamped rows it kept, and the edges between kept rows
 // with the type and payload each already carries.

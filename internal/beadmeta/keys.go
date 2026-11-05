@@ -424,9 +424,16 @@ const (
 // routed bead or a generic bead. The kid names the key that signed the grant,
 // so it identifies a person only when each principal signs with a key of
 // their own, and the same launcher's work carries a new value after a key
-// rotation. It is server-owned. The generic bead API refuses a client-supplied
-// value, and nothing is stamped when the request carried no verified
-// principal.
+// rotation. On the API it is server-owned: the generic bead API refuses a
+// client-supplied value, and a request with no verified principal stamps
+// nothing. Two writers copy a value instead of verifying a grant. The drain
+// dispatcher copies its run root's value onto each item workflow root it
+// instantiates, so that copy is as trustworthy as the run root's. A local
+// `gc sling` run from inside a session stamps the initiator of the work that
+// session has claimed (cmd/gc sling_inherit.go). Such a value is only as
+// trustworthy as the stamp it was copied from and the session identity in the
+// caller's environment, and nothing on the bead tells it apart from a
+// grant-verified one.
 const InitiatorMetadataKey = "gc.initiator"
 
 // OwnerNamespaceMetadataKey is the creation stamp a rig with federation =

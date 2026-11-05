@@ -4607,6 +4607,16 @@ func TestReaperWorkflowRootCensusKeepsItsClosesWhenTheRunBudgetRunsOut(t *testin
 			if !ok || !out.hasScope("city", "run budget exhausted; remaining work carries to the next run") {
 				t.Fatalf("outcome = %+v (declared %v), want the city's remaining work carried to the next run", out, ok)
 			}
+			// ga-efurfu: the steps the budget kept from running are named, so
+			// a city whose later steps never run is visible in the outcome and
+			// the summary rather than only in a generic partial.
+			stopped := map[string]string{"wisp": "2-issue-roots", "issue": "3"}[kind]
+			if !out.hasScope("city", "run budget exhausted before step "+stopped+"; it and every later step did not run in this scope") {
+				t.Fatalf("outcome = %+v, want the city's skipped steps from step %s named", out, stopped)
+			}
+			if gcText := f.read(t, f.gcLog); !strings.Contains(gcText, "budget_skipped:city@"+stopped) {
+				t.Fatalf("summary does not name the steps the budget skipped (want budget_skipped:city@%s):\n%s", stopped, gcText)
+			}
 			gcText := f.read(t, f.gcLog)
 			if strings.Contains(gcText, "ESCALATION") {
 				t.Fatalf("a spent run budget is not an anomaly:\n%s", gcText)

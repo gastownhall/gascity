@@ -1416,6 +1416,12 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	if err := infraDestinationEdgePayloadRefusal(writer, plan.carrying); err != nil {
 		return fail(err)
 	}
+	// A hold bd keeps in a carried bead's status crosses, or the copy refuses
+	// before the destination is touched (infra_class_holds.go). The holds
+	// kept in edges are the boundary plan's above.
+	if err := infraCopyParkedRefusal(plan, time.Now()); err != nil {
+		return fail(err)
+	}
 	if err := infraEngineCrashPoint("plan"); err != nil {
 		return fail(err)
 	}
@@ -1481,6 +1487,9 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	}
 	fmt.Fprintf(stderr, "%s: infrastructure classes migrated to %s (%d beads copied)\n", //nolint:errcheck // best-effort stderr
 		logPrefix, target.Database, imported)
+	for _, g := range plan.boundary.Gates {
+		fmt.Fprintf(stderr, "%s: %s waits on open work %s through a cross-store gate\n", logPrefix, g.Owner.ID, g.Blocker) //nolint:errcheck // best-effort stderr
+	}
 	// The manifest's size rather than the import count: the manifest is what
 	// every later verdict re-reads, so reporting anything else here would make
 	// the cutover's own event disagree with every boot that follows it.
@@ -1528,7 +1537,20 @@ func clearInfraRetainedCopiesReport(cityPath string, target infraBindingTarget, 
 		return report
 	}
 	fmt.Fprintf(stderr, "%s: %s\n", logPrefix, describeInfraClear(result)) //nolint:errcheck // best-effort stderr
+	// Removing the slice is history a Dolt work store keeps (ga-3xxr0o).
+	// Compaction reclaims it and ends AS OF recovery from before the clear,
+	// so it is the operator's call, never automatic.
+	if result.Cleared > 0 && infraWorkStoreIsManagedDolt(cityPath) {
+		fmt.Fprintf(stderr, "%s: the work store's Dolt history still holds the %d cleared row(s); once you no longer need AS OF recovery from before the clear, run `gc dolt compact` to reclaim it\n", logPrefix, result.Cleared) //nolint:errcheck // best-effort stderr
+	}
 	return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: provenBeads, Clear: result, LostCrossEdges: result.LostCrossEdges}
+}
+
+// infraWorkStoreIsManagedDolt reports whether the city's work store lives in
+// the city's managed Dolt server, the store `gc dolt compact` compacts. Tests
+// replace it.
+var infraWorkStoreIsManagedDolt = func(cityPath string) bool {
+	return scopeStoreLivesInTheCitysManagedDolt(cityPath, cityPath)
 }
 
 // clearRetainedInfraCopiesFn is the clear the operator command runs. Tests
@@ -2346,20 +2368,6 @@ func planInfraCityBoundary(cityPath string, plan *infraCopyPlan, all map[string]
 	return nil
 }
 
-// infraBoundaryRecordCount is how many boundary edges the plan records
-// without copying them, gated ones included.
-func infraBoundaryRecordCount(plan infraCopyPlan) int {
-	n := 0
-	for _, recs := range plan.boundary.Records {
-		for _, r := range recs {
-			if r.Action != rigEdgeExternal {
-				n++
-			}
-		}
-	}
-	return n
-}
-
 // infraCityElsewhereCandidates names the blockers the city plan looks for
 // outside the source and the binding: targets of an open moved row's
 // blocking or membership edge that the source does not hold.
@@ -2828,6 +2836,9 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		key := beads.DepPair{IssueID: owner, DependsOnID: blocker}
 		if !hasLabel(b.Labels, dispatch.CrossStoreGateLabel) || b.Metadata[infraMigrationStampKey] != config.StorageWorkBinding || !wantGates[key] {
 			return nil, nil, fmt.Errorf("binding holds %s, which the work store's infrastructure slice does not", b.ID)
+		}
+		if b.Status != "open" {
+			return nil, nil, fmt.Errorf("cross-store gate %s for %s is %s in the binding, want open", b.ID, owner, b.Status)
 		}
 		delete(wantGates, key)
 		gateOwner[b.ID] = owner

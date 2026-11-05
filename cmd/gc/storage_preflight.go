@@ -58,9 +58,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -232,7 +234,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
 	rows, all, listErr := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
-	var edgeErr, boundaryErr error
+	var edgeErr, holdsErr error
 	var plan infraCopyPlan
 	if listErr == nil {
 		allIDs := make(map[string]bool, len(all))
@@ -242,10 +244,14 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
 		plan, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		// The same plan the migration runs, so a hold it would refuse is named
+		// before the window rather than inside it: the cross-boundary plan's
+		// edge holds (D9) and the status holds.
 		if edgeErr == nil {
-			// The cross-boundary plan the copy runs (D9): a shape it refuses
-			// is refused here, by id, before the window.
-			boundaryErr = planInfraCityBoundary(request.CityPath, &plan, all, false)
+			holdsErr = planInfraCityBoundary(request.CityPath, &plan, all, false)
+		}
+		if edgeErr == nil && holdsErr == nil {
+			holdsErr = infraCopyParkedRefusal(plan, time.Now())
 		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
@@ -259,10 +265,20 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "edge payloads", edgeErr)
 	}
 	preflightPass(stdout, "edge payloads", "the work store can report the payload on every edge the copy would re-add")
-	if boundaryErr != nil {
-		return preflightBlock(stdout, "cross-store edges", boundaryErr)
+	if holdsErr != nil {
+		return preflightBlock(stdout, "holds", holdsErr)
 	}
-	preflightPass(stdout, "cross-store edges", fmt.Sprintf("would mint %d cross-store gate(s) and drop %d boundary edge(s), each recorded on its row", len(plan.boundary.Gates), infraBoundaryRecordCount(plan)))
+	preflightPass(stdout, "holds", fmt.Sprintf("every hold on a bead the copy carries crosses; %d bead(s) blocked on open work would wait on a cross-store gate", len(plan.boundary.Gates)))
+	// Informational: the clear drops each edge from a work bead onto a bead
+	// the copy moves (it re-adds none) and records it on its work bead.
+	if atRisk := infraCrossEdgesAtRisk(plan); len(atRisk) > 0 {
+		preflightNote(stdout, "cross-store edges", fmt.Sprintf("%d edge(s) from work beads into beads the copy moves: no store holds an edge onto a bead it no longer has, so the clear drops each and records it on its work bead (%s):", len(atRisk), beadmeta.MigratedCrossEdgesMetadataKey))
+		for _, edge := range atRisk {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
+		}
+	} else {
+		preflightPass(stdout, "cross-store edges", "no work bead links to a bead the copy moves")
+	}
 
 	// 7. What the destination already holds. Read-only: the database is opened
 	// only if it is already there, because opening creates it.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/clientcontext"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func remoteTestClient(t *testing.T, url string) *api.Client {
@@ -31,7 +32,7 @@ func remoteTestTarget(url string) *remoteTarget {
 // test ends.
 func newRemoteTestServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(h))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -73,10 +74,10 @@ func TestParseSlingVars(t *testing.T) {
 // and before reading stdin.
 func TestCmdSlingRemote_RefusesUnsupportedModes(t *testing.T) {
 	// A server that fails the test if it is ever contacted.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("server must not be contacted for a refused mode")
 		w.WriteHeader(500)
-	}))
+	})))
 	defer srv.Close()
 	prev := slingStdin
 	slingStdin = func() io.Reader {
@@ -126,14 +127,14 @@ func TestCmdSlingRemote_RefusesUnsupportedModes(t *testing.T) {
 // Happy path: a 2-arg bead sling forwards to the server and renders the result.
 func TestCmdSlingRemote_RoutesBead(t *testing.T) {
 	var gotPath, gotReq, gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotReq = r.Header.Get("X-GC-Request")
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"routed","target":"mayor","bead":"BL-42","warnings":["w1"]}`))
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
@@ -163,10 +164,10 @@ func TestCmdSlingRemote_RoutesBead(t *testing.T) {
 
 // --json emits a machine-readable object.
 func TestCmdSlingRemote_JSONOutput(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"launched","target":"mayor","formula":"review","workflow_id":"wf-9"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
@@ -198,12 +199,12 @@ func TestCmdSlingRemote_JSONOutput(t *testing.T) {
 // envelope gap the execution plan named for Phase 3.
 func TestCmdSlingRemote_ForwardsReassign(t *testing.T) {
 	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"routed","target":"mayor","bead":"BL-7"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
@@ -221,12 +222,12 @@ func TestCmdSlingRemote_ForwardsReassign(t *testing.T) {
 // forward to the server instead of being refused (C7).
 func TestCmdSlingRemote_ForwardsMetadataFlags(t *testing.T) {
 	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"routed","target":"mayor","bead":"BL-9"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
