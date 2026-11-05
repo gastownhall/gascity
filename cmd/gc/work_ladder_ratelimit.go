@@ -43,6 +43,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -67,10 +68,10 @@ func ladderProvider(row beads.Bead) string {
 
 // buildLadderFreshIndex reads every governed seat's last fresh restart off
 // raw.
-func buildLadderFreshIndex(raw []beads.Bead) ladderFreshIndex {
+func buildLadderFreshIndex(cfg *config.City, raw []beads.Bead) ladderFreshIndex {
 	x := ladderFreshIndex{}
 	for _, row := range raw {
-		if !ladderGoverns(row) {
+		if !ladderGoverns(cfg, row) {
 			continue
 		}
 		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])

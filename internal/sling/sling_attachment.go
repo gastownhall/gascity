@@ -18,10 +18,15 @@ import (
 )
 
 // BeadFromGetters tries multiple BeadQuerier implementations and returns
-// the first successful result.
+// the first successful result. It skips an absent getter: nil, and a store
+// that is no store (beads.IsNilStore), such as a zero class handle, which is
+// non-nil once boxed into a BeadQuerier and panics on its first Get.
 func BeadFromGetters(id string, getters ...BeadQuerier) (beads.Bead, bool) {
 	for _, getter := range getters {
 		if getter == nil {
+			continue
+		}
+		if store, ok := getter.(beads.Store); ok && beads.IsNilStore(store) {
 			continue
 		}
 		b, err := getter.Get(id)
