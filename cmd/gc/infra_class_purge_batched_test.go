@@ -2,19 +2,36 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// purgeBatchProbe records the batched edge reads a purge run makes.
+// purgeBatchProbe records the batched edge reads a purge run makes, and the
+// per-row dependents reads ("up") a batched run must not need.
 type purgeBatchProbe struct {
 	mu      sync.Mutex
 	batches [][]string
+	ups     int
+}
+
+func (p *purgeBatchProbe) recordUp() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ups++
+}
+
+// upReads is how many per-row dependents reads the run made.
+func (p *purgeBatchProbe) upReads() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ups
 }
 
 func (p *purgeBatchProbe) record(ids []string) {
@@ -49,6 +66,13 @@ type purgeBatchingStore struct {
 func (s purgeBatchingStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
 	s.probe.record(ids)
 	return s.FileStore.DepListBatch(ids)
+}
+
+func (s purgeBatchingStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if direction == "up" {
+		s.probe.recordUp()
+	}
+	return s.FileStore.DepList(id, direction)
 }
 
 // purgePerRowStore is a work store whose batched edge read reports itself
@@ -145,6 +169,7 @@ func readPurgeOutcomeFrom(t *testing.T, city purgeCity, store beads.Store, label
 		for _, e := range edges {
 			list = append(list, fmt.Sprintf("%s -[%s]-> %s payload=%q carried=%v", label(e.IssueID), e.Type, label(e.DependsOnID), e.Payload, e.Carried))
 		}
+		sort.Strings(list) // the backup orders by id, and labels reorder ids
 		return list
 	}
 	for _, record := range records {
@@ -155,6 +180,7 @@ func readPurgeOutcomeFrom(t *testing.T, city purgeCity, store beads.Store, label
 		for _, key := range entry.Endpoints {
 			ends = append(ends, label(key.ID))
 		}
+		sort.Strings(ends)
 		out.backup = append(out.backup, fmt.Sprintf("%s class=%s deps=%v dependents=%v endpoints=%v", id, entry.Class, edgeList(entry.Deps), edgeList(entry.Dependents), ends))
 	}
 	for _, list := range [][]string{out.rows, out.edges, out.backup} {
@@ -189,6 +215,9 @@ func TestPurgeStrandedBatchedEdgeReadMatchesThePerRowRead(t *testing.T) {
 	if !batchProbe.readAnchorOutside(selected) {
 		t.Errorf("the batched run never read the inbound edges in batches (batches %v): infraPurgeInboundEdgesInBatches did not run", batchProbe.batches)
 	}
+	if n := batchProbe.upReads(); n != 0 {
+		t.Errorf("the batched run made %d per-row dependents read(s): the batch did not answer", n)
+	}
 	if len(perRowProbe.batches) == 0 {
 		t.Error("the per-row run never asked for a batch; it does not prove the fallback")
 	}
@@ -215,5 +244,88 @@ func TestPurgeStrandedBatchedEdgeReadMatchesThePerRowRead(t *testing.T) {
 		if got := batched.inbound[id]; got != want {
 			t.Errorf("the backup of %s holds %d inbound edge(s), want %d", id, got, want)
 		}
+	}
+}
+
+// TestPurgeStrandedReadsInboundEdgesFromEveryBatchChunk: the inbound read
+// asks infraPurgeBatchChunk rows at a time, so a city with more rows than one
+// chunk has inbound edges in every chunk, and every one of them must reach
+// the backup, or a restore cannot put it back.
+func TestPurgeStrandedReadsInboundEdgesFromEveryBatchChunk(t *testing.T) {
+	n := 3 * infraPurgeBatchChunk
+	city := newSmallPurgeCity(t, n)
+	work := openPurgeWorkStore(t, city.workPath)
+	reused := mcPurgeRows / 2 // mcAutoHandoffMail's row under mcReusedID
+	edges := 0
+	for i := 5; i < n; i += 37 {
+		if i == reused || i+1 == reused {
+			continue
+		}
+		if err := work.DepAdd(fmt.Sprintf("mc-wisp-%04d", i), fmt.Sprintf("mc-wisp-%04d", i+1), "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		edges++
+	}
+	// The work bead and the session make the last chunk one row: give it an
+	// edge too. A store that omits edge-free anchors answers an edge-free
+	// chunk with nothing, and the purge then reads every row on its own.
+	if err := work.DepAdd(fmt.Sprintf("mc-wisp-%04d", n), fmt.Sprintf("mc-wisp-%04d", n-1), "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	edges++
+	probe := &purgeBatchProbe{}
+	openPurgeWorkStoreAs(t, city, func(store *beads.FileStore) beads.Store { return purgeBatchingStore{store, probe} })
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(t, city, n), &stdout, &stderr); code != 0 {
+		t.Fatalf("purge exited %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	out := readPurgeOutcome(t, city)
+	total := 0
+	for _, k := range out.inbound {
+		total += k
+	}
+	if total != edges {
+		t.Errorf("the backup holds %d inbound edge(s), want all %d, from every chunk", total, edges)
+	}
+	if got := probe.upReads(); got != 0 {
+		t.Errorf("the run made %d per-row dependents read(s): a batch did not answer", got)
+	}
+}
+
+// purgeFailingInboundStore answers the selected rows' batch and fails the
+// inbound read, the batch over every work-store row.
+type purgeFailingInboundStore struct {
+	*beads.FileStore
+	selected map[string]bool
+}
+
+func (s purgeFailingInboundStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	for _, id := range ids {
+		if !s.selected[id] {
+			return nil, errors.New("the link dropped mid-batch")
+		}
+	}
+	return s.FileStore.DepListBatch(ids)
+}
+
+// TestPurgeStrandedRefusesWhenTheInboundBatchReadFails: a failed batch is not
+// "no edges", so the run refuses before it writes a backup or removes a row.
+func TestPurgeStrandedRefusesWhenTheInboundBatchReadFails(t *testing.T) {
+	city, selected := purgeTierEdgeFixture(t)
+	openPurgeWorkStoreAs(t, city, func(store *beads.FileStore) beads.Store {
+		return purgeFailingInboundStore{store, selected}
+	})
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedPurge(t, city, confirmedPurge(t, city, len(selected)), &stdout, &stderr); code == 0 {
+		t.Fatalf("a purge whose inbound batch read failed exited 0; stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "the link dropped mid-batch") {
+		t.Errorf("the refusal does not carry the read's error: %s", stderr.String())
+	}
+	if files := purgeBackupFiles(t, city); len(files) != 0 {
+		t.Errorf("the refused run wrote a backup: %v", files)
+	}
+	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != len(selected) {
+		t.Errorf("the refused run removed rows: %d message rows left, want %d", got, len(selected))
 	}
 }

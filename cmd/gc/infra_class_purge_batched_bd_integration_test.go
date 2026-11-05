@@ -140,6 +140,9 @@ func TestPurgeStrandedBatchedEdgeReadMatchesThePerRowReadOnRealBd(t *testing.T) 
 	if !batchProbe.readAnchorOutside(selected) {
 		t.Errorf("the batched run never read the inbound edges in batches (batches %v)", batchProbe.batches)
 	}
+	if n := batchProbe.upReads(); n != 0 {
+		t.Errorf("the batched run made %d per-row dependents read(s): bd's batch did not answer", n)
+	}
 	if len(perRowProbe.batches) == 0 {
 		t.Error("the per-row run never asked for a batch; it does not prove the fallback")
 	}
@@ -172,6 +175,13 @@ type bdBatchingStore struct {
 func (s bdBatchingStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
 	s.probe.record(ids)
 	return s.BdStore.DepListBatch(ids)
+}
+
+func (s bdBatchingStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if direction == "up" {
+		s.probe.recordUp()
+	}
+	return s.BdStore.DepList(id, direction)
 }
 
 // bdPerRowStore is a bd work store whose batched edge read reports itself
