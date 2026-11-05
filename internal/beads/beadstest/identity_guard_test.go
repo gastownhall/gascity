@@ -25,6 +25,7 @@ type holder struct {
 	graph  b.GraphStore
 	legs   map[string]b.Store
 	name   string
+	Work   string // a field of this package named like a class accessor: it must not hide RigWork.Work
 }
 
 type state interface {
@@ -52,12 +53,26 @@ func flagged(st state, h holder, w b.WorkStore, m b.MoleculeTarget, n b.Molecule
 	_ = map[b.Store]bool{}     // map-key
 }
 
-// crossPackage holds 2 identity comparisons of handles another package hands
-// out (storeref.Stores is not declared here): a class accessor's .Store, and
-// two class accessors' handles.
-func crossPackage(rs storeref.Stores) {
+// crossPackage holds 5 identity comparisons of handles another package hands
+// out (storeref.Stores is not declared here): a class accessor's .Store, two
+// class accessors' handles, a RigWork's Work field, and the first results of
+// Rig and GraphFor.
+func crossPackage(rs, other storeref.Stores, w b.WorkStore) {
 	_ = rs.Graph().Store == rs.Work().Store
-	_ = rs.Graph() != rs.Sessions()
+	_ = rs.Graph() != other.Graph()
+	// Each operand below is store-typed only by the rule it pins.
+	for _, r := range rs.Rigs() {
+		for _, o := range other.Rigs() {
+			_ = r.Work == o.Work // storeref.RigWork's handle
+		}
+	}
+	rig, _ := rs.Rig("x")
+	otherRig, _ := other.Rig("x")
+	_ = rig == otherRig
+	g, _ := rs.GraphFor("rig:x")
+	otherG, _ := other.GraphFor("rig:x")
+	_ = g == otherG
+	_ = w
 }
 
 // switched holds 1 switch on a store.
@@ -114,7 +129,7 @@ func TestScanStoreIdentity(t *testing.T) {
 	want := map[string]int{
 		"fixture.go flagged eq":           7,
 		"fixture.go flagged map-key":      1,
-		"fixture.go crossPackage eq":      2,
+		"fixture.go crossPackage eq":      5,
 		"fixture.go switched switch":      1,
 		"fixture.go slicesHelpers slices": 3,
 	}

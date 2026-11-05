@@ -28,7 +28,8 @@ import (
 // parameter, result, variable or struct field of a beads store type, an
 // element of a map or slice of them, the result of the package's own function
 // or interface method returning one, or a handle reached from any package: a
-// class accessor (Work(), Graph(), ...) or a .Store field. It can miss a store
+// class accessor (Work(), Graph(), ...) or a field of that name (RigWork.Work),
+// the first result of Rig or GraphFor, or a .Store field. It can miss a store
 // another package's function returns under another name; the review covers
 // that gap, and a same-named non-store is listed with its reason.
 
@@ -46,12 +47,16 @@ var storeTypeNames = map[string]bool{
 	"MailStore": true, "OrdersStore": true, "NudgesStore": true, "MoleculeTarget": true,
 }
 
-// classAccessors are the methods that hand out a class handle in any package
-// (storeref.Stores, beads.ClassStores' readers): Stores().Graph() is a handle
-// whatever package it is read in.
+// classAccessors are the names that hand out a class handle in any package:
+// storeref.Stores' methods (Stores().Graph()), and the fields of
+// storeref.RigWork (Rigs()[i].Work) and beadstest.ClassStores.
 var classAccessors = map[string]bool{
 	"Work": true, "Graph": true, "Sessions": true, "Mail": true, "Orders": true, "Nudges": true,
 }
+
+// handleLookups are storeref.Stores' methods whose first result is a handle:
+// Rig(name) and GraphFor(ref).
+var handleLookups = map[string]bool{"Rig": true, "GraphFor": true}
 
 // CheckStoreIdentity scans the Go package in dir and fails t for every
 // "file func rule" key whose count differs from reviewed, which is keyed the
@@ -354,7 +359,17 @@ func (s *identityScanner) kindOf(e ast.Expr, sc scope) storeKind {
 		if e.Sel.Name == "Store" {
 			return isStore // a handle's embedded store, or a store field
 		}
-		return s.fields[e.Sel.Name]
+		k, declared := s.fields[e.Sel.Name]
+		if declared && k != notStore {
+			return k // the package's own store field
+		}
+		if classAccessors[e.Sel.Name] {
+			// Another package's handle field: Rigs()[i].Work. The selector's
+			// receiver is untyped here, so a field of this package with the
+			// same name and no store in it (api's patch types have Work and
+			// Mail) is flagged too, and listed with its reason.
+			return isStore
+		}
 	case *ast.CallExpr:
 		switch fun := e.Fun.(type) {
 		case *ast.Ident:
@@ -366,7 +381,7 @@ func (s *identityScanner) kindOf(e ast.Expr, sc scope) storeKind {
 			if k, declared := s.funcs[fun.Sel.Name]; declared {
 				return k // the package's own method of that name wins (State.Orders lists orders)
 			}
-			if classAccessors[fun.Sel.Name] && len(e.Args) == 0 {
+			if (classAccessors[fun.Sel.Name] && len(e.Args) == 0) || handleLookups[fun.Sel.Name] {
 				return isStore
 			}
 		}
