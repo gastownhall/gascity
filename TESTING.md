@@ -41,7 +41,7 @@ are run; Bazel is the runner that enforces it.
 | Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
 | Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
 | `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
-| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (evidence-only, allowed to fail; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
+| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (gating; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
 
@@ -60,12 +60,21 @@ other side's class is flagged), but its references to rows that already exist
 other side yet (`GraphApplyHandle` in `projection.go`), so a plan that wires a
 row to the wrong side's row passes the gate.
 
-Split-strict lane latency: `continue-on-error` keeps the lane's result out of
-the required `bazel test (side-by-side)` check, not its wall time. The lane is
-a leg of the matrix the gate job needs, so on a pull request that runs it the
-required check reports when it ends (about 5 minutes on a warm farm; 19 were
-seen cold). That keeps one copy of the lane's steps; give it its own job if
-the wait starts to matter.
+Split-strict lane gating: the lane is a leg of the matrix the required
+`bazel test (side-by-side)` check needs, so a red split-strict (a NEW ratchet
+key, a NEW FAILING test, a hung shard) fails that check, and on a pull request
+that runs it the required check reports when it ends (about 5 minutes on a
+warm farm; 19 were seen cold). It starts only in mode remote, for same-repo
+pull requests touching the storage paths, the nightly and dispatches (RC Gate
+included); fork, Dependabot and cache-mode PRs, merge groups and pushes do not
+run it. A regression landed that way turns the next storage PR red on files
+it never touched: check the open `split-strict-nightly` issue (a red nightly
+run opens or comments on it; bazel.yml's split-strict-alert job) before
+debugging your own change. Fix a red lane with `scripts/split-strict-baseline`:
+a new failure is classified as a product bug (fix the code), a fixture that
+does not model split stores (fix the fixture), or a gate artifact (list it
+with the reason). The downward ratchet (now-passing or unreached entries)
+gates the nightly only.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
@@ -420,7 +429,8 @@ this:
   is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
-  any other run. The `integration` lane can later be gated on `merge_group`
+  any other run. A storage PR's own run also has split-strict, which its
+  merge group does not (ga-ylpbsy.94.7). The `integration` lane can later be gated on `merge_group`
   only (G3).
 
 **Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
