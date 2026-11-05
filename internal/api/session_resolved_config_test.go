@@ -217,6 +217,7 @@ func TestResolvedSessionConfigForProviderWithholdsInheritedDemandSpawnEnv(t *tes
 	}
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
+		"own-city",
 		nil,
 		runtime.ProgramStatusOff,
 		"worker",
