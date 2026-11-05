@@ -55,7 +55,7 @@ import (
 // TierMode is TierIssues, which drops every Ephemeral row, so a projection
 // that just fills in a Metadata filter answers a strictly narrower question
 // than the one it names. DirectMembers avoids that by reading through
-// HandlesFor(store).Live, which forces TierBoth.
+// LiveFor(store), which forces TierBoth.
 //
 // The tier is not an edge case for molecules. A wisp molecule materializes
 // with EVERY node in ephemeral storage — the wisp bead policy resolves to
@@ -184,8 +184,9 @@ func AllMemberships() []Membership {
 // DirectMembers returns the MembershipDirectRootID member set of the workflow
 // rooted at rootID: the root bead first, then every bead whose
 // gc.root_bead_id metadata equals rootID, closed beads included. Members are
-// read through the store's LIVE handle, so a caller that just wrote a member
-// sees it rather than a cached snapshot.
+// read through the store's LIVE handle (LiveFor, so a class handle over a
+// cache reads past it as the cache itself does), so a caller that just wrote
+// a member sees it rather than a cached snapshot.
 //
 // A missing root is not an error — the metadata members are still returned, so
 // a molecule whose root has been relocated or removed does not silently become
@@ -197,21 +198,42 @@ func AllMemberships() []Membership {
 // by no other rule. See Membership for why the alternative rules are wrong for
 // these consumers.
 func DirectMembers(store Store, rootID string) ([]Bead, error) {
-	all, err := HandlesFor(store).Live.List(ListQuery{
+	all, err := LiveFor(store).List(ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]Bead, 0, len(all)+1)
-	seen := make(map[string]bool, len(all)+1)
-	if root, err := store.Get(rootID); err == nil {
-		result = append(result, root)
-		seen[root.ID] = true
+	var root *Bead
+	if got, err := store.Get(rootID); err == nil {
+		root = &got
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
+	}
+	return directMembersWithRoot(root, all), nil
+}
+
+// DirectMembersWithRoot is DirectMembers for a caller that has already read
+// the root in the same invocation: it lists the root's metadata members and
+// puts root first without reading the root again.
+func DirectMembersWithRoot(store Store, root Bead) ([]Bead, error) {
+	all, err := LiveFor(store).List(ListQuery{
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return directMembersWithRoot(&root, all), nil
+}
+
+func directMembersWithRoot(root *Bead, all []Bead) []Bead {
+	result := make([]Bead, 0, len(all)+1)
+	seen := make(map[string]bool, len(all)+1)
+	if root != nil {
+		result = append(result, *root)
+		seen[root.ID] = true
 	}
 	for _, bead := range all {
 		if seen[bead.ID] {
@@ -220,5 +242,5 @@ func DirectMembers(store Store, rootID string) ([]Bead, error) {
 		result = append(result, bead)
 		seen[bead.ID] = true
 	}
-	return result, nil
+	return result
 }

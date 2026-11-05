@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -50,7 +51,7 @@ func newInvocationTelemetryHandle(t *testing.T) (*SessionHandle, *beads.MemStore
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -67,7 +68,7 @@ func newInvocationTelemetryHandle(t *testing.T) (*SessionHandle, *beads.MemStore
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(handle.sessionID)
@@ -203,7 +204,7 @@ func TestMessageRecordsInvocationTokensAndCost(t *testing.T) {
 		usageEntry("u2", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -264,7 +265,7 @@ func TestMessageAdvancesCursorAndSumsNewEntries(t *testing.T) {
 		usageEntry("u1", "claude-opus-4-7", 999, 999, 999, 999),
 		usageEntry("u2", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "first"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "first"}); err != nil {
 		t.Fatalf("Message(first): %v", err)
 	}
 
@@ -276,7 +277,7 @@ func TestMessageAdvancesCursorAndSumsNewEntries(t *testing.T) {
 		usageEntry("u3", "claude-opus-4-7", 10, 5, 200, 80),
 		usageEntry("u4", "claude-opus-4-7", 1, 2, 3, 4),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "second"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "second"}); err != nil {
 		t.Fatalf("Message(second): %v", err)
 	}
 
@@ -302,7 +303,7 @@ func TestMessageAdvancesCursorAndSumsNewEntries(t *testing.T) {
 	}
 
 	// Third prompt op with no new entries must not change the totals.
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "third"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "third"}); err != nil {
 		t.Fatalf("Message(third): %v", err)
 	}
 	out = collectInvocationMetrics(t, reader)
@@ -328,7 +329,7 @@ func TestMessageDoesNotRecountSplitContentBlockGroups(t *testing.T) {
 		usageEntryWithMessageID("b1", "msg_A", 100, 50, 2000, 800),
 		usageEntryWithMessageID("b2", "msg_A", 100, 50, 2000, 800),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "first"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "first"}); err != nil {
 		t.Fatalf("Message(first): %v", err)
 	}
 
@@ -355,7 +356,7 @@ func TestMessageDoesNotRecountSplitContentBlockGroups(t *testing.T) {
 		usageEntryWithMessageID("b2", "msg_A", 100, 50, 2000, 800),
 		usageEntryWithMessageID("b3", "msg_A", 100, 50, 2000, 800),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "second"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "second"}); err != nil {
 		t.Fatalf("Message(second): %v", err)
 	}
 	out = collectInvocationMetrics(t, reader)
@@ -373,7 +374,7 @@ func TestMessageDoesNotRecountSplitContentBlockGroups(t *testing.T) {
 		usageEntryWithMessageID("b3", "msg_A", 100, 50, 2000, 800),
 		usageEntryWithMessageID("b4", "msg_B", 10, 5, 200, 80),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "third"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "third"}); err != nil {
 		t.Fatalf("Message(third): %v", err)
 	}
 	out = collectInvocationMetrics(t, reader)
@@ -405,7 +406,7 @@ func TestMessageSkipsCostForUnknownModel(t *testing.T) {
 	writeWorkerTestJSONL(t, transcriptPath, []map[string]any{
 		usageEntry("u1", "model-not-in-registry", 100, 50, 0, 0),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -429,7 +430,7 @@ func TestInvocationTelemetrySuppressedContext(t *testing.T) {
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 	ctx := WithoutOperationEvents(context.Background())
-	if _, err := handle.Message(ctx, MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(ctx, handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -446,7 +447,7 @@ func TestNudgeRecordsInvocationTokens(t *testing.T) {
 	writeWorkerTestJSONL(t, transcriptPath, []map[string]any{
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
-	if _, err := handle.Nudge(context.Background(), NudgeRequest{Text: "go"}); err != nil {
+	if _, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{Text: "go"}); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 
@@ -474,7 +475,7 @@ func TestNoLatencyMetricEmitted(t *testing.T) {
 	writeWorkerTestJSONL(t, transcriptPath, []map[string]any{
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -501,7 +502,7 @@ func newFamilyTelemetryHandle(t *testing.T, profile Profile, provider, command s
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -519,7 +520,7 @@ func newFamilyTelemetryHandle(t *testing.T, profile Profile, provider, command s
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	return handle, store, searchBase, workDir
@@ -601,7 +602,7 @@ func TestMessageRecordsCodexInvocationTokens(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -670,7 +671,7 @@ func TestMessageRecordsCodexTokensForResumedSession(t *testing.T) {
 		t.Fatalf("SetMetadata(last_woke_at): %v", err)
 	}
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -717,7 +718,7 @@ func TestCodexKeyedMissDoesNotFallBackToWindow(t *testing.T) {
 		t.Fatalf("SetMetadata(last_woke_at): %v", err)
 	}
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -743,7 +744,7 @@ func TestMessageRecordsCodexTokensFreshWakeWithoutSessionKey(t *testing.T) {
 		t.Fatalf("SetMetadata(last_woke_at): %v", err)
 	}
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -781,7 +782,7 @@ func TestMessageRecordsCodexTokensBehindSymlinkedRoot(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -817,7 +818,7 @@ func TestCodexCostFlowsWithConfiguredPricing(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -850,7 +851,7 @@ func TestMessageAdvancesCodexCursor(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "first"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "first"}); err != nil {
 		t.Fatalf("Message(first): %v", err)
 	}
 
@@ -863,7 +864,7 @@ func TestMessageAdvancesCodexCursor(t *testing.T) {
 		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
 		codexWorkerTokenCount("2026-06-12T10:00:20.000Z", 56066, 21683, 17792, 269),
 	})
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "second"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "second"}); err != nil {
 		t.Fatalf("Message(second): %v", err)
 	}
 
@@ -888,7 +889,7 @@ func TestMessageAdvancesCodexCursor(t *testing.T) {
 	}
 
 	// Third prompt op with no new entries must not change the totals.
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "third"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "third"}); err != nil {
 		t.Fatalf("Message(third): %v", err)
 	}
 	out = collectInvocationMetrics(t, reader)
@@ -913,7 +914,7 @@ func TestCodexTelemetrySkipsOutOfWindowRollouts(t *testing.T) {
 		codexWorkerTokenCount("2026-06-09T10:00:10.000Z", 34114, 17888, 15232, 309),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -943,7 +944,7 @@ func TestInvocationTelemetrySkipsUnsupportedFamilies(t *testing.T) {
 		usageEntry("k1", "kimi-model", 100, 50, 0, 0),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -957,7 +958,7 @@ func TestMessageWithoutTranscriptEmitsNothing(t *testing.T) {
 	reader := setupInvocationMetricsReader(t)
 	handle, store, _ := newInvocationTelemetryHandle(t)
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -971,5 +972,22 @@ func TestMessageWithoutTranscriptEmitsNothing(t *testing.T) {
 	}
 	if got := bead.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; got != "" {
 		t.Fatalf("cursor metadata = %q, want empty", got)
+	}
+}
+
+// TestSweepIntervalWindowEndsAtUsageClose pins the closed interval's discovery
+// window: a session closed straight from a live state has no slept_at inside
+// the interval, so the window ends at usage_closed_at rather than at now.
+func TestSweepIntervalWindowEndsAtUsageClose(t *testing.T) {
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	closedAt := start.Add(10 * time.Minute)
+	now := start.Add(48 * time.Hour)
+	meta := map[string]string{"awake_started_at": start.Format(time.RFC3339)}
+	for k, v := range sessionpkg.UsageClosePatch(closedAt) {
+		meta[k] = v
+	}
+	notBefore, notAfter := sweepIntervalWindow(meta, now)
+	if !notBefore.Equal(start) || !notAfter.Equal(closedAt) {
+		t.Fatalf("window = [%s, %s], want [%s, %s]", notBefore, notAfter, start, closedAt)
 	}
 }

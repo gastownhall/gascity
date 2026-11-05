@@ -10,10 +10,11 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/executionevent"
-	"github.com/spf13/cobra"
 )
 
 type eventsReemitExecutionResult struct {
@@ -90,17 +91,13 @@ func runEventsReemitExecution(cmd *cobra.Command, runID string, apply bool, stdo
 	if err != nil {
 		return fmt.Errorf("opening city work store: %w", err)
 	}
-	projection, err := executionevent.ProjectCurrent(
-		beads.GraphStore{Store: resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)},
-		beads.WorkStore{Store: store},
-		strings.TrimSpace(runID),
-	)
+	projection, err := projectExecutionReemitRun(cityPath, store, strings.TrimSpace(runID))
 	if err != nil {
 		return fmt.Errorf("projecting run %q: %w", runID, err)
 	}
 	facts := projection.Events("execution-reemit")
 	if apply {
-		recorder, err := newFileEventsRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, io.Discard)
+		recorder, err := openCityEventsLog(cityPath, io.Discard)
 		if err != nil {
 			return fmt.Errorf("opening event log: %w", err)
 		}
@@ -187,4 +184,12 @@ func requireStoppedExecutionReemitCity(cityPath string) (*os.File, error) {
 		return nil, fmt.Errorf("probing controller lock: %w", err)
 	}
 	return lock, nil
+}
+
+// projectExecutionReemitRun projects one run from the city's stores: the root
+// and its steps from the graph class store, which is the binding on a split
+// city, and the input convoy's edges from the work store the command opened.
+func projectExecutionReemitRun(cityPath string, store beads.Store, runID string) (executionevent.Projection, error) {
+	stores := cliStores(cityPath, store)
+	return executionevent.ProjectCurrent(stores.Graph(), stores.Work(), runID)
 }

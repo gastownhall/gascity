@@ -352,17 +352,17 @@ func TestBindingEnginePeelsRouteClear(t *testing.T) {
 	}
 }
 
-// TestRelocatedSQLiteSessionLedgerSeesThroughRouteClear is the same hazard one
+// TestIsRelocatedSQLiteSessionLedgerSeesThroughRouteClear is the same hazard one
 // caller up: the closed-session purge asks whether the sessions class is served
 // by the SQLite ledger through bindingEngine, and an answer of "no" is silent --
-// it returns nil and the purge simply stops on every split city.
-func TestRelocatedSQLiteSessionLedgerSeesThroughRouteClear(t *testing.T) {
+// the purge simply stops on every split city.
+func TestIsRelocatedSQLiteSessionLedgerSeesThroughRouteClear(t *testing.T) {
 	ledger := openSessionPurgeSQLiteStore(t)
 	guarded := beads.WithRouteChangeClearing(ledger, routeClearIdentity)
 
 	// The one-shot shape: the class store is the decorator over the ledger.
-	if got := relocatedSQLiteSessionLedger(wholeSplitRoutes(guarded), guarded, beads.NewMemStore()); got != guarded {
-		t.Fatalf("relocatedSQLiteSessionLedger over the decorated ledger = %T, want the class store: the decorator hid the engine", got)
+	if !isRelocatedSQLiteSessionLedger(wholeSplitRoutes(guarded), guarded, beads.NewMemStore()) {
+		t.Fatal("isRelocatedSQLiteSessionLedger over the decorated ledger = false, want true: the decorator hid the engine")
 	}
 
 	// The controller's shape: its cache over the decorator over the ledger.
@@ -371,8 +371,8 @@ func TestRelocatedSQLiteSessionLedgerSeesThroughRouteClear(t *testing.T) {
 	if _, cached := sessions.(*beads.CachingStore); !cached {
 		t.Fatalf("sessions class is %T, want the controller's cache", sessions)
 	}
-	if got := relocatedSQLiteSessionLedger(routes, sessions, beads.NewMemStore()); got != sessions {
-		t.Fatalf("relocatedSQLiteSessionLedger over the cached, decorated ledger = %T, want the cache", got)
+	if !isRelocatedSQLiteSessionLedger(routes, sessions, beads.NewMemStore()) {
+		t.Fatal("isRelocatedSQLiteSessionLedger over the cached, decorated ledger = false, want true")
 	}
 }
 

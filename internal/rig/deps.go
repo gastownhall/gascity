@@ -53,6 +53,16 @@ type Deps struct {
 	// ensureBundledRigImportsInstalled), preserving the "city.toml written last"
 	// atomicity invariant. Required.
 	ComposePacks func(cityPath string, imports []config.BoundImport) (pinned []config.BoundImport, commit func() error, err error)
+	// ResolveIncludeImports resolves a fresh add's explicit --include imports the
+	// way "gc import add" resolves an import (cmd/gc resolveRigIncludeImports):
+	// bundled sources keep their canonical pin, other version-less remote sources
+	// get gc import add's default version constraint (the constraint the city
+	// already holds for the source, else the newest release's), local paths and
+	// remote sources carrying "#ref" pass through, and the returned commit writes
+	// packs.lock for every bundled and ref-less remote include only AFTER the
+	// city.toml write. It may reach the network but must not mutate anything
+	// itself. nil = use ComposePacks (the API path never carries --include).
+	ResolveIncludeImports func(cityPath string, imports []config.BoundImport) (resolved []config.BoundImport, commit func() error, err error)
 	// WriteRoutes regenerates every rig's routes.jsonl (cmd/gc
 	// collectRigRoutes + writeAllRoutes). Required — it runs after the config
 	// write, so a nil here would panic past the topology rollback.
@@ -90,6 +100,14 @@ type Deps struct {
 	// PrepareAdopt readies provider state for --adopt (cmd/gc
 	// prepareRigAdoptProviderState). nil = skip; only consulted when req.Adopt.
 	PrepareAdopt func(cityPath, rigPath string) error
+	// ReadStorePrefix returns the issue prefix the bd store at rigPath records
+	// in its own config table (cmd/gc readAdoptedStoreIssuePrefix). bd keeps a
+	// store's prefix there and leaves .beads/config.yaml a commented template,
+	// so --adopt asks the store when config.yaml records none. It is consulted
+	// only on --adopt, only when config.yaml has no prefix and
+	// .beads/metadata.json exists. ("", nil) means the store records none. nil =
+	// config.yaml is the only source.
+	ReadStorePrefix func(rigPath string) (string, error)
 	// StoreContract reports whether the city uses the bd store contract (cmd/gc
 	// cityUsesBdStoreContract). It is a func, not a bool, because InitStore can
 	// seed provider state mid-flow and the flow re-evaluates it after init. nil =
@@ -111,7 +129,9 @@ type Deps struct {
 }
 
 // ProvisionRequest is the caller's rig-add intent. It mirrors the current
-// doRigAddWithResult parameters minus the fs and the io.Writers.
+// doRigAddWithResult parameters minus the fs and the io.Writers. Includes holds
+// the --include tokens: a pack source or pack name, optionally
+// "<binding>=<source>" to choose the import binding.
 type ProvisionRequest struct {
 	Name           string
 	Path           string // resolved rig path; the caller does any CWD-relative resolution

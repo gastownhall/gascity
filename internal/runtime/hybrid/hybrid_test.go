@@ -13,6 +13,88 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("local-agent", "token-local"); err != nil {
+			t.Fatalf("StopUnattendedSession(local): %v", err)
+		}
+		if got := local.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "local-agent", expectedToken: "token-local"}) {
+			t.Fatalf("local unattended stops = %#v, want exact local-agent/token-local call", got)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("remote", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("remote-agent-1", "token-remote"); err != nil {
+			t.Fatalf("StopUnattendedSession(remote): %v", err)
+		}
+		if got := remote.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "remote-agent-1", expectedToken: "token-remote"}) {
+			t.Fatalf("remote unattended stops = %#v, want exact remote-agent-1/token-remote call", got)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported local does not probe remote", func(t *testing.T) {
+		remote := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), remote, isRemote)
+
+		err := p.StopUnattendedSession("local-agent", "token")
+		if err == nil || !strings.Contains(err.Error(), "local backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual local-backend error", err)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("remote error does not probe local", func(t *testing.T) {
+		sentinel := errors.New("remote unattended stop unavailable")
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(sentinel)
+		p := New(local, remote, isRemote)
+
+		err := p.StopUnattendedSession("remote-agent-1", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "remote backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual remote error", err)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
+
 type livenessObservationErrorProvider struct {
 	*runtime.Fake
 	err error
@@ -35,6 +117,35 @@ func TestProvider_ForwardsLivenessObservationErrorToRoutedBackend(t *testing.T) 
 		}
 		if got != (runtime.Liveness{}) {
 			t.Fatalf("ObserveLivenessWithError(%q) = %+v, want zero while routed result is unknown", name, got)
+		}
+	}
+}
+
+// TestHybridForwardsIsAttachedWithError proves hybrid forwards the
+// error-bearing attachment probe to the routed backend. Without the forward,
+// the error is lost behind the bool IsAttached and a probe failure reads
+// "not attached".
+func TestHybridForwardsIsAttachedWithError(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	localErr := fmt.Errorf("local probe: %w", runtime.ErrRuntimeUnavailable)
+	remoteErr := fmt.Errorf("remote probe: %w", runtime.ErrRuntimeUnavailable)
+	local.AttachedErrors["local-agent"] = localErr
+	remote.AttachedErrors["remote-agent-1"] = remoteErr
+	remote.SetAttached("remote-agent-2", true)
+	h := New(local, remote, isRemote)
+
+	for _, tc := range []struct {
+		name    string
+		want    bool
+		wantErr error
+	}{
+		{"local-agent", false, localErr},
+		{"remote-agent-1", false, remoteErr},
+		{"remote-agent-2", true, nil},
+	} {
+		got, err := runtime.IsAttachedWithError(h, tc.name)
+		if got != tc.want || !errors.Is(err, tc.wantErr) {
+			t.Errorf("IsAttachedWithError(%q) = (%v, %v), want (%v, %v)", tc.name, got, err, tc.want, tc.wantErr)
 		}
 	}
 }
@@ -63,6 +174,34 @@ func TestProvider_ForwardsRelaunchToRoutedBackend(t *testing.T) {
 	}
 	if got := remote.CountCalls("Relaunch", "remote-agent-1"); got != 1 {
 		t.Errorf("remote backend Relaunch calls = %d, want 1", got)
+	}
+}
+
+// StopBackgroundWork must reach the routed backend (local vs remote), or
+// session StopTurn's BackgroundWorkStopper type-assert would be masked by the
+// hybrid router and a stopped Codex turn's background terminals would keep
+// running. A backend without it answers unsupported.
+func TestProvider_ForwardsStopBackgroundWorkToRoutedBackend(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	h := New(local, remote, isRemote)
+	for _, tc := range []struct {
+		name string
+		leg  *runtime.Fake
+	}{{"local-agent", local}, {"remote-agent-1", remote}} {
+		if err := h.StopBackgroundWork(context.Background(), tc.name); err != nil {
+			t.Fatalf("StopBackgroundWork(%s): %v", tc.name, err)
+		}
+		if got := tc.leg.CountCalls("StopBackgroundWork", tc.name); got != 1 {
+			t.Errorf("routed backend StopBackgroundWork(%s) calls = %d, want 1", tc.name, got)
+		}
+	}
+	if got := local.CountCalls("StopBackgroundWork", "remote-agent-1") + remote.CountCalls("StopBackgroundWork", "local-agent"); got != 0 {
+		t.Errorf("StopBackgroundWork reached the other backend %d times, want 0", got)
+	}
+
+	bare := New(local, bareLeaf{runtime.NewFake()}, isRemote)
+	if err := bare.StopBackgroundWork(context.Background(), "remote-agent-2"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("StopBackgroundWork on a backend without it = %v, want ErrInteractionUnsupported", err)
 	}
 }
 
@@ -587,6 +726,60 @@ func TestListRunningAttested_CompositeRequiresEveryBackend(t *testing.T) {
 	for _, tc := range cases {
 		if got := runtime.ListRunningAttested(New(tc.local, tc.remote, isRemote)); got != tc.want {
 			t.Errorf("%s: ListRunningAttested(hybrid) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Kills: an accessor that lists, and a Backends order or label that disagrees
+// with ListRunningByBackend (see the auto twin).
+func TestHybridBackends_NamesBackendsWithoutListing(t *testing.T) {
+	local := &scriptedListProvider{Fake: runtime.NewFake()}
+	remote := &scriptedListProvider{Fake: runtime.NewFake()}
+	p := New(local, remote, func(string) bool { return false })
+
+	backends := p.Backends()
+	if len(local.prefixes)+len(remote.prefixes) != 0 {
+		t.Fatalf("Backends() listed its backends (local %d, remote %d calls), want none", len(local.prefixes), len(remote.prefixes))
+	}
+	listings := p.ListRunningByBackend("")
+	if len(backends) != len(listings) {
+		t.Fatalf("Backends() = %d entries, ListRunningByBackend = %d", len(backends), len(listings))
+	}
+	for i, b := range backends {
+		if b.Label != listings[i].Label || b.Provider != listings[i].Provider {
+			t.Errorf("backend %d = (%q, %T), listing = (%q, %T)", i, b.Label, b.Provider, listings[i].Label, listings[i].Provider)
+		}
+	}
+}
+
+// serverDeathFake is a Fake backend that confirms, or refuses to confirm, that
+// its server is dead, as tmux does through runtime.ServerDeathConfirmer.
+type serverDeathFake struct {
+	*runtime.Fake
+	dead bool
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool { return f.dead }
+
+// hybrid forwards ServerDeathConfirmer to its local tmux backend, so
+// StopForCleanup absorbs a missing-server answer only for a server confirmed
+// dead, never for a live one whose socket file was deleted.
+func TestStopForCleanupMissingServerUsesLocalConfirmer(t *testing.T) {
+	serverGone := fmt.Errorf("killing session sky: %w", errors.New("no tmux server running"))
+	for _, dead := range []bool{false, true} {
+		local := &serverDeathFake{Fake: runtime.NewFake(), dead: dead}
+		local.StopErrors["sky"] = serverGone
+		p := New(local, runtime.NewFake(), isRemote)
+
+		if got := p.ServerConfirmedDead(); got != dead {
+			t.Errorf("ServerConfirmedDead() = %v, want the local backend's %v", got, dead)
+		}
+		err := runtime.StopForCleanup(p, "sky")
+		if dead && err != nil {
+			t.Errorf("StopForCleanup = %v over a dead server, want nil", err)
+		}
+		if !dead && !errors.Is(err, serverGone) {
+			t.Errorf("StopForCleanup = %v over a live server, want the missing-server answer", err)
 		}
 	}
 }

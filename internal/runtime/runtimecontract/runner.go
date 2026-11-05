@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // Options tune a conformance run. The zero value is CI-ready.
@@ -67,6 +69,12 @@ func (o *Options) applyDefaults() {
 // Run emits exactly one [Result] per [Catalog] requirement, in catalog
 // order (enforced by TestRunCoversEveryCatalogRequirement).
 func Run(ctx context.Context, executable string, opts Options) (Report, error) {
+	return run(ctx, executable, opts, nil)
+}
+
+// run is Run, probing only the requirements selected reports true for
+// (every one when it is nil) and recording the rest as skipped.
+func run(ctx context.Context, executable string, opts Options, selected func(Code) bool) (Report, error) {
 	path, err := exec.LookPath(executable)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolving executable %q: %w", executable, err)
@@ -80,8 +88,13 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 
 	// Resolve the handshake once; capability-gated probes consult it.
 	report.Protocol = r.handshake(ctx)
+	report.V2Missing = sessionexec.V2ProfileGaps(report.Protocol)
 
 	for _, req := range catalog {
+		if selected != nil && !selected(req.Code) {
+			report.record(req, StatusSkip, "not selected")
+			continue
+		}
 		probe, ok := probes[req.Code]
 		if !ok {
 			report.record(req, StatusFail, "no probe registered for this requirement (runtimecontract bug)")
@@ -89,7 +102,11 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 		}
 		status, detail := probe(ctx, r, report.Protocol)
 		report.record(req, status, detail)
+		if status == StatusFail {
+			report.V2Failed = append(report.V2Failed, req.Code)
+		}
 	}
+	report.V2Ready = len(report.V2Missing) == 0 && len(report.V2Failed) == 0
 	return report, nil
 }
 
@@ -124,10 +141,23 @@ func (r *runner) op(ctx context.Context, args ...string) outcome {
 }
 
 func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) outcome {
+	return r.opEnv(ctx, timeout, nil, stdin, args...)
+}
+
+// opEnv is opTimeout with env added to the executable's environment
+// (GC_EXEC_CITY_PATH, GC_RPP_FAULT for the observe group).
+func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) outcome {
+	var cmdEnv []string
+	if env != nil {
+		// Read before the op's deadline: execenv.Environ waits out an
+		// in-flight native store open, and that wait is not the op's.
+		cmdEnv = append(execenv.Environ(), env...)
+	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, r.path, args...)
+	cmd.Env = cmdEnv
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open: a conformance run reports a hang, not
 	// inherits it.

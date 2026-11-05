@@ -150,11 +150,15 @@ func TestNotifyOnHumanGateCreationOrder(t *testing.T) {
 // silently (failures are best-effort and swallowed at runtime), so they are
 // pinned here:
 //
-//   - The bead.created payload does NOT carry await_type, so a human gate is
-//     indistinguishable from a timer/gh gate at the event alone. The script
-//     must re-fetch the bead via `gc bd show` and gate on await_type == "human"
-//     AND status == "open" — otherwise it would notify on every gate creation
-//     (or none).
+//   - The bead.created payload does NOT carry the gate type, so a human gate
+//     is indistinguishable from a timer/gh gate at the event alone. The script
+//     must re-fetch the bead via `gc bd show` and gate on a human type AND
+//     status == "open" — otherwise it would notify on every gate creation (or
+//     none). The type is bd's await_type for bd's own gates, else the
+//     gc.gate_type stamp a formula [steps.gate] writes (gc stores have no
+//     await_type column). Gates typed neither way are never mailed.
+//   - The resolve hint names `gc bd close`, which every store serves; a split
+//     city refuses `gc bd gate resolve` for a gate its class binding holds.
 //   - Addressee resolution must consult gc.deferred_assignee: formula/molecule
 //     gates strip the assignee to that metadata key at create time, so a naive
 //     `.assignee`-only lookup finds an empty addressee and misroutes to the
@@ -185,8 +189,10 @@ func TestNotifyOnHumanGateCreationScriptContract(t *testing.T) {
 	for _, want := range []string{
 		"(.payload.bead // .payload)", // normalize API-envelope vs local-fallback event shape
 		`$b.issue_type == "gate"`,     // filter events to gate creations
-		"gc bd show",                  // re-fetch (event lacks await_type)
-		`"$AWAIT_TYPE" = "human"`,     // human gates only
+		"gc bd show",                  // re-fetch (event lacks the gate type)
+		`"$GATE_TYPE" = "human"`,      // human gates only
+		`gc.gate_type`,                // formula gates' declared type
+		"gc bd close",                 // resolve hint every store serves
 		`"$STATUS" = "open"`,          // skip already-resolved gates
 		`gc.deferred_assignee`,        // formula/molecule addressee
 		"--notify",                    // mail + nudge, human-safe primitive
@@ -261,9 +267,13 @@ func TestRenudgeStaleHumanGatesOrder(t *testing.T) {
 //   - Enumeration is over OPEN gates (`gc bd gate list`, open-only by default)
 //     with `--limit 0` so a rig past the default 50-gate page is not silently
 //     truncated — a truncated page would drop stale gates from the sweep.
-//   - It re-nudges ONLY open human gates: await_type == "human" AND
-//     status == "open". The live town carries dozens of legacy await_type=null
-//     workflow gates that must never be mailed about.
+//   - It re-nudges ONLY open human gates: await_type == "human" or, for a
+//     gate a formula synthesized, gc.gate_type == "human", AND
+//     status == "open". Legacy untyped workflow gates must never be mailed
+//     about.
+//   - Formula gates are enumerated by `gc ready --status open` filtered on
+//     gc.gate_type: on a split city they live in the class binding, which no
+//     per-scope `gc bd gate list` reads.
 //   - Both the staleness threshold and the repeat interval are configurable
 //     (GC_STALE_GATE_THRESHOLD / GC_STALE_GATE_RENUDGE_INTERVAL) — the order's
 //     purpose is "open past a configurable threshold, repeating on the
@@ -280,7 +290,7 @@ func TestRenudgeStaleHumanGatesOrder(t *testing.T) {
 //     matching the sibling scripts' cross-rig convention.
 //   - Timestamp parsing is portable: GNU-only `date -d` returns empty on
 //     BSD/macOS, skipping every gate and silently disabling the sweep, so the
-//     BSD `date -ju -f` fallback (matching wisp-compact.sh) is required.
+//     BSD `date -ju -f` fallback is required.
 //   - Loud-fail: an undeliverable send must surface and NOT be recorded. As
 //     with the creation notify, surfacing requires a NON-ZERO exit (the
 //     controller logs an exec order's output only on a non-zero exit), so the
@@ -295,7 +305,10 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	for _, want := range []string{
 		"gc bd gate list",                // enumerate OPEN gates (not events)
 		"--limit 0",                      // no silent 50-gate truncation
-		`.await_type == "human"`,         // human gates only
+		`.await_type == "human"`,         // bd's human gates
+		"gc ready --status open",         // formula gates, incl. split binding
+		"gc.gate_type",                   // formula gates' declared type
+		"gc bd close",                    // resolve hint every store serves
 		`.status == "open"`,              // skip already-resolved gates
 		"GC_STALE_GATE_THRESHOLD",        // configurable staleness threshold
 		"GC_STALE_GATE_RENUDGE_INTERVAL", // configurable repeat interval
@@ -320,8 +333,7 @@ func TestRenudgeStaleHumanGatesScriptContract(t *testing.T) {
 	}
 	// Timestamp parsing must be portable: GNU-only `date -d` returns empty on
 	// BSD/macOS, which skips every gate at the age check and silently disables
-	// the whole sweep. The BSD `date -ju -f` fallback (matching wisp-compact.sh)
-	// is load-bearing.
+	// the whole sweep. The BSD `date -ju -f` fallback is load-bearing.
 	if !strings.Contains(body, "date -ju -f") {
 		t.Error("renudge-stale-human-gates.sh must parse timestamps portably via the BSD `date -ju -f` fallback; GNU-only `date -d` disables the sweep on macOS")
 	}
@@ -383,5 +395,105 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestConvoyAutocloseBackstopOrder pins the shape of the bundled backstop
+// order: a city-scoped, idempotent cooldown exec of `gc convoy check`, so the
+// scan runs once per city rather than once per importing rig, with a timeout
+// a full walk fits in and an interval longer than that timeout.
+func TestConvoyAutocloseBackstopOrder(t *testing.T) {
+	const file = "convoy-autoclose-backstop.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", o.Trigger, "cooldown")
+	}
+	if o.On != "" {
+		t.Errorf("on = %q, want empty for a cooldown order", o.On)
+	}
+	if !o.IsExec() {
+		t.Errorf("want exec dispatch, got formula %q", o.Formula)
+	}
+	if o.Exec != "gc convoy check" {
+		t.Errorf("exec = %q, want %q", o.Exec, "gc convoy check")
+	}
+	if o.Pool != "" {
+		t.Errorf("exec orders must not set a pool, got %q", o.Pool)
+	}
+	if !o.IsCityScoped() {
+		t.Errorf("scope = %q, want city", o.Scope)
+	}
+	if !o.Idempotent {
+		t.Error("idempotent = false, want true")
+	}
+	// A full walk outlasts the 300s exec default, and the interval must stay
+	// longer than the timeout: the cooldown counts from when a run starts, and
+	// an idempotent order dispatches past a timed-out single-flight gate.
+	if o.Interval != "1h" {
+		t.Errorf("interval = %q, want %q", o.Interval, "1h")
+	}
+	if o.Timeout != "30m" {
+		t.Errorf("timeout = %q, want %q", o.Timeout, "30m")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatalf("interval %q is not a valid duration: %v", o.Interval, err)
+	}
+	if timeout := o.TimeoutOrDefault(); timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s, so a run still going could overlap the next", timeout, interval)
+	}
+}
+
+// TestOrphanSweepOrderTimeoutBelowInterval pins an explicit orphan-sweep
+// timeout strictly shorter than its interval. The cooldown counts from a
+// run's start, so a timeout at or above the interval (the 300s exec default
+// equals the 5m interval) would let a timed-out sweep be followed at once by
+// the next. The timeout must still leave room after the script's 120s
+// foreign-identity gate budget.
+func TestOrphanSweepOrderTimeoutBelowInterval(t *testing.T) {
+	const file = "orphan-sweep.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", o.Trigger, "cooldown")
+	}
+	if o.Timeout == "" {
+		t.Fatal("timeout is unset, so the order runs under the 300s exec default")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatalf("interval %q is not a valid duration: %v", o.Interval, err)
+	}
+	timeout := o.TimeoutOrDefault()
+	if timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s, so a timed-out sweep is followed at once by the next", timeout, interval)
+	}
+	const gateBudget = 120 * time.Second
+	if timeout <= gateBudget {
+		t.Errorf("timeout %s leaves no room after the %s gate budget for the reset work", timeout, gateBudget)
+	}
+}
+
+// The core reaper and jsonl-export orders read through `gc bd sql`, which an
+// http-served store refuses. Until they move onto served verbs they declare
+// every backend but http, so gc reports them inapplicable on an http scope and
+// keeps running them everywhere else.
+func TestCoreSQLOrdersDeclareRequiresBackendExceptHTTP(t *testing.T) {
+	for _, file := range []string{"reaper.toml", "jsonl-export.toml"} {
+		o := readOrder(t, file)
+		if err := orders.Validate(o); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		if got := strings.Join(o.RequiresBackend, ","); got != "dolt,doltlite,postgres" {
+			t.Errorf("%s requires_backend = %q, want dolt,doltlite,postgres", file, got)
+		}
+		if o.AppliesToBackend("http") {
+			t.Errorf("%s must not apply to an http scope", file)
+		}
 	}
 }

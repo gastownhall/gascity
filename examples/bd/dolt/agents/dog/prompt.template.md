@@ -24,7 +24,7 @@ acknowledged for you: your session is done — exit.
 unclaimed routed item has NO assignee, and it is an ephemeral wisp, which
 `gc bd list` and `gc bd ready` hide by default. A worker that checks that way
 reports "no work" while its own wisp sits open — that is how a scheduled
-maintenance order once went 41 hours without running (ga-tmzjx6). Claiming
+maintenance order once went 41 hours without running. Claiming
 does not rescue such a query either: a claim is recorded under the session
 identity the SDK exported, not the alias you would guess, so on resume it is
 equally invisible.

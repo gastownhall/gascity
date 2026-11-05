@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -38,10 +40,12 @@ type convoyGetResponse struct {
 
 // convoyCheckResponse is the response for GET /v0/convoy/{id}/check.
 type convoyCheckResponse struct {
-	ConvoyID string `json:"convoy_id" doc:"Convoy ID."`
-	Total    int    `json:"total" doc:"Total child bead count."`
-	Closed   int    `json:"closed" doc:"Closed child bead count."`
-	Complete bool   `json:"complete" doc:"True when all child beads are closed and total > 0."`
+	ConvoyID       string   `json:"convoy_id" doc:"Convoy ID."`
+	Total          int      `json:"total" doc:"Total child bead count."`
+	Closed         int      `json:"closed" doc:"Closed child bead count."`
+	Complete       bool     `json:"complete" doc:"True when all child beads are closed and total > 0."`
+	ChildIDs       []string `json:"child_ids,omitempty" doc:"IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0."`
+	DanglingTracks int      `json:"dangling_tracks,omitempty" doc:"Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0."`
 }
 
 // workflowDeleteResponse is the response for DELETE /v0/workflow/{workflow_id}.
@@ -62,6 +66,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
@@ -80,7 +85,21 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		return nil, err
 	}
 
-	stores := s.state.BeadStores()
+	// A rig suspended by effective state (cacheColdRigNames) is left cold, as
+	// /status leaves it: its store has no cache, so a read goes to bd and
+	// restarts the proxy and Dolt the controller stopped. A suspended rig whose
+	// store cannot be read therefore does not make the answer partial. Its name
+	// is dropped before sortedRigNames dedupes the stores, so a store it shares
+	// with the city or with a rig that is not suspended, as in legacy
+	// shared-file mode, is still read through that name. gc convoy list's
+	// direct read leaves the same rigs out.
+	cold := s.loadCacheColdRigs()
+	stores := make(map[string]beads.Store)
+	for name, store := range s.state.BeadStores() {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
 	rigNames := sortedRigNames(stores)
 	var convoys []beads.Bead
 	var pa partialAggregator
@@ -110,8 +129,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
 	sortKeysetDesc(convoys, beadKey)
 
-	index := s.latestIndex()
-	cacheAge := cacheAgeSeconds(cityStore)
+	freshness := cacheAgeSeconds(cityStore)
 	// A truncated response always carries next_cursor — cursor-less requests
 	// previously truncated silently, making the remainder unfetchable (the
 	// #3208 defect class the bead list already fixed).
@@ -121,8 +139,9 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		page = []beads.Bead{}
 	}
 	return &ListOutput[beads.Bead]{
-		Index:     index,
-		CacheAgeS: cacheAge,
+		Index:        index,
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 		Body: ListBody[beads.Bead]{
 			Items:         page,
 			Total:         total,
@@ -135,6 +154,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 
 // humaHandleConvoyGet is the Huma-typed handler for GET /v0/convoy/{id}.
 func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (*IndexOutput[convoyGetResponse], error) {
+	index := s.latestIndex()
 	id := input.ID
 
 	cityStore := s.state.CityBeadStore()
@@ -144,7 +164,6 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 
 	// Formula-compiled convoy (graph workflow): build the full DAG snapshot.
 	if isGraphConvoyID(s, id) {
-		index := s.latestIndex()
 		snapshot, err := s.buildWorkflowSnapshot(id, "", "", index)
 		if err != nil {
 			if errors.Is(err, errWorkflowNotFound) {
@@ -152,10 +171,12 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 			return nil, apierr.Internal.Msg("workflow snapshot failed")
 		}
+		freshness := cacheAgeSeconds(cityStore)
 		return &IndexOutput[convoyGetResponse]{
-			Index:     index,
-			CacheAgeS: cacheAgeSeconds(cityStore),
-			Body:      convoyGetResponse{workflowSnapshotResponse: snapshot},
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
+			Body:         convoyGetResponse{workflowSnapshotResponse: snapshot},
 		}, nil
 	}
 
@@ -173,7 +194,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			return nil, apierr.ConvoyNotFound.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		children, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, id, true)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
@@ -189,9 +210,11 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			}
 		}
 
+		freshness := cacheAgeSeconds(cityStore)
 		return &IndexOutput[convoyGetResponse]{
-			Index:     s.latestIndex(),
-			CacheAgeS: cacheAgeSeconds(cityStore),
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
 			Body: convoyGetResponse{
 				Convoy:   &b,
 				Children: children,
@@ -205,20 +228,28 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 // humaHandleConvoyCreate is the Huma-typed handler for POST /v0/convoys.
 // Title required via struct tag on ConvoyCreateInput.
 func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateInput) (*IndexOutput[beads.Bead], error) {
+	index := s.latestIndex()
 	// Idempotency: create at most once per Idempotency-Key. Item validation,
 	// the convoy bead create, and the link loop (with its rollback) all live in
-	// the closure so a failed create releases the reservation for retry.
-	convoy, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
+	// the closure so a failed create releases the reservation for retry. A
+	// replay returns the index cached with the body, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body, index,
 		func() (beads.Bead, error) {
 			store := s.findStore(input.Body.Rig)
 			if store == nil {
 				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
+			storeWork := beads.WorkStore{Store: store}
 
-			// Pre-validate all items exist before creating the convoy.
-			for _, itemID := range input.Body.Items {
-				if _, err := store.Get(itemID); err != nil {
+			// Pre-validate all items exist, and none is controller-owned,
+			// before creating the convoy.
+			for i, itemID := range input.Body.Items {
+				item, err := store.Get(itemID)
+				if err != nil {
 					return beads.Bead{}, storeError(err)
+				}
+				if err := refuseOwned(itemID, "tracks in a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
+					return beads.Bead{}, err
 				}
 			}
 
@@ -234,8 +265,8 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 			// back previously-created tracks deps and THEN delete the new convoy.
 			applied := make([]string, 0, len(input.Body.Items))
 			for _, itemID := range input.Body.Items {
-				if err := convoycore.TrackItem(store, created.ID, itemID); err != nil {
-					rollbackConvoyTracks(store, created.ID, applied, "convoy.create")
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: storeWork}, created.ID, itemID); err != nil {
+					rollbackConvoyTracks(storeWork, created.ID, applied, "convoy.create")
 					if delErr := store.Delete(created.ID); delErr != nil {
 						log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", created.ID, delErr)
 					}
@@ -250,8 +281,8 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 	}
 
 	return &IndexOutput[beads.Bead]{
-		Index: s.latestIndex(),
-		Body:  convoy,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 
@@ -263,6 +294,7 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
+		storeWork := beads.WorkStore{Store: store}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -273,16 +305,21 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		if b.Type != "convoy" {
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
-		// Pre-validate all items exist before linking.
-		for _, itemID := range input.Body.Items {
-			if _, err := store.Get(itemID); err != nil {
+		// Pre-validate all items exist, and none is controller-owned, before
+		// linking.
+		for i, itemID := range input.Body.Items {
+			item, err := store.Get(itemID)
+			if err != nil {
 				return nil, storeError(err)
+			}
+			if err := refuseOwned(itemID, "tracks in a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
+				return nil, err
 			}
 		}
 		applied := make([]string, 0, len(input.Body.Items))
 		for _, itemID := range input.Body.Items {
-			if err := convoycore.TrackItem(store, id, itemID); err != nil {
-				rollbackConvoyTracks(store, id, applied, "convoy.add")
+			if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: storeWork}, id, itemID); err != nil {
+				rollbackConvoyTracks(storeWork, id, applied, "convoy.add")
 				return nil, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
 			}
 			applied = append(applied, itemID)
@@ -300,6 +337,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
+		storeWork := beads.WorkStore{Store: store}
 		b, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
@@ -313,7 +351,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 		// Pre-validate all items exist and belong to this convoy via either
 		// legacy parent-child membership or the current tracks dependency.
 		snapshots := make(map[string]convoyMembershipSnapshot, len(input.Body.Items))
-		for _, itemID := range input.Body.Items {
+		for i, itemID := range input.Body.Items {
 			item, gerr := store.Get(itemID)
 			if gerr != nil {
 				if errors.Is(gerr, beads.ErrNotFound) {
@@ -321,7 +359,10 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 				}
 				return nil, apierr.Internal.Msg(gerr.Error())
 			}
-			hadTrack, terr := convoycore.HasTrack(store, id, itemID)
+			if err := refuseOwned(itemID, "untracks from a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
+				return nil, err
+			}
+			hadTrack, terr := convoycore.HasTrack(storeWork, id, itemID)
 			if terr != nil {
 				return nil, apierr.Internal.Msg(terr.Error())
 			}
@@ -339,7 +380,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 		for _, itemID := range input.Body.Items {
 			snapshot := snapshots[itemID]
 			if snapshot.HadTrack {
-				if err := convoycore.UntrackItem(store, id, itemID); err != nil {
+				if err := convoycore.UntrackItem(storeWork, id, itemID); err != nil {
 					rollbackConvoyMembershipRemoval(store, id, applied, snapshots, "convoy.remove")
 					return nil, apierr.Internal.Msg("failed to unlink item " + itemID + ": " + err.Error())
 				}
@@ -347,7 +388,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 			if snapshot.ParentID == id {
 				if err := store.Update(itemID, beads.UpdateOpts{ParentID: &empty}); err != nil {
 					if snapshot.HadTrack {
-						if trackErr := convoycore.TrackItem(store, id, itemID); trackErr != nil {
+						if trackErr := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: storeWork}, id, itemID); trackErr != nil {
 							log.Printf("gc api: convoy.remove rollback failed for current item %s tracks dep: %v", itemID, trackErr)
 						}
 					}
@@ -364,7 +405,7 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
 }
 
-func rollbackConvoyTracks(store beads.Store, convoyID string, applied []string, op string) {
+func rollbackConvoyTracks(store beads.WorkStore, convoyID string, applied []string, op string) {
 	for i := len(applied) - 1; i >= 0; i-- {
 		itemID := applied[i]
 		if err := convoycore.UntrackItem(store, convoyID, itemID); err != nil {
@@ -389,7 +430,7 @@ func rollbackConvoyMembershipRemoval(store beads.Store, convoyID string, applied
 			}
 		}
 		if snapshot.HadTrack {
-			if err := convoycore.TrackItem(store, convoyID, itemID); err != nil {
+			if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, itemID); err != nil {
 				log.Printf("gc api: %s rollback failed for item %s tracks dep: %v", op, itemID, err)
 			}
 		}
@@ -397,7 +438,12 @@ func rollbackConvoyMembershipRemoval(store beads.Store, convoyID string, applied
 }
 
 // humaHandleConvoyCheck is the Huma-typed handler for GET /v0/convoy/{id}/check.
+// It reads the stores /convoys lists from: a store only suspended rigs reach is
+// left cold, so a check of a listed convoy never touches a suspended rig, and a
+// suspended rig whose store cannot be read does not fail the check of a convoy
+// another store holds.
 func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInput) (*IndexOutput[convoyCheckResponse], error) {
+	index := s.latestIndex()
 	id := input.ID
 
 	cityStore := s.state.CityBeadStore()
@@ -405,7 +451,14 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		return nil, err
 	}
 
-	stores := s.state.BeadStores()
+	// The suspension frame of humaHandleConvoyList.
+	cold := s.loadCacheColdRigs()
+	stores := make(map[string]beads.Store)
+	for name, store := range s.state.BeadStores() {
+		if !cold[name] {
+			stores[name] = store
+		}
+	}
 
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -420,32 +473,40 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		children, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, id, true)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
-
-		total := len(children)
-		closed := 0
-		for _, c := range children {
-			if convoycore.IsTerminalStatus(c.Status) {
-				closed++
-			}
-		}
-
-		complete := total > 0 && closed == total
+		freshness := cacheAgeSeconds(cityStore)
 		return &IndexOutput[convoyCheckResponse]{
-			Index:     s.latestIndex(),
-			CacheAgeS: cacheAgeSeconds(cityStore),
-			Body: convoyCheckResponse{
-				ConvoyID: id,
-				Total:    total,
-				Closed:   closed,
-				Complete: complete,
-			},
+			Index:        index,
+			CacheAgeS:    freshness.ageS,
+			CacheRefresh: freshness.refresh,
+			Body:         convoyCheckFromMembers(id, children),
 		}, nil
 	}
 	return nil, apierr.ConvoyNotFound.Msg("convoy " + id + " not found")
+}
+
+// convoyCheckFromMembers is the /convoy/{id}/check answer for convoy id with
+// the given members (convoycore.Members, in membership order).
+func convoyCheckFromMembers(id string, members []beads.Bead) convoyCheckResponse {
+	check := convoyCheckResponse{
+		ConvoyID: id,
+		Total:    len(members),
+		ChildIDs: make([]string, 0, len(members)),
+	}
+	for _, m := range members {
+		check.ChildIDs = append(check.ChildIDs, m.ID)
+		if convoycore.IsTerminalStatus(m.Status) {
+			check.Closed++
+		}
+		if convoycore.IsUnresolvedTrackedItem(m) {
+			check.DanglingTracks++
+		}
+	}
+	check.Complete = check.Total > 0 && check.Closed == check.Total
+	return check
 }
 
 // humaHandleConvoyClose is the Huma-typed handler for POST /v0/convoy/{id}/close.
@@ -518,19 +579,25 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			continue
 		}
 
-		var ids []string
+		// open is the subset the close may stamp: the tree is listed with
+		// IncludeClosed, and a store that batches the close without reading each
+		// status first writes the skip onto every id it is handed, rewriting the
+		// outcome of a step that already finished.
+		var open []string
 		seen := make(map[string]struct{}, 4)
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
+		addBead := func(b beads.Bead) {
+			if b.ID == "" || coordclass.ControllerOwned(b) { // never a controller-owned row (mc-dkblm, architecture B)
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := seen[b.ID]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			seen[b.ID] = struct{}{}
+			if b.Status != "closed" {
+				open = append(open, b.ID)
+			}
 		}
 		addRoot := func(root beads.Bead) {
 			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
@@ -541,39 +608,55 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			}
 			rootSeen[root.ID] = struct{}{}
 			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
+			addBead(root)
 		}
-		if root, err := info.store.Get(workflowID); err == nil {
+		// Relic leg (S4 debt): a scope store holds graph roots and their
+		// steps only as rows written before the split; beads.RelicGet and
+		// beads.RelicRead count each read as debt, as humaHandleWorkflowDelete
+		// does.
+		if root, err := beads.RelicGet(info.store, workflowID); err == nil {
 			addRoot(root)
 		}
-		if roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
-				beadmeta.WorkflowIDMetadataKey: workflowID,
-			},
-			IncludeClosed: true,
+		var roots []beads.Bead
+		if err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+					beadmeta.WorkflowIDMetadataKey: workflowID,
+				},
+				IncludeClosed: true,
+			})
+			return listErr
 		}); err == nil {
 			for _, root := range roots {
 				addRoot(root)
 			}
 		}
 		for _, rootID := range rootIDs {
-			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-				IncludeClosed: true,
-			})
-			if err != nil {
+			var all []beads.Bead
+			if err := beads.RelicRead(func() error {
+				var listErr error
+				all, listErr = info.store.List(beads.ListQuery{
+					Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+					IncludeClosed: true,
+				})
+				return listErr
+			}); err != nil {
 				continue
 			}
 			for _, b := range all {
-				addID(b.ID)
+				addBead(b)
 			}
 		}
-		if len(ids) == 0 {
+		if len(seen) == 0 {
 			continue
 		}
 		found = true
-		info.store.CloseAll(ids, map[string]string{ //nolint:errcheck
+		if len(open) == 0 {
+			continue
+		}
+		info.store.CloseAll(open, map[string]string{ //nolint:errcheck
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
@@ -600,6 +683,7 @@ func storeError(err error) error {
 // humaHandleWorkflowGet is the Huma-typed handler for GET /v0/workflow/{workflow_id}.
 // Backward-compatible alias for the convoy/workflow snapshot endpoint.
 func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInput) (*IndexOutput[workflowSnapshotResponse], error) {
+	index := s.latestIndex()
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
 		return nil, apierr.InvalidRequest.Msg("convoy id is required")
@@ -609,7 +693,6 @@ func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInpu
 	if scopeErr != "" {
 		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
-	index := s.latestIndex()
 
 	snapshot, err := s.buildWorkflowSnapshot(workflowID, scopeKind, scopeRef, index)
 	if err != nil {
@@ -658,19 +741,27 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			continue
 		}
 
-		var ids []string
+		// ids is the whole tree, which Phase 2 deletes. open is the subset Phase
+		// 1 may stamp: the tree is listed with IncludeClosed, and a store that
+		// batches the close without reading each status first writes the skip
+		// onto every id it is handed, rewriting the outcome of a step that
+		// already finished.
+		var ids, open []string
 		seen := make(map[string]struct{}, 4)
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
+		addBead := func(b beads.Bead) {
+			if b.ID == "" || coordclass.ControllerOwned(b) { // never a controller-owned row (mc-dkblm, architecture B)
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := seen[b.ID]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			seen[b.ID] = struct{}{}
+			ids = append(ids, b.ID)
+			if b.Status != "closed" {
+				open = append(open, b.ID)
+			}
 		}
 		addRoot := func(root beads.Bead) {
 			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
@@ -681,19 +772,29 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			}
 			rootSeen[root.ID] = struct{}{}
 			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
+			addBead(root)
 		}
-		if root, err := info.store.Get(workflowID); err == nil {
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): a
+		// miss on either root probe is covered by the leg that owns the root.
+		if root, err := beads.RelicGet(info.store, workflowID); err == nil {
 			addRoot(root)
 		} else if !errors.Is(err, beads.ErrNotFound) {
 			pa.record("store "+info.scopeRef+" get root", err)
 		}
-		if roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
-				beadmeta.WorkflowIDMetadataKey: workflowID,
-			},
-			IncludeClosed: true,
+		var roots []beads.Bead
+		if err := beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+					beadmeta.WorkflowIDMetadataKey: workflowID,
+				},
+				IncludeClosed: true,
+			})
+			return listErr
 		}); err == nil {
 			for _, root := range roots {
 				addRoot(root)
@@ -702,16 +803,20 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			pa.record("store "+info.scopeRef+" list roots", err)
 		}
 		for _, rootID := range rootIDs {
-			all, err := info.store.List(beads.ListQuery{
-				Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-				IncludeClosed: true,
-			})
-			if err != nil {
+			var all []beads.Bead
+			if err := beads.RelicRead(func() error {
+				var listErr error
+				all, listErr = info.store.List(beads.ListQuery{
+					Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+					IncludeClosed: true,
+				})
+				return listErr
+			}); err != nil {
 				pa.record("store "+info.scopeRef+" list descendants", err)
 				continue
 			}
 			for _, b := range all {
-				addID(b.ID)
+				addBead(b)
 			}
 		}
 		if len(ids) == 0 {
@@ -720,13 +825,15 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		found = true
 
 		// Phase 1: Batch close all open beads.
-		n, closeErr := info.store.CloseAll(ids, map[string]string{
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-		})
-		closed += n
-		if closeErr != nil {
-			pa.record("store "+info.scopeRef+" close", closeErr)
+		if len(open) > 0 {
+			n, closeErr := info.store.CloseAll(open, map[string]string{
+				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+			})
+			closed += n
+			if closeErr != nil {
+				pa.record("store "+info.scopeRef+" close", closeErr)
+			}
 		}
 
 		// Phase 2: Delete if requested.

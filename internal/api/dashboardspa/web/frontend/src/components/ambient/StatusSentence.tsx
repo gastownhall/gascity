@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { laneNeedsOperator } from 'gas-city-dashboard-shared';
 import type { RunLane } from 'gas-city-dashboard-shared';
 

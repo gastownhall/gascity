@@ -83,7 +83,7 @@ func oracleSessionBeadShapes() []beads.Bead {
 var assignedWorkGolden = map[string]bool{"ga-bare": false, "ga-named": true, "ga-named-fallback": true, "ga-noname": false, "ga-pool": true}
 
 // coreConfigHashGolden is the captured golden for TestSessionCoreConfigForHashInfoGolden.
-var coreConfigHashGolden = map[string]string{"empty/ga-bare": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-effort-override": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named-fallback": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-noname": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-pool": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker-cmd/ga-bare": "v6:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-effort-override": "v6:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named": "v6:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named-fallback": "v6:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-noname": "v6:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-pool": "v6:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-provider/ga-bare": "v6:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-effort-override": "v6:f4922fa899cca0571515e4568d09101f08aa5ae3b737a050ded89bb0b56ca11f", "worker-provider/ga-named": "v6:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-named-fallback": "v6:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-noname": "v6:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-pool": "v6:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker/ga-bare": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-effort-override": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named-fallback": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-noname": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-pool": "v6:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34"}
+var coreConfigHashGolden = map[string]string{"empty/ga-bare": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-effort-override": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-named-fallback": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-noname": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "empty/ga-pool": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker-cmd/ga-bare": "v7:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-effort-override": "v7:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named": "v7:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-named-fallback": "v7:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-noname": "v7:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-cmd/ga-pool": "v7:fc83c0f3d669dfb8c48ddad730f0d62fef9c9a4d9094db93be8c0bef11c3ba4b", "worker-provider/ga-bare": "v7:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-effort-override": "v7:f4922fa899cca0571515e4568d09101f08aa5ae3b737a050ded89bb0b56ca11f", "worker-provider/ga-named": "v7:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-named-fallback": "v7:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-noname": "v7:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker-provider/ga-pool": "v7:ac80250a8849174aa18812eeb671ac92720a4b981015873d9405d3e348f72da1", "worker/ga-bare": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-effort-override": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-named-fallback": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-noname": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34", "worker/ga-pool": "v7:26a75e3704c256abbb0719e6274cd69ab5953792c0d08d1ecf4eda085849bc34"}
 
 // TestSessionCoreConfigForHashInfoGolden is the DEDICATED pin for
 // sessionCoreConfigForHashInfo — the config-drift core-hash input builder. Its retired
@@ -227,7 +227,11 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 			request.SessionBeadID == sb.ID &&
 			rawState == session.StateActive &&
 			sb.Metadata["wake_mode"] != "fresh"
-		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
+		parkedResumeContinuation := request.ParkedContinuation &&
+			request.Tier == "resume" &&
+			request.SessionBeadID == sb.ID &&
+			sb.Metadata["wake_mode"] != "fresh"
+		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation || parkedResumeContinuation) {
 			targetWorkDir = existingWorkDir
 		}
 		if strings.TrimSpace(sb.Metadata[beadmeta.WorkDirMetadataKey]) != targetWorkDir {
@@ -267,6 +271,20 @@ func TestComputePoolTriggerBindingPatchMatchesRaw(t *testing.T) {
 			beadmeta.WorkDirMetadataKey:             "/gc/old-with-title",
 			beadmeta.LegacyWorkDirMetadataKey:       "/gc/old-with-title",
 		}},
+		"parked": {ID: "s-parked", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: map[string]string{
+			"state":                                 string(session.StateAsleep),
+			"sleep_reason":                          "idle",
+			beadmeta.TriggerBeadIDMetadataKey:       "wb-old",
+			beadmeta.TriggerBeadStoreRefMetadataKey: "rig-old",
+			beadmeta.WorkDirMetadataKey:             "/gc/old-with-title",
+			beadmeta.LegacyWorkDirMetadataKey:       "/gc/old-with-title",
+		}},
+		"parked-fresh": {ID: "s-parked", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: map[string]string{
+			"state":                           string(session.StateAsleep),
+			"wake_mode":                       "fresh",
+			beadmeta.TriggerBeadIDMetadataKey: "wb-old",
+			beadmeta.WorkDirMetadataKey:       "/gc/old-with-title",
+		}},
 	}
 	requests := map[string]SessionRequest{
 		"clear":             {WorkBeadID: ""},
@@ -277,6 +295,9 @@ func TestComputePoolTriggerBindingPatchMatchesRaw(t *testing.T) {
 		"pack":              {WorkBeadID: "wb-new", WorkPack: "pack-new"},
 		"workspace":         {WorkBeadID: "wb-new", WorkPack: "pack-new", WorkWorkspace: "ws-new"},
 		"live-retry":        {Tier: "resume", SessionBeadID: "s-live", WorkBeadID: "wb-new"},
+		"parked-resume":     {Tier: "resume", SessionBeadID: "s-parked", WorkBeadID: "wb-new", ParkedContinuation: true},
+		"parked-unflagged":  {Tier: "resume", SessionBeadID: "s-parked", WorkBeadID: "wb-new"},
+		"parked-other-tier": {Tier: "new", SessionBeadID: "s-parked", WorkBeadID: "wb-new", ParkedContinuation: true},
 	}
 	workDirs := []string{"", "/gc/old", "/gc/new"}
 	for bn, sb := range bases {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestStoreResolveAddressAgreesWithResolveSessionID is the equivalence oracle
@@ -51,7 +52,7 @@ func TestStoreResolveAddressAgreesWithResolveSessionID(t *testing.T) {
 			if includeClosed {
 				resolve = ResolveSessionIDAllowClosed
 			}
-			wantID, wantErr := resolve(store, selector)
+			wantID, wantErr := resolve(beadstest.Sessions(store), selector)
 
 			got, err := NewStore(beads.SessionStore{Store: store}).ResolveAddress(selector, includeClosed)
 

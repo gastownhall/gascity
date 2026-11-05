@@ -44,6 +44,7 @@ func findEvent(t *testing.T, rec *events.Fake, eventType string) events.Event {
 // doHandoffRemote attaches a SessionLifecyclePayload identifying the
 // killed session and the "handoff" reason.
 func TestHandoffRemoteEmitsTypedSessionStoppedPayload(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	sp := runtime.NewFake()
@@ -63,8 +64,8 @@ func TestHandoffRemoteEmitsTypedSessionStoppedPayload(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
-		[]string{"Context refresh", "body"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(city, store, store, rec, sp, "deacon", "deacon", "mayor",
+		[]string{"Context refresh", "body"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

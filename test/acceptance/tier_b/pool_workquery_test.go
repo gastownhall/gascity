@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -29,7 +30,7 @@ func TestPoolWorkQueryFromWorktree(t *testing.T) {
 	bdPath := helpers.RequireBD(t)
 
 	// Set up a city with a rig.
-	cityDir := t.TempDir()
+	cityDir := beadstest.GuardedTempDir(t)
 	rigDir := filepath.Join(cityDir, "myrig")
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecats", "polecat-1")
 
@@ -80,6 +81,9 @@ func bdRunWithEnv(t *testing.T, bdPath, dir string, extraEnv map[string]string, 
 	t.Helper()
 	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
+	// BEADS_TEST_MODE keeps bd's detached metrics flusher from racing the
+	// TempDir teardown (ga-aik16g).
+	cmd.Env = append(cmd.Env, beadstest.EnvBeadsTestMode+"=1")
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -93,4 +97,37 @@ func bdRunWithEnv(t *testing.T, bdPath, dir string, extraEnv map[string]string, 
 		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig pins that bdRunWithEnv
+// (and bdRun, which wraps it with a nil extraEnv) keep the ambient HOME out
+// of the bd subprocess they exec. Both build their command through
+// helpers.ToolCommand, whose toolhome.Environ re-homes bd under a test-owned
+// home, drops ambient BEADS_*/BD_* variables and pins
+// BD_DOLT_SHARED_SERVER=false. This test is a regression guard on that
+// re-homing: a shared-server config.yaml sitting in the real $HOME (a real
+// fleet-host condition) must not route bd through that shared server
+// instead of dir's own local store.
+func TestBdRunWithEnvIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	bdPath := helpers.RequireBD(t)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	dir := beadstest.GuardedTempDir(t)
+	bdRun(t, bdPath, dir, "init")
+	bdRun(t, bdPath, dir, "create", "--title", "home-isolation probe", "--priority=P2")
+
+	out := bdRun(t, bdPath, dir, "list")
+	if !strings.Contains(out, "home-isolation probe") {
+		t.Fatalf("bd list under a shared-server HOME did not see the bead created in dir's own local store:\n%s", out)
+	}
 }

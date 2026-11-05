@@ -134,6 +134,44 @@ func ListRunningAttested(sp Provider) bool {
 	return ok && a.ListRunningComplete()
 }
 
+// SharedListing is an optional capability of a provider whose ListRunning
+// lists sessions beyond one city's: k8s lists every gc-agent pod in a
+// namespace that other cities may share. A name in such a listing does not
+// show that this city's session is running.
+type SharedListing interface {
+	ListRunningShared() bool
+}
+
+// ListRunningShared reports whether sp's listing, or any backend's of a
+// composite ([BackendsProvider], at any depth), is shared across cities.
+func ListRunningShared(sp Provider) bool {
+	if s, ok := sp.(SharedListing); ok && s.ListRunningShared() {
+		return true
+	}
+	if c, ok := sp.(BackendsProvider); ok {
+		for _, b := range c.Backends() {
+			if ListRunningShared(b.Provider) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ListRunningWithAttestation lists sp under prefix and reports whether that
+// listing may be read as proof of absence. Attestation is read before the
+// listing and after it, and only both count: a provider's attestation can
+// turn on while it lists (an exec pack whose failed handshake recovers
+// during the call), and the listing it returned is then the unattested one.
+// Attestation never turns off, so the read before is the one that can be
+// stale in the safe direction only. Every caller that reads absence from a
+// listing reads attestation through this, never after its own listing.
+func ListRunningWithAttestation(sp Provider, prefix string) (names []string, attested bool, err error) {
+	before := ListRunningAttested(sp)
+	names, err = sp.ListRunning(prefix)
+	return names, before && ListRunningAttested(sp), err
+}
+
 // BackendListingProvider is an optional capability of composite providers
 // that exposes each backend's ListRunning result separately, so callers can
 // judge each backend's listing on its own (its error, its [PartialListError]
@@ -145,7 +183,8 @@ func ListRunningAttested(sp Provider) bool {
 // one ListRunning call per leaf backend. A caller that wants the nested
 // breakdown must not also call the nested ListRunningByBackend for the same
 // observation: that lists the nested leaves a second time, at a different
-// instant, and the two answers need not agree.
+// instant, and the two answers need not agree. It walks [BackendsProvider]
+// instead and lists each leaf itself.
 type BackendListingProvider interface {
 	ListRunningByBackend(prefix string) []BackendListing
 }
@@ -158,6 +197,34 @@ type BackendListing struct {
 	Provider Provider
 	Names    []string
 	Err      error
+}
+
+// BackendsProvider is an optional capability of composite providers that
+// names their backends without listing them, in the order
+// [BackendListingProvider.ListRunningByBackend] lists them. It lets a caller
+// walk nested composites and list every leaf backend exactly once, which
+// ListRunningByBackend alone cannot: a nested composite's entry there is
+// already that composite's merged listing.
+type BackendsProvider interface {
+	Backends() []Backend
+}
+
+// Backend is one labeled backend of a composite provider.
+type Backend struct {
+	Label    string
+	Provider Provider
+}
+
+// ListBackends calls ListRunning once on each backend, in order. Composites
+// implement ListRunningByBackend with it, so the per-backend listing agrees
+// with [BackendsProvider.Backends] by construction.
+func ListBackends(backends []Backend, prefix string) []BackendListing {
+	listings := make([]BackendListing, 0, len(backends))
+	for _, b := range backends {
+		names, err := b.Provider.ListRunning(prefix)
+		listings = append(listings, BackendListing{Label: b.Label, Provider: b.Provider, Names: names, Err: err})
+	}
+	return listings
 }
 
 // MergeBackendListings merges per-backend listings exactly as

@@ -27,7 +27,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 		return nil, humaResolveError(err)
 	}
 
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -227,7 +227,7 @@ func (s *Server) emitStructuredFallbackSnapshotHuma(send StringIDSender, info se
 		Provider:           info.Provider,
 		Format:             "structured",
 		SchemaVersion:      sessionStructuredSchemaVersion,
-		History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityIdle)),
+		History:            structuredFallbackHistory(info, string(worker.TailActivityIdle)),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}
 	if update := buildStructuredStreamUpdate(resumeToken, projection, includeThinking); update != nil {
