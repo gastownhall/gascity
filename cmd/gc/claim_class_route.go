@@ -561,6 +561,11 @@ func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, 
 		r.graph.Get)
 }
 
+func (r *hookClaimClassRoute) claimExact(candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+	writer, _ := beads.As[beads.ConditionalWriter](r.class)
+	return hookClaimExactThroughStore(r.graph.Get, writer, candidate, assignee, sessionID)
+}
+
 // listContinuation reads a continuation group out of the binding and records
 // every member as resident, so the per-sibling assignment that follows does not
 // re-probe (or re-fail) one bd subprocess at a time.
@@ -665,6 +670,12 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		default:
 			return claimed, ok, err
 		}
+	}
+	ops.ClaimExact = func(ctx context.Context, dir string, env []string, candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+		if route.knownResident(candidate.ID) {
+			return route.claimExact(candidate, assignee, sessionID)
+		}
+		return base.ClaimExact(ctx, dir, env, candidate, assignee, sessionID)
 	}
 
 	ops.StampWorkMeta = func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {

@@ -52,6 +52,67 @@ func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing
 	}
 }
 
+func TestHookClaimExactStampsSessionAndGeneration(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate, err := store.Create(beads.Bead{Title: "step", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build", beadmeta.RoutedToMetadataKey: "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := hookClaimExactThroughStore(store.Get, store, candidate, "worker", "session-1")
+	if err != nil || !ok {
+		t.Fatalf("exact claim = (ok=%v, err=%v), want success", ok, err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker" || got.Metadata[beadmeta.SessionIDMetadataKey] != "session-1" || got.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" {
+		t.Fatalf("claim readback = %+v", got)
+	}
+}
+
+func TestHookClaimExactFencesObservedAssignee(t *testing.T) {
+	store := beads.NewMemStore()
+	candidate, err := store.Create(beads.Bead{Title: "step", Type: "task", Status: "open", Assignee: "old-worker", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(candidate.ID, beads.UpdateOpts{Assignee: stringPtr("new-worker")}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := hookClaimExactThroughStore(store.Get, store, candidate, "old-worker", "session-1")
+	if err != nil || ok {
+		t.Fatalf("stale-assignee claim = (ok=%v, err=%v), want refusal", ok, err)
+	}
+	if got.Assignee != "new-worker" || got.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" {
+		t.Fatalf("stale claim changed canonical bead: %+v", got)
+	}
+}
+
+func TestHookClaimSelectsExactForGraphSteps(t *testing.T) {
+	candidate := beads.Bead{ID: "step-1", Status: "open", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build",
+	}}
+	exactCalls, genericCalls := 0, 0
+	ops := hookClaimOps{
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			genericCalls++
+			return beads.Bead{}, false, nil
+		},
+		ClaimExact: func(_ context.Context, _ string, _ []string, got beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+			exactCalls++
+			if got.ID != candidate.ID || assignee != "worker" || sessionID != "session-1" {
+				t.Fatalf("exact claim args = (%+v, %q, %q)", got, assignee, sessionID)
+			}
+			return beads.Bead{ID: got.ID}, true, nil
+		},
+	}
+	_, ok, err := ops.claimCandidate(context.Background(), "/rig", []string{"GC_SESSION_ID=session-1"}, candidate, "worker")
+	if err != nil || !ok || exactCalls != 1 || genericCalls != 0 {
+		t.Fatalf("claimCandidate = (ok=%v, err=%v), exact=%d generic=%d", ok, err, exactCalls, genericCalls)
+	}
+}
+
 func TestDoHookClaimStopsAfterCommittedClaimReadbackFailure(t *testing.T) {
 	runner := func(string, string) (string, error) {
 		return `[

@@ -23,6 +23,7 @@ var ErrClaimGenerationReserved = errors.New("claim exact: onSuccess.Metadata mus
 // the bead's current value exactly.
 type ClaimExactPreconditions struct {
 	Status            *string
+	Assignee          *string
 	RoutedTo          *string
 	RootBeadID        *string
 	ContinuationGroup *string
@@ -44,7 +45,7 @@ const (
 	// transition and applied onSuccess together; no other write could have
 	// interleaved between the two.
 	ClaimExactClaimed ClaimExactOutcome = "claimed"
-	// ClaimExactPreconditionFailed means the bead's current status, routing,
+	// ClaimExactPreconditionFailed means the bead's current status, assignee, routing,
 	// or workflow root/group identity did not match want. No write was
 	// attempted.
 	ClaimExactPreconditionFailed ClaimExactOutcome = "precondition_failed"
@@ -97,11 +98,18 @@ const (
 // onSuccess.Metadata must not set beadmeta.ClaimGenerationMetadataKey; doing
 // so returns ErrClaimGenerationReserved without writing anything.
 func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditions, fromGeneration string, onSuccess beads.UpdateOpts) (beads.Bead, ClaimExactOutcome, error) {
+	writer, _ := beads.As[beads.ConditionalWriter](store)
+	return ClaimExactWithWriter(store.Get, writer, id, want, fromGeneration, onSuccess)
+}
+
+// ClaimExactWithWriter is ClaimExact for a store whose conditional writer is
+// supplied separately from its read interface.
+func ClaimExactWithWriter(get func(string) (beads.Bead, error), writer beads.ConditionalWriter, id string, want ClaimExactPreconditions, fromGeneration string, onSuccess beads.UpdateOpts) (beads.Bead, ClaimExactOutcome, error) {
 	if _, reserved := onSuccess.Metadata[beadmeta.ClaimGenerationMetadataKey]; reserved {
 		return beads.Bead{}, "", fmt.Errorf("claim exact %q: %w", id, ErrClaimGenerationReserved)
 	}
 
-	b, err := store.Get(id)
+	b, err := get(id)
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("claim exact %q: %w", id, err)
 	}
@@ -119,24 +127,30 @@ func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditi
 		return b, "", fmt.Errorf("claim exact %q: %w", id, err)
 	}
 
-	writer, ok := beads.As[beads.ConditionalWriter](store)
-	if !ok {
+	if writer == nil {
 		return b, "", fmt.Errorf("claim exact %q: %w", id, beads.ErrConditionalWriteUnsupported)
 	}
 
 	effects := claimEffectsWithGeneration(onSuccess, toGeneration)
 	if err := writer.UpdateIfMatch(id, b.Revision, effects); err != nil {
 		if beads.IsPreconditionFailed(err) {
-			return bestEffortGet(store, id, b), ClaimExactStale, nil
+			return bestEffortRead(get, id, b), ClaimExactStale, nil
 		}
-		return bestEffortGet(store, id, b), "", fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
+		return bestEffortRead(get, id, b), "", fmt.Errorf("claim exact %q: applying claim effects: %w", id, err)
 	}
 
-	final, err := store.Get(id)
+	final, err := get(id)
 	if err != nil {
 		return b, "", fmt.Errorf("claim exact %q: re-read after claim: %w", id, err)
 	}
 	return final, ClaimExactClaimed, nil
+}
+
+func bestEffortRead(get func(string) (beads.Bead, error), id string, fallback beads.Bead) beads.Bead {
+	if fresh, err := get(id); err == nil {
+		return fresh
+	}
+	return fallback
 }
 
 // claimEffectsWithGeneration returns a copy of onSuccess with
@@ -154,19 +168,11 @@ func claimEffectsWithGeneration(onSuccess beads.UpdateOpts, toGeneration string)
 	return effects
 }
 
-// bestEffortGet re-reads id and returns the fresh snapshot, falling back to
-// fallback if the re-read itself fails. It is only used on error paths where
-// the caller already has a reasonably fresh bead in hand and a failed re-read
-// should not turn into an empty, uninformative zero value.
-func bestEffortGet(store beads.MoleculeTarget, id string, fallback beads.Bead) beads.Bead {
-	if fresh, err := store.Get(id); err == nil {
-		return fresh
-	}
-	return fallback
-}
-
 func claimExactPreconditionsMatch(b beads.Bead, want ClaimExactPreconditions) bool {
 	if want.Status != nil && b.Status != *want.Status {
+		return false
+	}
+	if want.Assignee != nil && b.Assignee != *want.Assignee {
 		return false
 	}
 	if want.RoutedTo != nil && b.Metadata[beadmeta.RoutedToMetadataKey] != *want.RoutedTo {

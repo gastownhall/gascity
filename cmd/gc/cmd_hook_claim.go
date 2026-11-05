@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,6 +249,7 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 type hookClaimOps struct {
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
+	ClaimExact         hookClaimExactFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
 	DrainAck           hookDrainAckFunc
@@ -405,6 +408,7 @@ type hookClaimOps struct {
 
 type (
 	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookClaimExactFunc            func(context.Context, string, []string, beads.Bead, string, string) (beads.Bead, bool, error)
 	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
 	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
 	hookDrainAckFunc              func(io.Writer) error
@@ -664,6 +668,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 func (ops *hookClaimOps) applyDefaults() {
 	if ops.Claim == nil {
 		ops.Claim = hookClaimWithBdStore
+		if ops.ClaimExact == nil {
+			ops.ClaimExact = hookClaimExactWithBdStore
+		}
 	}
 	if ops.ListContinuation == nil {
 		ops.ListContinuation = hookListContinuationWithBdStore
@@ -773,6 +780,14 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ClaimWindow <= 0 {
 		ops.ClaimWindow = resolveHookClaimWindow()
 	}
+}
+
+func (ops hookClaimOps) claimCandidate(ctx context.Context, dir string, env []string, candidate beads.Bead, assignee string) (beads.Bead, bool, error) {
+	if strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey]) != "" &&
+		strings.TrimSpace(candidate.Metadata[beadmeta.StepIDMetadataKey]) != "" && hookClaimSessionID(env) != "" && ops.ClaimExact != nil {
+		return ops.ClaimExact(ctx, dir, env, candidate, assignee, hookClaimSessionID(env))
+	}
+	return ops.Claim(ctx, dir, env, candidate.ID, assignee)
 }
 
 // emitClaimFailed is ops.EmitClaimFailed for a caller that may drive a claim
@@ -966,7 +981,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		claimed, ok, err := ops.claimCandidate(ctx, dir, opts.Env, candidate, claimActor)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
@@ -1160,7 +1175,11 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		claimCandidate := candidate
+		if reclaimedFrom != "" {
+			claimCandidate.Status = "open"
+		}
+		claimed, ok, err := ops.claimCandidate(ctx, dir, opts.Env, claimCandidate, opts.Assignee)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()
@@ -2496,6 +2515,50 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
 		store.Get)
+}
+
+func hookClaimExactWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
+	writer, _ := beads.As[beads.ConditionalWriter](store)
+	return hookClaimExactThroughStore(store.Get, writer, candidate, assignee, sessionID)
+}
+
+func hookClaimExactThroughStore(get func(string) (beads.Bead, error), writer beads.ConditionalWriter, candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+	meta := candidate.Metadata
+	want := molecule.ClaimExactPreconditions{
+		Status: stringPtr(candidate.Status), Assignee: stringPtr(candidate.Assignee),
+		RootBeadID:        stringPtr(meta[beadmeta.RootBeadIDMetadataKey]),
+		RoutedTo:          stringPtr(meta[beadmeta.RoutedToMetadataKey]),
+		ContinuationGroup: stringPtr(meta[beadmeta.ContinuationGroupMetadataKey]),
+	}
+	status := "in_progress"
+	actor := assignee
+	bead, outcome, err := molecule.ClaimExactWithWriter(get, writer, candidate.ID, want, meta[beadmeta.ClaimGenerationMetadataKey], beads.UpdateOpts{
+		Status: &status, Assignee: &actor, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: sessionID},
+	})
+	if outcome != molecule.ClaimExactClaimed {
+		return bead, false, err
+	}
+	if err != nil {
+		return bead, true, err
+	}
+	generation := int64(0)
+	if from := meta[beadmeta.ClaimGenerationMetadataKey]; from != "" {
+		generation, err = strconv.ParseInt(from, 10, 64)
+		if err != nil || generation <= 0 || generation == math.MaxInt64 {
+			return bead, true, fmt.Errorf("claim exact %q returned a claim after invalid generation %q", candidate.ID, from)
+		}
+	}
+	if bead.ID != candidate.ID || bead.Status != status || bead.Assignee != assignee ||
+		bead.Metadata[beadmeta.SessionIDMetadataKey] != sessionID ||
+		bead.Metadata[beadmeta.ClaimGenerationMetadataKey] != strconv.FormatInt(generation+1, 10) ||
+		bead.Metadata[beadmeta.RootBeadIDMetadataKey] != meta[beadmeta.RootBeadIDMetadataKey] ||
+		bead.Metadata[beadmeta.StepIDMetadataKey] != meta[beadmeta.StepIDMetadataKey] ||
+		bead.Metadata[beadmeta.RoutedToMetadataKey] != meta[beadmeta.RoutedToMetadataKey] ||
+		bead.Metadata[beadmeta.ContinuationGroupMetadataKey] != meta[beadmeta.ContinuationGroupMetadataKey] {
+		return bead, true, fmt.Errorf("claim exact %q returned an unexpected canonical claim", candidate.ID)
+	}
+	return bead, true, nil
 }
 
 // hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
