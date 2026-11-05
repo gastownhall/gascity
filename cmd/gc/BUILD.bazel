@@ -119,6 +119,7 @@ go_library(
         "build_desired_state.go",
         "build_desired_state_pool_info.go",
         "builtin_include_doctor_check.go",
+        "busy_delivery_starvation.go",
         "by_id_relic_proof.go",
         "by_id_residency.go",
         "by_id_store_route.go",
@@ -301,6 +302,7 @@ go_library(
         "conversation_lane_worker.go",
         "convoy_fields.go",
         "crash_tracker.go",
+        "cross_edge_records.go",
         "cross_store_gate_lane.go",
         "cwd_fallback_guard.go",
         "dead_assignee_event.go",
@@ -322,6 +324,7 @@ go_library(
         "doctor_codex_hooks.go",
         "doctor_conversation_lanes.go",
         "doctor_cross_store.go",
+        "doctor_exec_runtime_identity.go",
         "doctor_executor_identity_residue_check.go",
         "doctor_fork_rate.go",
         "doctor_gate_sandbox.go",
@@ -407,6 +410,9 @@ go_library(
         "error_store.go",
         "event_authorship.go",
         "event_export.go",
+        "exec_runtime_readiness.go",
+        "exec_runtime_readiness_other.go",
+        "exec_runtime_readiness_unix.go",
         "execution_backstop.go",
         "execution_emit_store.go",
         "extmsg_binding_reaper.go",
@@ -433,16 +439,19 @@ go_library(
         "idle_tracker.go",
         "import_state_doctor_check.go",
         "infra_class_clear.go",
+        "infra_class_holds.go",
         "infra_class_migrate.go",
         "infra_class_purge.go",
         "infra_class_purge_restore.go",
         "infra_class_recover.go",
         "infra_class_recover_held.go",
         "infra_class_relower.go",
+        "infra_copy_engine.go",
         "infra_copy_manifest.go",
         "init_artifacts.go",
         "init_hosted_dolt.go",
         "init_provider_readiness.go",
+        "init_storage.go",
         "invocation_store_memo.go",
         "json_output.go",
         "json_schema.go",
@@ -478,7 +487,6 @@ go_library(
         "nudge_poller_city_stop.go",
         "nudge_queue_lock_policy.go",
         "nudge_queue_seam.go",
-        "nudge_queue_shim.go",
         "nudge_shadow_debts.go",
         "op_record.go",
         "op_sweep.go",
@@ -684,6 +692,7 @@ go_library(
         "skill_supervisor.go",
         "skill_visibility.go",
         "sling_dashboard_link.go",
+        "sling_inherit.go",
         "sling_remote.go",
         "soft_reload.go",
         "split_strict_seam.go",
@@ -1390,6 +1399,7 @@ go_test(
         "cmd_start_warmup_routing_test.go",
         "cmd_start_warmup_test.go",
         "cmd_status_test.go",
+        "cmd_stop_confirm_test.go",
         "cmd_stop_server_lifecycle_test.go",
         "cmd_stop_test.go",
         "cmd_storage_repair_sequence_test.go",
@@ -1464,6 +1474,7 @@ go_test(
         "conversation_lane_produce_test.go",
         "conversation_lane_protocol_test.go",
         "conversation_lane_respond_test.go",
+        "conversation_lane_starved_boundary_test.go",
         "conversation_lane_steer_test.go",
         "conversation_lane_submit_test.go",
         "conversation_lane_turn_test.go",
@@ -1472,6 +1483,7 @@ go_test(
         "convoy_chargolden_test.go",
         "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",
+        "cross_edge_records_test.go",
         "cross_store_gate_close_paths_test.go",
         "cross_store_gate_lane_test.go",
         "cross_store_parent_contract_test.go",
@@ -1515,6 +1527,7 @@ go_test(
         "doctor_codex_hooks_test.go",
         "doctor_conversation_lanes_test.go",
         "doctor_cross_store_test.go",
+        "doctor_exec_runtime_identity_test.go",
         "doctor_executor_identity_residue_check_test.go",
         "doctor_fork_rate_test.go",
         "doctor_gate_sandbox_test.go",
@@ -1600,6 +1613,7 @@ go_test(
         "endpoint_capacity_test.go",
         "event_authorship_test.go",
         "event_export_test.go",
+        "exec_runtime_readiness_test.go",
         "execution_backstop_test.go",
         "execution_backstop_work_started_test.go",
         "execution_emit_store_test.go",
@@ -1674,6 +1688,7 @@ go_test(
         "infra_class_clear_crash_resume_test.go",
         "infra_class_clear_phase_matrix_test.go",
         "infra_class_clear_test.go",
+        "infra_class_dropped_edges_test.go",
         "infra_class_migrate_edge_payload_test.go",
         "infra_class_migrate_equality_test.go",
         "infra_class_migrate_test.go",
@@ -1683,7 +1698,11 @@ go_test(
         "infra_class_recover_test.go",
         "infra_class_recover_topology_test.go",
         "infra_class_relower_test.go",
+        "infra_copy_engine_review_test.go",
+        "infra_copy_engine_test.go",
         "infra_copy_manifest_test.go",
+        "infra_engine_bench_test.go",
+        "infra_engine_fixture_test.go",
         "init_bd_version_floor_doc_test.go",
         "init_existing_store_test.go",
         "init_from_hosted_dolt_test.go",
@@ -1692,6 +1711,8 @@ go_test(
         "init_identity_failure_test.go",
         "init_prompt_template_path_test.go",
         "init_provider_readiness_test.go",
+        "init_storage_realbd_integration_test.go",
+        "init_storage_test.go",
         "init_workspace_prefix_preserve_test.go",
         "invocation_store_memo_test.go",
         "json_oddball_root_test.go",
@@ -1747,9 +1768,7 @@ go_test(
         "nudge_queue_lock_free_test.go",
         "nudge_queue_lock_policy_test.go",
         "nudge_queue_seam_test.go",
-        "nudge_queue_shim_test.go",
         "nudge_shadow_debts_test.go",
-        "nudge_shadow_view_wait_test.go",
         "nudge_store_ownership_test.go",
         "nudge_target_info_equiv_test.go",
         "oneshot_by_id_routes_test.go",
@@ -2236,6 +2255,8 @@ go_test(
         "skill_supervisor_test.go",
         "sling_dashboard_link_test.go",
         "sling_formula_split_route_test.go",
+        "sling_inherit_stamp_test.go",
+        "sling_inherit_test.go",
         "sling_nudge_backlog_test.go",
         "sling_nudge_budget_test.go",
         "sling_nudge_pool_instance_test.go",
@@ -2627,12 +2648,12 @@ go_test(
 # The split-strict projection gate (internal/beads/splittest/projection.go):
 # gc_test with GC_TEST_SPLIT_STRICT=1, which installs splitStrictSeam
 # (split_strict_seam.go), so a city that relocates nothing looks split to the
-# code under test. Non-blocking for now: manual, so //... skips it, and
-# bazel.yml's evidence-only split-strict lane runs it. TestMain fails the run
-# on a violation site testdata/split_strict_baseline.tsv does not list (the
-# ratchet), and on a failing test testdata/split_strict_known_failures.list does
-# not list; it reports the two apart. It becomes required before new cities
-# default to split.
+# code under test. Manual, so //... skips it; bazel.yml's split-strict lane
+# runs it and gates (nightly, dispatch, and PRs touching the storage paths).
+# TestMain fails the run on a violation site testdata/split_strict_baseline.tsv
+# does not list (the ratchet), and on a failing test
+# testdata/split_strict_known_failures.list does not list; it reports the two
+# apart.
 go_variant_test(
     name = "gc_split_strict_test",
     size = "large",
@@ -2720,6 +2741,8 @@ go_variant_test(
     size = "medium",
     args = ["-test.run=^(TestSim[A-Za-z0-9]*|TestI10V510mExemptions|TestDormantChangeFollowsRule2|TestCloseEndsSuspend|TestNamedPaneCountsAnOwnerlessRuntime|TestQuarantinedCommitBoundCountsOnlyV2sTime|TestQuietBoundFollowsRowTimersArmedInQuiescence|TestQuarantineAloneIsTheOnlyHold|TestStartRefusesARowClosedBeforeItsPreWake|TestFailedCreateCloseRetiresHolds|TestRollbackScreenParkRewritesHolds)$$"],
     env = {"GC_V2_SIM_LEAF": "exec"},
+    # Keep each corpus result's diagnostics within remote stdout upload limits.
+    shard_count = 4,
     test = ":gc_test",
 )
 

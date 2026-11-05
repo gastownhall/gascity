@@ -759,7 +759,7 @@ func (s *StrictStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 func (s *StrictStore) DeleteBatch(ids []string) error {
 	deleter, ok := s.Store.(beads.BatchDeleter)
 	if !ok {
-		return fmt.Errorf("strict store: leaf store %T does not support orphan-preserving batch delete", s.Store)
+		return fmt.Errorf("strict store: leaf store %T does not support orphan-preserving batch delete: %w", s.Store, beads.ErrBatchDeleteUnsupported)
 	}
 	return deleter.DeleteBatch(ids)
 }

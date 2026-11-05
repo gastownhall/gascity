@@ -342,6 +342,12 @@ func TestAnInterruptedClearResumesWithoutLosingTheBackup(t *testing.T) {
 	if got := checkInfraClassConvergence(cityPath, cfg, "gc start", &bytes.Buffer{}); got.Outcome != infraMigrationRetained {
 		t.Fatalf("boot after the interrupted clear = %s, want retained-copies", got.Outcome)
 	}
+	// Status counts what the session has left, not the session: the note's
+	// Pending is the whole session and does not shrink.
+	var status bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &status, &status); code == 0 || !strings.Contains(status.String(), "INTERRUPTED (2 of the 3 bead(s) in the unfinished session are still in the work store)") {
+		t.Fatalf("status after the interrupted clear = %d: %s", code, status.String())
+	}
 
 	log.Reset()
 	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {

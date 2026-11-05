@@ -13,6 +13,12 @@ applies live input admission off the planner pass. Preserve the split-store
 and non-exact live candidate reads. Moving only Ready ahead of the cached claim
 census can hide a new claim and turn a canceled respawn into an idle stop.
 
+An exact class binding may refresh graph-only demand from its cache. Rows
+carrying `gc.root_bead_id` or `gc.input_convoy_id` retain the off-pass gated
+recording: the cache's local blocker verdict does not include input admission.
+Never reintroduce a withheld native row through that cache optimization or
+read live input stores from the demand pass.
+
 Drain and fanout only expand/reconcile graphs: they validate input relations
 without requiring descendant members to be execution-ready. The input convoy's
 own prerequisites and parks, root/control parks, and existing graph dependency,

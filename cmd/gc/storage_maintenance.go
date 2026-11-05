@@ -125,6 +125,18 @@ type migrationSourceWindow struct {
 	lane      beads.BeadsDiagnostic
 	laneKnown bool
 	closed    bool
+	// deadline is when the verb's time budget runs out (zero: none). The
+	// engine stops at the next batch boundary past it (infra_copy_engine.go).
+	deadline time.Time
+}
+
+// setTimeBudget gives the window's run budget to spend from now; zero or less
+// is none.
+func (w *migrationSourceWindow) setTimeBudget(budget time.Duration) {
+	if w == nil || budget <= 0 {
+		return
+	}
+	w.deadline = time.Now().Add(budget)
 }
 
 // migrationWindows holds the process's open window. The controller lock the

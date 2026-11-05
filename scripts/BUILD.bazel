@@ -172,6 +172,7 @@ go_test(
         "residency_signature_rule_test.go",
         "runtime_tmux_lane_test.go",
         "runtime_tmux_manifest_test.go",
+        "security_scan_allowlist_test.go",
         "shard_cgo_test.go",
         "sign_darwin_local_test.go",
         "split_strict_baseline_test.go",
@@ -227,6 +228,7 @@ go_test(
         "//internal/testpolicy/timingplancli",
         "//internal/testpolicy/timingsummary",
         "//internal/testutil",
+        "@com_github_burntsushi_toml//:toml",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
