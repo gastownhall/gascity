@@ -159,7 +159,7 @@ const EnqueueRollbackCloseReason = "nudge rollback: enqueue transaction failed"
 // helper: an existence check by the durable nudge label, then a single Create
 // when absent.
 func (s *Store) Save(item Item) (beadID string, created bool, err error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return "", false, nil
 	}
 	existing, ok, err := s.find(item.ID, false)
@@ -210,7 +210,7 @@ func (s *Store) Save(item Item) (beadID string, created bool, err error) {
 // helper (SetMetadataBatch with the same keys, then Close), tolerating a missing
 // bead as a no-op.
 func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now time.Time) error {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil
 	}
 	update := map[string]string{
@@ -268,7 +268,7 @@ func (s *Store) Terminalize(item Item, state, reason, commitBoundary string, now
 // enqueueQueuedNudgeWithStore. Errors are joined and returned by the caller so a
 // leaked open bead is diagnosable.
 func (s *Store) RollbackEnqueue(beadID string) error {
-	if s == nil || s.store.Store == nil || beadID == "" {
+	if s == nil || s.store == (beads.NudgesStore{}) || beadID == "" {
 		return nil
 	}
 	var errs error
@@ -298,7 +298,7 @@ func (s *Store) RollbackEnqueue(beadID string) error {
 // joined-error assertions keep passing. Unlike Terminalize it adds no missing-bead
 // tolerance, matching the inline sweep it replaces.
 func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil
 	}
 	update := map[string]string{
@@ -332,7 +332,7 @@ func (s *Store) SweepStale(beadID, closeReason string, now time.Time) error {
 // cross-phase close budget on top, so the live exclusion moving inside here does
 // not alter which beads the budget-limited loop closes. It is nil-receiver safe.
 func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs map[string]bool) ([]NudgeShadow, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil, nil
 	}
 	if limit < 0 {
@@ -363,7 +363,7 @@ func (s *Store) StaleShadowsBefore(before time.Time, limit int, liveExcludeIDs m
 // or terminal clock is at or after since, oldest first. It preserves terminal
 // history needed by wait finalization across a storage cutover.
 func (s *Store) ShadowHistorySince(since time.Time) ([]NudgeShadow, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.NudgesStore{}) {
 		return nil, nil
 	}
 	candidates, err := s.store.List(beads.ListQuery{
@@ -414,7 +414,7 @@ func (s *Store) FindIncludingTerminal(nudgeID string) (NudgeShadow, bool, error)
 // durable "nudge:<id>" label, applying the lookup cap and the open-vs-terminal
 // selection rules. It is backend-invariant: it reads only bead fields.
 func (s *Store) find(nudgeID string, includeClosed bool) (beads.Bead, bool, error) {
-	if s == nil || s.store.Store == nil || nudgeID == "" {
+	if s == nil || s.store == (beads.NudgesStore{}) || nudgeID == "" {
 		return beads.Bead{}, false, nil
 	}
 	items, err := s.store.List(beads.ListQuery{

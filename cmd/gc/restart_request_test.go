@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -50,7 +51,7 @@ func testRowFirstRestart(verb, sessionName string, hint drainOps, stderr io.Writ
 // on store over sp, the write the worker boundary makes.
 func fencedRecorder(t *testing.T, store beads.Store, sp runtime.Provider, id string) func(string) error {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 	return func(token string) error { return mgr.RequestFreshRestartFenced(id, token, nil) }
 }
 
@@ -648,7 +649,7 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 	hint := newFakeDrainOps()
 	var stderr bytes.Buffer
 	restart := testRowFirstRestart("gc runtime request-restart", "worker", hint, &stderr)
-	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), session.WithCityPath(t.TempDir()))
 	var recordErr error
 	restart.record = func(token string) error {
 		// casOnly is nil, as on a legacy city: only the require refusal can
@@ -681,12 +682,13 @@ func TestRowFirstRestartRequireRefusesAnIncapableStore(t *testing.T) {
 }
 
 // TestRowFirstRestartWorkerSiteTakesTheCheckedWrite pins the worker-site
-// exemption as current behavior: on a worker site restartRecordsOnlyByCAS
-// answers false without asking the reconciler mode, so a session store with
-// no conditional writer takes the checked write even under a v2 controller.
-// It is safe today only because v2 refuses exec, k8s, ssh and pack runtimes
-// (PAR-EXEC), so no v2 city has worker sites. Lifting PAR-EXEC must revisit
-// this exemption: a v2 worker site would then take the checked write.
+// exemption for a legacy box: on a worker site restartRecordsOnlyByCAS
+// decides from the box's own config without asking the controller, so a
+// session store with no conditional writer takes the checked write when
+// that config latches legacy (here its conditional writes are off, so an
+// unset key falls back), whatever the remote controller answers. A box
+// whose config latches v2 refuses it instead
+// (TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite).
 func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 	original := controllerLatchedReconcilerMode
 	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
@@ -718,34 +720,109 @@ func TestRowFirstRestartWorkerSiteTakesTheCheckedWrite(t *testing.T) {
 	}
 }
 
-// TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes pins what keeps
-// the worker-site exemption (TestRowFirstRestartWorkerSiteTakesTheCheckedWrite)
-// inside the v2 owner's Q1 condition: a city that places sessions on worker
-// sites, through the exec, a pack, the ssh, the k8s or the hybrid session
-// runtime, never runs v2. An explicit v2 is refused, and an unset key falls
-// back to legacy. When v2 admits one of these runtimes, this fails first:
-// restartRecordsOnlyByCAS must then stop exempting worker sites, or a v2
-// city's box takes the checked write.
+// TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes pins today's
+// state since v2 admits remote exec runtimes (PAR-EXEC; the owner's decision
+// of 2026-11-04): a v2-ready script that declares no locality latches v2,
+// explicit or by default, and counts as remote, but with no worker-site
+// descriptor its city's restart writes stay CAS-only (restartRecordsOnlyByCAS
+// asks the controller, which latched v2). ssh, k8s and hybrid are still
+// refused. TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite pins the
+// worker-site side CN-2 inherits.
 func TestRestartWorkerSiteExemptionNeedsV2ToRefuseRemoteRuntimes(t *testing.T) {
+	remote := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'; exit 0; }; exit 2
+`)
 	for _, tc := range []struct {
 		name    string
 		runtime func(*config.City)
 	}{
-		{"exec", func(c *config.City) { c.Session.Provider = "exec:/opt/bin/runner" }},
+		{"exec", func(c *config.City) { c.Session.Provider = "exec:" + remote }},
 		{"pack runtime", func(c *config.City) {
 			c.Session.Provider = "cloudflare"
-			c.Runtimes = map[string]config.DiscoveredRuntime{"cloudflare": {Name: "cloudflare", PackName: "runtime-cloudflare"}}
+			c.Runtimes = map[string]config.DiscoveredRuntime{"cloudflare": {Name: "cloudflare", PackName: "runtime-cloudflare", Command: remote}}
 		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if mode, err := latchReconcilerMode(v2City(tc.runtime), "", noEnv); err != nil || mode != reconcilerV2 {
+				t.Fatalf("an explicit v2 with the %s session runtime latches %s (err %v), want v2", tc.name, mode, err)
+			}
+			if mode, err := latchReconcilerMode(v2DefaultCity(tc.runtime), "", noEnv); err != nil || mode != reconcilerV2 {
+				t.Fatalf("an unset session_reconciler with the %s session runtime latches %s (err %v), want v2", tc.name, mode, err)
+			}
+			cfg := v2City(tc.runtime)
+			if !sessionRuntimeIsRemote(cfg, "", cfg.Session.Provider) {
+				t.Fatalf("the %s session runtime that declares no locality is not remote", tc.name)
+			}
+			cityPath := t.TempDir() // no worker-site descriptor
+			if onWorkerSite(cityPath) {
+				t.Fatal("a city with no descriptor reads as a worker site")
+			}
+			original := controllerLatchedReconcilerMode
+			t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) { return reconcilerV2, true }
+			if !restartRecordsOnlyByCAS(cityPath, cfg)() {
+				t.Fatal("restartRecordsOnlyByCAS = false for a v2 city with no worker site, want CAS-only")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name    string
+		runtime func(*config.City)
+	}{
 		{"ssh", func(c *config.City) { c.Session.Provider = "ssh:ops@box:22" }},
 		{"k8s", func(c *config.City) { c.Session.Provider = "k8s" }},
 		{"hybrid", func(c *config.City) { c.Session.Provider = "hybrid" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if mode, err := latchReconcilerMode(v2City(tc.runtime), noEnv); err == nil {
-				t.Fatalf("an explicit v2 with the %s session runtime latches %s; a v2 city can then have worker sites, which take the checked restart write: revisit restartRecordsOnlyByCAS", tc.name, mode)
+			if mode, err := latchReconcilerMode(v2City(tc.runtime), "", noEnv); err == nil {
+				t.Fatalf("an explicit v2 with the %s session runtime latches %s; lifting it must keep worker-site restarts CAS-only (CN-2's precondition)", tc.name, mode)
 			}
-			if mode, err := latchReconcilerMode(v2DefaultCity(tc.runtime), noEnv); err != nil || mode != reconcilerLegacy {
-				t.Fatalf("an unset session_reconciler with the %s session runtime latches %s (err %v), want the legacy fallback; a v2 city can then have worker sites, which take the checked restart write: revisit restartRecordsOnlyByCAS", tc.name, mode, err)
+			if mode, err := latchReconcilerMode(v2DefaultCity(tc.runtime), "", noEnv); err != nil || mode != reconcilerLegacy {
+				t.Fatalf("an unset session_reconciler with the %s session runtime latches %s (err %v), want the legacy fallback", tc.name, mode, err)
+			}
+		})
+	}
+}
+
+// TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite is CN-2's binding
+// precondition (the owner's decision of 2026-11-04): a box of a v2 city that
+// a worker-site descriptor makes a worker site never takes the checked
+// restart write on a store with no conditional writer. The box decides from
+// its own config (workerSiteRunsV2), which here latches v2, so both restart
+// verbs refuse and record nothing, and the remote controller is not asked.
+// This fails if a worker-site descriptor lets a v2 city's box take the
+// checked write: CN-2 must then make worker-site restart writes CAS-only, or
+// carry the latched mode in the descriptor.
+func TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite(t *testing.T) {
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	for _, v := range restartVerbs {
+		t.Run(v.name, func(t *testing.T) {
+			cityDir, _ := newWorkerSiteSessionCity(t, workerSiteRestartSeeds[0].seed)
+			cityTOML := "[workspace]\nname = \"box-city\"\n\n[daemon]\nsession_reconciler = \"v2\"\n\n[beads]\nprovider = \"file\"\n\n[[agent]]\nname = \"worker\"\nstart_command = \"echo\"\n"
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_SESSION_NAME", "worker-1")
+			t.Setenv("GC_INSTANCE_TOKEN", workerSiteRestartToken)
+			t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off")
+			asked := 0
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) {
+				asked++
+				return reconcilerV2, true
+			}
+			if !onWorkerSite(cityDir) || !restartRecordsOnlyByCAS(cityDir, nil)() {
+				t.Fatal("restartRecordsOnlyByCAS = false on a v2 city's worker site, want CAS-only (CN-2's precondition)")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := v.run(&stdout, &stderr); code != 1 {
+				t.Fatalf("exit = %d, want 1 (the checked write refused); stderr=%s", code, stderr.String())
+			}
+			if got := localSessionBeads(t, cityDir); len(got) != 1 || got[0].Metadata["restart_requested"] != "" {
+				t.Fatalf("session rows %v, want the restart not recorded", got)
+			}
+			if asked != 0 {
+				t.Fatalf("reconciler mode asked %d times, want none on a worker site", asked)
 			}
 		})
 	}
@@ -987,5 +1064,43 @@ func TestRowFirstRestartRuntimeProofNeverLogsAToken(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Kills (review MUST-A, N9) a worker-site rule that fails open: a remote
+// box's config names the controller host's exec script, which the box
+// cannot run, so a probe there would read the latch refused or fallen back
+// (legacy) while the controller runs v2. A worker site with an exec or pack
+// runtime is CAS-only unless session_reconciler pins legacy, explicit v2 or
+// unset alike; a config the box cannot load is CAS-only too.
+func TestCN2WorkerSiteFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, toml string
+		casOnly    bool
+	}{
+		{"absent exec script, explicit v2", "[daemon]\nsession_reconciler = \"v2\"\n\n[session]\nprovider = \"exec:/opt/absent/gc-session-docker\"\n", true},
+		{"absent exec script, unset key", "[session]\nprovider = \"exec:/opt/absent/gc-session-docker\"\n", true},
+		{"exec script by an absent PATH name, unset key", "[session]\nprovider = \"exec:gc-session-absent\"\n", true},
+		{"absent exec script, pinned legacy", "[daemon]\nsession_reconciler = \"legacy\"\n\n[session]\nprovider = \"exec:/opt/absent/gc-session-docker\"\n", false},
+		{"unloadable config", "[[[ not toml", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, _ := newWorkerSiteSessionCity(t, nil)
+			t.Setenv("GC_SESSION", "") // the box's own config decides, not a test double
+			t.Setenv("GC_BEADS_CONDITIONAL_WRITES", "off")
+			body := "[workspace]\nname = \"box-city\"\n\n[beads]\nprovider = \"file\"\n\n" + tc.toml
+			if tc.name == "unloadable config" {
+				body = tc.toml
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !onWorkerSite(cityDir) {
+				t.Fatal("not a worker site")
+			}
+			if got := restartRecordsOnlyByCAS(cityDir, nil)(); got != tc.casOnly {
+				t.Fatalf("restartRecordsOnlyByCAS = %v, want %v (CN-2's precondition: a v2 city's worker site never takes the checked write)", got, tc.casOnly)
+			}
+		})
 	}
 }

@@ -199,7 +199,12 @@ calls = 4
 [[count]]
 path = "cmd/gc/cmd_beads_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 11
+
+[[count]]
+path = "cmd/gc/cmd_citystatus_fresh_test.go"
+resource = "http_test_server"
+calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_citystatus_test.go"
@@ -239,7 +244,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_doctor_test.go"
@@ -650,7 +655,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_wait_test.go"
 resource = "http_test_server"
-calls = 6
+calls = 7
 
 [[count]]
 path = "cmd/gc/cmd_wait_test.go"
@@ -1199,6 +1204,26 @@ resource = "cwd"
 calls = 6
 
 [[count]]
+path = "cmd/gc/route_equivalence_beads_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/route_equivalence_convoy_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
+path = "cmd/gc/route_equivalence_rigstatus_mail_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
+path = "cmd/gc/route_equivalence_session_list_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
 path = "cmd/gc/runtime_lease_crossproc_test.go"
 resource = "subprocess"
 calls = 1
@@ -1227,6 +1252,11 @@ calls = 1
 [[count]]
 path = "cmd/gc/session_lifecycle_parallel_test.go"
 resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/session_list_unified_test.go"
+resource = "http_test_server"
 calls = 1
 
 [[count]]
@@ -1608,9 +1638,14 @@ resource = "http_test_server"
 calls = 6
 
 [[count]]
+path = "internal/api/client_status_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 67
+calls = 74
 
 [[count]]
 path = "internal/api/client_waits_test.go"
@@ -1696,6 +1731,11 @@ calls = 1
 path = "internal/api/dashboardbff/wire_contract_test.go"
 resource = "http_test_server"
 calls = 1
+
+[[count]]
+path = "internal/api/decode_session_list_test.go"
+resource = "http_test_server"
+calls = 5
 
 [[count]]
 path = "internal/api/genclient/genclient_test.go"
@@ -1831,6 +1871,16 @@ calls = 4
 path = "internal/api/session_stream_capability_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "internal/api/status_build_cost_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/api/store_health_test.go"
+resource = "fixed_sleep"
+calls = 3
 
 [[count]]
 path = "internal/api/supervisor_dashboard_test.go"
@@ -2420,6 +2470,11 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimecontract/screen_reference_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
 resource = "subprocess"
 calls = 1
@@ -2616,6 +2671,18 @@ tagged = true
 path = "internal/runtime/tmux/tmux_test.go"
 resource = "subprocess"
 calls = 6
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/wrapped_wait_cost_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/tmux/wrapped_wait_cost_test.go"
+resource = "subprocess"
+calls = 1
 tagged = true
 
 [[count]]

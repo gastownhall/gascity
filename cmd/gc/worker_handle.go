@@ -488,6 +488,7 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
+	sessions := beads.SessionStore{Store: store}
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, session.ErrSessionNotFound
@@ -497,10 +498,10 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+		if info, pr, err := session.ResolveSessionRecordByExactID(sessions, target); err == nil {
 			return factory.SessionByRecord(info, pr)
 		}
-		if id, err := session.ResolveSessionID(store, target); err == nil {
+		if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return factory.SessionByID(id)
 		}
 		if sp != nil {
@@ -1031,17 +1032,30 @@ func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info se
 			}
 		}
 	}
-	for _, providerName := range []string{info.Provider, info.Template} {
-		providerName = strings.TrimSpace(providerName)
-		if providerName == "" {
-			continue
-		}
-		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
-		if err == nil {
-			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
-		}
+	if resolved := resolveProviderByName(cfg, info.Provider, info.Template); resolved != nil {
+		return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
 	}
 	return nil, ""
+}
+
+// resolveProviderByName resolves the provider a session no agent template
+// resolves for runs, by name: the first of names (its stored provider, then
+// its template) that resolves against cfg's provider catalog, nil when none
+// does.
+func resolveProviderByName(cfg *config.City, names ...string) *config.ResolvedProvider {
+	if cfg == nil {
+		return nil
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if resolved, err := config.ResolveProvider(&config.Agent{Provider: name}, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+			return resolved
+		}
+	}
+	return nil
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

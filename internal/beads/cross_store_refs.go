@@ -97,7 +97,7 @@ func GetMany(store Store, ids []string) (map[string]Bead, error) {
 		seen[id] = true
 		unique = append(unique, id)
 	}
-	live := HandlesFor(store).Live
+	live := LiveFor(store)
 	getter, batched := live.(ExactBatchGetter)
 	for start := 0; start < len(unique); start += getManyChunk {
 		chunk := unique[start:min(start+getManyChunk, len(unique))]

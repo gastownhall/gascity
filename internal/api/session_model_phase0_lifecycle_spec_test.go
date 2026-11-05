@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -407,7 +408,7 @@ func TestPhase0HandleSessionWake_NamedIdentityReassignsHistoricalStateToFreshCan
 	if err != nil {
 		t.Fatalf("Create(wait): %v", err)
 	}
-	fabric := extmsg.NewServices(fs.cityBeadStore)
+	fabric := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	ref := extmsg.ConversationRef{
 		ScopeID:        "test-city",
 		Provider:       "discord",

@@ -267,9 +267,8 @@ var multiLaneCommands = map[string]string{
 }
 
 // multiLaneEvidenceOnly are the lanes whose failure never fails the run:
-// integration until G3, and the split-strict projection gate until split is
-// the default for new cities.
-var multiLaneEvidenceOnly = map[string]bool{"integration": true, "split-strict": true}
+// integration until G3. The split-strict projection gate gates (ga-ylpbsy.94).
+var multiLaneEvidenceOnly = map[string]bool{"integration": true}
 
 // multiLaneFreshTargets are the targets the nightly fresh run adds to a lane
 // before --config=fresh: the timer-bound acceptance tests at their real
@@ -338,7 +337,9 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		"worker-host": {"contents": "read", "issues": "read"},
 		"rrc-seed":    {"contents": "read", "id-token": "write"}, // the rbe-rrc-writer certificate (bazel_rrc_test.go)
 		"rrc-verify":  {"contents": "read", "issues": "write"},   // the rrc-verify alert issue (bazel_rrc_test.go)
-		"gate":        nil,                                       // the top-level contents: read
+		// The nightly split-strict alert: this run's jobs, and its issue.
+		"split-strict-alert": {"actions": "read", "issues": "write"},
+		"gate":               nil, // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)
@@ -453,7 +454,7 @@ func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 
 // TestBazelMultiLaneLaneList runs the rbe job's Lanes step for every event
 // and mode and checks the lane job's matrix it yields: the lanes that start,
-// each lane's exact command, evidence-only on integration and split-strict, and at most
+// each lane's exact command, evidence-only on integration only, and at most
 // multiLaneForkCertificates lanes (one rbe-fork certificate each) for a fork
 // PR.
 func TestBazelMultiLaneLaneList(t *testing.T) {
@@ -501,11 +502,10 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 						if cmd, _ := entry["cmd"].(string); cmd != wantCmd {
 							t.Errorf("event %s, mode %s, fresh %s: lane %s cmd %q, want %q", event, mode, fresh, name, cmd, wantCmd)
 						}
-						// Evidence-only (exit 0 on failure): integration until G3,
-						// split-strict until split is the default.
+						// Evidence-only (exit 0 on failure): integration until G3.
 						ev, set := entry["evidence-only"]
 						if multiLaneEvidenceOnly[name] != (set && ev == true) {
-							t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration and split-strict only", event, mode, fresh, name, ev)
+							t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration only", event, mode, fresh, name, ev)
 						}
 						for key := range entry {
 							if key != "lane" && key != "cmd" && key != "evidence-only" {
@@ -1585,7 +1585,7 @@ func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
 		for _, id := range []string{"lane", "sync-check"} {
 			for _, s := range wf.Jobs[id].Steps {
 				_, syncFlags := s.Env["BAZEL_SYNC_FLAGS"]
-				probe := s.Name == bazelCacheZstdStep || s.Name == "Fork cache remote repo contents cache (read)"
+				probe := s.Name == bazelForkRRCReadStep
 				if s.Uses != setupBazelUses && !syncFlags && !probe {
 					continue
 				}
@@ -1873,5 +1873,41 @@ func TestSplitStrictLaneRunsOnTheRoutingCode(t *testing.T) {
 				t.Errorf("%s names %s, but a PR touching it does not run the split-strict lane", baseline, f)
 			}
 		}
+	}
+}
+
+// TestBazelSplitStrictLaneGates pins the split-strict lane as gating
+// (ga-ylpbsy.94.2): no job-level continue-on-error on the lane job (it would
+// keep a red leg out of the required gate's needs.lane.result), none on the
+// verdicts step, and the downward ratchet gating the nightly only. The
+// nightly alert must find the lane by the lane job's name.
+func TestBazelSplitStrictLaneGates(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	lane, ok := wf.Jobs["lane"]
+	if !ok {
+		t.Fatalf("%s: no lane job", bazelMultiLaneWorkflow)
+	}
+	if lane.ContinueOnError != "" {
+		t.Errorf("lane job continue-on-error %q; want none, so a red split-strict leg fails the required gate", lane.ContinueOnError)
+	}
+	if lane.Name != "bazel / ${{ matrix.lane }}" {
+		t.Errorf("lane job name %q; the split-strict alert matches the leg as \"bazel / split-strict\"", lane.Name)
+	}
+	steps := map[string]multiLaneStep{}
+	for _, s := range lane.Steps {
+		steps[s.Name] = s
+	}
+	if s, ok := steps["Split-strict verdicts"]; !ok || s.ContinueOnError != "" {
+		t.Errorf("Split-strict verdicts step present=%v continue-on-error %q; want present and none", ok, s.ContinueOnError)
+	}
+	if s, ok := steps["Split-strict downward ratchet"]; !ok || s.ContinueOnError != "${{ github.event_name != 'schedule' }}" {
+		t.Errorf("Split-strict downward ratchet present=%v continue-on-error %q; want it gating the nightly only", ok, s.ContinueOnError)
+	}
+	alert, ok := wf.Jobs["split-strict-alert"]
+	if !ok {
+		t.Fatalf("%s: no split-strict-alert job", bazelMultiLaneWorkflow)
+	}
+	if len(alert.Steps) != 1 || !strings.Contains(alert.Steps[0].Run, `endswith("bazel / split-strict")`) {
+		t.Errorf("split-strict-alert must find the lane leg by its job name (bazel / split-strict)")
 	}
 }

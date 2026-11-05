@@ -46,25 +46,21 @@ func bdSubjectPrefixTarget(cfg *config.City, cityTarget execStoreTarget, cityPat
 // bdAddressedSubjects returns the bead ids a by-id read or write addresses,
 // scanned exactly against the verb's flag manifest, or nil when argv is no
 // such invocation or cannot be scanned without guessing.
+//
+// gc's own `release-if-current <issue-id> <assignee>` addresses the issue
+// alone. Its assignee is an identity, often a pool session's bead id carrying
+// the city's prefix, and must never pick the store the release runs in.
 func bdAddressedSubjects(args []string) []string {
-	if id, ok := bdReleaseIfCurrentSubject(args); ok {
+	if id, _, ok, err := parseBdReleaseIfCurrentArgs(args); ok {
+		if err != nil {
+			return nil
+		}
 		return []string{id}
 	}
 	if ids := bdByIDReadSubjects(args); len(ids) > 0 {
 		return ids
 	}
 	return bdByIDMutationSubjects(args)
-}
-
-// bdReleaseIfCurrentSubject returns the one bead gc's own
-// `release-if-current <issue-id> <assignee>` addresses. The verb has no bd
-// flag manifest; its fixed arity is its manifest. The assignee is an identity,
-// not a subject: on a city whose rigs keep their own stores it is often a
-// session bead id carrying the city's prefix, which the city store holds, so
-// reading it as an id would send the release of a rig bead to the city store.
-func bdReleaseIfCurrentSubject(args []string) (string, bool) {
-	id, _, ok, err := parseBdReleaseIfCurrentArgs(args)
-	return id, ok && err == nil
 }
 
 // bdPrefixOwner returns the one bound store whose prefix id carries. ok is

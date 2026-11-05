@@ -238,6 +238,87 @@ func TestResolveBdScopeTargetSkipsProbesThatCannotChangeTheAnswer(t *testing.T) 
 	}
 }
 
+// TestResolveBdScopeTargetRoutesReleaseIfCurrentByTheBead: the release's
+// store is the bead's, named by the bead id's prefix. Its second argument is
+// the expected assignee, often a pool session's bead id with the city's
+// prefix; probed as a candidate, that session bead exists in the city store,
+// and the release of a rig bead went to the city store, which reported it
+// skipped, so a dead pool session's claim in a rig was never released.
+func TestResolveBdScopeTargetRoutesReleaseIfCurrentByTheBead(t *testing.T) {
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	probes := 0
+	bdBeadExists = func(string, *config.City, execStoreTarget, string) bool {
+		probes++
+		return true
+	}
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, "frontend"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "demo"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend", Prefix: "fe"}},
+	}
+	t.Setenv("GC_RIG", "")
+	setCwd(t, cityDir)
+	for _, tc := range []struct {
+		args     []string
+		wantKind string
+	}{
+		{[]string{"release-if-current", "fe-abc", "demo-session-0123456789abcdef0123456789abcdef"}, "rig"},
+		{[]string{"release-if-current", "demo-abc", "fe-session-0123456789abcdef0123456789abcdef"}, "city"},
+	} {
+		probes = 0
+		got, err := resolveBdScopeTarget(cfg, cityDir, "", tc.args, false, io.Discard)
+		if err != nil {
+			t.Fatalf("%v: resolveBdScopeTarget() error = %v", tc.args, err)
+		}
+		if got.ScopeKind != tc.wantKind || probes != 0 {
+			t.Fatalf("%v: scope = %+v after %d probes, want kind %q with no probe (the bead id's prefix names the store)", tc.args, got, probes, tc.wantKind)
+		}
+	}
+}
+
+// TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssignee: when the
+// bead's prefix cannot name its store (here two rigs share it), the existence
+// probe decides, and it is asked about the bead alone, never the assignee.
+func TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssignee(t *testing.T) {
+	origProbe := bdBeadExists
+	t.Cleanup(func() { bdBeadExists = origProbe })
+	var probed []string
+	bdBeadExists = func(_ string, _ *config.City, _ execStoreTarget, id string) bool {
+		probed = append(probed, id)
+		return false
+	}
+	cityDir := t.TempDir()
+	for _, dir := range []string{"frontend", "backend"} {
+		if err := os.MkdirAll(filepath.Join(cityDir, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "demo"},
+		Rigs: []config.Rig{
+			{Name: "frontend", Path: "frontend", Prefix: "fe"},
+			{Name: "backend", Path: "backend", Prefix: "fe"},
+		},
+	}
+	t.Setenv("GC_RIG", "")
+	setCwd(t, cityDir)
+	if _, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"release-if-current", "fe-abc", "demo-session-0123456789abcdef0123456789abcdef"}, false, io.Discard); err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	for _, id := range probed {
+		if id != "fe-abc" {
+			t.Fatalf("probed %q; a release-if-current's store is decided by its bead alone (probes: %v)", id, probed)
+		}
+	}
+	if len(probed) == 0 {
+		t.Fatal("fixture: the shared prefix should have left the decision to the existence probe")
+	}
+}
+
 // TestResolveBdScopeTargetProbesAPrefixTwoStoresShare pins where the prefix
 // alone cannot answer: when the city and a rig, or two rigs, carry the same
 // prefix, only the bead's existence tells their stores apart, so the prefix
@@ -443,12 +524,12 @@ func TestResolveBdScopeTargetRoutesReleaseIfCurrentByItsBead(t *testing.T) {
 	}
 }
 
-// TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssignee pins the probe
-// chain's half of the same rule. Where the prefix alone cannot answer (here the
-// city and a rig carry the same prefix), the existence probes ask about the
-// issue id only. The holder's session bead exists in the city store, so a probe
-// of the assignee would answer "city" for a bead the rig holds.
-func TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssignee(t *testing.T) {
+// TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssigneeWhenTheCitySharesItsPrefix
+// pins the probe chain's half of the same rule. Where the prefix alone cannot
+// answer (here the city and a rig carry the same prefix), the existence probes
+// ask about the issue id only. The holder's session bead exists in the city
+// store, so a probe of the assignee would answer "city" for a bead the rig holds.
+func TestResolveBdScopeTargetNeverProbesReleaseIfCurrentsAssigneeWhenTheCitySharesItsPrefix(t *testing.T) {
 	origProbe := bdBeadExists
 	t.Cleanup(func() { bdBeadExists = origProbe })
 	var probed []string

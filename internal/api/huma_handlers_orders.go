@@ -264,8 +264,9 @@ type OrderHistoryListBody struct {
 
 // OrderHistoryListOutput is the response envelope for GET /v0/orders/history.
 type OrderHistoryListOutput struct {
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      OrderHistoryListBody
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body OrderHistoryListBody
 }
 
 // humaHandleOrderHistory is the Huma-typed handler for GET /v0/orders/history.
@@ -342,7 +343,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			Name:          name,
 			ScopedName:    scopedName,
 			Rig:           rig,
-			CreatedAt:     b.CreatedAt.Format(time.RFC3339),
+			CreatedAt:     b.CreatedAt.Format(time.RFC3339Nano),
 			Labels:        b.Labels,
 			CaptureOutput: auto != nil && auto.IsExec(),
 		}
@@ -364,8 +365,10 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 	}
 
+	freshness := cacheAgeSeconds(store)
 	out := &OrderHistoryListOutput{
-		CacheAgeS: cacheAgeSeconds(store),
+		CacheAgeS:    freshness.ageS,
+		CacheRefresh: freshness.refresh,
 	}
 	out.Body.Entries = entries
 	return out, nil
@@ -426,7 +429,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	}{Body: orderHistoryDetailResponse{
 		BeadID:    b.ID,
 		StoreRef:  result.storeRef,
-		CreatedAt: b.CreatedAt.Format(time.RFC3339),
+		CreatedAt: b.CreatedAt.Format(time.RFC3339Nano),
 		Labels:    b.Labels,
 		Output:    output,
 	}}, nil

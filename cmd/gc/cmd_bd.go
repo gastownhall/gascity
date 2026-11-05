@@ -346,6 +346,9 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 //
 // An `@file` body is read — relative to scopeRoot, the directory bd runs in —
 // and validated like an inline one; a file that cannot be read is refused.
+// bd reads a file only for a value that starts with "@", and reads the path
+// after it as written, spaces included, so that is the path read here; a
+// space-padded "@", which bd rejects as JSON, is read with the spaces trimmed.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
@@ -419,6 +422,9 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []
 
 		metadataJSON := strings.TrimSpace(value)
 		if path, isFile := strings.CutPrefix(metadataJSON, "@"); isFile {
+			if exact, ok := strings.CutPrefix(value, "@"); ok {
+				path = exact
+			}
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(scopeRoot, path)
 			}
@@ -911,7 +917,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// The flag sets are the complete value-consuming and boolean (no-value)
 	// flags for this subcommand, in both long and short form, sourced from
-	// `bd <sub> --help` (bd 1.3.2, 2026-10-24). Unknown flags not in either set
+	// `bd <sub> --help` (bd 1.3.4, 2026-11-04). Unknown flags not in either set
 	// make the scan ambiguous.
 	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
 	if ambiguous {
@@ -1169,22 +1175,13 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return target, nil
 	}
 
-	// release-if-current's assignee is never a probe candidate, for the reason
-	// the prefix route above never reads it (bdReleaseIfCurrentSubject): the
-	// holder's session bead exists, so a probe would accept the store that
-	// holds the session rather than the bead being released.
-	probeArgs := args
-	if id, ok := bdReleaseIfCurrentSubject(args); ok {
-		probeArgs = []string{id}
-	}
-
 	// Bead-ID auto-detect accepts a candidate store only when the id actually
 	// exists there, which costs a full bd round trip per probe. A probe can only
 	// matter when some outcome differs from another, so when every candidate
 	// store AND the store the rest of the chain would pick are the same store,
 	// the answer is that store whatever the probes say — and the passthrough
 	// below is the one bd invocation the command pays.
-	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, probeArgs)
+	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, bdScopeProbeArgs(args))
 	fallback, gcRigDiscarded, fallbackErr := bdScopeFallbackTarget(cfg, cityPath, cityTarget, args)
 	if len(candidates) > 0 && fallbackErr == nil && gcRigDiscarded == "" && bdScopeCandidatesAgree(candidates, fallback) {
 		return fallback, nil
@@ -1239,6 +1236,18 @@ func bdScopeProbeCandidates(cfg *config.City, cityTarget execStoreTarget, cityPa
 		}
 	}
 	return candidates
+}
+
+// bdScopeProbeArgs narrows argv to the tokens that may name the bead whose
+// store the command runs in. A release-if-current names its bead first and the
+// expected assignee second; the assignee is an identity, often a pool
+// session's bead id that exists in the city store, so probing it would run
+// the release of a rig bead in the city store, where it is skipped.
+func bdScopeProbeArgs(args []string) []string {
+	if id, _, ok, err := parseBdReleaseIfCurrentArgs(args); ok && err == nil {
+		return []string{args[0], id}
+	}
+	return args
 }
 
 // bdScopeCandidatesAgree reports whether every candidate routes to fallback,

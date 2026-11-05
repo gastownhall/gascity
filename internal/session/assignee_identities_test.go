@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // The assignee-identity codec is the confined vocabulary shared by the
@@ -265,7 +266,7 @@ func TestHasRecordAnsweringTo(t *testing.T) {
 			record := seedRecord(t, mem, tc.beadType, tc.labeled, tc.open, tc.metadata)
 			store := &recordLookupStore{Store: mem}
 
-			got, err := HasRecordAnsweringTo(store, " repo/nux ")
+			got, err := HasRecordAnsweringTo(beadstest.Sessions(store), " repo/nux ")
 			if err != nil {
 				t.Fatalf("HasRecordAnsweringTo: %v", err)
 			}
@@ -314,7 +315,7 @@ func TestHasRecordAnsweringTo_CostFollowsMatchesNotTheLedger(t *testing.T) {
 		}
 		store := &recordLookupStore{Store: mem}
 		for _, identity := range []string{"repo/nux", "repo/dalinar"} {
-			if _, err := HasRecordAnsweringTo(store, identity); err != nil {
+			if _, err := HasRecordAnsweringTo(beadstest.Sessions(store), identity); err != nil {
 				t.Fatalf("HasRecordAnsweringTo(%s): %v", identity, err)
 			}
 		}
@@ -360,7 +361,7 @@ func TestHasRecordAnsweringTo_ListingErrors(t *testing.T) {
 			seedRecord(t, mem, BeadType, true, false, map[string]string{"alias": "repo/nux"})
 			store := &recordLookupStore{Store: mem, err: tc.err}
 
-			got, err := HasRecordAnsweringTo(store, tc.identity)
+			got, err := HasRecordAnsweringTo(beadstest.Sessions(store), tc.identity)
 			if !errors.Is(err, tc.err) {
 				t.Fatalf("err = %v, want it to wrap %v", err, tc.err)
 			}
@@ -408,7 +409,7 @@ func TestHasRecordAnsweringTo_ConfirmsEachRow(t *testing.T) {
 		t.Fatalf("folded lookup = %d rows, %v; want the one loose match", len(rows), err)
 	}
 
-	got, err := HasRecordAnsweringTo(store, "repo/nux")
+	got, err := HasRecordAnsweringTo(beadstest.Sessions(store), "repo/nux")
 	if err != nil {
 		t.Fatalf("HasRecordAnsweringTo: %v", err)
 	}
@@ -418,11 +419,11 @@ func TestHasRecordAnsweringTo_ConfirmsEachRow(t *testing.T) {
 }
 
 func TestHasRecordAnsweringTo_NothingToLookUp(t *testing.T) {
-	if got, err := HasRecordAnsweringTo(nil, "repo/nux"); got || err != nil {
+	if got, err := HasRecordAnsweringTo(beads.SessionStore{}, "repo/nux"); got || err != nil {
 		t.Fatalf("nil store = %v, %v; want false, nil", got, err)
 	}
 	store := &recordLookupStore{Store: beads.NewMemStore()}
-	if got, err := HasRecordAnsweringTo(store, "  "); got || err != nil || len(store.queries) != 0 {
+	if got, err := HasRecordAnsweringTo(beadstest.Sessions(store), "  "); got || err != nil || len(store.queries) != 0 {
 		t.Fatalf("blank identity = %v, %v after %d lookups; want false, nil and no lookup", got, err, len(store.queries))
 	}
 }
@@ -494,7 +495,7 @@ func TestRecordAnsweringTo(t *testing.T) {
 			record := seedRecordWithID(t, mem, tc.id, tc.beadType, tc.labeled, tc.open, tc.metadata)
 			store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}}
 
-			got, err := RecordAnsweringTo(store, " "+tc.identity+" ")
+			got, err := RecordAnsweringTo(beadstest.Sessions(store), " "+tc.identity+" ")
 			if err != nil {
 				t.Fatalf("RecordAnsweringTo(%s): %v", tc.identity, err)
 			}
@@ -523,12 +524,12 @@ func TestRecordAnsweringTo_QualifiedIdentityMatchesHasRecordAnsweringTo(t *testi
 		seedRecord(t, mem, BeadType, true, false, map[string]string{"alias": "repo/nux"})
 
 		anyShape := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}}
-		id, err := RecordAnsweringTo(anyShape, identity)
+		id, err := RecordAnsweringTo(beadstest.Sessions(anyShape), identity)
 		if err != nil {
 			t.Fatalf("RecordAnsweringTo(%s): %v", identity, err)
 		}
 		qualified := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}}
-		found, err := HasRecordAnsweringTo(qualified, identity)
+		found, err := HasRecordAnsweringTo(beadstest.Sessions(qualified), identity)
 		if err != nil {
 			t.Fatalf("HasRecordAnsweringTo(%s): %v", identity, err)
 		}
@@ -554,7 +555,7 @@ func TestRecordAnsweringTo_Errors(t *testing.T) {
 	t.Run("Get error", func(t *testing.T) {
 		mem := beads.NewMemStore()
 		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}, getErr: unreachable}
-		got, err := RecordAnsweringTo(store, "gc-d34d1")
+		got, err := RecordAnsweringTo(beadstest.Sessions(store), "gc-d34d1")
 		if got != "" || !errors.Is(err, unreachable) {
 			t.Fatalf("RecordAnsweringTo = %q, %v; want \"\" and the Get error", got, err)
 		}
@@ -566,7 +567,7 @@ func TestRecordAnsweringTo_Errors(t *testing.T) {
 		mem := beads.NewMemStore()
 		seedRecordWithID(t, mem, "gc-d34d1", BeadType, true, false, map[string]string{"session_name": "worker-gc-d34d1"})
 		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem, err: unreachable}}
-		got, err := RecordAnsweringTo(store, "worker-gc-d34d1")
+		got, err := RecordAnsweringTo(beadstest.Sessions(store), "worker-gc-d34d1")
 		if got != "" || !errors.Is(err, unreachable) {
 			t.Fatalf("RecordAnsweringTo = %q, %v; want \"\" and the listing error", got, err)
 		}
@@ -575,24 +576,24 @@ func TestRecordAnsweringTo_Errors(t *testing.T) {
 		mem := beads.NewMemStore()
 		record := seedRecordWithID(t, mem, "gc-d34d1", BeadType, true, false, map[string]string{"session_name": "worker-gc-d34d1"})
 		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem, err: partial}}
-		got, err := RecordAnsweringTo(store, "worker-gc-d34d1")
+		got, err := RecordAnsweringTo(beadstest.Sessions(store), "worker-gc-d34d1")
 		if got != record.ID || !errors.Is(err, partial) {
 			t.Fatalf("RecordAnsweringTo = %q, %v; want %q and the partial error", got, err, record.ID)
 		}
 	})
 	t.Run("nothing to look up", func(t *testing.T) {
-		if got, err := RecordAnsweringTo(nil, "gc-d34d1"); got != "" || err != nil {
+		if got, err := RecordAnsweringTo(beads.SessionStore{}, "gc-d34d1"); got != "" || err != nil {
 			t.Fatalf("nil store = %q, %v; want \"\", nil", got, err)
 		}
 		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: beads.NewMemStore()}}
-		if got, err := RecordAnsweringTo(store, " "); got != "" || err != nil || store.gets != 0 || len(store.queries) != 0 {
+		if got, err := RecordAnsweringTo(beadstest.Sessions(store), " "); got != "" || err != nil || store.gets != 0 || len(store.queries) != 0 {
 			t.Fatalf("blank identity = %q, %v; want no lookup", got, err)
 		}
 	})
 	t.Run("identities that cannot be a bead ID skip the Get", func(t *testing.T) {
 		for _, identity := range []string{"Pat Example", "-odd"} {
 			store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: beads.NewMemStore()}}
-			if _, err := RecordAnsweringTo(store, identity); err != nil {
+			if _, err := RecordAnsweringTo(beadstest.Sessions(store), identity); err != nil {
 				t.Fatalf("RecordAnsweringTo(%q): %v", identity, err)
 			}
 			if store.gets != 0 {

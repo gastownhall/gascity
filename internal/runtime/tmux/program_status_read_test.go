@@ -42,12 +42,12 @@ func psRecord(t *testing.T, nonce string, state runtime.ProgramState, mutate ...
 
 // capturePane is one pane's programPaneFormat fields as tmux prints them.
 type capturePane struct {
-	mark, id, pipe, tap, record string
-	dead                        bool
+	mark, id, pipe, tap, record, hold string
+	dead                              bool
 }
 
 func (c capturePane) fields() []string {
-	return []string{c.mark, c.id, c.pipe, c.tap, c.record}
+	return []string{c.mark, c.id, c.pipe, c.tap, c.record, c.hold}
 }
 
 func (c capturePane) deadField() string {

@@ -41,7 +41,7 @@ are run; Bazel is the runner that enforces it.
 | Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
 | Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
 | `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
-| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (evidence-only, allowed to fail; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
+| Split-strict projection gate: violation-key ratchet (fixture rows bound to the tests that reach them) and known-failures check (every entry with a reason, a regenerated one `UNTRIAGED:` until someone classifies it; flakes only in `split_strict_known_flaky.list` with an owner bead, never retried; a failed TestMain guard fails it too), reported apart; nightly downward ratchet fails on unreached rows and now-passing known failures (`GC_TEST_SPLIT_STRICT=1`; `internal/beads/splittest/projection.go`, `gate.go`) | `split-strict` (gating; mode remote: nightly, dispatch, PRs touching the store layer or routing code: cmd/gc, api, session, sling, molecule, orders, dispatch, readywork, executionevent, mail, nudgequeue, sourceworkflow; every file a baseline row names) | `bazel test //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test`; regenerate inputs from two or more full runs with `scripts/split-strict-baseline` (refuses inconsistent tests); check with `scripts/split-strict-baseline --check` | none |
 | Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
 | Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
 
@@ -60,12 +60,21 @@ other side's class is flagged), but its references to rows that already exist
 other side yet (`GraphApplyHandle` in `projection.go`), so a plan that wires a
 row to the wrong side's row passes the gate.
 
-Split-strict lane latency: `continue-on-error` keeps the lane's result out of
-the required `bazel test (side-by-side)` check, not its wall time. The lane is
-a leg of the matrix the gate job needs, so on a pull request that runs it the
-required check reports when it ends (about 5 minutes on a warm farm; 19 were
-seen cold). That keeps one copy of the lane's steps; give it its own job if
-the wait starts to matter.
+Split-strict lane gating: the lane is a leg of the matrix the required
+`bazel test (side-by-side)` check needs, so a red split-strict (a NEW ratchet
+key, a NEW FAILING test, a hung shard) fails that check, and on a pull request
+that runs it the required check reports when it ends (about 5 minutes on a
+warm farm; 19 were seen cold). It starts only in mode remote, for same-repo
+pull requests touching the storage paths, the nightly and dispatches (RC Gate
+included); fork, Dependabot and cache-mode PRs, merge groups and pushes do not
+run it. A regression landed that way turns the next storage PR red on files
+it never touched: check the open `split-strict-nightly` issue (a red nightly
+run opens or comments on it; bazel.yml's split-strict-alert job) before
+debugging your own change. Fix a red lane with `scripts/split-strict-baseline`:
+a new failure is classified as a product bug (fix the code), a fixture that
+does not model split stores (fix the fixture), or a gate artifact (list it
+with the reason). The downward ratchet (now-passing or unreached entries)
+gates the nightly only.
 
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
@@ -296,6 +305,40 @@ is measured with nothing beside them, and the 90-minute budget leaves about
 16 minutes over the slowest bd-dolt load that ran alone (1h13m49s). Beside
 the matrix parts a load can run past it, so no suite runs the two together.
 
+X6's fan-in (`TestX6FanIn`, in `conversationlane_test`) asserts its
+correctness on every run: every notice delivered once, one injection per
+boundary of at most `MaxBatchOps` notices, injections in order. Its steady
+phase also always holds the last injection to within 3 s of the rest's max
+(relative, so it scales with load) and every notice to a 30 s ceiling, which
+catches whole-path stalls (the 130 s lane lease recovery, the 60 s failed-pass
+backoff cap, the 60 s held-wake recheck) but not a lost wake, which the
+harness's 5 s anti-entropy scan recovers.
+The absolute SLO (p99 <= 5 s, max <= 7 s) is wall clock on a shared
+executor, which a loaded rbe-west worker broke 12 times in the merge queue
+in two weeks (#8240). It is logged on every run and asserted only on opt-in:
+
+| variable | selects | who needs it |
+| --- | --- | --- |
+| `GC_LANE_X6_PERF` | `1` turns X6 steady's absolute latency SLO from a log line into an assertion. No CI job sets it, so no CI job enforces the SLO: the nightly lanes share the same executors. Set it only in a local run on a host the run owns, with nothing beside it (command below) | `TestX6FanIn/steady` only |
+| `GC_LANE_X6_FULL` | `1` runs DES-O1's literal line (5,000 notices in 60 s), a manual measurement a keystroke runtime is expected to miss | `TestX6FanIn/full` only |
+
+Run the opted-in SLO locally, on a host the run owns with nothing beside it
+(not a shared executor or a shared development box). Bazel defaults to remote
+execution on the maintainers' hosts, so keep the test runner local:
+
+```bash
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --test_env=GC_LANE_X6_PERF=1 --test_filter='^TestX6FanIn$/^steady$' \
+  //test/conversationlane:conversationlane_test
+```
+
+Replacement coverage for the SLO, under "Flakes are defects": the busy
+re-probe cadence (`TestLaneHostReprobesBusyRuntimeWithoutRows`,
+`TestLaneWorkerNextDelay`) and the wake at a boundary's quiescence deadline
+(#8308's executor, planner and host tests) are pinned by deterministic unit
+tests, and the always-on ceiling and drain bound fail a run where a notice
+stalls. #8240 stays the tracking issue.
+
 ### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after
@@ -386,7 +429,8 @@ this:
   is what still proves each pull request was analyzed, so it stays.
 - **The lanes match a PR's.** Unit, acceptance, integration-packages and
   integration-smoke run, and a queue run reuses cached test results like
-  any other run. The `integration` lane can later be gated on `merge_group`
+  any other run. A storage PR's own run also has split-strict, which its
+  merge group does not (ga-ylpbsy.94.7). The `integration` lane can later be gated on `merge_group`
   only (G3).
 
 **Queue settings** (for 60-70 merges a day, with a peak of 7 an hour from
@@ -1025,6 +1069,39 @@ manifest pin above). Bumping it is a one-line PR titled
 `chore(rbe): bump rbe-worker to <sha8> (<subject>)`:
 
 1. Merge the change into rbe-worker's main.
+
+   Canary it on real pool VMs before the bump, by hand: a dispatch by
+   any App or bot (`*[bot]`, the pool scalers' `bazel-allocator[bot]`
+   included) with the input is refused. Two limits:
+   - A commit that changes what the worker measures (`worker-env`) cannot
+     be canaried this way: the canary skips the drift jobs (a drift issue
+     would cap both pools for the pin and fail remote-mode PRs), so its
+     worker serves only actions that send no worker-env. Re-pin the host in
+     the bump PR instead (step 3).
+   - A hand dispatch of the fork pool bypasses rbe-west's fork off switch
+     (`/etc/rbe-fork/enabled` on the core, which the fork scaler obeys):
+     check that it is on before a fork canary, and do not run one while the
+     fork edge is off on purpose.
+
+   Dispatch a pool workflow on main with the new commit as `rbe_worker_sha`:
+
+   ```
+   gh workflow run rbe-worker-pool.yml -R gastownhall/gascity -f rbe_worker_sha=<sha> -f idle_minutes=10 -f max_minutes=30
+   gh workflow run rbe-fork-pool.yml -R gastownhall/gascity -f rbe_worker_sha=<sha> -f idle_minutes=10 -f max_minutes=30
+   ```
+
+   The run is named `(canary, idle Nm) rbe-worker <sha>`, and its
+   `max_minutes` is capped at 60. The scalers' breaker ignores it (it counts
+   `bazel-allocator[bot]`'s runs alone). Their pool size counts it like any
+   unfinished run (max workers, the floor, booting, the drift cap, the fork
+   daily budget): one worker more, harmless.
+   The fetch takes the commit only if it is on rbe-worker main's first-parent
+   line and descends from the pin. Before any of its code runs, H5
+   (`h5.sh pin..sha`) checks every commit in between is signed, merged and
+   verified. A canary worker serves real actions like any other. Look for
+   `isolation: probe`, `worker ... started` and `rbe-first-exec: ... actions=N`
+   with N above 0, and for no `isolation:` failure. Empty `rbe_worker_sha`
+   (the default) is the pin.
 2. Change the 40-hex sha in `.github/actions/rbe-worker/pin` to the new
    commit. Use rbe-worker's `bin/bump-summary OLD NEW` output as the PR
    body: the compare URL, the commit list, and whether the bump touches the

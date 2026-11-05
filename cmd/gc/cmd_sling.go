@@ -506,6 +506,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
+	// openSourceWorkflowViews opens every candidate source-workflow store
+	// through its authoritative provider. It tolerates a store that fails to
+	// open: the views that opened come back, and each store that did not is
+	// listed as a skip for its caller to judge.
+	openSourceWorkflowViews := func() ([]convoyStoreView, []sourceWorkflowStoreSkip, error) {
+		return openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
+			return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
+		}, func(dir string) (beads.Store, error) {
+			return openAuthoritativeStoreAtForCity(dir, cityPath)
+		})
+	}
 	var eventRecorder events.Recorder
 	if !dryRun {
 		eventRecorder = openCityRecorderAt(cityPath, stderr)
@@ -522,11 +533,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		ExecutionWorkStore: executionEmitStore(store, cityPath),
 		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
-			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
-				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
-			}, func(dir string) (beads.Store, error) {
-				return openAuthoritativeStoreAtForCity(dir, cityPath)
-			})
+			stores, skips, err := openSourceWorkflowViews()
 			unscannedSkips, selectedRecovered := unscannedSourceWorkflowStoreSkips(cfg, cityPath, storeRef, skips)
 			if err != nil && !selectedRecovered {
 				return nil, err
@@ -553,6 +560,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		},
 	}
 
+	inheritSlingInitiator(&opts, slingClaimStoresFor(cfg, cityPath, cityName, openSourceWorkflowViews), os.Getenv, stderr)
 	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
 }
 
@@ -751,7 +759,7 @@ func populateSlingDepsCallbacks(deps *slingDeps, stderr io.Writer) {
 // report of a start it left to the reconciler; nil discards it, for graph
 // routing that has no caller's stderr to report to.
 func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver {
-	return func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
+	return func(store beads.SessionStore, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
 		if cfg == nil {
 			return "", false, nil
 		}
@@ -774,7 +782,10 @@ func cliDirectSessionResolver(stderr io.Writer) graphroute.DirectSessionResolver
 		// on a split city resolve and materialize through the sessions binding
 		// instead: through the scope store the canonical bead is invisible and a
 		// duplicate is minted where nothing reads it (write-audit B6).
-		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store, cfg, cityPath), spec.Identity, stderr)
+		// store.Store: the caller's raw scope store, as this resolver has always
+		// taken it; graphroute hands it over as a sessions handle (typed-store
+		// T5a), and the resolution below still takes the raw store (T9e).
+		id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, cliRelocatedSessionStore(store.Store, cfg, cityPath), spec.Identity, stderr)
 		if err != nil {
 			return "", false, err
 		}
@@ -1135,7 +1146,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 
 func dryRunBatchChildren(querier BeadChildQuerier, containerID string) ([]beads.Bead, error) {
 	if store, ok := querier.(beads.Store); ok {
-		return convoycore.Members(store, containerID, true)
+		return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, containerID, true)
 	}
 	return querier.List(beads.ListQuery{
 		ParentID: containerID, IncludeClosed: true, Sort: beads.SortCreatedAsc,
@@ -1539,7 +1550,8 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", stepID)
 	}
 	if target.fromAssignee {
-		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
+		// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+		binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(beads.SessionStore{Store: store}, cityName, cfg, target.value, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, fmt.Errorf("step %s: %w", stepID, err)
 		}
@@ -1677,8 +1689,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 }
 
 // slingCityStore is the city's store a sling nudge routes its lane notice
-// over (routeCLILaneNotice): store is nil when [ops] authoritative does not
-// list message, or on a worker site; opened is the store this sling opened
+// over (routeCLILaneNotice): store is nil when the lane does not execute
+// message (slingNudgeCityStore), or on a worker site; opened is the store this sling opened
 // for it, nil when cityPath names no city on disk, whose bead store is then
 // the city's.
 type slingCityStore struct {
@@ -1694,17 +1706,31 @@ func (c slingCityStore) close() {
 }
 
 // slingNudgeCityStore opens the city's store for a sling nudge under lane
-// authority (slingCityStore). A city store that does not open is the error.
+// authority (slingCityStore): [ops] authoritative lists message, or, unset,
+// the city's sessions-class store is one the default runs the lane over
+// (cliLaneExecutesMessage), which it opens the store to tell. A city store
+// that does not open is the error while message is listed; with the list
+// unset the nudge keeps its legacy path, since the default cannot be decided.
 func slingNudgeCityStore(cityPath string, cfg *config.City, store beads.Store) (slingCityStore, error) {
-	if !cliLaneExecutesMessage(cfg) || onWorkerSite(cityPath) {
+	if cliLaneMessageOff(cfg) || onWorkerSite(cityPath) {
 		return slingCityStore{}, nil
 	}
+	listed := cliLaneMessageListed(cfg)
 	opened, err := openSlingCityStore(cityPath)
 	switch {
-	case err != nil:
+	case err != nil && listed:
 		return slingCityStore{}, err
+	case err != nil:
+		return slingCityStore{}, nil
 	case opened == nil:
+		if !listed && !cliLaneExecutesMessage(cfg, cliSessionStore(store, cfg, cityPath)) {
+			return slingCityStore{}, nil
+		}
 		return slingCityStore{store: store}, nil
+	}
+	if !listed && !cliLaneExecutesMessage(cfg, cliSessionStore(opened, cfg, cityPath)) {
+		closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
+		return slingCityStore{}, nil
 	}
 	return slingCityStore{store: opened, opened: opened}, nil
 }

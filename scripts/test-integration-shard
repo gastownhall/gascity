@@ -139,6 +139,7 @@ cmd_gc_integration_tests=(
   TestGcBdCreateGraphJudgeFactsRealBd
   TestGcBdMolWispRootOnlyMintsOneWorkBead
   TestGcBdSplitJudgesMetadataAsTheStoresReadItBack
+  TestInitJudgeSplitBDMatchesGcBdVerdictOnRealBinaries
   TestInitializingARealEmbeddedRigLetsItCreateGcTypedBeads
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestManagedBeadsNativeCLICompatibility
@@ -158,6 +159,9 @@ cmd_gc_integration_tests=(
   TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux
   TestStopRefusesARuntimeReplacedAtTheCallOnRealTmux
   TestStorageGateServesACityFromItsBeadsWorkspace
+  TestStorageMigrateDoesNotCountItsOwnPooledSessions
+  TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
+  TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
 )
 
 join_regex() {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -673,7 +674,7 @@ func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *test
 		}
 	}
 
-	_, err = dispatch.ProcessControl(rigStore, finalizer, dispatch.ProcessOptions{
+	_, err = dispatch.ProcessControl(beadstest.Graph(rigStore), finalizer, dispatch.ProcessOptions{
 		ResolveStoreRef:      resolver,
 		SourceWorkflowStores: makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, openStore),
 		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
@@ -867,7 +868,7 @@ func TestWorkflowFinalizeRetriesWhenEverySourceWorkflowStoreFailsToOpen(t *testi
 				return nil, fmt.Errorf("unknown ref %s", ref)
 			}
 
-			_, err = dispatch.ProcessControl(rigStore, finalizer, dispatch.ProcessOptions{
+			_, err = dispatch.ProcessControl(beadstest.Graph(rigStore), finalizer, dispatch.ProcessOptions{
 				ResolveStoreRef:      resolver,
 				SourceWorkflowStores: makeSourceWorkflowStoresListerWithOpenStore(cityPath, tc.cfg, openStore),
 				SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
@@ -1333,7 +1334,7 @@ func TestRoutineControlPending_IsNotBudgetedOrEscalated(t *testing.T) {
 	routine := fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, dispatch.ErrControlPending)
 
 	var stderr bytes.Buffer
-	got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, bead, bead.ID, routine, &stderr)
+	got := handleControlDispatchError(t.TempDir(), t.TempDir(), beadstest.Graph(store), bead, bead.ID, routine, &stderr)
 	if !errors.Is(got, dispatch.ErrControlPending) {
 		t.Fatalf("handleControlDispatchError = %v, want the pending cause returned unchanged", got)
 	}
@@ -1408,7 +1409,7 @@ func TestStopCanceledFinalizerStaysOpenForRetry(t *testing.T) {
 			}
 
 			var stderr bytes.Buffer
-			got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, fin, fin.ID, tc.cause(fin.ID, root.ID), &stderr)
+			got := handleControlDispatchError(t.TempDir(), t.TempDir(), beadstest.Graph(store), fin, fin.ID, tc.cause(fin.ID, root.ID), &stderr)
 			if got == nil {
 				t.Fatal("handleControlDispatchError = nil, want the cause returned for retry (nil means quarantined)")
 			}
@@ -2965,7 +2966,7 @@ func TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource(t *testing.T) {
 	if len(roots) != 1 {
 		t.Fatalf("workflow roots = %d, want 1: %#v", len(roots), roots)
 	}
-	if _, err := sourceworkflow.CloseWorkflowSubtree(deps.GraphStore, roots[0].ID); err != nil {
+	if _, err := sourceworkflow.CloseWorkflowSubtree(beadstest.GraphMolecule(deps.GraphStore), roots[0].ID); err != nil {
 		t.Fatalf("CloseWorkflowSubtree(%s): %v", roots[0].ID, err)
 	}
 
@@ -4207,7 +4208,7 @@ func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 		t.Fatalf("create control: %v", err)
 	}
 
-	if _, err := quarantineControlFailureBead(store, control, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
+	if _, err := quarantineControlFailureBead(beadstest.Graph(store), control, fmt.Errorf("%w: bad workflow", dispatch.ErrControlGraphMalformed)); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -4264,7 +4265,7 @@ func TestQuarantineControlFailureBeadTruncatesReasonAtUTF8Boundary(t *testing.T)
 	}
 	reason := strings.Repeat("a", maxControlQuarantineReasonMetadata-1) + "é tail"
 
-	if _, err := quarantineControlFailureBead(store, control, errors.New(reason)); err != nil {
+	if _, err := quarantineControlFailureBead(beadstest.Graph(store), control, errors.New(reason)); err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
 
@@ -4305,7 +4306,7 @@ func TestQuarantineControlFailureBeadSettlesRootWhenFinalizerQuarantined(t *test
 		t.Fatalf("create finalizer: %v", err)
 	}
 
-	settleFailure, err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded"))
+	settleFailure, err := quarantineControlFailureBead(beadstest.Graph(store), finalizer, errors.New("finalizer exploded"))
 	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
@@ -4378,14 +4379,14 @@ func TestQuarantinedWorkflowRootStaysFailedAfterFinalizer(t *testing.T) {
 		t.Fatalf("DepAdd(root->finalizer): %v", err)
 	}
 
-	if _, err := quarantineControlFailureBead(store, root, errors.New(`unsupported control bead kind "workflow"`)); err != nil {
+	if _, err := quarantineControlFailureBead(beadstest.Graph(store), root, errors.New(`unsupported control bead kind "workflow"`)); err != nil {
 		t.Fatalf("quarantineControlFailureBead(root): %v", err)
 	}
 	finalizer, err = store.Get(finalizer.ID)
 	if err != nil {
 		t.Fatalf("get finalizer: %v", err)
 	}
-	result, err := dispatch.ProcessControl(store, finalizer, dispatch.ProcessOptions{})
+	result, err := dispatch.ProcessControl(beadstest.Graph(store), finalizer, dispatch.ProcessOptions{})
 	if err != nil {
 		t.Fatalf("ProcessControl(finalizer): %v", err)
 	}
@@ -4435,7 +4436,7 @@ func TestQuarantineControlFailureBeadDoesNotTouchRootForNonFinalizerControl(t *t
 		t.Fatalf("create control: %v", err)
 	}
 
-	settleFailure, err := quarantineControlFailureBead(store, control, errors.New("fanout exploded"))
+	settleFailure, err := quarantineControlFailureBead(beadstest.Graph(store), control, errors.New("fanout exploded"))
 	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
@@ -4488,7 +4489,7 @@ func TestQuarantineControlFailureBeadNeverDowngradesAlreadySettledRoot(t *testin
 		t.Fatalf("create finalizer: %v", err)
 	}
 
-	settleFailure, err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded"))
+	settleFailure, err := quarantineControlFailureBead(beadstest.Graph(store), finalizer, errors.New("finalizer exploded"))
 	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v", err)
 	}
@@ -4548,7 +4549,7 @@ func TestQuarantineControlFailureBeadToleratesRootCloseFailure(t *testing.T) {
 	}
 	store := &refusingCloseStore{Store: base, blockedID: root.ID, blockerID: finalizer.ID}
 
-	settleFailure, err := quarantineControlFailureBead(store, finalizer, errors.New("finalizer exploded"))
+	settleFailure, err := quarantineControlFailureBead(beadstest.Graph(store), finalizer, errors.New("finalizer exploded"))
 	if err != nil {
 		t.Fatalf("quarantineControlFailureBead: %v, want nil -- a root close failure must not undo an already-successful finalizer quarantine", err)
 	}

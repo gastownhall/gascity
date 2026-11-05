@@ -51,8 +51,8 @@ func (r *stagedRecorder) executeCtx(_ context.Context, args []string) (string, e
 	return r.execute(args)
 }
 
-// captureTestTmux returns a Tmux whose capability gate passes without a
-// companion or a server (the companion runs gc's relay protocol, the server's
+// captureTestTmux returns a Tmux under the live switch on whose capability
+// gate passes without a companion or a server (the companion runs gc's relay protocol, the server's
 // default-shell is testShell), its executor, and the capture warnings it
 // logs. probes counts gate evaluations.
 func captureTestTmux(t *testing.T) (tm *Tmux, rec *stagedRecorder, warnings *strings.Builder, probes *int) {
@@ -60,6 +60,7 @@ func captureTestTmux(t *testing.T) (tm *Tmux, rec *stagedRecorder, warnings *str
 	rec = &stagedRecorder{fakeExecutor: &fakeExecutor{}}
 	tm = NewTmux()
 	tm.exec = rec
+	tm.cfg.ProgramStatus = runtime.ProgramStatusOn
 	probes = new(int)
 	tm.capture.probe = func() (captureCapability, error) {
 		*probes++
@@ -286,6 +287,7 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 			{"set-option", "-p", "-F", "-t", "%5", programTapOption, r + ".#{pane_id}"},
 			{"set-option", "-pu", "-t", "%5", programStatusOption},
 			{"set-option", "-pu", "-t", "%5", programTextOption},
+			{"set-option", "-pu", "-t", "%5", programHoldOption},
 			{"pipe-pane", "-O", "-t", "%5", wantTapCommand(r, "claude-code")},
 		})...)
 		if !slices.Equal(got, want) {
@@ -328,6 +330,7 @@ func TestRespawnFailureIsReturned(t *testing.T) {
 func TestUndeclaredProviderIsNeverArmed(t *testing.T) {
 	for _, arm := range []runtime.ProgramStatusArm{{}, {App: "codex", Relay: true}} {
 		tm, rec, _, probes := captureTestTmux(t)
+		tm.cfg.ProgramStatus = runtime.ProgramStatusOff
 		rec.outs = []string{"%1"}
 		env := map[string]string{testSecretKey: testSecret}
 		if err := tm.newSessionWithCommandAndEnv("gc-undeclared", "/w", "codex", env, arm); err != nil {
@@ -367,6 +370,7 @@ func offDisarmLine(target string) string {
 	return "'set-option' '-pu' '-t' '" + target + "' '@gc_ps_tap' ; " +
 		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps' ; " +
 		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps_text' ; " +
+		"'set-option' '-pu' '-t' '" + target + "' '@gc_ps_hold' ; " +
 		"'pipe-pane' '-t' '" + target + "'"
 }
 
@@ -377,6 +381,7 @@ func offDisarmLine(target string) string {
 // (TestRespawnUnderSwitchOffRemovesOnlyABoundCapture).
 func TestSwitchOffIsByteIdentical(t *testing.T) {
 	tm, rec, _, probes := captureTestTmux(t)
+	tm.cfg.ProgramStatus = runtime.ProgramStatusOff
 	ops := newTmuxStartOps(tm, "", 0, runtime.Config{}, true)
 	if err := ops.createSession("gc-off", "/work", "codex", map[string]string{testSecretKey: testSecret}); err != nil {
 		t.Fatal(err)
@@ -518,6 +523,7 @@ func TestRelayDeclaredWithoutCompanionRelayStartsUnwrapped(t *testing.T) {
 				{"set-option", "-p", "-F", "-t", "%2", programTapOption, r + ".#{pane_id}"},
 				{"set-option", "-pu", "-t", "%2", programStatusOption},
 				{"set-option", "-pu", "-t", "%2", programTextOption},
+				{"set-option", "-pu", "-t", "%2", programHoldOption},
 				{"pipe-pane", "-O", "-t", "%2", wantTapCommand(r, "claude-code")},
 			})...)
 			if !slices.Equal(respawn, wantRespawn) {
@@ -544,6 +550,7 @@ func gateTmux(t *testing.T, line, defaultShell string) (tm *Tmux, rec *stagedRec
 	t.Setenv("PATH", pathDir)
 	cfg := DefaultConfig()
 	cfg.ProgramStatusBin = companion
+	cfg.ProgramStatus = runtime.ProgramStatusOn
 	tm = NewTmuxWithConfig(cfg)
 	rec = &stagedRecorder{fakeExecutor: &fakeExecutor{outs: []string{"3.4|/tmp/s", defaultShell, "%1"}}}
 	tm.exec = rec
@@ -662,6 +669,7 @@ func TestCapabilityGateDisablesArmingWhenCompanionMissing(t *testing.T) {
 	warnings := captureWarnings(t)
 	rec := &stagedRecorder{fakeExecutor: &fakeExecutor{out: "%1"}}
 	tm := NewTmux()
+	tm.cfg.ProgramStatus = runtime.ProgramStatusOn
 	tm.exec = rec
 	for range 2 {
 		if err := tm.newSessionWithCommandAndEnv("gc-nocomp", "", "codex", nil, runtime.ProgramStatusArm{Capture: true, Relay: true}); err != nil {
@@ -683,6 +691,7 @@ func TestCapabilityGateRefusesCompanionCodecMismatchOnce(t *testing.T) {
 	warnings := captureWarnings(t)
 	cfg := DefaultConfig()
 	cfg.ProgramStatusBin = bin
+	cfg.ProgramStatus = runtime.ProgramStatusOn
 	tm := NewTmuxWithConfig(cfg)
 	rec := &stagedRecorder{fakeExecutor: &fakeExecutor{out: "%1"}}
 	tm.exec = rec
@@ -733,6 +742,7 @@ func TestCapabilityGateRefusesOldTmuxAndUnsafeSocket(t *testing.T) {
 	warnings := captureWarnings(t)
 	cfg := DefaultConfig()
 	cfg.ProgramStatusBin = bin
+	cfg.ProgramStatus = runtime.ProgramStatusOn
 	tm := NewTmuxWithConfig(cfg)
 	rec := &stagedRecorder{fakeExecutor: &fakeExecutor{outs: []string{"3.1|/tmp/s"}, out: "%1"}}
 	tm.exec = rec
@@ -820,6 +830,7 @@ func TestUnarmedRespawnUnderLiveSwitchRemovesCapture(t *testing.T) {
 					{"set-option", "-pu", "-t", "%5", programTapOption},
 					{"set-option", "-pu", "-t", "%5", programStatusOption},
 					{"set-option", "-pu", "-t", "%5", programTextOption},
+					{"set-option", "-pu", "-t", "%5", programHoldOption},
 					{"pipe-pane", "-t", "%5"},
 				})...)
 				if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], want) {
@@ -883,5 +894,102 @@ func TestRespawnUnderSwitchOffRemovesOnlyABoundCapture(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A start consults the live switch, not the one its arm was derived under.
+// While the switch is off a declared arm, relay and all, starts exactly as an
+// undeclared one: no relay wrap, no nonce, no tap, no capability gate, on
+// create and on respawn. An arm resolved from config read before the switch
+// went off (ga-f4ovjm.19: relay-wrapped starts for minutes after the flip)
+// is the case this pins.
+func TestLiveSwitchOffArmsNothingWhateverTheArm(t *testing.T) {
+	arm := runtime.ProgramStatusArm{Capture: true, App: "claude-code", Relay: true}
+	for name, setOff := range map[string]func(*Tmux){
+		"configured off":     func(tm *Tmux) { tm.cfg.ProgramStatus = runtime.ProgramStatusOff },
+		"flipped off (live)": func(tm *Tmux) { tm.SetProgramStatusMode(runtime.ProgramStatusOff) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm, rec, warnings, probes := captureTestTmux(t)
+			setOff(tm)
+			rec.outs = []string{"%1"}
+			if err := tm.newSessionWithCommandAndEnv("gc-stale-arm", "/w", "claude", nil, arm); err != nil {
+				t.Fatal(err)
+			}
+			wantCreate := []string{"-u", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-stale-arm", "-c", "/w", "claude"}
+			if !slices.ContainsFunc(rec.calls, func(c []string) bool { return slices.Equal(c, wantCreate) }) {
+				t.Fatalf("create under switch off is not today's argv %q: %q", wantCreate, rec.calls)
+			}
+			if len(rec.staged) != 0 {
+				t.Fatalf("create under switch off staged a list: %q", rec.staged)
+			}
+			rec.calls = nil
+			if err := tm.respawnPaneWithWorkDir("%1", "/w", "claude", arm); err != nil {
+				t.Fatal(err)
+			}
+			wantRespawn := append([]string{"-u"}, tmuxArgvList([][]string{
+				{"respawn-pane", "-k", "-t", "%1", "-c", "/w", "claude"},
+				{"display-message", "-p", "-t", "%1", "#{pane_id}"},
+				{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
+			})...)
+			if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], wantRespawn) {
+				t.Fatalf("respawn under switch off\n got %q\nwant [%q]", rec.calls, wantRespawn)
+			}
+			if *probes != 0 {
+				t.Fatalf("switch off evaluated the capability gate %d times", *probes)
+			}
+			if warnings.Len() != 0 {
+				t.Fatalf("switch off logged capture warnings: %q", warnings.String())
+			}
+		})
+	}
+}
+
+// The other direction: a Tmux built under the switch off whose live switch
+// goes shadow or on arms the next start its arm declares, the relay wrap and
+// the tap both, on create and on respawn, with no rebuild.
+func TestLiveSwitchOnArmsTheNextStart(t *testing.T) {
+	arm := runtime.ProgramStatusArm{Capture: true, App: "claude-code", Relay: true}
+	relayed := shellquote.Join([]string{testCompanion, "relay", "--", testShell, "-c", "claude"})
+	for _, mode := range []runtime.ProgramStatusMode{runtime.ProgramStatusShadow, runtime.ProgramStatusOn} {
+		t.Run(string(mode), func(t *testing.T) {
+			tm, rec, _, _ := captureTestTmux(t)
+			tm.cfg.ProgramStatus = runtime.ProgramStatusOff
+			rec.outs = []string{"%1"}
+			if err := tm.newSessionWithCommandAndEnv("gc-before", "/w", "claude", nil, arm); err != nil {
+				t.Fatal(err)
+			}
+			if got := callsContaining(rec.calls, programstatus.CompanionName); len(got) != 0 || len(rec.staged) != 0 {
+				t.Fatalf("start before the flip armed: calls %q staged %q", got, rec.staged)
+			}
+
+			tm.SetProgramStatusMode(mode)
+			rec.calls, rec.outs, rec.idx = nil, []string{"%2"}, 0
+			if err := tm.newSessionWithCommandAndEnv("gc-after", "/w", "claude", nil, arm); err != nil {
+				t.Fatal(err)
+			}
+			create := rec.calls[0]
+			i := slices.Index(create, programTapOption)
+			if i < 0 {
+				t.Fatalf("create after the flip did not arm: %q", create)
+			}
+			r := strings.TrimSuffix(create[i+1], ".#{pane_id}")
+			want := append([]string{"-u"}, tmuxArgvList([][]string{
+				{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-after", "-c", "/w", relayed},
+				{"set-option", "-p", "-F", "-t", "=gc-after:", programTapOption, r + ".#{pane_id}"},
+				{"pipe-pane", "-O", "-t", "=gc-after:", wantTapCommand(r, "claude-code")},
+			})...)
+			if !slices.Equal(create, want) {
+				t.Fatalf("create after the flip\n got %q\nwant %q", create, want)
+			}
+
+			rec.calls = nil
+			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude", arm); err != nil {
+				t.Fatal(err)
+			}
+			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], relayed) || !slices.Contains(rec.calls[0], programTapOption) {
+				t.Fatalf("respawn after the flip is not relay-wrapped and tapped: %q", rec.calls)
+			}
+		})
 	}
 }

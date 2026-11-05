@@ -98,7 +98,7 @@ func NewProviderWithConfig(cfg Config) *Provider {
 	}
 	// Shadow reads take tap liveness from the cache's last process table,
 	// never refreshing it.
-	tm.shadow.taps = func() programTaps { return p.cache.observation().state.programTaps() }
+	tm.shadow.taps = func() programTaps { return tm.snapshotTaps(p.cache.observation().state) }
 	return p
 }
 
@@ -579,21 +579,23 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if strings.TrimSpace(name) == "" {
 		return runtime.Liveness{}
 	}
-	running := p.cache.IsRunning(name)
+	// A session the snapshot does not hold running (absent, or a corpse) has
+	// no live agent process either, so it answers without reading
+	// GT_PROCESS_NAMES: that read forks tmux once per call.
+	state := p.cache.currentState()
+	if session, ok := state.Sessions[name]; !ok || !session.Running {
+		return runtime.Liveness{}
+	}
 	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
 	if len(processNames) == 0 {
-		return runtime.Liveness{Running: running, Alive: running}
-	}
-	alive := p.cache.ProcessAlive(name, processNames)
-	if alive && !running {
-		running = true
+		return runtime.Liveness{Running: true, Alive: true}
 	}
 	return runtime.Liveness{
-		Running: running,
-		Alive:   alive,
+		Running: true,
+		Alive:   state.processAlive(name, processNames),
 	}
 }
 
@@ -1501,7 +1503,7 @@ type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
-	isRuntimeRunning(name string, processNames []string) bool
+	isRuntimeRunning(name string, processNames []string) (bool, error)
 	killSession(name string) error
 	waitForCommand(ctx context.Context, name string, timeout time.Duration) error
 	acceptStartupDialogs(ctx context.Context, name string) error
@@ -1639,8 +1641,10 @@ func (o *tmuxStartOps) isSessionRunning(name string) bool {
 	return o.tm.IsSessionRunning(name)
 }
 
-func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) bool {
-	return o.tm.IsRuntimeRunning(name, processNames)
+// isRuntimeRunning reports a process table it cannot read as an error
+// wrapping runtime.ErrRuntimeUnavailable, never as a dead agent.
+func (o *tmuxStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
+	return o.tm.runtimeRunning(name, processNames)
 }
 
 func (o *tmuxStartOps) killSession(name string) error {
@@ -1671,21 +1675,17 @@ func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *Runtim
 }
 
 // startupLadderShadower is the start ops' shadow seam for the startup
-// ladder's busy look (startup_ladder); ops that do not implement it record
-// nothing.
+// ladder's decisions, at each send and each busy look (startup_ladder); ops
+// that do not implement it record nothing.
 type startupLadderShadower interface {
-	shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error)
+	shadowStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
 }
 
-// shadowStartupBusy wraps busy to record each look beside the program's
-// record, against a baseline read now, before the ladder's first send. Off
-// shadow, busy is returned as is.
-func (o *tmuxStartOps) shadowStartupBusy(name string, busy func() (bool, error)) func() (bool, error) {
-	s, ok := o.tm.shadowRead(name)
-	if !ok {
-		return busy
-	}
-	return o.tm.shadowStartupBusy(name, s.Baseline(), busy)
+// shadowStartupLadder wraps send and busy to record each ladder decision
+// beside the program's record (Tmux.shadowStartupLadder). Off shadow, both
+// are returned as they are.
+func (o *tmuxStartOps) shadowStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.shadowStartupLadder(name, send, busy)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -2299,12 +2299,13 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		send := func() error { return ops.sendKeys(name, cfg.Nudge) }
 		busy := func() (bool, error) { return ops.paneBusy(name) }
 		if sh, ok := ops.(startupLadderShadower); ok {
-			busy = sh.shadowStartupBusy(name, busy)
+			send, busy = sh.shadowStartupLadder(name, send, busy)
 		}
 		if err := sendStartupNudgeWithRetry(ctx,
-			func() error { return ops.sendKeys(name, cfg.Nudge) },
+			send,
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
 			busy); err != nil {
 			// A resume-mode (or cold-start) session's startup nudge races the
@@ -2553,7 +2554,8 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 // Exceptions:
 //   - dead panes (remain-on-exit corpses) are recycled even without ProcessNames
 //   - if ProcessNames are configured and the agent is dead (zombie), the
-//     zombie session is killed and recreated
+//     zombie session is killed and recreated; an agent whose process table
+//     cannot be read is not dead, and its session is refused like a live one
 //
 // With cfg.FreshOnly there are no exceptions.
 //
@@ -2656,8 +2658,15 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 
-	// We have process names — check if the agent is alive.
-	if ops.isRuntimeRunning(name, cfg.ProcessNames) {
+	// We have process names — check if the agent is alive. A liveness read
+	// that fails proves nothing about the agent: the name is refused as for
+	// a live one, carrying the runtime.ErrRuntimeUnavailable cause, and
+	// nothing is killed, as refuseHeldName fails closed.
+	running, liveErr := ops.isRuntimeRunning(name, cfg.ProcessNames)
+	if liveErr != nil {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q (agent liveness unknown): %w", runtime.ErrSessionExists, name, liveErr))
+	}
+	if running {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
 	}
 
