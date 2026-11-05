@@ -7,8 +7,11 @@
 # aliases, so a CVE id here also covers the GHSA and GO ids of that advisory.
 #
 # Rules, enforced by TestOSVScannerAllowlistMirrorsTrivyWaivers
-# (scripts/security_scan_allowlist_test.go):
+# (scripts/security_scan_allowlist_test.go) and the gate itself:
 #   - every entry has an id, an ignoreUntil date and a reason;
+#   - the file holds nothing but [[IgnoredVulns]] entries: osv-scanner would
+#     apply any other setting (such as [[PackageOverrides]]) on its own and
+#     hide findings with no expiry, so the gate refuses it;
 #   - every entry mirrors a documented waiver in .trivyignore.yaml with the
 #     same id and the same expiry date. The rationale lives there; the reason
 #     here is a one-line pointer. A risk is accepted once, in one reviewed

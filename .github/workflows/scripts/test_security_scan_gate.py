@@ -76,6 +76,20 @@ class AllowlistTests(unittest.TestCase):
         with self.assertRaises(gate.GateInputError):
             self.load("[[IgnoredVulns]\n")
 
+    def test_rejects_package_overrides(self) -> None:
+        # osv-scanner would apply it natively and hide whole packages with no expiry or reason.
+        with self.assertRaisesRegex(gate.GateInputError, "PackageOverrides"):
+            self.load('[[PackageOverrides]]\nname = "grpc"\nignore = true\n')
+
+    def test_rejects_any_other_top_level_key(self) -> None:
+        with self.assertRaisesRegex(gate.GateInputError, "GoVersionOverride"):
+            self.load('GoVersionOverride = "1.26.10"\n' + ALLOWLIST)
+
+    def test_rejects_ignored_vulns_that_is_not_an_array_of_tables(self) -> None:
+        for text in ('IgnoredVulns = "CVE-2026-1"\n', 'IgnoredVulns = ["CVE-2026-1"]\n'):
+            with self.subTest(text=text), self.assertRaisesRegex(gate.GateInputError, "IgnoredVulns"):
+                self.load(text)
+
     def test_expiry_day_is_still_active(self) -> None:
         waiver = gate.Waiver("X", TODAY, "r")
         self.assertTrue(waiver.active(TODAY))
@@ -232,6 +246,16 @@ class MainTests(unittest.TestCase):
         code, _, err = self.run_main(self.tmp, "--osv", str(self.tmp / "absent.json"))
         self.assertEqual(code, 2)
         self.assertIn("absent.json", err)
+
+    def test_malformed_allowlist_is_exit_two(self) -> None:
+        (self.tmp / "osv.json").write_text(json.dumps(osv_report()), encoding="utf-8")
+        for text in ("[[IgnoredVulns]\n", "[[PackageOverrides]]\nname = \"grpc\"\nignore = true\n", 'IgnoredVulns = "CVE-2026-1"\n'):
+            with self.subTest(text=text):
+                (self.tmp / "osv-scanner.toml").write_text(text, encoding="utf-8")
+                code, out, err = self.run_main(self.tmp, "--osv", str(self.tmp / "osv.json"))
+                self.assertEqual(code, 2)
+                self.assertEqual(out, "")
+                self.assertIn("osv-scanner.toml", err)
 
     def test_malformed_module_spec_is_exit_two(self) -> None:
         code, _, err = self.run_main(self.tmp, "--govulncheck", "no-equals-sign")

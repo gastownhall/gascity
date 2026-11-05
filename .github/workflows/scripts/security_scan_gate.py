@@ -21,8 +21,12 @@ osv-scanner also reads natively). An expired entry accepts nothing, so a
 waiver whose date passes turns the scheduled run red instead of silently
 staying accepted.
 
+The allowlist may hold nothing but [[IgnoredVulns]] entries: osv-scanner
+would apply any other setting (such as [[PackageOverrides]]) on its own and
+hide findings with no expiry, so the gate refuses it.
+
 Exit status: 0 when nothing blocks, 1 when something does, 2 when a report
-or the allowlist cannot be read.
+or the allowlist cannot be read or is malformed.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ MEDIUM_CVSS = 4.0
 MALICIOUS = "MALICIOUS"
 BLOCKING_LABELS = frozenset({"HIGH", "CRITICAL", MALICIOUS})
 REACHABLE = "REACHABLE"
+ALLOWLIST_KEY = "IgnoredVulns"
 
 
 class GateInputError(Exception):
@@ -85,9 +90,20 @@ def load_allowlist(path: Path) -> list[Waiver]:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as err:
         raise GateInputError(f"reading allowlist {path}: {err}") from err
+    # osv-scanner applies every key in this file itself, so any other setting (PackageOverrides
+    # in particular) would hide findings from the gate with no expiry and no reason.
+    unexpected = sorted(set(data) - {ALLOWLIST_KEY})
+    if unexpected:
+        raise GateInputError(
+            f"{path}: only [[{ALLOWLIST_KEY}]] waivers are allowed, found {', '.join(unexpected)}; "
+            "other osv-scanner settings hide findings without an expiry"
+        )
+    entries = data.get(ALLOWLIST_KEY, [])
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise GateInputError(f"{path}: {ALLOWLIST_KEY} must be an array of tables ([[{ALLOWLIST_KEY}]])")
     waivers = []
-    for index, entry in enumerate(data.get("IgnoredVulns", [])):
-        where = f"{path} IgnoredVulns[{index}]"
+    for index, entry in enumerate(entries):
+        where = f"{path} {ALLOWLIST_KEY}[{index}]"
         vuln_id = entry.get("id")
         until = entry.get("ignoreUntil")
         reason = entry.get("reason")
