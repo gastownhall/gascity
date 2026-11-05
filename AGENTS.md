@@ -38,6 +38,8 @@ next to that code; read the matching file before changing it.
 | Gate processes | `internal/convergence/AGENTS.md` |
 | Go imports, new files, `scripts/`, test runners or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
+| Acceptance helpers | `test/acceptance/helpers/AGENTS.md` |
+| OSC companion | `cmd/gc-osc7501/AGENTS.md` |
 | `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
 | New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
 | A controller or session reconciler incident | `engdocs/contributors/reconciler-debugging.md` (use `gc trace`) |

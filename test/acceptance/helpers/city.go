@@ -71,13 +71,15 @@ func NewCityAt(t *testing.T, env *Env, cityDir string) *City {
 }
 
 // Init runs gc init with the given provider (non-interactive), retrying once
-// on pinned bd's proxy-open stall (runInit).
-func (c *City) Init(provider string) {
+// on pinned bd's proxy-open stall (runInit). initFlags explicitly select any
+// non-default topology a fixture needs; without them this tests ordinary init.
+func (c *City) Init(provider string, initFlags ...string) {
 	c.t.Helper()
 	args := []string{"init", "--skip-provider-readiness"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
 	}
+	args = append(args, initFlags...)
 	args = append(args, c.Dir)
 	out, err := c.runInit(args...)
 	if err != nil {
@@ -89,13 +91,15 @@ func (c *City) Init(provider string) {
 }
 
 // InitNoStart runs gc init without registering or starting the city, retrying
-// once on pinned bd's proxy-open stall (runInit).
-func (c *City) InitNoStart(provider string) {
+// once on pinned bd's proxy-open stall (runInit). initFlags have the same
+// explicit-topology contract as Init.
+func (c *City) InitNoStart(provider string, initFlags ...string) {
 	c.t.Helper()
 	args := []string{"init", "--skip-provider-readiness", "--no-start"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
 	}
+	args = append(args, initFlags...)
 	args = append(args, c.Dir)
 	out, err := c.runInit(args...)
 	if err != nil {

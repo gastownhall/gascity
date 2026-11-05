@@ -337,7 +337,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(t, gcHome, runtimeDir, true)
+	env := integrationNativeEnvFor(t, gcHome, runtimeDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -524,7 +524,7 @@ func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(t, gcHome, runtimeDir, true)
+	env := integrationNativeEnvFor(t, gcHome, runtimeDir)
 	// This test covers the supervisor's async unregister contract, not
 	// provider startup. Keep the city runtime deterministic so unregister
 	// does not race provider resume/startup-key handling.
@@ -792,7 +792,7 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(t, gcHome, runtimeDir, true)
+	env := integrationNativeEnvFor(t, gcHome, runtimeDir)
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(providerBinDir, envMap["PATH"]))
 	env = replaceEnv(env, "GC_SESSION", "fake")

@@ -218,8 +218,12 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	// Building the check must not open relocated storage before the stopped
+	// store gate and --check selection can suppress it.
+	var once sync.Once
+	var resolveStores func(orders.Order) ([]beads.OrdersStore, error)
 	return func(order orders.Order) (time.Time, error) {
+		once.Do(func() { resolveStores = cachedOrderHistoryStoresResolver(cityPath, cfg, stderr) })
 		stores, err := resolveStores(order)
 		if err != nil {
 			return time.Time{}, err
@@ -366,7 +370,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
-		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
+		registerCityStoreCheck(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPAdoptionDoctorCheck(cityPath, cfg, exec.LookPath))

@@ -1,8 +1,11 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "fakeclaude_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "main.go",
+        "native_transcript.go",
+    ],
     importpath = "github.com/gastownhall/gascity/test/conversationlane/fakeclaude",
     visibility = ["//visibility:private"],
     deps = ["@org_golang_x_term//:term"],
@@ -12,6 +15,19 @@ go_binary(
     name = "fakeclaude",
     embed = [":fakeclaude_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "fakeclaude_test",
+    srcs = [
+        "native_transcript_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":fakeclaude_lib"],
+    deps = [
+        "//internal/sessionlog",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

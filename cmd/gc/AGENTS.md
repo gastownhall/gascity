@@ -21,3 +21,16 @@ when the controller start hash is absent. Keep the retained native conversation
 and the stored message; first-start classification alone does not authorize
 resending it. Fresh conversation launch and explicit fresh-wake input remain
 unchanged.
+
+Doctor's prompt-budget check resolves storage-backed query topology. Register it
+through the store gate so stopped and suspended scopes remain cold, including
+when doctor runs with `--fix`; report the existing explicit not-checked reason.
+
+Whole-city suspension retires every journaled provider-owned scope, including
+detached storage bindings, after drain settles. Reuse ordinary stop's scope
+inventory and existing ownership and suspension fences. Rig-only suspension
+must leave unrelated detached scopes alone; an unreadable inventory fails cold.
+
+Construct doctor order-history resolvers only when their gated lookup runs.
+Registration and `--check` selection must not open relocated storage before
+a stopped or suspended store can be excluded.

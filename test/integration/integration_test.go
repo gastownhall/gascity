@@ -17,6 +17,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +57,7 @@ var gcBinary string
 var (
 	bdBinary              string
 	realBDBinary          string
+	rawPinnedBDBinary     string
 	doltBinary            string
 	integrationToolBinDir string
 )
@@ -257,6 +259,7 @@ func TestMain(m *testing.M) {
 	// forked by gc — goes through this wrapper, which re-homes bd under the run's
 	// temp dir: bd must never resolve the operator's ~/.beads (a user-level
 	// dolt.shared-server: true starts the host-wide shared Dolt server).
+	rawPinnedBDBinary = realBDBinary
 	wrappedRealBD := filepath.Join(tmpDir, "bd-real", "bd")
 	if err := toolhome.WriteWrapper(wrappedRealBD, filepath.Join(tmpDir, "bd-tool-home"), realBDBinary); err != nil {
 		panic("integration: wrapping real bd: " + err.Error())
@@ -1657,7 +1660,23 @@ func newIsolatedCommandEnvWithBD(t *testing.T, useDolt, directBD bool) []string 
 	t.Helper()
 
 	gcHome, _, env := newIsolatedEnvRoot(t, useDolt)
+	return startIsolatedCommandEnvWithBD(t, gcHome, env, directBD)
+}
 
+// newIsolatedCommandEnvNativeBD runs ordinary default split cities with the
+// real Go bd under the same private HOME and platform-service isolation.
+func newIsolatedCommandEnvNativeBD(t *testing.T) []string {
+	t.Helper()
+	gcHome, _, env := newIsolatedEnvRoot(t, true)
+	env, err := integrationEnvWithNativeBD(env, rawPinnedBDBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startIsolatedCommandEnvWithBD(t, gcHome, env, false)
+}
+
+func startIsolatedCommandEnvWithBD(t *testing.T, gcHome string, env []string, directBD bool) []string {
+	t.Helper()
 	root := filepath.Dir(gcHome)
 	shimDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
@@ -3039,4 +3058,41 @@ func runfilesBinary(rel string) string {
 		}
 	}
 	return ""
+}
+
+// integrationEnvWithNativeBD gives default split fixtures the actual Go bd.
+// The file-store controls retain their shim and tool-home wrapper. Refuse any
+// environment that could send the unwrapped binary to operator-owned state.
+func integrationEnvWithNativeBD(env []string, rawBD string) ([]string, error) {
+	vars := parseEnvList(env)
+	home := vars["HOME"]
+	gcHome := vars["GC_HOME"]
+	if !filepath.IsAbs(gcHome) || filepath.Clean(home) != filepath.Clean(integrationIsolatedHome(gcHome)) || vars[supervisorIsolatedHomeEnv] != "1" {
+		return nil, fmt.Errorf("native integration bd requires the isolated GC_HOME/HOME contract")
+	}
+	for _, key := range toolhome.Vars {
+		if key != "HOME" && vars[key] != "" {
+			return nil, fmt.Errorf("native integration bd refuses inherited %s", key)
+		}
+	}
+	if _, err := buildinfo.ReadFile(rawBD); err != nil {
+		return nil, fmt.Errorf("native integration bd needs the real Go binary: %w", err)
+	}
+	dir, err := os.MkdirTemp(gcHome, "native-bd-bin-")
+	if err != nil {
+		return nil, fmt.Errorf("staging native integration bd: %w", err)
+	}
+	if err := os.Symlink(rawBD, filepath.Join(dir, "bd")); err != nil {
+		return nil, fmt.Errorf("linking native integration bd: %w", err)
+	}
+	return replaceEnv(env, "PATH", prependPath(dir, vars["PATH"])), nil
+}
+
+func integrationNativeEnvFor(t *testing.T, gcHome, runtimeDir string) []string {
+	t.Helper()
+	env, err := integrationEnvWithNativeBD(integrationEnvFor(t, gcHome, runtimeDir, true), rawPinnedBDBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
 }

@@ -5,7 +5,8 @@
 //
 //	fakeclaude --state <dir> [claude flags...]
 //
-// The flags gc passes the claude family are ignored. The program runs as
+// The native --session-id/--resume key names the fixture transcript. Other
+// Claude flags are ignored. The program runs as
 // the session's agent in a tmux pane under the name claude, so gc's process
 // probes find it.
 //
@@ -30,7 +31,7 @@
 // <dir>/turn. Every event is appended to <dir>/events.jsonl as one JSON line
 // (Event): ready, turn_start, turn_end, submit, queued, escape, and
 // input_during_turn for any input but a bare Enter that arrives while a turn
-// runs.
+// runs. Its keyed JSONL records only these scripted turns, never model work.
 package main
 
 import (
@@ -103,7 +104,7 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: fakeclaude --state <dir> [claude flags...]") //nolint:errcheck // usage
 		return 1
 	}
-	u, err := newTUI(dir, os.Stdout)
+	u, err := newTUI(dir, os.Stdout, args...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeclaude: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -140,13 +141,18 @@ type tui struct {
 	// idle.
 	turnStart, turnEnd time.Time
 	lastDraw           time.Time
+	native             *nativeTranscript
 }
 
-func newTUI(dir string, out io.Writer) (*tui, error) {
+func newTUI(dir string, out io.Writer, args ...string) (*tui, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating the state dir: %w", err)
 	}
-	return &tui{dir: dir, out: out, width: defaultWidth, height: defaultHeight}, nil
+	native, err := newNativeTranscript(args)
+	if err != nil {
+		return nil, err
+	}
+	return &tui{dir: dir, out: out, width: defaultWidth, height: defaultHeight, native: native}, nil
 }
 
 // loop draws the screen and serves input and the clock until stdin closes
@@ -262,6 +268,9 @@ func (u *tui) endTurn(now time.Time) error {
 	}
 	for _, q := range u.queued {
 		u.transcript = append(u.transcript, promptPrefix+q)
+	}
+	if err := u.native.start(strings.Join(u.queued, "\n")); err != nil {
+		return err
 	}
 	u.queued = nil
 	u.startTurn(now, replyTurn)
@@ -425,6 +434,18 @@ func (u *tui) draw() error {
 
 // record appends e to events.jsonl.
 func (u *tui) record(e Event) error {
+	var nativeErr error
+	switch e.Event {
+	case "turn_start":
+		nativeErr = u.native.start("scripted control turn")
+	case "submit":
+		nativeErr = u.native.start(e.Text)
+	case "turn_end":
+		nativeErr = u.native.end()
+	}
+	if nativeErr != nil {
+		return fmt.Errorf("recording scripted native turn: %w", nativeErr)
+	}
 	e.At = time.Now().UTC().Format(time.RFC3339Nano)
 	line, err := json.Marshal(e)
 	if err != nil {

@@ -207,8 +207,22 @@ var stopSuspendedScopeStore = func(ctx context.Context, cityPath, scopeRoot stri
 // the city's proxy root is left alone unless the city is suspended too:
 // stopping it would stop the pair serving the city and every other rig.
 func (cr *CityRuntime) retireSuspendedScopes(ctx context.Context, suspended beadsScopeSuspension, drained func(scopeRoot string) bool) {
-	for _, root := range cr.beadsScopeRoots() {
+	roots := cr.beadsScopeRoots()
+	if suspended.City() {
+		ownedRoots, err := providerOwnedLifecycleScopeRoots(cr.cityPath, "stop")
+		if err != nil {
+			fmt.Fprintf(cr.stderr, "suspended city scope inventory: %v; leaving stores running\n", err) //nolint:errcheck // best-effort stderr
+			return
+		}
+		roots = append(roots, ownedRoots...)
+	}
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
 		key := normalizePathForCompare(root)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
 		if !suspended.Suspended(root) {
 			delete(cr.drainedLastTick, key)
 			continue

@@ -147,6 +147,17 @@ func TestRigAddRecoveryEligibility(t *testing.T) {
 	if err := recoverableShape(pinned, nil); err == nil {
 		t.Error("a topology that pins an endpoint in its own Env must not recover")
 	}
+	for _, args := range [][]string{
+		{"--beads-transport", "direct", "--beads-target", "local"},
+		{"--beads-transport", "proxied", "--beads-target", "external"},
+		{"--beads-transport", "proxied", "--beads-target", "local", "--dolt-port", "3307"},
+	} {
+		selected := m1
+		selected.InitArgs = func(*ExternalDolt) []string { return args }
+		if err := recoverableShape(selected, nil); err == nil {
+			t.Errorf("another or pinned selector %v must not recover", args)
+		}
+	}
 }
 
 type addStep struct {

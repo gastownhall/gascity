@@ -48,7 +48,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	writeSupervisorConfig(t, gcHome, port)
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := append(integrationEnvFor(t, gcHome, runtimeDir, true), "GC_SESSION=subprocess")
+	env := append(integrationNativeEnvFor(t, gcHome, runtimeDir), "GC_SESSION=subprocess")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -273,7 +273,7 @@ description = "Read and complete {{issue}}."
 		"target":     targetAgent,
 		"vars":       map[string]string{"issue": rootBead.ID},
 	}, http.StatusOK)
-	exerciseLiveContractFormulasAndWorkflows(t, baseURL, validator, cityBase, formulaName, targetAgent, rigName, rootBead.ID, runID)
+	exerciseLiveContractFormulasAndWorkflows(t, baseURL, validator, cityBase, cityName, formulaName, targetAgent, rigName, rootBead.ID, runID)
 	orderScopedName := exerciseLiveContractOrders(t, baseURL, validator, bin, env, cityDir, cityBase, rigName, runID)
 	conversation := exerciseLiveContractExtmsg(t, baseURL, validator, cityBase, sessionID, runID)
 
@@ -904,7 +904,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v *apico
 	}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(killID)+"/close?delete=true", nil, http.StatusOK)
 }
 
-func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, formulaName, targetAgent, rigName, rootBeadID, runID string) {
+func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, cityName, formulaName, targetAgent, rigName, rootBeadID, runID string) {
 	t.Helper()
 	formulas := liveContractJSON[struct {
 		Items []struct {
@@ -927,7 +927,7 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *a
 	liveContractRequestOneOf(t, baseURL, v, http.MethodPost, cityBase+"/sling", map[string]any{
 		"target": targetAgent,
 	}, []int{http.StatusOK, http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusNotFound})
-	workflow := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
+	workflowBody := map[string]any{
 		"description": "Workflow fixture created by TestGCLiveContract_BeadsAndEvents",
 		"labels":      []string{"real-world-app-contract", "workflow"},
 		"metadata": map[string]string{
@@ -936,15 +936,28 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *a
 			"gc.formula_contract": "graph.v2",
 			"gc.workflow_id":      "real-world-app-workflow-" + runID,
 		},
-		"rig":   rigName,
 		"title": "real-world app contract workflow " + runID,
 		"type":  "convoy",
-	}, http.StatusCreated)
+	}
+	// Graph storage is city-owned even while its input work lives in a rig.
+	workflowBody["rig"] = rigName
+	refused := liveContractRequest(t, baseURL, v, http.MethodPost, cityBase+"/beads", workflowBody, http.StatusBadRequest)
+	if !strings.Contains(string(refused), "rig must be empty") {
+		t.Fatalf("graph rig refusal = %s", refused)
+	}
+	delete(workflowBody, "rig")
+	workflow := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", workflowBody, http.StatusCreated)
 	workflowID := workflow.ID
-	liveContractJSON[map[string]any](t, baseURL, v, http.MethodGet, cityBase+"/workflow/"+url.PathEscape(workflowID)+"?scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+	snapshot := liveContractJSON[struct {
+		ScopeKind string `json:"scope_kind"`
+		ScopeRef  string `json:"scope_ref"`
+	}](t, baseURL, v, http.MethodGet, cityBase+"/workflow/"+url.PathEscape(workflowID)+"?scope_kind=city&scope_ref="+url.QueryEscape(cityName), nil, http.StatusOK)
+	if snapshot.ScopeKind != "city" || snapshot.ScopeRef != cityName {
+		t.Fatalf("graph workflow scope = %+v, want city %s", snapshot, cityName)
+	}
 	liveContractJSON[struct {
 		Status string `json:"status"`
-	}](t, baseURL, v, http.MethodDelete, cityBase+"/workflow/"+url.PathEscape(workflowID)+"?scope_kind=rig&scope_ref="+url.QueryEscape(rigName), nil, http.StatusOK)
+	}](t, baseURL, v, http.MethodDelete, cityBase+"/workflow/"+url.PathEscape(workflowID)+"?scope_kind=city&scope_ref="+url.QueryEscape(cityName), nil, http.StatusOK)
 
 	convoyItem := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "Disposable convoy item fixture created by TestGCLiveContract_BeadsAndEvents",
@@ -1030,11 +1043,12 @@ func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spe
 		t.Fatalf("order history after gc order run = %+v, want has_output false before any output is attached", history)
 	}
 	orderRunID := history.Entries[0].BeadID
-	t.Cleanup(func() {
-		if out, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "delete", "--force", orderRunID); err != nil {
-			t.Errorf("delete order run record %s: %v\n%s", orderRunID, err, out)
-		}
-	})
+	// This order record belongs to the infra binding. Generic bd deletion must
+	// refuse it; the isolated city's ordinary teardown owns its final cleanup.
+	out, err := runCommand(cityDir, env, 60*time.Second, bin, "bd", "delete", "--force", orderRunID)
+	if err == nil || !strings.Contains(out, "infra class binding") || !strings.Contains(out, "not served in process") {
+		t.Fatalf("generic delete did not refuse the infra-owned order record %s: %v\n%s", orderRunID, err, out)
+	}
 
 	// Dispatch records the run, not the exec's stdout; the history detail
 	// serves a captured output, which an operator attaches with bd.

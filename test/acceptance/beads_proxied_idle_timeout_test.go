@@ -90,7 +90,7 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 
 	// No controller: nothing but this test may touch the scopes, so the only
 	// thing that can retire a proxy is its own idle watcher.
-	city.InitNoStart("claude")
+	initProxiedSingleStore(t, city, true)
 	if out, err := city.GC("rig", "add", rigDir); err != nil {
 		t.Fatalf("gc rig add: %v\n%s", err, out)
 	}

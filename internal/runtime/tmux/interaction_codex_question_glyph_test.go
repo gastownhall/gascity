@@ -191,3 +191,103 @@ func TestCodexCompletedAsyncQuestionStillRequiresMatchingLiveQueue(t *testing.T)
 		})
 	}
 }
+
+// Captured unchanged from Codex0.162.1 on aa8ec2d44, case10 observation0082.
+// The live queue showed a20s timer while the same native request remained unanswered.
+// GC returned supported:true without a pending interaction for this screen.
+// Screen SHA256:f81bb50c89091271e0f403260d63b6d03d657113c8062eea42b71170fa26a019.
+const codexQuestionAgedNativeScreen = `qualification animal?", "options": ["Otter", "Owl"]}]. Immediately after
+  acceptance, while it remains open, invoke clock.sleep exactly ONCE with
+  duration_ms 60000. Use no other tools. Do not answer yourself or substitute
+  chat. After sleep finishes and the real native answer arrives, reply exactly
+  RFC8191_RECOVERY_16751b31bcb643d39842bf82191c0f31_ followed by its animal
+  label. Never repeat either tool.
+
+
+• Which qualification animal?
+
+  • Otter
+  • Owl
+
+• Working (14s • esc to interrupt)
+
+• Queued follow-up inputs
+  ? 1 question · 20s
+    ⇧← to answer
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol medium · ~/rfc8191/cities/rfc-questions-7ffcbbc787f74ad286603bacb…
+  ? for shortcuts`
+
+func TestCodexQuestionAgedNativeQueuePreservesPendingAndMessageGuard(t *testing.T) {
+	tm, ex := nativeQuestionTmux(t, codexQuestionAgedNativeScreen)
+	path := nativeQuestionRollout(t)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.ReplaceAll(string(data), "Which animal should be the test mascot?", "Which qualification animal?"))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tm.codexRolloutHeld = func(int) string { return path }
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.RequestID != "tmux-codex-question-call-own-question-0" || !slices.Equal(pending.Options, []string{"Otter", "Owl"}) {
+		t.Fatalf("aged live native request disappeared: pending=%+v err=%v", pending, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("aged request permitted ordinary input: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestCodexQuestionTimerRequiresLiveNativeQueueAndMatchingIdentity(t *testing.T) {
+	for label, change := range map[string]func(string) string{
+		"no heading": func(s string) string {
+			return strings.ReplaceAll(s, "• Queued follow-up inputs", "• Previous output")
+		},
+		"no answer hint":    func(s string) string { return strings.ReplaceAll(s, "⇧← to answer", "answer in chat") },
+		"invalid duration":  func(s string) string { return strings.ReplaceAll(s, " · 20s", " · later") },
+		"negative duration": func(s string) string { return strings.ReplaceAll(s, " · 20s", " · -20s") },
+		"trailing prose":    func(s string) string { return strings.ReplaceAll(s, " · 20s", " · 20s discussed earlier") },
+	} {
+		t.Run(label, func(t *testing.T) {
+			tm, ex := nativeQuestionTmux(t, change(codexQuestionAgedNativeScreen))
+			tm.codexRolloutHeld = func(int) string { return nativeQuestionRollout(t) }
+			if pending, err := tm.Pending("q"); pending != nil || err != nil {
+				t.Fatalf("invalid live-queue shape: pending=%+v err=%v", pending, err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+	for _, mode := range []string{"no rollout", "count mismatch", "resolved request"} {
+		t.Run(mode, func(t *testing.T) {
+			pane := codexQuestionAgedNativeScreen
+			if mode == "count mismatch" {
+				pane = strings.ReplaceAll(pane, "? 1 question", "? 2 questions")
+			}
+			tm, ex := nativeQuestionTmux(t, pane)
+			path := nativeQuestionRollout(t)
+			if mode == "resolved request" {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tm.codexRolloutHeld = func(int) string {
+				if mode == "no rollout" {
+					return ""
+				}
+				return path
+			}
+			if pending, err := tm.Pending("q"); pending != nil || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("unowned or inconsistent timed queue: pending=%+v err=%v", pending, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: "tmux-codex-question-call-own-question-0", Action: "answer", Text: "Otter"}); err == nil {
+				t.Fatal("unowned or inconsistent queue accepted an answer")
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}

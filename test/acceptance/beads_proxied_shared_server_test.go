@@ -60,7 +60,7 @@ func TestBeadsProxiedIgnoresUserLevelSharedServer(t *testing.T) {
 		}
 	})
 
-	city.Init("claude")
+	initProxiedSingleStore(t, city, false)
 	city.RigAdd(rigDir, "")
 
 	for _, scope := range []struct{ label, root string }{{"city", cityRoot}, {"rig", rigDir}} {

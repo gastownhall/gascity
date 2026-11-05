@@ -40,7 +40,7 @@ func bdDoltInRig(cityDir, rigDir string, args ...string) (string, error) {
 func TestCleanInstallTutorialPath(t *testing.T) {
 	requireDoltIntegration(t)
 
-	env := newIsolatedCommandEnv(t, true)
+	env := newIsolatedCommandEnvNativeBD(t)
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(t.TempDir(), cityName)
 	registerIntegrationDoltSQLServerCleanup(t, cityDir)

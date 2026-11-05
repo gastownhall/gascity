@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	codexQueuedQuestionCount = regexp.MustCompile(`^[?？] (\d+) questions?$`)
+	codexQueuedQuestionCount = regexp.MustCompile(`^[?？] (\d+) questions?(?: · [0-9]+s)?$`)
 	codexQuestionPosition    = regexp.MustCompile(`^([1-9][0-9]*) of ([1-9][0-9]*)$`)
 )
 

@@ -2068,12 +2068,37 @@ unrelated Tier A flows.
 
 #### Beads topology tests (`GC_ACCEPTANCE_BD_BIN`, `GC_ACCEPTANCE_LEGACY_GC_BIN`)
 
-Two groups of Tier A tests drive a real `bd` and a real `dolt` instead of the
+Three groups of Tier A tests drive a real `bd` and a real `dolt` instead of the
 hermetic providers: the `TestBeadsProxiedDefault*` tests, which prove the
-proxied-local default (independent top-level tests, so the sharded Bazel lane
-can spread them), and `TestBeadsInitTopologyMatrix`, which walks every
-supported way to initialise a beads scope. Both skip typed when their tooling is absent, so the
-default `make test-acceptance` run is unaffected.
+proxied-local controls (independent top-level tests, so the sharded Bazel lane
+can spread them), the ordinary factory storage front doors, and
+`TestBeadsInitTopologyMatrix`, which walks every supported way to initialise a
+beads scope. The Bazel acceptance targets pin bd and Dolt and require their
+tooling preconditions; a typed missing-tool skip in an offline run is not
+conformance evidence.
+
+Recorder-backed storage controls explicitly select `--beads-transport proxied
+--beads-target local` and verify that every class remains in the work store
+before counting forks. This preserves the factory pack while selecting the
+single-store compatibility shape. `TestBeadsFactoryDefaultStorageFrontDoors`
+separately exercises ordinary no-selector initialization with bd's real binary:
+split ownership, public/default-rig imports, front-door writes, restart, and
+stopped doctor with and without `--fix`. A control's fork census is not a
+measurement of the split default. See the
+[acceptance helper rules](test/acceptance/helpers/AGENTS.md).
+
+Binary API integration fixtures that create the ordinary split default stage
+the real pinned Go `bd` first on PATH under their isolated HOME. File-store
+controls keep their shim/tool-home wrapper. Initialization deliberately strips
+`GC_*` variables; do not pass test-only shim controls through production or
+weaken the Go-build-information check.
+
+Successful schema probes remove their temporary databases. Failed probes retain
+their original directory and report its path with the child's diagnostic. Under
+Bazel they also copy it into `TEST_UNDECLARED_OUTPUTS_DIR` before the private
+namespace is destroyed, so the failure can be investigated and exported. Keep bidirectional schema parity and
+the original 60-second bound; retaining evidence does not turn a failed probe
+into a pass.
 
 | variable | selects | who needs it |
 | --- | --- | --- |
@@ -2319,6 +2344,17 @@ its Bazel target, for example:
 ```bash
 bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_'
 ```
+
+The default split API, live-contract, tutorial and routed-query fixtures put
+an actual pinned Go `bd` first on PATH only under their private GC_HOME/HOME.
+Their native environment helper preserves the platform-service isolation and
+file-shim fallback; file-store controls retain the tool-home wrapper.
+
+The busy Claude lane fixture writes its own scripted turns under the exact
+`--session-id`/`--resume` key. An idle screen alone creates no transcript proof.
+Keep the 60-second busy turn and three exactly-once submissions, and exercise
+the separate screen-only boundary regressions. This fixture does not qualify
+an authenticated provider or model request.
 
 **Supervisor binary smoke test** (`test/integration/huma_binary_test.go`):
 builds `gc`, boots the supervisor against an isolated `GC_HOME`, waits

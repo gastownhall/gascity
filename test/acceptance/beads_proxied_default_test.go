@@ -1,9 +1,11 @@
 //go:build acceptance_a
 
-// Proxied-local default acceptance test.
+// Proxied-local storage controls and ordinary factory-default acceptance.
 //
-// This is the front-door proof for the beads v1.3.0 proxied-local
-// default: a fresh `gc init` with no transport selector must produce a store
+// The work-store controls explicitly select proxied/local so their recorder
+// remains compatible with a single-store city. Ordinary no-selector factory
+// coverage separately proves relocated infrastructure using bd's real binary.
+// In both shapes, the work store must produce a store
 // whose Dolt process belongs to bd (a `bd db-proxy-child` supervising a
 // `dolt sql-server` under the scope's proxy root), and every ordinary command
 // — doctor, bd, rig add, start, status, stop — must work against it and leave
@@ -144,20 +146,24 @@ func proxiedEnv(t *testing.T, bdPath, doltPath string) *helpers.Env {
 	return env
 }
 
-// proxiedEnvWithBD is proxiedEnv plus the bd it put on PATH: the tool-home
-// wrapper around bdPath (helpers.LinkBeadsTooling), which is the bd anything
-// standing in for BD_BIN must exec so the operator's HOME never reaches bd.
+// proxiedEnvWithBD returns the environment and its tool-home wrapper. The
+// environment follows the base's real-bd mode; recorders still exec the wrapper
+// so later HOME changes cannot expose the operator's state to an unwrapped bd.
 func proxiedEnvWithBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, string) {
 	t.Helper()
 	linkDir := filepath.Join(helpers.TempDir(t), "bin")
-	wrappedBD := helpers.LinkBeadsTooling(t, testEnv, linkDir, bdPath, doltPath)
 	env := testEnv.Clone()
+	wrappedBD := helpers.LinkBeadsTooling(t, env, linkDir, bdPath, doltPath)
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)
-	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
+	env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
-		Without(proxiedNativeFlagEnv), wrappedBD
+		Without(proxiedNativeFlagEnv)
+	if env.RunsRealBD() {
+		env.WithRealBD(bdPath)
+	}
+	return env, wrappedBD
 }
 
 // proxiedNativeFlagEnv is PR2's rollout flag: native reads over bd's proxy,
@@ -793,7 +799,7 @@ func createNamedGitRig(t *testing.T, name string) string {
 // proxied-local default it must produce.
 func (p *proxiedDefaultCity) initDefault(t *testing.T) {
 	t.Helper()
-	p.city.Init("claude")
+	initProxiedSingleStore(t, p.city, false)
 
 	assertProxiedScope(t, p.env, p.cityRoot, "city")
 
@@ -1389,7 +1395,7 @@ func TestBeadsProxiedDefaultLegacyManagedCityUnchanged(t *testing.T) {
 	env, legacy, legacyRoot, legacyRig := p.env, p.city, p.cityRoot, p.rigs["legacy-rig"]
 
 	out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
-		"--provider", "claude", legacyRoot)
+		"--provider", "claude", "--beads-transport", "proxied", "--beads-target", "local", legacyRoot)
 	if err != nil {
 		t.Fatalf("gc init: %v\n%s", err, out)
 	}
@@ -1600,7 +1606,7 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			t.Errorf("the fork-gate city's processes outlived the lane:\n%s", strings.Join(leaked, "\n"))
 		}
 	})
-	city.InitNoStart("claude")
+	initProxiedSingleStore(t, city, true)
 
 	t.Run("precondition-gc-initialised", func(t *testing.T) {
 		assertProxiedScope(t, env, cityRoot, "the fork-gate city")

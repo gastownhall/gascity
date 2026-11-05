@@ -2635,7 +2635,8 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 
 func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testing.T) {
 	fe := &fakeExecutor{
-		errs: []error{errors.New("command too long")},
+		// Spend first-input authority before the literal send fails.
+		errs: []error{nil, errors.New("command too long")},
 	}
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
@@ -2645,19 +2646,21 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
-	if len(fe.calls) != 3 {
-		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
+	if len(fe.calls) != 5 {
+		t.Fatalf("tmux calls = %d, want 5: %#v", len(fe.calls), fe.calls)
 	}
-	first := strings.Join(fe.calls[0], " ")
+	assertBootstrapSpendCall(t, fe.calls[0], "%1")
+	first := strings.Join(fe.calls[1], " ")
 	if !strings.Contains(first, "send-keys") || !strings.Contains(first, "-l") {
-		t.Fatalf("first call = %v, want literal send-keys", fe.calls[0])
+		t.Fatalf("first input call = %v, want literal send-keys", fe.calls[1])
 	}
-	assertTmuxCommand(t, fe.calls[1], "load-buffer")
-	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
-	third := strings.Join(fe.calls[2], "\x00")
+	assertTmuxCommand(t, fe.calls[2], "load-buffer")
+	assertBootstrapSpendCall(t, fe.calls[3], "%1")
+	assertTmuxCommand(t, fe.calls[4], "paste-buffer")
+	third := strings.Join(fe.calls[4], "\x00")
 	for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1"} {
 		if !strings.Contains(third, want) {
-			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[2], want)
+			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[4], want)
 		}
 	}
 }
@@ -2672,11 +2675,12 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
-	if len(fe.calls) != 2 {
-		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
+	if len(fe.calls) != 3 {
+		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
 	}
 	assertTmuxCommand(t, fe.calls[0], "load-buffer")
-	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+	assertBootstrapSpendCall(t, fe.calls[1], "%1")
+	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
 }
 
 // This isolates a transport hypothesis from the native RFC trial: Claude
@@ -2822,7 +2826,9 @@ func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T)
 
 func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *testing.T) {
 	errs := make([]error, 6)
-	errs[3] = errors.New("not in a mode")
+	// Each chunk loads, spends authority, then pastes. Fail the second
+	// paste, rather than its load or authority marker.
+	errs[5] = errors.New("not in a mode")
 	fe := &fakeExecutor{errs: errs}
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
@@ -2833,12 +2839,16 @@ func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *t
 	}
 
 	var loadCalls, pasteCalls int
-	for _, call := range fe.calls {
+	for index, call := range fe.calls {
 		joined := "\x00" + strings.Join(call, "\x00") + "\x00"
 		if strings.Contains(joined, "\x00load-buffer\x00") {
 			loadCalls++
 		}
 		if strings.Contains(joined, "\x00paste-buffer\x00") {
+			if index == 0 {
+				t.Fatal("paste has no preceding authority marker")
+			}
+			assertBootstrapSpendCall(t, fe.calls[index-1], "%1")
 			pasteCalls++
 		}
 	}

@@ -49,3 +49,11 @@ list as its response key, so Stop cannot cancel between consumption and input.
 Stop retires observations before cancellation; unknown delivery stays consumed
 across controller restart. A consumed visible approval is still pending for verification. Do not
 synthesize transcript messages or infer an invocation from PermissionRequest.
+
+## Native Codex timed question queues
+
+The captured Codex0.162.1 collapsed question count may end with a seconds
+countdown (` · 20s`). Recognize only that exact optional decoration. The live
+queue heading and answer hint, owned native rollout, unresolved request count,
+request ID and input fence remain required. A countdown is presentation, never
+answer authority; malformed suffixes and unmatched native requests refuse.

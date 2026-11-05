@@ -36,6 +36,12 @@ calls = 3
 tagged = true
 
 [[count]]
+path = "cmd/gc-osc7501/tap_memory_linux_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
 resource = "subprocess"
 calls = 1

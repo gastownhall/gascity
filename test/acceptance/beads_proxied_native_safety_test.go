@@ -180,7 +180,7 @@ func TestProxiedNativeSafety(t *testing.T) {
 			t.Errorf("processes outlived the safety city:\n%s", strings.Join(leaked, "\n"))
 		}
 	})
-	city.InitNoStart("claude")
+	initProxiedSingleStore(t, city, true)
 	assertProxiedScope(t, env, cityRoot, "the safety city")
 	// The lifecycle fixture's two readers (tryAccount, heal) are reused here
 	// rather than reimplemented: they already know that a disturbed scope may

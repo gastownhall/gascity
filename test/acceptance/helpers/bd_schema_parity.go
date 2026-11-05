@@ -91,8 +91,8 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 // bdSchemaProbeRoots lists where the probe's throwaway database may be created,
 // best first; "" is the default temp directory.
 //
-// The database is deleted the moment bd answers, so durability buys it
-// nothing, yet bd's embedded Dolt fsyncs it hundreds of times while creating it
+// A successful probe's database is deleted the moment bd answers, so durability
+// buys it nothing, yet bd's embedded Dolt fsyncs it hundreds of times while creating it
 // (539 fsyncs for one probe with bd 1.1.0). On a durable filesystem each of
 // those waits for the filesystem's log commit, which a busy host does not
 // bound: on the btrfs /var/tmp the pre-push gate uses as TMPDIR, one probe ran
@@ -113,7 +113,7 @@ func bdSchemaProbeRoots() []string {
 
 // bdLatestSchemaVersionUnder is bdLatestSchemaVersion with its temp directory
 // created under the first of roots that accepts one.
-func bdLatestSchemaVersionUnder(bdPath string, roots []string) (int, error) {
+func bdLatestSchemaVersionUnder(bdPath string, roots []string) (version int, probeErr error) {
 	dir, err := mkdirTempUnder(roots, "gc-bd-schema-probe-*")
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: create temp dir: %w", err)
@@ -123,6 +123,21 @@ func bdLatestSchemaVersionUnder(bdPath string, roots []string) (int, error) {
 	// leaked probe dir must not fail suite setup, but it must not vanish
 	// silently either.
 	defer func() {
+		if probeErr != nil {
+			probeErr = fmt.Errorf("%w\nbd schema probe evidence retained at %s", probeErr, dir)
+			// Bazel destroys the private /dev/shm namespace after the test.
+			// Copy the failed database before that teardown, without moving the
+			// live probe off RAM or changing its deadline or parity requirement.
+			if outputs := os.Getenv("TEST_UNDECLARED_OUTPUTS_DIR"); outputs != "" {
+				exported := filepath.Join(outputs, filepath.Base(dir))
+				if copyErr := os.CopyFS(exported, os.DirFS(dir)); copyErr != nil {
+					probeErr = errors.Join(probeErr, fmt.Errorf("exporting bd schema probe evidence to %s: %w", exported, copyErr))
+				} else {
+					probeErr = fmt.Errorf("%w\nbd schema probe evidence exported to %s", probeErr, exported)
+				}
+			}
+			return
+		}
 		if rmErr := os.RemoveAll(dir); rmErr != nil {
 			fmt.Fprintf(os.Stderr, "bd schema probe: leaked temp dir %s: %v\n", dir, rmErr)
 		}
