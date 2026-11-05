@@ -437,8 +437,9 @@ func rigImportRow(b beads.Bead, rig string, records []rigCrossEdgeRecord) beads.
 // rigImportHashFloor is the bd min_hash_length the rig needs once the
 // imported ids leave it: one longer than the longest hash suffix among them,
 // wisp ids included (bd mints wisp suffixes under the same length bounds), so
-// a short id the rig mints later can never re-mint an imported one (the
-// mc-wisp-jkl id-reuse defect, moved to rigs). Zero means no id needs it.
+// a short id the rig mints later cannot re-mint an imported one (the
+// mc-wisp-jkl id-reuse defect, moved to rigs); at bd's cap of 8 (below) that
+// holds only probabilistically. Zero means no id needs it.
 //
 // Only a suffix bd could have minted counts (bdHashShaped): a cross-store
 // gate's "xsg-<12 hex>" or a hand-named id is not one bd will mint again.

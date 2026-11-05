@@ -1131,3 +1131,20 @@ func TestStorageMigrateFromWorkStartsTheProxiedRigsItProbes(t *testing.T) {
 		}
 	}
 }
+
+// TestTheFromWorkWindowSaysWhyAnUnreadableRigRefusesTheCopy: a bound rig
+// whose proxied-server ownership cannot be read refuses the whole copy, and
+// the refusal says so, names the rig scope and the fix, and writes nothing.
+func TestTheFromWorkWindowSaysWhyAnUnreadableRigRefusesTheCopy(t *testing.T) {
+	request, _ := exclusionCity(t)
+	broken := t.TempDir()
+	request.Cfg.Rigs = append(request.Cfg.Rigs, config.Rig{Name: "broken", Prefix: "br", Path: broken})
+	writeScopeBeadsMetadata(t, broken, `{"database":"dolt","backend":"dolt","dolt_mode":`)
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	code, said := migrateFor(t, request)
+	if code == 0 || !strings.Contains(said, "cannot tell whether bd owns a proxied server for rig scope") || !strings.Contains(said, "the whole run is refused") {
+		t.Fatalf("migrate = %d: %s; want the whole copy refused, saying why", code, said)
+	}
+	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, request.Cfg), "a refused window records nothing")
+}

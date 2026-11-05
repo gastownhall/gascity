@@ -19,7 +19,8 @@ package main
 //  5. Write the manifest (S1's (id, created_at) format, plus #gc:scope,
 //     #gc:scope-annotated and #gc:gate), then the marker.
 //  6. Raise bd's min_hash_length in the rig store, so a short id minted
-//     after the clear can never re-mint an imported one.
+//     after the clear cannot re-mint an imported one (only probabilistically
+//     at bd's cap of 8 characters).
 //  7. Back up, prove the backup, mark the cleared note pending, delete the
 //     rig copies in batches, mark the note complete. No edge is re-added.
 //

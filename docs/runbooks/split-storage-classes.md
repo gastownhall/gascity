@@ -252,8 +252,11 @@ What the command does, in order:
    (only suffixes bd mints count: base36, 3 to 8 characters, so a cross-store
    gate's `xsg-` id does not; neither setting goes above 8, the longest suffix
    bd mints; it never lowers either, and raises `max_hash_length` with it when
-   needed), so
-   bd can never mint a carried id again once the clear removes it. A file
+   needed; an earlier `--from-rigs` may have set `max_hash_length` above 8, and
+   that alone is brought back down to 8), so bd does not mint a carried id
+   again once the clear removes it: every id it mints has a longer suffix than
+   any carried one. Where a carried suffix already has 8 characters the floor
+   stops at 8, and a new 8-character id only rarely could repeat one. A file
    store needs no floor and a generic exec store cannot take one; both are
    reported. A hosted bd store that refuses the write stops the run before the
    clear and names the value to set on the hosted project out of band; then

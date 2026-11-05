@@ -11,7 +11,11 @@ package main
 // work store's, before its clear, the same way: bd's min_hash_length is set
 // one past the longest hash suffix among the carried ids of the store's own
 // prefix, so every id it mints afterwards has a longer suffix than any id it
-// ever gave up. The floor is never lowered.
+// ever gave up, and so cannot be one. At bd's cap of 8 characters that
+// guarantee becomes a probability: a store that gave up an 8-character
+// suffix gets a floor of 8, and a new 8-character id could, very rarely,
+// repeat one. The floor is never lowered; max_hash_length is lowered only
+// to bd's cap of 8.
 //
 // A store that mints from a sequence (the file store) never rewinds it, and
 // SQLite stores recover their sequence floor from the ids they hold on open
@@ -69,9 +73,19 @@ func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
 	if n, perr := strconv.Atoi(strings.TrimSpace(maxText)); perr == nil && n > 0 {
 		maxLen = n
 	}
-	if maxLen < floor {
+	switch {
+	case maxLen < floor:
 		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(floor)); err != nil {
 			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, floor, err)
+		}
+	case maxLen > bdMaxMintedHashLength && floor <= bdMaxMintedHashLength:
+		// The one lowering: a max an earlier import set past bd's cap
+		// (S4b's floor had none) makes a hosted bd serve pad every id it
+		// mints to that length with zeros, and buys nothing bd mints. A min
+		// above the cap too is left as it is, max with it: lowering only the
+		// max would put it below the min, and the min is never lowered.
+		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(bdMaxMintedHashLength)); err != nil {
+			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, bdMaxMintedHashLength, err)
 		}
 	}
 	return floor, nil

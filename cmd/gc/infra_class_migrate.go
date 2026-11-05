@@ -1295,10 +1295,13 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		// advice names recover-stranded).
 		//
 		// A city already converged and cleared gets the id floor too: one a
-		// build without the floor cleared has none (S5 §8.2).
+		// build without the floor cleared has none (S5 §8.2). This path
+		// removes nothing, so a floor that cannot be set is a warning, not a
+		// stop: the rerun goes on to the served-binding note and the
+		// relowering it is the only way to finish.
 		if report.Outcome == infraMigrationConverged {
 			if err := reserveInfraCityIDs(cityPath, target, logPrefix, stderr); err != nil {
-				return say(infraMigrationUncheckable, fmt.Errorf("this city has converged, but its work store's id floor could not be set: %w", err))
+				fmt.Fprintf(stderr, "%s: WARNING: this city has converged, but its work store's id floor could not be set: %v. Nothing was removed and this run carries on; until the floor is set, bd can mint an id the copy carried into the binding. Set it, then check with `gc storage repair-sequence --%s`\n", logPrefix, err, storageIDFloorFlag) //nolint:errcheck // best-effort stderr
 			}
 			return report
 		}

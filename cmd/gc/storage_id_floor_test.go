@@ -21,9 +21,15 @@ type fakeHashConfig struct {
 	values map[string]string
 	sets   []string
 	setErr error
+	getErr error
 }
 
-func (c *fakeHashConfig) ConfigGet(key string) (string, error) { return c.values[key], nil }
+func (c *fakeHashConfig) ConfigGet(key string) (string, error) {
+	if c.getErr != nil {
+		return "", c.getErr
+	}
+	return c.values[key], nil
+}
 
 func (c *fakeHashConfig) ConfigSet(key, value string) error {
 	if c.setErr != nil {
@@ -428,8 +434,11 @@ func TestRepairSequenceIDFloorIsIdempotentUnderTheLock(t *testing.T) {
 }
 
 // TestAConvergedRerunAppliesTheFloor: a city an earlier build converged and
-// cleared without a floor gets one from the next `gc storage migrate`, which
-// otherwise has nothing to do; a floor that cannot be set fails that rerun.
+// cleared without a floor gets one from the next `gc storage migrate`. That
+// rerun removes nothing and is how an interrupted relowering is finished, so
+// a floor it cannot set (the write refused, or the read failing) is a loud
+// warning naming the value, and the run carries on: it rewrites the
+// served-binding note and exits 0.
 func TestAConvergedRerunAppliesTheFloor(t *testing.T) {
 	conf := &fakeHashConfig{values: map[string]string{}}
 	request, _ := floorCity(t, conf)
@@ -440,17 +449,58 @@ func TestAConvergedRerunAppliesTheFloor(t *testing.T) {
 	if len(conf.sets) != 0 {
 		t.Fatalf("precondition: the cutover set %v", conf.sets)
 	}
-	conf.setErr = errors.New("bd config set: refused")
-	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
-	if code, stderr := migrateFor(t, request); code == 0 || !strings.Contains(stderr, "its work store's id floor could not be set") {
-		t.Fatalf("a converged rerun whose floor failed = %d: %s", code, stderr)
+	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc", Hosted: "https://beads.example.test"})
+	note := bornSplitServedNotePath(request.CityPath)
+	for name, fail := range map[string]func(){
+		"the write refused": func() { conf.setErr = errors.New("bd config set: refused") },
+		"the read failing":  func() { conf.getErr = errors.New("bd config get: 502 bad gateway") },
+	} {
+		conf.setErr, conf.getErr = nil, nil
+		fail()
+		if err := os.Remove(note); err != nil {
+			t.Fatal(err)
+		}
+		code, stderr := migrateFor(t, request)
+		if code != 0 || !strings.Contains(stderr, "WARNING: this city has converged, but its work store's id floor could not be set") || !strings.Contains(stderr, "min_hash_length=7") || !strings.Contains(stderr, "Nothing was removed and this run carries on") {
+			t.Fatalf("%s: a converged rerun = %d, want 0 with a warning naming min_hash_length=7: %s", name, code, stderr)
+		}
+		if _, err := os.Stat(note); err != nil {
+			t.Fatalf("%s: the rerun stopped before the served-binding note: %v", name, err)
+		}
 	}
-	conf.setErr = nil
-	if code, stderr := migrateFor(t, request); code != 0 || conf.values[bdMinHashLengthKey] != "7" {
+	conf.setErr, conf.getErr = nil, nil
+	if code, stderr := migrateFor(t, request); code != 0 || conf.values[bdMinHashLengthKey] != "7" || strings.Contains(stderr, "WARNING") {
 		t.Fatalf("a converged rerun = %d, min_hash_length %q: %s", code, conf.values[bdMinHashLengthKey], stderr)
 	}
 	conf.sets = nil
 	if code, stderr := migrateFor(t, request); code != 0 || len(conf.sets) != 0 {
 		t.Fatalf("a second converged rerun = %d, writes %v: %s", code, conf.sets, stderr)
+	}
+}
+
+// TestAMaxAboveBdsCapIsBroughtDownTo8: an earlier import may have set
+// max_hash_length past 8 (a hosted bd serve then pads every id to it); the
+// reservation brings it back to 8, the one lowering it makes, unless the min
+// is above 8 too, and a second run writes nothing.
+func TestAMaxAboveBdsCapIsBroughtDownTo8(t *testing.T) {
+	conf := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "13"}}
+	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
+	got, err := reserveCityIDs("/city", []string{"mc-q1w2e"})
+	if err != nil || got.Floor != 6 || strings.Join(conf.sets, ",") != "min_hash_length=6,max_hash_length=8" {
+		t.Fatalf("reserve = %+v (%v), writes %v; want min 6 and max brought down to 8", got, err, conf.sets)
+	}
+	conf.sets = nil
+	if _, err := reserveCityIDs("/city", []string{"mc-q1w2e"}); err != nil || len(conf.sets) != 0 {
+		t.Fatalf("a second run writes %v (%v), want nothing", conf.sets, err)
+	}
+	at := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "8"}}
+	if _, err := raiseBdHashFloor(at, 6); err != nil || strings.Join(at.sets, ",") != "min_hash_length=6" {
+		t.Fatalf("a max of exactly 8 writes %v (%v), want it left alone", at.sets, err)
+	}
+	// A min above the cap as well stays, and the max with it: never below the
+	// min (TestReserveCityIDsRaisesNeverLowersAndIsIdempotent's 12/14).
+	both := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "13", bdMaxHashLengthKey: "13"}}
+	if floor, err := raiseBdHashFloor(both, 6); err != nil || floor != 13 || len(both.sets) != 0 {
+		t.Fatalf("min and max 13 = floor %d (%v), writes %v; want both left alone", floor, err, both.sets)
 	}
 }
