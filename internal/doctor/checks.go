@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
@@ -908,7 +909,7 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusWarning
 		r.Message = "legacy split store detected: both .beads/dolt and .beads/embeddeddolt contain or may contain data, but no active local store was identified"
 		r.Details = splitStoreDetails("unknown", activeSource, serverRepos, embeddedRepos)
-		r.FixHint = splitStoreFixHint("unknown")
+		r.FixHint = splitStoreFixHint("unknown", c.readNoticeApplies())
 		return r
 	}
 
@@ -927,7 +928,7 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusWarning
 	r.Message = fmt.Sprintf("legacy split store detected: active .beads/%s (%s), inactive .beads/%s contains %d Dolt repo(s)", activeStore, activeSource, inactiveStore, len(inactiveRepos))
 	r.Details = splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos)
-	r.FixHint = splitStoreFixHint(activeStore)
+	r.FixHint = splitStoreFixHint(activeStore, c.readNoticeApplies())
 	return r
 }
 
@@ -979,7 +980,7 @@ func (c *BDSplitStoreCheck) unreadStoreBesideTheActiveOne(beadsDir, serverDir, e
 		Message: fmt.Sprintf("unread bead database beside the active store: active .beads/%s (%s), unread .beads/%s contains %d Dolt repo(s)",
 			activeStore, activeSource, inactiveStore, len(inactiveRepos)),
 		Details: splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos),
-		FixHint: splitStoreFixHint(activeStore),
+		FixHint: splitStoreFixHint(activeStore, c.readNoticeApplies()),
 	}
 }
 
@@ -1076,9 +1077,77 @@ func activeBDStoreFromMetadata(path string) (string, string) {
 		return "metadata.json dolt_mode=" + mode, "dolt"
 	case "embedded", "local":
 		return "metadata.json dolt_mode=" + mode, "embeddeddolt"
+	case "proxied-server":
+		if proxiedLedgerIsScopeDoltDir(filepath.Dir(path), meta.Database) {
+			return "metadata.json dolt_mode=" + mode, "dolt"
+		}
+		return "metadata.json dolt_mode=" + mode, ""
 	default:
 		return mode, ""
 	}
+}
+
+// proxiedLedgerIsScopeDoltDir reports whether a proxied-server scope's ledger
+// lives in that scope's own .beads/dolt. Unlike server and embedded, the
+// proxied-server mode alone does not say which local directory bd reads: its
+// root moves with BEADS_PROXIED_SERVER_ROOT_PATH, the sidecar's root_path,
+// shared-server mode, BEADS_DOLT_DATA_DIR and metadata.json's dolt_data_dir, so
+// the check resolves bd's root (proxyendpoint.ProviderRoot) instead of mapping
+// the mode. database is metadata.json's raw `database` value.
+//
+// It fails closed. Each of these leaves the active store unknown:
+//   - a root anywhere other than the scope's .beads/dolt;
+//   - a resolver error, such as a malformed sidecar, which the
+//     proxied-idle-timeout check reports for a scope gc journals and the
+//     beads-store check's endpoint detail names as "resolve proxy root";
+//   - an external upstream in the sidecar: the data lives on a server somebody
+//     else runs and the local root is proxy scaffolding, although ProviderRoot,
+//     which does not read the external block, still answers .beads/dolt;
+//   - shared-server mode that may be on (bdSharedServerMayRootScope), which
+//     roots the scope in bd's host-wide shared directory; ProviderRoot mirrors
+//     only its BEADS_DOLT_SHARED_SERVER arm;
+//   - an absolute legacy `database` key, which bd's DatabasePath uses as the
+//     data directory when no dolt_data_dir is set and ProviderRoot does not
+//     mirror.
+//
+// The last two are ruled out whatever else the scope sets. That is stricter
+// than bd, where an arm that precedes them wins (BEADS_PROXIED_SERVER_ROOT_PATH
+// or the sidecar's root_path; for the absolute `database`, also
+// BEADS_DOLT_DATA_DIR or dolt_data_dir), so a scope that also points such an
+// arm at its own .beads/dolt is left unknown, not identified.
+func proxiedLedgerIsScopeDoltDir(beadsDir, database string) bool {
+	scopeRoot := filepath.Dir(beadsDir)
+	if scopeProxiedUpstreamIsExternal(scopeRoot) || bdSharedServerMayRootScope(beadsDir) || filepath.IsAbs(database) {
+		return false
+	}
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil || root == "" {
+		return false
+	}
+	return pathutil.NormalizePathForCompare(root) == pathutil.NormalizePathForCompare(filepath.Join(beadsDir, "dolt"))
+}
+
+// bdSharedServerMayRootScope reports whether bd's shared-server mode may be on
+// for the scope whose .beads directory is beadsDir. It fails closed, answering
+// true when:
+//   - the scope's config.yaml cannot be read or parsed, or pins the mode on;
+//   - BEADS_DOLT_SHARED_SERVER or BD_DOLT_SHARED_SERVER turns it on: bd reads
+//     both ahead of every config file, so they outrank the scope's pin;
+//   - bd's user-level config turns it on and the scope does not pin it.
+//
+// The dolt.shared-server: false pin gc writes into each proxied scope it owns
+// therefore keeps that scope identified under a user-level config that turns
+// the mode on. The pin is read as the proxied-shared-server check reads it
+// (contract.ReadSharedServerPin); the rest of bd's config merge, the scope's
+// config.local.yaml and a flat key outranking a nested one across layers, is
+// not re-derived here.
+func bdSharedServerMayRootScope(beadsDir string) bool {
+	pin, err := contract.ReadSharedServerPin(fsys.OSFS{}, filepath.Join(beadsDir, "config.yaml"))
+	if err != nil || pin == contract.SharedServerPinnedOn {
+		return true
+	}
+	on, source := UserLevelBdSharedServerMode()
+	return on && (pin == contract.SharedServerUnset || source == proxyendpoint.SharedServerModeEnv || source == bdSharedServerConfigEnv)
 }
 
 func sameDoctorScope(a, b string) bool {
@@ -1120,13 +1189,30 @@ func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRe
 // The bound stated here is the one the guard actually holds: once per scope per
 // process. A `gc` command is one process, so an operator sees it once per
 // command; a supervisor sees it once for the life of the daemon.
-func splitStoreFixHint(activeStore string) string {
-	silence := "; keep both directories until reconciled — while both exist, an empty whole-ledger read from this scope prints one notice per gc process, which " +
-		beads.AllowUnreadStoreReadEnvVar + "=1 silences"
-	if activeStore == "" || activeStore == "unknown" {
-		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + silence
+//
+// The notice is named only when readNoticeApplies says the guard can raise it
+// for this scope. Telling an operator to expect, and to silence, a notice that
+// never appears (a proxied-server scope, which the guard leaves unmapped) is
+// the same contradiction from the other side.
+func splitStoreFixHint(activeStore string, readNoticeApplies bool) string {
+	keep := "; keep both directories until reconciled"
+	if readNoticeApplies {
+		keep += " — while both exist, an empty whole-ledger read from this scope prints one notice per gc process, which " +
+			beads.AllowUnreadStoreReadEnvVar + "=1 silences"
 	}
-	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store" + silence
+	if activeStore == "" || activeStore == "unknown" {
+		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + keep
+	}
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store" + keep
+}
+
+// readNoticeApplies reports whether BdStore's read-time guard can print its
+// unread-store notice for this scope as it sits on disk. It asks the guard's
+// own predicate (beads.UnreadBeadDatabase), so the fix hint names the notice
+// exactly when the guard could raise it.
+func (c *BDSplitStoreCheck) readNoticeApplies() bool {
+	_, _, ok := beads.UnreadBeadDatabase(c.scopePath)
+	return ok
 }
 
 func describeRepoList(repos []string) string {

@@ -325,11 +325,15 @@ func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City,
 }
 
 // initDirIfReady initializes beads for a single directory, ensuring the
-// backing service is ready first. For the bd provider, this is a no-op
-// (Dolt isn't running until gc start). Used by gc init and gc rig add.
+// backing service is ready first. Provider-owned scopes (the bd default) are
+// initialized and health-checked now, so the store is usable before gc start.
+// Used by gc init and gc rig add.
 //
-// Returns (deferred bool, err). deferred=true means the bd provider
-// skipped init — the caller should tell the user it's deferred to gc start.
+// Returns (deferred bool, err). deferred=true means init was left for gc
+// start — under GC_DOLT=skip, with no provider resolved, when an exec:
+// provider's probe reports its backing service unavailable, or for an
+// external endpoint whose credentials only gc start carries — and the caller
+// should tell the user it's deferred.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	if gcDoltSkip() {
 		scopeOwned, ownershipErr := scopeProviderOwned(cityPath, dir)
