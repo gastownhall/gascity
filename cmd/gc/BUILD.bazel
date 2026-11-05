@@ -2265,6 +2265,7 @@ go_test(
         "split_store_closeread_test.go",
         "split_store_work_legs_test.go",
         "split_strict_gate_test.go",
+        "split_strict_gating_demo_test.go",
         "split_topology_conformance_test.go",
         "split_topology_env_test.go",
         "split_worktree_evidence_test.go",
