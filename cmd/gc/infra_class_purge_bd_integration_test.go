@@ -16,8 +16,9 @@ import (
 )
 
 // realBdPurgeCity is a converged split city whose work store is a real bd
-// store (embedded Dolt, driven through beads.BdStore, the store a bd city's
-// work store is), opened as production opens it: under the bead-policy
+// store (embedded Dolt, or a dolt sql-server when newRealBdPurgeCity's
+// initArgs point bd at one), driven through beads.BdStore, the store a bd
+// city's work store is, opened as production opens it: under the bead-policy
 // wrapper. The cutover carried a July bead under mcReusedID into the binding.
 type realBdPurgeCity struct {
 	purgeCity
@@ -27,7 +28,7 @@ type realBdPurgeCity struct {
 	july time.Time
 }
 
-func newRealBdPurgeCity(t *testing.T) realBdPurgeCity {
+func newRealBdPurgeCity(t *testing.T, initArgs ...string) realBdPurgeCity {
 	t.Helper()
 	bdPath, err := findPreferredBinary("bd", strings.TrimSpace(os.Getenv("GC_TEST_BD_BIN")))
 	if err != nil {
@@ -62,7 +63,7 @@ func newRealBdPurgeCity(t *testing.T) realBdPurgeCity {
 		"BEADS_ACTOR":        "gc-test",
 	})}
 	city.must("git", "init", "-q", ".")
-	city.must("bd", "init", "-p", "mc", "--quiet", "--skip-hooks")
+	city.must("bd", append([]string{"init", "-p", "mc", "--quiet", "--skip-hooks"}, initArgs...)...)
 
 	// The cutover, from a pre-cutover snapshot holding the July bead under
 	// the id bd will mint again.
