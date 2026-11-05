@@ -1700,9 +1700,12 @@ export const zReadyBeadDep = z.object({
 
 export const zReadyBead = z.object({
     assignee: z.string().optional(),
+    await_id: z.string().optional(),
+    await_type: z.string().optional(),
     blocked_by: z.array(zReadyBeadBlocker).nullish(),
     close_reason: z.string().optional(),
     created_at: z.iso.datetime(),
+    created_by: z.string().optional(),
     defer_until: z.iso.datetime().optional(),
     dependencies: z.array(zReadyBeadDep).nullish(),
     description: z.string().optional(),
@@ -1715,6 +1718,8 @@ export const zReadyBead = z.object({
     metadata: z.record(z.string(), z.string()).optional(),
     needs: z.array(z.string()).nullish(),
     no_history: z.boolean().optional(),
+    notes: z.string().optional(),
+    owner: z.string().optional(),
     parent: z.string().optional(),
     priority: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     ref: z.string().optional(),
