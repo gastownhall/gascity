@@ -47,9 +47,29 @@ func TestTutorial01NamesTheBdDogBinding(t *testing.T) {
 			t.Errorf("tutorial 01 is missing %q", want)
 		}
 	}
-	for _, stale := range []string{"`dolt.dog`", "`dolt.` prefix"} {
-		if strings.Contains(text, stale) {
-			t.Errorf("tutorial 01 still names %s, which gc status no longer prints", stale)
+}
+
+// TestTutorialsDoNotNameTheDoltDogBinding covers every tutorial, not only 01:
+// a later tutorial that points back at the pool tutorial 01 showed must use
+// the name the reader saw there.
+func TestTutorialsDoNotNameTheDoltDogBinding(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join(repoRoot(), "docs", "tutorials", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("found no tutorials under docs/tutorials")
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		text := strings.Join(strings.Fields(string(data)), " ")
+		for _, stale := range []string{"`dolt.dog`", "`dolt.` prefix"} {
+			if strings.Contains(text, stale) {
+				t.Errorf("%s still names %s, which gc status no longer prints", filepath.Base(path), stale)
+			}
 		}
 	}
 }

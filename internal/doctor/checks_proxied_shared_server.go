@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -203,19 +204,24 @@ func BdSharedServerDir() string {
 	return filepath.Join(home, ".beads", "shared-server")
 }
 
+// bdSharedServerConfigEnv is bd's viper env binding for dolt.shared-server
+// (prefix BD_, "." and "-" -> "_"). It outranks every config file layer.
+const bdSharedServerConfigEnv = "BD_DOLT_SHARED_SERVER"
+
 // UserLevelBdSharedServerMode reports whether bd's user-level configuration
 // turns shared-server mode on for a workspace with no opinion of its own, and
 // names the source. It mirrors bd's precedence for this one key:
 // BEADS_DOLT_SHARED_SERVER (only "1"/"true" force it on), then
 // BD_DOLT_SHARED_SERVER, then ~/.config/bd/config.yaml (and the platform user
-// config dir), then the legacy ~/.beads/config.yaml.
+// config dir), then the legacy ~/.beads/config.yaml. An environment source is
+// named by its variable, a file by its path.
 func UserLevelBdSharedServerMode() (bool, string) {
-	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
-		return true, "BEADS_DOLT_SHARED_SERVER"
+	if v := os.Getenv(proxyendpoint.SharedServerModeEnv); v == "1" || strings.EqualFold(v, "true") {
+		return true, proxyendpoint.SharedServerModeEnv
 	}
-	if v, ok := os.LookupEnv("BD_DOLT_SHARED_SERVER"); ok && v != "" {
+	if v, ok := os.LookupEnv(bdSharedServerConfigEnv); ok && v != "" {
 		on, err := strconv.ParseBool(strings.TrimSpace(v))
-		return err == nil && on, "BD_DOLT_SHARED_SERVER"
+		return err == nil && on, bdSharedServerConfigEnv
 	}
 	var paths []string
 	if dir, err := os.UserConfigDir(); err == nil {

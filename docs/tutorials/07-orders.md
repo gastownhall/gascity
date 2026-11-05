@@ -49,7 +49,7 @@ pool = "worker"
 ```
 
 The `pool` field tells the orchestrator where to send the work. A _pool_ is a
-named group of agents that share a work queue (you saw the bundled `dolt.dog`
+named group of agents that share a work queue (you saw the bundled `bd.dog`
 pool in Tutorial 01); a single agent's name works as a pool target too, so the
 examples here route to the `worker` agent from Tutorial 05. When the order
 fires, the orchestrator runs the formula and writes `gc.routed_to=worker` on the

@@ -1456,6 +1456,37 @@ func TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists(t *testing.T) {
 	if !strings.Contains(r.FixHint, "keep both directories until reconciled") {
 		t.Fatalf("fix hint = %q, want the recovery the storage-mode announcement mirrors", r.FixHint)
 	}
+	if !strings.Contains(r.FixHint, beads.AllowUnreadStoreReadEnvVar+"=1 silences") {
+		t.Fatalf("fix hint = %q, want the read-time notice this shape raises and its override", r.FixHint)
+	}
+}
+
+// TestBDSplitStoreCheck_FixHintNamesTheReadNoticeOnlyWhenTheGuardCanRaiseIt
+// covers the server-mode shape the read-time guard does not notice: it looks
+// for the scope's own dolt_database under the other mode's directory, so a
+// repository there with another name still gets the recovery but not the
+// notice clause.
+func TestBDSplitStoreCheck_FixHintNamesTheReadNoticeOnlyWhenTheGuardCanRaiseIt(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"jc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "other"))
+
+	r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "unread bead database") {
+		t.Fatalf("status = %d msg = %q, want the unread-database warning", r.Status, r.Message)
+	}
+	if !strings.Contains(r.FixHint, "keep both directories until reconciled") {
+		t.Fatalf("fix hint = %q, want the keep-both recovery", r.FixHint)
+	}
+	if strings.Contains(r.FixHint, beads.AllowUnreadStoreReadEnvVar) {
+		t.Fatalf("fix hint = %q, names a read-time notice the guard cannot raise for this shape", r.FixHint)
+	}
 }
 
 // TestBDSplitStoreCheck_OneStoreScopesStayOK is the false-positive budget for
