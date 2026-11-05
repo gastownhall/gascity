@@ -1192,6 +1192,30 @@ one exists, strengthen or parameterize it instead of creating another journey.
 Conformance is a reusable testing pattern rather than a sixth execution tier:
 one contract suite is intentionally executed against multiple implementations.
 
+### The hot tier's B3 pre-check (rbe-fork-pool.yml hot_precheck_digest)
+
+Before the fork pool reads big blobs from rbe-west's R2 hot tier
+(`RBE_FORK_HOT_URL`; infra `nativelink-cas/west` README "Hot blobs on R2"),
+the edge is checked once from a Blacksmith runner: the WAF admits
+Blacksmith alone, and the promotion needs the fork worker certificate. By
+hand, on main:
+
+```
+gh workflow run rbe-fork-pool.yml -R gastownhall/gascity -f hot_precheck_digest=<64-hex sha256>-<size>
+```
+
+The digest is a blob of 64 MiB or more that the fork tier holds (rbe-west's
+`fork-big` or `cas-big`) and that R2 does not hold yet: the check aborts on
+one already promoted. The run (named `hot-precheck`) starts no worker and no
+drift job. It runs infra's `rbe-hot-precheck.sh`, vendored byte for byte in
+`.github/rbe-hot/` with its sha256 (infra is private; the job checks the
+sha256 first). The fork worker certificate is in 0600 files for that one step,
+and the job fails unless the script prints `precheck: ok`. The promotion is
+real: one PUT of about a quarter of the blob's size. A dispatch by any
+`*[bot]`, or together with `rbe_worker_sha`, is refused. A new infra version
+of the script: copy it, update `rbe-hot-precheck.sha256`, and update the
+two constants in `scripts/rbe_fork_pool_test.go`.
+
 ### RED, GREEN, refactor, measure
 
 Every behavior change and bug fix follows this loop:
