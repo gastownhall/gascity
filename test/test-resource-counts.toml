@@ -1568,11 +1568,6 @@ resource = "subprocess"
 calls = 11
 
 [[count]]
-path = "examples/gastown/jsonl_export_binding_test.go"
-resource = "subprocess"
-calls = 1
-
-[[count]]
 path = "examples/gastown/maintenance_bd_integration_test.go"
 resource = "fixed_sleep"
 calls = 1

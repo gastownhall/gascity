@@ -5560,21 +5560,25 @@ Each store gets an exact copy where its kind has one and, always, a JSONL of
 every row with its edges and their payloads:
 
   binding (SQLite)   VACUUM INTO, then PRAGMA integrity_check on the copy
-  native Dolt        a Dolt tag of HEAD (gc-storage-snapshot-&lt;id&gt;)
+  native Dolt        a Dolt tag of HEAD (wisps, in dolt_ignore'd tables, are
+                     not in it; the JSONL holds them)
   bd CLI, hosted bd  bd export --all
   file               a copy of the file
   generic exec       the JSONL alone
 
-manifest.json records the stores, their row and edge counts, each file's
-sha256, the gc version and the work store's identity. It is written last, after
-every file is re-read and proven, so a directory without one is an interrupted
-snapshot, never a complete one.
+The JSONL is a record, not yet a restore source: no tool imports it.
 
---binding alone runs against a live city and takes no lock: it only reads.
---work and --rigs need the city stopped and --fleet-stopped, and run in the
-maintenance window. --keep N keeps the newest N snapshots in &lt;to&gt; and removes
-the rest, interrupted ones included. --verify ID re-reads a snapshot and proves
-it against its manifest.
+manifest.json records the stores, their row and edge counts, each file's
+sha256, the gc version, the work store's identity, and the binding root's
+records. It is written last, after every file is re-read and proven, so a
+directory without one is an interrupted snapshot, never a complete one.
+
+--binding alone runs against a live city: it only reads. --work and --rigs
+need the city stopped and --fleet-stopped, and run in the maintenance window.
+Every snapshot refuses while a migration, a re-copy or a rig import holds the
+city. --keep N keeps the newest N snapshots in &lt;to&gt; (this one always among
+them, and a pinned one never counted or removed) and removes the rest.
+--verify ID re-reads a snapshot and proves it against its manifest.
 
 ```
 gc storage snapshot [flags]
@@ -5585,8 +5589,8 @@ gc storage snapshot [flags]
 | `--binding` | bool |  | snapshot the infrastructure binding (live; read-only) |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
-| `--if-bound` | bool |  | on a city with no binding, do nothing and exit 0 (the binding-snapshot order) |
-| `--keep` | int | `2` | keep the newest N snapshots in --to and remove the rest |
+| `--if-bound` | bool |  | with --binding alone: on a city with no binding, do nothing and exit 0 (the binding-snapshot order) |
+| `--keep` | int | `2` | keep the newest N snapshots in --to, this one included, and remove the rest (at least 1) |
 | `--rigs` | bool |  | snapshot every rig's store (needs --fleet-stopped) |
 | `--to` | string |  | directory to write snapshots into (default &lt;city&gt;/.gc/snapshots) |
 | `--verify` | string |  | re-read snapshot ID in --to and prove it against its manifest, writing nothing |
@@ -5600,11 +5604,17 @@ gc storage snapshot [flags]
 
 Put snapshot &lt;id&gt;'s binding database back in place of the live one.
 
-The snapshot is proven against its manifest first (sha256 and integrity_check),
-then installed under the controller lock with the city stopped. The database it
-replaces, with its -wal and -shm, is kept beside it as *.pre-restore-&lt;ts&gt;. A
-restore interrupted before the new database is in place leaves no database at
-the binding path, which every boot refuses; run the same command again.
+It refuses a snapshot of another city or another work store, and one taken
+before the binding's records changed (a migration, a recovery or a rig import
+since): the database is only half of a binding, and the records beside it are
+not restored.
+
+The snapshot is proven against its manifest first, then installed under the
+controller lock with the city stopped, in WAL mode, with the id floor raised
+past every id the replaced database held. The database it replaces, with its
+-wal, -shm and -journal, is kept beside it as *.pre-restore-&lt;ts&gt;. A restore
+interrupted before the new database is in place leaves no database at the
+binding path, which every boot refuses, naming this command; run it again.
 
 Only --binding is restorable here. A work store is restored by the runbook:
 DOLT_RESET --hard to the snapshot's tag, or bd import of its export.

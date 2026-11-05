@@ -817,11 +817,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 	}
 
 	if state == infraConvergenceStale {
-		remedy := storageClearInstruction()
-		if present, err := infraPathExists(target.RetainedBackupPath()); err == nil && present {
-			remedy = storageRecopyFromBackupInstruction()
-		}
-		fmt.Fprintf(stdout, "converged: no (the marker is present and %s)\nblocking invariant: re-copy the binding with `%s`\n", infraStaleCause(target), remedy) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "converged: no (the marker is present and %s)\nblocking invariant: repair the binding with `%s`\n", infraStaleCause(target), infraStaleBindingRemedy(target)) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	if state != infraConvergenceMarked {

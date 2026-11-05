@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -17,9 +19,15 @@ import (
 // checkpoint its WAL, and it is one read transaction: a writer committing to a
 // live WAL database meanwhile is not in the copy, and nothing it commits is
 // half in it. dst must not exist (VACUUM INTO refuses a non-empty file). The
-// copy is fsynced before the check: VACUUM INTO does not sync its output.
+// copy is fsynced: VACUUM INTO does not sync its output.
+//
+// The copy is in rollback-journal mode (journal_mode=delete), whatever src's
+// mode, and that is kept on purpose: an archived snapshot is one
+// self-contained file, with no -wal or -shm beside it to lose when it is
+// copied, and it is only ever read immutable. A restore that installs it as a
+// live binding switches it to WAL first (SetSQLiteJournalModeWAL).
 func VacuumSQLiteInto(ctx context.Context, src, dst string) error {
-	db, err := sql.Open("sqlite", sqliteStoreDSN(src, true))
+	db, err := sql.Open("sqlite", sqliteSnapshotSourceDSN(src))
 	if err != nil {
 		return fmt.Errorf("opening %s for a snapshot: %w", src, err)
 	}
@@ -39,41 +47,45 @@ func VacuumSQLiteInto(ctx context.Context, src, dst string) error {
 // an error naming every problem it reports. A database that answers anything
 // but the single row "ok" fails.
 func SQLiteIntegrityCheck(ctx context.Context, path string) error {
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("integrity check of %s: %w", path, err)
-	}
-	query := url.Values{}
-	query.Set("mode", "ro")
-	query.Set("immutable", "1")
-	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return fmt.Errorf("integrity check of %s: %w", path, err)
-	}
-	defer db.Close() //nolint:errcheck // read-only handle
-	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check")
-	if err != nil {
-		return fmt.Errorf("integrity check of %s: %w", path, err)
-	}
-	defer rows.Close() //nolint:errcheck // read-only cursor
 	var problems []string
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			return fmt.Errorf("integrity check of %s: %w", path, err)
+	err := withImmutableSQLite(path, func(db *sql.DB) error {
+		rows, err := db.QueryContext(ctx, "PRAGMA integrity_check")
+		if err != nil {
+			return err
 		}
-		problems = append(problems, line)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("integrity check of %s: %w", path, err)
+		defer rows.Close() //nolint:errcheck // read-only cursor
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				return err
+			}
+			problems = append(problems, line)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return fmt.Errorf("integrity check: %w", err)
 	}
 	if len(problems) == 1 && problems[0] == "ok" {
 		return nil
 	}
 	if len(problems) == 0 {
-		return fmt.Errorf("integrity check of %s: %w", path, errors.New("no answer"))
+		return fmt.Errorf("integrity check of %s: no answer", path)
 	}
 	return fmt.Errorf("integrity check of %s failed: %s", path, strings.Join(problems, "; "))
+}
+
+// sqliteSnapshotSourceDSN is the read-only DSN a snapshot reads its source
+// through. It is the store's read-only DSN without the mmap window: a copy
+// reads every page once, in order, so mapping the file buys nothing and would
+// count up to the whole window against the process's resident set.
+func sqliteSnapshotSourceDSN(path string) string {
+	query := url.Values{}
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "mmap_size(0)")
+	query.Set("mode", sqliteStoreDSNReadOnlyMode)
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
 
 func syncFile(path string) error {
@@ -88,10 +100,15 @@ func syncFile(path string) error {
 	return f.Close()
 }
 
+// ErrSQLiteCheckpointBusy is CheckpointSQLiteWAL's refusal when another
+// connection holds the database: the WAL could not be folded in whole.
+var ErrSQLiteCheckpointBusy = errors.New("another connection holds the database")
+
 // CheckpointSQLiteWAL folds the WAL of the database at path into the
 // database and truncates it (PRAGMA wal_checkpoint(TRUNCATE)), so the main
 // file alone holds every committed row. It writes, so only a caller that
-// holds the database's writers off may call it.
+// holds the database's writers off may call it. A checkpoint another
+// connection blocks is ErrSQLiteCheckpointBusy.
 func CheckpointSQLiteWAL(ctx context.Context, path string) error {
 	db, err := sql.Open("sqlite", sqliteStoreDSN(path, false))
 	if err != nil {
@@ -103,8 +120,125 @@ func CheckpointSQLiteWAL(ctx context.Context, path string) error {
 	if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
 		return fmt.Errorf("checkpointing %s: %w", path, err)
 	}
-	if busy != 0 {
-		return fmt.Errorf("checkpointing %s: another connection holds the database", path)
+	if busy != 0 || (logFrames >= 0 && checkpointed < logFrames) {
+		return fmt.Errorf("checkpointing %s: %w", path, ErrSQLiteCheckpointBusy)
+	}
+	return nil
+}
+
+// SetSQLiteJournalModeWAL puts the database at path in WAL mode and proves
+// it. VACUUM INTO writes its copy in rollback-journal mode, and a store opened
+// over an existing database never changes the mode, so a copy installed as a
+// live binding without this would make every reader stall its writers.
+func SetSQLiteJournalModeWAL(ctx context.Context, path string) error {
+	db, err := sql.Open("sqlite", sqliteStoreDSN(path, false))
+	if err != nil {
+		return fmt.Errorf("setting WAL mode on %s: %w", path, err)
+	}
+	defer db.Close() //nolint:errcheck // nothing written but the header
+	db.SetMaxOpenConns(1)
+	var mode string
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
+		return fmt.Errorf("setting WAL mode on %s: %w", path, err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		return fmt.Errorf("setting WAL mode on %s: the database answered journal_mode %q", path, mode)
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("setting WAL mode on %s: %w", path, err)
+	}
+	wal, err := SQLiteFileIsWAL(path)
+	if err != nil {
+		return fmt.Errorf("setting WAL mode on %s: %w", path, err)
+	}
+	if !wal {
+		return fmt.Errorf("setting WAL mode on %s: the header does not record WAL", path)
+	}
+	return nil
+}
+
+// SQLiteFileIsWAL reports whether the database file at path is in WAL mode,
+// from its header (the read and write format versions are 2 in WAL mode, 1 in
+// rollback-journal mode): the mode a store opened over it will use. It opens
+// no connection, so it reads a live database as safely as a closed one.
+func SQLiteFileIsWAL(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	header := make([]byte, 20)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return false, fmt.Errorf("reading the header of %s: %w", path, err)
+	}
+	if string(header[:16]) != "SQLite format 3\x00" {
+		return false, fmt.Errorf("%s is not a SQLite database", path)
+	}
+	return header[18] == 2 && header[19] == 2, nil
+}
+
+// SQLiteBeadIDs lists every bead id of the database at path, sorted, so a
+// reader can page through it by id rather than hold every row at once.
+// Nothing else may have the database open (it is read immutable).
+func SQLiteBeadIDs(ctx context.Context, path string) ([]string, error) {
+	var ids []string
+	err := withImmutableSQLite(path, func(db *sql.DB) error {
+		rows, err := db.QueryContext(ctx, "SELECT id FROM beads ORDER BY id")
+		if err != nil {
+			return err
+		}
+		defer rows.Close() //nolint:errcheck // read-only cursor
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return rows.Err()
+	})
+	return ids, err
+}
+
+// SQLiteSequenceHighWaterAt is the highest positive auto id under prefix the
+// database at path holds, read immutable.
+func SQLiteSequenceHighWaterAt(ctx context.Context, path, prefix string) (int64, error) {
+	var hw sqliteSequenceHighWater
+	err := withImmutableSQLite(path, func(db *sql.DB) error {
+		var err error
+		hw, err = scanSQLiteSequenceHighWater(ctx, db, prefix)
+		return err
+	})
+	return hw.positive, err
+}
+
+// SQLiteSequenceFloorAt reads the persisted id floor of prefix in the store
+// directory dir (zero when there is none).
+func SQLiteSequenceFloorAt(dir, prefix string) (int64, error) {
+	return readSQLiteSequenceFloor(filepath.Join(dir, sqliteSequenceFloorFilenameFor(prefix)))
+}
+
+// RaiseSQLiteSequenceFloorAt raises the persisted id floor of prefix in dir to
+// at least n, never lowering it. A store opened afterwards allocates above it.
+func RaiseSQLiteSequenceFloorAt(dir, prefix string, n int64) error {
+	_, err := persistSQLiteSequenceFloorAtLeast(filepath.Join(dir, sqliteSequenceFloorFilenameFor(prefix)), n)
+	return err
+}
+
+func withImmutableSQLite(path string, fn func(*sql.DB) error) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	query := url.Values{}
+	query.Set("mode", "ro")
+	query.Set("immutable", "1")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String())
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	defer db.Close() //nolint:errcheck // read-only handle
+	if err := fn(db); err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	return nil
 }

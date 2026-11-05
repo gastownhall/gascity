@@ -2,8 +2,10 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -126,5 +128,93 @@ func TestSQLiteIntegrityCheckRefusesACorruptCopy(t *testing.T) {
 	}
 	if err := SQLiteIntegrityCheck(context.Background(), dst); err == nil {
 		t.Fatal("integrity_check passed a copy with a damaged page")
+	}
+}
+
+// TestSQLiteSnapshotHelpers covers the restore's building blocks: a copy
+// switched to WAL records it in its header; the no-mmap read-only store reads
+// and refuses writes; ids list sorted; a checkpoint under another connection's
+// open read is busy; the id floor only rises.
+func TestSQLiteSnapshotHelpers(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created []string
+	for range 3 {
+		b, err := store.Create(Bead{Title: "row"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created = append(created, b.ID)
+	}
+	src := filepath.Join(dir, sqliteStoreFilename)
+	if wal, err := SQLiteFileIsWAL(src); err != nil || !wal {
+		t.Fatalf("a store's database is not WAL in its header: %v %v", wal, err)
+	}
+
+	// A reader holding a read transaction open keeps the checkpoint from
+	// truncating the WAL.
+	tx, err := store.(*SQLiteStore).readDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM beads").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(Bead{Title: "after the reader"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckpointSQLiteWAL(ctx, src); !errors.Is(err, ErrSQLiteCheckpointBusy) {
+		t.Fatalf("checkpoint under an open read = %v, want ErrSQLiteCheckpointBusy", err)
+	}
+	_ = tx.Rollback()
+	_ = store.(*SQLiteStore).CloseStore()
+
+	dst := filepath.Join(t.TempDir(), sqliteStoreFilename)
+	if err := VacuumSQLiteInto(ctx, src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if wal, _ := SQLiteFileIsWAL(dst); wal {
+		t.Fatal("the VACUUM INTO copy is WAL; the snapshot documents rollback-journal")
+	}
+	ids, err := SQLiteBeadIDs(ctx, dst)
+	if err != nil || len(ids) != 4 || !sort.StringsAreSorted(ids) {
+		t.Fatalf("SQLiteBeadIDs = %v, %v", ids, err)
+	}
+	hw, err := SQLiteSequenceHighWaterAt(ctx, dst, sqliteDefaultPrefix)
+	if err != nil || hw != 4 {
+		t.Fatalf("high-water = %d, %v; want 4", hw, err)
+	}
+	copied, err := OpenSQLiteStore(filepath.Dir(dst), WithSQLiteStoreReadOnlyNoMmap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := copied.Get(created[0]); err != nil || got.ID != created[0] {
+		t.Fatalf("no-mmap read = %v, %v", got.ID, err)
+	}
+	if _, err := copied.Create(Bead{Title: "a write"}); err == nil {
+		t.Fatal("the read-only no-mmap store accepted a write")
+	}
+	_ = copied.(*SQLiteStore).CloseStore()
+	if err := SetSQLiteJournalModeWAL(ctx, dst); err != nil {
+		t.Fatal(err)
+	}
+	if wal, _ := SQLiteFileIsWAL(dst); !wal {
+		t.Fatal("SetSQLiteJournalModeWAL left the header in rollback-journal mode")
+	}
+
+	floorDir := t.TempDir()
+	if err := RaiseSQLiteSequenceFloorAt(floorDir, "gcg", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := RaiseSQLiteSequenceFloorAt(floorDir, "gcg", 4); err != nil {
+		t.Fatal(err)
+	}
+	if floor, err := SQLiteSequenceFloorAt(floorDir, "gcg"); err != nil || floor != 10 {
+		t.Fatalf("floor = %d, %v; want 10 (never lowered)", floor, err)
 	}
 }

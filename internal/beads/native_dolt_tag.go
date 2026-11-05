@@ -14,9 +14,6 @@ type DoltTagger interface {
 	// DoltTag tags HEAD as name with message and returns the commit it
 	// tagged and whether the working set held changes HEAD does not cover.
 	DoltTag(name, message string) (DoltTagResult, error)
-	// DoltTagCommit returns the commit tag name points at, or ok=false when
-	// no such tag exists.
-	DoltTagCommit(name string) (commit string, ok bool, err error)
 }
 
 // DoltTagResult is what one DoltTag call tagged.
@@ -75,20 +72,6 @@ func (t nativeDoltTagger) DoltTag(name, message string) (DoltTagResult, error) {
 		return DoltTagResult{}, fmt.Errorf("tagging %s: %w", name, err)
 	}
 	return result, nil
-}
-
-// DoltTagCommit reads the commit a tag points at.
-func (t nativeDoltTagger) DoltTagCommit(name string) (commit string, ok bool, err error) {
-	err = t.withConn(func(ctx context.Context, conn *sql.Conn) error {
-		return conn.QueryRowContext(ctx, "SELECT tag_hash FROM dolt_tags WHERE tag_name = ?", name).Scan(&commit)
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("reading tag %s: %w", name, err)
-	}
-	return commit, true, nil
 }
 
 // withConn runs fn on one pinned connection of the store's storage.

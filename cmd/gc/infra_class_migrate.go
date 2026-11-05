@@ -927,12 +927,8 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		// that never converged and the revert stays withheld by the marker the
 		// evidence probe can still see. Its claim about the present does not
 		// hold, and only the operator command may act on that.
-		remedy := storageClearInstruction()
-		if backedUp, err := infraPathExists(target.RetainedBackupPath()); err == nil && backedUp {
-			remedy = storageRecopyFromBackupInstruction()
-		}
-		return say(fmt.Errorf("%s claims convergence but %s; the binding cannot serve until it is re-copied with:  %s",
-			target.MarkerPath(), infraStaleCause(target), remedy))
+		return say(fmt.Errorf("%s claims convergence but %s; the binding cannot serve until it is repaired with:  %s",
+			target.MarkerPath(), infraStaleCause(target), infraStaleBindingRemedy(target)))
 	}
 
 	// No marker. Either this city has infrastructure beads in the work store —

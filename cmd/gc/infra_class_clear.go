@@ -79,6 +79,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -803,28 +805,61 @@ func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEn
 // writeInfraRetainedBackupAt is writeInfraRetainedBackup for the backup at
 // path in dir, labeled with binding: the city's, or a rig's.
 func writeInfraRetainedBackupAt(dir, path, binding string, entries []infraBackupEntry) error {
+	_, err := writeInfraBackupFile(dir, path, infraRetainedBackupFormat, binding, "retained-source backup", len(entries), func(emit func(infraBackupEntry) error) error {
+		for _, entry := range entries {
+			if err := emit(entry); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return err
+}
+
+// infraBackupFileWritten is what writeInfraBackupFile wrote: its size and
+// sha256.
+type infraBackupFileWritten struct {
+	Bytes  int64
+	SHA256 string
+}
+
+// writeInfraBackupFile writes a file in the backup's line shape (a header
+// naming format, binding and n, then one infraBackupEntry per row produce
+// emits) atomically: temp file, fsync, rename, directory fsync. A crash
+// leaves the previous file or the new one, never a truncated file read as
+// complete, and a produce that emits other than n rows writes nothing. The
+// retained-source backup and the storage snapshot's JSONL share it; label
+// names the file in errors.
+func writeInfraBackupFile(dir, path, format, binding, label string, n int, produce func(emit func(infraBackupEntry) error) error) (infraBackupFileWritten, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("writing the retained-source backup: %w", err)
+		return infraBackupFileWritten{}, fmt.Errorf("writing the %s: %w", label, err)
 	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("writing the retained-source backup: %w", err)
+		return infraBackupFileWritten{}, fmt.Errorf("writing the %s: %w", label, err)
 	}
 	name := tmp.Name()
-	fail := func(cause error) error {
+	fail := func(cause error) (infraBackupFileWritten, error) {
 		_ = tmp.Close()
 		_ = os.Remove(name)
-		return fmt.Errorf("writing the retained-source backup: %w", cause)
+		return infraBackupFileWritten{}, fmt.Errorf("writing the %s: %w", label, cause)
 	}
-	writer := bufio.NewWriter(tmp)
+	sum := sha256.New()
+	counted := &countingWriter{target: io.MultiWriter(tmp, sum)}
+	writer := bufio.NewWriter(counted)
 	encoder := json.NewEncoder(writer)
-	if err := encoder.Encode(infraBackupHeader{Format: infraRetainedBackupFormat, Binding: binding, Beads: len(entries), WrittenAt: time.Now().UTC()}); err != nil {
+	if err := encoder.Encode(infraBackupHeader{Format: format, Binding: binding, Beads: n, WrittenAt: time.Now().UTC()}); err != nil {
 		return fail(err)
 	}
-	for _, entry := range entries {
-		if err := encoder.Encode(entry); err != nil {
-			return fail(err)
-		}
+	emitted := 0
+	if err := produce(func(entry infraBackupEntry) error {
+		emitted++
+		return encoder.Encode(entry)
+	}); err != nil {
+		return fail(err)
+	}
+	if emitted != n {
+		return fail(fmt.Errorf("the header records %d bead(s) and %d were written", n, emitted))
 	}
 	if err := writer.Flush(); err != nil {
 		return fail(err)
@@ -834,14 +869,14 @@ func writeInfraRetainedBackupAt(dir, path, binding string, entries []infraBackup
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(name)
-		return fmt.Errorf("writing the retained-source backup: %w", err)
+		return infraBackupFileWritten{}, fmt.Errorf("writing the %s: %w", label, err)
 	}
 	if err := infraMigrationRename(name, path); err != nil {
 		_ = os.Remove(name)
-		return fmt.Errorf("writing the retained-source backup: %w", err)
+		return infraBackupFileWritten{}, fmt.Errorf("writing the %s: %w", label, err)
 	}
 	syncInfraDir(dir)
-	return nil
+	return infraBackupFileWritten{Bytes: counted.n, SHA256: hex.EncodeToString(sum.Sum(nil))}, nil
 }
 
 // readInfraRetainedBackup reads the backup. present=false with no error means
@@ -852,33 +887,53 @@ func readInfraRetainedBackup(target infraBindingTarget) ([]infraBackupEntry, boo
 
 // readInfraRetainedBackupAt reads the backup at path.
 func readInfraRetainedBackupAt(path string) ([]infraBackupEntry, bool, error) {
-	contents, err := os.ReadFile(path)
+	var entries []infraBackupEntry
+	_, present, err := scanInfraBackupFile(path, infraRetainedBackupFormat, "retained-source backup", func(entry infraBackupEntry) error {
+		entries = append(entries, entry)
+		return nil
+	})
+	if err != nil || !present {
+		return nil, present, err
+	}
+	return entries, true, nil
+}
+
+// scanInfraBackupFile reads a file in the backup's line shape, handing each
+// entry to fn as it is decoded rather than holding them all. It refuses a
+// header of another format, and a body whose row count is not the header's.
+// present=false with no error means there is no file.
+func scanInfraBackupFile(path, format, label string, fn func(infraBackupEntry) error) (int, bool, error) {
+	var header infraBackupHeader
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
+			return 0, false, nil
 		}
-		return nil, false, fmt.Errorf("reading the retained-source backup %s: %w", path, err)
+		return 0, false, fmt.Errorf("reading the %s %s: %w", label, path, err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	var header infraBackupHeader
+	defer f.Close() //nolint:errcheck // read-only
+	decoder := json.NewDecoder(bufio.NewReader(f))
 	if err := decoder.Decode(&header); err != nil {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: header: %w", path, err)
+		return 0, true, fmt.Errorf("reading the %s %s: header: %w", label, path, err)
 	}
-	if header.Format != infraRetainedBackupFormat {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: format %q, want %q", path, header.Format, infraRetainedBackupFormat)
+	if header.Format != format {
+		return 0, true, fmt.Errorf("reading the %s %s: format %q, want %q", label, path, header.Format, format)
 	}
-	var entries []infraBackupEntry
+	n := 0
 	for decoder.More() {
 		var entry infraBackupEntry
 		if err := decoder.Decode(&entry); err != nil {
-			return nil, true, fmt.Errorf("reading the retained-source backup %s: entry %d: %w", path, len(entries)+1, err)
+			return n, true, fmt.Errorf("reading the %s %s: entry %d: %w", label, path, n+1, err)
 		}
-		entries = append(entries, entry)
+		n++
+		if err := fn(entry); err != nil {
+			return n, true, err
+		}
 	}
-	if len(entries) != header.Beads {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: header records %d bead(s), file holds %d", path, header.Beads, len(entries))
+	if n != header.Beads {
+		return n, true, fmt.Errorf("reading the %s %s: header records %d bead(s), file holds %d", label, path, header.Beads, n)
 	}
-	return entries, true, nil
+	return n, true, nil
 }
 
 // verifyInfraRetainedBackup re-reads the backup from disk and proves it holds

@@ -1231,6 +1231,72 @@ Make sure the `gc` on every agent's `PATH` is the build that has `gc ready`:
 the generated work query shells out to it by name, and an older `gc` on `PATH`
 fails every hook with `running work query: exit status 1`.
 
+## Snapshots and restoring the binding
+
+`gc storage snapshot` writes a snapshot of the city's stores into a new
+directory, `.gc/snapshots/<id>/` by default (`--to DIR` to put it elsewhere):
+
+```
+# live, read-only: the binding alone
+gc storage snapshot --binding
+# with the city stopped: the binding, the work store and every rig
+gc storage snapshot --binding --work --rigs --fleet-stopped
+# re-read one and prove it against its manifest
+gc storage snapshot --verify <id>
+```
+
+Each store gets an exact copy where its kind has one, and a JSONL of every
+row with its edges and their payloads:
+
+| Store | Exact copy |
+|---|---|
+| SQLite binding | `VACUUM INTO`, proven with `PRAGMA integrity_check`. The copy is one self-contained file in rollback-journal mode |
+| Native Dolt | a Dolt tag, `gc-storage-snapshot-<id>-<dir hash>`, of HEAD |
+| bd CLI, hosted bd | `bd export --all` |
+| File | a copy of the file |
+| Generic exec | none |
+
+Know what each one can bring back:
+
+- **The JSONL is a record, not a restore source.** No tool imports it yet
+  (the manifest says `"jsonl_restorable": false`). For a generic exec store,
+  which has no exact copy, a snapshot is therefore not a way back to the
+  store.
+- **A Dolt tag holds the committed tables only.** bd keeps wisps in
+  `dolt_ignore`'d tables, so they are not in the tag; the JSONL holds them. A
+  working set with uncommitted changes is noted in the manifest.
+- **The binding is restorable** (below). A work store is restored by hand:
+  `CALL DOLT_RESET('--hard', '<tag>')` on its Dolt, or `bd import` of the
+  snapshot's `work/export.jsonl`. `gc storage migrate --to-work` is the
+  automated rollback.
+
+A snapshot directory holds `manifest.json` only once every file in it has
+been re-read and proven, so a directory without one is an interrupted
+snapshot: `--verify` refuses it, and the next snapshot into the same
+directory removes it. `--keep N` (default 2) keeps the newest N. A snapshot
+with a `pinned` file in its directory is never counted or removed.
+
+On a split city the core `binding-snapshot` order snapshots the binding every
+6 hours into the pack's state directory (`binding-archive/`, `--keep 4`). On
+a city with no binding it does nothing.
+
+### Restoring the binding
+
+With the city stopped:
+
+```
+gc storage snapshot restore <id> --binding --fleet-stopped
+```
+
+It refuses a snapshot of another city or another work store, and one taken
+before the binding's records changed (a migration, a recovery or a rig import
+since): it restores only the database, and those records describe what the
+database must hold. It then installs the snapshot's database in WAL mode,
+raises the id floor past every id the replaced database held, and keeps the
+replaced database (with its `-wal`, `-shm` and `-journal`) beside it as
+`*.pre-restore-<ts>`. If it is interrupted, the city refuses to start and
+names the same command; run it again.
+
 ## Rolling back
 
 **Before cutover, rollback is free** — nothing moved, so nothing is lost. How
