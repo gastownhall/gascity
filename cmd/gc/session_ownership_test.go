@@ -883,6 +883,40 @@ func TestHeldWorkIntent(t *testing.T) {
 	}
 }
 
+// The held-work keep's bound (heldWorkInBound), one predicate for every keep
+// site: a seat woke less than parkedWorkMaxHold ago is left to the keep; one
+// woken that long ago or longer is not, and neither is one whose wake stamp
+// proves nothing (missing, unreadable, or parkedSleptAtFutureSkew or more
+// past now).
+func TestHeldWorkInBound(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	stamp := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	for _, tc := range []struct {
+		name  string
+		woke  string
+		want  bool
+		until time.Time
+	}{
+		{name: "woke just now", woke: stamp(0), want: true, until: now.Add(parkedWorkMaxHold)},
+		{name: "woke an hour ago", woke: stamp(-time.Hour), want: true, until: now.Add(parkedWorkMaxHold - time.Hour)},
+		{name: "woke a second inside the bound", woke: stamp(-parkedWorkMaxHold + time.Second), want: true, until: now.Add(time.Second)},
+		{name: "woke the bound ago", woke: stamp(-parkedWorkMaxHold), until: now},
+		{name: "woke past the bound", woke: stamp(-parkedWorkMaxHold - time.Hour), until: now.Add(-time.Hour)},
+		{name: "woke within the skew ahead of now", woke: stamp(parkedSleptAtFutureSkew - time.Second), want: true, until: now.Add(parkedSleptAtFutureSkew - time.Second + parkedWorkMaxHold)},
+		{name: "woke the skew ahead of now", woke: stamp(parkedSleptAtFutureSkew)},
+		{name: "no wake stamp", woke: ""},
+		{name: "an unreadable wake stamp", woke: "yesterday"},
+	} {
+		info := sessionpkg.Info{LastWokeAt: tc.woke}
+		if got := heldWorkInBound(info, now); got != tc.want {
+			t.Errorf("%s: heldWorkInBound = %v, want %v", tc.name, got, tc.want)
+		}
+		if until, ok := heldWorkHoldUntil(info, now); !until.Equal(tc.until) || ok != !tc.until.IsZero() {
+			t.Errorf("%s: heldWorkHoldUntil = %v %v, want %v", tc.name, until, ok, tc.until)
+		}
+	}
+}
+
 // The ack's held-work cancel keeps to the keep's intents: a reconciler-owned
 // timer-drain ack on a seat holding work under an agent's wait is not
 // canceled for the work, and the stop it acked proceeds.
@@ -900,6 +934,36 @@ func TestReconcileSessionBeads_HeldWorkAckCancelSkipsAWaitIntent(t *testing.T) {
 	f.tickWith(t, newDrainOps(f.env.sp), map[string]int{}, nil)
 	if stopped, why := f.stopObservation(t); !stopped || why == "drain-ack-pending" {
 		t.Fatalf("stop observation = %v %q, want the acked stop under way; stdout:\n%s\nstderr:\n%s", stopped, why, f.env.stdout.String(), f.env.stderr.String())
+	}
+}
+
+// wokeAgo stamps the seat's last wake ago, before now.
+func (f *ownershipFixture) wokeAgo(t *testing.T, ago time.Duration) {
+	t.Helper()
+	f.env.setSessionMetadata(&f.session, map[string]string{"last_woke_at": f.env.clk.Now().Add(-ago).UTC().Format(time.RFC3339)})
+	f.reprime(t)
+}
+
+// The ack's held-work cancel keeps to the keep's bound (heldWorkInBound): a
+// reconciler-owned timer-drain ack on a seat that woke parkedWorkMaxHold ago
+// holding work is not canceled for the work, and the stop it acked proceeds.
+func TestReconcileSessionBeads_HeldWorkAckCancelEndsAtItsBound(t *testing.T) {
+	for _, reason := range []string{"idle", "no-wake-reason"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+			f.wokeAgo(t, parkedWorkMaxHold)
+			ds := beginDrainForTest(t, f.env.store, f.env.dt, f.session.ID, reason, f.env.clk.Now(), f.env.clk.Now().Add(time.Hour))
+			if err := setReconcilerDrainAckMetadata(f.env.sp, ownershipWorkerName, ds); err != nil {
+				t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+			}
+			ds.ackSet = true
+			f.holdBlockedWork(t, "open")
+			f.tickWith(t, newDrainOps(f.env.sp), map[string]int{}, nil)
+			if stopped, why := f.stopObservation(t); !stopped || why == "drain-ack-pending" {
+				t.Fatalf("stop observation = %v %q, want the acked stop under way; stdout:\n%s\nstderr:\n%s", stopped, why, f.env.stdout.String(), f.env.stderr.String())
+			}
+		})
 	}
 }
 
@@ -1031,6 +1095,43 @@ func TestReconcileSessionBeads_PoolSeatHoldingUncoveredWorkDrainsAsToday(t *test
 	}
 }
 
+// atHoldBound is timer with its seat stamped as woken parkedWorkMaxHold ago
+// once timer's own setup has run: the held-work keep's bound
+// (heldWorkInBound) has ended.
+func atHoldBound(timer heldWorkTimerDrain) heldWorkTimerDrain {
+	setup := timer.setup
+	timer.setup = func(t *testing.T, f *ownershipFixture) {
+		t.Helper()
+		setup(t, f)
+		f.wokeAgo(t, parkedWorkMaxHold)
+	}
+	return timer
+}
+
+// Past its bound (heldWorkInBound) the held-work keep holds no seat: each
+// timer drains a seat that woke parkedWorkMaxHold ago holding blocked work
+// exactly as it drains the same seat holding nothing.
+func TestReconcileSessionBeads_PoolSeatHoldingWorkPastItsBoundDrainsAsToday(t *testing.T) {
+	for _, timer := range heldWorkTimerDrains() {
+		t.Run(timer.name, func(t *testing.T) {
+			observe := func(held bool) string {
+				f := newOwnershipFixture(t)
+				if held {
+					f.holdBlockedWork(t, "open")
+				}
+				f.runTimer(t, atHoldBound(timer), nil)
+				return f.drainObservation(t)
+			}
+			if want := observe(false); want != "drain:"+timer.reason {
+				t.Fatalf("test premise: the seat holding nothing gave stop observation %q, want drain:%s", want, timer.reason)
+			}
+			if got := observe(true); got != "drain:"+timer.reason {
+				t.Fatalf("stop observation = %q, want drain:%s as for the seat holding nothing", got, timer.reason)
+			}
+		})
+	}
+}
+
 // An explicit sleep intent other than idle-stop-pending still drains a seat
 // holding blocked work.
 func TestReconcileSessionBeads_PoolSeatHoldingWorkStillDrainsOnExplicitIntent(t *testing.T) {
@@ -1050,31 +1151,237 @@ func TestReconcileSessionBeads_PoolSeatHoldingWorkStillDrainsOnExplicitIntent(t 
 }
 
 // The configured idle_timeout ladder is not a timer drain the held-work keep
-// covers: it still stops a seat holding only blocked work.
+// covers: it still stops a seat holding only blocked work. That stop ends the
+// keep's hold, so it finishes as the timer drain the keep held back would
+// have (CompleteDrainPatch(idle)), which the park accepts, and the seat stays
+// open on its work; a held-work read that fails counts as held (fail closed).
+// A seat the keep does not cover sleeps on idle-timeout as before (a
+// workless one closes on it).
 func TestReconcileSessionBeads_IdleTimeoutStillStopsSeatHoldingOnlyBlockedWork(t *testing.T) {
-	f := newOwnershipFixture(t)
-	f.holdBlockedWork(t, "open")
-	f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
-	session, err := f.env.store.Get(f.session.ID)
+	held := func(t *testing.T, f *ownershipFixture) { f.holdBlockedWork(t, "open") }
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, f *ownershipFixture)
+		want  string
+	}{
+		{name: "a seat holding blocked work", setup: held, want: "idle"},
+		// The read of the only work it holds fails: the read fails closed.
+		{name: "a seat whose held-work read fails", setup: func(t *testing.T, f *ownershipFixture) {
+			held(t, f)
+			f.reads.arm(f.work.ID)
+		}, want: "idle"},
+		// Past the keep's bound its timer drain may still be running.
+		{name: "a seat past the keep's bound holding blocked work", setup: func(t *testing.T, f *ownershipFixture) {
+			held(t, f)
+			f.wokeAgo(t, parkedWorkMaxHold)
+		}, want: "idle"},
+		{name: "a seat holding nothing", setup: func(*testing.T, *ownershipFixture) {}, want: "idle-timeout"},
+		{name: "a named session holding blocked work", setup: func(t *testing.T, f *ownershipFixture) {
+			held(t, f)
+			f.env.setSessionMetadata(&f.session, map[string]string{namedSessionMetadataKey: "true"})
+			f.reprime(t)
+		}, want: "idle-timeout"},
+		{name: "a seat under a wait holding blocked work", setup: func(t *testing.T, f *ownershipFixture) {
+			held(t, f)
+			f.env.setSessionMetadata(&f.session, map[string]string{"sleep_intent": "wait-hold", "wait_hold": "true"})
+			f.reprime(t)
+		}, want: "idle-timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOwnershipFixture(t)
+			tc.setup(t, f)
+			f.env.addDesired(ownershipWorkerName, ownershipPoolTemplate, false)
+			session, err := f.env.store.Get(f.session.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			it := newFakeIdleTracker()
+			it.idle[ownershipWorkerName] = true
+			reconcileSessionBeadsAtPath(
+				context.Background(), f.env.city, []beads.Bead{session}, f.env.desiredState, configuredSessionNames(f.env.cfg, "", f.env.store),
+				f.env.cfg, f.env.sp, f.env.store, nil, nil, nil, nil, f.env.dt, map[string]int{ownershipPoolTemplate: 1}, false, nil, "",
+				it, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr,
+				withAsyncDrainAckStopTracker(f.env.stops),
+			)
+			if f.env.sp.IsRunning(ownershipWorkerName) {
+				t.Fatalf("idle_timeout left the seat running; stdout:\n%s\nstderr:\n%s", f.env.stdout.String(), f.env.stderr.String())
+			}
+			b, err := f.backing.Get(f.session.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			if b.Metadata["sleep_reason"] != tc.want {
+				t.Fatalf("sleep_reason %q, want %s", b.Metadata["sleep_reason"], tc.want)
+			}
+			if tc.want == "idle" && (b.Status == "closed" || b.Metadata["state"] != "asleep") {
+				t.Fatalf("seat %s in state %q, want it open and asleep on its work", b.Status, b.Metadata["state"])
+			}
+		})
+	}
+}
+
+// heldWorkSeatEnv is a live, desired, resumable pool seat holding one open
+// pin routed to its pool and blocked by an open bead, with no wake reason, on
+// an agent whose idle_timeout is 10m: the shape the held-work keep holds, and
+// the review probe of #8534's first iteration.
+type heldWorkSeatEnv struct {
+	env  *reconcilerTestEnv
+	seat beads.Bead
+	pin  beads.Bead
+	rec  *capturingRecorder
+	dops drainOps
+	it   *fakeIdleTracker
+}
+
+const heldWorkSeatName = "worker-1"
+
+func newHeldWorkSeatEnv(t *testing.T) *heldWorkSeatEnv {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(4), IdleTimeout: "10m"}}}
+	env.addDesired(heldWorkSeatName, "worker", false)
+	seat := env.createSessionBead(heldWorkSeatName, "worker")
+	env.markSessionActive(&seat)
+	env.setSessionMetadata(&seat, map[string]string{poolManagedMetadataKey: "true"})
+	if err := env.sp.Start(context.Background(), heldWorkSeatName, runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(%s): %v", heldWorkSeatName, err)
+	}
+	for key, value := range map[string]string{"GC_SESSION_ID": seat.ID, "GC_INSTANCE_TOKEN": seat.Metadata["instance_token"]} {
+		if err := env.sp.SetMeta(heldWorkSeatName, key, value); err != nil {
+			t.Fatalf("SetMeta(%s): %v", key, err)
+		}
+	}
+	blocker, err := env.store.Create(beads.Bead{Title: "review loop", Type: "task"})
 	if err != nil {
-		t.Fatalf("Get(session): %v", err)
+		t.Fatalf("Create(blocker): %v", err)
 	}
-	it := newFakeIdleTracker()
-	it.idle[ownershipWorkerName] = true
-	reconcileSessionBeadsAtPath(
-		context.Background(), f.env.city, []beads.Bead{session}, f.env.desiredState, configuredSessionNames(f.env.cfg, "", f.env.store),
-		f.env.cfg, f.env.sp, f.env.store, nil, nil, nil, nil, f.env.dt, map[string]int{ownershipPoolTemplate: 1}, false, nil, "",
-		it, f.env.clk, f.env.rec, 0, 0, &f.env.stdout, &f.env.stderr,
-		withAsyncDrainAckStopTracker(f.env.stops),
-	)
-	if f.env.sp.IsRunning(ownershipWorkerName) {
-		t.Fatalf("idle_timeout left the seat holding only blocked work %s running; stdout:\n%s\nstderr:\n%s", f.work.ID, f.env.stdout.String(), f.env.stderr.String())
-	}
-	b, err := f.backing.Get(f.session.ID)
+	pin, err := env.store.Create(beads.Bead{Title: "finalize", Type: "task", Assignee: seat.ID, Metadata: map[string]string{"gc.routed_to": "worker"}})
 	if err != nil {
-		t.Fatalf("Get(session): %v", err)
+		t.Fatalf("Create(pin): %v", err)
 	}
-	if b.Metadata["sleep_reason"] != "idle-timeout" {
-		t.Fatalf("sleep_reason = %q, want idle-timeout", b.Metadata["sleep_reason"])
+	if err := env.store.DepAdd(pin.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	rec := &capturingRecorder{}
+	env.rec = rec
+	return &heldWorkSeatEnv{env: env, seat: seat, pin: pin, rec: rec, dops: newDrainOps(env.sp), it: newFakeIdleTracker()}
+}
+
+// tick runs one controller tick over the seat as beadReconcileTick does: the
+// park verdicts decided over the seat's row as it stands before the tick, the
+// pin not ready, and the drain-ack's async stops waited out.
+func (h *heldWorkSeatEnv) tick(t *testing.T) {
+	t.Helper()
+	b, err := h.env.store.Get(h.seat.ID)
+	if err != nil {
+		t.Fatalf("Get(seat): %v", err)
+	}
+	info, err := sessionFrontDoor(h.env.store).Get(h.seat.ID)
+	if err != nil {
+		t.Fatalf("front door Get(seat): %v", err)
+	}
+	pin, err := h.env.store.Get(h.pin.ID)
+	if err != nil {
+		t.Fatalf("Get(pin): %v", err)
+	}
+	work, ready := []beads.Bead{pin}, []bool{false}
+	parked := parkRows(h.env.cfg, []sessionpkg.Info{info}, work, ready, h.env.clk.Now().UTC())
+	stops := &asyncStartTracker{}
+	reconcileSessionBeadsAtPath(context.Background(), h.env.city, []beads.Bead{b}, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, h.dops, work, nil, nil, h.env.dt, nil, false, nil, "", h.it, h.env.clk, h.env.rec, 0, 0,
+		&h.env.stdout, &h.env.stderr, withAsyncDrainAckStopTracker(stops), withReadyAssignedFlags(ready), withParkedSeats(parked))
+	waitAsyncStopsForTest(t, stops)
+}
+
+// The held-work keep's live hold ends where the timer drain it held back
+// would have ended the seat (#8534 review, iteration 1): kept live while it
+// holds a blocked pin, then stopped by its idle_timeout, the seat parks on its
+// pin (#8110) through every tick past the stranded repair's confirm grace. No
+// session.stranded is emitted, not even on the stop's own tick, and the pin
+// stays on the seat for the resume.
+func TestReconcileSessionBeads_HeldSeatParksAtItsIdleTimeout(t *testing.T) {
+	h := newHeldWorkSeatEnv(t)
+	for tick := 1; tick <= 3; tick++ {
+		h.tick(t)
+		if !h.env.sp.IsRunning(heldWorkSeatName) || h.env.dt.get(h.seat.ID) != nil {
+			t.Fatalf("live tick %d: running %t, drain %+v; want the seat kept for its pin; stderr:\n%s", tick, h.env.sp.IsRunning(heldWorkSeatName), h.env.dt.get(h.seat.ID), h.env.stderr.String())
+		}
+		h.env.clk.Advance(15 * time.Second)
+	}
+	h.env.clk.Advance(10 * time.Minute)
+	h.it.idle[heldWorkSeatName] = true
+	h.tick(t)
+	if h.env.sp.IsRunning(heldWorkSeatName) {
+		t.Fatalf("idle_timeout left the held seat running; stderr:\n%s", h.env.stderr.String())
+	}
+	for tick := 0; tick <= 3; tick++ {
+		if tick > 0 {
+			h.env.clk.Advance(strandedRepairConfirmGrace + time.Minute)
+			h.tick(t)
+		}
+		if got := len(h.rec.strandedEvents()); got != 0 {
+			t.Fatalf("tick %d after the idle stop: %d session.stranded events, want none for a parked seat; stderr:\n%s", tick, got, h.env.stderr.String())
+		}
+		seat, err := h.env.store.Get(h.seat.ID)
+		if err != nil {
+			t.Fatalf("Get(seat): %v", err)
+		}
+		if seat.Status == "closed" || seat.Metadata["state"] != "asleep" || seat.Metadata["sleep_reason"] != "idle" || seat.Metadata[strandedEventEmittedKey] != "" {
+			t.Fatalf("tick %d after the idle stop: seat %s %v; want parked: open, asleep on idle, unmarked", tick, seat.Status, seat.Metadata)
+		}
+		if pin, err := h.env.store.Get(h.pin.ID); err != nil || pin.Status != "open" || pin.Assignee != h.seat.ID {
+			t.Fatalf("tick %d after the idle stop: pin %s/%q (%v); want open on its seat", tick, pin.Status, pin.Assignee, err)
+		}
+	}
+}
+
+// Without an idle_timeout the held-work keep's live hold ends at its bound
+// (heldWorkInBound; #8534 review, iteration 2): kept live while it holds a
+// blocked pin, the seat's no-wake-reason drain begins a day past its wake and
+// stops it, as main's begins at once, so it gives back its runtime and cap
+// headroom; the seat then parks on its pin (#8110) through every tick past
+// the stranded repair's confirm grace, with no session.stranded and the pin
+// still on the seat for the resume.
+func TestReconcileSessionBeads_HeldSeatDrainsAndParksPastItsBound(t *testing.T) {
+	h := newHeldWorkSeatEnv(t)
+	h.env.cfg.Agents[0].IdleTimeout = ""
+	for tick := 1; tick <= 3; tick++ {
+		h.tick(t)
+		if !h.env.sp.IsRunning(heldWorkSeatName) || h.env.dt.get(h.seat.ID) != nil {
+			t.Fatalf("live tick %d: running %t, drain %+v; want the seat kept for its pin; stderr:\n%s", tick, h.env.sp.IsRunning(heldWorkSeatName), h.env.dt.get(h.seat.ID), h.env.stderr.String())
+		}
+		h.env.clk.Advance(15 * time.Second)
+	}
+	h.env.clk.Advance(parkedWorkMaxHold)
+	h.tick(t)
+	if ds := h.env.dt.get(h.seat.ID); ds == nil || ds.reason != "no-wake-reason" {
+		t.Fatalf("drain %+v past the keep's bound; want the no-wake-reason drain begun; stderr:\n%s", ds, h.env.stderr.String())
+	}
+	h.env.clk.Advance(defaultDrainTimeout + time.Second)
+	h.tick(t)
+	if h.env.sp.IsRunning(heldWorkSeatName) {
+		t.Fatalf("the drain past the keep's bound left the seat running; stderr:\n%s", h.env.stderr.String())
+	}
+	// The stopped seat's drain finalizes on the tick after its stop.
+	h.env.clk.Advance(15 * time.Second)
+	h.tick(t)
+	for tick := 0; tick <= 3; tick++ {
+		if tick > 0 {
+			h.env.clk.Advance(strandedRepairConfirmGrace + time.Minute)
+			h.tick(t)
+		}
+		if got := len(h.rec.strandedEvents()); got != 0 {
+			t.Fatalf("tick %d after the drain: %d session.stranded events, want none for a parked seat; stderr:\n%s", tick, got, h.env.stderr.String())
+		}
+		seat, err := h.env.store.Get(h.seat.ID)
+		if err != nil {
+			t.Fatalf("Get(seat): %v", err)
+		}
+		if seat.Status == "closed" || seat.Metadata["state"] != "asleep" || seat.Metadata["sleep_reason"] != "idle" || seat.Metadata[strandedEventEmittedKey] != "" {
+			t.Fatalf("tick %d after the drain: seat %s %v; want parked: open, asleep on idle, unmarked", tick, seat.Status, seat.Metadata)
+		}
+		if pin, err := h.env.store.Get(h.pin.ID); err != nil || pin.Status != "open" || pin.Assignee != h.seat.ID {
+			t.Fatalf("tick %d after the drain: pin %s/%q (%v); want open on its seat", tick, pin.Status, pin.Assignee, err)
+		}
 	}
 }

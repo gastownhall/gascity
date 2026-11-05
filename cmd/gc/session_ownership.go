@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -180,6 +181,58 @@ func heldWorkDrainReason(reason string) bool {
 func heldWorkIntent(info sessionpkg.Info) bool {
 	d := sessionpkg.DispositionOfInfo(info)
 	return d.Operator != sessionpkg.OperatorSuspended && !d.WaitIntent && d.Unknown&sessionpkg.UnknownIntent == 0
+}
+
+// heldWorkInBound reports whether the held-work keep may still hold info's
+// seat at now: the seat woke (last_woke_at) less than parkedWorkMaxHold, the
+// park's bound, before now. A held seat keeps its runtime, cap headroom and
+// pool slot, which a parked seat gives back, so past the bound its timer
+// drains run as they would without the keep, and the seat they sleep parks or
+// strands as any drained seat does (parkSeats): a seat whose agent stopped
+// answering gives them back within a day of its wake. A seat holds work live
+// for no longer than it has been awake, so no hold outlasts the bound. A wake
+// stamp that is missing, unreadable or more than parkedSleptAtFutureSkew past
+// now proves nothing, and the seat drains as today. The bound runs from the
+// wake, not from the pane's last activity, which an idle Claude Code TUI keeps
+// fresh by repainting its status line (ga-07mi8). Every keep site reads it, on
+// both reconcilers; the idle stop does not (idleStopSleepPatch).
+func heldWorkInBound(info sessionpkg.Info, now time.Time) bool {
+	until, ok := heldWorkHoldUntil(info, now)
+	return ok && now.Before(until)
+}
+
+// heldWorkHoldUntil is when the held-work keep's bound on info's seat ends:
+// its last_woke_at plus parkedWorkMaxHold. ok is false for a wake stamp that
+// proves nothing (heldWorkInBound).
+func heldWorkHoldUntil(info sessionpkg.Info, now time.Time) (until time.Time, ok bool) {
+	woke, err := time.Parse(time.RFC3339, strings.TrimSpace(info.LastWokeAt))
+	if err != nil || woke.Sub(now) >= parkedSleptAtFutureSkew {
+		return time.Time{}, false
+	}
+	return woke.Add(parkedWorkMaxHold), true
+}
+
+// idleStopSleepPatch is the sleep legacy's idle-timeout stop (dec) writes on
+// info's seat, and whether the seat holds work the held-work keep counts. The
+// ordinary idle stop of a seat the keep covers (heldWorkIntent,
+// liveClaimVetoApplies) that holds work (sessionHoldsAssignedWork, failing
+// closed) finishes as its timer drain would have (finalizePatch with work:
+// CompleteDrainPatch(idle)), which the park (parkableRow) accepts: inside the
+// keep's bound the stop ends the hold that held that drain back, and past it
+// (heldWorkInBound) the drain may still be running. Any other stop, the defer
+// streak's forced stop included, takes the ladder's SleepPatch. v2's is
+// idleTimeoutHeldWorkFinish.
+func idleStopSleepPatch(cityPath string, cfg *config.City, info sessionpkg.Info, suspState suspensionstate.State, sw *SeatWork, dec sessionpkg.TimerDecision, now time.Time, stderr io.Writer) (sessionpkg.MetadataPatch, bool) {
+	if dec.SleepReason == string(sessionpkg.SleepReasonIdleTimeout) && heldWorkIntent(info) && liveClaimVetoApplies(cityPath, cfg, info, suspState) {
+		holds, _, err := sessionHoldsAssignedWork(sw, info)
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: idle timeout for %s: reading its held work: %v\n", info.SessionNameMetadata, err) //nolint:errcheck // best-effort stderr
+		}
+		if holds {
+			return sessionpkg.CompleteDrainPatch(now, string(sessionpkg.SleepReasonIdle), info.WakeMode == "fresh"), true
+		}
+	}
+	return sessionpkg.SleepPatch(now, dec.SleepReason), false
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,

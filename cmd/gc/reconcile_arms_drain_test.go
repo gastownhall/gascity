@@ -768,8 +768,21 @@ func TestFloorAckOverATokenlessCorpseIsSignaled(t *testing.T) {
 	}
 }
 
-// heldSeat makes gc-1 a pool seat of the configured pool agent worker.
-var heldSeat = []string{"pool_managed", "true"}
+// heldSeat makes gc-1 a pool seat of the configured pool agent worker, woken
+// an hour before gatherNow: inside the held-work keep's bound.
+var heldSeat = []string{"pool_managed", "true", "last_woke_at", rowAt(-time.Hour)}
+
+// pastHoldBound are wake stamps on which the held-work keep's bound
+// (heldWorkInBound) holds nothing at gatherNow: it has ended, or the stamp
+// proves nothing.
+var pastHoldBound = []struct {
+	name string
+	meta []string
+}{
+	{"woken the bound ago", []string{"last_woke_at", rowAt(-parkedWorkMaxHold)}},
+	{"no wake stamp", []string{"last_woke_at", ""}},
+	{"a wake stamp the skew ahead", []string{"last_woke_at", rowAt(parkedSleptAtFutureSkew)}},
+}
 
 // poolSeatCity configures worker as a pool agent, which the held-work keep's
 // eligibility (liveClaimVetoApplies) reads.
@@ -1195,5 +1208,62 @@ func TestHeldWorkDarkLegKeepsSeatAsLegacy(t *testing.T) {
 				t.Fatalf("requested idle drain: %+v, want canceled=%v, else signaled", it, leg.dark)
 			}
 		})
+	}
+}
+
+// TestDrainBeginEndsTheHeldWorkKeepAtItsBound (the keep's bound, #8534
+// review 2). Kills a held-work keep with no bound: A20 keeps a pool seat
+// holding blocked work that woke inside parkedWorkMaxHold, requeuing the row
+// at the bound's end, and begins its timer drain once the bound has passed,
+// or when its wake stamp proves nothing, as on a seat holding nothing.
+func TestDrainBeginEndsTheHeldWorkKeepAtItsBound(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	idleProvable := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
+	for _, timer := range []struct {
+		reason string
+		entry  func(*selectionEntry)
+		world  func(*World)
+	}{{reasonNoWake, noWake, func(*World) {}}, {drainIdle, idle, idleProvable}} {
+		t.Run(timer.reason+", a second inside the bound", func(t *testing.T) {
+			meta := slices.Concat(heldSeat, []string{"last_woke_at", rowAt(time.Second - parkedWorkMaxHold)})
+			it, next := decideDrain(t, meta, timer.entry, poolSeatCity, timer.world, heldOpen)
+			if it.Kind != "" || it.Reason != decideDrainWorkKept || !next.Equal(gatherNow.Add(time.Second)) {
+				t.Fatalf("%+v requeued at %v, want the row kept for its work until %v", it, next, gatherNow.Add(time.Second))
+			}
+		})
+		for _, c := range pastHoldBound {
+			t.Run(timer.reason+", "+c.name, func(t *testing.T) {
+				it, _ := decideDrain(t, slices.Concat(heldSeat, c.meta), timer.entry, poolSeatCity, timer.world, heldOpen)
+				if (it.Kind != intentDrainBegin && it.Kind != intentDrainBeginFresh) || it.Reason != decideDrainBegin+timer.reason {
+					t.Fatalf("%+v, want the %s drain to begin", it, timer.reason)
+				}
+			})
+		}
+	}
+}
+
+// TestDrainVoidCancelEndsTheHeldWorkKeepAtItsBound (the keep's bound). Kills
+// a held-work cancel with no bound: once the keep's bound has passed, or when
+// the seat's wake stamp proves nothing, A19 leaves a requested timer drain on
+// a pool seat holding blocked work to its signal, and the signal does not
+// read the seat's held work (HeldWork), which would refuse it.
+func TestDrainVoidCancelEndsTheHeldWorkKeepAtItsBound(t *testing.T) {
+	noWake := func(e *selectionEntry) { e.Desired = desireSleep }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, timer := range []struct {
+		reason string
+		entry  func(*selectionEntry)
+	}{{reasonNoWake, noWake}, {drainIdle, idle}} {
+		for _, c := range pastHoldBound {
+			t.Run(timer.reason+", "+c.name, func(t *testing.T) {
+				it, _ := decideDrain(t, slices.Concat(heldSeat, c.meta, intentAt(timer.reason, "3")), timer.entry, poolSeatCity, heldOpen)
+				if (it.Kind != intentSignal && it.Kind != intentSignalFresh) || it.Reason != decideDrainSignal+timer.reason || it.HeldWork {
+					t.Fatalf("%+v, want the %s signal, reading no held work", it, timer.reason)
+				}
+			})
+		}
 	}
 }

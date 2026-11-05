@@ -1056,6 +1056,12 @@ func parityFixtures() []parityFixture {
 		cfg.Agents[0].SleepAfterIdle = "5m"
 		return cfg
 	}
+	// idleTimeoutWorkers is the worker pool on a 5m idle_timeout.
+	idleTimeoutWorkers := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents[0].IdleTimeout = "5m"
+		return cfg
+	}
 	// chat is a city with an always named session; legacy preserves its
 	// row outside the desired state only while the city is suspended.
 	chat := func(suspended bool) func() *config.City {
@@ -1340,6 +1346,25 @@ func parityFixtures() []parityFixture {
 				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
 			},
 			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A live pool seat holding only a blocked pin, with no wake
+			// reason, idle past its idle_timeout (#8534 review): the
+			// held-work keep holds it from its timer drains, and the idle
+			// timeout stops it. That stop ends the keep's hold, so both
+			// copies finish it as the drain the keep held back (sleep_reason
+			// idle) and park it on its pin, its conversation kept, with no
+			// session.stranded.
+			Name: "a held seat idle past its idle_timeout parks", Behaviors: []string{"SESS-576", "SESS-624"},
+			City: idleTimeoutWorkers,
+			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "session_key", "conversation-1")},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:     []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{

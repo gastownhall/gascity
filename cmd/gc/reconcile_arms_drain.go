@@ -185,12 +185,12 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 	case p.authorized == nil || (p.keepHolds && r.entry.Desired == desireKeep):
 		return intent{}, false
 	case drainLens(r, req.Reason) || (req.Reason == reasonNoWake && workKeepsNoWakeRow(r)) ||
-		((req.Reason == reasonNoWake || req.Reason == drainIdle) && r.seatHoldsWork()):
+		((req.Reason == reasonNoWake || req.Reason == drainIdle) && r.heldWorkKeeps()):
 		// Work assigned to a no-wake-reason row after its begin: legacy's
 		// assigned-work cancel at its ack (DRAIN-046), which the begin's
 		// keep matches (C6a2 review 1b). Work a pool seat holds but has no
-		// wake reason to run yet cancels its timer drain, as legacy's
-		// held-work keep does.
+		// wake reason to run yet cancels its timer drain inside the keep's
+		// bound, as legacy's held-work keep does.
 		kind = intentDrainCancel
 	case p.authorized(r, req.Reason):
 		return intent{}, false
@@ -225,11 +225,18 @@ func (r *rowFacts) inProgressWorkAssigned(scope workScope) bool {
 	return false
 }
 
-// seatHoldsWork is legacy's held-work keep (sessionHoldsAssignedWork) over
-// the pass's held-work read (Demand.HeldWork, collectHeldWork): a seat the
-// keep covers (heldWorkSeat) holds work assigned to its ReleaseScope. A
-// held-work read that missed a leg fails closed for every seat, as legacy's
-// does: the missed leg may hold any seat's work.
+// heldWorkKeeps is legacy's held-work keep over the pass's facts: a seat
+// holding work the keep counts (seatHoldsWork), inside the keep's bound
+// (heldWorkInBound). A19's held-work cancel and A20's keep read it.
+func (r *rowFacts) heldWorkKeeps() bool {
+	return heldWorkInBound(r.row.Info, r.w.Now) && r.seatHoldsWork()
+}
+
+// seatHoldsWork is legacy's sessionHoldsAssignedWork over the pass's
+// held-work read (Demand.HeldWork, collectHeldWork): a seat the keep covers
+// (heldWorkSeat) holds work assigned to its ReleaseScope. A held-work read
+// that missed a leg fails closed for every seat, as legacy's does: the
+// missed leg may hold any seat's work.
 func (r *rowFacts) seatHoldsWork() bool {
 	if !r.heldWorkSeat() {
 		return false
@@ -367,10 +374,10 @@ func (r *rowFacts) ackPredatesRuntime(at time.Time) bool {
 // Keep, or one whose reason's row a later PR completes, holds here too.
 // An idle or no-wake-reason signal reads L3 and L4 fresh (C8.9), so it is
 // the fresh kind, and rests on the row's own live runtime; on a seat the
-// held-work keep covers it reads the seat's held work live too (HeldWork),
-// since A19's held-work cancel read the pass's. The effect decides again on
-// the fresh row, so a drain A19 voids or cancels since the pass is never
-// signaled (R16).
+// held-work keep covers, inside its bound (heldWorkInBound), it reads the
+// seat's held work live too (HeldWork), since A19's held-work cancel read
+// the pass's. The effect decides again on the fresh row, so a drain A19
+// voids or cancels since the pass is never signaled (R16).
 func armSignal(r *rowFacts, req stopRequest) (intent, bool) {
 	hold := intent{Reason: decideStopActive}
 	p := drainPolicyOf(req.Reason)
@@ -386,7 +393,7 @@ func armSignal(r *rowFacts, req stopRequest) (intent, bool) {
 		return hold, true
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	held := (req.Reason == reasonNoWake || req.Reason == drainIdle) && r.heldWorkSeat()
+	held := (req.Reason == reasonNoWake || req.Reason == drainIdle) && heldWorkInBound(r.row.Info, r.w.Now) && r.heldWorkSeat()
 	return intent{Kind: kind, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now), HeldWork: held}, true
 }
 
@@ -485,10 +492,14 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		// (DRAIN-046), so a session it keeps running is never drained (ruling
 		// at the C6a2 review: match legacy).
 		return intent{Reason: decideDrainWorkKept}, true
-	case (reason == reasonNoWake || reason == drainIdle) && r.seatHoldsWork():
+	case (reason == reasonNoWake || reason == drainIdle) && r.heldWorkKeeps():
 		// A pool seat holding assigned work it has no wake reason to run yet
-		// (blocked open or in-progress work): legacy's held-work keep, so the
-		// work is not stranded on a stopped seat.
+		// (blocked open or in-progress work): legacy's held-work keep, live, to
+		// run that work in the conversation it holds. A15's idle timeout ends
+		// the hold (idleTimeoutHeldWorkFinish), and so does its bound, past
+		// which the timer drains run as they would without the keep.
+		until, _ := heldWorkHoldUntil(info, r.w.Now)
+		r.after(requeueUntil(r.w.Now, until))
 		return r.workKept(basis), true
 	case e.Desired == desireDrain && wakeGracePreservesUndesiredRow(info, r.w.Now) && r.w.OperatorSuspend[r.k] == "":
 		woke, _ := parseRFC3339Metadata(info.LastWokeAt)

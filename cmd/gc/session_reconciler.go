@@ -3355,14 +3355,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					// Held-work cancel lens for a reconciler-owned timer-drain ack
 					// (see the no-wake arm's held-work keep), under the keep's
-					// intents and eligibility: a pool seat holding assigned work it
-					// has no wake reason to run yet keeps its runtime. A recovered
-					// ack with no tracked drain is cleared, and so is the
+					// intents, bound and eligibility: a pool seat holding assigned
+					// work it has no wake reason to run yet keeps its runtime. A
+					// recovered ack with no tracked drain is cleared, and so is the
 					// idle-stop-pending mark, which this tick's no-wake arm, skipped
 					// here, would clear. An agent's own ack is the agent's decision
 					// (markDrainAckStopPending) and is not canceled.
 					if alive && reconcilerOwnedAck && heldWorkDrainReason(ackReason) && heldWorkIntent(infoByID[id]) &&
-						liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
+						heldWorkInBound(infoByID[id], clk.Now()) && liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
 						held, workID, err := sessionHoldsAssignedWork(sw, infoByID[id])
 						if err != nil {
 							fmt.Fprintf(stderr, "session reconciler: keeping %s from a %s drain: reading its assigned work: %v\n", name, ackReason, err) //nolint:errcheck
@@ -4617,8 +4617,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					telemetry.RecordAgentIdleKill(context.Background(), tp.DisplayName())
 					// Mark for immediate re-wake on this same tick by clearing
 					// last_woke_at and setting state to asleep. The wake logic
-					// below will pick it up.
-					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
+					// below will pick it up, but for a seat holding work the
+					// held-work keep counts, which sleeps as its timer drain
+					// would have (idleStopSleepPatch) and is left to the next
+					// tick.
+					batch, held := idleStopSleepPatch(cityPath, cfg, infoByID[id], suspState, sw, dec, clk.Now(), stderr)
 					// OPTIMISTIC fold (origin/main parity): the idle kill already happened,
 					// so the sleep MUST land on the snapshot even if its persistence fails.
 					// The idle kill falls through to the wakeTargets append below, whose
@@ -4635,6 +4638,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// raw bead pointer, now deleted.
 					tick.applySleepOptimistic(id, sessionFrontDoor(store), batch)
 					alive = false
+					if held {
+						// The next tick decides its park, on a verdict over its
+						// asleep row; this tick's pool-free branch would read
+						// the verdict decided over its live row and strand it.
+						continue
+					}
 				}
 			}
 			// Fall through to wakeReasons — it will re-wake immediately if config present
@@ -5160,13 +5169,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			// Held-work keep (sessionHoldsAssignedWork) for the timer drains: a
 			// pool seat holding assigned work it has no wake reason to run yet
-			// (blocked open or in_progress work) is kept, before the idle probe,
-			// so the work is not stranded on a stopped seat: a timer drain begun
-			// before the work was assigned is canceled, with the reconciler's
-			// GC_DRAIN_ACK, and an idle-stop-pending mark is cleared. The same
-			// intents (heldWorkIntent) and eligibility as the live-claim veto
-			// below apply.
-			if heldWorkDrainReason(reason) && heldWorkIntent(info) &&
+			// (blocked open or in_progress work) is kept live, before the idle
+			// probe, to run that work in the conversation it holds: a timer
+			// drain begun before the work was assigned is canceled, with the
+			// reconciler's GC_DRAIN_ACK, and an idle-stop-pending mark is
+			// cleared. The same intents (heldWorkIntent) and eligibility as the
+			// live-claim veto below apply. The idle timeout ends the hold
+			// (idleStopSleepPatch), and so does its bound (heldWorkInBound),
+			// past which its timer drains run as they would without the keep.
+			if heldWorkDrainReason(reason) && heldWorkIntent(info) && heldWorkInBound(info, clk.Now()) &&
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
 				held, workID, err := sessionHoldsAssignedWork(sw, info)
 				if err != nil {
