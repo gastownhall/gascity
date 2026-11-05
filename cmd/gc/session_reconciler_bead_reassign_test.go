@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -1011,5 +1012,86 @@ func TestCycleAliveSessionForFreshReassign_EarlyReturnsEmitNoEvent(t *testing.T)
 				t.Fatalf("events = %+v, want none on an early return", evs)
 			}
 		})
+	}
+}
+
+// freshCycleWriteFailStore fails every SetMetadataBatch whose patch carries
+// failKey and passes every other write through, so a test can fail exactly one
+// write of the fresh-cycle teardown after the kill has already succeeded.
+type freshCycleWriteFailStore struct {
+	beads.Store
+	failKey string
+}
+
+func (s freshCycleWriteFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[s.failKey]; ok {
+		return errors.New("injected write failure on " + s.failKey)
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestCycleAliveSessionForFreshReassign_WriteFailureAfterKillEmitsNoEvent pins
+// the two early returns of the fresh-mode bead-reassign cycle (ga-uci1jl) that
+// run after the kill has already succeeded: the named-session circuit-breaker
+// reset and the handoff write. Each reports not-ran with its own diagnostic,
+// leaves the handoff unwritten and records nothing on the event stream.
+func TestCycleAliveSessionForFreshReassign_WriteFailureAfterKillEmitsNoEvent(t *testing.T) {
+	cases := []struct {
+		name       string
+		failKey    string
+		wantStderr string
+	}{
+		{"breaker reset fails", sessionCircuitStateMetadata, "clearing session circuit breaker for fresh-cycle "},
+		{"handoff write fails", sessionpkg.CurrentBeadIDKey, "recording fresh-cycle handoff for "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName, fake := newFreshCycleEventEnv(t)
+			store := freshCycleWriteFailStore{Store: env.store, failKey: tc.failKey}
+			var stderr strings.Builder
+
+			ran, fold := cycleAliveSessionForFreshReassign(env.city, fake, sessionInfoFromBead(session), env.desiredState[sessionName],
+				env.sp, store, env.cfg, nil, sessionName, "wb-new", time.Now(), nil, &stderr, nil)
+
+			if ran || fold != nil {
+				t.Fatalf("ran = %v, fold = %v, want false, nil", ran, fold)
+			}
+			if want := tc.wantStderr + sessionName; !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want it to contain %q: the cycle returned from a different branch", stderr.String(), want)
+			}
+			evs, err := fake.List(events.Filter{})
+			if err != nil {
+				t.Fatalf("listing events: %v", err)
+			}
+			if len(evs) != 0 {
+				t.Fatalf("events = %+v, want none: the cycle did not complete", evs)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("reading session row: %v", err)
+			}
+			if got.Metadata[sessionpkg.CurrentBeadIDKey] != "wb-prev" {
+				t.Fatalf("%s = %q, want wb-prev: a failed cycle must not write the handoff", sessionpkg.CurrentBeadIDKey, got.Metadata[sessionpkg.CurrentBeadIDKey])
+			}
+		})
+	}
+}
+
+// TestCycleAliveSessionForFreshReassign_NilRecorderStillCycles pins the
+// documented contract of the recorder parameter (ga-uci1jl): a nil recorder is
+// allowed, the cycle still runs and hands the new bead over, and nothing is
+// recorded.
+func TestCycleAliveSessionForFreshReassign_NilRecorderStillCycles(t *testing.T) {
+	env, session, sessionName, _ := newFreshCycleEventEnv(t)
+	var stderr strings.Builder
+
+	ran, fold := cycleAliveSessionForFreshReassign(env.city, nil, sessionInfoFromBead(session), env.desiredState[sessionName],
+		env.sp, env.store, env.cfg, nil, sessionName, "wb-new", time.Now(), nil, &stderr, nil)
+
+	if !ran || fold == nil {
+		t.Fatalf("ran = %v, fold = %v, want true and a fold (stderr %q)", ran, fold, stderr.String())
+	}
+	if fold[sessionpkg.CurrentBeadIDKey] != "wb-new" {
+		t.Fatalf("fold[%s] = %q, want wb-new", sessionpkg.CurrentBeadIDKey, fold[sessionpkg.CurrentBeadIDKey])
 	}
 }
