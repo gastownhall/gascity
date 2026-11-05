@@ -2804,6 +2804,29 @@ func beadCopyDifference(want, got beads.Bead) string {
 	case want.CloseReason != got.CloseReason:
 		return fmt.Sprintf("close_reason %q != %q", want.CloseReason, got.CloseReason)
 	}
+	return beadCopyTailDifference(want, got)
+}
+
+// beadCopyTailDifference witnesses what beadCopyDifference's switch does not:
+// bd's plain string columns, then the label set and the metadata map.
+//
+// CreatedBy, Owner, Notes, AwaitType and AwaitID are durable columns the
+// destination holds (SQLiteStore persists the whole bead through bead_json), so
+// a copy that dropped one lost state the retained source still has. It is a
+// separate function so the gocyclo budget of beadCopyDifference does not grow
+// with every column bd adds.
+func beadCopyTailDifference(want, got beads.Bead) string {
+	for _, col := range []struct{ name, want, got string }{
+		{"created_by", want.CreatedBy, got.CreatedBy},
+		{"owner", want.Owner, got.Owner},
+		{"notes", want.Notes, got.Notes},
+		{"await_type", want.AwaitType, got.AwaitType},
+		{"await_id", want.AwaitID, got.AwaitID},
+	} {
+		if col.want != col.got {
+			return fmt.Sprintf("%s %q != %q", col.name, col.want, col.got)
+		}
+	}
 	if diff := stringSetDifference("label", want.Labels, got.Labels); diff != "" {
 		return diff
 	}

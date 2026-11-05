@@ -87,6 +87,11 @@ func infraEqualityFixture() beads.Bead {
 		DeferUntil:   &deferred,
 		IsBlocked:    &blocked,
 		CloseReason:  "superseded by the next lifecycle row",
+		CreatedBy:    "dispatcher",
+		Owner:        "owner@example.com",
+		Notes:        "durable scratch notes",
+		AwaitType:    "gh:run",
+		AwaitID:      "12345",
 		Revision:     7,
 		ClaimFence:   3,
 		// Set so the exempt mutations below model the loss that actually
@@ -131,6 +136,11 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 			b.CloseReason = ""
 			return b
 		},
+		"CreatedBy": func(b beads.Bead) beads.Bead { b.CreatedBy = ""; return b },
+		"Owner":     func(b beads.Bead) beads.Bead { b.Owner = ""; return b },
+		"Notes":     func(b beads.Bead) beads.Bead { b.Notes = ""; return b },
+		"AwaitType": func(b beads.Bead) beads.Bead { b.AwaitType = ""; return b },
+		"AwaitID":   func(b beads.Bead) beads.Bead { b.AwaitID = ""; return b },
 		// Unlike every other entry, this mutation is not a LOSS — it is a value
 		// the destination must never carry at all. infraMigrationRow strips it,
 		// so any non-nil value on the destination is a readiness projection the

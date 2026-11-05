@@ -65,6 +65,15 @@ type ReadyBead struct {
 	// needs nothing: the store's own Ready already applied readiness, so a row it
 	// returned is by construction unblocked.
 	BlockedBy []ReadyBeadBlocker `json:"blocked_by,omitempty"`
+	// CreatedBy, Owner, Notes, AwaitType and AwaitID follow beads.Bead onto the
+	// wire, under the names bd's `bd ready --json` emits them, so the field set
+	// stays the HTTP Bead shape and a consumer decoding this array into
+	// []beads.Bead keeps what bd recorded.
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	AwaitType string `json:"await_type,omitempty"`
+	AwaitID   string `json:"await_id,omitempty"`
 }
 
 // ReadyBeadDep is the wire shape of one dependency edge, for the same reason
@@ -131,6 +140,11 @@ func ToReadyBead(b beads.Bead) ReadyBead {
 		DeferUntil:   b.DeferUntil,
 		IsBlocked:    b.IsBlocked,
 		CloseReason:  b.CloseReason,
+		CreatedBy:    b.CreatedBy,
+		Owner:        b.Owner,
+		Notes:        b.Notes,
+		AwaitType:    b.AwaitType,
+		AwaitID:      b.AwaitID,
 	}
 }
 

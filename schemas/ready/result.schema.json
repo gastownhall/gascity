@@ -127,6 +127,21 @@
             }
           }
         }
+      },
+      "created_by": {
+        "type": "string"
+      },
+      "owner": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      },
+      "await_type": {
+        "type": "string"
+      },
+      "await_id": {
+        "type": "string"
       }
     },
     "additionalProperties": false
