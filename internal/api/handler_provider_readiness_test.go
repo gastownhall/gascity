@@ -591,7 +591,10 @@ func TestHandleProviderReadinessReturnsConfiguredStatuses(t *testing.T) {
 	writeExecutable(t, binDir, "claude", `#!/bin/sh
 printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
 `)
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'Logged in using ChatGPT' >&2
+`)
 	writeExecutable(t, binDir, "gemini", "#!/bin/sh\nexit 0\n")
 
 	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
@@ -675,7 +678,10 @@ func TestHandleReadinessReturnsConfiguredStatuses(t *testing.T) {
 	writeExecutable(t, binDir, "claude", `#!/bin/sh
 printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
 `)
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'Logged in using ChatGPT' >&2
+`)
 	writeExecutable(t, binDir, "gemini", "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, binDir, "gh", "#!/bin/sh\nexit 0\n")
 
@@ -832,7 +838,11 @@ func TestHandleProviderReadinessReturnsNeedsAuthForCodexWithoutTokens(t *testing
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'Not logged in' >&2
+exit 1
+`)
 
 	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
 		t.Fatalf("mkdir codex dir: %v", err)
@@ -877,7 +887,11 @@ func TestHandleProviderReadinessReturnsNeedsAuthForCodexWithEmptyTokensObject(t 
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'Not logged in' >&2
+exit 1
+`)
 
 	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
 		t.Fatalf("mkdir codex dir: %v", err)
@@ -1233,13 +1247,16 @@ func TestHandleProviderReadinessReturnsNeedsAuthForAntigravityWithoutToken(t *te
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=antigravity&fresh=1", "antigravity", probeStatusNeedsAuth)
 }
 
-func TestHandleProviderReadinessReturnsInvalidConfigurationForUnsupportedAuthModes(t *testing.T) {
+func TestHandleProviderReadinessUsesNativeCodexLoginAndPreservesGeminiPolicy(t *testing.T) {
 	homeDir := t.TempDir()
 	binDir := filepath.Join(homeDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'Logged in using an API key - unit-nonsecret' >&2
+`)
 	writeExecutable(t, binDir, "gemini", "#!/bin/sh\nexit 0\n")
 
 	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
@@ -1285,21 +1302,25 @@ func TestHandleProviderReadinessReturnsInvalidConfigurationForUnsupportedAuthMod
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp.Providers["codex"].Status; got != probeStatusInvalidConfiguration {
-		t.Errorf("codex status = %q, want %q", got, probeStatusInvalidConfiguration)
+	if got := resp.Providers["codex"].Status; got != probeStatusConfigured {
+		t.Errorf("codex status = %q, want %q", got, probeStatusConfigured)
 	}
 	if got := resp.Providers["gemini"].Status; got != probeStatusInvalidConfiguration {
 		t.Errorf("gemini status = %q, want %q", got, probeStatusInvalidConfiguration)
 	}
 }
 
-func TestHandleProviderReadinessIncludesInvalidConfigurationDetail(t *testing.T) {
+func TestHandleProviderReadinessIncludesSafeNativeProbeErrorDetail(t *testing.T) {
 	homeDir := t.TempDir()
 	binDir := filepath.Join(homeDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
-	writeExecutable(t, binDir, "codex", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, binDir, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.162.1"; exit 0; fi
+echo 'native status unavailable - unit-secret-redaction-marker' >&2
+exit 1
+`)
 
 	if err := os.MkdirAll(filepath.Join(homeDir, ".codex"), 0o755); err != nil {
 		t.Fatalf("mkdir codex dir: %v", err)
@@ -1333,8 +1354,11 @@ func TestHandleProviderReadinessIncludesInvalidConfigurationDetail(t *testing.T)
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if detail := resp.Providers["codex"].Detail; !strings.Contains(detail, "ChatGPT auth") {
-		t.Fatalf("codex detail = %q, want unsupported-auth detail", detail)
+	if got := resp.Providers["codex"]; got.Status != probeStatusProbeError || got.Detail != "configured Codex executable did not return a valid login-status verdict" {
+		t.Fatalf("codex readiness = %+v, want safe native probe-error detail", got)
+	}
+	if strings.Contains(rec.Body.String(), "unit-secret-redaction-marker") {
+		t.Fatal("native diagnostic output leaked")
 	}
 }
 
@@ -1738,4 +1762,78 @@ func unsetGitHubCLITokenEnv(t *testing.T) {
 	// to the HOME-based default path.
 	t.Setenv("GH_CONFIG_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
+}
+
+// A stored default account must never override the supervisor's selected native
+// Codex context. These protocol fixtures are source checks, not native evidence.
+func TestSupervisorCodexReadinessUsesSelectedNativeContext(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "codex", `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo 'codex-cli 0.162.1'
+  exit 0
+fi
+if [ "$1 $2" != "login status" ]; then exit 2; fi
+if [ -n "$CODEX_ACCESS_TOKEN" ]; then
+  echo 'Error checking login status: personal access token metadata request failed with status 401 Unauthorized' >&2
+  exit 1
+fi
+if [ -n "$CODEX_HOME" ]; then
+  echo 'Not logged in' >&2
+  exit 1
+fi
+echo 'Logged in using ChatGPT' >&2
+`)
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"stale-default-fixture"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	oldPath, oldCache := providerProbePathEnv, providerProbeCache
+	providerProbePathEnv, providerProbeCache = bin, newCachedProviderProbeStore()
+	t.Cleanup(func() { providerProbePathEnv, providerProbeCache = oldPath, oldCache })
+	handler := newTestSupervisorMux(t, map[string]*fakeState{})
+	for _, tc := range []struct {
+		name, selectedHome, token, want string
+	}{
+		{"empty selected home", filepath.Join(home, "empty"), "", probeStatusNeedsAuth},
+		{"restored default context", "", "", probeStatusConfigured},
+		{"invalid access override", "", "at-unit-invalid-nonsecret", probeStatusProbeError},
+		{"restored after override", "", "", probeStatusConfigured},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", tc.selectedHome)
+			t.Setenv("CODEX_ACCESS_TOKEN", tc.token)
+			for _, route := range []string{"/v0/provider-readiness?providers=codex", "/v0/readiness?items=codex"} {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, route, nil))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("%s: status %d", route, rec.Code)
+				}
+				var body struct {
+					Providers map[string]providerReadiness `json:"providers"`
+					Items     map[string]ReadinessItem     `json:"items"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				got := body.Providers["codex"].Status
+				if strings.Contains(route, "/readiness?") {
+					got = body.Items["codex"].Status
+				}
+				if got != tc.want {
+					t.Errorf("%s: Codex status %q, want %q", route, got, tc.want)
+				}
+				if tc.token != "" && strings.Contains(rec.Body.String(), tc.token) {
+					t.Fatal("credential override leaked in response")
+				}
+			}
+		})
+	}
 }

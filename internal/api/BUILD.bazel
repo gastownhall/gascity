@@ -248,6 +248,7 @@ go_library(
         "//internal/packman",
         "//internal/pendingwatch",
         "//internal/processenv",
+        "//internal/providerreadiness",
         "//internal/readywork",
         "//internal/reconcilekey",
         "//internal/rig",

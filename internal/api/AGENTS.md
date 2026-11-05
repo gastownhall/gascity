@@ -761,3 +761,12 @@ watermark: a point read/write may advance `LastFreshAt` without synchronizing
 every row. The existing zero value means unknown or not applicable, not proven
 freshness. A cached body's elapsed age is a lower bound when its source age is
 unknown; count lag is not by itself an incomplete or failed status response.
+
+## Codex onboarding readiness
+
+Both supervisor and city readiness projections use the shared bounded native
+Codex login-status probe. A credential file's presence cannot establish readiness
+or override `CODEX_HOME` or `CODEX_ACCESS_TOKEN`. Separate cached verdicts by the
+selected context without storing token bytes in cache keys or diagnostics. Accept
+the native CLI's supported login modes as the CLI preflight does. These verdicts
+describe local configuration, not successful remote inference.
