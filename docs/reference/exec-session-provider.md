@@ -18,6 +18,12 @@ export GC_SESSION=exec:/path/to/gc-session-screen
 export GC_SESSION=exec:gc-session-screen
 ```
 
+Prefer an absolute path. A PATH lookup resolves in each gc process's own
+environment, so the supervisor, `gc start` and a cron job can run different
+files under one name, and reconciler v2's admission (see
+[observe.v1](#observev1-reconciler-v2)) reads the handshake of the file the
+deciding process resolves.
+
 ## Pack-Declared Runtimes
 
 A pack can ship (or install) a runtime executable and bind it to a
@@ -652,8 +658,21 @@ in its handshake. A script that declares `observe.v1` **and**
 handshake alone. `gc runtime conformance` reports `v2-ready: yes` only for a
 script that also passes every requirement; otherwise it names the
 capabilities the script lacks and the requirements it failed. A script that
-declares neither keeps today's behavior exactly. Declaring `observe.v1`
-obliges the script to:
+declares neither keeps today's behavior exactly.
+
+Reconciler v2 runs on a v2-ready script, and refuses any other exec
+runtime, naming what its handshake lacks. Admission asks the script's
+`protocol` once per version of the file (its path, size, modification time
+and inode), within 10 seconds, and remembers the answer; at boot the
+controller checks that the provider it built reads the same. With
+`session_reconciler` unset, a v2-ready script switches the city to v2
+unless the city falls back to legacy for another reason, and the boot log
+and `gc doctor` say which. `input-fence` is not required, but
+without it (with `proc.exec`) input gc fences to one incarnation is refused
+on the box, and `gc doctor` warns. The handshake's `locality` decides
+whether gc's storage verbs treat the runtime as remote (absent: remote).
+
+Declaring `observe.v1` obliges the script to:
 
 1. Implement `observe`, `inventory` and `kill-object` (below).
 2. Honor `fresh_only` on `start` (and `provision`, if declared).
@@ -835,6 +854,28 @@ box (exit 0) and a name no box holds (exit 66). `gc runtime check` runs a
 smoke check of the three ops. `contrib/session-scripts/gc-session-screen` is
 the reference implementation.
 
+### Switching an existing exec city to v2
+
+Upgrading gc alone changes nothing for a script that does not declare the
+profile: the city stays legacy. Declaring `observe.v1` and
+`report-attachment` makes an unset `session_reconciler` resolve to v2 at the
+next controller start, unless the city falls back to legacy for another
+reason (pin `session_reconciler = "legacy"` to stay). It
+also changes what the script's legacy city sees: a failed `observe` reads
+unknown rather than not running, listings are attested (so `gc stop` skips
+its per-name sweep), and a declared op's exit 2 is a failure. Before
+switching a city with running sessions:
+
+1. Run `gc runtime conformance <script>`.
+2. Run `gc doctor`: `exec-runtime-identity` judges each running box under
+   an open session row as v2 does, on its batched identity or, when that is
+   null, its observed one, and names the boxes v2 would hold instead of
+   adopting them: Ownerless (no `GC_SESSION_ID` and no `GC_INSTANCE_TOKEN`)
+   or Unknown (no token that matches the row, and no proof the box is the
+   row's own). Make the script report the identity of boxes it started
+   before the upgrade (observe.v1 item 4).
+3. Otherwise stop those sessions first.
+
 ## Writing Your Own Script
 
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.
@@ -876,8 +917,12 @@ live on one host keys that state by host as well, or one host reads the
 other's boxes as dead and removes them.
 
 gc sets `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` on every operation to
-the city the provider serves. A script shared by several cities on one
-backend scopes its boxes and listings by them.
+the city the provider serves, the admission probe's `protocol` (see
+[observe.v1](#observev1-reconciler-v2)) included. A script shared by
+several cities on one backend scopes its boxes and listings by them. A
+handshake should still read no state and answer the same for every city:
+`gc start`, the orchestrator and `gc doctor` each probe it in their own
+process and remember the answer per version of the file.
 
 A script runs with gc's own environment. The session's environment arrives
 in the start config's `env` (see [Session environment](#session-environment)).

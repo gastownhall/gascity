@@ -13,6 +13,10 @@ import (
 // next caller re-runs it. A success is cached for the provider's life.
 const handshakeRetryAfter = 30 * time.Second
 
+// HandshakeRetryAfter is handshakeRetryAfter, for callers that remember a
+// failed handshake of their own (gc's exec admission probe).
+const HandshakeRetryAfter = handshakeRetryAfter
+
 // handshakeNow is the handshake cache's clock.
 var handshakeNow = time.Now
 
