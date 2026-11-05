@@ -19,6 +19,12 @@ type subagentGuardTranscript interface {
 	TranscriptRecords(context.Context) ([]json.RawMessage, error)
 }
 
+// claudeLayoutGuardSource is implemented by transcripts that can narrow their
+// lookup to the Claude layout, the only format the guard parses.
+type claudeLayoutGuardSource interface {
+	claudeLayoutTranscript() subagentGuardTranscript
+}
+
 // InFlightBackgroundSubagents returns background subagents without a terminal
 // task notification in the parent transcript. Transcript parse errors are
 // returned so callers can deliberately fail open before a destructive action.
@@ -27,7 +33,15 @@ type subagentGuardTranscript interface {
 // a subagent's terminal notification can be recorded as a queue-operation,
 // which carries no uuid and is pruned by the active-branch walk. Reading the
 // pruned view reports a finished subagent as live and refuses a safe kill.
+//
+// The guard parses Claude-format records only, so a transcript that offers a
+// Claude-layout view is read through it: a session with no Claude transcript
+// then reads as having no evidence, instead of triggering a walk of the Codex
+// and Pi session trees.
 func InFlightBackgroundSubagents(ctx context.Context, transcript subagentGuardTranscript) ([]InFlightSubagent, error) {
+	if src, ok := transcript.(claudeLayoutGuardSource); ok {
+		transcript = src.claudeLayoutTranscript()
+	}
 	mappings, err := transcript.AgentMappings(ctx)
 	if err != nil {
 		return nil, err

@@ -2172,14 +2172,34 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 // session key) from a transcript that simply has not been written yet use this
 // instead of TranscriptPath, whose empty path is overloaded across all three.
 func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (string, TranscriptLookup, error) {
+	return m.transcriptPathClassified(id, searchPaths, false)
+}
+
+// TranscriptPathClaudeLayout resolves the session's transcript by the Claude
+// layout alone: the session key, then the work-directory slug under the Claude
+// projects roots in searchPaths. It never reads the Codex or Pi session trees,
+// whatever provider the session bead records, so its cost does not grow with
+// the number of rollouts on disk. A caller that parses only Claude-format
+// records (the kill guard) uses it so a session with no Claude transcript
+// reports TranscriptAbsent instead of paying for a walk that cannot help.
+func (m *Manager) TranscriptPathClaudeLayout(id string, searchPaths []string) (string, TranscriptLookup, error) {
+	return m.transcriptPathClassified(id, searchPaths, true)
+}
+
+// transcriptPathClassified implements TranscriptPathClassified. With
+// claudeLayout set, every discovery step looks as a Claude session would,
+// while the same-workdir ambiguity check still uses the recorded provider.
+func (m *Manager) transcriptPathClassified(id string, searchPaths []string, claudeLayout bool) (string, TranscriptLookup, error) {
 	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
 		return "", TranscriptAbsent, err
 	}
 	workDir := b.Metadata["work_dir"]
 	if workDir == "" {
-		if path := m.acpCaptureTranscriptPath(b); path != "" {
-			return path, TranscriptFound, nil
+		if !claudeLayout {
+			if path := m.acpCaptureTranscriptPath(b); path != "" {
+				return path, TranscriptFound, nil
+			}
 		}
 		return "", TranscriptNoWorkDir, nil
 	}
@@ -2187,17 +2207,23 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	if provider == "" {
 		provider = strings.TrimSpace(b.Metadata["provider"])
 	}
+	discoverAs := provider
+	if claudeLayout {
+		discoverAs = "claude"
+	}
 	if len(searchPaths) == 0 {
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
-	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+	if path := workertranscript.DiscoverKeyedPath(searchPaths, discoverAs, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
 	// An ACP session's transcript is the capture gc wrote itself. A keyed
 	// native transcript (above) still wins; the workdir fallbacks below could
 	// return an unrelated provider's file.
-	if path := m.acpCaptureTranscriptPath(b); path != "" {
-		return path, TranscriptFound, nil
+	if !claudeLayout {
+		if path := m.acpCaptureTranscriptPath(b); path != "" {
+			return path, TranscriptFound, nil
+		}
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
@@ -2206,7 +2232,7 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	// seats can share a name and epoch), and its continuation epoch.
 	if path := workertranscript.DiscoverScopedPath(
 		searchPaths,
-		provider,
+		discoverAs,
 		workDir,
 		b.Metadata["session_name"],
 		b.ID,
@@ -2235,14 +2261,14 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		for _, s := range sameWorkDirSessions {
 			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
 		}
-		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
+		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, discoverAs, workDir, b.ID, sameWorkDirInfos); path != "" {
 			return path, TranscriptFound, nil
 		}
 		// Without a stable session key, multiple sessions sharing the same
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
-	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+	if path := workertranscript.DiscoverPath(searchPaths, discoverAs, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil
