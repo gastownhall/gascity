@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -203,10 +204,12 @@ func newSeededState(deps SeededCityDeps) *seededState {
 		s.rigStores = map[string]beads.Store{}
 	}
 	if s.cityStore != nil {
-		// Unrouted on purpose: SeededCityDeps carries one store for every
-		// class, so there is no messaging binding to route to. See the
-		// CityBeadStore doc for what that means for a split-city case.
-		svc := extmsg.NewServices(s.cityStore)
+		// SeededCityDeps carries one store for every class, so there is no
+		// messaging binding to route to: the single-store Stores hand both
+		// classes the city store. See the CityBeadStore doc for what that
+		// means for a split-city case.
+		stores := s.classStores()
+		svc := extmsg.NewServices(stores.Mail(), stores.Sessions())
 		s.extmsgSvc = &svc
 	}
 	return s
@@ -256,28 +259,33 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 	return nil, nil
 }
 
+// classStores mints the seeded city's handles: a single-store topology, so
 // NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
-// collapse to the city store on a seeded single-store city, exactly as they do
-// on a default (non-relocated) controller city.
+// wrap the city store, exactly as they do on a default (non-relocated)
+// controller city.
+func (s *seededState) classStores() storeref.Stores {
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}}, storeref.StoresOptions{})
+}
+
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: s.cityStore}
+	return s.classStores().Nudges()
 }
 
 // NudgeQueue is the city's state.json queue over the seeded city store.
 func (s *seededState) NudgeQueue() NudgeQueue {
-	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.cityStore}
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.NudgesBeadStore()}
 }
 
 func (s *seededState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: s.cityStore}
+	return s.classStores().Sessions()
 }
 
 func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: s.cityStore}
+	return s.classStores().Graph()
 }
 
 func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return beads.OrdersStore{Store: s.cityStore}
+	return s.classStores().Orders()
 }
 
 // ClassBindingHasLegacyResidents answers true for everything: a seeded city

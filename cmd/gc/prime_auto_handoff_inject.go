@@ -226,7 +226,7 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 		return sessionStartMail{}
 	}
 	cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
+	msgStore := cliMailStore(store, cfg, cityPath)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	// The ordinary provider is exactly what openCityMailProvider would build:
 	// the same name precedence as mailProviderName (GC_MAIL, then [mail]
@@ -244,7 +244,7 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 	// The handoff archive below consumes what it injected, so with message
 	// listed it withdraws the handoffs' lane notices, as gc mail check
 	// --inject's archive does through openCityMailProvider.
-	mp := withBeadMailNoticeWithdrawal(beadmail.NewWithStores(msgStore, sessStore), sessStore, cfg, stderr)
+	mp := withBeadMailNoticeWithdrawal(beadmail.NewWithStores(msgStore, beads.SessionStore{Store: sessStore}), sessStore, cfg, stderr)
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	var (
 		target resolvedMailTarget

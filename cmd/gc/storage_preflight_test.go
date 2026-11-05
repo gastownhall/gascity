@@ -622,6 +622,9 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			other := newOtherCity(t)
 			writeManagedDoltCity(t, request.CityPath)
 			stopManagedDolt(t, request.CityPath, 3417)
+			// The window starts the stopped managed Dolt before the
+			// shared-store check; this fixture has no provider script.
+			stubMigrationWindowStartStop(t, &migrationWindowProvider{})
 			writeExplicitDoltCity(t, other, 3417)
 			stubOtherCities(t, other)
 			return request
@@ -788,8 +791,16 @@ func TestPreflightAndMigrateAgreeOnAManagedStoreAcrossTheStop(t *testing.T) {
 	}
 
 	stopManagedDolt(t, request.CityPath, port)
+	// The maintenance window sees the stopped managed Dolt and starts it for
+	// the run; this fixture has no provider script, so only the start and the
+	// stop are stubbed.
+	provider := &migrationWindowProvider{}
+	stubMigrationWindowStartStop(t, provider)
 	if code, stderr := migrateFor(t, request); code != 0 {
 		t.Fatalf("preflight cleared the live city, and the migration refused it once its managed Dolt was stopped: exit %d: %s", code, stderr)
+	}
+	if provider.starts != 1 || provider.stops != 1 {
+		t.Fatalf("starts = %d, stops = %d: the window did not see the stopped managed Dolt it must start", provider.starts, provider.stops)
 	}
 }
 

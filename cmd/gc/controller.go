@@ -296,20 +296,18 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 		})
 		return
 	}
-	store, err := openCityStoreAt(cityPath)
+	// This runs inside the controller, so the session bead is read and written
+	// through the session store of the runtime this process serves, never the
+	// one-shot funnel (see registeredSessionFrontDoor).
+	sessFront, err := registeredSessionFrontDoor(cityPath)
 	if err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
 			Outcome: "failed",
-			Error:   fmt.Sprintf("opening city store: %v", err),
+			Error:   err.Error(),
 		})
 		return
 	}
-	// Route the session circuit-breaker reset through the session
-	// coordination-class store so a [beads.classes.sessions] relocation reaches
-	// this socket-command path. No-refresh loader: this runs inside the running
-	// controller (packs already materialized); nil cfg → cliSessionStore identity.
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err := resetSessionCircuitBreakerState(cliSessionStore(store, cfg, cityPath), sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+	if err := resetSessionCircuitBreakerFront(sessFront, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
 			Outcome: "failed",
 			Error:   err.Error(),
@@ -320,6 +318,12 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 }
 
 func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
+	return resetSessionCircuitBreakerFront(sessionFrontDoor(store), sessionID, identity, cb)
+}
+
+// resetSessionCircuitBreakerFront is resetSessionCircuitBreakerState over a
+// session front door the caller already resolved.
+func resetSessionCircuitBreakerFront(sessFront *sessionpkg.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
 		return nil
@@ -327,7 +331,7 @@ func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identi
 	if cb == nil {
 		cb = defaultSessionCircuitBreaker()
 	}
-	if err := loadPersistedSessionCircuitResetGeneration(sessionFrontDoor(store), sessionID, identity, cb); err != nil {
+	if err := loadPersistedSessionCircuitResetGeneration(sessFront, sessionID, identity, cb); err != nil {
 		return err
 	}
 	initialSnapshot := cb.snapshotIdentity(identity)
@@ -335,7 +339,7 @@ func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identi
 		cb.Reset(identity)
 		return nil
 	}
-	if err := resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot); err != nil {
+	if err := resetAndClearSessionCircuitBreakerState(sessFront, sessionID, identity, cb, initialSnapshot); err != nil {
 		return err
 	}
 	// The second cycle invalidates an OPEN persist that may race through
@@ -343,12 +347,12 @@ func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identi
 	// snapshot so the controller never leaves memory CLOSED while storage still
 	// says OPEN. TestResetSessionCircuitBreakerStateClearsRacingOpenPersist
 	// guards this from being collapsed into a single reset.
-	return resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot)
+	return resetAndClearSessionCircuitBreakerState(sessFront, sessionID, identity, cb, initialSnapshot)
 }
 
-func resetAndClearSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
+func resetAndClearSessionCircuitBreakerState(sessFront *sessionpkg.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
 	resetGeneration := cb.Reset(identity)
-	if err := clearPersistedSessionCircuitBreakerMetadata(sessionFrontDoor(store), sessionID, resetGeneration); err != nil {
+	if err := clearPersistedSessionCircuitBreakerMetadata(sessFront, sessionID, resetGeneration); err != nil {
 		cb.restoreIdentity(identity, restoreSnapshot)
 		// Restore the pre-reset snapshot rather than the just-reset one so a
 		// durable clear failure cannot strand the breaker CLOSED in memory.
@@ -1017,9 +1021,19 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
 		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
 	}
+	// Refuse, not warn: a running city must not adopt a rig layout that
+	// start and the supervisor would refuse on the next restart.
+	if err := config.ValidateRigFederationLayout(cityRoot, newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating rigs: %w", err))
+	}
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
+	}
+	// Every reload, changed or not, repeats that a guarded rig is not
+	// protected by this build.
+	for _, w := range config.RigFederationWarnings(newCfg.Rigs) {
+		reloadWarnings = append(reloadWarnings, "config reload: "+w)
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
@@ -1540,11 +1554,6 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
-	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-	telemetry.RecordControllerLifecycle(context.Background(), "started")
-	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
-	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
-
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
@@ -1569,6 +1578,13 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Recorded only once the runtime exists, as the supervisor does: building it
+	// built the order dispatcher, which read the event head its never-run event
+	// orders start from, so an order on controller.started sees this one.
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for
@@ -1744,9 +1760,9 @@ func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, city
 	if cs == nil {
 		return 0, nil
 	}
-	store := cs.SessionsBeadStore().Store
-	if store == nil {
+	sessions := cs.SessionsBeadStore()
+	if sessions == (beads.SessionStore{}) {
 		return 0, nil
 	}
-	return sessionpkg.ReleaseStaleConfiguredNameClaims(store, cfg, cityName)
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(sessions, cfg, cityName)
 }

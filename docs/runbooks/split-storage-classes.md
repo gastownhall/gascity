@@ -117,7 +117,7 @@ The checks that most often stop a real cutover, and what each wants from you:
 | `shared store` | Another registered city uses this city's work store. Under `--force=shared-store:<identity>` it still blocks on rows that name another city's scope, and on an attestation that finds no registered city on the store. | If this city is the only writer of what it migrates, attest the identity the block prints. Move rows that name another city's scope first: no attestation covers them. Register an unregistered co-tenant again (`gc register <path>`). |
 | `rig scopes` | A rig's graph rows have a shape the rig import cannot move without a cross-store edge (an open `tracks`/`parent-child` edge between a graph row and rig work, open work blocked by an open graph row), or a rig store cannot be read. | Do what the named fix says (close the workflow or convoy, finish the work, or remove the edge), or restore access to the rig. Rig history, closed or suspended, no longer blocks: each rig is a `[note]` with what its import would move. |
 | `served binding` | This city already served its infrastructure classes from a different binding. | Verify or recover that binding first. Removing the note is your attestation that you have. |
-| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Nothing in your data: this city's work store runs on an engine that cannot report edge payloads, so this binary cannot split it. The block is permanent until the work store is on an engine that can (SQLite or native Dolt). |
+| `edge payloads` | The work store cannot be asked what its dependency edges carry — `waits_for` gates store a payload there. | Rehearse on the running city: preflight opens the work store as it finds it, and a stopped managed or proxied city has no server to read. The migration itself starts the provider for its run (Step 4). A store that stays on the bd CLI lane is refused there by the reason it stayed: executable bd hooks (remove or disable them for the window, or wait for ga-qcpgy), schema skew (`bd migrate`), or `GC_BEADS_FORCE_FALLBACK=1` (unset it). The migration probes every edge it and its clear read, cross-store edges included, before writing anything. A generic exec store (one not backed by bd: not `gc-beads-bd`, not `gc-beads-k8s`) is not refused: its protocol carries no payload, so its edges are copied carrying none and the manifest records `#gc:source-payload-blind exec`. A `gc-beads-k8s` store with an edge to read is refused: bd holds payloads the exec protocol cannot report, and no native lane serves it yet, so keep that city unsplit. |
 | `destination` | The binding already holds beads this migration did not write. | Find out whose they are before letting a copy overwrite them. |
 
 The `shared store` row judges the city as the migration will, with the city
@@ -144,6 +144,17 @@ inside one. And `--fleet-stopped` is **never checked**, here or anywhere: it is
 an operator attestation precisely because no process can verify it, and
 preflight says so rather than letting a clean report read as broader than it
 is.
+
+A split can also release maintenance a large work store was starving. The core
+reaper runs its steps in order under one run budget, and on a work store
+holding many infrastructure rows the early steps can spend it every run. Its
+later steps, such as auto-closing stale issues (step 5), then never run. Once
+the split moves those rows out, the first reaper run after it reaches those
+steps and acts on everything that was eligible all along: one city closed 98
+stale work beads in a single run. Before the window, look at the reaper's
+recent `order.skipped` events and its summary's `budget_skipped:` field, which
+names each `<scope>@<step>` the budget kept from running. If later steps have
+been skipped, expect that burst, and decide beforehand whether to let it run.
 
 ## Step 4: run the migration
 
@@ -190,22 +201,80 @@ What the command does, in order:
    refused here first rather than migrated toward.
 2. Takes the city's `.gc/controller.lock` and holds it until it exits. It
    refuses while something else holds the lock, while the city is registered
-   with the supervisor, while any of its sessions runs, on a remote stage, and,
-   without the matching `--force`, on a remote runtime or a shared work store.
-   It also refuses if a controller answers the city's socket.
-3. Takes a migration guard over the city, so a second migrator cannot run.
-4. Does not census rig scopes. A rig's graph rows stay readable through its
+   with the supervisor, while any of its sessions runs, on a remote stage,
+   and, without the matching `--force`, on a remote runtime or a shared work
+   store (under `--force=shared-store`, it takes every co-tenant's lock). It
+   refuses if a controller answers the city's socket, and without
+   `--fleet-stopped`. None of these reads the work store, and a run they
+   refuse never touches the bead-store provider.
+3. Takes a migration guard over the city, so a second migrator cannot run. It
+   reads no store either, and a run it refuses never touches the provider: a
+   dry run or a `--purge-type` run of `gc storage recover-stranded` holds the
+   guard without the lock above, and the provider is not started or stopped
+   under it.
+4. Opens the maintenance window, once those checks have passed:
+   - `gc stop` stopped the city's bead-store provider, and a managed bd/Dolt,
+     proxied or bd-contract exec city has no server to read without it. The
+     window starts the provider the way `gc start` does (no agents, no nudge
+     pollers), recording that it did in `.gc/storage-window.json` first, and
+     stops it again before the guard and the lock are released. If that stop
+     fails, the run exits non-zero, keeps the record, and does not tell you to
+     start the city: stop the bead store with `gc stop` first. A provider that
+     was already up is left as it was, except a bd-owned proxy: bd restarts it
+     on any read, so the window always starts the city's proxied scope (and,
+     for `--from-rigs`, the proxied scope of each rig it reads) and stops every
+     provider-owned scope at the end, as `gc stop` does. A provider a killed
+     run started is stopped by the next run, whoever has started it since: the
+     city is stopped and locked.
+   - Inside the window the migration's own opens of the work store take the
+     native lane: the proxied-native lane is forced on and
+     `beads.native_transport = "off"` is overridden, for those opens only, with
+     the configuration the command loaded.
+   - On a gc-managed Dolt the window started, it lists the server's client
+     sessions over its published port and refuses while any other client holds
+     one, naming each, or when they cannot be listed. Such a refusal stops the
+     provider only if this run started it; one a killed run started stays
+     running and recorded. A bd-owned proxy or an exec provider cannot be
+     judged that way: the run names it, and `--fleet-stopped` covers it.
+
+   Under `--force=shared-store`, it then refuses rows that name another city's
+   scope, the one check here that reads the work store.
+5. Does not census rig scopes. A rig's graph rows stay readable through its
    relic legs and move with `gc storage migrate --from-rigs` once the binding
    has converged; the success message names every rig still awaiting that.
-5. Copies every infrastructure bead with its id and within-class dependency
-   topology preserved.
-6. Closes the destination, reopens it, and proves field-level equality against
+6. Copies every infrastructure bead with its id and within-class dependency
+   topology preserved, and every hold on it (see **Holds** below).
+7. Closes the destination, reopens it, and proves field-level equality against
    the bytes on disk — not against the connection that wrote them.
-7. Records a proven-copy manifest, and only then the convergence marker.
-8. Clears the work store's copies of the beads it moved. Each row, with every
+8. Records a proven-copy manifest, and only then the convergence marker.
+9. Clears the work store's copies of the beads it moved. Each row, with every
    dependency edge touching it and that edge's payload, is first written to
    `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
    and proven equal to the rows it records; only then is a row removed.
+
+**Holds.** A bead parked in the work store stays parked in the binding. An
+open infrastructure bead with a `blocks` edge onto an unfinished work bead (a
+parked `mol-dog` wisp blocked on an open work bead, say) waits in the binding on
+a cross-store gate: a `gate` bead in the binding that names the work bead, which
+the controller's gate lane closes once the work bead closes. The migrate output
+names each one. A hold the binding cannot express makes the migration refuse,
+before anything is copied, naming each bead and its fix; `gc storage preflight`
+reports the same refusal under `holds`:
+
+- **an undated deferral** (`bd` status `deferred` with no future
+  `defer_until`): give the bead a dated deferral, `bd defer <id> --until
+  <date>`, which the copy carries as `defer_until`, or undefer it;
+- **any other status `bd` parks a bead with** (`blocked`, `pinned`, `hooked`,
+  or a custom status): the binding stores only `open`, `in_progress` and
+  `closed`, and the bead would arrive `open` and ready. Keep it parked with a
+  dated deferral (`bd defer <id> --until <date>`), release it (`bd update <id>
+  --status open`), or close it;
+- **a `waits-for` or `conditional-blocks` edge onto unfinished work**: a
+  cross-store gate encodes only `blocks`. Finish the work bead, close the
+  infrastructure bead, or replace the edge with a `blocks` edge.
+
+An infrastructure bead blocked on open work needs no manual deferral before the
+migration.
 
 **What the backup holds, and what it does not.** The backup records each bead
 as gc models it: id, title, status, type, description, priority, assignee,
@@ -215,23 +284,85 @@ payload. That is exactly the set of fields the copy carried into the binding
 and the equality stage proved. It does **not** hold the fields only `bd` models:
 notes, comments, close reason and closed-at, design, acceptance criteria, the
 event history, and the indefinitely-deferred state. Those were never copied
-into the binding either. On a native-Dolt work store each removal is a Dolt
+into the binding either (an open bead in the indefinitely-deferred state is
+refused, see **Holds**). On a native-Dolt work store each removal is a Dolt
 commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
 before the clear) is the full-fidelity backstop for them.
 
-Nothing in the work store changes before the marker: until step 7 the source is
+**Batches, the time budget, and resuming.** The copy and the clear run in
+batches: rows are created 500 to a transaction, edges 2,000 to one, the edges
+and their payloads are read in batches of 1,000 rows, and the clear removes
+1,000 rows per batched delete (a store without batched deletes removes them
+one at a time). Before a chunk is deleted, every edge touching it is removed,
+250 edges to a transaction where the work store can, so the delete rewrites no
+work bead's text. On a native-Dolt work store a chunk therefore costs one
+commit for its delete plus one per 250 of its edges: a chunk with no edges is
+one commit, and a chunk of 1,000 pour steps of a formula (about 2,000 edges)
+is nine. On an MC-sized city (40,000 rows, 18,662 edges) with a SQLite work
+store the whole run takes 30 to 40 seconds, about 20 of them in the clear. A
+native-Dolt work store's clear is much slower: each edge removal re-derives
+the blocked state of the beads it touches, about 60 ms an edge even inside a
+transaction on a loaded host, so the clear of an MC-sized city takes on the
+order of 20 to 30 minutes there, and a default budget may pause it once. A
+work store reached through the proxied lane or a hosted bd server removes
+edges one at a time, one commit each (about 130 ms an edge): about 50 minutes
+for an MC-sized city, so the default budget pauses it once and a second run
+finishes it. `--time-budget` (default `30m`, `0` for none) is checked between
+the copy's batches and between the clear's chunks, never inside one. A clear
+chunk runs to its end once started, so a dense one (1,000 pour steps of a
+formula) can overrun the budget by about 2.5 minutes on a native-Dolt work
+store and 4 to 5 minutes on the proxied or hosted-bd lanes. When it is spent,
+the run stops at the next boundary and exits 75 with `paused in <phase> at <n>/<N>`:
+
+- before a first cutover's marker, the city is unconverged and boot refuses
+  it, as for any copy still under way. Running the same command again keeps
+  every row an earlier run copied that still equals the work store, and every
+  edge between kept rows that already carries the right payload. It deletes
+  and copies again any row the work store changed since, or that the binding
+  holds an edge of the work store no longer has.
+- after the marker, the clear is pending and boot refuses it as retained
+  copies. Running the same command again finishes the clear from the rows it
+  had not yet removed. The cross-store edges the clear keeps (from a work bead
+  into a moved row) are re-added only when the clear finishes, so between runs
+  the edges into rows an earlier run already removed are absent from the work
+  store: a blocking one does not hold its work bead back until the clear is
+  finished. They are recorded in the backup, and the finishing run restores
+  them.
+- in the re-copy of a binding whose database is gone (`--from-backup`, or
+  `--from-work` on a city whose work store was never cleared), the old marker
+  is still in place, so before the re-copy creates the database it writes
+  `infra.recopying` beside the marker. Until the re-copy's own marker lands and
+  removes that record, the binding is stale whatever its database holds: boot
+  refuses it, `gc storage status` reports it unconverged, and running the same
+  command again resumes the re-copy, keeping every row already copied that
+  still equals its source. A re-copy that fails or is killed part way stays
+  stale the same way.
+
+In every case the proof is unchanged: the copy is proven against a re-read of
+its source before the marker, and the clear deletes only rows the manifest
+proves the binding holds.
+
+Nothing in the work store changes before the marker: until step 8 the source is
 exactly as you left it, and the cutover can still be abandoned by a config
 edit. Past the marker the binding is the only authoritative copy, which is why
-step 8 exists — a copy left behind in the work store is served to every reader
+step 9 exists — a copy left behind in the work store is served to every reader
 that reaches the work store first (`bd`, `gc hook`, the demand and claim
 surfaces), and a workflow step closed in the binding stays open there and is
 dispatched again and again.
 
-Step 8 changes only what it has to. A work bead whose blocking dependency
+Step 9 changes only what it has to. A work bead whose blocking dependency
 points at a moved bead keeps that dependency, unless the binding has already
 closed the bead it waits on, in which case the dependency is released. Every
 other dependency from a work bead into a moved bead is kept by re-adding it
 after its target row is removed.
+
+Step 8 never changes a work bead's text. `bd delete --force` (and the native
+Dolt delete) rewrites every mention of a deleted id in the text of each bead
+still linked to it, to `[deleted:<id>]`. The beads step 8 removes were moved,
+not deleted, so every edge touching a moved row is removed from the work store
+(and recorded in the backup) before the row is, and the delete finds no
+neighbor to rewrite. No pre-removal of work-to-infrastructure edges is needed
+before the migration.
 
 **On a `bd` or native-Dolt work store those kept edges are lost.** Removing a
 row there drops every edge touching it, and the store refuses to re-add an edge
@@ -242,15 +373,27 @@ blocking is not expressible on a split city yet (ga-2orlf); the migration does
 not refuse over it, because refusing would leave a city that boot also refuses
 with no way forward. Instead:
 
+- `gc storage preflight` lists every such edge under `cross-store edges`
+  before the window, as a note that does not block;
 - the migrate output lists every such edge as **AT RISK** before the first row
   is removed;
-- every edge the store then refuses is recorded in
+- every edge the store then refuses is recorded on its work bead, as a
+  `dropped` entry in `gc.migrated_cross_edges` (the shape `--from-rigs` uses:
+  `dir`, `type`, `other`, `other_status_at_import`, `payload`, `action`), so
+  `gc bd show <id>` still names the bead a bug was discovered from;
+- every edge the store then refuses is also recorded in
   `.gc/storage-infra-cleared.json`, listed under `lost cross-store edges` by
   `gc storage status`, and carried as `lost_cross_edges` on every
   `storage.binding.*` event that reads the note;
 - every one stays in the backup (`dependents` on the moved bead's entry).
 
 A file or SQLite work store keeps them.
+
+On a work store served by the city's managed Dolt server, the clear's
+deletes stay in the database's Dolt history, and the migrate output ends with
+a reminder to run `gc dolt compact`. Compaction reclaims that space and also
+ends `AS OF` recovery from before the clear, so run it only once you no longer
+need that backstop. The migration never compacts on its own.
 
 The command is idempotent. Run it again on a converged city and it re-proves
 convergence and finishes any clear that did not complete — including the
@@ -293,10 +436,10 @@ A rig whose store holds no infrastructure bead never needs this step: `gc rig
 add` (a new rig, `--adopt`, or a re-add) and the rig census the city runs at
 each boot record it `infra.rig.<rig>.clean` once the city binding has
 converged, so a rig added before a born-split city's first start, or an adopted
-store holding only work, does not wait for an import. A suspended rig is not
-censused at boot. Neither records a store the import refuses as shared (see
-below): that rig stays awaiting import, and `gc rig add` and the boot census's
-`storage.rig_residue` event say why.
+store holding only work, does not wait for an import. A rig suspended at boot
+is not opened then: the controller censuses it when it resumes. Neither records
+a store the import refuses as shared (see below): that rig stays awaiting
+import, and `gc rig add` and the census's `storage.rig_residue` event say why.
 
 The import refuses, before writing anything, a rig store another registered
 city also uses or that it cannot rule out as one (a shared or company store
@@ -306,8 +449,20 @@ and that pins no database name cannot be compared), rows scoped to another rig
 or city, open rows another city's agent claims, rows its manifest says it
 carried that the binding no longer holds, and a rig whose store cannot read the
 payload of an edge the import copies or backs up. A bd CLI rig with an edge on
-a row it moves is such a rig; a proxied-server rig reads payloads natively with
-`GC_BEADS_PROXIED_NATIVE=1`. While an
+a row it moves is such a rig, and so is a generic exec rig with one: the city
+migration copies a generic exec store's edges carrying no payload, as its
+protocol declares, but the rig import does not take that declaration yet. The
+import runs in the same maintenance window as the city migration (Step 4), so
+a managed rig is read natively. A proxied-server rig is read on the
+proxied-native lane, which the window forces on. When the window starts the
+city's provider it also starts the proxied scope of every rig the import
+reads, and a rig scope that will not start refuses the run; at the end it
+stops every provider-owned scope, as `gc stop` does. A rig whose proxy is
+down anyway (the window found the provider up and started nothing) is read
+through the bd CLI instead, silently: a rig with no edge on the rows the
+import moves imports as before, and one with such an edge is refused by the
+payload-read refusal above. Bring that rig's proxy up (any `bd` read in the
+rig does) and run the import again. While an
 import is in flight (`infra.rig.<rig>.importing` beside the binding) boot and
 every gc command refuse; re-run the import to finish it. If a rig store is
 gone for good after its import wrote its marker, `gc storage migrate
@@ -338,6 +493,31 @@ On a converged city `source:` reads 0 and `binding:` carries the count. On an
 unconverged city `binding:` reads zero without the database being created to
 learn it.
 
+A work row that blocks on a malformed `<type>:<id>` literal (such as
+`discovered-from:<id>`, a typed edge written as a `blocks` target) reads as
+ready on a single-store city, because bd reads the literal as no blocker. On a
+split city `gc ready` holds the row, because no store resolves the literal,
+whether or not the split moved `<id>`. `gc storage preflight` lists every such
+row of the city's work store under `malformed edges` before the window, with
+where its `<id>` ends up. It does not read the rigs' stores:
+`gc doctor --check dangling-blocking-edges` names their rows after the split.
+After the split, `gc doctor --check dangling-blocking-edges --fix` repairs each
+literal:
+
+- one whose `<id>` is still in the row's store is rewritten as that typed edge;
+- one whose `<id>` only the binding holds (the split moved it there, or the
+  binding minted it) is removed, and the edge it meant is recorded on the row
+  with the literal's payload (`gc.migrated_cross_edges`, `action: "dropped"`).
+  It writes no edge, because no edge crosses stores. `--fix` keeps the literal
+  and says why when the row's store cannot report the payload, or when the row
+  already records that edge without it. For the first, bring the scope's proxy
+  up (any `bd` read in the scope does) and run `--fix` again. Either way you
+  can remove the literal yourself with `gc bd dep remove <row> <literal>`,
+  which drops its payload;
+- one whose `<id>` no store holds is removed;
+- one whose `<id>` another work store holds (a rig's, or the city's for a
+  rig's row) is left for you.
+
 ## gc bd on split cities
 
 On a split city, `gc bd` is an allowlist. bd writes whatever it is told into
@@ -353,9 +533,9 @@ How a command gets through:
   tag's. Instead gc walks the binary's `--help` for every visible command and
   compares the commands, aliases and flags (shorthand, type, default,
   no-value default, usage) with the visible projection of each pinned
-  inventory: bd 1.3.2, and the bd 1.3.0 Enterprise build at commit
-  `77612097cec0`. A binary that matches one is judged against that
-  inventory; any other is refused, with a `gc_bd.refused` event and a
+  inventory: bd 1.3.2, bd 1.3.4 (bd 1.3.3 has the same tree), and the
+  bd 1.3.0 Enterprise build at commit `77612097cec0`. A binary that
+  matches one is judged against that inventory; any other is refused, with a `gc_bd.refused` event and a
   `gc doctor` error (check `bd-command-inventory`, which `gc start` also
   warns about). The inventory is bd's own command tree, hidden flags
   included, dumped from source by `internal/bdflags/inventorygen/generate.sh`
@@ -468,16 +648,23 @@ gc serves its own `release-if-current` itself.
   a string value, but a JSON null reads as empty to the bd CLI and as the text
   `null` to a native Dolt store, and `gc.root_bead_id` set to `null` is a
   graph marker. A write is refused when either reading moves the bead out of
-  the classes its store holds, and an import row the two readings place in
-  different classes is refused even with `--skip-infra`. Write such a key as a
-  string, leave it out, or clear it with `update --unset-metadata`.
+  the classes its store holds. An import row is kept when its store holds the
+  row's class under both readings, and is handled like any row of a class the
+  store does not hold (refused, or left out with `--skip-infra`) when it holds
+  neither; a row its store holds under one reading only is refused, even with
+  `--skip-infra`. Write such a key as a string, leave it out, or clear it with
+  `update --unset-metadata`.
 - `label propagate`: a class-marker label is refused.
 - `import`: rows of a class the store does not hold are refused, or left out
   with `--skip-infra`. gc reads the file the way bd's import does: a line
   with a `_schema` key is the export header, a line whose `_type` key is
   exactly `"memory"` is a memory record, and a row whose status is
   `tombstone` is skipped. bd imports every other line as an issue, whatever
-  else its `_type` says, so gc classifies every other line.
+  else its `_type` says, so gc classifies every other line. A row the store
+  keeps is refused when a class binding holds a bead with its id, as
+  `create --id` is: `gc storage migrate` keeps a moved bead's id, so every
+  by-id gc command would answer from the binding's bead. A dry run writes
+  nothing and is not checked.
 - `mol burn` (the gastown patrols): every id must name exactly one bead of
   the work store, as for `delete`. The burn is refused when a class-binding
   bead depends on, or an open cross-store drain gate waits on, the molecule
@@ -518,13 +705,20 @@ gc serves its own `release-if-current` itself.
   and leave the edge dangling.
 - `batch`: every `create` line is classified.
 - A file gc judges (`batch --file`, `delete --from-file`, a `--metadata @file`,
-  a `create --graph` plan, the `import` source) is copied to a private
-  temporary file once judged, and bd is pointed at the copy, which is removed
-  when `gc bd` returns. bd writes exactly what gc judged: a file rewritten
-  after gc read it changes nothing. A pipe (`<(...)`, `/dev/stdin`) given to
-  `batch --file`, `delete --from-file`, `create --graph` or `import` is
-  drained by gc's read, and bd gets the drained bytes. bd names the copy, not
-  your file, in what it prints.
+  a `create --graph` plan, the `import` source) is copied, under its own file
+  name, into a private directory under `TMPDIR` (or `/tmp`) once judged, and bd
+  is pointed at the copy, which is removed when `gc bd` returns. bd writes
+  exactly what gc judged: a file rewritten after gc read it changes nothing.
+  A pipe (`<(...)`, `/dev/stdin`) given to `batch --file`,
+  `delete --from-file`, `create --graph` or `import` is drained by gc's read,
+  and bd gets the drained bytes. bd prints the copy's path; where it records
+  only a file name (an `import`'s history entry), that is your file's name. A
+  write gc cannot copy (`TMPDIR` missing, unwritable or full) is refused.
+  Every spelling of the `import` source bd accepts (a short-flag run such as
+  `-qia.jsonl`, a name after `--`) is pointed at the copy. On every city,
+  single-store or split, a `--metadata @file` of `create`, `new` or `update`
+  is read once, before any check, so every check and bd read the same bytes
+  and a pipe works there too.
 - `sql`: only a single plain read is allowed: no comments, no Dolt procedures,
   no backtick-quoted Dolt names.
 - `config set` and `config unset`: only `types.custom`, `types.infra`,
@@ -605,7 +799,7 @@ gc start
 gc storage status
 ```
 
-The command re-proves convergence, then runs step 8 above. Copies the binding's
+The command re-proves convergence, then runs step 9 above. Copies the binding's
 own garbage collection has since removed from the binding are cleared too:
 they are the frozen rows the demand surface would otherwise serve forever.
 
@@ -1223,6 +1417,12 @@ Leave the marker alone. The procedure does not need it gone — a marker with no
 database is precisely the state that re-runs the copy — and it is the binding's
 own record that this city has been in service, which the post-cutover refusals
 key on.
+
+If the re-copy stops part way (it exits 75 when `--time-budget` is spent, or
+it fails, or it is killed), run the same command again, and leave
+`infra.recopying` alone too: until the re-copy finishes, that record is what
+keeps boot from serving the partly re-copied database, and a rerun of
+`--from-backup` from refusing it as a binding that is not stale.
 
 ## What a later boot keeps checking
 

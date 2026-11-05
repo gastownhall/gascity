@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1142,7 +1143,7 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 
 			dops := newFakeDrainOps()
 			var stdout, stderr bytes.Buffer
-			code := routeCityStatus(cityPath, dops, c, tc.nilReason, false, &stdout, &stderr, func() int {
+			code := routeCityStatus(cityPath, cfg, dops, c, tc.nilReason, false, &stdout, &stderr, func() int {
 				return cmdCityStatusLocalFallback(cfg, cityPath, false, &stdout, &stderr)
 			})
 
@@ -1287,7 +1288,7 @@ func TestRouteCityStatus_APIJSONIncludesCacheAge(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, dops, c, "", true, &stdout, &stderr, func() int {
+	if code := routeCityStatus(cityPath, cfg, dops, c, "", true, &stdout, &stderr, func() int {
 		return cmdCityStatusLocalFallback(cfg, cityPath, true, &stdout, &stderr)
 	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
@@ -1314,7 +1315,7 @@ func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, dops, nil, "controller-down", true, &stdout, &stderr, func() int {
+	if code := routeCityStatus(cityPath, cfg, dops, nil, "controller-down", true, &stdout, &stderr, func() int {
 		return cmdCityStatusLocalFallback(cfg, cityPath, true, &stdout, &stderr)
 	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
@@ -1328,9 +1329,10 @@ func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
 	}
 }
 
-// TestRouteCityStatus_APIStaleBanner verifies the human-output staleness
-// banner appears when the supervisor reports a cache age > 30 s.
-func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
+// TestRouteCityStatus_CacheAgeFooterOnStderr verifies the API route prints
+// the cache-age footer on stderr, not stdout, when the supervisor reports a
+// cache age more than twice its re-scan interval.
+func TestRouteCityStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	cityPath := writeCityStatusTestCity(t)
 	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
 	if err != nil {
@@ -1338,7 +1340,7 @@ func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
 	}
 	staleHandler := func(_ *testing.T) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("X-GC-Cache-Age-S", "123")
+			setBehindCacheHeaders(w)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "test-city", "path": "/tmp/test-city",
@@ -1356,14 +1358,12 @@ func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, dops, c, "", false, &stdout, &stderr, func() int {
+	if code := routeCityStatus(cityPath, cfg, dops, c, "", false, &stdout, &stderr, func() int {
 		return cmdCityStatusLocalFallback(cfg, cityPath, false, &stdout, &stderr)
 	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age:") {
-		t.Errorf("human output should include stale banner, got:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 func TestControllerStatusGuidance(t *testing.T) {
@@ -1521,7 +1521,7 @@ func TestRenderCityStatusFromAPIPartialRendersUnknownNotStopped(t *testing.T) {
 	cr := api.CachedRead[api.StatusView]{Body: view}
 
 	var stdout bytes.Buffer
-	if code := renderCityStatusFromAPI(view.CityPath, cr, newFakeDrainOps(), false, &stdout); code != 0 {
+	if code := renderCityStatusFromAPI(view.CityPath, nil, cr, newFakeDrainOps(), false, &stdout, io.Discard); code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
 	out := stdout.String()
@@ -1534,7 +1534,7 @@ func TestRenderCityStatusFromAPIPartialRendersUnknownNotStopped(t *testing.T) {
 
 	// The JSON projection off the same view must also carry the partial flags.
 	var jsonOut bytes.Buffer
-	if code := renderCityStatusFromAPI(view.CityPath, cr, newFakeDrainOps(), true, &jsonOut); code != 0 {
+	if code := renderCityStatusFromAPI(view.CityPath, nil, cr, newFakeDrainOps(), true, &jsonOut, io.Discard); code != 0 {
 		t.Fatalf("json code = %d, want 0", code)
 	}
 	var status StatusJSON

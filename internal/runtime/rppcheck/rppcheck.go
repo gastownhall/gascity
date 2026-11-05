@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // Status is the outcome of a single conformance check.
@@ -196,11 +197,27 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 
 // knownCapabilities maps declared capability strings to the op each one
 // promises. Unknown declared strings are ignored (forward compatibility,
-// RUNTIME-RPP-008).
+// RUNTIME-RPP-008). The conformance-only tokens (conformance-faults,
+// city-scoped) promise no op of their own, so they map to "": they are
+// listed only so the handshake check does not report them as unknown, and
+// `gc runtime conformance` checks the behavior they claim.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
+	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
+	"conformance-faults":                       "",
+	"city-scoped":                              "",
 }
+
+// The observe.v1 smoke checks (`gc runtime conformance` gates the profile
+// in full; see internal/runtime/runtimecontract).
+const (
+	observeCheck       = "capability observe.v1: observe"
+	inventoryCheck     = "capability observe.v1: inventory"
+	killObjectCheck    = "capability observe.v1: kill-object"
+	observeAbsentCheck = "capability observe.v1: observe after stop"
+	observeBogusObject = `{"object":{"id":"gc-rpp-check-none","created":"0"},"mode":"corpse"}`
+)
 
 const handshakeCheck = "protocol handshake"
 
@@ -297,6 +314,9 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	}
 
 	c.checkRequiredBool(ctx, "lifecycle: is-running after stop", name, "false")
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
+		c.checkObserve(ctx, observeAbsentCheck, name, "absent")
+	}
 
 	again := c.runOp(ctx, nil, "stop", name)
 	switch {
@@ -347,17 +367,22 @@ func (c *checker) remainingCheckNames() []string {
 			names = append(names, "optional: "+knownCapabilities[capability])
 		}
 	}
-	return append(names,
+	names = append(names,
 		"optional: process-alive",
 		c.nudgeCheckName(),
 		"optional: metadata round-trip",
 		"optional: peek",
 		"optional: list-running",
-		"lifecycle: stop",
-		"lifecycle: is-running after stop",
-		"lifecycle: stop idempotent",
-		"optional: interrupt",
 	)
+	observe := c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1)
+	if observe {
+		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
+	}
+	names = append(names, "lifecycle: stop", "lifecycle: is-running after stop")
+	if observe {
+		names = append(names, observeAbsentCheck)
+	}
+	return append(names, "lifecycle: stop idempotent", "optional: interrupt")
 }
 
 func (c *checker) skipRemainingChecks(detail string) {
@@ -380,6 +405,80 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkMetadataRoundTrip(ctx, name)
 	c.checkOptional(ctx, "optional: peek", nil, "peek", name, "10")
 	c.checkListRunning(ctx, name)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
+		c.checkObserve(ctx, observeCheck, name, "running")
+		c.checkInventory(ctx, name)
+		c.checkKillObjectBogus(ctx, name)
+	}
+}
+
+// checkObserve runs `observe <name>` and requires the answer gc accepts
+// (exec.ParseObserve) in state want, with the box's object when present.
+func (c *checker) checkObserve(ctx context.Context, check, name, want string) {
+	res := c.runOp(ctx, nil, "observe", name)
+	switch {
+	case res.unsupported:
+		c.record(check, StatusFail, "observe.v1 declared but observe not implemented (exit 2)")
+		return
+	case res.err != nil:
+		c.record(check, StatusFail, res.err.Error())
+		return
+	}
+	o, err := sessionexec.ParseObserve([]byte(res.stdout))
+	switch {
+	case err != nil:
+		c.record(check, StatusFail, fmt.Sprintf("observe answer gc would read as unknown: %v", err))
+	case o.State != want:
+		c.record(check, StatusFail, fmt.Sprintf("observe state %q, want %q", o.State, want))
+	default:
+		c.record(check, StatusPass, "")
+	}
+}
+
+// checkInventory runs `inventory` and requires the answer gc accepts
+// (exec.ParseInventory), complete, listing the running session.
+func (c *checker) checkInventory(ctx context.Context, name string) {
+	res := c.runOp(ctx, nil, "inventory")
+	switch {
+	case res.unsupported:
+		c.record(inventoryCheck, StatusFail, "observe.v1 declared but inventory not implemented (exit 2)")
+		return
+	case res.err != nil:
+		c.record(inventoryCheck, StatusFail, res.err.Error())
+		return
+	}
+	inv, err := sessionexec.ParseInventory([]byte(res.stdout))
+	switch {
+	case err != nil:
+		c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory answer gc would refuse: %v", err))
+		return
+	case !inv.Complete:
+		c.record(inventoryCheck, StatusFail, "inventory answered complete:false with every box readable")
+		return
+	}
+	for _, n := range inv.Names {
+		if n == name {
+			c.record(inventoryCheck, StatusPass, "")
+			return
+		}
+	}
+	c.record(inventoryCheck, StatusFail, fmt.Sprintf("inventory does not list the running %s", name))
+}
+
+// checkKillObjectBogus runs `kill-object` for an object that names no box,
+// which must answer gone and kill nothing.
+func (c *checker) checkKillObjectBogus(ctx context.Context, name string) {
+	res := c.runOp(ctx, []byte(observeBogusObject), "kill-object", name)
+	switch {
+	case res.unsupported:
+		c.record(killObjectCheck, StatusFail, "observe.v1 declared but kill-object not implemented (exit 2)")
+	case res.err != nil:
+		c.record(killObjectCheck, StatusFail, res.err.Error())
+	case res.stdout != "gone":
+		c.record(killObjectCheck, StatusFail, fmt.Sprintf("kill-object for an object that names no box = %q, want gone", res.stdout))
+	default:
+		c.record(killObjectCheck, StatusPass, "")
+	}
 }
 
 // checkCapabilityOp runs the op a capability promises. Declared: exit 2

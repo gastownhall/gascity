@@ -29,7 +29,8 @@ func (s *Server) humaHandleWaitList(_ context.Context, input *WaitListInput) (*W
 		return nil, err
 	}
 	waits, err := session.NewStore(store).ListWaits(input.State, input.Session)
-	out := &WaitListOutput{CacheAgeS: cacheAgeSeconds(store.Store)}
+	freshness := cacheAgeSeconds(store.Store)
+	out := &WaitListOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	if err != nil {
 		switch {
 		case beads.IsLookupLimitError(err):
@@ -76,7 +77,8 @@ func (s *Server) humaHandleWaitGet(_ context.Context, input *WaitGetInput) (*Wai
 		}
 		return nil, humaStoreError(err)
 	}
-	out := &WaitGetOutput{CacheAgeS: cacheAgeSeconds(store.Store)}
+	freshness := cacheAgeSeconds(store.Store)
+	out := &WaitGetOutput{CacheAgeS: freshness.ageS, CacheRefresh: freshness.refresh}
 	out.Body = waitViewFromInfo(w)
 	return out, nil
 }
@@ -96,20 +98,21 @@ func waitViewFromInfo(w session.WaitInfo) WaitView {
 		created = w.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return WaitView{
-		ID:              w.ID,
-		SessionID:       w.SessionID,
-		SessionName:     w.SessionName,
-		Kind:            w.Kind,
-		State:           w.State,
-		DepIDs:          w.DepIDs,
-		DepMode:         w.DepMode,
-		RegisteredEpoch: w.RegisteredEpoch,
-		DeliveryAttempt: w.DeliveryAttempt,
-		NudgeID:         w.NudgeID,
-		ExpiresAt:       w.ExpiresAt,
-		Note:            w.Note,
-		Status:          w.Status,
-		CreatedAt:       created,
-		Labels:          w.Labels,
+		ID:                     w.ID,
+		SessionID:              w.SessionID,
+		SessionName:            w.SessionName,
+		Kind:                   w.Kind,
+		State:                  w.State,
+		DepIDs:                 w.DepIDs,
+		DepMode:                w.DepMode,
+		RegisteredEpoch:        w.RegisteredEpoch,
+		RegisteredResetPending: w.RegisteredResetPending,
+		DeliveryAttempt:        w.DeliveryAttempt,
+		NudgeID:                w.NudgeID,
+		ExpiresAt:              w.ExpiresAt,
+		Note:                   w.Note,
+		Status:                 w.Status,
+		CreatedAt:              created,
+		Labels:                 w.Labels,
 	}
 }

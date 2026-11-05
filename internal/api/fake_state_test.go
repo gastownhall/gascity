@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
@@ -19,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -92,7 +93,7 @@ func newFakeState(t testing.TB) *fakeState {
 	store := beads.NewMemStore()
 	// Mail is messaging-class: under GC_TEST_SPLIT_STRICT=1 it reads the city
 	// store through the gate's class view (identity otherwise).
-	mp := beadmail.New(splittest.GateClassView(store))
+	mp := newTestBeadMail(splittest.GateClassView(store))
 	// Under GC_TEST_SPLIT_STRICT=1 the city store exists, as it does on
 	// every real city: without one the class accessors had no store and the
 	// fixture's rows could only be read through rig views.
@@ -186,7 +187,7 @@ func (f *fakeState) NudgeQueue() NudgeQueue {
 	if f.nudgeQueue != nil {
 		return f.nudgeQueue
 	}
-	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore().Store}
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore()}
 }
 
 func (f *fakeState) SessionsBeadStore() beads.SessionStore {
@@ -376,18 +377,9 @@ func (f *fakeMutatorState) SuspendRig(name string) error {
 	if !found {
 		return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 	}
-	tmpl := cfg.Workspace.SessionTemplate
-	for _, a := range cfg.Agents {
-		if a.Dir != name {
-			continue
-		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
-		for _, ea := range expanded {
-			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
-			_ = f.sp.SetMeta(sessionName, "suspended", "true")
-		}
-	}
-	return nil
+	// As the controller's SuspendRig does (configedit.Editor.SuspendRig).
+	suspended := true
+	return suspensionstate.SetRigSuspended(fsys.OSFS{}, f.cityPath, name, &suspended)
 }
 
 func (f *fakeMutatorState) ResumeRig(name string) error {
@@ -402,18 +394,9 @@ func (f *fakeMutatorState) ResumeRig(name string) error {
 	if !found {
 		return fmt.Errorf("%w: rig %q", configedit.ErrNotFound, name)
 	}
-	tmpl := cfg.Workspace.SessionTemplate
-	for _, a := range cfg.Agents {
-		if a.Dir != name {
-			continue
-		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
-		for _, ea := range expanded {
-			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
-			_ = f.sp.RemoveMeta(sessionName, "suspended")
-		}
-	}
-	return nil
+	// As the controller's ResumeRig does (configedit.Editor.ResumeRig).
+	suspended := false
+	return suspensionstate.SetRigSuspended(fsys.OSFS{}, f.cityPath, name, &suspended)
 }
 
 func (f *fakeMutatorState) SuspendCity() error { f.cfg.Workspace.Suspended = true; return nil }
@@ -735,3 +718,10 @@ func (f *fakeMutatorState) DeleteProviderPatch(name string) error {
 }
 
 func intPtr(n int) *int { return &n }
+
+// newTestBeadMail is the stateless beadmail provider over one store serving
+// both the messaging and the sessions class, as a single-store city's store
+// does.
+func newTestBeadMail(store beads.Store) *beadmail.Provider {
+	return beadmail.NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
+}

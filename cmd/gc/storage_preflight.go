@@ -14,7 +14,9 @@ package main
 // reimplements none. Every step below calls the same function the migration
 // calls, so a refusal that changes there changes here — and a check added there
 // without a line here shows up as a preflight that clears a city the migration
-// refuses, which is the one failure mode this verb cannot tolerate.
+// refuses, which is the one failure mode this verb cannot tolerate. The one
+// thing it adds is a note, never a block: the "malformed edges" note in step 6
+// names the work rows the split will hold until `gc doctor --fix` repairs them.
 //
 // That last sentence is a claim about a list, and a comment cannot keep a list
 // honest: the first cut of this file asserted it while omitting three of the
@@ -58,10 +60,14 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // storagePreflightVerb is the read-only rehearsal of the migrate verb.
@@ -211,7 +217,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return 0
 	}
 	if state == infraConvergenceStale {
-		preflightPass(stdout, "cutover", "a convergence marker exists with no database under it, so the copy would run again and re-converge")
+		preflightPass(stdout, "cutover", fmt.Sprintf("a convergence marker exists and %s, so the copy would run again and re-converge", infraStaleCause(target)))
 	} else {
 		preflightPass(stdout, "cutover", "not converged yet, which is what the migration is for")
 	}
@@ -219,8 +225,10 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	// 6. What the copy would carry, and whether it could read it. A read that
 	// failed leaves the whole clearance unfounded, so it blocks rather than
 	// reporting zero — the same positive-looking absence this path refuses
-	// everywhere else. The edge-payload refusal runs on the same open source and
-	// the same snapshot the migration hands it, because a payload the copy cannot
+	// everywhere else. The edge-payload refusal runs on the same open source,
+	// the same snapshot, and the same id set the migration hands it, so it reads
+	// the edges the way the copy will (in batches, over every row the work store
+	// holds, when the store lists them in batches): a payload the copy cannot
 	// READ is refused by edge id at exactly this point in the window. Whether it
 	// could WRITE one is not asked here: that answer lives on the destination,
 	// and opening the destination is the one thing this rehearsal will not do.
@@ -228,12 +236,44 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	if err != nil {
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
-	rows, listErr := readInfraSnapshot(source)
-	var edgeErr error
+	rows, allIDs, listErr := readInfraSnapshotWithIDs(source, coordclass.CurrentGeneration)
+	var edgeErr, holdsErr, literalErr error
+	var gates []infraCopyGate
+	var plan infraCopyPlan
+	var literals []string
+	var literalRows int
 	if listErr == nil {
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
-		_, edgeErr = infraSourceEdgePayloadRefusal(source, rows)
+		plan, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		// The same plan the migration runs, so a hold it would refuse is named
+		// before the window rather than inside it.
+		if edgeErr == nil {
+			gates, holdsErr = planInfraCopyHolds(plan, source, time.Now())
+		}
+		// The open work rows' edges, as doctor's dangling-edge scan reads them.
+		moved := make(map[string]bool, len(rows))
+		for _, b := range rows {
+			moved[b.ID] = true
+		}
+		var live []string
+		for _, status := range []string{"open", "in_progress"} {
+			got, err := source.List(beads.ListQuery{Status: status, AllowScan: true, Live: true, TierMode: beads.TierBoth})
+			if err != nil {
+				literalErr = fmt.Errorf("listing %s rows: %w", status, err)
+				break
+			}
+			for _, b := range got {
+				live = append(live, b.ID)
+			}
+		}
+		if literalErr == nil && len(live) > 0 {
+			deps, err := doctorDepsFor(source, live)
+			if err != nil {
+				literalErr = fmt.Errorf("listing the open rows' dependencies: %w", err)
+			}
+			literals, literalRows = malformedLiteralRows(deps, moved, allIDs)
+		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
 		fmt.Fprintf(stderr, "%s: closing the work store: %v\n", storagePreflightLogPrefix, closeErr) //nolint:errcheck // best-effort stderr
@@ -246,6 +286,29 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "edge payloads", edgeErr)
 	}
 	preflightPass(stdout, "edge payloads", "the work store can report the payload on every edge the copy would re-add")
+	if holdsErr != nil {
+		return preflightBlock(stdout, "holds", holdsErr)
+	}
+	preflightPass(stdout, "holds", fmt.Sprintf("every hold on a bead the copy carries crosses; %d bead(s) blocked on open work would wait on a cross-store gate", len(gates)))
+	// Informational: the clear records each edge it drops on its work bead.
+	if atRisk := infraCrossEdgesAtRisk(plan); len(atRisk) > 0 {
+		preflightNote(stdout, "cross-store edges", fmt.Sprintf("%d edge(s) from work beads into beads the copy moves: a bd or native-Dolt work store cannot keep an edge onto a bead it no longer holds, so the clear drops each and records it on its work bead (%s):", len(atRisk), beadmeta.MigratedCrossEdgesMetadataKey))
+		for _, edge := range atRisk {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
+		}
+	} else {
+		preflightPass(stdout, "cross-store edges", "no work bead links to a bead the copy moves")
+	}
+	// Informational: doctor --fix settles each after the split.
+	switch {
+	case literalErr != nil:
+		preflightNote(stdout, "malformed edges", fmt.Sprintf("could not read the open rows' edges (%v), so rows blocked on a malformed <type>:<id> literal are not listed", literalErr))
+	case len(literals) > 0:
+		preflightNote(stdout, "malformed edges", fmt.Sprintf("%d row(s) of the city's work store block on a malformed <type>:<id> literal (%d edge(s), below). bd reads it as no blocker, but no store resolves it, so after the split gc ready holds each row until `gc doctor --check dangling-blocking-edges --fix` repairs it: a literal whose <id> stays in the work store is rewritten as that typed edge, one whose <id> moves to the binding is removed and the edge recorded on the row with its payload (%s), and one whose <id> no store holds is removed (a rig's is left for you). Rigs' rows are not read here; doctor names theirs after the split. Or repair each now (bd dep remove <row> <literal>, then, where <id> stays, bd dep add <row> <id> -t <type>), and the row stays ready across the split:", literalRows, len(literals), beadmeta.MigratedCrossEdgesMetadataKey))
+		for _, edge := range literals {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
+		}
+	}
 
 	// 7. What the destination already holds. Read-only: the database is opened
 	// only if it is already there, because opening creates it.

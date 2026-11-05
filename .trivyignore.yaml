@@ -75,9 +75,16 @@ vulnerabilities:
   # .github/scripts/mcp-mail-filelock-exit-regression.py, which the container scan
   # runs in the image. GitPython 3.2 made archive commits 1.5-2.9x slower, enough
   # to lose a fifth to a quarter of a 400-message burst to archive-lock timeouts.
-  # The two HIGH advisories those lines fix are not reachable from this image,
-  # and each statement says why. The LOW filelock advisories (GHSA-567q-5qvw-pf92,
-  # GHSA-9vhv-jxww-xfm5) are Windows only and below the gate.
+  # Of the HIGH advisories those lines fix, all but one are not reachable from
+  # this image, and each statement says why. The LOW filelock advisories
+  # (GHSA-567q-5qvw-pf92, GHSA-9vhv-jxww-xfm5) are Windows only and below the gate.
+  #
+  # GHSA-m64x-33q8-m5h7 (added 2026-11-01, owner decision) is the exception: its
+  # parser IS reachable from mcp-agent-mail, and the waiver holds only for the
+  # shipped contrib/k8s/mcp-mail-deployment.yaml, which mounts no workspace repos.
+  # TestMCPMailDeploymentMountsNoWorkspaceRepos fails if that manifest gains a
+  # mount, so a change that could expose the pod to foreign commits has to revisit
+  # this entry first.
   #
   # Each entry names the dist-info path of the exact release the lock pins, so
   # moving that pin stops the waiver from matching and the scan re-checks the
@@ -97,6 +104,26 @@ vulnerabilities:
       - "usr/local/lib/python3.12/site-packages/gitpython-3.1.62.dist-info/METADATA"
     expired_at: 2027-01-26
     statement: GHSA-83vg-56qc-22m7, GitPython 3.1.62 (fixed in 3.2.1, with no 3.1.x backport). The flaw is in Repo.create_submodule / Submodule.add, which clone a submodule before rejecting a path inside .git, so a submodule can plant a git hook. mcp-agent-mail never creates, adds or updates submodules (no submodule API appears anywhere in the package). It uses GitPython for its own mail archive (Repo.init, index commits, and Repo.clone_from of a local backup bundle during restore) and to open agent workspace repos read-only for branch and remote URL lookups. The lock is held on 3.1.x because GitPython 3.2 makes archive commits 1.5-2.9x slower and drops mail under bursts (review of #8307). Drop this entry once the lock moves to a GitPython release without that slowdown.
+  - id: GHSA-23mf-xhv8-69c2
+    paths:
+      - "usr/local/lib/python3.12/site-packages/gitpython-3.1.62.dist-info/METADATA"
+    expired_at: 2027-01-26
+    statement: GitPython 3.1.62 (fixed in 3.2.0, with no 3.1.x backport). The flaw is in Head.checkout, which checks its keyword options but passes the branch name to git checkout unchecked, so a branch named like --pathspec-from-file=<file> reads an arbitrary file. mcp-agent-mail never checks out a branch; it only reads active_branch.name and runs rev-parse --abbrev-ref HEAD. The lock is held on 3.1.x because GitPython 3.2 makes archive commits 1.5-2.9x slower and drops mail under bursts (review of #8307). Drop this entry once the lock moves to a GitPython release without that slowdown.
+  - id: GHSA-f9j4-qggq-h239
+    paths:
+      - "usr/local/lib/python3.12/site-packages/gitpython-3.1.62.dist-info/METADATA"
+    expired_at: 2027-01-26
+    statement: GitPython 3.1.62 (fixed in 3.2.0, with no 3.1.x backport). The flaw is in Remote.pull, whose unsafe-option guard skips the positional refspec, so a refspec like --upload-pack=<cmd> runs a command over a local-path or SSH remote. mcp-agent-mail never pulls, fetches or pushes; it reads remotes only to look up a remote URL (git remote get-url). The lock is held on 3.1.x because GitPython 3.2 makes archive commits 1.5-2.9x slower and drops mail under bursts (review of #8307). Drop this entry once the lock moves to a GitPython release without that slowdown.
+  - id: GHSA-w8jc-g24h-crhw
+    paths:
+      - "usr/local/lib/python3.12/site-packages/gitpython-3.1.62.dist-info/METADATA"
+    expired_at: 2027-01-26
+    statement: GitPython 3.1.62 (fixed in 3.2.0, with no 3.1.x backport). The flaw is in three wrappers that skip GitPython's unsafe-protocol or unsafe-option checks, Git.ls_remote, Repo.merge_base and IndexFile.move, so an ext transport URL or a caller-supplied option reaches git. mcp-agent-mail calls none of them; its only git command wrappers are rev-parse, symbolic-ref, remote get-url and bundle create, with fixed arguments. The lock is held on 3.1.x because GitPython 3.2 makes archive commits 1.5-2.9x slower and drops mail under bursts (review of #8307). Drop this entry once the lock moves to a GitPython release without that slowdown.
+  - id: GHSA-m64x-33q8-m5h7
+    paths:
+      - "usr/local/lib/python3.12/site-packages/gitpython-3.1.62.dist-info/METADATA"
+    expired_at: 2027-01-26
+    statement: GitPython 3.1.62 (fixed in 3.2.0, with no 3.1.x backport). parse_actor_and_date backtracks quadratically on a malformed author, committer or tagger line, and it runs whenever a commit is read. This one IS reachable from mcp-agent-mail. Besides its own archive (commits it writes with the operator's GIT_AUTHOR_NAME/EMAIL), _latest_git_activity reads the newest commit touching a file reservation from the workspace path the MCP client registered as the project key; one crafted workspace commit cost 7.7s of CPU in this image. The impact is CPU denial of service only. It is accepted, by owner decision on 2026-11-01, because the shipped contrib/k8s/mcp-mail-deployment.yaml mounts no workspace repos (only the mail-data volume and /tmp, on a read-only root filesystem), so the only repository the pod can open is the archive it wrote itself, and restoring a foreign bundle is an operator-only CLI step. Anyone who mounts workspace repos into this image, or runs it outside that manifest, must revisit this waiver; TestMCPMailDeploymentMountsNoWorkspaceRepos fails on any new mount. The lock is held on 3.1.x because GitPython 3.2 makes archive commits 1.5-2.9x slower and drops mail under bursts (review of #8307). Drop this entry once the lock moves to a GitPython release without that slowdown.
   # main's time-boxed waiver bridge (#5885) is fully retired: its thrift entry
   # went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached 0.24.0 and
   # its GitPython entries went when .github/requirements/mcp-agent-mail.txt

@@ -79,6 +79,11 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
 const ExitCodeTempFail = 75
 
+// ExitCodeNoScreen is sysexits.h EX_NOINPUT: an observe.v1 exec script's
+// `peek` of a name whose box has no screen to read (no box, or a dead box
+// whose screen is gone). It is an answer, not a failure: an empty screen.
+const ExitCodeNoScreen = 66
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"
@@ -860,6 +865,11 @@ type InventoryEntry struct {
 	// Incarnation identifies this runtime instance of the session. A new
 	// runtime under the same name, or a respawn of the session's first pane,
 	// gets a different value. Empty when the provider cannot report one.
+	// A provider whose fresh reads name the session's object
+	// (Liveness.ObjectID and ObjectCreated) leads it with
+	// "<ObjectID>:<ObjectCreated>", as tmux's
+	// "#{session_id}:#{session_created}:#{pane_pid}" does, so a probe's
+	// answer can be matched to this incarnation.
 	//
 	// On tmux it can also change without a restart: swap-pane,
 	// split-window -b, rotate-window, or killing pane 0.0 moves a different
@@ -889,6 +899,66 @@ type InventoryEntry struct {
 	// ([ProgramStatusProvider]) taken in the same batch: Unread unless the
 	// runtime reads program status for this session.
 	Program ProgramStatus
+	// ProcessKnown and ProcessAlive report whether the agent process (the
+	// GT_PROCESS_NAMES the session was started with) runs in the session's
+	// live box, as the batched read sees it (an exec pack's `inventory`),
+	// so no per-name process probe is needed. ProcessAlive is meaningless
+	// unless ProcessKnown.
+	ProcessKnown, ProcessAlive bool
+	// IdentityKnown and Identity report the session's identity env
+	// (GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN, GT_PROCESS_NAMES;
+	// a missing key is unset) for this Incarnation, read in the same batch.
+	// An empty Identity is a box with no gc identity. Identity is
+	// meaningless unless IdentityKnown.
+	IdentityKnown bool
+	Identity      map[string]string
+}
+
+// InventoryGate is implemented by providers whose [InventoryProvider] is
+// static on the type but served only when their backend says so (an exec
+// pack that is not v2-ready has none). Read it through [InventoryFor].
+type InventoryGate interface {
+	InventoryAvailable() bool
+}
+
+// InventoryLister is implemented by providers whose listing is their
+// batched inventory (an exec pack's `inventory`): ListInventory answers
+// ListRunning(prefix), and the inventory of the names it lists, from one
+// read, so a caller wanting both makes one call, under one bound. Read it
+// through [ListInventoryWithAttestation], which serves it only where
+// [InventoryFor] does.
+type InventoryLister interface {
+	ListInventory(prefix string) ([]string, map[string]InventoryEntry, error)
+}
+
+// ListInventoryWithAttestation is [ListRunningWithAttestation], plus the
+// inventory of the listed names when sp serves both from one read
+// ([InventoryLister], gated as [InventoryFor]); otherwise the inventory is
+// nil and the caller reads it separately, if at all.
+func ListInventoryWithAttestation(sp Provider, prefix string) (names []string, inventory map[string]InventoryEntry, attested bool, err error) {
+	lister, ok := sp.(InventoryLister)
+	if _, served := InventoryFor(sp); !ok || !served {
+		names, attested, err = ListRunningWithAttestation(sp, prefix)
+		return names, nil, attested, err
+	}
+	before := ListRunningAttested(sp)
+	names, inventory, err = lister.ListInventory(prefix)
+	return names, inventory, before && ListRunningAttested(sp), err
+}
+
+// InventoryFor returns p's batched inventory when p has one it serves now:
+// an [InventoryProvider] that is not an [InventoryGate] reporting it
+// unavailable. Every caller deciding whether to take a batched inventory
+// asks it, so a gated-off provider takes the no-inventory path exactly.
+func InventoryFor(p Provider) (InventoryProvider, bool) {
+	inv, ok := p.(InventoryProvider)
+	if !ok {
+		return nil, false
+	}
+	if gate, gated := p.(InventoryGate); gated && !gate.InventoryAvailable() {
+		return nil, false
+	}
+	return inv, true
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -906,6 +976,28 @@ type EnvironmentBatchProvider interface {
 // identity.
 type IdentitySidecarProvider interface {
 	LocalIdentitySidecar() bool
+}
+
+// IdentityObserver is an optional extension for providers that read a
+// session's identity env (GC_SESSION_ID, GC_RUNTIME_EPOCH,
+// GC_INSTANCE_TOKEN, GT_PROCESS_NAMES) in one fresh answer, without
+// [EnvironmentBatchProvider]'s adoption and API side effects. A provider
+// whose identity is not readable now reports IdentityObservable false.
+// ObserveIdentity returns [ErrSessionNotFound] for an absent name and an
+// error wrapping [ErrRuntimeUnavailable] while the identity cannot be read;
+// an empty map is a box with no gc identity.
+type IdentityObserver interface {
+	IdentityObservable() bool
+	ObserveIdentity(name string) (map[string]string, error)
+}
+
+// V2ReadinessReporter is an optional extension for providers whose fitness
+// for reconciler v2 depends on what their backend declares (an exec
+// script's handshake). V2Readiness returns the capabilities v2 needs that
+// the backend lacks, nil when it has them all, or the error that kept it
+// from asking.
+type V2ReadinessReporter interface {
+	V2Readiness() (missing []string, err error)
 }
 
 // TransportCapabilityProvider is an optional extension for providers that can
@@ -1088,7 +1180,8 @@ type LiveRuntime struct {
 	// tmux process on this host. It is not socket-scoped to one provider
 	// instance, and it does not separate a server from a client. A caller that
 	// needs true provider-scoped attribution — this provider's own server, on
-	// this provider's socket — must add that check itself.
+	// this provider's socket — must add that check itself, or read the
+	// provider's LiveUnlisted.
 	//
 	// It is the positive form of the PPID test above, and it exists because the
 	// negative form cannot be made reliable: recognizing a reparent destination
@@ -1126,6 +1219,19 @@ type LiveRuntime struct {
 	// IsTracked is true when this runtime also appears in the provider's
 	// registry. False marks a live process that is invisible to the provider.
 	IsTracked bool
+	// LiveUnlisted is true when the provider claims an untracked root as a
+	// live runtime of its own that its listing does not show, or cannot rule
+	// that out. Only the provider sets it, from its own provider-scoped
+	// evidence, which ParentIsProviderInfrastructure alone is not: the tmux
+	// provider sets it on a tmux-parented root unless the root's TMUX
+	// variable proves its parent is a server bound to another socket, so a
+	// pane of this provider's socket name in a socket directory this process
+	// does not resolve, or one a failed or racing listing missed, is set,
+	// while a server an agent started on its own socket is not. Such a root
+	// is not an orphan, and a replacement would race it for the session's
+	// work, so a caller that terminates orphans before a start must refuse
+	// the start instead.
+	LiveUnlisted bool
 }
 
 // ProcessTableScanner is an optional extension for runtimes that can discover

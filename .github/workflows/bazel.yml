@@ -34,16 +34,20 @@
 #     every mode: they
 #     never failed in 33 main runs of the full suite, which is still flaky;
 #   - split-strict runs cmd/gc and internal/api under the split-strict
-#     projection gate (GC_TEST_SPLIT_STRICT=1), evidence-only and allowed to
-#     fail as a job, in mode remote: nightly, on dispatch, and on PRs that
-#     touch the storage paths; its "Split-strict verdicts" step reports the
-#     ratchet and the failing-test check apart. Non-blocking until it becomes
-#     required before new cities default to split. Its result never reaches
-#     the gate, but its wall time does: it is a leg of the lane matrix the
-#     gate job needs, so on a PR that runs it the required check reports when
-#     it ends (about 5 min on a warm farm, 19 min seen cold). That buys one
-#     copy of the lane's steps; give it its own job if the wait starts to
-#     matter;
+#     projection gate (GC_TEST_SPLIT_STRICT=1) and gates. It starts in mode
+#     remote only: on the nightly schedule, on dispatch (RC Gate included),
+#     and on same-repo pull requests that touch the storage paths (the
+#     Split-strict paths step). It does not start for fork, Dependabot or
+#     cache-mode pull requests, merge groups, pushes, or a PR whose changes
+#     reach the targets only through packages outside the path list, so a
+#     regression can still land that way; the next PR that runs the lane then
+#     fails on files it never touched, and the split-strict-nightly issue
+#     (the split-strict-alert job) says main is red. Its "Split-strict
+#     verdicts" step reports the ratchet and the failing-test check apart,
+#     and either FAIL fails the lane. It is a leg of the lane matrix the gate
+#     job needs, so a red split-strict fails the required check, and on a PR
+#     that runs it the required check reports when it ends (about 5 min on a
+#     warm farm, 19 min seen cold);
 #   - integration runs on the nightly schedule and dispatches only,
 #     evidence-only, until G3 (bazel-nightly.yml; off every push since
 #     rbe-ci-cost-latency-study.md recommendation 5: evidence-only, so its
@@ -77,9 +81,8 @@ name: bazel
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Merge queue (dormant until the main ruleset enables one; TESTING.md
-  # "Merge queue"): both required checks of this workflow must report on
-  # every queue entry's merge-group commit. A merge group is same-repo
+  # Merge queue (TESTING.md "Merge queue"): both required checks of this
+  # workflow must report on every queue entry's merge-group commit. A merge group is same-repo
   # trust (only people who can merge can queue), so the rbe job takes mode
   # remote; the queue ref is already the merge, so fresh-merge and the base
   # step skip it, and the OpenAPI gate diffs against merge_group.base_sha.
@@ -329,13 +332,13 @@ jobs:
           # --test_filter (GA-1), so --config=integration alone no longer
           # filters anything.
           smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_smoke_test'"$fresh"'"}'
-          # Evidence-only: cmd/gc and internal/api under the split-strict
-          # projection gate (GC_TEST_SPLIT_STRICT=1; the manual
-          # gc_split_strict_test and api_split_strict_test targets). Its
-          # ratchet fails a run that reaches a violation site the packages'
-          # testdata/split_strict_baseline.tsv does not list. Non-blocking
-          # until it becomes required before new cities default to split.
-          splitstrict='{"lane":"split-strict","cmd":"test --config=ci --keep_going //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test'"$fresh"'","evidence-only":true}'
+          # Gating: cmd/gc and internal/api under the split-strict projection
+          # gate (GC_TEST_SPLIT_STRICT=1; the manual gc_split_strict_test and
+          # api_split_strict_test targets). Its ratchet fails a run that
+          # reaches a violation site the packages'
+          # testdata/split_strict_baseline.tsv does not list, and its TESTS
+          # check a test failing that split_strict_known_failures.list does not.
+          splitstrict='{"lane":"split-strict","cmd":"test --config=ci --keep_going //cmd/gc:gc_split_strict_test //internal/api:api_split_strict_test'"$fresh"'"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the
           # fork pool too (mode fork-ro, instance oss-fork, loopback only):
@@ -360,6 +363,11 @@ jobs:
             case "$EVENT/$SPLIT_STRICT_PATHS" in
               schedule/*|workflow_dispatch/*|pull_request/true) lanes+=",$splitstrict" ;;
             esac
+          elif [ "$EVENT/$SPLIT_STRICT_PATHS" = pull_request/true ]; then
+            # The PR touches the storage paths but this mode cannot run the
+            # gating lane: say so instead of passing silently.
+            echo "::notice title=split-strict not run::this pull request touches the split-strict storage paths, but mode $MODE does not start the split-strict lane; it gates only same-repo PRs in mode remote"
+            echo "split-strict: not run (mode $MODE); this PR touches the storage paths" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "lanes=[$lanes]" >> "$GITHUB_OUTPUT"
 
@@ -426,10 +434,6 @@ jobs:
     # critical lanes (ga-vnycm2.12). A fork repository's own CI (mode local)
     # has no Blacksmith: ubuntu-latest.
     runs-on: ${{ github.repository_owner_id != '255961667' && 'ubuntu-latest' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
-    # The split-strict lane is non-blocking twice over: evidence-only (its
-    # bazel step exits 0) and, should any other step of it fail, allowed to
-    # fail as a job, so the required gate's needs.lane.result never sees it.
-    continue-on-error: ${{ matrix.lane == 'split-strict' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -576,22 +580,6 @@ jobs:
             echo 'common --loading_phase_threads=64'
           } >> .bazelrc.local
 
-      # zstd transfers with the anonymous read-only cache (rbe-cache, :8443),
-      # only while it advertises zstd: cache-zstd-probe.sh asks its
-      # GetCapabilities, and any failure means no flag (never a failed step).
-      # A probe, not a repository variable: fork pull_request runs see no
-      # vars. Never for remote execution: rbe-west's trusted schedulers and
-      # the fork edge advertise no compressor, and Bazel then refuses the
-      # remote. Transport only (the line's config is fork-cache, which only
-      # setup-bazel's rc selects), so action keys are unchanged. .bazelrc
-      # try-imports the gitignored .bazelrc.local.
-      - name: Fork cache zstd transfers
-        if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
-        run: |
-          if bash tools/rbe/cache-zstd-probe.sh; then
-            echo 'build:fork-cache --remote_cache_compression' >> .bazelrc.local
-          fi
-
       # The remote repo contents cache, read-only, for the lanes that use
       # fork-cache (engdocs/design/bazel-remote-repo-contents-cache.md):
       # external repositories come from the trees rrc-seed wrote on main
@@ -607,19 +595,30 @@ jobs:
       # time only: once loading is done Bazel fetches the files lazily, and
       # losing rbe-cache mid-run fails the command (R4, bazel#30218). The
       # step summary records the verdict and rbe-cache's TCP connect time.
+      # First, a diagnostic for every fork-cache lane: .bazelrc's fork-cache
+      # asks for zstd, so if rbe-cache stops advertising it
+      # (cache-zstd-probe.sh) Bazel refuses the remote and the lane builds
+      # locally. Then a warning says so, and the reader's lines (which would
+      # only cost lookups) are skipped. Never a failed step.
       - name: Fork cache remote repo contents cache (read)
         if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
         run: |
-          if why=$(bash tools/rbe/cache-rrc-probe.sh 2>&1); then
-            {
-              echo 'startup --experimental_remote_repo_contents_cache'
-              echo 'common --loading_phase_threads=64'
-            } >> .bazelrc.local
-            echo "$why"
-            read=on
+          read=off
+          if zstd_why=$(bash tools/rbe/cache-zstd-probe.sh 2>&1); then
+            echo "$zstd_why"
+            if why=$(bash tools/rbe/cache-rrc-probe.sh 2>&1); then
+              {
+                echo 'startup --experimental_remote_repo_contents_cache'
+                echo 'common --loading_phase_threads=64'
+              } >> .bazelrc.local
+              echo "$why"
+              read=on
+            else
+              echo "::notice title=No remote repo contents cache::$why"
+            fi
           else
-            echo "::notice title=No remote repo contents cache::$why"
-            read=off
+            echo "::warning title=rbe-cache without zstd::$zstd_why (.bazelrc's fork-cache asks for zstd, so Bazel refuses rbe-cache)"
+            why=$zstd_why
           fi
           echo "Fork cache remote repo contents cache read: **$read** (${why#rbe-cache rrc probe: })" >> "$GITHUB_STEP_SUMMARY"
 
@@ -679,7 +678,7 @@ jobs:
             --experimental_build_event_upload_strategy=local || rc=$?
           echo "bazel / $LANE: exit $rc, $(( $(date +%s) - start ))s wall, mode $MODE" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -ne 0 ] && [ "$EVIDENCE_ONLY" = true ]; then
-            echo "::warning title=$LANE is evidence-only::bazel exited $rc; not gating (integration until G3, split-strict until split is the default)"
+            echo "::warning title=$LANE is evidence-only::bazel exited $rc; not gating (integration until G3)"
             exit 0
           fi
           exit "$rc"
@@ -687,10 +686,9 @@ jobs:
       # The split-strict lane's own verdicts, kept apart from its test
       # failures: every shard's test.log ends with a RATCHET and a TESTS line
       # (internal/beads/splittest/gate.go). A shard without them hung or
-      # crashed before reporting, which is a failure too. Reporting only.
-      # Not continue-on-error: a FAIL verdict fails this step, so the lane's
-      # check is red when the gate is; the job-level continue-on-error is what
-      # keeps the lane out of the required gate. A known flake
+      # crashed before reporting, which is a failure too. A FAIL verdict
+      # fails this step, so the lane, and with it the required gate, is red
+      # when the split-strict gate is. A known flake
       # (testdata/split_strict_known_flaky.list, with its owner bead) is
       # reported without failing the TESTS verdict; Bazel retries stay off.
       # Each shard caps a function's distinct lines over its own tests only,
@@ -745,8 +743,12 @@ jobs:
       # longer reaches a baseline row (fixed or renamed), or in which a known
       # failure passes or no longer runs, fails until the inputs shrink
       # (scripts/split-strict-baseline --check).
+      # It gates the nightly (and so its alert) only: on a dispatch (RC Gate
+      # included) a list entry that now passes is housekeeping, not a reason
+      # to block a release.
       - name: Split-strict downward ratchet
         if: always() && matrix.lane == 'split-strict' && steps.test.outcome != 'skipped' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        continue-on-error: ${{ github.event_name != 'schedule' }}
         run: |
           set -uo pipefail
           rc=0
@@ -756,8 +758,8 @@ jobs:
 
       # The split-strict lane's logs carry its observed site tables (the gate
       # prints them; a remote run brings no test.outputs back), which
-      # scripts/split-strict-baseline regenerates the baselines from. The lane
-      # is evidence-only, so the failure-only upload below never fires for it.
+      # scripts/split-strict-baseline regenerates the baselines from, from a
+      # passing run as well as a failing one, so this uploads on every run.
       - name: Upload split-strict logs
         if: always() && matrix.lane == 'split-strict' && steps.test.outcome != 'skipped'
         continue-on-error: true
@@ -847,8 +849,9 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
 
+      # The split-strict lane uploads its logs on every run (above).
       - name: Upload test logs
-        if: failure() && steps.test.outcome == 'failure'
+        if: failure() && steps.test.outcome == 'failure' && matrix.lane != 'split-strict'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bazel-${{ matrix.lane }}-testlogs
@@ -990,6 +993,58 @@ jobs:
       - name: Remove the writer key
         if: always()
         run: rm -f -- "$RUNNER_TEMP/bazel-ci-secret/rrc-writer.key" "$RUNNER_TEMP/bazel-ci-secret/rrc-writer.crt"
+
+  # A red nightly split-strict lane opens (or comments on) the open
+  # split-strict-nightly issue, so the verdict reaches the issue list as well
+  # as the nightly run's status: the lane does not start on every change
+  # that can turn it red (the header's split-strict note), and a red main
+  # fails the next storage PR on files it never touched (ga-ylpbsy.94).
+  # Schedule only: a pull request's red lane already fails its required
+  # check, and a dispatch is someone already looking.
+  split-strict-alert:
+    name: bazel / split-strict alert
+    needs: [rbe, lane]
+    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.rbe.result == 'success' }}
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      actions: read # this run's jobs, for the split-strict lane's conclusion
+      issues: write # the split-strict-nightly alert issue
+    steps:
+      - name: Alert (split-strict-nightly issue)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LANES: ${{ needs.rbe.outputs.lanes }}
+        run: |
+          set -euo pipefail
+          # The lane runs in mode remote only; a run that did not start it has
+          # no verdict to report.
+          if ! jq -e 'any(.[]; .lane == "split-strict")' <<<"$LANES" >/dev/null; then
+            echo "split-strict lane not started (mode not remote); nothing to report" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          conclusion=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name | endswith("bazel / split-strict")) | .conclusion' | head -n1)
+          echo "split-strict lane: ${conclusion:-not found}" | tee -a "$GITHUB_STEP_SUMMARY"
+          case "$conclusion" in
+            success) exit 0 ;;
+            "") conclusion="missing (the lane did not report)" ;;
+          esac
+          title="split-strict: the nightly split-strict lane is red on main"
+          body="The nightly split-strict lane (//cmd/gc:gc_split_strict_test, //internal/api:api_split_strict_test under GC_TEST_SPLIT_STRICT=1) concluded \`$conclusion\`: $RUN_URL
+
+          Open the run's split-strict job and start at its \"Split-strict verdicts\" and \"Split-strict downward ratchet\" steps. An error titled split-strict ratchet, split-strict tests or split-strict combined line caps, or a downward-ratchet FAIL, names the cause: a NEW ratchet key (a read or write of one class through another class's store), a NEW FAILING test, a hung shard, a baseline row no run reached, or a known failure that now passes or no longer runs. If the verdicts step reports no report or no logs, or never ran, it is a build, setup, worker-env preflight or timeout failure. Fix or regenerate with scripts/split-strict-baseline (TESTING.md, split-strict). Until the verdicts step is green, every pull request that runs the lane fails its required check on it, whatever it changed; a downward-ratchet failure alone affects only the nightly."
+          gh label create split-strict-nightly -R "$GITHUB_REPOSITORY" --color B60205 \
+            --description "The nightly split-strict lane is red on main" 2>/dev/null || true
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --label split-strict-nightly --state open --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "Again ($conclusion): $RUN_URL"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label split-strict-nightly --title "$title" --body "$body"
+          fi
 
   # Nightly check of the remote repo contents cache (ga-vnycm2.26, design
   # R1/R2). A cached repository tree is trusted by every reader, and nothing

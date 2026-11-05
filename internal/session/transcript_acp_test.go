@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -33,7 +34,7 @@ func newACPDiscoveryFixture(t *testing.T, withCity bool) acpDiscoveryFixture {
 	if withCity {
 		opts = append(opts, WithCityPath(f.city))
 	}
-	f.mgr = NewManagerWithOptions(f.store, runtime.NewFake(), opts...)
+	f.mgr = NewManagerWithOptions(beadstest.Sessions(f.store), runtime.NewFake(), opts...)
 	return f
 }
 
@@ -290,7 +291,7 @@ func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T)
 		if err := autoSP.Start(context.Background(), b.Metadata["session_name"], runtime.Config{}); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		mgr := NewManagerWithOptions(store, autoSP, WithCityPath(city))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), autoSP, WithCityPath(city))
 		capture := writeCityCapture(t, city, b.ID)
 
 		path, lookup, err := mgr.TranscriptPathClassified(b.ID, []string{t.TempDir()})
@@ -305,7 +306,7 @@ func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T)
 		city := t.TempDir()
 		store := beads.NewMemStore()
 		b := controllerShapedACPBead(t, store)
-		mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(city),
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), WithCityPath(city),
 			WithTransportResolver(func(template, _ string) string {
 				if template == "worker" {
 					return "acp"
@@ -326,7 +327,7 @@ func TestTranscriptPathACPCaptureForControllerBeadWithoutTransport(t *testing.T)
 		city := t.TempDir()
 		store := beads.NewMemStore()
 		b := controllerShapedACPBead(t, store)
-		mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(city))
+		mgr := NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), WithCityPath(city))
 		writeCityCapture(t, city, b.ID)
 
 		path, err := mgr.TranscriptPath(b.ID, []string{t.TempDir()})

@@ -14,7 +14,6 @@ import (
 func staleDBFilteredEnv(keys ...string) []string {
 	keys = append(keys,
 		"GC_BEAD_ID",
-		"GC_TRIGGER_BEAD_ID",
 		"GC_ESCALATE_SCRIPT",
 		"GC_ESCALATE_SEARCH_PACKS",
 		"GC_ESCALATION_RECIPIENT",
@@ -41,7 +40,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	desc := f.Steps[0].Description
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"`,
 		`TMP_DIR=$(mktemp -d`,
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
@@ -74,6 +73,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`GC_BEAD_ID:-<work-bead>`,
 		`GC_BEAD_ID:?`,
 		`Dolt orphan(s) detected`,
+		`GC_TRIGGER_`,
 	} {
 		if strings.Contains(desc, bad) {
 			t.Errorf("formula step still contains retired or leaky pattern %q", bad)
@@ -89,7 +89,7 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	script := renderStaleDBFormulaShell(t)
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`WORK_BEAD="${GC_BEAD_ID:-$(gc hook current --id-only)}"`,
 		`if [ "$PROTECTED_NON_BASELINE" -ge "10" ]; then`,
 		`protected_non_baseline: ((.summary.protected_total // 0) - (.summary.protected_by_kind["active-rig"] // 0))`,
 	} {
@@ -575,13 +575,48 @@ esac
 }
 
 // TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain proves the formula
-// runs in a real pool shell, where neither GC_BEAD_ID nor GC_TRIGGER_BEAD_ID
-// is guaranteed: the bead-id chain must fall through to
-// `gc hook current --id-only`, the back-channel stamped by `gc hook --claim`.
-// Before this chain the formula required GC_BEAD_ID — an env var no session
-// shell has ever received — so even a correctly claiming dog aborted at the
-// WORK_BEAD guard (ga-2q2r0).
+// runs in a real pool shell, where GC_BEAD_ID is not guaranteed: the bead-id
+// chain must fall through to `gc hook current --id-only`, the back-channel
+// stamped by `gc hook --claim`. Before this chain the formula required
+// GC_BEAD_ID — an env var no session shell has ever received — so even a
+// correctly claiming dog aborted at the WORK_BEAD guard (ga-2q2r0).
 func TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain(t *testing.T) {
+	log, out := runStaleDBFormulaViaHookCurrent(t)
+	for _, want := range []string{
+		"gc hook current --id-only",
+		staleDBCloseWrite("bead-hook-1"),
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+}
+
+// Kills a bead-id chain that consults GC_TRIGGER_BEAD_ID: a shell that still
+// carries a foreign id there (an older gc exported the frozen demand stamp)
+// closes the bead its own claim names, never the foreign one
+// (gastownhall/gascity#5738).
+func TestStaleDBFormulaIgnoresForeignTriggerBeadID(t *testing.T) {
+	log, out := runStaleDBFormulaViaHookCurrent(t, "GC_TRIGGER_BEAD_ID=bead-foreign")
+	for _, want := range []string{
+		"gc hook current --id-only",
+		staleDBCloseWrite("bead-hook-1"),
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+	if strings.Contains(log, "bead-foreign") {
+		t.Fatalf("command log names the foreign trigger id\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+// runStaleDBFormulaViaHookCurrent runs the rendered formula with GC_BEAD_ID
+// unset, a fake gc whose `hook current --id-only` names bead-hook-1, and
+// extraEnv appended, returning the command log and the combined output.
+func runStaleDBFormulaViaHookCurrent(t *testing.T, extraEnv ...string) (string, string) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
 	}
@@ -646,6 +681,7 @@ esac
 		"GC_TEST_SCAN_JSON="+scanPath,
 		"GC_TEST_APPLY_JSON="+applyPath,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	logData, readErr := os.ReadFile(logPath)
 	if readErr != nil {
@@ -655,15 +691,7 @@ esac
 	if err != nil {
 		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
 	}
-	for _, want := range []string{
-		"gc hook current --id-only",
-		staleDBCloseWrite("bead-hook-1"),
-		"gc runtime drain-ack",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
-		}
-	}
+	return log, string(out)
 }
 
 // TestStaleDBFormulaFailsLoudlyWhenNoWorkBeadIDResolvable pins the chain's

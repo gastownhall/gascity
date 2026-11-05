@@ -3344,3 +3344,24 @@ func TestCmdStopBodyHoldsTheFlockWhileStoppingAnInterruptedStart(t *testing.T) {
 		t.Error("the runtime name's flock was free while its stop ran; a start could have begun under the stop")
 	}
 }
+
+// Kills (PAR-EXEC MUST-1, gc stop): a stop that reads its listing's
+// attestation after the listing: a blind listing taken while the runtime
+// was not attested would skip the recorded-session sweep. The runtime's
+// later listings stay blind, so the orphan sweep cannot repair that.
+func TestCmdStopBodySweepsWhenAttestationTurnsOnDuringTheListing(t *testing.T) {
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "idler-adhoc-1")
+	sp := newFlippingLeaf(fake)
+	sp.staysBlind = true
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp,
+		map[string]string{"session_name": "idler-adhoc-1", "template": "idler", "state": "draining"},
+	)
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody = %d, stderr = %q", code, stderr.String())
+	}
+	if fake.IsRunning("idler-adhoc-1") {
+		t.Fatalf("idler-adhoc-1 survived the stop: the blind listing was read as attested; stderr = %q", stderr.String())
+	}
+}

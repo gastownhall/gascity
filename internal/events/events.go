@@ -72,6 +72,20 @@ const (
 	// demand again when it changes, when the city config changes, or for one
 	// probe seat each time the hold's backoff runs out.
 	BeadClaimLoopHeld = "bead.claim_loop_held"
+	// AgentClaimsStalled fires when the controller's claims-stall guard
+	// (cmd/gc/claim_stall_guard.go) finds an agent template's seats no longer
+	// claiming the work routed to them on the provider they run: several seats
+	// in a row failed to start, were escalated by the work ladder for an
+	// unanswered trigger, or stayed unclaimed past the claim deadline while
+	// their trigger waited. It is an operator alert (the core pack's
+	// notify-on-claims-stalled order mails it); the payload says what the
+	// guard did about it and until when, and it is raised again, in the same
+	// episode, each time a probe seat fails.
+	AgentClaimsStalled = "agent.claims_stalled"
+	// AgentClaimsResumed fires when a stall the guard found ends: a seat on
+	// the stalled provider claimed its work, or a config change moved the
+	// template off it. Any hold on the template's demand is lifted.
+	AgentClaimsResumed = "agent.claims_resumed"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -214,7 +228,10 @@ const (
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
-	// whether to clear-assignee-and-respawn or escalate.
+	// whether to clear-assignee-and-respawn or escalate. A pool seat parked
+	// on pre-assigned blocked work (cmd/gc/seat_parked.go) does not fire it;
+	// one that stops parking (past its bound, or crowded out of a full
+	// slot-bounded pool) fires it though its work is an open, unstarted pin.
 	SessionStranded = "session.stranded"
 	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
 	// retires a pool-managed session bead that entered drain and never
@@ -611,10 +628,11 @@ const (
 	// --from-rigs`: what the import did for that rig (imported, clean,
 	// nothing to import, refused, failed).
 	StorageRigImport = "storage.rig_import"
-	// StorageRigResidue is published by the controller's one asynchronous
-	// census at boot for each rig that holds infrastructure rows the city
-	// binding should hold: a rig awaiting import, a clear left pending, or
-	// rows written to the rig after its import.
+	// StorageRigResidue is published by the controller's asynchronous rig
+	// census (at boot, or when a rig suspended at boot resumes) for each rig
+	// that holds infrastructure rows the city binding should hold: a rig
+	// awaiting import, a clear left pending, or rows written to the rig after
+	// its import.
 	StorageRigResidue = "storage.rig_residue"
 )
 
@@ -654,6 +672,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
 	BeadClaimFailed, BeadClaimLoopHeld,
+	AgentClaimsStalled, AgentClaimsResumed,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,

@@ -95,6 +95,33 @@ func TestNewSessionProviderForCityByName_ExecPrefixUsesExecProvider(t *testing.T
 	assertProviderPkg(t, sp, "exec")
 }
 
+// Kills (PAR-EXEC §13.5 13): an exec provider built without the city it
+// serves, by the exec: prefix or as a pack runtime.
+func TestExecProvidersCarryTheirCity(t *testing.T) {
+	script := writeRPPScript(t, `case "$1" in get-meta) echo "$GC_EXEC_CITY_NAME|$GC_EXEC_CITY_PATH" ;; *) exit 2 ;; esac
+`)
+	cityPath := t.TempDir()
+	byPrefix, err := newSessionProviderForCityByName(nil, "exec:"+script, config.SessionConfig{}, "alpha", cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := runtimeRegistryForCity(&config.City{Runtimes: map[string]config.DiscoveredRuntime{
+		"cloudpack": {Name: "cloudpack", Command: script, PackName: "cloud", PackDir: filepath.Dir(script)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPack, err := reg.New("cloudpack", config.SessionConfig{}, "alpha", cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, sp := range map[string]runtime.Provider{"exec:": byPrefix, "pack": byPack} {
+		if v, err := sp.GetMeta("s", "k"); v != "alpha|"+cityPath || err != nil {
+			t.Errorf("%s: the script saw %q, %v; want alpha|%s", name, v, err, cityPath)
+		}
+	}
+}
+
 func TestNewSessionProviderForCityByName_SSHPrefixUsesSSHProvider(t *testing.T) {
 	sp, err := newSessionProviderForCityByName(nil, "ssh:gcagent@host:2222", config.SessionConfig{}, "city", t.TempDir())
 	if err != nil {

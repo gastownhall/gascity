@@ -931,6 +931,7 @@ const (
 	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
 	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
 	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	StarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
 	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
 	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
 	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
@@ -962,6 +963,8 @@ func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 	case Readiness:
 		return true
 	case StartupLadder:
+		return true
+	case StarvedBypass:
 		return true
 	case SubmitConfirm:
 		return true
@@ -2107,6 +2110,18 @@ type AdapterEventPayload struct {
 	Provider  string `json:"provider"`
 }
 
+// AgentClaimsPayload defines model for AgentClaimsPayload.
+type AgentClaimsPayload struct {
+	Action   *string    `json:"action,omitempty"`
+	Cause    *string    `json:"cause,omitempty"`
+	Episode  string     `json:"episode"`
+	Provider string     `json:"provider"`
+	Seats    *int64     `json:"seats,omitempty"`
+	Since    time.Time  `json:"since"`
+	Template string     `json:"template"`
+	Until    *time.Time `json:"until,omitempty"`
+}
+
 // AgentCreateInputBody defines model for AgentCreateInputBody.
 type AgentCreateInputBody struct {
 	// Dir Working directory (rig name).
@@ -3172,6 +3187,9 @@ type ConvoyAddInputBody struct {
 
 // ConvoyCheckResponse defines model for ConvoyCheckResponse.
 type ConvoyCheckResponse struct {
+	// ChildIds IDs of the child beads counted in total, in membership order (created_at, then id); a dangling track appears as the id it names. Omitted when total is 0.
+	ChildIds *[]string `json:"child_ids,omitempty"`
+
 	// Closed Closed child bead count.
 	Closed int64 `json:"closed"`
 
@@ -3180,6 +3198,9 @@ type ConvoyCheckResponse struct {
 
 	// ConvoyId Convoy ID.
 	ConvoyId string `json:"convoy_id"`
+
+	// DanglingTracks Child beads counted in total whose tracks dependency names a bead that cannot be resolved. Omitted when 0.
+	DanglingTracks *int64 `json:"dangling_tracks,omitempty"`
 
 	// Total Total child bead count.
 	Total int64 `json:"total"`
@@ -5755,28 +5776,31 @@ type SessionResponse struct {
 	Activity   *string `json:"activity,omitempty"`
 
 	// ActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
-	ActivitySource         *SessionResponseActivitySource `json:"activity_source,omitempty"`
-	AgentKind              *string                        `json:"agent_kind,omitempty"`
-	Alias                  *string                        `json:"alias,omitempty"`
-	Attached               bool                           `json:"attached"`
-	ConfiguredNamedSession *bool                          `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                         `json:"context_pct,omitempty"`
-	ContextWindow          *int64                         `json:"context_window,omitempty"`
-	CreatedAt              string                         `json:"created_at"`
-	DisplayName            *string                        `json:"display_name,omitempty"`
-	Id                     string                         `json:"id"`
-	Kind                   *string                        `json:"kind,omitempty"`
-	LastActive             *string                        `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                        `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string                        `json:"last_output,omitempty"`
-	Metadata               *map[string]string             `json:"metadata,omitempty"`
-	Model                  *string                        `json:"model,omitempty"`
-	Options                *map[string]string             `json:"options,omitempty"`
-	Pool                   *string                        `json:"pool,omitempty"`
-	ProgramStatus          *SessionProgramStatus          `json:"program_status,omitempty"`
-	Provider               string                         `json:"provider"`
-	Reason                 *string                        `json:"reason,omitempty"`
-	Rig                    *string                        `json:"rig,omitempty"`
+	ActivitySource *SessionResponseActivitySource `json:"activity_source,omitempty"`
+	AgentKind      *string                        `json:"agent_kind,omitempty"`
+
+	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Sent on every session by Gas City 1.6 and later servers, empty when the session records none; older servers omit it.
+	AgentName              *string               `json:"agent_name,omitempty"`
+	Alias                  *string               `json:"alias,omitempty"`
+	Attached               bool                  `json:"attached"`
+	ConfiguredNamedSession *bool                 `json:"configured_named_session,omitempty"`
+	ContextPct             *int64                `json:"context_pct,omitempty"`
+	ContextWindow          *int64                `json:"context_window,omitempty"`
+	CreatedAt              string                `json:"created_at"`
+	DisplayName            *string               `json:"display_name,omitempty"`
+	Id                     string                `json:"id"`
+	Kind                   *string               `json:"kind,omitempty"`
+	LastActive             *string               `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string               `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string               `json:"last_output,omitempty"`
+	Metadata               *map[string]string    `json:"metadata,omitempty"`
+	Model                  *string               `json:"model,omitempty"`
+	Options                *map[string]string    `json:"options,omitempty"`
+	Pool                   *string               `json:"pool,omitempty"`
+	ProgramStatus          *SessionProgramStatus `json:"program_status,omitempty"`
+	Provider               string                `json:"provider"`
+	Reason                 *string               `json:"reason,omitempty"`
+	Rig                    *string               `json:"rig,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -5785,8 +5809,17 @@ type SessionResponse struct {
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
-	Turn                   *SessionTurn            `json:"turn,omitempty"`
-	WorkDir                *string                 `json:"work_dir,omitempty"`
+
+	// Transport How gc drives the session runtime, for example tmux or acp. Empty when unknown.
+	Transport *string      `json:"transport,omitempty"`
+	Turn      *SessionTurn `json:"turn,omitempty"`
+
+	// WakeReasons Why the controller keeps this open session awake (for example session, config, create, attached, keep-warm, wait, pending, pin), as gc session list's REASON column shows them when no lifecycle reason applies. Sent only on GET /sessions?wake_reasons=true, by servers that compute them.
+	WakeReasons *[]string `json:"wake_reasons,omitempty"`
+	WorkDir     *string   `json:"work_dir,omitempty"`
+
+	// WorkerDir The agent process's canonical working directory (a per-bead worktree when it has one), which work_dir may not be.
+	WorkerDir *string `json:"worker_dir,omitempty"`
 }
 
 // SessionResponseActivitySource Where activity came from: program (the session program's own report, under the city's program_status switch on) or transcript. Set only while program_status is present. The session stream's activity frames stay transcript-derived; its program_status frame carries the program's report.
@@ -7158,6 +7191,9 @@ type StatusAgentDetail struct {
 	// Scope city or rig.
 	Scope string `json:"scope"`
 
+	// SessionId Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read).
+	SessionId *string `json:"session_id,omitempty"`
+
 	// SessionName tmux session name CLI drain-ops key on.
 	SessionName *string `json:"session_name,omitempty"`
 
@@ -7636,6 +7672,38 @@ type TranscriptProvenance string
 // TypedEventStreamEnvelope Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
 type TypedEventStreamEnvelope struct {
 	union json.RawMessage
+}
+
+// TypedEventStreamEnvelopeAgentClaimsResumed defines model for TypedEventStreamEnvelopeAgentClaimsResumed.
+type TypedEventStreamEnvelopeAgentClaimsResumed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeAgentClaimsStalled defines model for TypedEventStreamEnvelopeAgentClaimsStalled.
+type TypedEventStreamEnvelopeAgentClaimsStalled struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBackendCredentialResolved defines model for TypedEventStreamEnvelopeBackendCredentialResolved.
@@ -9641,6 +9709,40 @@ type TypedEventStreamEnvelopeWorkerOperation struct {
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
 type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
+}
+
+// TypedTaggedEventStreamEnvelopeAgentClaimsResumed defines model for TypedTaggedEventStreamEnvelopeAgentClaimsResumed.
+type TypedTaggedEventStreamEnvelopeAgentClaimsResumed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeAgentClaimsStalled defines model for TypedTaggedEventStreamEnvelopeAgentClaimsStalled.
+type TypedTaggedEventStreamEnvelopeAgentClaimsStalled struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AgentClaimsPayload       `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBackendCredentialResolved defines model for TypedTaggedEventStreamEnvelopeBackendCredentialResolved.
@@ -11917,6 +12019,9 @@ type WaitView struct {
 	// RegisteredEpoch Session continuation epoch at registration.
 	RegisteredEpoch *string `json:"registered_epoch,omitempty"`
 
+	// RegisteredResetPending True when the wait was registered while its session had a fresh restart pending: it belongs to the conversation that restart starts.
+	RegisteredResetPending *bool `json:"registered_reset_pending,omitempty"`
+
 	// SessionId Session bead ID the wait is registered against.
 	SessionId string `json:"session_id"`
 
@@ -13027,11 +13132,14 @@ type PostV0CityByCityNameServiceByNameRestartParams struct {
 
 // GetV0CityByCityNameSessionByIdParams defines parameters for GetV0CityByCityNameSessionById.
 type GetV0CityByCityNameSessionByIdParams struct {
-	// Peek Include last output preview.
+	// Peek Include a best-effort last output preview of a running active session. See peek_strict for gc session peek's contract.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 
-	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5.
+	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5. With peek_strict=true it is passed to the runtime as given, and 0 asks for the runtime's full capture.
 	PeekLines *int64 `form:"peek_lines,omitempty" json:"peek_lines,omitempty"`
+
+	// PeekStrict Peek with gc session peek's contract instead of the best-effort preview; implies peek. {id} resolves as for a live-session command, so a closed session is found only by its exact bead id. Every open session that is not suspended is peeked whatever its runtime state, and peek_lines is passed to the runtime as given (0 asks for its full capture). A suspended or closed session is refused with 409 session-inactive, and a failed peek fails the request instead of omitting last_output.
+	PeekStrict *bool `form:"peek_strict,omitempty" json:"peek_strict,omitempty"`
 
 	// ExactId Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
 	ExactId *bool `form:"exact_id,omitempty" json:"exact_id,omitempty"`
@@ -13224,6 +13332,9 @@ type GetV0CityByCityNameSessionsParams struct {
 
 	// Peek Include last output preview.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
+
+	// WakeReasons Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.
+	WakeReasons *bool `form:"wake_reasons,omitempty" json:"wake_reasons,omitempty"`
 }
 
 // CreateSessionParams defines parameters for CreateSession.
@@ -13251,6 +13362,9 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
 	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
+
+	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
 // PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
@@ -13607,6 +13721,32 @@ func (t *EventPayload) FromAdapterEventPayload(v AdapterEventPayload) error {
 
 // MergeAdapterEventPayload performs a merge with any union data inside the EventPayload, using the provided AdapterEventPayload
 func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsAgentClaimsPayload returns the union data inside the EventPayload as a AgentClaimsPayload
+func (t EventPayload) AsAgentClaimsPayload() (AgentClaimsPayload, error) {
+	var body AgentClaimsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromAgentClaimsPayload overwrites any union data inside the EventPayload as the provided AgentClaimsPayload
+func (t *EventPayload) FromAgentClaimsPayload(v AgentClaimsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeAgentClaimsPayload performs a merge with any union data inside the EventPayload, using the provided AgentClaimsPayload
+func (t *EventPayload) MergeAgentClaimsPayload(v AgentClaimsPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -17190,6 +17330,62 @@ func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTypedEventStreamEnvelopeAgentClaimsResumed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAgentClaimsResumed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAgentClaimsResumed() (TypedEventStreamEnvelopeAgentClaimsResumed, error) {
+	var body TypedEventStreamEnvelopeAgentClaimsResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAgentClaimsResumed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAgentClaimsResumed(v TypedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAgentClaimsResumed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAgentClaimsResumed(v TypedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeAgentClaimsStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeAgentClaimsStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeAgentClaimsStalled() (TypedEventStreamEnvelopeAgentClaimsStalled, error) {
+	var body TypedEventStreamEnvelopeAgentClaimsStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeAgentClaimsStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeAgentClaimsStalled(v TypedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeAgentClaimsStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeAgentClaimsStalled(v TypedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBackendCredentialResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBackendCredentialResolved
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBackendCredentialResolved() (TypedEventStreamEnvelopeBackendCredentialResolved, error) {
 	var body TypedEventStreamEnvelopeBackendCredentialResolved
@@ -20706,6 +20902,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "agent.claims_resumed":
+		return t.AsTypedEventStreamEnvelopeAgentClaimsResumed()
+	case "agent.claims_stalled":
+		return t.AsTypedEventStreamEnvelopeAgentClaimsStalled()
 	case "backend.credential_resolved":
 		return t.AsTypedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_failed":
@@ -20966,6 +21166,62 @@ func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
 
 func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed() (TypedTaggedEventStreamEnvelopeAgentClaimsResumed, error) {
+	var body TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAgentClaimsResumed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAgentClaimsResumed(v TypedTaggedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAgentClaimsResumed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAgentClaimsResumed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAgentClaimsResumed(v TypedTaggedEventStreamEnvelopeAgentClaimsResumed) error {
+	v.Type = "agent.claims_resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled() (TypedTaggedEventStreamEnvelopeAgentClaimsStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeAgentClaimsStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeAgentClaimsStalled(v TypedTaggedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeAgentClaimsStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeAgentClaimsStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeAgentClaimsStalled(v TypedTaggedEventStreamEnvelopeAgentClaimsStalled) error {
+	v.Type = "agent.claims_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -24485,6 +24741,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "agent.claims_resumed":
+		return t.AsTypedTaggedEventStreamEnvelopeAgentClaimsResumed()
+	case "agent.claims_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeAgentClaimsStalled()
 	case "backend.credential_resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_failed":
@@ -36511,6 +36771,22 @@ func NewGetV0CityByCityNameSessionByIdRequest(server string, cityName string, id
 
 		}
 
+		if params.PeekStrict != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "peek_strict", *params.PeekStrict, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		if params.ExactId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "exact_id", *params.ExactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
@@ -38286,6 +38562,22 @@ func NewGetV0CityByCityNameSessionsRequest(server string, cityName string, param
 
 		}
 
+		if params.WakeReasons != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wake_reasons", *params.WakeReasons, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -38492,6 +38784,22 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 		if params.Lite != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "lite", *params.Lite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Fresh != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "fresh", *params.Fresh, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

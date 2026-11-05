@@ -3,6 +3,7 @@ package acceptancehelpers
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"os/user"
@@ -41,7 +42,16 @@ type Env struct {
 	// hostClaudeState lets the Claude state seeding write under the real user
 	// home. Only WithHostClaudeState sets it; see claude_state.go.
 	hostClaudeState bool
+	// realBD is the bd binary gc runs unwrapped (BD_BIN and the lead of PATH),
+	// or "" when gc runs bd through the tool-home wrapper. NewEnv sets it to
+	// the configured bd; WithWrappedBD, WithHostHome and any HOME other than
+	// the isolated one, or none, clear it.
+	realBD string
 }
+
+// realBDDirName is the directory under GC_HOME that holds the real-bd links
+// WithRealBD puts on PATH, one subdirectory per bd binary.
+const realBDDirName = "real-bd-bin"
 
 // NewEnv creates an isolated environment with the minimum inherited
 // variables (PATH, TMPDIR, locale, shell) plus test-specific overrides
@@ -96,10 +106,14 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	if err := os.MkdirAll(e.toolHome, 0o755); err != nil {
 		panic(fmt.Sprintf("acceptance: creating bd/dolt tool home under %s: %v", gcHome, err))
 	}
-	// Any bd gc resolves through PATH comes from here first: the configured bd
-	// behind the tool-home wrapper, ahead of every host copy. Suites that stage
-	// their own bd (TopologyEnv, proxiedEnv, BD_BIN pins) put it earlier still.
-	if bdPath := FindBD(); bdPath != "" {
+	// The configured bd is staged twice. Behind the tool-home wrapper, ahead of
+	// every host copy, for WithWrappedBD and the host-home tiers; and as itself
+	// (WithRealBD, applied once gc's HOME is isolated below), which is what gc
+	// runs by default: a split city's gc bd refuses the wrapper. Suites that
+	// stage their own bd (TopologyEnv, proxiedEnv, BD_BIN pins) put it earlier
+	// still.
+	bdPath := FindBD()
+	if bdPath != "" {
 		bdDir := filepath.Join(gcHome, "beads-bin")
 		if _, err := InstallBeadsTooling(e, bdDir, bdPath, ""); err != nil {
 			panic(fmt.Sprintf("acceptance: staging bd under %s: %v", gcHome, err))
@@ -152,6 +166,7 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// shared-server mode off there too; a test that exercises the user-level
 	// layer on purpose sets it to "".
 	e.vars[bdSharedServerConfigEnv] = "false"
+	e.vars[bdDisableMetricsEnv] = "1"
 
 	// Dolt reads its global config from $DOLT_ROOT_PATH/.dolt/config_global.json,
 	// falling back to $HOME. gc's init preflight (checkDoltAuthorIdentity) probes
@@ -205,6 +220,13 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e.vars["GC_BEADS"] = beadsProvider
 	e.vars["GC_SESSION"] = "subprocess"
 
+	if bdPath != "" {
+		abs, err := filepath.Abs(bdPath)
+		if err != nil {
+			panic(fmt.Sprintf("acceptance: resolving bd path %q: %v", bdPath, err))
+		}
+		e.WithRealBD(abs)
+	}
 	return e
 }
 
@@ -232,17 +254,29 @@ func installServiceManagerShims(gcHome string) (string, error) {
 // package, and With mutates in place, so a test that needs its own PATH or
 // provider selection must take a copy rather than reach into the shared one.
 func (e *Env) Clone() *Env {
-	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome, hostClaudeState: e.hostClaudeState}
+	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome, hostClaudeState: e.hostClaudeState, realBD: e.realBD}
 	for k, v := range e.vars {
 		clone.vars[k] = v
 	}
 	return clone
 }
 
-// With sets a variable, returning the Env for chaining.
+// With sets a variable, returning the Env for chaining. Setting HOME to
+// anything but NewEnv's isolated home puts bd back behind the tool-home
+// wrapper (WithWrappedBD): an unwrapped bd would resolve user-level state
+// under that HOME.
 func (e *Env) With(key, val string) *Env {
 	e.vars[key] = val
+	if key == "HOME" && !e.homeIsIsolated() {
+		e.WithWrappedBD()
+	}
 	return e
+}
+
+// homeIsIsolated reports whether gc's HOME is NewEnv's isolated home.
+func (e *Env) homeIsIsolated() bool {
+	gcHome := e.vars["GC_HOME"]
+	return gcHome != "" && e.vars["HOME"] == IsolatedHome(gcHome)
 }
 
 // WithHostHome hands gc the operator's own HOME in place of the isolated one,
@@ -259,8 +293,142 @@ func (e *Env) WithHostHome() *Env {
 		}
 		home = lu.HomeDir
 	}
-	e.vars["HOME"] = home
+	return e.With("HOME", home)
+}
+
+// WithRealBD makes bdPath itself the bd gc runs, returning the Env for
+// chaining: BD_BIN names it, and a directory holding only a bd link to it
+// goes on PATH (replacing any earlier real-bd directory) just ahead of the
+// first directory that holds another bd, so every scope gc serves resolves it
+// ahead of the tool-home wrapper while directories with no bd — the hermetic
+// provider doubles — keep their place in front. NewEnv applies it to the
+// configured bd; a test calls it to run a different bd.
+//
+// A split-storage city needs it. gc bd there forwards only to bd's own Go
+// binary, which gc identifies by its Go build info (the bd trust policy in
+// docs/runbooks/split-storage-classes.md). The wrapper is a shell script and
+// has none, so gc refuses every forwarded command: the city's gate-sweep order
+// on every cycle, and any gc bd a test or worker runs on a work bead.
+//
+// The cost is the wrapper's re-homing: every bd gc forks then resolves
+// user-level state under gc's HOME instead of the tool home. That keeps the
+// operator's home out of reach only because NewEnv isolated gc's HOME and
+// pinned bd's shared-server mode and metrics off, so it panics on an Env whose
+// gc has any other HOME, and leaving that HOME (WithHostHome, With("HOME"),
+// Without("HOME")) drops back to the wrapper. A failed bd init also no longer
+// prints its dolt logs (ParseBDInitDiagnostics); a test that needs them calls
+// WithWrappedBD.
+func (e *Env) WithRealBD(bdPath string) *Env {
+	if !filepath.IsAbs(bdPath) {
+		panic(fmt.Sprintf("acceptance: WithRealBD needs an absolute bd path, got %q (gc ignores a relative BD_BIN)", bdPath))
+	}
+	if !e.homeIsIsolated() {
+		panic(fmt.Sprintf("acceptance: WithRealBD on an Env whose gc HOME %q is not NewEnv's isolated home: an unwrapped bd would resolve user-level state there", e.vars["HOME"]))
+	}
+	dir, err := linkRealBD(filepath.Join(e.vars["GC_HOME"], realBDDirName), bdPath)
+	if err != nil {
+		panic(fmt.Sprintf("acceptance: %v", err))
+	}
+	e.dropRealBDFromPath()
+	e.vars["BD_BIN"] = bdPath
+	e.vars["PATH"] = insertAheadOfFirstBD(e.vars["PATH"], dir)
+	e.realBD = bdPath
 	return e
+}
+
+// insertAheadOfFirstBD returns pathList with dir inserted just before the
+// first entry that holds a bd, or at the front when none does.
+func insertAheadOfFirstBD(pathList, dir string) string {
+	entries := filepath.SplitList(pathList)
+	at := 0
+	for i, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(entry, "bd")); err == nil {
+			at = i
+			break
+		}
+	}
+	out := make([]string, 0, len(entries)+1)
+	out = append(out, entries[:at]...)
+	out = append(out, dir)
+	out = append(out, entries[at:]...)
+	return strings.Join(out, string(os.PathListSeparator))
+}
+
+// WithWrappedBD makes gc run bd through the tool-home wrapper NewEnv staged,
+// returning the Env for chaining: BD_BIN is unset and the real-bd directory
+// leaves PATH. It is for tests that assert wrapper behavior (re-homing, the
+// dolt logs of a failed bd init); a split city refuses the wrapper.
+func (e *Env) WithWrappedBD() *Env {
+	if e.realBD == "" {
+		return e
+	}
+	e.dropRealBDFromPath()
+	if e.vars["BD_BIN"] == e.realBD {
+		delete(e.vars, "BD_BIN")
+	}
+	e.realBD = ""
+	return e
+}
+
+// RunsRealBD reports whether gc runs bd unwrapped (WithRealBD) rather than
+// through the tool-home wrapper.
+func (e *Env) RunsRealBD() bool {
+	return e.realBD != ""
+}
+
+// dropRealBDFromPath removes every real-bd directory WithRealBD put on PATH.
+func (e *Env) dropRealBDFromPath() {
+	gcHome := e.vars["GC_HOME"]
+	if gcHome == "" {
+		return
+	}
+	root := filepath.Join(gcHome, realBDDirName) + string(os.PathSeparator)
+	entries := filepath.SplitList(e.vars["PATH"])
+	kept := entries[:0]
+	for _, dir := range entries {
+		if !strings.HasPrefix(dir+string(os.PathSeparator), root) {
+			kept = append(kept, dir)
+		}
+	}
+	e.vars["PATH"] = strings.Join(kept, string(os.PathListSeparator))
+}
+
+// linkRealBD returns a directory under root holding only a bd symlink to
+// bdPath. Each bd gets its own directory, and an existing link is replaced
+// atomically, so Envs sharing a GC_HOME never see each other's bd or a
+// missing one.
+func linkRealBD(root, bdPath string) (string, error) {
+	dir := filepath.Join(root, fmt.Sprintf("%016x", fnv64(bdPath)))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating %s: %w", dir, err)
+	}
+	link := filepath.Join(dir, "bd")
+	if target, err := os.Readlink(link); err == nil && target == bdPath {
+		return dir, nil
+	}
+	tmp, err := os.MkdirTemp(root, ".link-")
+	if err != nil {
+		return "", fmt.Errorf("staging a bd link under %s: %w", root, err)
+	}
+	defer os.RemoveAll(tmp) //nolint:errcheck // best-effort cleanup of the staging dir
+	staged := filepath.Join(tmp, "bd")
+	if err := os.Symlink(bdPath, staged); err != nil {
+		return "", fmt.Errorf("linking %s to %s: %w", staged, bdPath, err)
+	}
+	if err := os.Rename(staged, link); err != nil {
+		return "", fmt.Errorf("installing %s: %w", link, err)
+	}
+	return dir, nil
+}
+
+// fnv64 is the 64-bit FNV-1a hash of s.
+func fnv64(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum64()
 }
 
 // WithHostClaudeState asks to let the harness seed Claude onboarding and
@@ -281,9 +449,14 @@ func IsolatedHome(gcHome string) string {
 	return filepath.Join(gcHome, "home")
 }
 
-// Without removes a variable.
+// Without removes a variable. Removing HOME puts bd back behind the tool-home
+// wrapper (WithWrappedBD), as setting it elsewhere does: an unwrapped bd with
+// no HOME would resolve user-level state from the passwd home.
 func (e *Env) Without(key string) *Env {
 	delete(e.vars, key)
+	if key == "HOME" {
+		e.WithWrappedBD()
+	}
 	return e
 }
 

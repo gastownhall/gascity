@@ -213,10 +213,12 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 // unnudged, until the hold lifts, and then the ladder takes it up afresh. A
 // claim whose seat asked a person and waits on their decision
 // (beadmeta.AwaitsHuman, read off the claim's own bead: the same bead ID can
-// exist in another store) is the ladder's only to nudge, an hour apart
+// exist in another store) is the ladder's only to nudge, an hour apart, or
+// a day apart while the seat's turns show its newest turn completed
 // (workladder.Work.AwaitsHuman): no nudge can hurry a person, and no recycle
 // or release may cut the wait short, but a turn that died after the answer
-// came must not leave the step silent for good.
+// came, or an answer that started no turn, must not leave the step silent
+// for good.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
 	held := make(map[string]bool)
@@ -335,7 +337,8 @@ func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
 
 // awaitsHuman reports whether claim b's seat (seat, its session ID) asked a
 // person and waits on their decision (gc.awaiting_human names it): the
-// ladder only nudges it, an hour apart, until the seat works the step again
+// ladder only nudges it, an hour apart, or a day apart while the seat's
+// turns show its newest turn completed, until the seat works the step again
 // and clears it.
 func awaitsHuman(b beads.Bead, seat string) bool {
 	return beadmeta.AwaitsHuman(b.Metadata[beadmeta.AwaitingHumanMetadataKey], seat)
@@ -910,7 +913,9 @@ func recycleReason(r workladder.Recycle) string {
 // (write-ahead). A delivery error counts the attempt, but one that says the
 // runtime is unavailable, or that the seat is at a prompt only a human can
 // answer (a permission prompt), is re-counted as paused: neither is the
-// agent ignoring its work. A delivery the runtime proved but whose turn it
+// agent ignoring its work. One the runtime deferred, typing nothing, because
+// a turn is running (runtime.ErrSessionBusy) is re-counted as paused too,
+// with no refusal counted: the seat is working. A delivery the runtime proved but whose turn it
 // never saw start (runtime.ErrNudgeDeliveredUnobserved) reached the seat,
 // as the conversation lane acks it: a provider that refuses the turn at once
 // is one cause, and that refusal answers this nudge.
@@ -930,7 +935,11 @@ func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
 	if err != nil && !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
 		fmt.Fprintf(p.l.stderr, "work-ladder: nudging %s about %s failed: %v\n", row.ID, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
 		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
-		if (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && !n.Paused && p.refused(row.ID, n) {
+		switch {
+		case n.Paused:
+		case errors.Is(err, runtime.ErrSessionBusy):
+			p.deferred(row.ID, n)
+		case (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && p.refused(row.ID, n):
 			p.event(events.WorkEscalated, row, n.Key, gen, workLadderEventFields{Reason: workladder.AlertNudgeRefused})
 		}
 		return
@@ -970,6 +979,14 @@ func (p *ladderPass) nudgeText(row beads.Bead, n workladder.Nudge) string {
 	default:
 		return ladderClaimedNudge
 	}
+}
+
+// deferred re-counts n, which the runtime deferred with nothing typed, as
+// paused (workladder.NudgeDeferred).
+func (p *ladderPass) deferred(id string, n workladder.Nudge) {
+	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {
+		return workladder.NudgeDeferred(r, n.Key, n.Attempt, p.now)
+	})
 }
 
 // refused records, by CAS, that the seat could not take counted nudge n (a

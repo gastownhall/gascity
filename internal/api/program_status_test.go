@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/config"
@@ -305,6 +308,193 @@ func TestPublishedSwitchCapsProgramStatusWithoutRestart(t *testing.T) {
 	}
 }
 
+// Claude transcripts whose tails decide a session's activity: a turn that
+// ended (idle) and one waiting on its tool (in-turn).
+var (
+	endedTurnTranscript = []string{
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":\"done\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	}
+	toolTurnTranscript = []string{
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use"}]},"timestamp":"2025-01-01T00:00:01Z"}`,
+	}
+)
+
+// observationShadowCity is a session API whose city publishes the shadow
+// switch, over a FullFake, with rig myrig at a work dir of its own (rigDir)
+// and transcripts under a search path of its own.
+type observationShadowCity struct {
+	fs                 *fakeState
+	h                  http.Handler
+	rigDir, searchBase string
+}
+
+// newObservationShadowCity is an observationShadowCity whose agents are one
+// claude agent in myrig per name. A lone one's session file is unambiguous
+// (canAttributeSession), so its agent rows read its transcript; a second
+// makes it ambiguous, and its rows report no activity, as a pool seat's or a
+// non-claude agent's do.
+func newObservationShadowCity(t *testing.T, agents ...string) *observationShadowCity {
+	t.Helper()
+	fs := newSessionFakeState(t)
+	c := &observationShadowCity{fs: fs, rigDir: t.TempDir(), searchBase: t.TempDir()}
+	fs.cfg.Session.ProgramStatus = string(runtime.ProgramStatusShadow)
+	fs.cfg.Rigs = []config.Rig{{Name: "myrig", Path: c.rigDir}}
+	fs.cfg.Agents = nil
+	for _, name := range agents {
+		fs.cfg.Agents = append(fs.cfg.Agents, config.Agent{Name: name, Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)})
+	}
+	fs.sessionProvider = runtime.FullFake{Fake: fs.sp}
+	c.h = newTestCityHandlerWith(t, fs, newServerWithSearchPaths(fs, c.searchBase))
+	return c
+}
+
+// start starts claude session name of template in workDir, with transcript
+// as its keyed transcript (none: the session has no transcript) and a record
+// reading st under shadow, and returns its id.
+func (c *observationShadowCity) start(t *testing.T, name, template, workDir string, st runtime.ProgramState, transcript ...string) string {
+	t.Helper()
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(c.fs.cityBeadStore), c.fs.sp, session.WithCityPath(c.fs.cityPath))
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		ExplicitName: name, Template: template, Title: name, Command: "claude", WorkDir: workDir, Provider: "claude",
+		Resume:    session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("create session %s: %v", name, err)
+	}
+	if len(transcript) > 0 {
+		writeNamedSessionJSONL(t, c.searchBase, workDir, info.SessionKey+".jsonl", transcript...)
+	}
+	c.fs.sp.SetProgramPane(name, programRowAt(runtime.ProgramStatusShadow, st, "", time.Now().Add(-time.Second)))
+	return info.ID
+}
+
+// Kills an observation point (observation) recorded only on the worker's
+// SessionHandle.State, which the session reads a dashboard or a client polls
+// never call (ga-f4ovjm.69), and producers of it that disagree about one
+// session: under the shadow switch each session read records the activity
+// its transcript decides beside the record, in-turn busy and idle idle. A
+// transcript that decides nothing records nothing, and neither do the agent
+// reads, whose activity is their session's transcript, nor any read with
+// the switch off.
+func TestObservationShadowRecordedOnSessionReads(t *testing.T) {
+	c := newObservationShadowCity(t, "worker")
+	idle := c.start(t, "myrig--worker", "myrig/worker", c.rigDir, runtime.ProgramIdle, endedTurnTranscript...)
+	busy := c.start(t, "busy", "default", t.TempDir(), runtime.ProgramWorking, toolTurnTranscript...)
+	silent := c.start(t, "silent", "default", t.TempDir(), runtime.ProgramIdle)
+	type pair struct{ scrape, program runtime.ProgramVerdict }
+	var got []runtime.ProgramStatusComparison
+	c.fs.sp.ProgramShadowSink = func(cmp runtime.ProgramStatusComparison) {
+		if cmp.Point == runtime.ProgramPointObservation {
+			got = append(got, cmp)
+		}
+	}
+	// read returns what GET url recorded, by session.
+	read := func(url string) map[string]pair {
+		t.Helper()
+		got = nil
+		var body any
+		getProgramStatusJSON(t, c.h, url, &body)
+		out := map[string]pair{}
+		for _, cmp := range got {
+			if _, twice := out[cmp.Session]; twice {
+				t.Errorf("GET %s recorded %s twice: %+v", url, cmp.Session, got)
+			}
+			out[cmp.Session] = pair{cmp.Scrape, cmp.Program}
+		}
+		return out
+	}
+
+	// The agent rows read the session's transcript: what the agent reads do
+	// not record is the transcript's idle, not an unknown activity.
+	var agent agentResponse
+	getProgramStatusJSON(t, c.h, cityURL(c.fs, "/agent/myrig/worker"), &agent)
+	if agent.Activity != activityIdle {
+		t.Fatalf("agent activity %q, want the session transcript's idle", agent.Activity)
+	}
+	idleIdle := pair{runtime.ProgramVerdictIdle, runtime.ProgramVerdictIdle}
+	busyBusy := pair{runtime.ProgramVerdictBusy, runtime.ProgramVerdictBusy}
+	reads := []struct {
+		url  string
+		want map[string]pair
+	}{
+		{cityURL(c.fs, "/session/") + idle, map[string]pair{"myrig--worker": idleIdle}},
+		{cityURL(c.fs, "/session/") + busy, map[string]pair{"busy": busyBusy}},
+		{cityURL(c.fs, "/session/") + silent, map[string]pair{}},
+		{cityURL(c.fs, "/sessions"), map[string]pair{"myrig--worker": idleIdle, "busy": busyBusy}},
+		{cityURL(c.fs, "/agent/myrig/worker"), map[string]pair{}},
+		{cityURL(c.fs, "/agents"), map[string]pair{}},
+	}
+	for _, r := range reads {
+		if g := read(r.url); !maps.Equal(g, r.want) {
+			t.Errorf("GET %s under shadow recorded %v, want %v", r.url, g, r.want)
+		}
+	}
+
+	publishProgramStatusSwitch(c.fs, runtime.ProgramStatusOff)
+	for _, r := range reads {
+		if g := read(r.url); len(g) != 0 {
+			t.Errorf("GET %s published off recorded %v, want nothing", r.url, g)
+		}
+	}
+}
+
+// Kills observation producers that disagree about one unchanged session:
+// agent reads that recorded indeterminate for an agent whose session file is
+// ambiguous (two claude agents share its rig), beside the session reads'
+// idle from its transcript. Every alternation was then a change the city
+// recorder kept, and each kept comparison's event refetched the dashboard's
+// Agents view into another pair of reads. Alternating every read of the
+// session keeps one comparison through the recorder's change filter
+// (cmd/gc programShadowRecorder.offer), each kept one recorded as an event
+// as the recorder records it, which moves the index the agent list's cache
+// is served at.
+func TestObservationShadowKeepsOneComparisonAcrossAlternatingReads(t *testing.T) {
+	c := newObservationShadowCity(t, "worker", "helper")
+	id := c.start(t, "myrig--worker", "myrig/worker", c.rigDir, runtime.ProgramIdle, endedTurnTranscript...)
+	type reading struct {
+		scrape, program runtime.ProgramVerdict
+		validity        runtime.ProgramStatusValidity
+	}
+	last := map[string]reading{}
+	var offered int
+	var kept []runtime.ProgramStatusComparison
+	c.fs.sp.ProgramShadowSink = func(cmp runtime.ProgramStatusComparison) {
+		if cmp.Point != runtime.ProgramPointObservation {
+			return
+		}
+		offered++
+		r := reading{cmp.Scrape, cmp.Program, cmp.Status.Validity}
+		if prev, ok := last[cmp.Session]; ok && prev == r {
+			return
+		}
+		last[cmp.Session] = r
+		kept = append(kept, cmp)
+		c.fs.eventProv.Record(events.Event{Type: events.SessionProgramStatusShadow, Actor: "gc", Subject: cmp.Session})
+	}
+
+	var agent agentResponse
+	getProgramStatusJSON(t, c.h, cityURL(c.fs, "/agent/myrig/worker"), &agent)
+	if agent.Activity != "" {
+		t.Fatalf("agent activity %q, want none: the agent's session file must be ambiguous", agent.Activity)
+	}
+	for range 3 {
+		for _, url := range []string{
+			cityURL(c.fs, "/agents"), cityURL(c.fs, "/agent/myrig/worker"),
+			cityURL(c.fs, "/sessions"), cityURL(c.fs, "/session/") + id,
+		} {
+			var body any
+			getProgramStatusJSON(t, c.h, url, &body)
+		}
+	}
+	want := reading{runtime.ProgramVerdictIdle, runtime.ProgramVerdictIdle, runtime.ProgramStatusValid}
+	if len(kept) != 1 || kept[0].Session != "myrig--worker" || (reading{kept[0].Scrape, kept[0].Program, kept[0].Status.Validity}) != want {
+		t.Fatalf("alternating reads kept %d of %d comparisons %+v, want one: myrig--worker %+v", len(kept), offered, kept, want)
+	}
+}
+
 // Kills a program-status read that probes liveness first. A session or agent
 // row answered IsRunning for its running field, and the stream needs no
 // probe: a stopped session reads Unread or exited, which nothing shows. A
@@ -415,7 +605,7 @@ func programStreamSession(t *testing.T, fs *fakeState, searchBase string, transc
 	if !transcript {
 		return createTestSession(t, fs.cityBeadStore, fs.sp, "Peek")
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude",
