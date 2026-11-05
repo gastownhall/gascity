@@ -1552,9 +1552,9 @@ func pinRealHomeEnv(env []string) []string {
 
 // realHomeDir returns the home directory the passwd database records for the
 // current uid, never $HOME: os.UserHomeDir() returns $HOME, which a test
-// process may already have pointed at an isolated directory. Unlike
-// pinRealHomeEnv's callers, it fails closed -- an isolation assertion must not
-// compare against a guessed path.
+// process may already have pointed at an isolated directory. It returns an
+// error rather than a guess: pinRealHomeEnv treats that error as "leave the env
+// alone", but an isolation assertion must fail closed.
 func realHomeDir() (string, error) {
 	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
 	if err != nil {
