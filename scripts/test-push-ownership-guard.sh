@@ -585,6 +585,25 @@ test_bead_id_explicit_gc_bead_id_wins() {
     rm -rf "$repo" "$fbd"
 }
 
+test_bead_id_branch_ignores_ga_inside_a_word() {
+    local repo fbd out rc show_ids
+    # "omega-check" contains "ga-check" but names no bead: only a "ga-" at
+    # the start or after a separator is an id.
+    repo="$(new_repo_with_branch "fix/omega-check")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-other01" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/fake-bd-state/show-ids" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-other01" <<<"$show_ids" && ! grep -qx "ga-check" <<<"$show_ids"; then
+        record_pass "resolve/branch-ignores-ga-inside-a-word (rc=0, fell back to ga-other01)"
+    else
+        record_fail "resolve/branch-ignores-ga-inside-a-word" "expected the assignee fallback ga-other01 and no ga-check lookup, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_bead_scoped_branch_blocks_when_id_and_fallback_do_not_resolve() {
     local repo fbd out rc show_ids
     repo="$(new_repo_with_branch "fix/ga-c1v9-short-id")"
@@ -1377,6 +1396,7 @@ run_all() {
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_five_character_id
     test_bead_id_explicit_gc_bead_id_wins
+    test_bead_id_branch_ignores_ga_inside_a_word
     test_bead_scoped_branch_blocks_when_id_and_fallback_do_not_resolve
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_branch_resolves_seven_char_id

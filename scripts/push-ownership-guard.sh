@@ -302,7 +302,8 @@ _pog_resolve_bead_id() {
         if [[ "$branch" != deploy/*-gate && "$branch" =~ (^|[^[:alnum:]])ga- ]]; then
             branch_scoped=1
         fi
-        branch_id="$(grep -oE 'ga-[0-9a-z]{5,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        # Same boundary as branch_scoped: "omega-check" names no bead.
+        branch_id="$(grep -oE '(^|[^[:alnum:]])ga-[0-9a-z]{5,}(\.[0-9]+)*' <<<"$branch" | head -1 | sed -E 's/^[^[:alnum:]]//' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
