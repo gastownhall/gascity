@@ -2063,6 +2063,12 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			overrides := map[string]string{
 				"BEADS_DIR": filepath.Join(dir, ".beads"),
 			}
+			// A gc-initiated server-mode init is gc-owned by construction and
+			// has no scope pin yet. Under a user-level dolt.shared-server: true,
+			// bd init would take the host-wide gate exclusively, may start the
+			// host shared server, and would persist the choice into the scope's
+			// config.yaml. See applyProxiedSharedServerOptOut.
+			applyProxiedSharedServerOptOut(overrides)
 			canonicalDoltDatabase := strings.TrimSpace(doltDatabase)
 			if canonicalDoltDatabase == "" {
 				canonicalDoltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
@@ -2214,12 +2220,14 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	}
 	applyExportSuppressionEnv(env)
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
+	// bd init under a user-level dolt.shared-server: true would take the
+	// host-wide gate, root a new proxy in ~/.beads/shared-server, and persist
+	// that choice into the scope's config.yaml. Both the proxied and the
+	// direct-server arm are gc-initiated, so both opt out. See
+	// applyProxiedSharedServerOptOut.
+	applyProxiedSharedServerOptOut(env)
 	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
-		// bd init under a user-level dolt.shared-server: true would root the
-		// new proxy in ~/.beads/shared-server and persist that choice into the
-		// scope's config.yaml. See applyProxiedSharedServerOptOut.
-		applyProxiedSharedServerOptOut(env)
 		// The idle timeout is always passed explicitly: left out, bd retires
 		// the proxy and its Dolt child after its own 30s default, and it is
 		// also what makes bd write the client-info sidecar the lifecycle reads
