@@ -2908,6 +2908,11 @@ resource = "subprocess"
 calls = 5
 
 [[count]]
+path = "scripts/check_routed_test_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "scripts/check_split_topology_rows_test.go"
 resource = "subprocess"
 calls = 1
