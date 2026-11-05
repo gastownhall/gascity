@@ -33,6 +33,7 @@ next to that code; read the matching file before changing it.
 | CLI or session lifecycle | `cmd/gc/AGENTS.md`, `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | Runtime | `internal/runtime/AGENTS.md`, `internal/providerreadiness/AGENTS.md` |
+| Provider process environment | `internal/processenv/AGENTS.md` |
 | Provider hooks | `internal/hooks/AGENTS.md` |
 | Gate processes | `internal/convergence/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |

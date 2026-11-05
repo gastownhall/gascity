@@ -135,6 +135,78 @@ func TestRuntimeReadinessUsesCodexConfiguredHome(t *testing.T) {
 	}
 }
 
+func TestBeginnerPreflightUsesAmbientCodexHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	oldProbe := initProbeProvidersReadiness
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+	initProbeProvidersReadiness = probeResolvedProviderReadiness
+	home := t.TempDir()
+	bin := t.TempDir()
+	body := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  --version) printf 'codex-cli 0.162.1\n'; exit 0 ;;
+  'login status')
+    if [ "$CODEX_HOME" = %s ]; then
+      printf 'Not logged in\n' >&2
+      exit 1
+    fi
+    printf 'Logged in using ChatGPT\n' >&2
+    exit 0 ;;
+  *) exit 79 ;;
+esac
+`, shellQuotePath(home))
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_HOME", home)
+	err := preflightInitSelectedProviders(wizardConfig{
+		experience: "beginner", defaultProvider: "codex", providers: []string{"codex"},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "login") {
+		t.Fatalf("selected empty Codex home did not block pre-scaffold readiness: %v", err)
+	}
+}
+
+func TestBeginnerPreflightUsesAmbientCodexAccessToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	oldProbe := initProbeProvidersReadiness
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+	initProbeProvidersReadiness = probeResolvedProviderReadiness
+	bin := t.TempDir()
+	body := `#!/bin/sh
+case "$*" in
+  --version) printf 'codex-cli 0.162.1\n'; exit 0 ;;
+  'login status')
+    if [ "$CODEX_ACCESS_TOKEN" = 'at-nonsecret-unit-fixture' ]; then
+      printf 'Error checking login status: personal access token metadata request failed with status 401 Unauthorized\n' >&2
+      exit 1
+    fi
+    printf 'Logged in using ChatGPT\n' >&2
+    exit 0 ;;
+  *) exit 79 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_ACCESS_TOKEN", "at-nonsecret-unit-fixture")
+	err := preflightInitSelectedProviders(wizardConfig{
+		experience: "beginner", defaultProvider: "codex", providers: []string{"codex"},
+	}, false)
+	if err == nil {
+		t.Fatal("selected rejected Codex token did not block pre-scaffold readiness")
+	}
+	if strings.Contains(err.Error(), "at-nonsecret-unit-fixture") {
+		t.Fatal("readiness diagnostic disclosed the token override")
+	}
+}
+
 func TestRuntimeReadinessChecksEachEffectiveAgentCredentialContext(t *testing.T) {
 	city, _ := runtimeReadinessCity(t, "claude", `{"loggedIn":true}`)
 	script := filepath.Join(t.TempDir(), "agent-runtime")

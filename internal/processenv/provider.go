@@ -84,6 +84,8 @@ var providerCredentialEnvKeys = map[string]bool{
 	"AWS_USE_DUALSTACK_ENDPOINT":             true,
 	"AWS_USE_FIPS_ENDPOINT":                  true,
 	"AWS_WEB_IDENTITY_TOKEN_FILE":            true,
+	"CODEX_ACCESS_TOKEN":                     true,
+	"CODEX_HOME":                             true,
 }
 
 // ControllerOnlyEnvKeys are controller-scope variables that must never reach a
