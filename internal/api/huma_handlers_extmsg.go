@@ -182,6 +182,48 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 	return out, nil
 }
 
+// humaHandleExtMsgOutboundFile projects the authorized outbound file pipeline.
+func (s *Server) humaHandleExtMsgOutboundFile(ctx context.Context, input *ExtMsgOutboundFileInput) (*ExtMsgOutboundFileOutput, error) {
+	key := input.IdempotencyKey
+	if key == "" {
+		key = input.Body.IdempotencyKey
+	} else if input.Body.IdempotencyKey != "" && input.Body.IdempotencyKey != key {
+		return nil, apierr.IdempotencyMismatch.Msg("header and body idempotency keys disagree")
+	}
+	input.Body.IdempotencyKey = key
+	return withIdempotency(s.idem, "/v0/extmsg/outbound-file", key, input.Body, func() (*ExtMsgOutboundFileOutput, error) {
+		return s.publishExtMsgOutboundFile(ctx, input.Body)
+	})
+}
+
+func (s *Server) publishExtMsgOutboundFile(ctx context.Context, req extmsg.PublishFileRequest) (*ExtMsgOutboundFileOutput, error) {
+	svc, err := s.humaExtmsgServices()
+	if err != nil {
+		return nil, err
+	}
+	reg, err := s.humaExtmsgAdapterRegistry()
+	if err != nil {
+		return nil, err
+	}
+	deps := extmsg.OutboundDeps{Services: *svc, Registry: reg, EmitEvent: s.extmsgEmitEvent(), ResolveSessionSelector: s.extmsgResolveSessionSelector()}
+	result, err := extmsg.HandleOutboundFile(ctx, deps, extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}, req)
+	if err != nil {
+		return nil, apierr.ValidationFailed.Msg(err.Error())
+	}
+	if result.Receipt.Delivered {
+		conversation := req.Conversation
+		if result.Receipt.Conversation != (extmsg.ConversationRef{}) {
+			conversation = result.Receipt.Conversation
+		}
+		display := s.extmsgSessionHandleForSelector(req.SessionID)
+		text, sessionID := req.TranscriptText(), req.SessionID
+		s.runBackground(func(ctx context.Context) {
+			s.extmsgNotifyMembers(ctx, conversation, display, "agent", text, sessionID, "")
+		})
+	}
+	return &ExtMsgOutboundFileOutput{Body: *result}, nil
+}
+
 // --- Bindings ---
 
 // humaHandleExtMsgBindingList is the Huma-typed handler for GET /v0/extmsg/bindings.

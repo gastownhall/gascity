@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -68,6 +70,108 @@ type OutboundDeps struct {
 // monotonic generation concept. Downstream consumers in the producer path
 // do not compare generations against zero today.
 func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req OutboundRequest) (*OutboundResult, error) {
+	return handleOutbound(ctx, deps, caller, req, func(adapter TransportAdapter) (*PublishReceipt, error) {
+		return adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // S1016: copy API inputs explicitly so future internal fields cannot leak to the adapter wire.
+			SessionID: req.SessionID, Conversation: req.Conversation, Text: req.Text,
+			ReplyToMessageID: req.ReplyToMessageID, IdempotencyKey: req.IdempotencyKey, Metadata: req.Metadata,
+		})
+	})
+}
+
+// PublishFileRequest identifies a file on the adapter's filesystem. The adapter
+// owns file access and allowed-root enforcement; gc never opens FilePath.
+// IdempotencyKey is forwarded; deduplication depends on the adapter's contract.
+type PublishFileRequest struct {
+	SessionID        string            `json:"session_id" minLength:"1"`
+	Conversation     ConversationRef   `json:"conversation"`
+	FilePath         string            `json:"file_path" minLength:"1"`
+	Filename         string            `json:"filename,omitempty"`
+	InitialComment   string            `json:"initial_comment,omitempty"`
+	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
+	Title            string            `json:"title,omitempty"`
+	IdempotencyKey   string            `json:"idempotency_key,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
+}
+
+// TranscriptText describes a file publish without disclosing its local path.
+func (r PublishFileRequest) TranscriptText() string {
+	name := r.Filename
+	if name == "" {
+		name = filepath.Base(r.FilePath)
+	}
+	text := "[file: " + name + "]"
+	if r.InitialComment != "" {
+		text = r.InitialComment + "\n" + text
+	}
+	return text
+}
+
+// PublishFileReceipt records the adapter's file-upload result. FileID is the
+// provider's canonical file reference, not a chat message or thread timestamp.
+type PublishFileReceipt struct {
+	FileID       string
+	Conversation ConversationRef
+	Delivered    bool
+	FailureKind  PublishFailureKind
+	Error        string `json:"Error,omitempty"`
+}
+
+// FileTransportAdapter is an optional extension for adapters that upload files.
+type FileTransportAdapter interface {
+	PublishFile(ctx context.Context, req PublishFileRequest) (*PublishFileReceipt, error)
+}
+
+// OutboundFileResult captures a file receipt and the outbound records it created.
+type OutboundFileResult struct {
+	Receipt         PublishFileReceipt
+	DeliveryContext *DeliveryContextRecord        `json:"DeliveryContext,omitempty"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
+}
+
+// HandleOutboundFile uses the message outbound authorization and recording
+// pipeline for a file upload. Only confirmed delivery creates outbound records.
+func HandleOutboundFile(ctx context.Context, deps OutboundDeps, caller Caller, req PublishFileRequest) (*OutboundFileResult, error) {
+	if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.FilePath) == "" {
+		return nil, fmt.Errorf("session_id and file_path are required: %w", ErrInvalidInput)
+	}
+	metadata := mapsClone(req.Metadata)
+	name := req.Filename
+	if name == "" {
+		name = filepath.Base(req.FilePath)
+	}
+	metadata["filename"] = name
+	var fileReceipt *PublishFileReceipt
+	result, err := handleOutbound(ctx, deps, caller, OutboundRequest{
+		SessionID: req.SessionID, Conversation: req.Conversation, Text: req.TranscriptText(),
+		ReplyToMessageID: req.ReplyToMessageID, IdempotencyKey: req.IdempotencyKey, Metadata: metadata,
+	}, func(adapter TransportAdapter) (*PublishReceipt, error) {
+		files, ok := adapter.(FileTransportAdapter)
+		if !ok {
+			return nil, ErrAdapterUnsupported
+		}
+		var err error
+		fileReceipt, err = files.PublishFile(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if fileReceipt == nil || (fileReceipt.Delivered && strings.TrimSpace(fileReceipt.FileID) == "") {
+			return nil, fmt.Errorf("adapter returned no file receipt or delivered file ID: %w", ErrInvariantViolation)
+		}
+		if fileReceipt.Delivered {
+			metadata["file_id"] = fileReceipt.FileID
+		}
+		return &PublishReceipt{
+			MessageID: fileReceipt.FileID, Conversation: fileReceipt.Conversation,
+			Delivered: fileReceipt.Delivered, FailureKind: fileReceipt.FailureKind,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &OutboundFileResult{Receipt: *fileReceipt, DeliveryContext: result.DeliveryContext, TranscriptEntry: result.TranscriptEntry}, nil
+}
+
+func handleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req OutboundRequest, publish func(TransportAdapter) (*PublishReceipt, error)) (*OutboundResult, error) {
 	if deps.Registry == nil {
 		return nil, errors.New("adapter registry is nil")
 	}
@@ -154,24 +258,8 @@ func HandleOutbound(ctx context.Context, deps OutboundDeps, caller Caller, req O
 		return nil, fmt.Errorf("no adapter for %s/%s", req.Conversation.Provider, req.Conversation.AccountID)
 	}
 
-	// Step 4: Publish. SessionID is propagated to the adapter as a
-	// first-class field on PublishRequest (gc-kvt); adapters that need
-	// per-session behavior (e.g. Slack identity overrides) read it
-	// directly. The caller-supplied metadata flows through unchanged.
-	//
-	// Field-by-field assignment is intentional even though the structs
-	// currently share a shape — OutboundRequest is the API caller's input
-	// surface and PublishRequest is the gc-to-adapter wire contract; any
-	// future divergence (e.g. an internal-only OutboundRequest field)
-	// must not silently leak onto the wire.
-	receipt, err := adapter.Publish(ctx, PublishRequest{ //nolint:staticcheck // S1016: field-by-field copy is intentional, not a struct conversion — see comment above
-		SessionID:        req.SessionID,
-		Conversation:     req.Conversation,
-		Text:             req.Text,
-		ReplyToMessageID: req.ReplyToMessageID,
-		IdempotencyKey:   req.IdempotencyKey,
-		Metadata:         req.Metadata,
-	})
+	// Step 4: Publish only after authorization, using the requested transport.
+	receipt, err := publish(adapter)
 	if err != nil {
 		return nil, fmt.Errorf("adapter publish: %w", err)
 	}

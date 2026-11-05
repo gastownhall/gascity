@@ -22,6 +22,130 @@ type testExtMsgAdapter struct {
 	receiptConversation extmsg.ConversationRef
 }
 
+type testExtMsgFileAdapter struct {
+	*testExtMsgAdapter
+	files     []extmsg.PublishFileRequest
+	delivered bool
+}
+
+func (a *testExtMsgFileAdapter) PublishFile(_ context.Context, req extmsg.PublishFileRequest) (*extmsg.PublishFileReceipt, error) {
+	a.files = append(a.files, req)
+	return &extmsg.PublishFileReceipt{FileID: "F123", Conversation: req.Conversation, Delivered: a.delivered}, nil
+}
+
+func TestHandleExtMsgOutboundFileRouteAndFanout(t *testing.T) {
+	for _, mode := range []string{"delivered", "header-key", "wrong-session", "unsupported", "undelivered", "missing-path"} {
+		t.Run(mode, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			t.Cleanup(srv.waitForBackground)
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
+			fs.extmsgSvc = &services
+			registry := extmsg.NewAdapterRegistry()
+			adapter := &testExtMsgFileAdapter{testExtMsgAdapter: &testExtMsgAdapter{}, delivered: mode != "undelivered"}
+			if mode == "unsupported" {
+				registry.Register(extmsg.AdapterKey{Provider: "slack", AccountID: "T1"}, adapter.testExtMsgAdapter)
+			} else {
+				registry.Register(extmsg.AdapterKey{Provider: "slack", AccountID: "T1"}, adapter)
+			}
+			fs.adapterReg = registry
+			source := createTestSession(t, fs.cityBeadStore, fs.sp, "File publisher")
+			ref := extmsg.ConversationRef{ScopeID: "workspace", Provider: "slack", AccountID: "T1", ConversationID: "C-test", Kind: extmsg.ConversationRoom}
+			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+			if _, err := services.Bindings.Bind(context.Background(), caller, extmsg.BindInput{Conversation: ref, SessionID: source.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{Caller: caller, Conversation: ref, SessionID: "myrig/worker", BackfillPolicy: extmsg.MembershipBackfillSinceJoin, Owner: extmsg.MembershipOwnerManual}); err != nil {
+				t.Fatal(err)
+			}
+			input := extmsg.PublishFileRequest{SessionID: source.ID, Conversation: ref, FilePath: "/staged/results.txt", InitialComment: "upload results"}
+			if mode == "delivered" {
+				input.IdempotencyKey = "file-retry"
+			}
+			if mode == "wrong-session" {
+				input.SessionID = "stranger"
+			}
+			if mode == "missing-path" {
+				input.FilePath = ""
+			}
+			body, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			post := func(body []byte) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				req := newPostRequest(cityURL(fs, "/extmsg/outbound-file"), strings.NewReader(string(body)))
+				if mode == "header-key" {
+					req.Header.Set("Idempotency-Key", "file-retry")
+				}
+				srv.ServeHTTP(rec, req)
+				return rec
+			}
+			rec := post(body)
+			wantStatus := http.StatusOK
+			if mode == "wrong-session" || mode == "unsupported" || mode == "missing-path" {
+				wantStatus = http.StatusUnprocessableEntity
+			}
+			if rec.Code != wantStatus {
+				t.Fatalf("status=%d want %d: %s", rec.Code, wantStatus, rec.Body.String())
+			}
+			srv.waitForBackground()
+			if mode == "delivered" || mode == "header-key" {
+				replay := post(body)
+				if replay.Code != http.StatusOK || replay.Body.String() != rec.Body.String() || len(adapter.files) != 1 {
+					t.Fatalf("keyed retry republished or changed receipt: status=%d files=%d body=%s", replay.Code, len(adapter.files), replay.Body.String())
+				}
+				input.InitialComment = "different upload"
+				changed, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mismatch := post(changed); mismatch.Code != http.StatusUnprocessableEntity {
+					t.Fatalf("key reuse status=%d: %s", mismatch.Code, mismatch.Body.String())
+				}
+				srv.waitForBackground()
+				var result extmsg.OutboundFileResult
+				if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if !result.Receipt.Delivered || result.Receipt.FileID != "F123" || result.TranscriptEntry == nil {
+					t.Fatalf("result: %+v", result)
+				}
+				if len(adapter.files) != 1 || adapter.files[0].FilePath != input.FilePath {
+					t.Fatalf("file calls: %+v", adapter.files)
+				}
+				peerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
+				if err != nil {
+					t.Fatal(err)
+				}
+				peer, err := fs.cityBeadStore.Get(peerID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				peerNudges := 0
+				for _, call := range fs.sp.SnapshotCalls() {
+					if call.Method == "Nudge" && call.Name == source.SessionName {
+						t.Fatal("file publisher nudged itself")
+					}
+					if call.Method == "Nudge" && call.Name == peer.Metadata["session_name"] && strings.Contains(call.Message, "results.txt") {
+						peerNudges++
+					}
+				}
+				if peerNudges == 0 {
+					t.Fatal("file publish did not notify peer")
+				}
+				if peerNudges != 1 {
+					t.Fatal("keyed retry repeated peer notification")
+				}
+			} else {
+				if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
+					t.Fatal("failed publish woke peer")
+				}
+			}
+		})
+	}
+}
+
 func (a *testExtMsgAdapter) Name() string { return "test-extmsg-adapter" }
 
 func (a *testExtMsgAdapter) Capabilities() extmsg.AdapterCapabilities {

@@ -64,6 +64,123 @@ type capturedEvent struct {
 	Payload events.Payload
 }
 
+type stubFileAdapter struct {
+	*stubAdapter
+	files       []PublishFileRequest
+	fileReceipt PublishFileReceipt
+	fileErr     error
+	nilReceipt  bool
+}
+
+func (a *stubFileAdapter) PublishFile(_ context.Context, req PublishFileRequest) (*PublishFileReceipt, error) {
+	a.files = append(a.files, req)
+	if a.fileErr != nil || a.nilReceipt {
+		return nil, a.fileErr
+	}
+	receipt := a.fileReceipt
+	receipt.Conversation = req.Conversation
+	return &receipt, nil
+}
+
+func TestHandleOutboundFileAuthorizationAndRecording(t *testing.T) {
+	for _, mode := range []string{"binding", "agent", "group", "wrong-session", "unsupported", "undelivered", "nil-receipt", "missing-id", "adapter-error", "missing-session", "missing-path"} {
+		t.Run(mode, func(t *testing.T) {
+			fabric, textAdapter, captured, deps := newOutboundTestRig(t)
+			ref := testConversationRef()
+			caller := testControllerCaller()
+			adapter := &stubFileAdapter{stubAdapter: textAdapter, fileReceipt: PublishFileReceipt{FileID: "F123", Delivered: mode != "undelivered"}}
+			adapter.nilReceipt = mode == "nil-receipt"
+			if mode == "adapter-error" {
+				adapter.fileErr = errors.New("upload failed")
+			}
+			if mode == "missing-id" {
+				adapter.fileReceipt.FileID = ""
+			}
+			if mode != "unsupported" {
+				deps.Registry.Register(AdapterKey{Provider: ref.Provider, AccountID: ref.AccountID}, adapter)
+			}
+			if mode == "group" {
+				group, err := fabric.Groups.EnsureGroup(context.Background(), caller, EnsureGroupInput{RootConversation: ref, Mode: GroupModeLauncher})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := fabric.Groups.UpsertParticipant(context.Background(), caller, UpsertParticipantInput{GroupID: group.ID, Handle: "publisher", SessionID: "sess-file"}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				input := BindInput{Conversation: ref, SessionID: "sess-file"}
+				if mode == "agent" {
+					input.SessionID, input.AgentName = "", "publisher"
+					deps.ResolveSessionSelector = func(context.Context, string) (string, error) { return "sess-file", nil }
+				}
+				if _, err := fabric.Bindings.Bind(context.Background(), caller, input); err != nil {
+					t.Fatal(err)
+				}
+			}
+			req := PublishFileRequest{SessionID: "sess-file", Conversation: ref, FilePath: "/adapter-only/report.pdf", Filename: "report.pdf", InitialComment: "latest results", ReplyToMessageID: "thread-1", Title: "Run report", IdempotencyKey: "upload-1"}
+			if mode == "wrong-session" {
+				req.SessionID = "stranger"
+			}
+			if mode == "missing-session" {
+				req.SessionID = ""
+			}
+			if mode == "missing-path" {
+				req.FilePath = " "
+			}
+			result, err := HandleOutboundFile(context.Background(), deps, caller, req)
+			if mode == "nil-receipt" || mode == "missing-id" || mode == "adapter-error" || mode == "missing-session" || mode == "missing-path" {
+				if err == nil || result != nil {
+					t.Fatalf("invalid upload: result=%+v err=%v", result, err)
+				}
+				if len(*captured) != 0 {
+					t.Fatal("invalid upload emitted outbound event")
+				}
+				return
+			}
+			if mode == "wrong-session" || mode == "unsupported" {
+				if err == nil {
+					t.Fatal("expected rejection")
+				}
+				if len(adapter.files) != 0 || len(textAdapter.publishs) != 0 {
+					t.Fatal("rejected request reached adapter")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(adapter.files) != 1 || adapter.files[0].FilePath != req.FilePath || adapter.files[0].ReplyToMessageID != "thread-1" || adapter.files[0].IdempotencyKey != "upload-1" {
+				t.Fatalf("file request lost fields: %+v", adapter.files)
+			}
+			if len(textAdapter.publishs) != 0 {
+				t.Fatal("file sent through text publish")
+			}
+			if mode == "undelivered" {
+				if result.TranscriptEntry != nil || result.DeliveryContext != nil || len(*captured) != 0 {
+					t.Fatal("failed upload recorded as delivered")
+				}
+				return
+			}
+			if result.Receipt.FileID != "F123" || !result.Receipt.Delivered {
+				t.Fatalf("receipt: %+v", result.Receipt)
+			}
+			entry := result.TranscriptEntry
+			if entry == nil || entry.ProviderMessageID != "F123" || entry.SourceSessionID != "sess-file" || !strings.Contains(entry.Text, "latest results") || !strings.Contains(entry.Text, "report.pdf") || strings.Contains(entry.Text, "/adapter-only") {
+				t.Fatalf("transcript: %+v", entry)
+			}
+			if entry.Metadata["file_id"] != "F123" || entry.Metadata["filename"] != "report.pdf" {
+				t.Fatalf("file metadata: %+v", entry.Metadata)
+			}
+			if (result.DeliveryContext != nil) != (mode == "binding") {
+				t.Fatalf("delivery context: %+v", result.DeliveryContext)
+			}
+			if len(*captured) != 1 || (*captured)[0].Type != events.ExtMsgOutbound {
+				t.Fatalf("events: %+v", *captured)
+			}
+		})
+	}
+}
+
 func newOutboundTestRig(t *testing.T) (Services, *stubAdapter, *[]capturedEvent, OutboundDeps) {
 	t.Helper()
 	store := beads.NewMemStore()
