@@ -1288,14 +1288,43 @@ With the city stopped:
 gc storage snapshot restore <id> --binding --fleet-stopped
 ```
 
-It refuses a snapshot of another city or another work store, and one taken
-before the binding's records changed (a migration, a recovery or a rig import
-since): it restores only the database, and those records describe what the
-database must hold. It then installs the snapshot's database in WAL mode,
-raises the id floor past every id the replaced database held, and keeps the
-replaced database (with its `-wal`, `-shm` and `-journal`) beside it as
-`*.pre-restore-<ts>`. If it is interrupted, the city refuses to start and
-names the same command; run it again.
+It installs the snapshot's database in WAL mode, raises the id floor past
+every id the replaced database held (a wrapped range included), and keeps the
+replaced database, with its `-wal`, `-shm` and `-journal`, beside it as
+`*.pre-restore-<ts>`.
+
+> **Do not copy a snapshot's `beads.sqlite` into place by hand.** It is in
+> rollback-journal mode, so a binding served from it makes every reader stall
+> the controller's writers, and a copy put down next to the live database's
+> `-wal` can have that WAL replayed into it. The restore command switches it
+> to WAL and moves the old files aside first.
+
+From the moment the restore starts copying until it finishes, the binding
+counts as stale (`infra.restoring` beside it): every `gc` that boots refuses
+it and names the restore. A refusal before the live database moves changes
+nothing. A restore interrupted after that holds the city stale until you run
+the same command again. If one was interrupted before it moved anything, the
+stale message says the database is still in place; remove `infra.restoring`
+to keep it.
+
+The restore refuses a snapshot of another work store (compared as boot
+compares a marker: the project id, else the database; never the path), and
+one taken before the binding's records changed: a migration, a recovery or a
+rig import since. A rig marked clean since, and a marker that only gained its
+`work-store` identity line, are compatible.
+
+**Rolling back past a rig import.** A snapshot from before `gc storage migrate
+--from-rigs` imported a rig refuses, naming the rig's records
+(`infra.rig.<rig>.migrated` and its cleared note). The binding's database is
+only half of the rollback: the rig's rows left the rig's store. To go back:
+
+1. Restore the rig's own Dolt store from the backup taken before the import
+   (`dolt backup restore`, or `CALL DOLT_RESET('--hard', '<tag>')` where a
+   snapshot tagged it).
+2. Move the rig's records aside: `infra.rig.<rig>.*` beside the binding, and
+   `.gc/storage-infra-cleared.rig.<rig>.json`.
+3. Restore the binding: `gc storage snapshot restore <id> --binding --fleet-stopped`.
+4. Check with `gc storage status`: the rig shows as awaiting import again.
 
 ## Rolling back
 

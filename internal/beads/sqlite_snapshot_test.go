@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -185,7 +186,7 @@ func TestSQLiteSnapshotHelpers(t *testing.T) {
 	if err != nil || len(ids) != 4 || !sort.StringsAreSorted(ids) {
 		t.Fatalf("SQLiteBeadIDs = %v, %v", ids, err)
 	}
-	hw, err := SQLiteSequenceHighWaterAt(ctx, dst, sqliteDefaultPrefix)
+	hw, err := SQLiteSequenceHighWaterAt(dst, sqliteDefaultPrefix)
 	if err != nil || hw != 4 {
 		t.Fatalf("high-water = %d, %v; want 4", hw, err)
 	}
@@ -208,13 +209,68 @@ func TestSQLiteSnapshotHelpers(t *testing.T) {
 	}
 
 	floorDir := t.TempDir()
-	if err := RaiseSQLiteSequenceFloorAt(floorDir, "gcg", 10); err != nil {
-		t.Fatal(err)
+	if got, err := RaiseSQLiteSequenceFloorPast(floorDir, "gcg", []int64{10}); err != nil || got != 10 {
+		t.Fatalf("raise to 10 = %d, %v", got, err)
 	}
-	if err := RaiseSQLiteSequenceFloorAt(floorDir, "gcg", 4); err != nil {
-		t.Fatal(err)
+	if got, err := RaiseSQLiteSequenceFloorPast(floorDir, "gcg", []int64{4}); err != nil || got != 10 {
+		t.Fatalf("raise to 4 = %d, %v; want 10 (never lowered)", got, err)
 	}
 	if floor, err := SQLiteSequenceFloorAt(floorDir, "gcg"); err != nil || floor != 10 {
-		t.Fatalf("floor = %d, %v; want 10 (never lowered)", floor, err)
+		t.Fatalf("floor = %d, %v; want 10", floor, err)
+	}
+}
+
+// TestRaiseSQLiteSequenceFloorPastAWrappedRange is round-3 C: a database an
+// older build wrapped holds negative auto ids, which come after every positive
+// one in allocation order. With the floor sidecar gone, the raise must land
+// on the wrapped high-water, not the positive one, or the next mint refuses
+// (ErrSQLiteSequenceWrapped).
+func TestRaiseSQLiteSequenceFloorPastAWrappedRange(t *testing.T) {
+	dir := t.TempDir()
+	opened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := opened.(*SQLiteStore)
+	for range 3 {
+		if _, err := store.Create(Bead{Title: "positive"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const wrapped = int64(-9223372036853998976)
+	if _, err := store.CreateWithForeignID(Bead{ID: fmt.Sprintf("gcg-%d", wrapped), Title: "minted by a wrapping build"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.CloseStore()
+	floors, _ := filepath.Glob(filepath.Join(dir, "*.seqfloor"))
+	for _, f := range floors {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db := filepath.Join(dir, sqliteStoreFilename)
+	if hw, err := SQLiteSequenceHighWaterAt(db, "gcg"); err != nil || hw != wrapped {
+		t.Fatalf("high-water = %d, %v; want the wrapped %d", hw, err, wrapped)
+	}
+	// A wrapped floor recorded elsewhere (a snapshot's) counts as later than
+	// any positive one, with no database to read it from.
+	if got, err := RaiseSQLiteSequenceFloorPast(t.TempDir(), "gcg", []int64{3, wrapped}); err != nil || got != wrapped {
+		t.Fatalf("floor from a recorded wrapped floor = %d, %v; want %d", got, err, wrapped)
+	}
+	floor, err := RaiseSQLiteSequenceFloorPast(dir, "gcg", []int64{3}, db)
+	if err != nil || floor != wrapped {
+		t.Fatalf("floor = %d, %v; want the wrapped %d", floor, err, wrapped)
+	}
+	reopened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix("gcg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.(*SQLiteStore).CloseStore() //nolint:errcheck // test cleanup
+	minted, err := reopened.Create(Bead{Title: "after the raise"})
+	if err != nil {
+		t.Fatalf("minting past the raised floor: %v", err)
+	}
+	if minted.ID != fmt.Sprintf("gcg-%d", wrapped+1) {
+		t.Fatalf("minted %s, want the id after the wrapped high-water", minted.ID)
 	}
 }

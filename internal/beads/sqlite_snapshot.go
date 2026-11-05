@@ -200,16 +200,23 @@ func SQLiteBeadIDs(ctx context.Context, path string) ([]string, error) {
 	return ids, err
 }
 
-// SQLiteSequenceHighWaterAt is the highest positive auto id under prefix the
-// database at path holds, read immutable.
-func SQLiteSequenceHighWaterAt(ctx context.Context, path, prefix string) (int64, error) {
+// SQLiteSequenceHighWaterAt is the latest auto id under prefix the database
+// at path holds, in allocation order: a wrapped store's negative ids rank
+// above every positive one (sequenceMax). It is read immutable.
+func SQLiteSequenceHighWaterAt(path, prefix string) (int64, error) {
 	var hw sqliteSequenceHighWater
 	err := withImmutableSQLite(path, func(db *sql.DB) error {
 		var err error
-		hw, err = scanSQLiteSequenceHighWater(ctx, db, prefix)
+		hw, err = scanSQLiteSequenceHighWater(context.Background(), db, prefix)
 		return err
 	})
-	return hw.positive, err
+	if err != nil {
+		return 0, err
+	}
+	if hw.hasNegative {
+		return sequenceMax(hw.positive, hw.negative), nil
+	}
+	return hw.positive, nil
 }
 
 // SQLiteSequenceFloorAt reads the persisted id floor of prefix in the store
@@ -218,11 +225,28 @@ func SQLiteSequenceFloorAt(dir, prefix string) (int64, error) {
 	return readSQLiteSequenceFloor(filepath.Join(dir, sqliteSequenceFloorFilenameFor(prefix)))
 }
 
-// RaiseSQLiteSequenceFloorAt raises the persisted id floor of prefix in dir to
-// at least n, never lowering it. A store opened afterwards allocates above it.
-func RaiseSQLiteSequenceFloorAt(dir, prefix string, n int64) error {
-	_, err := persistSQLiteSequenceFloorAtLeast(filepath.Join(dir, sqliteSequenceFloorFilenameFor(prefix)), n)
-	return err
+// RaiseSQLiteSequenceFloorPast raises the persisted id floor of prefix in dir
+// to the latest, in allocation order, of its current value, floors and the
+// high-water of each database in databases (one that cannot be read is
+// skipped: it may be the damaged database being replaced). It never lowers the
+// floor, and returns the floor it persisted. A store opened over dir
+// afterwards mints past every id those databases held, a wrapped range
+// included.
+func RaiseSQLiteSequenceFloorPast(dir, prefix string, floors []int64, databases ...string) (int64, error) {
+	path := filepath.Join(dir, sqliteSequenceFloorFilenameFor(prefix))
+	floor, err := readSQLiteSequenceFloor(path)
+	if err != nil {
+		return 0, err
+	}
+	for _, f := range floors {
+		floor = sequenceMax(floor, f)
+	}
+	for _, db := range databases {
+		if hw, err := SQLiteSequenceHighWaterAt(db, prefix); err == nil {
+			floor = sequenceMax(floor, hw)
+		}
+	}
+	return persistSQLiteSequenceFloorAtLeast(path, floor)
 }
 
 func withImmutableSQLite(path string, fn func(*sql.DB) error) error {

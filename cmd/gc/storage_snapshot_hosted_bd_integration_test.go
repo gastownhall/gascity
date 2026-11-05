@@ -116,7 +116,10 @@ func TestStorageSnapshotHostedBdWorkStore(t *testing.T) {
 	runBd(server, "init", "--prefix", "hb", "--quiet", "--skip-agents", "--skip-hooks", "--server", "--server-host", "127.0.0.1", "--server-port", strconv.Itoa(port))
 	runBd(server, "create", "hosted one", "-t", "task", "--quiet")
 	runBd(server, "create", "hosted two", "-t", "task", "--quiet")
-	serve := exec.Command(bd, "serve", "--addr", "127.0.0.1:0")
+	// An explicit port, picked outside the reserved ones: bd's own ephemeral
+	// pick could land on one.
+	servePort := hostedSnapshotFreePort(t)
+	serve := exec.Command(bd, "serve", "--addr", "127.0.0.1:"+strconv.Itoa(servePort))
 	serve.Dir, serve.Env = server, bdEnv(server)
 	stdout, err := serve.StdoutPipe()
 	if err != nil {
@@ -132,8 +135,8 @@ func TestStorageSnapshotHostedBdWorkStore(t *testing.T) {
 		}
 	}
 	go func() { _, _ = io.Copy(io.Discard, stdout) }()
-	if endpoint == "" {
-		t.Fatal("bd serve printed no address")
+	if endpoint != "http://127.0.0.1:"+strconv.Itoa(servePort) {
+		t.Fatalf("bd serve listens at %q, want the picked port %d", endpoint, servePort)
 	}
 
 	// The city, connected to the hosted store over HTTP.

@@ -5610,17 +5610,21 @@ gc storage snapshot [flags]
 
 Put snapshot &lt;id&gt;'s binding database back in place of the live one.
 
-It refuses a snapshot of another city or another work store, and one taken
-before the binding's records changed (a migration, a recovery or a rig import
-since): the database is only half of a binding, and the records beside it are
-not restored.
+It refuses a snapshot of another work store, and one taken before the
+binding's records changed (a migration, a recovery or a rig import since; a
+rig marked clean since, or a marker that only gained its identity line, is
+compatible): the database is only half of a binding, and the records beside
+it are not restored.
 
 The snapshot is proven against its manifest first, then installed under the
 controller lock with the city stopped, in WAL mode, with the id floor raised
 past every id the replaced database held. The database it replaces, with its
--wal, -shm and -journal, is kept beside it as *.pre-restore-&lt;ts&gt;. A restore
-interrupted before the new database is in place leaves no database at the
-binding path, which every boot refuses, naming this command; run it again.
+-wal, -shm and -journal, is kept beside it as *.pre-restore-&lt;ts&gt;.
+
+From the moment it starts copying until it finishes, the binding counts as
+stale (infra.restoring beside it): every gc that boots refuses it and names
+this command. A refusal before the live database moves changes nothing. A
+restore interrupted after that holds the city stale until you run it again.
 
 Only --binding is restorable here. A work store is restored by the runbook:
 DOLT_RESET --hard to the snapshot's tag, or bd import of its export.

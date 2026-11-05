@@ -7,9 +7,10 @@ package main
 // database holds and where it was carried from (the convergence marker, the
 // copy manifest, each rig's import records, the city's cleared notes). A
 // restore puts back only the database, so it refuses unless those records are
-// the ones the snapshot recorded: restoring a database from before a rig
-// import, under the import's records, would leave the rig's rows nowhere. It
-// refuses a snapshot of another city or another work store too.
+// compatible with the ones the snapshot recorded (snapshotRecordsCompatible):
+// restoring a database from before a rig import, under the import's records,
+// would leave the rig's rows nowhere. It refuses a snapshot of another work
+// store too, judged as boot judges a marker (workStoreIdentityMismatch).
 //
 // Under the controller lock, the migration guard and the snapshot directory's
 // lock, it then:
@@ -17,24 +18,29 @@ package main
 //  1. folds the live database's WAL into it, refusing when another connection
 //     holds the database (a busy checkpoint, or a -wal or -shm that outlives
 //     this command's connection);
-//  2. writes infra.restoring beside the marker, so a boot that finds the
-//     binding stale names this command rather than a re-copy;
+//  2. writes infra.restoring beside the marker. From here until step 7 the
+//     binding is stale whatever its database holds (readInfraConvergenceState),
+//     so every gc that boots refuses it rather than write to a database about
+//     to be replaced, and names this command;
 //  3. copies the snapshot's database beside the live one, proves the copy's
 //     sha256, and switches it to WAL (VACUUM INTO writes rollback-journal
 //     mode, and a store opened over an existing database keeps the mode);
-//  4. raises the id floor to the most of the live floor, the snapshot's and
-//     the live database's high-water, so no id the replaced database held is
-//     minted again;
-//  5. moves the live database, then its -wal, -shm and -journal, aside as
-//     *.pre-restore-<ts> (a run killed after the first move leaves no
-//     database at the binding path, which boot refuses), and renames the copy
-//     into place;
-//  6. removes infra.restoring.
+//  4. repeats step 1, so a process that opened the binding during the copy,
+//     past its boot gate, is refused before anything moves;
+//  5. raises the id floor to the latest, in allocation order, of the live
+//     floor, the snapshot's and the live database's high-water, so no id the
+//     replaced database held is minted again, a wrapped range included;
+//  6. moves the live database, then its -wal, -shm and -journal, aside as
+//     *.pre-restore-<ts>, and renames the copy into place;
+//  7. removes infra.restoring.
 //
-// Nothing is deleted. Every step is safe to run again.
+// A refusal before step 6 changes nothing (the copy and the record go). Once
+// step 6 has begun, the record holds the binding stale until the same command
+// finishes it. Nothing is deleted.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -57,22 +63,90 @@ func (t infraBindingTarget) RestoreRecordPath() string {
 	return filepath.Join(t.Root, infraRestoreRecordName)
 }
 
+// infraRestoreRecord is the content of infra.restoring.
+type infraRestoreRecord struct {
+	Snapshot  string    `json:"snapshot"`
+	To        string    `json:"to"`
+	Database  string    `json:"database"`
+	StartedAt time.Time `json:"started_at"`
+	// Command finishes the restore.
+	Command string `json:"command"`
+}
+
+// readInfraRestoreRecord reads infra.restoring. present=false with no error
+// means no restore is under way.
+func readInfraRestoreRecord(target infraBindingTarget) (infraRestoreRecord, bool, error) {
+	var rec infraRestoreRecord
+	data, err := os.ReadFile(target.RestoreRecordPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return rec, false, nil
+	}
+	if err != nil {
+		return rec, true, fmt.Errorf("reading the restore record %s: %w", target.RestoreRecordPath(), err)
+	}
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return rec, true, fmt.Errorf("reading the restore record %s: %w", target.RestoreRecordPath(), err)
+	}
+	return rec, true, nil
+}
+
+// writeInfraRestoreRecord writes infra.restoring atomically. An earlier
+// run's record is superseded: this run is the one the binding now waits on.
+func writeInfraRestoreRecord(target infraBindingTarget, rec infraRestoreRecord) error {
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(target.Root, infraRestoreRecordName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(append(data, '\n'))
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = infraMigrationRename(tmp.Name(), target.RestoreRecordPath())
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("recording the restore at %s: %w", target.RestoreRecordPath(), err)
+	}
+	syncInfraDir(target.Root)
+	return nil
+}
+
 // snapshotRestoreInstruction is the command that restores snapshot id from to.
 func snapshotRestoreInstruction(id, to string) string {
 	return "gc storage snapshot restore " + id + " --binding --" + storageFleetStoppedFlag + " --to " + to
 }
 
-// infraStaleBindingRemedy is the command that repairs a stale binding (a
-// marker whose database is gone): the interrupted restore when one is
-// recorded, else the re-copy, from the retained-source backup when the work
-// store's copies were cleared.
+// infraRestoreStaleCause says what an unfinished restore has done, for a
+// stale binding's message; ok=false when none is recorded.
+func infraRestoreStaleCause(target infraBindingTarget) (string, bool) {
+	rec, present, err := readInfraRestoreRecord(target)
+	switch {
+	case !present:
+		return "", false
+	case err != nil:
+		return fmt.Sprintf("a restore of %s is under way and its record cannot be read (%v)", target.Database, err), true
+	}
+	if present, _ := infraPathExists(target.Database); present {
+		return fmt.Sprintf("a restore of snapshot %s into %s began at %s and has not finished; the database it would replace is still in place. Re-run the restore, or remove %s to keep that database", rec.Snapshot, target.Database, rec.StartedAt.Format(time.RFC3339), target.RestoreRecordPath()), true
+	}
+	return fmt.Sprintf("a restore of snapshot %s into %s began at %s and has not finished; the database it replaces is moved aside", rec.Snapshot, target.Database, rec.StartedAt.Format(time.RFC3339)), true
+}
+
+// infraStaleBindingRemedy is the command that repairs a stale binding: the
+// restore its record names when one is under way, else the re-copy, from the
+// retained-source backup when the work store's copies were cleared.
 func infraStaleBindingRemedy(target infraBindingTarget) string {
-	if data, err := os.ReadFile(target.RestoreRecordPath()); err == nil {
-		line := strings.TrimSpace(string(data))
-		if i := strings.LastIndex(line, "`"); i > 0 {
-			if j := strings.LastIndex(line[:i], "`"); j >= 0 {
-				return line[j+1 : i]
-			}
+	if rec, present, err := readInfraRestoreRecord(target); present {
+		if err == nil && rec.Command != "" {
+			return rec.Command
 		}
 		return "gc storage snapshot restore <id> --binding --" + storageFleetStoppedFlag + " (re-run the interrupted restore; " + target.RestoreRecordPath() + " names it)"
 	}
@@ -96,17 +170,21 @@ func newStorageSnapshotRestoreCmd(prefix string, stdout, stderr io.Writer) *cobr
 		SilenceUsage: true,
 		Long: `Put snapshot <id>'s binding database back in place of the live one.
 
-It refuses a snapshot of another city or another work store, and one taken
-before the binding's records changed (a migration, a recovery or a rig import
-since): the database is only half of a binding, and the records beside it are
-not restored.
+It refuses a snapshot of another work store, and one taken before the
+binding's records changed (a migration, a recovery or a rig import since; a
+rig marked clean since, or a marker that only gained its identity line, is
+compatible): the database is only half of a binding, and the records beside
+it are not restored.
 
 The snapshot is proven against its manifest first, then installed under the
 controller lock with the city stopped, in WAL mode, with the id floor raised
 past every id the replaced database held. The database it replaces, with its
--wal, -shm and -journal, is kept beside it as *.pre-restore-<ts>. A restore
-interrupted before the new database is in place leaves no database at the
-binding path, which every boot refuses, naming this command; run it again.
+-wal, -shm and -journal, is kept beside it as *.pre-restore-<ts>.
+
+From the moment it starts copying until it finishes, the binding counts as
+stale (infra.restoring beside it): every gc that boots refuses it and names
+this command. A refusal before the live database moves changes nothing. A
+restore interrupted after that holds the city stale until you run it again.
 
 Only --binding is restorable here. A work store is restored by the runbook:
 DOLT_RESET --hard to the snapshot's tag, or bd import of its export.`,
@@ -194,9 +272,13 @@ func doStorageSnapshotRestore(ctx context.Context, request storageOperatorReques
 	if err != nil {
 		return fail(fmt.Errorf("snapshot %s cannot be restored here, so nothing was restored: %w", id, err))
 	}
-	aside, err := installSnapshotBinding(ctx, target, filepath.Join(dir, file.Path), file.SHA256, m.Binding.SequenceFloor, snapshotRestoreInstruction(id, to), time.Now().UTC())
+	rec := infraRestoreRecord{Snapshot: id, To: to, Database: target.Database, StartedAt: time.Now().UTC(), Command: snapshotRestoreInstruction(id, to)}
+	aside, err := installSnapshotBinding(ctx, target, filepath.Join(dir, file.Path), file.SHA256, m.Binding.SequenceFloor, rec)
 	if err != nil {
-		return fail(fmt.Errorf("%w. Run this command again to finish", err))
+		if len(aside) == 0 {
+			return fail(fmt.Errorf("%w. Nothing was moved; the binding is as it was", err))
+		}
+		return fail(fmt.Errorf("%w. The binding is held stale until this restore finishes: run this command again", err))
 	}
 	fmt.Fprintf(stdout, "Restored the binding %s from snapshot %s.\n", target.Database, id) //nolint:errcheck // best-effort stdout
 	if len(aside) > 0 {
@@ -207,8 +289,8 @@ func doStorageSnapshotRestore(ctx context.Context, request storageOperatorReques
 }
 
 // snapshotRestorable is the binding copy of m, refused when m is of another
-// city or another work store, or when the binding's records have changed
-// since m was taken.
+// work store, or when the binding's records are no longer compatible with
+// the ones m recorded.
 func snapshotRestorable(m snapshotManifest, request storageOperatorRequest, target infraBindingTarget) (snapshotFile, error) {
 	var file *snapshotFile
 	for _, rec := range m.Stores {
@@ -219,35 +301,56 @@ func snapshotRestorable(m snapshotManifest, request storageOperatorRequest, targ
 	if file == nil || m.Binding == nil {
 		return snapshotFile{}, errors.New("it holds no binding copy")
 	}
-	if !samePath(m.City, request.CityPath) {
-		return snapshotFile{}, fmt.Errorf("it is a snapshot of the city at %s, not of this one (%s)", m.City, request.CityPath)
+	recorded, err := parseWorkStoreIdentity(m.Identity)
+	if err != nil {
+		return snapshotFile{}, fmt.Errorf("reading its work-store identity: %w", err)
 	}
-	identity, err := currentWorkStoreIdentity(request.CityPath)
+	current, err := currentWorkStoreIdentity(request.CityPath)
 	if err != nil {
 		return snapshotFile{}, err
 	}
-	if m.Identity != identity.String() {
-		return snapshotFile{}, fmt.Errorf("it was taken against the work store %s, and this city's is now %s: the binding belongs to the work store it was carried from", m.Identity, identity.String())
+	if mismatch := workStoreIdentityMismatch(recorded, current); mismatch != "" {
+		return snapshotFile{}, fmt.Errorf("it was taken against another work store: %s. The binding belongs to the work store it was carried from", strings.Replace(mismatch, "the binding was converged from", "the snapshot's binding was converged from", 1))
 	}
-	current, err := readSnapshotBindingRecords(request.CityPath, target)
+	records, err := readSnapshotBindingRecords(request.CityPath, target)
 	if err != nil {
 		return snapshotFile{}, err
 	}
-	if diff := diffSnapshotRecords(m.Binding.Records, current.Records); len(diff) > 0 {
-		return snapshotFile{}, fmt.Errorf("the binding's records have changed since it was taken: %s. A restore puts back only the database, so it would serve rows those records no longer describe (a rig import since the snapshot would leave that rig's rows in neither store). Restore a snapshot taken since, or roll the change back first", strings.Join(diff, "; "))
+	if diff := snapshotRecordsCompatible(m.Binding.Records, records.Records); len(diff) > 0 {
+		return snapshotFile{}, fmt.Errorf("the binding's records have changed since it was taken: %s. A restore puts back only the database, so it would serve rows those records no longer describe (a rig import since the snapshot would leave that rig's rows in neither store). Restore a snapshot taken since, or roll the change back first (the runbook's \"Restoring the binding\" names the steps)", strings.Join(diff, "; "))
 	}
 	return *file, nil
 }
 
-// installSnapshotBinding is restore steps 1-6 (the file comment) for target,
+// snapshotRecordsCompatible is diffSnapshotRecords less the changes a restore
+// of the snapshot's database stays true under: a rig marked clean since (it
+// moved nothing into the binding). The marker's identity line is already out
+// of its hash (snapshotRecordSum).
+func snapshotRecordsCompatible(recorded, current []snapshotRecord) []string {
+	was := make(map[string]bool, len(recorded))
+	for _, r := range recorded {
+		was[r.Name] = true
+	}
+	var kept []snapshotRecord
+	for _, r := range current {
+		if !was[r.Name] && strings.HasSuffix(r.Name, ".clean") {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return diffSnapshotRecords(recorded, kept)
+}
+
+// installSnapshotBinding is restore steps 1-7 (the file comment) for target,
 // from the snapshot copy src recorded with wantSHA and the id floor floor.
-func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src, wantSHA string, floor int64, instruction string, now time.Time) ([]string, error) {
+// aside is what it moved; empty means it changed nothing.
+func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src, wantSHA string, floor int64, rec infraRestoreRecord) ([]string, error) {
 	database, dir := target.Database, filepath.Dir(target.Database)
 	if err := quiesceSnapshotRestoreTarget(ctx, database); err != nil {
 		return nil, err
 	}
-	if err := writeRigImportRecord(target.RestoreRecordPath(), fmt.Sprintf("restore of binding %s into %s under way since %s; until it finishes the binding is stale. Finish it with `%s`", target.Binding, database, now.Format(time.RFC3339), instruction)); err != nil {
-		return nil, fmt.Errorf("recording the restore at %s: %w", target.RestoreRecordPath(), err)
+	if err := writeInfraRestoreRecord(target, rec); err != nil {
+		return nil, err
 	}
 	// Temp copies a killed restore left.
 	if stale, err := filepath.Glob(database + ".restore-*"); err == nil {
@@ -257,7 +360,7 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(database)+".restore-*")
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, os.Remove(target.RestoreRecordPath()))
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
@@ -283,19 +386,31 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 	if err := beads.SetSQLiteJournalModeWAL(ctx, tmpPath); err != nil {
 		return failCopy(err)
 	}
-	if err := raiseRestoredSequenceFloor(ctx, target, floor); err != nil {
-		return failCopy(err)
-	}
 	if err := storageSnapshotStep("restore copied"); err != nil {
 		return failCopy(err)
 	}
-	suffix := ".pre-restore-" + now.Format("20060102T150405Z")
+	// A process that opened the binding during the copy, past its boot gate,
+	// is refused here, before anything moves.
+	if err := quiesceSnapshotRestoreTarget(ctx, database); err != nil {
+		return failCopy(err)
+	}
+	prefix, err := infraBindingIDPrefix()
+	if err != nil {
+		return failCopy(err)
+	}
+	if _, err := beads.RaiseSQLiteSequenceFloorPast(target.Dir, prefix, []int64{floor}, database); err != nil {
+		return failCopy(fmt.Errorf("raising the binding's id floor: %w", err))
+	}
+	suffix := ".pre-restore-" + rec.StartedAt.Format("20060102T150405Z")
 	var aside []string
 	for _, p := range []string{database, database + "-wal", database + "-shm", database + "-journal"} {
 		if _, err := os.Lstat(p); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err := os.Rename(p, p+suffix); err != nil {
+			if len(aside) == 0 {
+				return failCopy(fmt.Errorf("moving %s aside: %w", p, err))
+			}
 			return aside, fmt.Errorf("moving %s aside: %w", p, err)
 		}
 		aside = append(aside, p+suffix)
@@ -304,11 +419,11 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 		}
 	}
 	if err := os.Rename(tmpPath, database); err != nil {
-		return aside, fmt.Errorf("installing %s: %w", database, err)
+		return append(aside, tmpPath), fmt.Errorf("installing %s: %w", database, err)
 	}
 	syncInfraDir(dir)
 	if err := os.Remove(target.RestoreRecordPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return aside, fmt.Errorf("removing the restore record %s: %w", target.RestoreRecordPath(), err)
+		return append(aside, target.RestoreRecordPath()), fmt.Errorf("removing the restore record %s: %w", target.RestoreRecordPath(), err)
 	}
 	syncInfraDir(target.Root)
 	return aside, nil
@@ -335,31 +450,6 @@ func quiesceSnapshotRestoreTarget(ctx context.Context, database string) error {
 		if _, err := os.Lstat(p); err == nil {
 			return fmt.Errorf("another process has the binding %s open (%s outlives this command's connection); stop it and run this again", database, p)
 		}
-	}
-	return nil
-}
-
-// raiseRestoredSequenceFloor raises the binding's id floor to the most of its
-// current value, the snapshot's (recorded) and the replaced database's
-// high-water, so the restored database mints no id the replaced one held.
-func raiseRestoredSequenceFloor(ctx context.Context, target infraBindingTarget, recorded int64) error {
-	prefix, err := infraBindingIDPrefix()
-	if err != nil {
-		return err
-	}
-	floor, err := beads.SQLiteSequenceFloorAt(target.Dir, prefix)
-	if err != nil {
-		return fmt.Errorf("reading the binding's id floor: %w", err)
-	}
-	floor = max(floor, recorded)
-	// A database too damaged to read gives no high-water, and needs none: the
-	// floor leads the allocator (every block is fsynced to it before an id in
-	// it is handed out), so it already covers every id that database minted.
-	if hw, err := beads.SQLiteSequenceHighWaterAt(ctx, target.Database, prefix); err == nil {
-		floor = max(floor, hw)
-	}
-	if err := beads.RaiseSQLiteSequenceFloorAt(target.Dir, prefix, floor); err != nil {
-		return fmt.Errorf("raising the binding's id floor to %d: %w", floor, err)
 	}
 	return nil
 }

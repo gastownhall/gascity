@@ -749,7 +749,7 @@ func TestInstallSnapshotBindingRefusesACopyThatDoesNotMatch(t *testing.T) {
 	id, m := onlySnapshot(t, city.to)
 	before := mustReadFile(t, city.target.Database)
 	src := filepath.Join(city.to, id, m.Stores[0].Exact.File.Path)
-	if _, err := installSnapshotBinding(context.Background(), city.target, src, strings.Repeat("0", 64), m.Binding.SequenceFloor, "restore", time.Now()); err == nil {
+	if _, err := installSnapshotBinding(context.Background(), city.target, src, strings.Repeat("0", 64), m.Binding.SequenceFloor, infraRestoreRecord{Snapshot: id, StartedAt: time.Now()}); err == nil {
 		t.Fatal("a copy whose hash does not match was installed")
 	}
 	if !bytes.Equal(mustReadFile(t, city.target.Database), before) {
@@ -1232,7 +1232,6 @@ func TestStorageSnapshotRestoreRefusesAfterTheRecordsChanged(t *testing.T) {
 		edit   func(*snapshotManifest)
 		reason string
 	}{
-		{"another city", func(m *snapshotManifest) { m.City = "/elsewhere" }, "not of this one"},
 		{"another work store", func(m *snapshotManifest) { m.Identity = "project=other database=- path=-" }, "work store"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1361,7 +1360,7 @@ func TestStorageSnapshotRefusesWhileTheBindingIsBeingWritten(t *testing.T) {
 				t.Fatal(err)
 			}
 			return func() { _ = guard.Release() }
-		}, "another storage migration"},
+		}, "another storage command (a migration, a recovery, a purge or a restore) holds this city"},
 		{"re-copy", func(t *testing.T, city snapshotCity) func() {
 			if err := os.WriteFile(city.target.RecopyRecordPath(), []byte("re-copy\n"), 0o644); err != nil {
 				t.Fatal(err)
@@ -1592,5 +1591,341 @@ func TestStorageSnapshotRestoreRaisesALaggingFloor(t *testing.T) {
 		if suffix(a) <= high {
 			t.Fatalf("the restored binding minted %s, at or below gcg-%d, the replaced database's high-water: its ids can be minted again", a, high)
 		}
+	}
+}
+
+// TestStorageSnapshotRestoreHoldsTheBindingStaleWhileCopying is round-3 A:
+// from the moment the restore starts copying, the binding counts as stale, so
+// a gc that boots during the copy refuses it (and names the restore) instead
+// of writing a row the restore then moves aside.
+func TestStorageSnapshotRestoreHoldsTheBindingStaleWhileCopying(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	prev := storageSnapshotStep
+	t.Cleanup(func() { storageSnapshotStep = prev })
+	sawStale := false
+	storageSnapshotStep = func(step string) error {
+		if step != "restore copied" {
+			return nil
+		}
+		state, err := readInfraConvergenceState(city.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sawStale = state == infraConvergenceStale
+		var stdout, stderr bytes.Buffer
+		if code := doStorageStatus(city.request, &stdout, &stderr); code == 0 || !strings.Contains(stdout.String(), "snapshot restore "+id) {
+			t.Errorf("status during the copy (exit %d) does not refuse naming the restore:\n%s", code, stdout.String())
+		}
+		return nil
+	}
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	if !sawStale {
+		t.Fatal("the binding was not stale during the restore's copy: a gc booting then would write to a database about to be moved aside")
+	}
+	if state, err := readInfraConvergenceState(city.target); err != nil || state != infraConvergenceMarked {
+		t.Fatalf("after the restore the binding is %v (%v), want marked", state, err)
+	}
+}
+
+// TestStorageSnapshotRestoreRefusesAWriterThatOpenedDuringTheCopy is round-3
+// A: a process that opened the binding during the copy, past any boot gate,
+// and still has it open, is refused before anything moves; its row stays in
+// the live binding, and the restore's record goes.
+func TestStorageSnapshotRestoreRefusesAWriterThatOpenedDuringTheCopy(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	prev := storageSnapshotStep
+	t.Cleanup(func() { storageSnapshotStep = prev })
+	var late beads.Store
+	var row beads.Bead
+	storageSnapshotStep = func(step string) error {
+		if step != "restore copied" {
+			return nil
+		}
+		var err error
+		if late, err = openInfraDestination(city.target); err != nil {
+			t.Fatal(err)
+		}
+		row = mustCreateInfraBead(t, late, beads.Bead{Title: "written during the copy", Type: "task"})
+		return nil
+	}
+	code, stderr := city.restore(t, id)
+	if late != nil {
+		_ = closeBeadStoreHandle(late)
+	}
+	if code == 0 || !strings.Contains(stderr, "another process has the binding") || !strings.Contains(stderr, "Nothing was moved") {
+		t.Fatalf("restore with a writer that opened during the copy: exit %d: %s", code, stderr)
+	}
+	if aside, _ := filepath.Glob(city.target.Database + "*.pre-restore-*"); len(aside) != 0 {
+		t.Fatalf("a refused restore moved %v", aside)
+	}
+	if _, err := os.Stat(city.target.RestoreRecordPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused restore left its record, holding the binding stale")
+	}
+	found := false
+	for _, got := range bindingFingerprint(t, city.target) {
+		found = found || got == row.ID
+	}
+	if !found {
+		t.Fatalf("the row written during the copy (%s) is not in the live binding", row.ID)
+	}
+}
+
+// TestStorageSnapshotRestoreSupersedesAnAbandonedRecord: a restore killed
+// before its first move leaves its record over the old database. The binding
+// is stale, its message says the database is still in place and how to keep
+// it, and a later restore supersedes the record rather than leaving it to name
+// the old snapshot.
+func TestStorageSnapshotRestoreSupersedesAnAbandonedRecord(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	if err := writeInfraRestoreRecord(city.target, infraRestoreRecord{Snapshot: "20200101T000000Z", Database: city.target.Database, StartedAt: time.Now().UTC(), Command: snapshotRestoreInstruction("20200101T000000Z", city.to)}); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := readInfraConvergenceState(city.target); state != infraConvergenceStale {
+		t.Fatalf("a binding under an unfinished restore's record is %v, want stale", state)
+	}
+	if cause := infraStaleCause(city.target); !strings.Contains(cause, "still in place") || !strings.Contains(cause, "remove "+city.target.RestoreRecordPath()) {
+		t.Fatalf("stale cause = %q", cause)
+	}
+	prev := storageSnapshotStep
+	t.Cleanup(func() { storageSnapshotStep = prev })
+	storageSnapshotStep = func(step string) error {
+		if step == "restore copied" {
+			rec, _, err := readInfraRestoreRecord(city.target)
+			if err != nil || rec.Snapshot != id {
+				t.Errorf("during the restore the record names %q (%v), want %s", rec.Snapshot, err, id)
+			}
+		}
+		return nil
+	}
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	if _, err := os.Stat(city.target.RestoreRecordPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the superseded record survived the restore")
+	}
+}
+
+// TestStorageSnapshotRestoreAcceptsCompatibleChanges is round-3 B: changes a
+// restore of the snapshot's database stays true under do not refuse it: a rig
+// marked clean since, a marker that only gained its identity line, the city
+// moved to another path, and the work store's path changed under the same
+// project.
+func TestStorageSnapshotRestoreAcceptsCompatibleChanges(t *testing.T) {
+	t.Run("rig marked clean since", func(t *testing.T) {
+		city, id, _ := snapshottedCity(t)
+		if err := os.WriteFile(filepath.Join(city.target.Root, rigGraphCleanMarkerName("quiet")), []byte("clean\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if code, stderr := city.restore(t, id); code != 0 {
+			t.Fatal(stderr)
+		}
+	})
+	t.Run("marker gained its identity line", func(t *testing.T) {
+		city := newSnapshotCity(t)
+		marker := string(mustReadFile(t, city.target.MarkerPath()))
+		var legacy []string
+		for _, line := range strings.SplitAfter(marker, "\n") {
+			if !strings.HasPrefix(line, workStoreIdentityLinePrefix) {
+				legacy = append(legacy, line)
+			}
+		}
+		if strings.Join(legacy, "") == marker {
+			t.Fatal("the fixture's marker has no identity line to take out")
+		}
+		if err := os.WriteFile(city.target.MarkerPath(), []byte(strings.Join(legacy, "")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
+			t.Fatal(stderr)
+		}
+		id, _ := onlySnapshot(t, city.to)
+		if err := os.WriteFile(city.target.MarkerPath(), []byte(marker), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		city.request.FleetStopped = true
+		if code, stderr := city.restore(t, id); code != 0 {
+			t.Fatal(stderr)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		edit func(*snapshotManifest)
+	}{
+		{"city moved", func(m *snapshotManifest) { m.City = "/where/the/city/was" }},
+		{"work-store path changed", func(m *snapshotManifest) {
+			id, err := parseWorkStoreIdentity(m.Identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id.Path = "/where/the/work/store/was"
+			m.Identity = id.String()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, id, _ := snapshottedCity(t)
+			manifestPath := filepath.Join(city.to, id, storageSnapshotManifestName)
+			var m snapshotManifest
+			if err := json.Unmarshal(mustReadFile(t, manifestPath), &m); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(&m)
+			data, _ := json.Marshal(m)
+			if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if code, stderr := city.restore(t, id); code != 0 {
+				t.Fatal(stderr)
+			}
+		})
+	}
+}
+
+// TestStorageSnapshotRestoreRefusesAGoneRecord is M4f: a record the snapshot
+// recorded that is gone since (a rig import's marker moved aside) refuses.
+func TestStorageSnapshotRestoreRefusesAGoneRecord(t *testing.T) {
+	city := newSnapshotCity(t)
+	gp := filepath.Join(city.target.Root, rigGraphImportMarkerName("gp"))
+	if err := os.WriteFile(gp, []byte("imported\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
+		t.Fatal(stderr)
+	}
+	id, _ := onlySnapshot(t, city.to)
+	if err := os.Remove(gp); err != nil {
+		t.Fatal(err)
+	}
+	city.request.FleetStopped = true
+	if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "binding/infra.rig.gp.migrated (gone since the snapshot)") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+}
+
+// TestStorageSnapshotRestoreUsesTheRecordedFloor is M4i: the floor the
+// snapshot recorded counts even when the live sidecar is gone and neither
+// database reaches it, so ids the binding had reserved up to it are not
+// minted again.
+func TestStorageSnapshotRestoreUsesTheRecordedFloor(t *testing.T) {
+	city := newSnapshotCity(t)
+	const recorded = 5000
+	if _, err := beads.RaiseSQLiteSequenceFloorPast(city.target.Dir, "gcg", []int64{recorded}); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
+		t.Fatal(stderr)
+	}
+	id, m := onlySnapshot(t, city.to)
+	if m.Binding.SequenceFloor != recorded {
+		t.Fatalf("the manifest records floor %d, want %d", m.Binding.SequenceFloor, recorded)
+	}
+	floors, _ := filepath.Glob(filepath.Join(city.target.Dir, "*seqfloor*"))
+	for _, f := range floors {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	city.request.FleetStopped = true
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	for _, a := range addBindingRows(t, city.target, 3) {
+		n, err := strconv.Atoi(a[strings.LastIndex(a, "-")+1:])
+		if err != nil || n <= recorded {
+			t.Fatalf("the restored binding minted %s, at or below the recorded floor %d", a, recorded)
+		}
+	}
+}
+
+// TestStorageSnapshotRestoreRaisesTheFloorPastAWrappedRange is round-3 C end
+// to end: the replaced binding holds a wrapped (negative) auto id, its floor
+// sidecar is gone, and the restored binding still mints, past the wrapped id.
+func TestStorageSnapshotRestoreRaisesTheFloorPastAWrappedRange(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	const wrapped = int64(-9223372036853998976)
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator, ok := beads.As[beads.ForeignIDCreator](binding)
+	if !ok {
+		t.Fatal("the binding cannot pin an id")
+	}
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: fmt.Sprintf("gcg-%d", wrapped), Title: "minted by a wrapping build", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	floors, _ := filepath.Glob(filepath.Join(city.target.Dir, "*seqfloor*"))
+	for _, f := range floors {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	if floor, err := beads.SQLiteSequenceFloorAt(city.target.Dir, "gcg"); err != nil || floor != wrapped {
+		t.Fatalf("floor after the restore = %d (%v), want the wrapped %d", floor, err, wrapped)
+	}
+	minted := addBindingRows(t, city.target, 1)
+	if minted[0] != fmt.Sprintf("gcg-%d", wrapped+1) {
+		t.Fatalf("the restored binding minted %s, want the id after the wrapped one", minted[0])
+	}
+}
+
+// TestStorageSnapshotNamesAnInconsistentRow is round-3 D: a row stored under
+// an id its bead does not carry fails the snapshot, naming the row, instead
+// of a count mismatch with no culprit.
+func TestStorageSnapshotNamesAnInconsistentRow(t *testing.T) {
+	city := newSnapshotCity(t)
+	db, err := sql.Open("sqlite", "file:"+city.target.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var victim string
+	if err := db.QueryRow("SELECT id FROM beads ORDER BY id LIMIT 1").Scan(&victim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE beads SET bead_json = json_set(bead_json, '$.id', 'gcg-damaged') WHERE id = ?", victim); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true})
+	if code == 0 || !strings.Contains(stderr, victim) || !strings.Contains(stderr, "inconsistent") {
+		t.Fatalf("snapshot over an inconsistent row %s: exit %d: %s", victim, code, stderr)
+	}
+}
+
+// TestSnapshotDiskPreflightCountsTheWAL is R06: the preflight measures the
+// live WAL, so a binding whose WAL is large refuses where its database alone
+// would fit.
+func TestSnapshotDiskPreflightCountsTheWAL(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "beads.sqlite")
+	for path, size := range map[string]int64{database: 1 << 20, database + "-wal": 100 << 20} {
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+	}
+	withWAL, withoutWAL := snapshotDiskNeed(1<<20, 100<<20), snapshotDiskNeed(1<<20, 0)
+	free := doltDiskMinFreeBytes() + (withWAL+withoutWAL)/2
+	prev := doltContainerFreeBytesFunc
+	t.Cleanup(func() { doltContainerFreeBytesFunc = prev })
+	doltContainerFreeBytesFunc = func(string) (int64, error) { return free, nil }
+	var stderr bytes.Buffer
+	if err := snapshotDiskPreflight(dir, database, "x", &stderr); err == nil {
+		t.Fatalf("the preflight passed %d free bytes for a binding that needs %d with its WAL", free, withWAL)
+	}
+	if err := os.Remove(database + "-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotDiskPreflight(dir, database, "x", &stderr); err != nil {
+		t.Fatalf("without the WAL the same free space should fit: %v", err)
 	}
 }

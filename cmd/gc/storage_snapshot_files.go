@@ -151,8 +151,7 @@ func readSnapshotBindingRecords(cityPath string, target infraBindingTarget) (sna
 		if err != nil {
 			return out, fmt.Errorf("reading the binding record %s: %w", p, err)
 		}
-		sum := sha256.Sum256(data)
-		out.Records = append(out.Records, snapshotRecord{Name: name, SHA256: hex.EncodeToString(sum[:])})
+		out.Records = append(out.Records, snapshotRecord{Name: name, SHA256: snapshotRecordSum(name, data)})
 	}
 	sort.Slice(out.Records, func(i, j int) bool { return out.Records[i].Name < out.Records[j].Name })
 	prefix, err := infraBindingIDPrefix()
@@ -163,6 +162,25 @@ func readSnapshotBindingRecords(cityPath string, target infraBindingTarget) (sna
 		return out, fmt.Errorf("reading the binding's id floor: %w", err)
 	}
 	return out, nil
+}
+
+// snapshotRecordSum is a record's sha256, the convergence marker's without
+// its work-store identity line: the first converged boot back-fills that line
+// into a legacy marker (backfillMarkerWorkStoreIdentity), which records nothing
+// new about what the database holds, so it must not make a snapshot of the
+// same binding unrestorable.
+func snapshotRecordSum(name string, data []byte) string {
+	if name == "binding/"+infraMigratedMarkerName {
+		var kept []string
+		for _, line := range strings.SplitAfter(string(data), "\n") {
+			if !strings.HasPrefix(line, workStoreIdentityLinePrefix) {
+				kept = append(kept, line)
+			}
+		}
+		data = []byte(strings.Join(kept, ""))
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // diffSnapshotRecords lists every record that was added, removed or changed
@@ -528,9 +546,11 @@ func applySnapshotRetention(to string, keep int, own string) ([]string, error) {
 	return removed, errors.Join(errs...)
 }
 
-// pinStorageSnapshot pins a complete snapshot so retention keeps it: the
-// split's journal (S5-H) pins its mandatory snapshot until the split is done.
-// The pin is a file, so an operator can see and remove it.
+// pinStorageSnapshot pins a complete snapshot so retention keeps it. It has
+// no caller in this slice on purpose: S5-H's journal pins the split's
+// mandatory snapshot with it until the split is done, and retention honors
+// the pin from now, so an operator's hand-written pin works today. The pin is
+// a file, so an operator can see and remove it.
 func pinStorageSnapshot(to, id, reason string) error {
 	dir := filepath.Join(to, id)
 	if _, err := readSnapshotManifest(dir); err != nil {

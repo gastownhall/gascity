@@ -65,6 +65,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
 const (
@@ -256,9 +257,12 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 		}
 		defer lock.Close() //nolint:errcheck // released last
 	}
-	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
+	guard, err := storebinding.AcquireMigrationGuard(ctx, cityMigrationGuardDirectory(request.CityPath), storageMigrationGeneration)
+	if errors.Is(err, storebinding.ErrMigrationGuardBusy) {
+		return fail(errors.New("another storage command (a migration, a recovery, a purge or a restore) holds this city, so no snapshot was taken; the binding may be mid-write. Run this again when it is done (the binding-snapshot order retries at its next interval)"))
+	}
 	if err != nil {
-		return fail(err)
+		return fail(fmt.Errorf("taking the migration guard: %w", err))
 	}
 	defer guard.Release() //nolint:errcheck // released before the lock
 	if bound {
@@ -496,6 +500,9 @@ func snapshotBinding(ctx context.Context, target infraBindingTarget, dir string)
 			if err != nil {
 				return fmt.Errorf("listing the copy: %w", err)
 			}
+			if err := snapshotPageConsistency(page, rows); err != nil {
+				return err
+			}
 			edges, verdict, err := emitSnapshotEntries(rows, store, batch, payloadBatch, payloads, absent, emit)
 			if err != nil {
 				return err
@@ -509,6 +516,32 @@ func snapshotBinding(ctx context.Context, target infraBindingTarget, dir string)
 		rec.Payloads = snapshotPayloadVerdict(payloads, payloadBatch, absent)
 	}
 	return rec, err
+}
+
+// snapshotPageConsistency refuses a page whose rows are not exactly the ids
+// it asked for. The page's ids come from the database's id column, and a row
+// decodes its id from the bead it stores: a row whose two disagree is a
+// damaged binding, and it is named rather than silently dropped or doubled
+// (a copy of it would not restore the bead its id names).
+func snapshotPageConsistency(page []string, rows []beads.Bead) error {
+	want := make(map[string]bool, len(page))
+	for _, id := range page {
+		want[id] = true
+	}
+	var foreign []string
+	for _, b := range rows {
+		if !want[b.ID] {
+			foreign = append(foreign, b.ID)
+			continue
+		}
+		delete(want, b.ID)
+	}
+	if len(want) == 0 && len(foreign) == 0 {
+		return nil
+	}
+	missing := sortedMapKeys(want)
+	sort.Strings(foreign)
+	return fmt.Errorf("the binding is inconsistent: row(s) %s are stored under an id their bead does not carry (it reads back as %s), so no JSONL can record them faithfully. Repair those rows, then snapshot again", strings.Join(missing, ", "), strings.Join(foreign, ", "))
 }
 
 // snapshotScope snapshots the city's work store or one rig's: the exact copy
