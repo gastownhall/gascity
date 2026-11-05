@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // This is the second of the two regression tests Risk R1 requires (design
@@ -354,10 +356,16 @@ func isGeneratedGoFile(data []byte) bool {
 	return false
 }
 
-// findRepoRoot walks up from this test file's own directory to the nearest
-// ancestor containing go.mod.
+// findRepoRoot returns the module root. Under Bazel the runfiles tree (this
+// test's //:go.mod + //:repo_go_srcs data) is the module, because Bazel
+// compiles with runfiles-relative paths and runtime.Caller arithmetic lands on
+// "." rather than the root. Elsewhere it walks up from this test file's own
+// directory to the nearest ancestor containing go.mod.
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
