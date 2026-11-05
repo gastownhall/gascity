@@ -309,8 +309,15 @@ func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
 	}
 	var out []beads.Store
 	add := func(store beads.Store) {
-		if store == nil || slices.Contains(out, store) {
+		if store == nil {
 			return
+		}
+		// SameStore, not ==: a class handle over a store already listed is
+		// that store, and sweeping it twice moves nothing more.
+		for _, listed := range out {
+			if beads.SameStore(listed, store) {
+				return
+			}
 		}
 		out = append(out, store)
 	}

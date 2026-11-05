@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -179,6 +181,11 @@ func (r *rebuiltOverState) SessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{Store: r.store}
 }
 func (r *rebuiltOverState) CityBeadStore() beads.Store { return r.store }
+
+func (r *rebuiltOverState) Stores() storeref.Stores {
+	return mirrorAccessorStores(r, slices.Collect(maps.Keys(r.stores)))
+}
+
 func (r *rebuiltOverState) EventProvider() events.Provider {
 	if r.ev != nil {
 		return r.ev

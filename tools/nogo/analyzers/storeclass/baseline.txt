@@ -1733,9 +1733,7 @@ internal/agentutil/pool.go	findSessionNameByTemplate	raw-param	1
 internal/api/beads_graph_federation.go	Server.bindingReservedPrefixes	raw-param	1
 internal/api/beads_graph_federation.go	relocatedGraphStore	raw-result	1
 internal/api/beads_graph_federation.go	relocatedGraphStore	unwrap	1
-internal/api/cache_liveness.go	cacheAgeSeconds	cap-assert	1
 internal/api/cache_liveness.go	cacheAgeSeconds	raw-param	1
-internal/api/cache_liveness.go	cacheLiveOr503	cap-assert	1
 internal/api/cache_liveness.go	cacheLiveOr503	raw-param	1
 internal/api/conversation_ops.go	Server.conversationOpTarget	unwrap	2
 internal/api/conversation_ops.go	Server.humaHandleConversationOpPropose	unwrap	2
@@ -1758,7 +1756,6 @@ internal/api/handler_agent_output.go	Server.trySessionLogOutputHuma	unwrap	1
 internal/api/handler_agent_output_stream.go	Server.streamSessionLog	unwrap	1
 internal/api/handler_agent_output_stream.go	Server.streamSessionLogHuma	unwrap	1
 internal/api/handler_agents.go	Server.enrichSessionMeta	unwrap	1
-internal/api/handler_agents.go	Server.findActiveBeadForAssigneesWithFreshness	cap-assert	1
 internal/api/handler_agents.go	activeBeadSearchScope	raw-param	1
 internal/api/handler_agents.go	activeBeadSearchScope	raw-result	1
 internal/api/handler_agents.go	findLiveActiveBeadInStores	raw-param	1
@@ -1826,20 +1823,16 @@ internal/api/handler_status.go	Server.statusSessionSnapshot	unwrap	1
 internal/api/handler_status.go	Server.statusWorkCounts	raw-field	1
 internal/api/handler_status.go	Server.statusWorkCounts	unwrap	1
 internal/api/handler_status.go	statusListStoreWithTimeout	raw-param	1
-internal/api/handler_status.go	statusReadyStoreWithTimeout	cap-assert	1
 internal/api/handler_status.go	statusReadyStoreWithTimeout	raw-param	1
 internal/api/handler_status.go	statusStoreWorkCounts	raw-param	1
 internal/api/handler_status.go	statusStoreWorkCountsFor	raw-param	1
-internal/api/handler_status.go	statusStoredWorkCounts	cap-assert	1
 internal/api/handler_status.go	statusStoredWorkCounts	raw-param	1
 internal/api/huma_handlers_beads.go	Server.humaHandleBeadList	read-marker	1
 internal/api/huma_handlers_beads.go	Server.humaHandleBeadReady	raw-param	1
-internal/api/huma_handlers_beads.go	Server.humaHandleBeadUpdate	cap-assert	1
 internal/api/huma_handlers_beads.go	Server.refuseClassFlip	raw-param	1
 internal/api/huma_handlers_beads.go	Server.storeClassHolds	raw-param	1
 internal/api/huma_handlers_beads.go	beadListFanOut	raw-param	1
 internal/api/huma_handlers_beads.go	beadListLeg	raw-field	1
-internal/api/huma_handlers_beads.go	beadListLegCount	cap-assert	1
 internal/api/huma_handlers_beads.go	beadListLegCount	raw-param	1
 internal/api/huma_handlers_convoys.go	Server.humaDeleteWorkflow	read-marker	3
 internal/api/huma_handlers_convoys.go	Server.humaHandleConvoyAdd	mint	1
@@ -1856,7 +1849,6 @@ internal/api/huma_handlers_orders.go	appendOrdersClassStoreInfo	unwrap	1
 internal/api/huma_handlers_orders.go	orderFrontDoorsFromWorkflowInfos	mint	2
 internal/api/huma_handlers_orders.go	orderHistoryBeadAcrossStoreInfos	read-marker	1
 internal/api/huma_handlers_orders.go	orderHistoryBeadsAcrossStoreInfos	read-marker	1
-internal/api/huma_handlers_orders.go	orderHistoryBeadsAcrossStoreInfosCachedFirst	cap-assert	1
 internal/api/huma_handlers_orders.go	orderHistoryBeadsAcrossStoreInfosCachedFirst	read-marker	1
 internal/api/huma_handlers_rigs.go	Server.rollbackFailedProvision	raw-param	1
 internal/api/huma_handlers_runs.go	Server.cancelRun	mint	1
@@ -2023,9 +2015,7 @@ internal/api/session_runtime.go	Server.sessionMetadata	unwrap	1
 internal/api/session_turn.go	Server.humaHandleSessionTurn	unwrap	3
 internal/api/state.go	State	raw-param	2
 internal/api/state.go	State	raw-result	4
-internal/api/store_health.go	countBeadStoreRows	cap-assert	1
 internal/api/store_health.go	countBeadStoreRows	raw-param	1
-internal/api/store_health.go	measuredStoreRows	cap-assert	1
 internal/api/store_health.go	measuredStoreRows	raw-param	1
 internal/api/work_record_close_gate.go	Server.gateWorkRecordClose	raw-param	1
 internal/api/work_record_close_gate.go	Server.workRecordLegacyRepoDir	raw-param	1

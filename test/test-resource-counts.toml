@@ -912,6 +912,18 @@ resource = "environment"
 calls = 3
 
 [[count]]
+path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/infra_copy_manifest_test.go"
 resource = "fixed_sleep"
 calls = 1

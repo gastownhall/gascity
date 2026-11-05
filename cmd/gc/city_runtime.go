@@ -261,6 +261,9 @@ type CityRuntime struct {
 	// they change (city_stores.go).
 	standaloneStores    storesEpochCache
 	standaloneRigStores map[string]beads.Store
+	// standaloneRigGen names standaloneRigStores for the store epoch:
+	// setStandaloneStores bumps it on every swap.
+	standaloneRigGen uint64
 
 	// storageRoutes is the opened non-work storage binding this process
 	// resolved once at boot, or nil for every city that authors no [storage]
@@ -4639,6 +4642,7 @@ func (cr *CityRuntime) setStandaloneStores(city beads.Store, rigs map[string]bea
 	cr.serviceStateMu.Lock()
 	cr.standaloneCityStore = city
 	cr.standaloneRigStores = rigs
+	cr.standaloneRigGen++
 	cr.serviceStateMu.Unlock()
 }
 
