@@ -6,7 +6,9 @@ reports into one verdict:
 
 * osv-scanner (every lockfile and go.mod). A finding blocks when its CVSS
   score is 7.0 or higher, or, when it carries no score, when its advisory
-  labels itself HIGH or CRITICAL.
+  labels itself HIGH or CRITICAL. A known-malicious package (an OSV MAL-*
+  record from the OpenSSF malicious-packages feed) always blocks: those
+  records carry no score and no label, so the CVSS rule alone would pass them.
 * govulncheck (each Go module). The Go vulnerability database carries no
   severity at all, so the gate uses reachability instead: a finding blocks
   when the module calls the vulnerable symbol. Imported-only and
@@ -37,7 +39,8 @@ from pathlib import Path
 HIGH_CVSS = 7.0
 CRITICAL_CVSS = 9.0
 MEDIUM_CVSS = 4.0
-BLOCKING_LABELS = frozenset({"HIGH", "CRITICAL"})
+MALICIOUS = "MALICIOUS"
+BLOCKING_LABELS = frozenset({"HIGH", "CRITICAL", MALICIOUS})
 REACHABLE = "REACHABLE"
 
 
@@ -112,6 +115,8 @@ def label_for_score(score: float) -> str:
 
 
 def _group_severity(group: dict, vulns_by_id: dict[str, dict]) -> str:
+    if any(str(vuln_id).startswith("MAL-") for vuln_id in (*group.get("ids", []), *group.get("aliases", []))):
+        return MALICIOUS
     raw = str(group.get("max_severity") or "").strip()
     if raw:
         try:

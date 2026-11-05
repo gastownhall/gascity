@@ -114,6 +114,26 @@ class OSVTests(unittest.TestCase):
         )
         self.assertEqual([(f.severity, f.gating) for f in findings], [("HIGH", True), ("UNSCORED", False)])
 
+    def test_malicious_package_blocks_without_a_score(self) -> None:
+        # OpenSSF malicious-packages records (MAL-*) carry no CVSS score and no
+        # label; a MAL alias also outranks a low score on a grouped advisory.
+        findings = gate.osv_findings(
+            osv_report(
+                osv_package(
+                    "flatmap-stream",
+                    "0.1.1",
+                    [
+                        {"ids": ["MAL-2025-20690"], "aliases": ["MAL-2025-20690"], "max_severity": ""},
+                        {"ids": ["GHSA-low"], "aliases": ["GHSA-low", "MAL-2025-1"], "max_severity": "3.1"},
+                    ],
+                    [{"id": "MAL-2025-20690"}, {"id": "GHSA-low", "database_specific": {"severity": "LOW"}}],
+                )
+            )
+        )
+        self.assertEqual([(f.severity, f.gating) for f in findings], [(gate.MALICIOUS, True), (gate.MALICIOUS, True)])
+        verdict = gate.decide(findings, [], TODAY)
+        self.assertEqual(len(verdict.blocking), 2)
+
     def test_empty_report_has_no_findings(self) -> None:
         self.assertEqual(gate.osv_findings({"results": []}), [])
         self.assertEqual(gate.osv_findings({}), [])
