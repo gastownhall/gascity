@@ -55,7 +55,7 @@ type seamShape struct {
 	name string
 	// open stacks the shape over an already-seeded engine and returns what a
 	// caller holds. A cache in the stack is primed after the seed.
-	open func(t *testing.T, e guardedMem) beads.Store
+	open func(t *testing.T, e seamEngine) beads.Store
 }
 
 func newCache(t *testing.T, backing beads.Store) *beads.CachingStore {
@@ -69,24 +69,24 @@ func newCache(t *testing.T, backing beads.Store) *beads.CachingStore {
 
 func seamShapes() []seamShape {
 	return []seamShape{
-		{"decorator over engine", func(_ *testing.T, e guardedMem) beads.Store {
+		{"decorator over engine", func(_ *testing.T, e seamEngine) beads.Store {
 			return beads.WithRouteChangeClearing(e, identityNormalizer)
 		}},
 		// Production shape 1: the CLI work store, decorator over the policy store.
-		{"decorator over targeter over engine", func(_ *testing.T, e guardedMem) beads.Store {
+		{"decorator over targeter over engine", func(_ *testing.T, e seamEngine) beads.Store {
 			return beads.WithRouteChangeClearing(targetingStore{Store: e, target: e}, identityNormalizer)
 		}},
 		// Production shape 3: the controller binding, cache over decorator.
-		{"cache over decorator over engine", func(t *testing.T, e guardedMem) beads.Store {
+		{"cache over decorator over engine", func(t *testing.T, e seamEngine) beads.Store {
 			return newCache(t, beads.WithRouteChangeClearing(e, identityNormalizer))
 		}},
 		// Production shape 2: the controller work ledger, policy over cache over decorator.
-		{"targeter over cache over decorator over engine", func(t *testing.T, e guardedMem) beads.Store {
+		{"targeter over cache over decorator over engine", func(t *testing.T, e seamEngine) beads.Store {
 			c := newCache(t, beads.WithRouteChangeClearing(e, identityNormalizer))
 			return targetingStore{Store: c, target: c}
 		}},
 		// The decorator outermost over a cache (the shape the lane test also runs).
-		{"decorator over cache over engine", func(t *testing.T, e guardedMem) beads.Store {
+		{"decorator over cache over engine", func(t *testing.T, e seamEngine) beads.Store {
 			return beads.WithRouteChangeClearing(newCache(t, e), identityNormalizer)
 		}},
 	}
@@ -98,7 +98,7 @@ type seamCarrier struct {
 	// write attempts to change key from `from` to `to` on bead id through the
 	// carrier. stale makes the carrier's own precondition fail. landed reports
 	// whether the write took effect; an error is a transport failure.
-	write func(t *testing.T, store beads.Store, engine guardedMem, id, key, from, to string, stale bool) (landed bool, err error)
+	write func(t *testing.T, store beads.Store, engine seamEngine, id, key, from, to string, stale bool) (landed bool, err error)
 }
 
 func casLanded(w beads.MetadataCASWriter, ok bool, t *testing.T, id, key, from, to string, stale bool) (bool, error) {
@@ -112,7 +112,7 @@ func casLanded(w beads.MetadataCASWriter, ok bool, t *testing.T, id, key, from, 
 	return w.CompareAndSetMetadataKey(id, key, from, to)
 }
 
-func fencedLanded(w beads.ConditionalWriter, ok bool, t *testing.T, engine guardedMem, id, key, to string, stale bool) (bool, error) {
+func fencedLanded(w beads.ConditionalWriter, ok bool, t *testing.T, engine seamEngine, id, key, to string, stale bool) (bool, error) {
 	t.Helper()
 	if !ok {
 		return false, errUnresolved
@@ -137,52 +137,52 @@ func fencedLanded(w beads.ConditionalWriter, ok bool, t *testing.T, engine guard
 
 func seamCarriers() []seamCarrier {
 	return []seamCarrier{
-		{"MetadataCASWriterFor", func(t *testing.T, s beads.Store, _ guardedMem, id, key, from, to string, stale bool) (bool, error) {
+		{"MetadataCASWriterFor", func(t *testing.T, s beads.Store, _ seamEngine, id, key, from, to string, stale bool) (bool, error) {
 			w, ok := beads.MetadataCASWriterFor(s)
 			return casLanded(w, ok, t, id, key, from, to, stale)
 		}},
-		{"As[MetadataCASWriter]", func(t *testing.T, s beads.Store, _ guardedMem, id, key, from, to string, stale bool) (bool, error) {
+		{"As[MetadataCASWriter]", func(t *testing.T, s beads.Store, _ seamEngine, id, key, from, to string, stale bool) (bool, error) {
 			w, ok := beads.As[beads.MetadataCASWriter](s)
 			return casLanded(w, ok, t, id, key, from, to, stale)
 		}},
-		{"ApplyMetadataCAS", func(_ *testing.T, s beads.Store, _ guardedMem, id, key, from, to string, stale bool) (bool, error) {
+		{"ApplyMetadataCAS", func(_ *testing.T, s beads.Store, _ seamEngine, id, key, from, to string, stale bool) (bool, error) {
 			if stale {
 				from = "stale-" + from
 			}
 			out, err := beads.ApplyMetadataCAS(s, id, key, from, to)
 			return out == beads.MetadataCASSwapped, err
 		}},
-		{"ConditionalWriterForTarget.CAS", func(t *testing.T, s beads.Store, _ guardedMem, id, key, from, to string, stale bool) (bool, error) {
+		{"ConditionalWriterForTarget.CAS", func(t *testing.T, s beads.Store, _ seamEngine, id, key, from, to string, stale bool) (bool, error) {
 			w, ok := beads.ConditionalWriterForTarget(s)
 			return casLanded(w, ok, t, id, key, from, to, stale)
 		}},
-		{"ConditionalWriterForTarget.UpdateIfMatch", func(t *testing.T, s beads.Store, e guardedMem, id, key, _, to string, stale bool) (bool, error) {
+		{"ConditionalWriterForTarget.UpdateIfMatch", func(t *testing.T, s beads.Store, e seamEngine, id, key, _, to string, stale bool) (bool, error) {
 			w, ok := beads.ConditionalWriterForTarget(s)
 			return fencedLanded(w, ok, t, e, id, key, to, stale)
 		}},
-		{"As[ConditionalWriter].CAS", func(t *testing.T, s beads.Store, _ guardedMem, id, key, from, to string, stale bool) (bool, error) {
+		{"As[ConditionalWriter].CAS", func(t *testing.T, s beads.Store, _ seamEngine, id, key, from, to string, stale bool) (bool, error) {
 			w, ok := beads.As[beads.ConditionalWriter](s)
 			return casLanded(w, ok, t, id, key, from, to, stale)
 		}},
-		{"As[ConditionalWriter].UpdateIfMatch", func(t *testing.T, s beads.Store, e guardedMem, id, key, _, to string, stale bool) (bool, error) {
+		{"As[ConditionalWriter].UpdateIfMatch", func(t *testing.T, s beads.Store, e seamEngine, id, key, _, to string, stale bool) (bool, error) {
 			w, ok := beads.As[beads.ConditionalWriter](s)
 			return fencedLanded(w, ok, t, e, id, key, to, stale)
 		}},
-		{"ResolveConditionalWriter.CAS", func(t *testing.T, s beads.Store, _ guardedMem, id, key, from, to string, stale bool) (bool, error) {
+		{"ResolveConditionalWriter.CAS", func(t *testing.T, s beads.Store, _ seamEngine, id, key, from, to string, stale bool) (bool, error) {
 			w, _, err := beads.ResolveConditionalWriter(s)
 			if err != nil {
 				t.Fatalf("ResolveConditionalWriter: %v", err)
 			}
 			return casLanded(w, w != nil, t, id, key, from, to, stale)
 		}},
-		{"ResolveConditionalWriter.UpdateIfMatch", func(t *testing.T, s beads.Store, e guardedMem, id, key, _, to string, stale bool) (bool, error) {
+		{"ResolveConditionalWriter.UpdateIfMatch", func(t *testing.T, s beads.Store, e seamEngine, id, key, _, to string, stale bool) (bool, error) {
 			w, _, err := beads.ResolveConditionalWriter(s)
 			if err != nil {
 				t.Fatalf("ResolveConditionalWriter: %v", err)
 			}
 			return fencedLanded(w, w != nil, t, e, id, key, to, stale)
 		}},
-		{"AssignmentGuardedUpdaterFor", func(t *testing.T, s beads.Store, e guardedMem, id, key, _, to string, stale bool) (bool, error) {
+		{"AssignmentGuardedUpdaterFor", func(t *testing.T, s beads.Store, e seamEngine, id, key, _, to string, stale bool) (bool, error) {
 			w, ok := beads.AssignmentGuardedUpdaterFor(s)
 			if !ok {
 				return false, errUnresolved
@@ -197,7 +197,7 @@ func seamCarriers() []seamCarrier {
 			}
 			return w.UpdateIfAssignment(id, cur.Status, assignee, beads.UpdateOpts{Metadata: map[string]string{key: to}})
 		}},
-		{"As[AssignmentGuardedUpdater]", func(t *testing.T, s beads.Store, e guardedMem, id, key, _, to string, stale bool) (bool, error) {
+		{"As[AssignmentGuardedUpdater]", func(t *testing.T, s beads.Store, e seamEngine, id, key, _, to string, stale bool) (bool, error) {
 			w, ok := beads.As[beads.AssignmentGuardedUpdater](s)
 			if !ok {
 				return false, errUnresolved
@@ -233,6 +233,35 @@ func newSeamEngine(t *testing.T) guardedMem {
 	return e
 }
 
+// seamEngine is what the seam carriers need of an engine double: the store
+// and the assignment-guarded update.
+type seamEngine interface {
+	beads.Store
+	UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error)
+}
+
+// completeGuardedMem is guardedMem that also declares its List rows carry
+// complete edges, as every production engine does (ga-l69b9m, architect
+// Amendment 2). The decorator over it is a different concrete type than over a
+// silent engine, and every place that recognizes the decorator by type must
+// recognize both.
+type completeGuardedMem struct {
+	guardedMem
+	beads.CompleteDeps
+}
+
+// seamEngineKinds are the engine doubles every seam test runs over: one that
+// declares edge completeness and one silent about it.
+var seamEngineKinds = []struct {
+	name string
+	new  func(t *testing.T) seamEngine
+}{
+	{"silent engine", func(t *testing.T) seamEngine { return newSeamEngine(t) }},
+	{"declaring engine", func(t *testing.T) seamEngine {
+		return completeGuardedMem{newSeamEngine(t), beads.CompleteDeps{Answer: func() bool { return true }}}
+	}},
+}
+
 // seamOpaque reports the (shape, carrier) pairs whose lookup is non-peeling
 // by design: As[ConditionalWriter] resolves through ConditionalWriterFor,
 // which never looks through a wrapper that merely declares a resolve target,
@@ -249,31 +278,33 @@ type seamAttempt func(key, from, to string, stale bool) bool
 // forEachSeam runs run once per (shape, carrier) over a freshly seeded,
 // routed bead. Pairs whose lookup is opaque by design (seamOpaque) are
 // asserted unresolved and skipped.
-func forEachSeam(t *testing.T, run func(t *testing.T, engine guardedMem, id string, attempt seamAttempt)) {
+func forEachSeam(t *testing.T, run func(t *testing.T, engine seamEngine, id string, attempt seamAttempt)) {
 	t.Helper()
-	for _, shape := range seamShapes() {
-		for _, carrier := range seamCarriers() {
-			t.Run(shape.name+"/"+carrier.name, func(t *testing.T) {
-				engine := newSeamEngine(t)
-				b := seedRoutedBead(t, engine, testOldTarget)
-				top := shape.open(t, engine)
-				opaque := seamOpaque(shape, carrier)
-				attempt := func(key, from, to string, stale bool) bool {
-					landed, err := carrier.write(t, top, engine, b.ID, key, from, to, stale)
-					switch {
-					case errors.Is(err, errUnresolved) && opaque:
-						t.Skipf("%s is non-peeling and %s hides it, as designed", carrier.name, shape.name)
-					case errors.Is(err, errUnresolved):
-						t.Fatalf("%s did not resolve through %s", carrier.name, shape.name)
-					case opaque:
-						t.Fatalf("%s resolved through %s, but the lookup is non-peeling by design", carrier.name, shape.name)
-					case err != nil:
-						t.Fatalf("write: %v", err)
+	for _, kind := range seamEngineKinds {
+		for _, shape := range seamShapes() {
+			for _, carrier := range seamCarriers() {
+				t.Run(kind.name+"/"+shape.name+"/"+carrier.name, func(t *testing.T) {
+					engine := kind.new(t)
+					b := seedRoutedBead(t, engine, testOldTarget)
+					top := shape.open(t, engine)
+					opaque := seamOpaque(shape, carrier)
+					attempt := func(key, from, to string, stale bool) bool {
+						landed, err := carrier.write(t, top, engine, b.ID, key, from, to, stale)
+						switch {
+						case errors.Is(err, errUnresolved) && opaque:
+							t.Skipf("%s is non-peeling and %s hides it, as designed", carrier.name, shape.name)
+						case errors.Is(err, errUnresolved):
+							t.Fatalf("%s did not resolve through %s", carrier.name, shape.name)
+						case opaque:
+							t.Fatalf("%s resolved through %s, but the lookup is non-peeling by design", carrier.name, shape.name)
+						case err != nil:
+							t.Fatalf("write: %v", err)
+						}
+						return landed
 					}
-					return landed
-				}
-				run(t, engine, b.ID, attempt)
-			})
+					run(t, engine, b.ID, attempt)
+				})
+			}
 		}
 	}
 }
@@ -289,7 +320,7 @@ func routedTo(t *testing.T, s beads.Store, id string) string {
 
 // A genuine re-route that lands through any capability clears the stamps.
 func TestRouteClearSeam_GenuineRerouteThroughCapabilityClearsStamps(t *testing.T) {
-	forEachSeam(t, func(t *testing.T, engine guardedMem, id string, attempt seamAttempt) {
+	forEachSeam(t, func(t *testing.T, engine seamEngine, id string, attempt seamAttempt) {
 		if !attempt(beadmeta.RoutedToMetadataKey, testOldTarget, testNewTarget, false) {
 			t.Fatalf("the re-route did not land")
 		}
@@ -302,7 +333,7 @@ func TestRouteClearSeam_GenuineRerouteThroughCapabilityClearsStamps(t *testing.T
 
 // A write that lost its race changed nothing, so it must clear nothing.
 func TestRouteClearSeam_LostWriteLeavesStampsIntact(t *testing.T) {
-	forEachSeam(t, func(t *testing.T, engine guardedMem, id string, attempt seamAttempt) {
+	forEachSeam(t, func(t *testing.T, engine seamEngine, id string, attempt seamAttempt) {
 		if attempt(beadmeta.RoutedToMetadataKey, testOldTarget, testNewTarget, true) {
 			t.Fatalf("the stale write landed")
 		}
@@ -315,7 +346,7 @@ func TestRouteClearSeam_LostWriteLeavesStampsIntact(t *testing.T) {
 
 // A capability write to any other key is a straight pass-through.
 func TestRouteClearSeam_NonRoutedToWriteLeavesStampsIntact(t *testing.T) {
-	forEachSeam(t, func(t *testing.T, engine guardedMem, id string, attempt seamAttempt) {
+	forEachSeam(t, func(t *testing.T, engine seamEngine, id string, attempt seamAttempt) {
 		if !attempt(seamOtherKey, "", "x", false) {
 			t.Fatalf("the write to %s did not land", seamOtherKey)
 		}
@@ -330,7 +361,7 @@ func TestRouteClearSeam_NonRoutedToWriteLeavesStampsIntact(t *testing.T) {
 // already present reports not-swapped; the fenced and guarded updates land.
 // Either way nothing is cleared.
 func TestRouteClearSeam_SameTargetThroughCapabilityIsNoOp(t *testing.T) {
-	forEachSeam(t, func(t *testing.T, engine guardedMem, id string, attempt seamAttempt) {
+	forEachSeam(t, func(t *testing.T, engine seamEngine, id string, attempt seamAttempt) {
 		attempt(beadmeta.RoutedToMetadataKey, testOldTarget, testOldTarget, false)
 		assertStampsIntact(t, engine, id)
 	})

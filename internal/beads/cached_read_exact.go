@@ -20,6 +20,12 @@ package beads
 // that declares it: a CachingStore stamps its ready projection only through
 // the concrete engine it wraps (SQLite's is unexported), so a cache over a
 // wrapper misses blockers the engine's live Ready honors.
+//
+// The one exception is a wrapper in this package that forwards the engine's
+// ready-projection enrichment (enrichReadyProjectionForCache): it hands the
+// cache the same stamped projection the engine would, so it forwards the
+// declaration with it, and the route-clearing decorator does. A wrapper that
+// drops the enrichment forward reports false in the same change.
 type CachedReadExact interface {
 	CachedReadExact() bool
 }

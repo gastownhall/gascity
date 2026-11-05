@@ -121,3 +121,21 @@ func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
 func (s *BdStore) SetTxProjectionTimeoutForTest(d time.Duration) {
 	s.txProjectionTimeout = d
 }
+
+// CompleteDeps lets an external test double declare, as an engine does, that
+// the rows its List returns carry their complete edge set. Embed it beside the
+// store: the unexported method promotes through the embedding.
+type CompleteDeps struct{ Answer func() bool }
+
+func (c CompleteDeps) listIncludesCompleteDependencies() bool { return c.Answer() }
+
+// DeclaresCompleteDependencies reports whether store implements the
+// edge-completeness declaration a CachingStore trusts over its backing, and the
+// answer it gives now. declared is the presence the cache asserts on first.
+func DeclaresCompleteDependencies(store Store) (answer, declared bool) {
+	d, ok := store.(listDependencyCompletenessStore)
+	if !ok {
+		return false, false
+	}
+	return d.listIncludesCompleteDependencies(), true
+}

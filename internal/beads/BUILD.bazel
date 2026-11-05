@@ -278,6 +278,7 @@ go_test(
         "ready_context_internal_test.go",
         "route_clear_cache_parity_test.go",
         "route_clear_capability_table_test.go",
+        "route_clear_completeness_test.go",
         "route_clear_fidelity_test.go",
         "route_clear_guarded_batch_test.go",
         "route_clear_seam_test.go",

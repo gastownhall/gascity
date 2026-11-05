@@ -48,8 +48,35 @@ type routeChangeClearingStore struct {
 // routing write itself has succeeded. normalizer decides whether an old/new
 // target pair is a genuine change (e.g. collapsing pool-slot suffixes so
 // "worker" -> "worker-2" is a no-op, per FR-2 / ga-79uuwq).
+//
+// The decorator is one of two shapes, chosen by whether store declares that its
+// List rows carry their complete edge set (listDependencyCompletenessStore). A
+// cache asserts on that declaration's presence and then trusts its value, so the
+// decorator declares it exactly when store does and never otherwise; see
+// completeEdgesRouteChangeClearingStore.
 func WithRouteChangeClearing(store Store, normalizer RouteNormalizerFunc) Store {
-	return &routeChangeClearingStore{Store: store, normalizer: normalizer}
+	base := &routeChangeClearingStore{Store: store, normalizer: normalizer}
+	if _, declares := store.(listDependencyCompletenessStore); declares {
+		return &completeEdgesRouteChangeClearingStore{routeChangeClearingStore: base}
+	}
+	return base
+}
+
+// routeClearingGate is how a store reveals the route-clearing decorator it is,
+// in either shape. Both recognition sites (UnwrapRouteChangeClearing and
+// followResolveTargetThroughGate) ask for it instead of naming a concrete type.
+type routeClearingGate interface {
+	routeClearing() *routeChangeClearingStore
+}
+
+func (w *routeChangeClearingStore) routeClearing() *routeChangeClearingStore { return w }
+
+// routeClearingOf returns the decorator store is, in either shape, or nil.
+func routeClearingOf(store Store) *routeChangeClearingStore {
+	if gate, ok := store.(routeClearingGate); ok {
+		return gate.routeClearing()
+	}
+	return nil
 }
 
 // UnwrapRouteChangeClearing returns the store a WithRouteChangeClearing
@@ -60,7 +87,7 @@ func WithRouteChangeClearing(store Store, normalizer RouteNormalizerFunc) Store 
 // one layer: a caller that needs more loops, since a decorator may sit over
 // another process layer.
 func UnwrapRouteChangeClearing(store Store) (Store, bool) {
-	if guard, ok := store.(*routeChangeClearingStore); ok && guard != nil {
+	if guard := routeClearingOf(store); guard != nil {
 		return guard.Store, true
 	}
 	return store, false
@@ -86,6 +113,7 @@ var (
 	_ NamespaceCensusHandleProvider    = (*routeChangeClearingStore)(nil)
 	_ ConditionalWriterHandleProvider  = (*routeChangeClearingStore)(nil)
 	_ MetadataCASWriterHandleProvider  = (*routeChangeClearingStore)(nil)
+	_ GuardedBatcherHandleProvider     = (*routeChangeClearingStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the immediate backing store as the
@@ -418,22 +446,43 @@ func (w *routeChangeClearingStore) NamespaceCensusHandle() (NamespaceCensus, boo
 // as the one-shot emitter's revision-fenced writes, without claiming it
 // globally. The writer is gated: a gc.routed_to write that lands through it
 // clears the executor-identity stamps as this decorator's own writes do, and
-// every other write passes straight through (route_clear_gate.go). The
-// production resolver (ResolveConditionalWriter) does not ask this decorator:
-// it follows ConditionalWritesResolveTarget to the terminal store first, so
-// rollout-mode gating is unchanged, and returns the same gated writer for a
-// walk that crossed it.
+// every other write passes straight through (route_clear_gate.go). This is new
+// exposure for direct ConditionalWriterFor callers, which found no writer
+// through this decorator before. The production resolver
+// (ResolveConditionalWriter) does not ask this decorator: it follows
+// ConditionalWritesResolveTarget to the terminal store first, so rollout-mode
+// gating is unchanged, and returns the same gated writer for a walk that
+// crossed it.
 func (w *routeChangeClearingStore) ConditionalWriterHandle() (ConditionalWriter, bool) {
 	writer, ok := ConditionalWriterFor(w.Store)
 	return w.gateConditionalWriter(writer), ok
 }
 
 // MetadataCASWriterHandle exposes the backing store's metadata compare-and-set
-// (MetadataCASWriterFor) for the same reason, and behind the same gate, as
+// (MetadataCASWriterFor) to direct callers, behind the same gate as
 // ConditionalWriterHandle above.
 func (w *routeChangeClearingStore) MetadataCASWriterHandle() (MetadataCASWriter, bool) {
 	writer, ok := MetadataCASWriterFor(w.Store)
 	return w.gateMetadataCAS(writer), ok
+}
+
+// GuardedBatcherHandle answers the backing store's guarded batcher behind the
+// gate (gatedGuardedBatcher), or no batcher when the backing has none. A batch
+// Update that writes gc.routed_to clears the executor-identity stamps after the
+// batch lands, as this decorator's own Update does; every other batch passes
+// through.
+//
+// ApplyGuarded is deliberately NOT a method of this decorator. A structural
+// ApplyGuarded would answer for every backing, including one with no batcher,
+// and GuardedBatcherFor would report a capability nobody can serve. Discovery
+// goes through this handle, which is honest about the backing, and the lane
+// host and the opjournal lane store find the batcher through it.
+func (w *routeChangeClearingStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
+	inner, ok := GuardedBatcherFor(w.Store)
+	if !ok {
+		return nil, false
+	}
+	return gatedGuardedBatcher{inner: inner, gate: w}, true
 }
 
 // SetMetadata clears the rerouted bead's (and its molecule root's) executor-
@@ -524,16 +573,19 @@ func (w *routeChangeClearingStore) Update(id string, opts UpdateOpts) error {
 // this decorator delegates to has already succeeded by the time
 // clearIfGenuine runs, and that write must never be reported as failed
 // because a best-effort follow-up cleanup was rejected (design sec 1 NFR-5).
-func (w *routeChangeClearingStore) clearIfGenuine(id string, before Bead, oldTarget, newTarget string) {
+//
+// It reports whether the reroute was genuine, so the clear ran (a failed clear
+// still counts: the attempt wrote, or tried to write, past the routing write).
+func (w *routeChangeClearingStore) clearIfGenuine(id string, before Bead, oldTarget, newTarget string) bool {
 	if w.normalizer(oldTarget) == w.normalizer(newTarget) {
-		return
+		return false
 	}
 
 	if oldTarget == "" {
 		if stamped := before.Metadata[beadmeta.SessionNameMetadataKey]; stamped != "" {
 			bridged := agent.UnsanitizeQualifiedNameFromSession(stamped)
 			if w.normalizer(bridged) == w.normalizer(newTarget) {
-				return
+				return false
 			}
 		}
 	}
@@ -552,4 +604,6 @@ func (w *routeChangeClearingStore) clearIfGenuine(id string, before Bead, oldTar
 			log.Printf("beads route-clear: clearing executor-identity stamps on molecule root %s (step %s rerouted to %q): %v", rootID, id, newTarget, err)
 		}
 	}
+
+	return true
 }

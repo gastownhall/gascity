@@ -175,13 +175,15 @@ func TestRouteClearGuardedBatch_StaleRevisionRefusalClearsNothing(t *testing.T) 
 	if !beads.IsPreconditionFailed(err) {
 		t.Fatalf("ApplyGuarded with a stale guard = %v, want a precondition failure", err)
 	}
+	// Counted before the assertions below, which read through the spy.
+	gets := f.engine.gets.Load()
 	assertGuardedLanded(t, f, f.bead.ID, testOldTarget)
 	assertStampsIntact(t, f.engine, f.bead.ID)
 	if n := f.engine.clears.Load(); n != 0 {
 		t.Errorf("a refused batch ran %d stamp clear(s), want none", n)
 	}
-	if n := f.engine.gets.Load(); n != 1 {
-		t.Errorf("a refused batch issued %d Get(s), want only the one pre-read", n)
+	if gets != 1 {
+		t.Errorf("a refused batch issued %d Get(s), want only the one pre-read", gets)
 	}
 }
 

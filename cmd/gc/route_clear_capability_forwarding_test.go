@@ -448,27 +448,38 @@ var routeClearOmittedEngineCapabilities = map[string]func(beads.Store) bool{
 // decorator drops does not fail anywhere: the caller's assertion simply stops
 // matching and it takes a slower or weaker path.
 func TestRouteClearCarriesEveryBindingEngineCapability(t *testing.T) {
-	wrapper := reflect.TypeOf(beads.WithRouteChangeClearing(beads.NewMemStore(), routeClearIdentity))
-
-	for _, engine := range bindingEngineTypes {
-		var missing []string
-		for i := 0; i < engine.NumMethod(); i++ {
-			method := engine.Method(i)
-			got, ok := wrapper.MethodByName(method.Name)
-			if !ok {
-				if _, omitted := routeClearOmittedEngineCapabilities[method.Name]; !omitted {
-					missing = append(missing, method.Name)
+	// The decorator is one concrete type over a backing that declares edge
+	// completeness and another over one that does not (ga-l69b9m, architect
+	// Amendment 2); both are held to the engines' method sets.
+	for _, wrapper := range []reflect.Type{
+		reflect.TypeOf(beads.WithRouteChangeClearing(beads.NewMemStore(), routeClearIdentity)),
+		reflect.TypeOf(beads.WithRouteChangeClearing(openBindingEngineForTest(t), routeClearIdentity)),
+	} {
+		for _, engine := range bindingEngineTypes {
+			var missing []string
+			for i := 0; i < engine.NumMethod(); i++ {
+				method := engine.Method(i)
+				got, ok := wrapper.MethodByName(method.Name)
+				if !ok {
+					if _, omitted := routeClearOmittedEngineCapabilities[method.Name]; !omitted {
+						missing = append(missing, method.Name)
+					}
+					continue
 				}
-				continue
+				// Compare the signatures without their receivers.
+				if got.Type.String() != strings.Replace(method.Type.String(), engine.String(), wrapper.String(), 1) {
+					missing = append(missing, method.Name+" (signature differs)")
+				}
 			}
-			// Compare the signatures without their receivers.
-			if got.Type.String() != strings.Replace(method.Type.String(), engine.String(), wrapper.String(), 1) {
-				missing = append(missing, method.Name+" (signature differs)")
+			sort.Strings(missing)
+			if len(missing) > 0 {
+				t.Errorf("the route-change-clearing decorator (%s) drops %v from %s; every one is a capability assertion that stops matching", wrapper, missing, engine)
 			}
 		}
-		sort.Strings(missing)
-		if len(missing) > 0 {
-			t.Errorf("the route-change-clearing decorator drops %v from %s; every one is a capability assertion that stops matching", missing, engine)
+		for name := range routeClearOmittedEngineCapabilities {
+			if _, structural := wrapper.MethodByName(name); structural {
+				t.Errorf("%s is listed as omitted but the decorator (%s) carries it; drop it from the list", name, wrapper)
+			}
 		}
 	}
 
@@ -476,9 +487,6 @@ func TestRouteClearCarriesEveryBindingEngineCapability(t *testing.T) {
 	for name, discover := range routeClearOmittedEngineCapabilities {
 		if discover != nil && !discover(carried) {
 			t.Errorf("%s is not discoverable through the decorator over a SQLite engine", name)
-		}
-		if _, structural := wrapper.MethodByName(name); structural {
-			t.Errorf("%s is listed as omitted but the decorator carries it; drop it from the list", name)
 		}
 	}
 }
@@ -803,5 +811,34 @@ func TestOpenStoreAtForCityForwardsReadyContextThroughRouteClear(t *testing.T) {
 	// failing outright -- not that FileStore starts answering successfully.
 	if _, err := reader.ReadyContext(context.Background()); !errors.Is(err, beads.ErrReadyContextUnsupported) {
 		t.Fatalf("ReadyContext error = %v, want errors.Is(err, beads.ErrReadyContextUnsupported): FileStore deliberately vetoes ReadyContext", err)
+	}
+}
+
+// payloadReader answers every edge with one carried payload, standing in for a
+// backing that can read an edge's payload one edge at a time but not in batch.
+type payloadReader struct {
+	beads.Store
+}
+
+func (payloadReader) DepMetadata(string, string) (string, bool, error) {
+	return `{"gate":"x"}`, true, nil
+}
+
+// The migration's payload read falls back to per-edge reads when the batch read
+// is refused with ErrDepMetadataUnsupported, so the decorator over a backing with
+// no batch read must refuse with that sentinel and not fail the read outright
+// (ga-l69b9m, architect Amendment 2).
+func TestRouteClearEdgePayloadBatchOverASilentBackingFallsBackToPerEdgeReads(t *testing.T) {
+	batch, ok := beads.WithRouteChangeClearing(payloadReader{Store: beads.NewMemStore()}, routeClearIdentity).(beads.DepMetadataBatchReader)
+	if !ok {
+		t.Fatal("the decorator does not carry the batch edge-payload read")
+	}
+	edges := map[string][]beads.Dep{"a": {{IssueID: "a", DependsOnID: "b", Type: "blocks"}}}
+	got, err := readInfraPayloads(batch, payloadReader{Store: beads.NewMemStore()}, edges, func(beads.Dep) bool { return true })
+	if err != nil {
+		t.Fatalf("readInfraPayloads over the decorator over a backing with no batch read: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("readInfraPayloads = %v, want the one edge's payload read per edge", got)
 	}
 }
