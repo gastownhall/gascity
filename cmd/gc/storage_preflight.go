@@ -231,12 +231,22 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	if err != nil {
 		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
-	rows, allIDs, listErr := readInfraSnapshotWithIDs(source, coordclass.CurrentGeneration)
-	var edgeErr error
+	rows, all, listErr := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
+	var edgeErr, boundaryErr error
+	var plan infraCopyPlan
 	if listErr == nil {
+		allIDs := make(map[string]bool, len(all))
+		for id := range all {
+			allIDs[id] = true
+		}
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
-		_, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		plan, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		if edgeErr == nil {
+			// The cross-boundary plan the copy runs (D9): a shape it refuses
+			// is refused here, by id, before the window.
+			boundaryErr = planInfraCityBoundary(request.CityPath, &plan, all, false)
+		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
 		fmt.Fprintf(stderr, "%s: closing the work store: %v\n", storagePreflightLogPrefix, closeErr) //nolint:errcheck // best-effort stderr
@@ -249,6 +259,10 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return preflightBlock(stdout, "edge payloads", edgeErr)
 	}
 	preflightPass(stdout, "edge payloads", "the work store can report the payload on every edge the copy would re-add")
+	if boundaryErr != nil {
+		return preflightBlock(stdout, "cross-store edges", boundaryErr)
+	}
+	preflightPass(stdout, "cross-store edges", fmt.Sprintf("would mint %d cross-store gate(s) and drop %d boundary edge(s), each recorded on its row", len(plan.boundary.Gates), infraBoundaryRecordCount(plan)))
 
 	// 7. What the destination already holds. Read-only: the database is opened
 	// only if it is already there, because opening creates it.

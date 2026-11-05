@@ -966,7 +966,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	destination := beads.NewMemStore()
 	bead := mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
 
-	if _, err := verifyInfraCopy(infraStoreOpener(destination), source); err == nil {
+	if _, _, err := verifyInfraCopy(infraStoreOpener(destination), source, infraCopyPlan{}); err == nil {
 		t.Fatal("equality passed against an empty destination")
 	}
 
@@ -975,7 +975,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	if _, err := destination.Create(drifted); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(infraStoreOpener(destination), source); err == nil {
+	if _, _, err := verifyInfraCopy(infraStoreOpener(destination), source, infraCopyPlan{}); err == nil {
 		t.Fatal("equality passed against a drifted copy")
 	}
 
@@ -983,7 +983,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	if _, err := faithful.Create(bead); err != nil {
 		t.Fatal(err)
 	}
-	proven, err := verifyInfraCopy(infraStoreOpener(faithful), source)
+	proven, _, err := verifyInfraCopy(infraStoreOpener(faithful), source, infraCopyPlan{})
 	if err != nil {
 		t.Fatalf("equality rejected a faithful copy: %v", err)
 	}
@@ -998,7 +998,7 @@ func TestVerifyInfraCopyFailsClosed(t *testing.T) {
 	if _, err := faithful.Create(beads.Bead{Title: "invented", Type: "session", Labels: []string{"gc:session"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(infraStoreOpener(faithful), source); err == nil {
+	if _, _, err := verifyInfraCopy(infraStoreOpener(faithful), source, infraCopyPlan{}); err == nil {
 		t.Fatal("equality passed against a destination holding an extra row")
 	}
 

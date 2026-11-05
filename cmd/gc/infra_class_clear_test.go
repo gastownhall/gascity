@@ -181,11 +181,16 @@ func TestTheClearRefusesRowsTheProvenCopyNeverCarried(t *testing.T) {
 	}
 }
 
-// TestTheClearReleasesSatisfiedCrossStoreBlocksAndKeepsTheRest pins the edge
-// rule. A work bead blocked on a relocated bead the binding has closed stops
-// waiting on its frozen copy; one blocked on a relocated bead still open keeps
-// waiting; a non-blocking edge is kept.
-func TestTheClearReleasesSatisfiedCrossStoreBlocksAndKeepsTheRest(t *testing.T) {
+// TestTheClearRefusesAnOpenCrossStoreBlockerAndDropsTheRest pins D9 on the
+// clear of a city an earlier build converged with its copies retained (S51):
+// a work bead still blocked by a moved bead the binding has not finished
+// stops the clear before any row goes, and once the binding finishes it the
+// clear removes every edge from a work bead onto a moved bead and re-adds
+// none, each recorded in the backup as dropped.
+//
+// Red on main: the clear re-added the open blocker's edge and the related
+// edge after the delete (infraRestoreKeptEdge), writing cross-store edges.
+func TestTheClearRefusesAnOpenCrossStoreBlockerAndDropsTheRest(t *testing.T) {
 	cityPath := t.TempDir()
 	source := stubInfraMigrationSource(t)
 	done := mustCreateInfraBead(t, source, beads.Bead{Title: "graft finished", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
@@ -193,6 +198,12 @@ func TestTheClearReleasesSatisfiedCrossStoreBlocksAndKeepsTheRest(t *testing.T) 
 	waitsOnDone := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on the finished graft", Type: "task"})
 	waitsOnRunning := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on the running graft", Type: "task"})
 	related := mustCreateInfraBead(t, source, beads.Bead{Title: "work related to the running graft", Type: "task"})
+	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
+	}
+	// The edges an earlier build's copy never planned, present at the clear.
 	for _, edge := range []beads.Dep{
 		{IssueID: waitsOnDone.ID, DependsOnID: done.ID, Type: "blocks"},
 		{IssueID: waitsOnRunning.ID, DependsOnID: running.ID, Type: "blocks"},
@@ -202,109 +213,140 @@ func TestTheClearReleasesSatisfiedCrossStoreBlocksAndKeepsTheRest(t *testing.T) 
 			t.Fatalf("seeding %v: %v", edge, err)
 		}
 	}
-	cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
-	var log bytes.Buffer
-	if got := migrateInfraClassesRetainingSource(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("cutover = %s: %s", got.Outcome, log.String())
-	}
 	target := mustResolveInfraTarget(t, cityPath, cfg)
-	binding := openMigratedDestination(t, target)
-	if err := binding.Close(done.ID); err != nil {
-		t.Fatalf("closing %s in the binding: %v", done.ID, err)
+	closeInBinding := func(id string) {
+		t.Helper()
+		binding := openMigratedDestination(t, target)
+		if err := binding.Close(id); err != nil {
+			t.Fatalf("closing %s in the binding: %v", id, err)
+		}
+		_ = closeBeadStoreHandle(binding)
 	}
-	_ = closeBeadStoreHandle(binding)
+	closeInBinding(done.ID)
 
+	log.Reset()
+	refused := migrateInfraClasses(t, cityPath, cfg, &log)
+	var refusal *infraClearBoundaryRefusal
+	if refused.Outcome != infraMigrationRetained || !errors.As(refused.Fault, &refusal) {
+		t.Fatalf("outcome = %s (%v), want the clear refused over the open blocker: %s", refused.Outcome, refused.Fault, log.String())
+	}
+	if len(refusal.Refusals) != 1 || !slices.Equal(refusal.Refusals[0].IDs, []string{waitsOnRunning.ID, running.ID}) || !strings.Contains(refusal.Refusals[0].Remedy, "gc bd dep remove "+waitsOnRunning.ID+" "+running.ID) {
+		t.Fatalf("refusals = %+v, want exactly %s blocked by %s with its remedy", refusal.Refusals, waitsOnRunning.ID, running.ID)
+	}
+	for _, id := range []string{done.ID, running.ID} {
+		if _, err := source.Get(id); err != nil {
+			t.Fatalf("the refused clear removed %s: %v", id, err)
+		}
+	}
+	if note, present, _ := readInfraClearedNote(cityPath); present && len(note.Pending) > 0 {
+		t.Fatalf("the refused clear left a pending note %+v; nothing was removed", note)
+	}
+
+	closeInBinding(running.ID)
 	log.Reset()
 	report := migrateInfraClasses(t, cityPath, cfg, &log)
 	if report.Outcome != infraMigrationConverged {
 		t.Fatalf("outcome = %s: %s", report.Outcome, log.String())
 	}
-	if len(report.Clear.Released) != 1 || report.Clear.Released[0].IssueID != waitsOnDone.ID {
-		t.Fatalf("released = %+v, want exactly %s -> %s", report.Clear.Released, waitsOnDone.ID, done.ID)
+	if len(report.Clear.Dropped) != 3 {
+		t.Fatalf("dropped = %+v, want all three edges onto moved beads", report.Clear.Dropped)
 	}
-
-	edgesOf := func(id string) []string {
-		deps, err := source.DepList(id, "down")
+	for _, w := range []beads.Bead{waitsOnDone, waitsOnRunning, related} {
+		deps, err := source.DepList(w.ID, "down")
 		if err != nil {
-			t.Fatalf("DepList(%s): %v", id, err)
+			t.Fatal(err)
 		}
-		var out []string
-		for _, d := range deps {
-			out = append(out, d.DependsOnID)
+		if len(deps) != 0 {
+			t.Fatalf("%s still holds %+v after the clear: a cross-store edge was re-added", w.ID, deps)
 		}
-		return out
 	}
-	if got := edgesOf(waitsOnDone.ID); len(got) != 0 {
-		t.Fatalf("%s still waits on %v after the binding closed its blocker", waitsOnDone.ID, got)
-	}
-	if got := edgesOf(waitsOnRunning.ID); !slices.Equal(got, []string{running.ID}) {
-		t.Fatalf("%s edges = %v; a dependent of a still-open relocated bead must keep waiting", waitsOnRunning.ID, got)
-	}
-	if got := edgesOf(related.ID); !slices.Equal(got, []string{running.ID}) {
-		t.Fatalf("%s edges = %v; a non-blocking cross edge must be kept", related.ID, got)
-	}
-	ready, err := source.Ready()
-	if err != nil {
-		t.Fatalf("Ready: %v", err)
-	}
-	var readyIDs []string
-	for _, b := range ready {
-		readyIDs = append(readyIDs, b.ID)
-	}
-	if !slices.Contains(readyIDs, waitsOnDone.ID) {
-		t.Errorf("%s is not ready after its blocker closed in the binding: %v", waitsOnDone.ID, readyIDs)
-	}
-	if slices.Contains(readyIDs, waitsOnRunning.ID) {
-		t.Errorf("%s became ready while its blocker is still open in the binding: %v", waitsOnRunning.ID, readyIDs)
-	}
-
 	backup, _, err := readInfraRetainedBackup(target)
 	if err != nil {
 		t.Fatalf("reading the backup: %v", err)
 	}
 	dependents := 0
 	for _, e := range backup {
-		dependents += len(e.Dependents)
+		for _, d := range e.Dependents {
+			dependents++
+			if d.Disposition != rigEdgeDropped {
+				t.Errorf("backup records %s as %q, want %q", d, d.Disposition, rigEdgeDropped)
+			}
+		}
 	}
 	if dependents != 3 {
 		t.Fatalf("the backup records %d cross-store dependents, want all 3", dependents)
 	}
 }
 
-// TestInfraBindingCopySatisfiesJudgesTheReadinessOutcome pins the clear's
-// release decision to the readiness contract: a binding copy releases its
-// cross-store dependents exactly when Ready() would treat it as satisfied. A
-// formula step that passed releases them even when its work record says
-// blocked, since dispatch has already advanced past it.
-func TestInfraBindingCopySatisfiesJudgesTheReadinessOutcome(t *testing.T) {
-	held := map[string]beads.Bead{
-		"open":    {ID: "open", Status: "open"},
-		"closed":  {ID: "closed", Status: "closed"},
-		"blocked": {ID: "blocked", Status: "closed", Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}},
-		"passed-step": {ID: "passed-step", Status: "closed", Metadata: beads.StringMap{
-			beadmeta.StepRefMetadataKey:     "mol.review",
-			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
-			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
-		}},
-	}
+// TestTheClearBoundaryCheckFollowsTheSharedPlan is the clear's refusal
+// table: an edge from a row that stays onto a row the clear removes refuses
+// exactly when the shared plan refuses it, judged by the binding's copy of
+// the removed row (a copy the binding's GC collected reads as closed), and
+// only while the work store still holds the edge. A formula step that passed
+// releases its dependents even when its work record says blocked, as
+// readiness judges it.
+func TestTheClearBoundaryCheckFollowsTheSharedPlan(t *testing.T) {
+	passed := beads.StringMap{beadmeta.StepRefMetadataKey: "mol.review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}
+	blocked := beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}
 	for _, tc := range []struct {
-		id   string
-		want bool
+		name     string
+		kind     string
+		work     string // the dependent's status in the work store
+		copy     *beads.Bead
+		detached bool // an earlier run already removed the edge
+		refuse   bool
 	}{
-		{id: "collected", want: true},
-		{id: "open", want: false},
-		{id: "closed", want: true},
-		{id: "blocked", want: false},
-		{id: "passed-step", want: true},
+		{name: "blocks on an open copy", kind: "blocks", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
+		{name: "blocks on a closed copy", kind: "blocks", work: "open", copy: &beads.Bead{Status: "closed"}},
+		{name: "blocks on a copy closed blocked", kind: "blocks", work: "open", copy: &beads.Bead{Status: "closed", Metadata: blocked}, refuse: true},
+		{name: "blocks on a passed step closed blocked", kind: "blocks", work: "open", copy: &beads.Bead{Status: "closed", Metadata: passed}},
+		{name: "blocks on a collected copy", kind: "blocks", work: "open"},
+		{name: "a closed dependent blocked", kind: "blocks", work: "closed", copy: &beads.Bead{Status: "open"}},
+		{name: "waits-for on an open copy", kind: "waits-for", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
+		{name: "conditional-blocks on an open copy", kind: "conditional-blocks", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
+		{name: "tracks, both open", kind: "tracks", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
+		{name: "tracks, the dependent closed", kind: "tracks", work: "closed", copy: &beads.Bead{Status: "open"}},
+		{name: "tracks, the copy closed", kind: "tracks", work: "open", copy: &beads.Bead{Status: "closed"}},
+		{name: "parent-child, both open", kind: "parent-child", work: "open", copy: &beads.Bead{Status: "open"}, refuse: true},
+		{name: "related, both open", kind: "related", work: "open", copy: &beads.Bead{Status: "open"}},
+		{name: "blocks on an open copy, already detached", kind: "blocks", work: "open", copy: &beads.Bead{Status: "open"}, detached: true},
 	} {
-		if got := infraBindingCopySatisfies(held, tc.id); got != tc.want {
-			t.Errorf("infraBindingCopySatisfies(%q) = %v, want %v", tc.id, got, tc.want)
-		}
-		if b, ok := held[tc.id]; ok {
-			if ready := beads.DependencySatisfied(b.Status, beads.ReadinessWorkOutcome(b.Metadata)); ready != tc.want {
-				t.Errorf("%q: the clear releases = %v but readiness says satisfied = %v", tc.id, tc.want, ready)
+		t.Run(tc.name, func(t *testing.T) {
+			source := beads.NewMemStore()
+			d := mustCreateInfraBead(t, source, beads.Bead{Title: "moved", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+			w := mustCreateInfraBead(t, source, beads.Bead{Title: "work", Type: "task"})
+			if tc.work == "closed" {
+				if err := source.Close(w.ID); err != nil {
+					t.Fatal(err)
+				}
+				w.Status = "closed"
 			}
-		}
+			if !tc.detached {
+				if err := source.DepAdd(w.ID, d.ID, tc.kind); err != nil {
+					t.Fatal(err)
+				}
+			}
+			held := map[string]beads.Bead{}
+			if tc.copy != nil {
+				c := *tc.copy
+				c.ID = d.ID
+				held[d.ID] = c
+			}
+			entries := []infraBackupEntry{{Bead: d, Dependents: []infraBackupEdge{{IssueID: w.ID, DependsOnID: d.ID, Type: tc.kind}}}}
+			refusals, dropped, err := infraClearBoundaryRefusals(source, entries, map[string]bool{d.ID: true}, map[string]beads.Bead{w.ID: w}, held, coordclass.CurrentGeneration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(refusals) > 0; got != tc.refuse {
+				t.Fatalf("refused = %v (%+v), want %v", got, refusals, tc.refuse)
+			}
+			if tc.refuse && !slices.Equal(refusals[0].IDs, []string{w.ID, d.ID}) {
+				t.Fatalf("the refusal names %v, want %s and %s", refusals[0].IDs, w.ID, d.ID)
+			}
+			if len(dropped) != 1 || dropped[0].IssueID != w.ID {
+				t.Fatalf("dropped = %+v, want the one edge", dropped)
+			}
+		})
 	}
 }
 
@@ -479,73 +521,65 @@ func TestStorageMigrateTakesExactlyOneSource(t *testing.T) {
 	}
 }
 
-// danglingRefusingStore models a bd or native-Dolt work store: Delete drops
-// every edge touching the row, and DepAdd refuses an edge to a bead the store
-// does not hold.
-type danglingRefusingStore struct{ *beads.MemStore }
-
-func (s danglingRefusingStore) Delete(id string) error {
-	for _, dir := range []string{"up", "down"} {
-		deps, _ := s.DepList(id, dir)
-		for _, d := range deps {
-			_ = s.DepRemove(d.IssueID, d.DependsOnID)
-		}
-	}
-	return s.MemStore.Delete(id)
-}
-
-func (s danglingRefusingStore) DepAdd(issueID, dependsOnID, depType string) error {
-	if _, err := s.Get(dependsOnID); err != nil {
-		return errors.New(`no issue found matching "` + dependsOnID + `"`)
-	}
-	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
-}
-
-// TestCrossStoreEdgesADoltStoreCannotKeepAreAnnouncedAndRecorded pins the
-// Dolt-shaped loss: the edges at risk are listed before any row is removed,
-// and the ones the store then refuses are recorded where they outlive the
-// run — the cleared note, `gc storage status`, and the boot event.
-func TestCrossStoreEdgesADoltStoreCannotKeepAreAnnouncedAndRecorded(t *testing.T) {
+// TestTheCopyRefusesAWorkBeadBlockedByAnOpenMovedBead pins the W -> D row of
+// D9 on the city copy: an open work bead blocked by an open infrastructure
+// bead cannot be carried (a work store holds no cross-store gate), so the
+// copy refuses by id, with the fix, before the binding holds a row.
+//
+// Red on main: the copy carried the moved bead, and the clear re-added the
+// edge after the delete as a cross-store edge.
+func TestTheCopyRefusesAWorkBeadBlockedByAnOpenMovedBead(t *testing.T) {
 	stubInfraControllerPing(t, 0)
-	mem := beads.NewMemStore()
-	source := danglingRefusingStore{mem}
-	prev := openInfraMigrationSource
-	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
-	t.Cleanup(func() { openInfraMigrationSource = prev })
-
+	source := stubInfraMigrationSource(t)
 	running := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
 	waiting := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on the running graft", Type: "task"})
 	if err := source.DepAdd(waiting.ID, running.ID, "blocks"); err != nil {
 		t.Fatal(err)
 	}
 	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
-	cityPath, cfg := request.CityPath, request.Cfg
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log)
+	var refusal *infraBoundaryRefusal
+	if report.Outcome != infraMigrationUnconverged || !errors.As(report.Fault, &refusal) {
+		t.Fatalf("migrate = %s (%v), want the copy refused: %s", report.Outcome, report.Fault, log.String())
+	}
+	if len(refusal.Refusals) != 1 || !slices.Equal(refusal.Refusals[0].IDs, []string{waiting.ID, running.ID}) {
+		t.Fatalf("refusals = %+v", refusal.Refusals)
+	}
+	if !strings.Contains(log.String(), "gc bd dep remove "+waiting.ID+" "+running.ID) {
+		t.Fatalf("the refusal does not name the fix: %s", log.String())
+	}
+	target := mustResolveInfraTarget(t, request.CityPath, request.Cfg)
+	if count, known := infraBindingContents(t, target); !known || count != 0 {
+		t.Fatalf("the binding holds %d row(s) (known %v) after a refused copy, want none", count, known)
+	}
+	if _, err := source.Get(running.ID); err != nil {
+		t.Fatalf("the refused copy removed %s: %v", running.ID, err)
+	}
+}
 
-	var announced bytes.Buffer
-	deleted := false
-	prevDel := infraClearBeforeDelete
-	infraClearBeforeDelete = func(string) error {
-		if !deleted && !strings.Contains(announced.String(), "AT RISK") {
-			t.Errorf("a row was removed before the at-risk cross edges were announced: %q", announced.String())
-		}
-		deleted = true
-		return nil
+// TestALostCrossEdgeAnEarlierClearRecordedStillReachesStatusAndBoot: a clear
+// by an earlier build that could not keep an edge recorded it in the cleared
+// note. This build re-adds no edge, so it loses none, but the record it reads
+// still reaches `gc storage status` and the boot event.
+func TestALostCrossEdgeAnEarlierClearRecordedStillReachesStatusAndBoot(t *testing.T) {
+	stubInfraControllerPing(t, 0)
+	source := stubInfraMigrationSource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
+	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	cityPath, cfg := request.CityPath, request.Cfg
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
 	}
-	t.Cleanup(func() { infraClearBeforeDelete = prevDel })
-	report := migrateInfraClasses(t, cityPath, cfg, &announced)
-	if report.Outcome != infraMigrationConverged {
-		t.Fatalf("migrate = %s: %s", report.Outcome, announced.String())
-	}
-	edge := waiting.ID + " -[blocks]-> " + running.ID
-	if !strings.Contains(announced.String(), edge) {
-		t.Fatalf("the migrate output does not list the edge at risk %q: %s", edge, announced.String())
-	}
-	if len(report.LostCrossEdges) != 1 || !strings.HasPrefix(report.LostCrossEdges[0], edge) {
-		t.Fatalf("report.LostCrossEdges = %v, want the refused edge %q", report.LostCrossEdges, edge)
-	}
+	edge := "gc-w1 -[blocks]-> gc-d1"
 	note, present, err := readInfraClearedNote(cityPath)
-	if err != nil || !present || !note.Complete || len(note.LostCrossEdges) != 1 {
-		t.Fatalf("cleared note = %+v present=%v err=%v; want complete with the lost edge", note, present, err)
+	if err != nil || !present {
+		t.Fatalf("cleared note present=%v err=%v", present, err)
+	}
+	note.LostCrossEdges = []string{edge + " (no issue found)"}
+	if err := writeInfraClearedNote(cityPath, note); err != nil {
+		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -553,7 +587,6 @@ func TestCrossStoreEdgesADoltStoreCannotKeepAreAnnouncedAndRecorded(t *testing.T
 	if !strings.Contains(stdout.String(), "lost cross-store edges: 1") || !strings.Contains(stdout.String(), edge) {
 		t.Fatalf("status does not list the lost edge: %s", stdout.String())
 	}
-
 	rec := events.NewFake()
 	routes, err := storageBootGate(cityPath, cfg, "gc start", rec, &bytes.Buffer{})
 	if err != nil {
@@ -701,6 +734,10 @@ func TestTheClearNeverRewritesWorkBeadText(t *testing.T) {
 				return b
 			}
 			blocked := work("blocked on the running graft", "Four were P1: tr-l0py1, tr-rikgb, tr-wso41, "+moved.ID+".")
+			// Closed: an open one would refuse the copy (D9's W -> D row).
+			if err := source.Close(blocked.ID); err != nil {
+				t.Fatal(err)
+			}
 			released := work("waited on the finished graft", "follow-up of "+movedClosed.ID+"; see "+movedClosed.ID+" notes")
 			related := work("related to the running graft", moved.ID+" is the graft this tracks")
 			work("cites the graft with no edge", "context: "+moved.ID)
@@ -732,22 +769,13 @@ func TestTheClearNeverRewritesWorkBeadText(t *testing.T) {
 					t.Errorf("work bead %s text rewritten by the clear:\n got %q\nwant %q", id, got.Description, want)
 				}
 			}
-			if len(report.Clear.Released) != 1 || report.Clear.Released[0].IssueID != released.ID {
-				t.Errorf("released = %+v, want exactly %s", report.Clear.Released, released.ID)
+			if len(report.Clear.Dropped) != 3 {
+				t.Errorf("dropped = %+v, want the three edges onto moved beads", report.Clear.Dropped)
 			}
-			if tc.refuseDangling {
-				if len(report.Clear.Unrestorable) != 2 {
-					t.Errorf("unrestorable = %v, want the two kept edges a bd-like store refuses", report.Clear.Unrestorable)
+			for _, w := range []beads.Bead{blocked, released, related} {
+				if deps, err := source.DepList(w.ID, "down"); err != nil || len(deps) != 0 {
+					t.Errorf("%s deps = %+v (%v); the clear re-adds no cross-store edge", w.ID, deps, err)
 				}
-				return
-			}
-			deps, err := source.DepList(blocked.ID, "down")
-			if err != nil || len(deps) != 1 || deps[0].DependsOnID != moved.ID || deps[0].Type != "blocks" {
-				t.Errorf("%s deps = %+v (%v); the kept blocking edge must survive the clear", blocked.ID, deps, err)
-			}
-			deps, err = source.DepList(related.ID, "down")
-			if err != nil || len(deps) != 1 || deps[0].DependsOnID != moved.ID || deps[0].Type != "related" {
-				t.Errorf("%s deps = %+v (%v); the kept related edge must survive the clear", related.ID, deps, err)
 			}
 		})
 	}
