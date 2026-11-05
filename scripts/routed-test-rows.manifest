@@ -3,6 +3,8 @@
 # Every file listed here MUST contain all six read-path routing rows enforced by
 # scripts/check-routed-test-rows.sh (api-happy-path, api-cache-not-live,
 # api-500-fallback, api-404-error, controller-down, escape-hatch).
+# Rows are table cases declared with name: "<row>"; routing-reason strings
+# in unrelated tests are not matrix declarations.
 #
 # This checked-in denominator is the hardening the CLI-unification council asked
 # for: without it, renaming a row marker would drop every file to "0 rows found"

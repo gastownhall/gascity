@@ -43,11 +43,12 @@ required_rows=(
     "escape-hatch"
 )
 
-# count_rows FILE -> echoes how many of the six required rows the file contains.
+# count_rows FILE -> counts the six named matrix cases, not routing-reason
+# strings elsewhere in a focused test. Matrix tables declare each as name: "...".
 count_rows() {
     local file="$1" present=0 row
     for row in "${required_rows[@]}"; do
-        if grep -Fq "$row" "$file"; then
+        if grep -Eq "(^|[[:space:]{,])name[[:space:]]*:[[:space:]]*\"$row\"" "$file"; then
             present=$((present + 1))
         fi
     done

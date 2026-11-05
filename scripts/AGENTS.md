@@ -1,5 +1,13 @@
 # scripts — change guide
 
+## Routed test matrix rows are named cases
+
+`check-routed-test-rows.sh` discovers the six read-path matrix rows from
+`name: "<row>"` table cases, not arbitrary routing-reason strings. Its
+manifest remains the non-empty denominator: listed files must have every row,
+and any newly discovered matrix must be complete and listed. Keep the guard's
+synthetic regression cases in `check_routed_test_rows_test.go` in sync.
+
 ## Hermetic Git test config is mirrored
 
 `Makefile`'s `TEST_ENV` and the nested `env -i` wrappers in
