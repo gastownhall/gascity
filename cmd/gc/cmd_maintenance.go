@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,11 +20,15 @@ import (
 func newMaintenanceCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "maintenance",
-		Short: "Dolt store maintenance (gc + snapshot)",
-		Long: `Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+		Short: "Dolt store maintenance (observe-only: no gc or snapshot yet)",
+		Long: `Manage periodic Dolt store maintenance (see engdocs/contributors/dolt-maintenance.md).
 
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
-in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.`,
+in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+
+The loop is observe-only for now: a run checks free disk space and records run history
+and events, but takes no backup snapshot and runs no CALL DOLT_GC, so a completed run
+does not mean the store was compacted.`,
 	}
 	cmd.AddCommand(newMaintenanceStatusCmd(stdout, stderr))
 	cmd.AddCommand(newMaintenanceDoltGCCmd(stdout, stderr))
@@ -80,38 +83,32 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	c, reason := maintenanceAPIClient(cityPath)
+	c, reason := maintenanceDoltGCAPIClient(cityPath)
 	return routeMaintenanceDoltGC(c, reason, wait, jsonOut, stdout, stderr)
 }
 
-// maintenanceAPIClient resolves the supervisor API client for the
-// maintenance subcommands, or returns (nil, reason) when routing isn't
+// maintenanceAPIClient resolves the supervisor API client for
+// `gc maintenance status`, or returns (nil, reason) when routing isn't
 // available. Indirected through a var so tests inject a client pointed at
 // httptest.Server or force a specific fallback reason without spinning up
 // a real controller.
-var maintenanceAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	// Maintenance has no local fallback. A supervisor-managed city omits a
-	// standalone [api] port (the supervisor serves the API on its own port via
-	// city-scoped routes), so apiClient returns nil even though the controller
-	// socket is alive; route to the supervisor-managed client directly rather
-	// than reporting controller-down. General commands keep apiClient's
-	// nil→local fallback, so this routing is scoped to maintenance. (gascity ga-tp7)
-	//
-	// Honor the GC_NO_API escape hatch: apiClient returns nil under it, and the
-	// alive-hook/supervisor client below never re-check it, so without this guard
-	// an explicit operator opt-out would be silently bypassed for maintenance.
-	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
-		if apiRouteControllerAliveHook(cityPath) != 0 {
-			if c := apiRouteSupervisorClientHook(cityPath); c != nil {
-				return c, ""
-			}
-		}
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Maintenance has no local fallback, so it uses the shared
+// supervisorFallthroughAPIClient helper (gascity ga-tp7): a supervisor-managed
+// city omits a standalone [api] port (the supervisor serves the API on its
+// own port via city-scoped routes), so apiClient alone returns nil even
+// though the controller socket is alive; route to the supervisor-managed
+// client directly rather than reporting controller-down. The `gc maintenance
+// dolt-gc` trigger resolves through maintenanceDoltGCAPIClient instead, which
+// does not send a supervisor that requires write grants a grantless mutation.
+var maintenanceAPIClient = supervisorFallthroughAPIClient
+
+// maintenanceDoltGCAPIClient resolves the supervisor API client for
+// `gc maintenance dolt-gc`. It routes like maintenanceAPIClient, except that a
+// supervisor-hosted city whose supervisor requires city write grants gets
+// (nil, "grant-required"): this client mints no grant, so the trigger would
+// be refused with a 401. Indirected through a var for tests.
+var maintenanceDoltGCAPIClient = supervisorFallthroughMutationAPIClient
 
 // routeMaintenanceStatus dispatches `gc maintenance status` to the
 // supervisor API. There is no local fallback (the in-memory ring buffer
@@ -146,12 +143,17 @@ func routeMaintenanceStatus(c *api.Client, nilReason string, jsonOut bool, stdou
 
 // routeMaintenanceDoltGC dispatches `gc maintenance dolt-gc` to the
 // supervisor API. Exit codes match the bead spec: 0 on success/accepted,
-// 1 on --wait failure, 2 when the supervisor is unreachable, 3 on 409
-// (run already in progress).
+// 1 on --wait failure, 2 when the supervisor is unreachable or requires a
+// city write grant this client cannot mint, 3 on 409 (run already in
+// progress).
 func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "maintenance dolt-gc"
 	if c == nil {
 		logRoute(stderr, cmdName, "fallback", nilReason)
+		if nilReason == "grant-required" {
+			fmt.Fprintf(stderr, "gc maintenance dolt-gc: the supervisor requires a signed city write grant (%s), which gc cannot attach to this command yet\n", nilReason) //nolint:errcheck // best-effort stderr
+			return 2
+		}
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor not running (%s)\n", nilReason) //nolint:errcheck // best-effort stderr
 		return 2
 	}
@@ -181,8 +183,8 @@ func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool,
 }
 
 // renderMaintenanceStatus prints the status view as human-readable text or
-// JSON, appending a stale-read banner when the API cache age exceeds the
-// shared threshold. Always returns 0 — status is purely informational.
+// JSON. The status is not read from the bead cache, so it prints no cache-age
+// footer. Always returns 0 — status is purely informational.
 func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonOut bool, stdout io.Writer) int {
 	if jsonOut {
 		envelope := map[string]any{
@@ -221,9 +223,6 @@ func renderMaintenanceStatus(cr api.CachedRead[api.MaintenanceStatusView], jsonO
 			}
 			fmt.Fprintln(stdout, line) //nolint:errcheck
 		}
-	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
 	}
 	return 0
 }

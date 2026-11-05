@@ -2,11 +2,15 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -21,12 +25,83 @@ var (
 	// Give streamed startup snapshots a short chance to surface a follow-on
 	// dialog after an initial shell prompt appears.
 	startupDialogStreamReadyGrace = 100 * time.Millisecond
+	// dialogLogf reports startup-dialog waits that end without the signal they
+	// wait for. Tests swap it to capture the message.
+	dialogLogf = log.Printf
 )
 
 // StartupDialogTimeout returns the current timeout budget used by the shared
 // startup dialog helpers. Tests override the backing variable directly.
 func StartupDialogTimeout() time.Duration {
 	return dialogPollTimeout
+}
+
+// startupDialogBudget bounds the polling startup-dialog sequence as a whole
+// instead of per dialog class.
+//
+// Every phase early-returns as soon as it recognizes the pane — its own dialog,
+// any later dialog, or a ready prompt — so a phase only ever burns its full
+// timeout when the pane shows nothing recognizable at all. In that state the
+// remaining phases are polling the very same blank pane and will burn theirs
+// too, so a per-phase timeout multiplied the wait by the number of dialog
+// classes: nine phases x 8s = 72s, past the 60s default [session]
+// startup_timeout. The caller's context then expired mid-sequence and turned
+// "the agent never drew anything" into a hard start failure blamed on whichever
+// dialog the wall-clock happened to land in.
+//
+// A shared deadline collapses that to one timeout for the whole sequence.
+// Recognizing the pane (observe) refreshes it, so a real dialog chain still gets
+// a fresh timeout for each follow-on dialog to render — the streaming twin,
+// AcceptStartupDialogsFromStreamWithStatus, already stops early on the same
+// "nothing observed" signal.
+//
+// The budget is therefore the window for the pane to draw its FIRST recognizable
+// frame. A runtime slower than that wants a larger timeout, and raising one is
+// now affordable: it costs its own value once instead of once per dialog class,
+// so it no longer has to be kept small enough that nine of them fit in the start
+// deadline.
+type startupDialogBudget struct {
+	timeout  time.Duration
+	deadline time.Time
+}
+
+func newStartupDialogBudget(timeout time.Duration) *startupDialogBudget {
+	return &startupDialogBudget{timeout: timeout, deadline: dialogClock.Now().Add(timeout)}
+}
+
+// live reports whether the sequence may keep polling.
+func (b *startupDialogBudget) live() bool {
+	return dialogClock.Now().Before(b.deadline)
+}
+
+// observe records that a phase recognized the pane and grants the next phase a
+// fresh timeout to wait for its own dialog to render.
+func (b *startupDialogBudget) observe() {
+	b.deadline = dialogClock.Now().Add(b.timeout)
+}
+
+// startupDialogClock is the time source of the polling startup-dialog
+// helpers: the waits between peeks (sleep) and the budget deadline.
+type startupDialogClock interface {
+	Now() time.Time
+	// Sleep waits for d or until ctx is canceled.
+	Sleep(ctx context.Context, d time.Duration)
+}
+
+// dialogClock is the wall clock in production. Tests swap in a stepped
+// virtual clock so that a fake pane's key and frame timing is ordered against
+// the handler's peeks deterministically instead of racing real timers.
+var dialogClock startupDialogClock = wallDialogClock{}
+
+type wallDialogClock struct{}
+
+func (wallDialogClock) Now() time.Time { return time.Now() }
+
+func (wallDialogClock) Sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
+	}
 }
 
 // StartupDialogOption configures optional policy for the startup-dialog helpers.
@@ -64,14 +139,19 @@ func newStartupDialogConfig(opts []StartupDialogOption) startupDialogConfig {
 
 // AcceptStartupDialogs dismisses startup dialogs that can block automated
 // sessions. Handles (in order):
+//  0. Claude first-run theme picker ("Choose the text style…") — requires Enter
 //  1. Claude resume selector — requires Down+Enter to resume the full session
 //  2. Codex update dialog ("Update available") — requires Down+Enter to skip
-//  3. Workspace trust dialog (Claude "Quick safety check", Codex "Do you trust the contents of this directory?", pi "Trust project folder?")
+//  3. Workspace trust dialog (Claude "Quick safety check", older Codex
+//     "Do you trust the contents of this directory?", Codex 0.156
+//     "Trust this folder?", Gemini "Do you trust the files in this folder?",
+//     pi "Trust project folder?")
 //  4. External CLAUDE.md imports dialog (Claude "Allow external CLAUDE.md file imports?") — requires Enter to allow (option 1 pre-selected)
 //  5. MCP trust dialog (Claude "New MCP server found in this project") — requires Down+Enter to trust all project MCP servers
 //  6. Codex hook review dialog — requires Down+Enter to trust hooks
 //  7. Bypass permissions warning ("Bypass Permissions mode") — requires Down+Enter
 //  8. Claude custom API key confirmation — requires Up+Enter to select "Yes"
+//  9. Rate-limit / usage-limit dialog ("Usage limit reached") — requires Down+Enter to select "Stop" so the session exits cleanly
 //
 // The peek function should return the last N lines of the session's terminal output.
 // The sendKeys function should send bare tmux-style keystrokes (e.g., "Enter", "Down").
@@ -87,7 +167,9 @@ func AcceptStartupDialogs(
 }
 
 // AcceptStartupDialogsFromStream dismisses known startup dialogs using an
-// event stream of full-screen snapshots instead of repeated peeks.
+// event stream of full-screen snapshots instead of repeated peeks. It drops
+// the "stream inconclusive" status; callers that can fall back to peeks
+// should use AcceptStartupDialogsFromStreamWithStatus.
 func AcceptStartupDialogsFromStream(
 	ctx context.Context,
 	timeout time.Duration,
@@ -102,6 +184,13 @@ func AcceptStartupDialogsFromStream(
 // AcceptStartupDialogsFromStreamWithStatus dismisses known startup dialogs
 // using an event stream of full-screen snapshots instead of repeated peeks
 // and reports whether the stream observed readiness or a known dialog state.
+// It also reports false when a workspace-trust dialog needs its selection
+// moved: the stream cannot re-read the screen to confirm the move, so it
+// sends nothing and the caller should fall back to AcceptStartupDialogs with
+// synchronous peeks. The stream also ends at the first snapshot of a Codex
+// composer that is still starting: Codex can replace it with a startup dialog
+// seconds later, and only the peek watch in AcceptStartupDialogs waits for
+// that. A stream that observed no readiness before then reports false.
 func AcceptStartupDialogsFromStreamWithStatus(
 	ctx context.Context,
 	timeout time.Duration,
@@ -118,7 +207,18 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return sendKeys(keys...)
 	}
 
-	phaseObserved, err := acceptClaudeResumeDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err := acceptThemeSelectionDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if err != nil {
+		return observed, fmt.Errorf("theme selection dialog: %w", err)
+	}
+	observed = observed || phaseObserved
+	if !phaseObserved && !observed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return observed, err
+	}
+	phaseObserved, err = acceptClaudeResumeDialogFromStream(ctx, timeout, stream, trackingSendKeys)
 	if err != nil {
 		return observed, fmt.Errorf("claude resume dialog: %w", err)
 	}
@@ -141,6 +241,11 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return observed, err
 	}
 	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if errors.Is(err, errStartupDialogStreamInconclusive) {
+		// The trust dialog is up and needs a selection move. Report the
+		// stream as inconclusive so the caller answers it with peeks.
+		return false, nil
+	}
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
 	}
@@ -226,8 +331,31 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	return observed, nil
 }
 
-// AcceptStartupDialogsWithTimeout dismisses known startup dialogs using the
-// provided timeout budget for each dialog class.
+// CodexStartupPending reports whether content shows a Codex pane that has
+// drawn its composer but not yet finished starting: Codex 0.156+ draws the
+// composer before it configures the session, and draws its status line
+// ("<model> · <dir>") under the composer only once startup is done. Text typed
+// into such a pane can be swallowed by a startup dialog drawn after it.
+func CodexStartupPending(content string) bool {
+	return codexStartupPending(content)
+}
+
+func codexStartupPending(content string) bool {
+	// A Codex composer drawn without its status line can still be replaced by
+	// a startup dialog (see watchCodexStartup).
+	return containsCodexBanner(content) && !containsStartupDialog(content) && !codexStartupSettled(content)
+}
+
+// AcceptStartupDialogsWithTimeout dismisses known startup dialogs within the
+// provided timeout budget. The budget covers the ordered pass as a whole and is
+// refreshed every time a phase recognizes the pane, so a pane that never renders
+// costs one timeout rather than one per dialog class (see startupDialogBudget).
+// A Codex composer still starting after the pass is then watched for up to one
+// more timeout for a dialog drawn after it (see watchCodexStartup), and each
+// such dialog gets a fresh pass: a Codex pane can add up to
+// maxCodexStartupDialogRounds watches and passes. A short timeout shortens each
+// watch, so a 2s one, such as the session layer's deferred Codex check, can end
+// before a dialog Codex draws up to 3.0s after its composer.
 func AcceptStartupDialogsWithTimeout(
 	ctx context.Context,
 	timeout time.Duration,
@@ -235,59 +363,245 @@ func AcceptStartupDialogsWithTimeout(
 	sendKeys func(keys ...string) error,
 	opts ...StartupDialogOption,
 ) error {
+	for round := 0; ; round++ {
+		if err := acceptStartupDialogsOnce(ctx, timeout, peek, sendKeys, opts...); err != nil {
+			return err
+		}
+		if round == maxCodexStartupDialogRounds {
+			return nil
+		}
+		late, err := watchCodexStartup(ctx, timeout, peek)
+		if err != nil || !late {
+			return err
+		}
+	}
+}
+
+// maxCodexStartupDialogRounds bounds how many dialogs a Codex pane can draw
+// after the initial pass and still have answered: each costs another watch and
+// pass, so one call runs at most maxCodexStartupDialogRounds+1 passes.
+const maxCodexStartupDialogRounds = 3
+
+// watchCodexStartup waits for a Codex pane to finish starting and reports
+// whether a startup dialog appeared instead. Codex 0.156+ draws its composer
+// before configuring the session, then can replace it with a dialog such as
+// "Hooks need review" seconds later (1.6-3.0s measured on 0.162.1). The
+// composer's "› " is the same signal the ordered handlers read as "no dialog is
+// coming", so without this watch a late dialog parks the session (#6464).
+// Startup is finished once Codex draws its status line under the composer.
+// Only a starting Codex composer is watched (see codexStartupPending), and only
+// a dialog that newly replaces it triggers another pass. That pass answers only
+// the dialogs the ordered pass recognizes: a late trust prompt is answered once
+// containsWorkspaceTrustDialog matches the 0.156+ wording (#6734). The watch is
+// bounded by timeout and logs when it expires, because a Codex build or config
+// that never draws the status line waits that long on every start.
+func watchCodexStartup(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+) (bool, error) {
+	content, err := peek(startupDialogPeekLines)
+	if err != nil {
+		return false, err
+	}
+	// Watch only a Codex composer that is still starting. Whatever else the
+	// ordered pass left on screen, including a dialog it already answered, is
+	// not re-answered here.
+	if !codexStartupPending(content) {
+		return false, nil
+	}
+	deadline := dialogClock.Now().Add(timeout)
+	for dialogClock.Now().Before(deadline) {
+		sleep(ctx, dialogPollInterval)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		content, err = peek(startupDialogPeekLines)
+		if err != nil {
+			return false, err
+		}
+		// A late dialog may replace the whole screen, banner included.
+		if containsStartupDialog(content) {
+			return true, nil
+		}
+		if !containsCodexBanner(content) || codexStartupSettled(content) {
+			return false, nil
+		}
+	}
+	dialogLogf("startup dialogs: Codex drew no status line (\"<model> · <dir>\") under its composer within %v; "+
+		"stopped watching for a late startup dialog", timeout)
+	return false, nil
+}
+
+func containsStartupDialog(content string) bool {
+	return containsThemeSelectionDialog(content) || containsPostThemeStartupDialog(content)
+}
+
+func containsCodexBanner(content string) bool {
+	return strings.Contains(content, "OpenAI Codex")
+}
+
+// codexStartupSettled reports whether Codex has drawn its status line
+// ("<model> · <dir>") under the composer, which it does only after startup,
+// including any trust or hook-review dialog, has finished. A dialog footer such
+// as "enter confirm · esc skip" has " · " too, so callers check for a startup
+// dialog first. A dialog's "› 1." cursor row is a numbered menu row, not a
+// prompt (see isNumberedMenuRow), so it does not anchor the search.
+func codexStartupSettled(content string) bool {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !containsPromptIndicator(lines[i]) {
+			continue
+		}
+		for _, below := range lines[i+1:] {
+			if strings.Contains(below, " · ") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// acceptStartupDialogsOnce answers each known startup dialog in order.
+func acceptStartupDialogsOnce(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+	opts ...StartupDialogOption,
+) error {
 	cfg := newStartupDialogConfig(opts)
-	if err := acceptClaudeResumeDialog(ctx, timeout, peek, sendKeys); err != nil {
+	budget := newStartupDialogBudget(timeout)
+	if err := acceptThemeSelectionDialog(ctx, budget, peek, sendKeys); err != nil {
+		return fmt.Errorf("theme selection dialog: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := acceptClaudeResumeDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("claude resume dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptCodexUpdateDialog(ctx, timeout, peek, sendKeys); err != nil {
+	if err := acceptCodexUpdateDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("codex update dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptWorkspaceTrustDialog(ctx, timeout, peek, sendKeys); err != nil {
+	if err := acceptWorkspaceTrustDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("workspace trust dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptExternalImportsDialog(ctx, timeout, peek, sendKeys, cfg.trustedImportRoot); err != nil {
+	if err := acceptExternalImportsDialog(ctx, budget, peek, sendKeys, cfg.trustedImportRoot); err != nil {
 		return fmt.Errorf("external imports dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptMCPTrustDialog(ctx, timeout, peek, sendKeys); err != nil {
+	if err := acceptMCPTrustDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("mcp trust dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptCodexHookReviewDialog(ctx, timeout, peek, sendKeys); err != nil {
+	if err := acceptCodexHookReviewDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("codex hook review dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptBypassPermissionsWarning(ctx, timeout, peek, sendKeys); err != nil {
+	if err := acceptBypassPermissionsWarning(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("bypass permissions warning: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := acceptCustomAPIKeyDialog(ctx, timeout, peek, sendKeys); err != nil {
+	if err := acceptCustomAPIKeyDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("custom API key dialog: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := dismissRateLimitDialog(ctx, timeout, peek, sendKeys); err != nil {
+	if err := dismissRateLimitDialog(ctx, budget, peek, sendKeys); err != nil {
 		return fmt.Errorf("rate limit dialog: %w", err)
 	}
 	return nil
+}
+
+// acceptThemeSelectionDialog dismisses Claude Code's first-run theme picker
+// ("Choose the text style that looks best with your terminal"). It is the very
+// first screen Claude draws when the box has no ~/.claude config yet, so it runs
+// ahead of every other phase — nothing else is reachable until it is answered.
+//
+// A container runtime that gives each session a fresh box hits this on EVERY
+// start, not just once: the config that records the choice dies with the box.
+// The pre-selected option is already the sane default, so Enter accepts it.
+func acceptThemeSelectionDialog(
+	ctx context.Context,
+	budget *startupDialogBudget,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+) error {
+	for budget.live() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		content, err := peek(startupDialogPeekLines)
+		if err != nil {
+			return err
+		}
+
+		if containsThemeSelectionDialog(content) {
+			budget.observe()
+			if err := sendKeys("Enter"); err != nil {
+				return err
+			}
+			sleep(ctx, startupDialogAcceptDelay)
+			return nil
+		}
+
+		if containsPromptIndicator(content) || containsPostThemeStartupDialog(content) {
+			budget.observe()
+			return nil
+		}
+
+		sleep(ctx, dialogPollInterval)
+	}
+	return nil
+}
+
+func acceptThemeSelectionDialogFromStream(
+	ctx context.Context,
+	timeout time.Duration,
+	snapshots *replayableSnapshotCursor,
+	sendKeys func(keys ...string) error,
+) (bool, error) {
+	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
+		match:       containsThemeSelectionDialog,
+		matchKeys:   []string{"Enter"},
+		matchDelay:  startupDialogAcceptDelay,
+		ready:       containsPromptIndicator,
+		readyOrNext: containsPostThemeStartupDialog,
+	})
+}
+
+// containsThemeSelectionDialog requires both the picker's prompt and its
+// "/theme" escape hatch so ordinary output mentioning a text style cannot
+// false-match and eat an Enter.
+func containsThemeSelectionDialog(content string) bool {
+	return strings.Contains(content, "Choose the text style") &&
+		strings.Contains(content, "/theme")
+}
+
+func containsPostThemeStartupDialog(content string) bool {
+	return containsClaudeResumeDialog(content) ||
+		containsPostClaudeResumeStartupDialog(content)
 }
 
 // acceptClaudeResumeDialog dismisses Claude's high-token/old-session resume
@@ -296,12 +610,11 @@ func AcceptStartupDialogsWithTimeout(
 // as-is" to preserve the in-flight workflow context instead of summarizing it.
 func acceptClaudeResumeDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -312,6 +625,7 @@ func acceptClaudeResumeDialog(
 		}
 
 		if containsClaudeResumeDialog(content) {
+			budget.observe()
 			if err := sendKeys("Down"); err != nil {
 				return err
 			}
@@ -328,6 +642,7 @@ func acceptClaudeResumeDialog(
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -372,12 +687,11 @@ func containsPostClaudeResumeStartupDialog(content string) bool {
 // selection is "Update now", so automated sessions must move down to "Skip".
 func acceptCodexUpdateDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -388,6 +702,7 @@ func acceptCodexUpdateDialog(
 		}
 
 		if containsCodexUpdateDialog(content) {
+			budget.observe()
 			if err := sendKeys("Down"); err != nil {
 				return err
 			}
@@ -403,6 +718,7 @@ func acceptCodexUpdateDialog(
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -442,19 +758,60 @@ func containsPostUpdateStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
+// maxTrustDialogMoveAttempts bounds how many times the workspace-trust
+// handlers move the selection and re-read the dialog before giving up. Each
+// attempt derives the movement from the frame actually on screen, so a dropped
+// keystroke is corrected by the next attempt; running out means the cursor
+// never reached the trust row and the dialog is left unconfirmed.
+const maxTrustDialogMoveAttempts = 3
+
+// ErrWorkspaceTrustUnconfirmed reports that a workspace-trust dialog was left
+// on screen because no frame ever showed the cursor on the trust row. The
+// handlers return it rather than pressing Enter on whatever is selected,
+// which could be "No, exit".
+var ErrWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust option; left the dialog unconfirmed")
+
+// errStartupDialogStreamInconclusive reports that a stream handler found a
+// dialog whose selection must move before it can be confirmed. A snapshot
+// stream cannot be re-read on demand, so it cannot close the move/re-read/
+// confirm loop safely: frames may lag the screen, Claude's trust cursor wraps,
+// and Claude re-renders the dialog shortly after first paint, resetting the
+// cursor. The stream handler sends nothing and the caller falls back to
+// synchronous peeks (AcceptStartupDialogs).
+var errStartupDialogStreamInconclusive = errors.New("startup dialog needs a selection move; stream cannot re-read the screen")
+
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
-// agents. Claude shows "Quick safety check"; Codex shows
-// "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". In all cases the safe continue option is
-// pre-selected, so Enter accepts.
+// agents. Claude shows "Quick safety check"; older Codex shows
+// "Do you trust the contents of this directory?"; Codex 0.156 shows
+// "Trust this folder?"; Gemini shows "Do you trust the files in this folder?";
+// pi (>= 0.79) shows "Trust project folder?". The safe option isn't reliably
+// pre-selected — a stale Claude Code build can default the cursor to
+// "No, exit" — so the handler locates the cursor and the trust option in the
+// rendered content and moves the selection before confirming; it never
+// blind-sends a fixed key sequence. When it can't locate both rows it sends no
+// keys, and the snapshot falls through to the existing readiness check, which
+// hands the phase off. Holding the phase open instead is tracked separately.
+//
+// Selection and confirmation are a closed loop: movement keys are sent
+// alone, the pane is re-read, and Enter is sent only from a frame whose
+// cursor is on the trust row. Claude drops keys for a moment after the
+// dialog first renders and its cursor wraps, so a blind Enter, or a blind
+// extra move, can land on "No, exit". Moves are bounded by
+// maxTrustDialogMoveAttempts. The trust row must show on two consecutive
+// frames before Enter, so a late move, or the re-render that resets
+// Claude's cursor shortly after first paint, cannot slip in between the
+// frame and the Enter. This holds even when this call sent no move: an
+// earlier pass (the tmux post-readiness pass, or a deferred dismiss) may
+// still have movement keys in flight.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	moves := 0
+	trustFrames := 0 // consecutive frames showing the cursor on the trust row
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -465,14 +822,47 @@ func acceptWorkspaceTrustDialog(
 		}
 
 		if containsWorkspaceTrustDialog(content) {
-			if err := sendKeys("Enter"); err != nil {
-				return err
+			if keys, ok := workspaceTrustConfirmKeys(content); ok {
+				budget.observe()
+				if len(keys) > 1 {
+					// Closed loop: move the selection, then re-read the pane
+					// on the next iteration. Enter is only ever sent from a
+					// frame that shows the cursor on the trust row, so a
+					// movement key Claude drops right after first render
+					// leads to another move, never to confirming "No, exit".
+					trustFrames = 0
+					moves++
+					if moves > maxTrustDialogMoveAttempts {
+						return fmt.Errorf("%w after %d selection moves", ErrWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
+					}
+					if err := sendKeys(keys[:len(keys)-1]...); err != nil {
+						return err
+					}
+					sleep(ctx, startupDialogAcceptDelay)
+					continue
+				}
+				trustFrames++
+				if trustFrames < 2 {
+					// Confirm only once the trust row holds on two
+					// consecutive frames: a move Claude applies late (this
+					// pass's or an earlier pass's), or the re-render that
+					// resets its cursor shortly after first paint, must not
+					// land between frame and Enter.
+					sleep(ctx, startupDialogAcceptDelay)
+					continue
+				}
+				if err := sendKeys(keys...); err != nil {
+					return err
+				}
+				sleep(ctx, startupDialogAcceptDelay)
+				return nil
 			}
-			sleep(ctx, startupDialogAcceptDelay)
-			return nil
 		}
 
+		trustFrames = 0
+
 		if containsPromptIndicator(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -482,6 +872,7 @@ func acceptWorkspaceTrustDialog(
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -497,20 +888,208 @@ func acceptWorkspaceTrustDialogFromStream(
 	sendKeys func(keys ...string) error,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsWorkspaceTrustDialog,
-		matchKeys:   []string{"Enter"},
-		matchDelay:  startupDialogAcceptDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostTrustStartupDialog,
+		match:        containsWorkspaceTrustDialog,
+		matchKeysFor: workspaceTrustConfirmKeys,
+		matchDelay:   startupDialogAcceptDelay,
+		ready:        containsPromptIndicator,
+		readyOrNext:  containsPostTrustStartupDialog,
+		// See acceptWorkspaceTrustDialog. When the selection has to move,
+		// the stream hands off to synchronous peeks, which run the closed
+		// loop (errStartupDialogStreamInconclusive).
+		confirmOnlyFromSelectedFrame: true,
 	})
 }
 
 func containsWorkspaceTrustDialog(content string) bool {
-	return strings.Contains(content, "trust this folder") ||
+	return strings.Contains(content, "Trust this folder?") ||
+		strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?") ||
 		strings.Contains(content, "Do you trust the files in this folder?") ||
 		strings.Contains(content, "Trust project folder?")
+}
+
+// trustDialogLayout describes how one coding agent renders its
+// workspace-trust confirmation as a cursor-selectable option list: the
+// marker glyphs that can mark the selected row, and how to recognize the
+// row whose label is the safe "trust this workspace" option.
+type trustDialogLayout struct {
+	markers    []string
+	isTrustRow func(label string) bool
+}
+
+var claudeTrustDialogLayout = trustDialogLayout{
+	// Only "❯": a bare ">" is the most common false cursor in terminal
+	// scrollback (shell prompts, quoted text, diff context), and the real
+	// captured pane uses "❯".
+	markers: []string{"❯"},
+	isTrustRow: func(label string) bool {
+		return strings.Contains(strings.ToLower(label), "trust this folder") && !strings.HasPrefix(label, "No")
+	},
+}
+
+var codexTrustDialogLayout = trustDialogLayout{
+	markers: []string{"›"},
+	isTrustRow: func(label string) bool {
+		return strings.Contains(strings.ToLower(label), "trust and continue")
+	},
+}
+
+var geminiTrustDialogLayout = trustDialogLayout{
+	markers: []string{"●"},
+	isTrustRow: func(label string) bool {
+		return strings.Contains(strings.ToLower(label), "trust folder")
+	},
+}
+
+var piTrustDialogLayout = trustDialogLayout{
+	markers: []string{"→"},
+	isTrustRow: func(label string) bool {
+		return strings.EqualFold(strings.TrimSpace(label), "Trust")
+	},
+}
+
+// workspaceTrustConfirmKeys locates the cursor row and the safe trust
+// option in a rendered workspace-trust dialog and returns the keys that
+// move the selection onto that option and confirm it. Claude, Codex 0.156,
+// Gemini, and pi each render the confirmation as a cursor-navigable list, but
+// with their own marker glyph and label wording (Claude: "❯"/"trust this
+// folder"; Codex 0.156: "›"/"Trust and continue"; Gemini:
+// "●"/"trust folder"; pi: "→"/"Trust"), so which layout to scan with is
+// chosen by which question text matched. Codex 0.156's question is chosen
+// only when it is the last trust question in the capture
+// (codexTrustQuestionIsLast), so a stale copy in scrollback cannot pre-empt
+// another agent's live dialog. Older Codex's trust prompt has no rendered
+// option list at all, so it is answered unconditionally — there is no wrong
+// selection to guard against.
+//
+// For the list-style layouts, it reports ok=false when the cursor or the
+// trust row can't be located — a layout still mid-render, or one none of
+// the known layouts match — so the caller sends nothing rather than
+// guessing: a fixed key sequence would confirm whichever option happens to
+// be pre-selected, including a "don't trust" option (the original bug, for
+// Claude).
+func workspaceTrustConfirmKeys(content string) ([]string, bool) {
+	switch {
+	case codexTrustQuestionIsLast(content):
+		return deriveTrustDialogKeys(content, "Trust this folder?", codexTrustDialogLayout)
+	case strings.Contains(content, "trust this folder") || strings.Contains(content, "Quick safety check"):
+		// "Quick safety check" is the dialog's header line, so it anchors the
+		// scan above every option row. "trust this folder" is itself an option
+		// label, so it only anchors when the header isn't rendered.
+		question := "Quick safety check"
+		if !strings.Contains(content, question) {
+			question = "trust this folder"
+		}
+		return deriveTrustDialogKeys(content, question, claudeTrustDialogLayout)
+	case strings.Contains(content, "Do you trust the files in this folder?"):
+		return deriveTrustDialogKeys(content, "Do you trust the files in this folder?", geminiTrustDialogLayout)
+	case strings.Contains(content, "Trust project folder?"):
+		return deriveTrustDialogKeys(content, "Trust project folder?", piTrustDialogLayout)
+	case strings.Contains(content, "Do you trust the contents of this directory?"):
+		return []string{"Enter"}, true
+	default:
+		return nil, false
+	}
+}
+
+// codexTrustQuestionIsLast reports whether Codex 0.156's "Trust this folder?"
+// occurs in content after every other agent's trust question. The capture
+// includes scrollback above the live dialog (see trustDialogWindow), and the
+// live dialog is the bottom-most, so a "Trust this folder?" left in history
+// above another agent's live dialog must not select the Codex layout.
+func codexTrustQuestionIsLast(content string) bool {
+	codexAt := strings.LastIndex(content, "Trust this folder?")
+	if codexAt < 0 {
+		return false
+	}
+	for _, question := range []string{
+		"trust this folder",
+		"Quick safety check",
+		"Do you trust the files in this folder?",
+		"Trust project folder?",
+		"Do you trust the contents of this directory?",
+	} {
+		if strings.LastIndex(content, question) > codexAt {
+			return false
+		}
+	}
+	return true
+}
+
+// deriveTrustDialogKeys locates the cursor row and the trust row in a
+// rendered option-list trust dialog and returns the keys that move the
+// selection onto the trust row and confirm it. question is the literal that
+// identified the dialog; the scan is scoped to the dialog itself so
+// scrollback can't supply a false cursor row.
+func deriveTrustDialogKeys(content, question string, layout trustDialogLayout) ([]string, bool) {
+	content = trustDialogWindow(content, question)
+	lines := strings.Split(content, "\n")
+	cutset := strings.Join(layout.markers, "") + " "
+
+	cursorIdx, trustIdx := -1, -1
+	for i, line := range lines {
+		// Strip a leading box-drawing border the same way
+		// containsPromptIndicator does, so a trust dialog a TUI renders inside
+		// a bordered box ("│ ❯ Yes, I trust this folder") still yields both a
+		// cursor row and a label instead of no keys at all.
+		trimmed := stripLeadingBoxBorder(strings.TrimSpace(line))
+		if trimmed == "" {
+			continue
+		}
+
+		if cursorIdx == -1 {
+			for _, marker := range layout.markers {
+				if strings.HasPrefix(trimmed, marker) {
+					cursorIdx = i
+					break
+				}
+			}
+		}
+
+		if trustIdx == -1 {
+			label := strings.TrimSpace(strings.TrimLeft(trimmed, cutset))
+			if layout.isTrustRow(label) {
+				trustIdx = i
+			}
+		}
+	}
+
+	if cursorIdx == -1 || trustIdx == -1 {
+		return nil, false
+	}
+
+	switch delta := trustIdx - cursorIdx; {
+	case delta > 0:
+		keys := make([]string, 0, delta+1)
+		for i := 0; i < delta; i++ {
+			keys = append(keys, "Down")
+		}
+		return append(keys, "Enter"), true
+	case delta < 0:
+		keys := make([]string, 0, -delta+1)
+		for i := 0; i < -delta; i++ {
+			keys = append(keys, "Up")
+		}
+		return append(keys, "Enter"), true
+	default:
+		return []string{"Enter"}, true
+	}
+}
+
+// trustDialogWindow narrows content to the rendered dialog by starting at the
+// line carrying the last occurrence of question. peek returns the whole pane
+// (capture-pane -S -120), so index 0 is up to 120 lines of scrollback above
+// the dialog, any of which could otherwise be mistaken for the cursor row.
+func trustDialogWindow(content, question string) string {
+	i := strings.LastIndex(content, question)
+	if i < 0 {
+		return content
+	}
+	if start := strings.LastIndexByte(content[:i], '\n'); start >= 0 {
+		return content[start+1:]
+	}
+	return content
 }
 
 func containsPostTrustStartupDialog(content string) bool {
@@ -539,13 +1118,12 @@ func containsPostTrustStartupDialog(content string) bool {
 // repository. An empty trustedRoot trusts nothing.
 func acceptExternalImportsDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 	trustedRoot string,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -556,6 +1134,7 @@ func acceptExternalImportsDialog(
 		}
 
 		if containsExternalImportsDialog(content) && externalImportsTrusted(content, trustedRoot) {
+			budget.observe()
 			if err := sendKeys("Enter"); err != nil {
 				return err
 			}
@@ -564,6 +1143,7 @@ func acceptExternalImportsDialog(
 		}
 
 		if containsPromptIndicator(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -572,6 +1152,7 @@ func acceptExternalImportsDialog(
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -729,12 +1310,11 @@ func isPathPrefix(ancestor, descendant string) bool {
 // runs after acceptWorkspaceTrustDialog. See gascity#3466.
 func acceptMCPTrustDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -745,6 +1325,7 @@ func acceptMCPTrustDialog(
 		}
 
 		if containsMCPTrustDialog(content) {
+			budget.observe()
 			if err := sendKeys("Down"); err != nil {
 				return err
 			}
@@ -757,6 +1338,7 @@ func acceptMCPTrustDialog(
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -797,12 +1379,11 @@ func acceptMCPTrustDialogFromStream(
 // second option, "Trust all and continue", so press Down then Enter.
 func acceptCodexHookReviewDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -813,6 +1394,7 @@ func acceptCodexHookReviewDialog(
 		}
 
 		if containsCodexHookReviewDialog(content) {
+			budget.observe()
 			if err := sendKeys("Down"); err != nil {
 				return err
 			}
@@ -824,6 +1406,7 @@ func acceptCodexHookReviewDialog(
 			strings.Contains(content, "Bypass Permissions mode") ||
 			containsCustomAPIKeyDialog(content) ||
 			ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -867,12 +1450,11 @@ func containsPostCodexHookReviewStartupDialog(content string) bool {
 // warning requiring Down arrow to select "Yes, I accept" and then Enter.
 func acceptBypassPermissionsWarning(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -883,6 +1465,7 @@ func acceptBypassPermissionsWarning(
 		}
 
 		if strings.Contains(content, "Bypass Permissions mode") {
+			budget.observe()
 			if err := sendKeys("Down"); err != nil {
 				return err
 			}
@@ -890,7 +1473,12 @@ func acceptBypassPermissionsWarning(
 			return sendKeys("Enter")
 		}
 
-		if containsPromptIndicator(content) {
+		// Hand off as soon as a later dialog is on screen, matching the stream
+		// twin's readyOrNext. Without this the phase polls out its budget on a
+		// pane that already shows the API-key or rate-limit dialog and starves
+		// the two phases that handle them.
+		if containsPromptIndicator(content) || containsPostBypassStartupDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -924,12 +1512,11 @@ func containsPostBypassStartupDialog(content string) bool {
 // Enter to choose "Yes" and proceed with the configured provider.
 func acceptCustomAPIKeyDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -940,6 +1527,7 @@ func acceptCustomAPIKeyDialog(
 		}
 
 		if containsCustomAPIKeyDialog(content) {
+			budget.observe()
 			if err := sendKeys("Up"); err != nil {
 				return err
 			}
@@ -948,6 +1536,7 @@ func acceptCustomAPIKeyDialog(
 		}
 
 		if containsPromptIndicator(content) || ContainsRateLimitDialog(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -983,12 +1572,11 @@ func containsCustomAPIKeyDialog(content string) bool {
 // wake failures.
 func dismissRateLimitDialog(
 	ctx context.Context,
-	timeout time.Duration,
+	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1001,6 +1589,7 @@ func dismissRateLimitDialog(
 		if ContainsRateLimitDialog(content) {
 			// Select "Stop" (option 2). The menu has "Keep trying" selected
 			// by default, so press Down then Enter.
+			budget.observe()
 			if err := sendKeys("Down"); err != nil {
 				return err
 			}
@@ -1009,6 +1598,7 @@ func dismissRateLimitDialog(
 		}
 
 		if containsPromptIndicator(content) {
+			budget.observe()
 			return nil
 		}
 
@@ -1036,7 +1626,23 @@ type streamDialogSpec struct {
 	ready       func(string) bool
 	readyOrNext func(string) bool
 	matchKeys   []string
-	matchDelay  time.Duration
+	// matchKeysFor, when set, computes the keys to send from the matched
+	// content instead of using the static matchKeys — e.g. deriving the
+	// cursor movement needed for a dialog whose safe option isn't always
+	// pre-selected. A false second return means the content matched but
+	// the correct keys couldn't be determined; no keys are sent for that
+	// snapshot rather than guessing, and it falls through to the spec's
+	// readiness checks like any unmatched snapshot.
+	matchKeysFor func(string) ([]string, bool)
+	matchDelay   time.Duration
+	// confirmOnlyFromSelectedFrame limits the stream to single-key matches:
+	// a match that needs the selection moved first sends nothing and
+	// returns errStartupDialogStreamInconclusive so the caller answers it
+	// with synchronous peeks. A stream frame may lag the screen, and Claude
+	// re-renders the trust dialog shortly after first paint, resetting its
+	// cursor and dropping keys, so a streamed frame showing the cursor on
+	// the target row does not prove the cursor is still there.
+	confirmOnlyFromSelectedFrame bool
 }
 
 type replayableSnapshotStream struct {
@@ -1052,18 +1658,32 @@ type replayableSnapshotCursor struct {
 	carry  []string
 }
 
+// newReplayableSnapshotCursor reads startup snapshots from src until the first
+// one of a Codex composer that is still starting (see
+// AcceptStartupDialogsFromStreamWithStatus).
 func newReplayableSnapshotCursor(src <-chan string) *replayableSnapshotCursor {
-	return newReplayableSnapshotCursorFromStream(newReplayableSnapshotStream(src))
+	return newReplayableSnapshotCursorFromStream(newReplayableSnapshotStream(src, codexStartupPending))
 }
 
 func newReplayableSnapshotCursorFromStream(stream *replayableSnapshotStream) *replayableSnapshotCursor {
 	return &replayableSnapshotCursor{stream: stream}
 }
 
-func newReplayableSnapshotStream(src <-chan string) *replayableSnapshotStream {
+// newReplayableSnapshotStream publishes the snapshots from src until one
+// matches end, then finishes and discards the rest so the sender never blocks.
+func newReplayableSnapshotStream(src <-chan string, end func(string) bool) *replayableSnapshotStream {
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
 	go func() {
+		ended := false
 		for content := range src {
+			if ended {
+				continue
+			}
+			if end(content) {
+				ended = true
+				stream.finish()
+				continue
+			}
 			stream.publish(content)
 		}
 		stream.finish()
@@ -1173,8 +1793,17 @@ func acceptDialogFromStream(
 		if len(history) > 0 {
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
-					snapshots.replay(history[idx+1:])
-					return true, sendDialogKeys(ctx, sendKeys, spec.matchKeys, spec.matchDelay)
+					keys, ok := spec.matchKeys, true
+					if spec.matchKeysFor != nil {
+						keys, ok = spec.matchKeysFor(content)
+					}
+					if ok && spec.confirmOnlyFromSelectedFrame && len(keys) > 1 {
+						return true, errStartupDialogStreamInconclusive
+					}
+					if ok {
+						snapshots.replay(history[idx+1:])
+						return true, sendDialogKeys(ctx, sendKeys, keys, spec.matchDelay)
+					}
 				}
 				if spec.readyOrNext != nil && spec.readyOrNext(content) {
 					snapshots.replay(history[idx:])
@@ -1267,8 +1896,13 @@ func sendDialogKeys(
 // ContainsRateLimitDialog reports whether pane content shows a provider
 // rate-limit or usage-limit startup dialog. It is intentionally permissive for
 // startup compatibility; use ContainsProviderRateLimitScreen when classifying
-// arbitrary post-crash scrollback.
+// arbitrary post-crash scrollback. A Codex pane that has finished starting
+// shows no startup dialog, so its text, such as a first prompt that mentions
+// rate limits, does not match.
 func ContainsRateLimitDialog(content string) bool {
+	if containsCodexBanner(content) && codexStartupSettled(content) {
+		return false
+	}
 	return strings.Contains(content, "Usage limit reached") ||
 		strings.Contains(content, "You've hit your limit") ||
 		strings.Contains(content, "/rate-limit-options") ||
@@ -1286,6 +1920,25 @@ func ContainsRateLimitDialog(content string) bool {
 func ContainsModelSwitchModal(content string) bool {
 	return strings.Contains(content, "Keep current model") &&
 		strings.Contains(content, "Switch to ")
+}
+
+// ContainsFeedbackSurveyModal reports whether pane content shows Claude
+// Code's post-turn "how did I do?" feedback survey (bundle 2.1.251,
+// component DT: option row built from HL = [{1,Bad},{2,Fine},{3,Good}] plus
+// optional ffe = {4,Unsure}, and WL = {0,Dismiss}). The survey has two
+// variants — session feedback and memory recollection — with different,
+// unstable titles, so the option row is the only sound anchor. The dismiss
+// key is "0".
+//
+// This requires all four cells on a single line, matching lineContainsAll's
+// same-line-co-occurrence reasoning used elsewhere in this file: testing the
+// whole pane blob would let the labels land on unrelated scrollback (e.g.
+// prose that merely discusses the survey) and send spurious keystrokes into
+// a working agent's composer. "4: Unsure" is deliberately excluded from the
+// required set — it is present only in the memory-recollection variant, and
+// requiring it would miss the session-feedback variant entirely.
+func ContainsFeedbackSurveyModal(content string) bool {
+	return lineContainsAll(content, "1: Bad", "2: Fine", "3: Good", "0: Dismiss")
 }
 
 // ContainsProviderRateLimitScreen reports whether pane content has
@@ -1351,9 +2004,118 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case containsCreditBalanceStop(lower):
+		return "quota_exceeded"
 	default:
 		return ""
 	}
+}
+
+// ProviderResumeRefusalReason classifies content, a startup death's error
+// (which carries its last pane output) or a dead pane's screen, as the
+// provider's own refusal to resume sessionKey, the conversation it was
+// handed, "" when it is not: claude's "No conversation found with session
+// ID: <key>", the phrase and that key on one line. A refused resume cannot
+// succeed from that launch, so its caller starts the conversation fresh
+// instead of retrying the same resume (mc-bm1af).
+//
+// The key anchors it: a resumed claude draws its history before it can die,
+// so the phrase about another conversation (or the resume picker's "No
+// conversations found") in that history is no refusal.
+func ProviderResumeRefusalReason(content, sessionKey string) string {
+	key := strings.ToLower(strings.TrimSpace(sessionKey))
+	if key == "" {
+		return ""
+	}
+	for _, line := range strings.Split(strings.ToLower(content), "\n") {
+		if strings.Contains(line, "no conversation found with session id") && strings.Contains(line, key) {
+			return "conversation_not_found"
+		}
+	}
+	return ""
+}
+
+// Claude Code's exhausted-credit stop phrases: the TUI's displayed stop and
+// the headless message.
+const (
+	creditBalanceStopPhrase         = "credit balance too low"
+	creditBalanceStopHeadlessPhrase = "credit balance is too low"
+)
+
+// The raw Anthropic API error for an exhausted credit balance, as Claude Code
+// renders it: an "API Error: 4xx" line whose JSON body carries the sentence
+// "Your credit balance is too low to access the Anthropic API". The sentence
+// starts about 90 columns in, so a narrow pane wraps it onto indented
+// continuation lines; it is matched with all whitespace removed so word and
+// mid-word wraps both join back up.
+const (
+	apiClientErrorPrefix      = "api error: 4"
+	apiCreditBalanceSentence  = "creditbalanceistoolowtoaccess"
+	apiErrorContinuationLines = 5
+)
+
+// containsCreditBalanceStop reports whether lowercased content shows Claude
+// Code's exhausted-credit stop as an error line of its own.
+//
+// The match is anchored rather than a bare substring because a terminal park
+// has no self-heal (it needs an explicit wake or an operator), so a false hit
+// on a session that merely quoted the phrase and then crashed is worse than a
+// miss, which degrades to ordinary crash counting.
+func containsCreditBalanceStop(lower string) bool {
+	lines := strings.Split(lower, "\n")
+	for i, line := range lines {
+		body := creditErrorBody(line)
+		if isCreditBalanceStopLine(body, creditBalanceStopPhrase) ||
+			isCreditBalanceStopLine(body, creditBalanceStopHeadlessPhrase) {
+			return true
+		}
+		if strings.HasPrefix(body, apiClientErrorPrefix) &&
+			strings.Contains(apiErrorBlock(lines[i:]), apiCreditBalanceSentence) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCreditBalanceStopLine reports whether an error body is the stop phrase on
+// its own or followed only by Claude Code's " · " remedy separator (whatever
+// the remedy text, billing host, or clipping after it). Prose that wraps the
+// phrase to the start of a line continues with words and does not match.
+func isCreditBalanceStopLine(body, phrase string) bool {
+	rest, ok := strings.CutPrefix(body, phrase)
+	if !ok {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	return rest == "" || strings.HasPrefix(rest, "·")
+}
+
+// apiErrorBlock joins an API error line (lines[0]) with its wrapped
+// continuation: up to apiErrorContinuationLines following lines that are
+// non-blank and indented, stopping at the first that is not. All whitespace is
+// dropped so a wrap at any column, even mid-word, rejoins the sentence, while
+// the bound keeps a later, unrelated line from completing the match.
+func apiErrorBlock(lines []string) string {
+	block := []string{lines[0]}
+	for _, line := range lines[1:] {
+		if len(block) > apiErrorContinuationLines || strings.TrimSpace(line) == "" {
+			break
+		}
+		if r, _ := utf8.DecodeRuneInString(line); !unicode.IsSpace(r) {
+			break
+		}
+		block = append(block, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(block, "\n")), "")
+}
+
+// creditErrorBody returns line with its indentation and Claude Code's leading
+// "⎿" error marker trimmed. strings.TrimSpace trims Unicode space, so the
+// marker's no-break-space padding needs no special case.
+func creditErrorBody(line string) string {
+	body := strings.TrimSpace(line)
+	body = strings.TrimPrefix(body, "⎿")
+	return strings.TrimSpace(body)
 }
 
 // lineContainsAll reports whether any single line of content contains every
@@ -1459,8 +2221,5 @@ func sleep(ctx context.Context, d time.Duration) {
 	if d <= 0 {
 		return
 	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
-	}
+	dialogClock.Sleep(ctx, d)
 }

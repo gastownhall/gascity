@@ -17,11 +17,12 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // isolateProviderDiscovery points provider transcript discovery at an empty,
@@ -638,7 +639,7 @@ func TestHandleSessionTranscriptStructuredNormalizesFirstClassProviders(t *testi
 			h := newTestCityHandlerWith(t, fs, srv)
 			srv.sessionLogSearchPaths = []string{searchBase}
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			workDir := t.TempDir()
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: tt.provider, WorkDir: workDir, Provider: tt.provider, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
@@ -698,7 +699,7 @@ func TestHandleSessionTranscriptStructuredGracefullyDowngradesAllBuiltinProvider
 			srv := New(fs)
 			h := newTestCityHandlerWith(t, fs, srv)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: provider, WorkDir: t.TempDir(), Provider: provider, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -731,6 +732,7 @@ func TestHandleSessionTranscriptStructuredGracefullyDowngradesAllBuiltinProvider
 			if len(resp.History.Diagnostics) == 0 || resp.History.Diagnostics[0].Code != structuredTranscriptUnavailableCode {
 				t.Fatalf("Diagnostics = %+v, want transcript_unavailable", resp.History.Diagnostics)
 			}
+			assertStructuredFallbackActivityUnknown(t, resp)
 			resume, ok := decodeStructuredResumeToken(resp.History.Cursor.ResumeToken)
 			if !ok || !resume.IncludeThinking {
 				t.Fatalf("fallback resume token = %+v, valid=%t; want include_thinking=true", resume, ok)
@@ -760,7 +762,7 @@ func TestHandleSessionTranscriptStructuredSkipsCodexUnknownEvents(t *testing.T) 
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -801,7 +803,7 @@ func TestHandleSessionTranscriptStructuredNormalizesCodexSystemErrors(t *testing
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -858,7 +860,7 @@ func TestHandleSessionTranscriptStructuredNormalizesGeminiSystemError(t *testing
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -902,7 +904,7 @@ func TestHandleSessionTranscriptStructuredNormalizesClaudeTaskOutput(t *testing.
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: session.ProviderResume{
 		ResumeFlag:    "--resume",
@@ -960,7 +962,7 @@ func TestHandleSessionTranscriptStructuredNormalizesClaudeBashOutput(t *testing.
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: session.ProviderResume{
 		ResumeFlag:    "--resume",
@@ -1015,7 +1017,7 @@ func TestHandleSessionTranscriptStructuredLinksClaudeWriteStdin(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: session.ProviderResume{
 		ResumeFlag:    "--resume",
@@ -1071,7 +1073,7 @@ func TestHandleSessionStreamStructuredGracefullyDowngradesWithoutTranscript(t *t
 			srv := New(fs)
 			h := newTestCityHandlerWith(t, fs, srv)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: provider, WorkDir: t.TempDir(), Provider: provider, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -1098,6 +1100,7 @@ func TestHandleSessionStreamStructuredGracefullyDowngradesWithoutTranscript(t *t
 			if !strings.Contains(body, provider+" pane output") {
 				t.Fatalf("stream body missing text fallback: %s", body)
 			}
+			assertStructuredStreamFallbackActivityUnknown(t, body)
 			if !strings.Contains(body, `"role":"assistant"`) {
 				t.Fatalf("stream body fallback role is not assistant: %s", body)
 			}
@@ -1116,7 +1119,7 @@ func TestHandleSessionStreamStructuredUsesRelocatedSessionStoreForPaneFallback(t
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(relocated, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(relocated), fs.sp, session.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
 		Title:    "Relocated",
@@ -1164,7 +1167,7 @@ func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *tes
 			humaHandler := newTestCityHandlerWith(t, fs, srv)
 			srv.sessionLogSearchPaths = []string{searchBase}
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			workDir := t.TempDir()
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 				Template: "myrig/worker",
@@ -1209,7 +1212,7 @@ func TestSessionStreamStructuredPromotesFallbackToHistoryWithoutReconnect(t *tes
 			)
 			select {
 			case structuredPeekPoll <- time.Now():
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("structured peek stream did not consume the injected poll tick")
 			}
 
@@ -1250,7 +1253,7 @@ func TestHandleSessionStreamStructuredClosedWithoutHistoryMatchesTranscriptSnaps
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
 		Title:    "Closed",
@@ -1266,7 +1269,7 @@ func TestHandleSessionStreamStructuredClosedWithoutHistoryMatchesTranscriptSnaps
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1318,7 +1321,7 @@ func TestHandleSessionStreamStructuredAfterCursorSuppressesRESTSnapshotReplay(t 
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -1382,7 +1385,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -1425,7 +1428,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	rec := newSyncResponseRecorder()
 	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
@@ -1436,7 +1439,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		close(done)
 	}()
 
-	initialBody := waitForRecorderSubstring(t, rec, "event: activity", testutil.GoroutineRaceTimeout)
+	initialBody := waitForRecorderSubstring(t, rec, "event: activity", hangBudget)
 	if strings.Contains(initialBody, "event: structured") {
 		cancel()
 		<-done
@@ -1463,7 +1466,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", testutil.GoroutineRaceTimeout)
+	body := waitForRecorderFrame(t, rec, "event: structured\n", hangBudget)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")
@@ -1487,7 +1490,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -1530,7 +1533,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		t.Fatalf("REST history cursor = %+v, want resume token", snapshot.History)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*testutil.GoroutineRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	rec := newSyncResponseRecorder()
 	path := cityURL(fs, "/session/") + info.ID + "/stream?format=structured&after_cursor=" + url.QueryEscape(snapshot.History.Cursor.ResumeToken)
@@ -1541,7 +1544,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		close(done)
 	}()
 
-	initialBody := waitForRecorderSubstring(t, rec, "event: structured", testutil.GoroutineRaceTimeout)
+	initialBody := waitForRecorderFrame(t, rec, "event: structured\n", hangBudget)
 	initialFrame := firstSSETestFrame(t, initialBody, "structured")
 	var initialUpdate SessionStreamStructuredMessageEvent
 	if err := json.Unmarshal([]byte(initialFrame.Data), &initialUpdate); err != nil {
@@ -1580,7 +1583,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, `"id":"m5"`, testutil.GoroutineRaceTimeout)
+	body := waitForRecorderSubstring(t, rec, `"id":"m5"`, hangBudget)
 	cancel()
 	<-done
 	var frame sseTestFrame
@@ -1612,7 +1615,7 @@ func TestHandleSessionStreamStructuredInvalidCursorEmitsResetSnapshot(t *testing
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -1634,7 +1637,7 @@ func TestHandleSessionStreamStructuredInvalidCursorEmitsResetSnapshot(t *testing
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"m1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1668,7 +1671,7 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -1734,7 +1737,7 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", 10*time.Second)
+	body := waitForRecorderFrame(t, rec, "event: structured\n", 10*time.Second)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")
@@ -1754,7 +1757,7 @@ func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "cursor", WorkDir: t.TempDir(), Provider: "cursor", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1778,6 +1781,7 @@ func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
 	if resp.History == nil || resp.History.Continuity.Status != "degraded" {
 		t.Fatalf("History = %+v, want degraded structured fallback", resp.History)
 	}
+	assertStructuredFallbackActivityUnknown(t, resp)
 	resume, ok := decodeStructuredResumeToken(resp.History.Cursor.ResumeToken)
 	if !ok || !resume.IncludeThinking {
 		t.Fatalf("legacy fallback resume token = %+v, valid=%t; want include_thinking=true", resume, ok)
@@ -1792,7 +1796,7 @@ func TestLegacySessionStreamStructuredGracefullyDowngrades(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "cursor", WorkDir: t.TempDir(), Provider: "cursor", Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1819,11 +1823,38 @@ func TestLegacySessionStreamStructuredGracefullyDowngrades(t *testing.T) {
 	if !strings.Contains(body, "cursor pane output") {
 		t.Fatalf("stream body missing text fallback: %s", body)
 	}
+	assertStructuredStreamFallbackActivityUnknown(t, body)
 	if !strings.Contains(body, `"role":"assistant"`) {
 		t.Fatalf("stream body fallback role is not assistant: %s", body)
 	}
 	cancel()
 	<-done
+}
+
+// assertStructuredFallbackActivityUnknown checks that a degraded structured
+// transcript for a running session with no transcript reports unknown
+// activity: pane output alone does not show whether the agent is mid-turn.
+func assertStructuredFallbackActivityUnknown(t *testing.T, resp sessionTranscriptGetResponse) {
+	t.Helper()
+	if resp.History == nil {
+		t.Fatal("History is nil, want degraded structured history")
+	}
+	if got, want := resp.History.TailState.Activity, string(worker.TailActivityUnknown); got != want {
+		t.Fatalf("fallback tail_state.activity = %q, want %q: nothing observed the turn state", got, want)
+	}
+}
+
+// assertStructuredStreamFallbackActivityUnknown is the SSE-body counterpart of
+// assertStructuredFallbackActivityUnknown.
+func assertStructuredStreamFallbackActivityUnknown(t *testing.T, body string) {
+	t.Helper()
+	want := `"activity":"` + string(worker.TailActivityUnknown) + `"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("stream fallback missing %s: %s", want, body)
+	}
+	if inTurn := `"activity":"` + string(worker.TailActivityInTurn) + `"`; strings.Contains(body, inTurn) {
+		t.Fatalf("stream fallback claims %s without observing a turn: %s", inTurn, body)
+	}
 }
 
 func findStructuredToolPair(messages []SessionStructuredMessage, toolCallID string) (*SessionStructuredBlock, *SessionStructuredBlock) {

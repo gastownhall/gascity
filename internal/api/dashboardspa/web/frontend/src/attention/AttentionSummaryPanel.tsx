@@ -1,5 +1,5 @@
 import { Fragment } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { useAttentionModel } from './context';
 import { attentionDomainHref, attentionDomainLabel } from './labels';
 import type { AttentionItem, AttentionSeverity } from './compose';

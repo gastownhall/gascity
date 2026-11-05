@@ -35,8 +35,8 @@ import (
 // other (hard) error short-circuits and returns nil rows. The hard
 // error is wrapped with context naming which leg failed so logs are
 // diagnosable.
-func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead, error) {
-	if store == nil {
+func ListAllSessionBeads(store beads.SessionStore, base beads.ListQuery) ([]beads.Bead, error) {
+	if store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 
@@ -140,6 +140,11 @@ type ListAllOptions struct {
 	// order that a no-op sort would not stabilize (the cold path returns store
 	// order — the two would disagree). Every CacheFirst caller sets SortCreatedDesc.
 	CacheFirst bool
+	// TierMode sets query.TierMode on each leg. The zero value is the
+	// store's default tier; a federated census states
+	// beads.FederatedReadTier so a relocated sessions binding answers its
+	// ephemeral rows too.
+	TierMode beads.TierMode
 }
 
 // ListedSession pairs the scalar Info projection with the persisted-response
@@ -155,8 +160,8 @@ type ListedSession struct {
 // cachedListStore is the optional read-model cache capability: it answers a
 // ListQuery from an in-memory cache, reporting whether the cache was clean
 // enough to serve it. It is the same seam internal/api/cache_read_model.go
-// peeks; the CacheFirst tier asserts it on the embedded raw store (optional
-// capabilities are not promoted through the SessionStore wrapper).
+// peeks; the CacheFirst tier reaches it through the handle with beads.As
+// (optional capabilities are not promoted through the SessionStore handle).
 type cachedListStore interface {
 	CachedList(beads.ListQuery) ([]beads.Bead, bool)
 }
@@ -329,7 +334,7 @@ func (s *Store) ListAllWithResponses(opts ListAllOptions) ([]ListedSession, erro
 // union. It returns the raw beads so the two public methods can pick their
 // projection; the beads never escape the package.
 func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	base := beads.ListQuery{
@@ -337,6 +342,23 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 		Sort:          opts.Sort,
 		Limit:         opts.Limit,
 		Live:          opts.Live,
+		TierMode:      opts.TierMode,
+	}
+	if !opts.IncludeClosed && !opts.Live {
+		// Session bead status is open/closed; richer lifecycle states live in
+		// metadata. Stating the predicate keeps this census cache-servable
+		// under a partial prime, mirroring listSessionBeadsByMetadata. Scoped
+		// to !Live: a Live query bypasses CachingStore's cache path entirely
+		// (query.Live routes straight to the backing store — see
+		// CachingStore.List), so cacheServableForListQueryLocked never sees
+		// it and the predicate would be inert for cache-servability. Setting
+		// it anyway would change the query SHAPE of every Live+non-IncludeClosed
+		// census (e.g. the pool-availability live check in
+		// executePlannedPoolSessionBeadCreate) from {Live:true,Status:""} to
+		// {Live:true,Status:"open"}, which can collide with unrelated
+		// Status=="open"-keyed backing-store error/outage handling that has
+		// nothing to do with this cache fix.
+		base.Status = "open"
 	}
 	// CacheFirst peek — skipped when Live is set (Live wins; the caller demands
 	// a store read, not a cache peek).
@@ -345,7 +367,7 @@ func (s *Store) listAllBeads(opts ListAllOptions) ([]beads.Bead, error) {
 			return merged, nil
 		}
 	}
-	return ListAllSessionBeads(s.store.Store, base)
+	return ListAllSessionBeads(s.store, base)
 }
 
 // cachedListUnion ports the internal/api/cache_read_model.go peek-union: it asks
@@ -368,12 +390,12 @@ func (s *Store) cachedListUnion(opts ListAllOptions) ([]beads.Bead, bool) {
 	if opts.Sort == beads.SortDefault {
 		return nil, false
 	}
-	cached, ok := s.store.Store.(cachedListStore)
+	cached, ok := beads.As[cachedListStore](s.store)
 	if !ok {
 		return nil, false
 	}
-	typeQuery := beads.ListQuery{Type: BeadType, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed}
-	labelQuery := beads.ListQuery{Label: LabelSession, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed}
+	typeQuery := beads.ListQuery{Type: BeadType, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed, TierMode: opts.TierMode}
+	labelQuery := beads.ListQuery{Label: LabelSession, Sort: opts.Sort, IncludeClosed: opts.IncludeClosed, TierMode: opts.TierMode}
 	typeRows, typeOK := cached.CachedList(typeQuery)
 	labelRows, labelOK := cached.CachedList(labelQuery)
 	if !typeOK || !labelOK {
@@ -417,10 +439,10 @@ func (s *Store) cachedListUnion(opts ListAllOptions) ([]beads.Bead, bool) {
 // Any error (including a PartialResultError) is returned as (false, err),
 // matching the raw probe it replaces: a degraded list cannot prove absence.
 func (s *Store) HasOpenSessionNamed(sessionName string) (bool, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return false, nil
 	}
-	existing, err := ListAllSessionBeads(s.store.Store, beads.ListQuery{
+	existing, err := ListAllSessionBeads(s.store, beads.ListQuery{
 		Metadata: map[string]string{"session_name": sessionName},
 		Live:     true,
 	})

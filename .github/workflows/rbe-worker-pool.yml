@@ -1,0 +1,265 @@
+# OSS remote-execution worker pool on Blacksmith (farm v2, infra
+# docs/architecture/rbe-farm-west-v0.md). Dispatched by the rbe-west pool
+# scaler: each run is one NativeLink worker for rbe-west's OSS scheduler that
+# retires itself after idle_minutes with nothing in flight (or at max_minutes),
+# draining first.
+#
+# Blacksmith donates this compute for workflows of our OSS repos only. These
+# workers register with the OSS scheduler (dedicated rbe-oss-worker cert);
+# developer and agent builds use the default instance and never run here.
+name: rbe-worker-pool
+# The run name says the role (floor or burst) and the idle window, for
+# people: no scaler reads it. A dispatch without the input (CI pre-warm, by
+# hand) is named burst and keeps the default idle_minutes. A canary
+# (rbe_worker_sha) is named canary with its commit. The scalers' breaker
+# counts bazel-allocator[bot]'s runs alone, so a hand canary never trips it;
+# their pool size counts every unfinished run of this workflow (max workers,
+# the floor, booting, the drift cap), a canary too:
+# one worker more, harmless.
+run-name: ${{ format('rbe-worker-pool ({0}, idle {1}m){2}', inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_minutes:
+        description: Retire after this many minutes with no action in flight
+        default: "15"
+        type: string
+      max_minutes:
+        description: Retire after this many minutes regardless (recycles the VM)
+        default: "300"
+        type: string
+      role:
+        description: floor (keeps a warm worker, the longer idle window) or burst; the run's name only, the worker never reads it
+        default: burst
+        type: choice
+        options:
+          - burst
+          - floor
+      rbe_worker_sha:
+        description: >
+          Canary, by hand only: run this gastownhall/rbe-worker commit instead
+          of .github/actions/rbe-worker/pin. 40-hex, on rbe-worker main's
+          first-parent line, a descendant of the pin, and every commit since
+          the pin signed, merged and verified (h5.sh). max_minutes is capped
+          at 60. Empty (the default): the pin.
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: rbe pool worker (Blacksmith, OSS scheduler)
+    # Default branch only. The worker's local CAS starts from the read-only
+    # warm set (RBE_WARM_URL below), never from a Blacksmith sticky disk: any
+    # job in this repository, the fork pool's included, could commit one.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
+          persist-credentials: false
+      # The worker code: gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
+      # fetched anonymously from its main and verified there. No secret in
+      # this step.
+      # Canary (input rbe_worker_sha): never from an App or bot (the pool
+      # scalers' bazel-allocator[bot] included), a
+      # 40-hex sha alone, max_minutes capped. Every value reaches the shell
+      # through env, never an expression inside run.
+      - name: Canary input
+        id: canary
+        if: inputs.rbe_worker_sha != ''
+        env:
+          SHA: ${{ inputs.rbe_worker_sha }}
+          ACTOR: ${{ github.triggering_actor }}
+          MAX: ${{ inputs.max_minutes }}
+        run: |
+          set -euo pipefail
+          if [[ $ACTOR == *"[bot]" ]]; then
+            echo "::error title=rbe-worker canary::a canary is dispatched by a person, never an App or bot ($ACTOR); refused"
+            exit 1
+          fi
+          [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=rbe-worker canary::rbe_worker_sha must be 40-hex"; exit 1; }
+          [[ $MAX =~ ^[1-9][0-9]{0,3}$ ]] || { echo "::error title=rbe-worker canary::max_minutes must be minutes"; exit 1; }
+          echo "max_minutes=$(( MAX < 60 ? MAX : 60 ))" >>"$GITHUB_OUTPUT"
+          echo "rbe-worker canary $SHA by $ACTOR" >>"$GITHUB_STEP_SUMMARY"
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+        with:
+          canary-sha: ${{ inputs.rbe_worker_sha }}
+      # Canary: every commit since the pin is signed, web-flow and merged
+      # (H5, as a pin bump), and the canary descends from the pin; before
+      # any fetched code runs. h5.sh is this checkout's, not the fetched tree's.
+      - name: Canary commits since the pin are signed, merged and verified (H5)
+        if: inputs.rbe_worker_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_REPO_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          PIN_SHA: ${{ steps.rbe-worker.outputs.pin }}
+          NEW_SHA: ${{ steps.rbe-worker.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git -C "$WORKER_REPO_DIR/.." merge-base --is-ancestor "$PIN_SHA" "$NEW_SHA" ||
+            { echo "::error title=rbe-worker canary::$NEW_SHA does not descend from the pin $PIN_SHA"; exit 1; }
+          .github/actions/rbe-worker/h5.sh "$WORKER_REPO_DIR/.." "$PIN_SHA" "$NEW_SHA"
+      # worker-env (rbe-worker's worker-env-drift): provision and measure this
+      # host against the pin before serving. Drift fails this step, never the
+      # worker: a drifted worker still registers (advertising what it
+      # measured) and serves only the pool's actions that send no
+      # worker-env. gascity's and beads' both send the pin, so it serves
+      # neither. The upload is what await-drift reports from.
+      - name: Measure this host against the worker-env pin
+        id: worker-env
+        continue-on-error: true
+        env:
+          WORKER_MODE: measure
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+      - name: Upload the worker-env drift
+        if: steps.worker-env.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-env-drift
+          path: ${{ runner.temp }}/worker-env-drift
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: NativeLink worker until idle or max age
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+          WORKER_MODE: pool
+          POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          POOL_MAX_MINUTES: ${{ steps.canary.outputs.max_minutes || inputs.max_minutes }}
+          WORKER_NAME: gha-pool-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Actions run as per-action slot users, away from the worker key and
+          # this step's environment (S11.3). Rollback: set the repository
+          # variable RBE_ACTION_ISOLATION to 0; the next dispatch runs actions
+          # as the runner user again. canary: the workers of one run in
+          # RBE_ACTION_CANARY_EVERY (by GITHUB_RUN_ID) try isolation and, if it
+          # fails, warn and run as 0 instead of exiting; the others run as 0.
+          RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}
+          RBE_ACTION_CANARY_EVERY: ${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}
+          # REAPI compressed-blobs (zstd) fetches for blobs of 64 KiB or more:
+          # about a quarter of the bytes on the wire for test binaries and
+          # archives. Uploads stay identity. Set RBE_WIRE_ZSTD=1 together with
+          # RBE_WIRE_ZSTD_READ_URL=grpcs://rbe-zread.ops.gascity.com:443 (the
+          # dedicated read-only zstd host; the worker refuses to start with the
+          # switch on and no zread URL). Rollback: RBE_WIRE_ZSTD=0, and the
+          # next dispatch fetches identity again; for an emergency also cancel
+          # the running pool runs, which keep their store until they retire.
+          RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
+          RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
+          # Warm set (infra README "Warm worker caches"): hot CAS blobs the core
+          # selects from trusted results and publishes read-only on R2; no pool
+          # VM can write it, and the worker re-hashes every blob before
+          # NativeLink loads it. Off until RBE_WARM_URL is set (an
+          # https://rbe-warm.ops.gascity.com URL); RBE_WARM_EVERY=N warms one
+          # run in N (the A/B canary). Rollback: unset RBE_WARM_URL; the next
+          # dispatch starts cold.
+          RBE_WARM_URL: ${{ vars.RBE_WARM_URL || '' }}
+          RBE_WARM_EVERY: ${{ vars.RBE_WARM_EVERY || '1' }}
+          # Hot tier (infra README "Hot blobs on R2"): compressed reads of big
+          # blobs come from the read-only R2 hot tier through the worker's
+          # rbe-hotread sidecar on 127.0.0.1:50090 (slot users refused), every
+          # blob re-hashed; any miss or failure reads the zread host. Needs
+          # RBE_WIRE_ZSTD=1. Off until RBE_HOT_URL is set, to https://HOST/h/oss
+          # (this tier's prefix alone: anything else, the worker warns and runs
+          # without it). RBE_HOT_EVERY=N takes the runs whose run id is a
+          # multiple of N, as RBE_WARM_EVERY does; keep RBE_WARM_EVERY at 1
+          # during a hot canary, or the two arms mix. Rollback: unset
+          # RBE_HOT_URL (it also feeds rbe-worker-legacy.yml), and new VMs read
+          # the zread host alone; for an emergency also cancel the running
+          # pool runs, which keep their sidecar until they retire.
+          RBE_HOT_URL: ${{ vars.RBE_HOT_URL || '' }}
+          RBE_HOT_EVERY: ${{ vars.RBE_HOT_EVERY || '1' }}
+          # Local CAS cap (blacksmith-worker.sh CAS_MAX_BYTES; empty: its
+          # 150 GB default). Plain decimal bytes, 10 to 13 digits, no leading
+          # zero (^[1-9][0-9]{9,12}$): 400 GB is 400000000000. Anything else
+          # (400e9, 400G, 4.0e11) makes every worker exit 2 at start, taking
+          # this pool down. The 32-vCPU runners have 1.5 TB; heavy VMs end
+          # pinned at 150 GB (2026-11-02), fetching again what they evict.
+          # NativeLink keeps an uncounted 0o555 copy of executable inputs, so
+          # the CAS can take up to twice this on disk. Each VM fixes the value
+          # when it starts. Rollback: unset RBE_CAS_MAX_BYTES (it also feeds
+          # rbe-worker-legacy.yml), and new VMs take 150 GB. For an emergency,
+          # also cancel the running pool runs, which keep their cap until they
+          # retire.
+          CAS_MAX_BYTES: ${{ vars.RBE_CAS_MAX_BYTES || '' }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+
+  # Beside the worker, which serves for hours: wait for its drift upload to
+  # complete, so drift is reported while the worker still runs. GitHub-hosted,
+  # no token beyond reading this run's jobs.
+  await-drift:
+    name: worker-env drift watch
+    # Never on a canary (rbe_worker_sha): its commit may measure what the
+    # pin does not, and a drift issue would cap both pools for the pin.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.rbe_worker_sha == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      drift: ${{ steps.await.outputs.drift }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+      - name: Wait for the worker's measurement
+        id: await
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: '"$RBE_WORKER_DIR/worker-env-drift" await "rbe pool worker (Blacksmith, OSS scheduler)" "Upload the worker-env drift"'
+
+  # The pinned host's drift issue: opened with the manifest and pin to commit,
+  # or updated with a new measurement. The farm caps the pools while it is
+  # open. The only job with issues: write, off the worker VM; one at a time
+  # across workflows, so no duplicate issues.
+  report-drift:
+    name: worker-env drift report
+    needs: await-drift
+    if: needs.await-drift.outputs.drift == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: rbe-worker-env-drift-report
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Download the worker-env drift
+        id: drift
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-env-drift
+          path: ${{ runner.temp }}/worker-env-drift
+      - name: Fetch the pinned rbe-worker
+        if: steps.drift.outcome == 'success'
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+      - name: Open or update the drift issue
+        if: steps.drift.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: '"$RBE_WORKER_DIR/worker-env-drift" report "$RUNNER_TEMP/worker-env-drift"'

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -23,6 +24,11 @@ type Session struct {
 	// Entries that aren't relevant for display (file-history-snapshot,
 	// progress hooks) are filtered out.
 	Messages []*Entry
+
+	// DetachedUsage holds per-invocation usage parsed from the whole transcript
+	// for providers that record usage apart from assistant messages (Codex).
+	// Consumers associate it against the full message list before paging.
+	DetachedUsage []TailUsage
 
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
@@ -42,6 +48,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -156,7 +165,9 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -179,6 +190,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -236,7 +249,9 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -259,6 +274,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -404,6 +421,15 @@ func parseFile(path string) ([]*Entry, error) {
 	return entries, err
 }
 
+// ReadFileRecords reads every JSONL record from a transcript in file order,
+// before any active-branch selection. BuildDag drops entries without a uuid,
+// so records such as queue-operation task notifications never reach a caller
+// that reads a session. Callers that must observe those records — rather than
+// render a conversation — need this instead of a Read* helper.
+func ReadFileRecords(path string) ([]*Entry, error) {
+	return parseFile(path)
+}
+
 // parseFileDetailed reads all JSONL lines from a file into entries and
 // returns load diagnostics for malformed lines and torn tails.
 func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
@@ -438,6 +464,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 		raw := make([]byte, len(line))
 		copy(raw, line)
 		e.Raw = raw
+		attachClaudeAPIErrorEvent(&e)
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
@@ -572,6 +599,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -611,6 +640,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -1464,13 +1495,18 @@ func DefaultGeminiSearchPaths() []string {
 }
 
 // DefaultKimiSearchPaths returns the default search paths for Kimi Code
-// session files (~/.kimi/sessions).
+// session files: legacy ~/.kimi/sessions, native ~/.kimi-code/sessions, and
+// $KIMI_CODE_HOME/sessions when that variable is set to a non-blank value.
 func DefaultKimiSearchPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".kimi", "sessions")}
+	roots := []string{filepath.Join(home, ".kimi", "sessions"), filepath.Join(home, ".kimi-code", "sessions")}
+	if codeHome := strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")); codeHome != "" {
+		roots = append(roots, filepath.Join(codeHome, "sessions"))
+	}
+	return roots
 }
 
 // DefaultAntigravitySearchPaths returns the default search paths for Antigravity JSONL
@@ -1529,6 +1565,40 @@ func mergePaths(defaults, extras []string) []string {
 	return result
 }
 
+// WholeFileJSONFamily reports whether a provider family stores each session as
+// one whole-file JSON document (an OpenCode-shaped `{info, messages}` export or
+// a mirror of one) rather than as append-only JSONL.
+//
+// The tail-chunk malformed heuristic is meaningless for these families: a tail
+// chunk of a pretty-printed JSON document always "starts mid line", so the flag
+// fires on every healthy file. Suppressing it is behavior-neutral — the flag is
+// documented as a heuristic that full-file parser diagnostics override, and
+// these families' readers set no tail diagnostics of their own, so nothing
+// downstream loses a signal it previously acted on.
+func WholeFileJSONFamily(provider string) bool {
+	switch ProviderFamily(provider) {
+	case "opencode", "mimocode", "zcode":
+		return true
+	default:
+		return false
+	}
+}
+
+// DerivesActivityFromHistory reports whether tail activity for a family must be
+// derived from normalized history rather than read from a trailing record.
+//
+// Deliberately narrower than WholeFileJSONFamily. The derivation is only sound
+// where the mirror is known to record a user message at turn START and close it
+// out when the turn ends — an invariant this repo owns for zcode, because it
+// owns the writer (internal/worker/adapters/zcode). OpenCode and MiMo Code
+// share the file SHAPE but their exports are written by upstream plugins on
+// their own schedule, so the same inference is not established for them and
+// enabling it would silently change their production activity reporting.
+// Extending this set is a per-family exercise, not a shape check.
+func DerivesActivityFromHistory(provider string) bool {
+	return ProviderFamily(provider) == "zcode"
+}
+
 // ProviderFamily returns the canonical transcript provider family for provider.
 func ProviderFamily(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))
@@ -1555,6 +1625,8 @@ func ProviderFamily(provider string) string {
 		return "mimocode"
 	case strings.Contains(p, "opencode") || providerComponent(p, "groq") || providerComponent(p, "cerebras"):
 		return "opencode"
+	case strings.Contains(p, "zcode"):
+		return "zcode"
 	case strings.Contains(p, "antigravity"):
 		return "antigravity"
 	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/") ||
@@ -1616,12 +1688,16 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		// Current Claude versions replace every UTF-16 code unit outside
+		// [A-Za-z0-9] with "-", underscores included. Keep the legacy
+		// spelling as a candidate for transcripts written earlier.
+		for _, slug := range []string{claudeSanitizedProjectSlug(path), ProjectSlug(path)} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }
@@ -1652,6 +1728,27 @@ func addDarwinClaudePathAliases(path string, add func(string)) {
 	case strings.HasPrefix(path, "/private/var/"):
 		add("/var/" + strings.TrimPrefix(path, "/private/var/"))
 	}
+}
+
+// claudeSanitizedProjectSlug is the project directory name current Claude
+// Code versions write: every UTF-16 code unit outside [A-Za-z0-9] becomes "-"
+// (Claude is a JavaScript program, so a character outside the Basic
+// Multilingual Plane becomes two).
+func claudeSanitizedProjectSlug(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		n := utf16.RuneLen(r)
+		if n < 1 {
+			n = 1
+		}
+		b.WriteString(strings.Repeat("-", n))
+	}
+	return b.String()
 }
 
 // ProjectSlug converts an absolute path to the project directory slug

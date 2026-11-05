@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,8 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func mustBdRuntimeEnv(t *testing.T, cityPath string) map[string]string {
@@ -78,11 +79,19 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 }
 
+// TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry runs a real
+// bd shim that fails the way an unreachable external store fails, because that
+// is the only failure shape bdTransportRetryableError matches. Anything else
+// leaves the retry branch unreached and the assertion vacuous no matter what
+// the guard does.
 func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testing.T) {
 	cityPath := t.TempDir()
 	binDir := t.TempDir()
 	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\necho clean-runner-sentinel credentials=$BEADS_CREDENTIALS_FILE >&2\nexit 17\n"), 0o755); err != nil {
+	invocations := filepath.Join(t.TempDir(), "bd-invocations")
+	shim := fmt.Sprintf("#!/bin/sh\necho run >> %q\n"+
+		"echo clean-runner-sentinel credentials=$BEADS_CREDENTIALS_FILE: dial tcp 10.0.0.5:5432: connect: connection refused >&2\nexit 17\n", invocations)
+	if err := os.WriteFile(bdPath, []byte(shim), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cityTOML := fmt.Sprintf("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = %q\n", binDir+string(os.PathListSeparator)+"$PATH")
@@ -98,6 +107,14 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	credentialsPath := filepath.Join(t.TempDir(), "custom-credentials")
 	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
 
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() { recoverManagedBDCommand = origRecover })
+	recoverCalls := 0
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+
 	_, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
 	if err == nil {
 		t.Fatal("runner error = nil, want fake bd failure")
@@ -108,11 +125,275 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	if !strings.Contains(err.Error(), "credentials="+credentialsPath) {
 		t.Fatalf("runner error = %q, want preserved credential file", err)
 	}
-	if strings.Contains(err.Error(), "managed recovery") || strings.Contains(err.Error(), "postgres storage binding") {
-		t.Fatalf("runner error = %q, managed retry path must not run", err)
+	if recoverCalls != 0 {
+		t.Errorf("recoverCalls = %d, want 0: gc must not run managed-Dolt recovery for a store it does not manage", recoverCalls)
+	}
+	if got := countBdShimInvocations(t, invocations); got != 1 {
+		t.Errorf("bd invocations = %d, want 1: a bound scope's failed command must not be retried", got)
 	}
 }
 
+func TestBdContextCommandRunnerForCityPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"bound\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBoundCityFixture(t, cityPath)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("bd context runner: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func TestBeadsCommandRunnerWithContextPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	env := map[string]string{"BD_BIN": bdPath}
+	runner, err := beadsCommandRunnerWithContextForHostedCity(context.Background(), cityPath, env)
+	if err != nil {
+		t.Fatalf("context runner: %v", err)
+	}
+	out, err := runner(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("context runner invocation: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func countBdShimInvocations(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "run\n")
+}
+
+// boundScopeTransportProbe stubs the bd exec layer and the managed-recovery
+// hook and counts both. The stubbed bd fails with a transport-shaped error
+// because that is the one shape that reaches the managed-Dolt retry — the work
+// a scope served by a storage binding gc does not manage must never trigger.
+type boundScopeTransportProbe struct {
+	attempts     int
+	recoverCalls int
+	bdErr        error
+}
+
+func newBoundScopeTransportProbe(t *testing.T) *boundScopeTransportProbe {
+	t.Helper()
+	origRunner := beadsExecCommandRunnerWithEnv
+	origRecover := recoverManagedBDCommand
+	t.Cleanup(func() {
+		beadsExecCommandRunnerWithEnv = origRunner
+		recoverManagedBDCommand = origRecover
+	})
+	probe := &boundScopeTransportProbe{
+		bdErr: errors.New("dial tcp 10.0.0.5:5432: connect: connection refused"),
+	}
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			probe.attempts++
+			return nil, probe.bdErr
+		}
+	}
+	recoverManagedBDCommand = func(_ string) error {
+		probe.recoverCalls++
+		return nil
+	}
+	return probe
+}
+
+func (p *boundScopeTransportProbe) assertNoManagedRecovery(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("runner err = nil, want the bd transport failure surfaced")
+	}
+	if !errors.Is(err, p.bdErr) {
+		t.Fatalf("err = %q, want the bd transport error preserved", err)
+	}
+	if p.attempts != 1 {
+		t.Errorf("attempts = %d, want 1: a store gc does not manage is not gc's to retry", p.attempts)
+	}
+	if p.recoverCalls != 0 {
+		t.Errorf("recoverCalls = %d, want 0: managed-Dolt recovery must not run for a store gc does not manage", p.recoverCalls)
+	}
+}
+
+// writeBoundCityFixture gives a city a complete storage binding naming a
+// backend this build has never registered, so the assertions below pin the
+// binding shape rather than a backend name.
+func writeBoundCityFixture(t *testing.T, cityPath string) {
+	t.Helper()
+	writeOpaqueBindingScopeFixtureWithBackend(t, cityPath, "acme")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeInheritingRigFixture(t *testing.T, cityPath, name string) string {
+	t.Helper()
+	rigDir := filepath.Join(cityPath, "rigs", name)
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: rig
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return rigDir
+}
+
+// TestControlBdCommandRunnerForCityBoundCitySkipsManagedRecovery pins the
+// control dispatcher's city runner, which has no equivalent of the
+// bdContextCommandRunnerForCity short-circuit that protects `gc bd`.
+//
+// A transient outage of the bound store must surface as the bd error it is.
+// Recovering here would start a managed Dolt server for a city gc explicitly
+// does not own, and retrying would double the load on a backend already down.
+func TestControlBdCommandRunnerForCityBoundCitySkipsManagedRecovery(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	writeBoundCityFixture(t, cityPath)
+
+	probe := newBoundScopeTransportProbe(t)
+	_, err := controlBdCommandRunnerForCity(cityPath)(cityPath, "bd", "list", "--json")
+	probe.assertNoManagedRecovery(t, err)
+}
+
+// TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery covers both ways a
+// rig ends up on a store gc does not manage: its own binding, and the city's
+// binding inherited.
+func TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery(t *testing.T) {
+	t.Run("rig inherits the city binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "inherited")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "inherited", Path: "rigs/inherited", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := bdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+
+	t.Run("rig carries its own binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "own")
+		writeOpaqueBindingScopeFixtureWithBackend(t, rigDir, "acme")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "own", Path: "rigs/own", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := bdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+}
+
+// TestCanonicalScopeDoltProjectionAuthoritativeSkipsABoundCity pins the last
+// consumer of "is this store gc's to project?".
+//
+// The answer feeds mergeCanonicalScopeDoltEnv, which strips password mirrors
+// from the resolution input because the projection is about to supply the
+// resolved auth itself. A bound city gets no projection, so stripping there
+// removes an operator's credential and puts nothing back.
+func TestCanonicalScopeDoltProjectionAuthoritativeSkipsABoundCity(t *testing.T) {
+	cityPath := t.TempDir()
+	writeBoundCityFixture(t, cityPath)
+
+	if canonicalScopeDoltProjectionAuthoritative(cityPath) {
+		t.Fatal("canonicalScopeDoltProjectionAuthoritative = true for a city gc does not project")
+	}
+}
+
+// TestControlBdCommandRunnerForRigBoundScopeSkipsManagedRecovery is the
+// control-dispatcher companion to
+// TestBdCommandRunnerForRigBoundScopeSkipsManagedRecovery. Every rig store the
+// controller opens runs through this runner.
+func TestControlBdCommandRunnerForRigBoundScopeSkipsManagedRecovery(t *testing.T) {
+	t.Run("rig inherits the city binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "inherited")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "inherited", Path: "rigs/inherited", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := controlBdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+
+	t.Run("rig carries its own binding", func(t *testing.T) {
+		t.Setenv("GC_BEADS", "bd")
+		cityPath := t.TempDir()
+		writeBoundCityFixture(t, cityPath)
+		rigDir := writeInheritingRigFixture(t, cityPath, "own")
+		writeOpaqueBindingScopeFixtureWithBackend(t, rigDir, "acme")
+		cfg := &config.City{Rigs: []config.Rig{{Name: "own", Path: "rigs/own", Prefix: "rig"}}}
+
+		probe := newBoundScopeTransportProbe(t)
+		_, err := controlBdCommandRunnerForRig(cityPath, cfg, rigDir)(rigDir, "bd", "list", "--json")
+		probe.assertNoManagedRecovery(t, err)
+	})
+}
+
+// TestRuntimeEnvDelegatesCompleteStorageBindingToBd is the end-to-end proof
+// that an opaque binding is a complete answer on its own.
+//
+// The city's metadata names a backend this build does not register, carries
+// dolt fields that would once have been fatal, and carries a key gc has never
+// heard of. gc reads none of it: the binding is recognized before metadata
+// parsing, so the city boots, the inherited rig boots, every projected backend
+// variable arrives withheld, only BD_BIN and the operator's credentials file
+// are set, and the file on disk comes back byte-for-byte. Everything after
+// that is bd's, reading its own workspace configuration and running its own
+// credential ladder.
 func TestRuntimeEnvDelegatesCompleteStorageBindingToBd(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
@@ -134,7 +415,6 @@ func TestRuntimeEnvDelegatesCompleteStorageBindingToBd(t *testing.T) {
 	}
 
 	projectedKeys := append([]string{}, projectedDoltEnvKeys...)
-	projectedKeys = append(projectedKeys, projectedPostgresEnvKeys...)
 	projectedKeys = append(projectedKeys, projectedBeadsBackendEnvKeys...)
 	for _, key := range projectedKeys {
 		t.Setenv(key, "stale-projection")
@@ -210,6 +490,25 @@ func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeProcessEnvCarriesWorkspaceBDBinaryPin(t *testing.T) {
+	cityPath := t.TempDir()
+	pinDir := t.TempDir()
+	pinned := filepath.Join(pinDir, "bd")
+	writeExecutable(t, pinned, "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	env, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("cityRuntimeProcessEnvWithError() error = %v", err)
+	}
+	if got := envEntriesMap(env)["BD_BIN"]; got != pinned {
+		t.Fatalf("BD_BIN = %q, want workspace-pinned %q", got, pinned)
+	}
+}
+
 func TestCityRuntimeProcessEnvUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
 	orig := processEnvSnapshotExcludingNativeDoltOpen
 	called := false
@@ -273,6 +572,66 @@ func TestRecoverManagedBDCommandUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got == "ambient.example.com" {
 		t.Fatalf("recoverManagedBDCommand inherited unprojected native-open env host %q", got)
+	}
+}
+
+func TestRecoverManagedBDCommandCarriesWorkspaceBDBinaryPin(t *testing.T) {
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	pinned := filepath.Join(binDir, "bd")
+	writeExecutable(t, pinned, "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n[workspace.env]\nPATH = "+strconv.Quote(binDir)+"\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	envFile := filepath.Join(t.TempDir(), "recover-env.txt")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$BD_BIN\" > \"" + envFile + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() error = %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read captured env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != pinned {
+		t.Fatalf("recover BD_BIN = %q, want workspace-pinned %q", got, pinned)
+	}
+}
+
+// Recovering the legacy managed server is the path an in-place gc upgrade most
+// needs to keep working: the supervisor that calls it is already running, and an
+// upgrade that removed the directory /proc/self/exe resolved through leaves it
+// unable to canonicalize its own binary. main pinned no GC_BIN here at all, so
+// refusing turned a bounded staleness into a recover that can never run — and
+// with it, a managed Dolt nothing stops on SIGTERM. The pin degrades instead.
+func TestRecoverManagedBDCommandRunsWhenGCBinaryResolutionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-ran")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ntouch "+capture+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", errors.New("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() = %v, want the recover to run anyway", err)
+	}
+	if _, statErr := os.Stat(capture); statErr != nil {
+		t.Fatalf("recover child never ran: %v", statErr)
 	}
 }
 
@@ -523,6 +882,51 @@ func TestBdRuntimeEnvForRigNoRecoveryMatchesRecoveryForExternalTarget(t *testing
 	}
 	if got := env["GC_RIG"]; got != "repo" {
 		t.Errorf("GC_RIG = %q, want repo", got)
+	}
+}
+
+// TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime pins the probe
+// gc hook asks after a rig leg's read failed (hookRigRuntimeUnavailable): a rig
+// inheriting the city's managed Dolt runtime reports it unavailable while that
+// runtime is not running, without starting or publishing one, and available
+// once it runs; a rig whose store is not the managed bd contract never does.
+func TestRigManagedRuntimeUnavailableReportsAStoppedManagedRuntime(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	for dir, yaml := range map[string]string{
+		cityDir: "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+		rigDir:  "issue_prefix: repo\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
+
+	if !rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if !hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = false with the city's managed runtime stopped")
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("the probe published managed runtime state (stat err = %v); it must start nothing", err)
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	if hookRigRuntimeUnavailable(cityDir, cfg, "repo") {
+		t.Fatal("hookRigRuntimeUnavailable = true for a rig whose store is not the managed bd contract")
+	}
+	t.Setenv("GC_BEADS", "bd")
+
+	writeReachableManagedDoltState(t, cityDir)
+	if rigManagedRuntimeUnavailable(cityDir, cfg, rigDir) {
+		t.Fatal("rigManagedRuntimeUnavailable = true with the city's managed runtime running")
 	}
 }
 
@@ -2524,6 +2928,67 @@ dolt.port: 4407
 	}
 }
 
+// The one-shot CLI pool cap belongs to the one-shot wrapper, not to the
+// shared projection: nativeDoltOpenEnvForScopeContext also serves the
+// controller's long-lived stores, which keep the beads library's daemon-sized
+// project pool. These pin both halves on both branches of the projection (the
+// city scope and a rig scope) so a refactor cannot silently widen the cap onto
+// the controller or drop it from the CLI.
+func TestNativeDoltOneShotOpenEnvForScopeCapsPoolOnBothScopes(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: city-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: myrig
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "my-rig", Path: rigDir}}}
+
+	for _, tc := range []struct {
+		name      string
+		scopeRoot string
+	}{
+		{name: "city scope", scopeRoot: cityDir},
+		{name: "rig scope", scopeRoot: rigDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capped, err := nativeDoltOneShotOpenEnvForScope(cityDir, cfg, tc.scopeRoot)
+			if err != nil {
+				t.Fatalf("nativeDoltOneShotOpenEnvForScope: %v", err)
+			}
+			if got := capped["BEADS_DOLT_MAX_CONNS"]; got != "1" {
+				t.Fatalf("one-shot BEADS_DOLT_MAX_CONNS = %q, want 1: a one-shot CLI open must cap the project pool", got)
+			}
+
+			base, err := nativeDoltOpenEnvForScope(cityDir, cfg, tc.scopeRoot)
+			if err != nil {
+				t.Fatalf("nativeDoltOpenEnvForScope: %v", err)
+			}
+			if got, ok := base["BEADS_DOLT_MAX_CONNS"]; ok {
+				t.Fatalf("base BEADS_DOLT_MAX_CONNS = %q (present), want absent: the controller's long-lived stores keep the daemon-sized pool", got)
+			}
+		})
+	}
+}
+
 func TestBdRuntimeEnvForRigUsesCanonicalManagedRigTarget(t *testing.T) {
 	t.Setenv("GC_DOLT_HOST", "")
 	_ = os.Unsetenv("GC_DOLT_HOST")
@@ -2773,7 +3238,6 @@ dolt.user: stale-user
 }
 
 func TestBdRuntimeEnvForRigPropagatesCityMetadataError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -4245,308 +4709,74 @@ func TestControlBdCommandRunnerDefaultsBeadsActorToControllerWhenUnset(t *testin
 	}
 }
 
-// ── PG-backend wiring (slice 3 of PG-auth) ─────────────────────────────
+// ── Scopes bound to a backend gc does not implement ────────────────────
 
-func writePGScopeFixture(t *testing.T, scopeRoot, password string) {
+// writeOpaqueBindingScopeFixture writes the metadata of a scope served by a
+// backend gc does not implement: a complete storage binding — backend,
+// storage_endpoint and storage_database all present — whose backend name this
+// build deliberately does not register.
+//
+// It is the one shape gc supports for such a scope, and the shape most of the
+// cmd/gc suite needs when it wants "a scope whose store gc does not manage".
+// The endpoint and database strings are opaque here on purpose: nothing in gc
+// parses them.
+// writeUnregisteredBackendMetadata writes the metadata of a scope naming a
+// backend this build does not register, with no storage binding to fall back
+// on. It is the shape every refusal path has to reject by name: gc cannot
+// project an environment for it, and something has to say so before a bd
+// subprocess inherits whatever the ambient environment happens to hold.
+func writeUnregisteredBackendMetadata(t *testing.T, scopeRoot string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	meta := `{"backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads"}`
+	meta := `{"database":"beads","backend":"postgres"}`
 	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if password != "" {
-		envFile := filepath.Join(scopeRoot, ".beads", ".env")
-		if err := os.WriteFile(envFile, []byte("BEADS_POSTGRES_PASSWORD="+password+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
-func clearAmbientPostgresEnv(t *testing.T) {
+// assertRefusesUnregisteredBackend holds the whole refusal contract in one
+// place: the typed cause, the offending name, and the set this build does
+// register. An operator who meets one of these refusals must not have to learn
+// a second vocabulary to read the next one, so every path asserts the same
+// three facts.
+func assertRefusesUnregisteredBackend(t *testing.T, err error) {
 	t.Helper()
-	for _, key := range projectedPostgresEnvKeys {
-		t.Setenv(key, "")
-		_ = os.Unsetenv(key)
+	if err == nil {
+		t.Fatal("error = nil, want a refusal naming the unregistered backend")
 	}
-	t.Setenv("BEADS_CREDENTIALS_FILE", "")
-	_ = os.Unsetenv("BEADS_CREDENTIALS_FILE")
-	t.Setenv("HOME", t.TempDir())
-}
-
-func TestApplyResolvedScopePostgresEnv_HappyPath(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	cityPath := t.TempDir()
-	scopeRoot := t.TempDir()
-	writePGScopeFixture(t, scopeRoot, "devpw")
-
-	env := map[string]string{}
-	meta := contract.MetadataState{
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads",
+	if !errors.Is(err, contract.ErrUnknownBackend) {
+		t.Fatalf("error = %v, want ErrUnknownBackend", err)
 	}
-	if err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta); err != nil {
-		t.Fatalf("applyResolvedScopePostgresEnv: %v", err)
+	registered, regErr := contract.RegisteredBackends()
+	if regErr != nil {
+		t.Fatalf("RegisteredBackends: %v", regErr)
 	}
-	want := map[string]string{
-		"GC_POSTGRES_PASSWORD":    "devpw",
-		"BEADS_POSTGRES_PASSWORD": "devpw",
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PORT":     "5432",
-		"BEADS_POSTGRES_USER":     "bd",
-		"BEADS_POSTGRES_DATABASE": "beads",
-	}
-	for key, value := range want {
-		if got := env[key]; got != value {
-			t.Errorf("env[%q] = %q, want %q", key, got, value)
+	for _, want := range []string{`"postgres"`, strings.Join(registered, ", ")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q omits %q", err, want)
 		}
 	}
 }
 
-func TestEmitPostgresCredentialResolved_DedupsWithinProcess(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	scopeA := t.TempDir()
-	writePGScopeFixture(t, scopeA, "devpw")
-	scopeB := t.TempDir()
-	writePGScopeFixture(t, scopeB, "devpw")
-
-	meta := contract.MetadataState{
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads",
-	}
-	for i := 0; i < 10; i++ {
-		if err := applyResolvedScopePostgresEnv(map[string]string{}, cityPath, scopeA, meta); err != nil {
-			t.Fatalf("scopeA call %d: %v", i, err)
-		}
-	}
-	for i := 0; i < 10; i++ {
-		if err := applyResolvedScopePostgresEnv(map[string]string{}, cityPath, scopeB, meta); err != nil {
-			t.Fatalf("scopeB call %d: %v", i, err)
-		}
-	}
-
-	got, err := events.ReadFiltered(
-		filepath.Join(cityPath, ".gc", "events.jsonl"),
-		events.Filter{Type: events.PostgresCredentialResolved},
-	)
-	if err != nil {
-		t.Fatalf("ReadFiltered pg.credential_resolved: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("pg.credential_resolved count = %d, want 2 (one per distinct scope)", len(got))
-	}
+func writeOpaqueBindingScopeFixture(t *testing.T, scopeRoot string) {
+	t.Helper()
+	writeOpaqueBindingScopeFixtureWithBackend(t, scopeRoot, "postgres")
 }
 
-func TestBdRuntimeEnvForRig_PostgresBackend(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD"} {
-		t.Setenv(key, "")
-		_ = os.Unsetenv(key)
-	}
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+// writeOpaqueBindingScopeFixtureWithBackend writes a complete storage binding
+// naming an arbitrary backend. Tests that pin the binding shape rather than a
+// particular vocabulary pass a name this build has never registered, so a
+// regression cannot hide behind a leftover special case for a known name.
+func writeOpaqueBindingScopeFixtureWithBackend(t *testing.T, scopeRoot, backend string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
+	meta := fmt.Sprintf(`{"backend":%q,"storage_endpoint":"%s://bd@db.example.test:5432","storage_database":"beads"}`, backend, backend)
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
-	}
-
-	rigDir := filepath.Join(cityPath, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "devpw")
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
-	}
-
-	wantPG := map[string]string{
-		"GC_POSTGRES_PASSWORD":    "devpw",
-		"BEADS_POSTGRES_PASSWORD": "devpw",
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PORT":     "5432",
-		"BEADS_POSTGRES_USER":     "bd",
-		"BEADS_POSTGRES_DATABASE": "beads",
-	}
-	for key, value := range wantPG {
-		if got := env[key]; got != value {
-			t.Errorf("env[%q] = %q, want %q", key, got, value)
-		}
-	}
-	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_PASSWORD", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_USER"} {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed rig", key, value)
-		}
-	}
-}
-
-func TestBdRuntimeEnvCity_PostgresBackend(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	env, err := bdRuntimeEnvWithError(cityPath)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvWithError() error = %v", err)
-	}
-
-	wantPG := map[string]string{
-		"GC_POSTGRES_PASSWORD":    "citypw",
-		"BEADS_POSTGRES_PASSWORD": "citypw",
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PORT":     "5432",
-		"BEADS_POSTGRES_USER":     "bd",
-		"BEADS_POSTGRES_DATABASE": "beads",
-	}
-	for key, value := range wantPG {
-		if got := env[key]; got != value {
-			t.Errorf("env[%q] = %q, want %q", key, got, value)
-		}
-	}
-	for _, key := range projectedDoltEnvKeys {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed city", key, value)
-		}
-	}
-}
-
-func TestBdRuntimeEnvForRig_InheritsCityPostgresBackend(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
-	t.Setenv("GC_DOLT_PORT", "3307")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigDir := filepath.Join(cityPath, "rigs", "pg-inherited")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg-inherited", Prefix: "pg"}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
-	}
-
-	wantPG := map[string]string{
-		"GC_POSTGRES_PASSWORD":    "citypw",
-		"BEADS_POSTGRES_PASSWORD": "citypw",
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PORT":     "5432",
-		"BEADS_POSTGRES_USER":     "bd",
-		"BEADS_POSTGRES_DATABASE": "beads",
-	}
-	for key, value := range wantPG {
-		if got := env[key]; got != value {
-			t.Errorf("env[%q] = %q, want %q", key, got, value)
-		}
-	}
-	for _, key := range projectedDoltEnvKeys {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for inherited PG-backed city", key, value)
-		}
-	}
-	if got := env["BEADS_DIR"]; !samePath(got, filepath.Join(rigDir, ".beads")) {
-		t.Fatalf("BEADS_DIR = %q, want rig .beads", got)
-	}
-}
-
-func TestBdRuntimeEnvForRig_ExplicitLegacyDoltRigClearsCityPostgresProjection(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigDir := filepath.Join(cityPath, "rigs", "legacy-dolt")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{
-		Name:     "legacy-dolt",
-		Path:     "rigs/legacy-dolt",
-		Prefix:   "ld",
-		DoltHost: "rig-db.example.test",
-		DoltPort: "4406",
-	}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
-	}
-
-	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.test" {
-		t.Fatalf("GC_DOLT_HOST = %q, want rig-db.example.test", got)
-	}
-	if got := env["GC_DOLT_PORT"]; got != "4406" {
-		t.Fatalf("GC_DOLT_PORT = %q, want 4406", got)
-	}
-	for _, key := range projectedPostgresEnvKeys {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for explicit legacy Dolt rig", key, value)
-		}
 	}
 }
 
@@ -4560,7 +4790,6 @@ dolt.auto-start: false
 // attempts plaintext and the gateway rejects it even though canonical external
 // rigs connect with TLS (review finding F1, PR #4008).
 func TestBdRuntimeEnvForRig_ExplicitLegacyExternalRigCarriesAmbientTLS(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	// Controller launched on a hosted TLS gateway carries an ambient TLS
@@ -4568,7 +4797,7 @@ func TestBdRuntimeEnvForRig_ExplicitLegacyExternalRigCarriesAmbientTLS(t *testin
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4613,13 +4842,12 @@ dolt.auto-start: false
 // also carry the ambient hosted-gateway TLS requirement (review finding F1,
 // PR #4008).
 func TestNativeDoltOpenEnvForScope_ExplicitLegacyExternalRigCarriesAmbientTLS(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4705,13 +4933,12 @@ while :; do sleep 1; done
 // non-TLS local server (PR #4008 review finding: gating the carry on External
 // alone leaked TLS onto plaintext local endpoints).
 func TestBdRuntimeEnvForRig_ExplicitLocalExternalRigClearsAmbientTLS(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4751,13 +4978,12 @@ dolt.auto-start: false
 // 127.0.0.1 host and External=true. It is a plaintext local endpoint, so ambient
 // BEADS_DOLT_SERVER_TLS=1 must be cleared, not carried (PR #4008 review finding).
 func TestBdRuntimeEnvForRig_PortOnlyLegacyExternalRigClearsAmbientTLS(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4793,13 +5019,12 @@ dolt.auto-start: false
 // env for a plaintext local legacy rig must also clear the ambient hosted-gateway
 // TLS requirement (PR #4008 review finding).
 func TestNativeDoltOpenEnvForScope_ExplicitLocalExternalRigClearsAmbientTLS(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -4830,58 +5055,12 @@ dolt.auto-start: false
 	}
 }
 
-func TestBdRuntimeEnvForRig_ExplicitLegacyDoltRigIgnoresUnresolvableCityPostgres(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigDir := filepath.Join(cityPath, "rigs", "legacy-dolt")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{
-		Name:     "legacy-dolt",
-		Path:     "rigs/legacy-dolt",
-		Prefix:   "ld",
-		DoltHost: "rig-db.example.test",
-		DoltPort: "4406",
-	}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
-	}
-
-	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.test" {
-		t.Fatalf("GC_DOLT_HOST = %q, want rig-db.example.test", got)
-	}
-	if got := env["GC_DOLT_PORT"]; got != "4406" {
-		t.Fatalf("GC_DOLT_PORT = %q, want 4406", got)
-	}
-	for _, key := range projectedPostgresEnvKeys {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for explicit legacy Dolt rig", key, value)
-		}
-	}
-}
-
 func TestBdRuntimeEnvForRig_ExplicitLegacyDoltRigSurfacesInvalidCityConfig(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: explicit
 gc.endpoint_status: verified
@@ -4908,707 +5087,14 @@ dolt.port: 4406
 	if err == nil {
 		t.Fatal("bdRuntimeEnvForRigWithError() error = nil, want invalid city endpoint error")
 	}
-	if errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v, want non-credential city config error", err)
-	}
 	if !strings.Contains(err.Error(), "invalid canonical endpoint state") {
 		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v, want invalid canonical endpoint state", err)
 	}
 }
 
-func TestBdRuntimeEnvForRig_AuthoritativeDoltRigIgnoresUnresolvableCityPostgres(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	rigDir := filepath.Join(cityPath, "rigs", "canonical-dolt")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: cd
-gc.endpoint_origin: explicit
-gc.endpoint_status: verified
-dolt.auto-start: false
-dolt.host: rig-db.example.test
-dolt.port: 4407
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{
-		Name:   "canonical-dolt",
-		Path:   "rigs/canonical-dolt",
-		Prefix: "cd",
-	}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
-	}
-
-	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.test" {
-		t.Fatalf("GC_DOLT_HOST = %q, want rig-db.example.test", got)
-	}
-	if got := env["GC_DOLT_PORT"]; got != "4407" {
-		t.Fatalf("GC_DOLT_PORT = %q, want 4407", got)
-	}
-	for _, key := range projectedPostgresEnvKeys {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for authoritative Dolt rig", key, value)
-		}
-	}
-}
-
-func TestCityRuntimeProcessEnv_PostgresBackend(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
-	t.Setenv("BEADS_POSTGRES_PASSWORD", "ambient-pg")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, err := cityRuntimeProcessEnvWithError(cityPath)
-	if err != nil {
-		t.Fatalf("cityRuntimeProcessEnvWithError() error = %v", err)
-	}
-	env := listToMap(entries)
-
-	if got := env["BEADS_POSTGRES_PASSWORD"]; got != "citypw" {
-		t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want citypw", got)
-	}
-	if got := env["BEADS_POSTGRES_HOST"]; got != "db.example.test" {
-		t.Fatalf("BEADS_POSTGRES_HOST = %q, want db.example.test", got)
-	}
-	if got := env["GC_DOLT_HOST"]; got != "" {
-		t.Fatalf("GC_DOLT_HOST = %q, want empty for PG-backed city process env", got)
-	}
-	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "" {
-		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want explicit empty for PG-backed city process env", got)
-	}
-}
-
-func TestCityRuntimeProcessEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := cityRuntimeProcessEnvWithError(cityPath)
-	if err == nil {
-		t.Fatal("cityRuntimeProcessEnvWithError() error = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
-}
-
-func TestBdRuntimeEnvForRig_PostgresBackendClearsCityDoltProjection(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_ = writeReachableManagedDoltState(t, cityPath)
-
-	rigDir := filepath.Join(cityPath, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "rigpw")
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
-	}
-
-	if got := env["BEADS_POSTGRES_PASSWORD"]; got != "rigpw" {
-		t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want rigpw", got)
-	}
-	for _, key := range projectedDoltEnvKeys {
-		if value, ok := env[key]; ok && value != "" {
-			t.Errorf("env[%q] = %q, want empty/absent for PG-backed rig", key, value)
-		}
-	}
-}
-
-func TestMergeRuntimeEnvScrubsPostgresKeys(t *testing.T) {
-	for _, key := range projectedPostgresEnvKeys {
-		t.Setenv(key, "PARENT")
-	}
-
-	parentEnv := []string{}
-	for _, key := range projectedPostgresEnvKeys {
-		parentEnv = append(parentEnv, key+"=PARENT")
-	}
-	overrides := map[string]string{"BEADS_POSTGRES_PASSWORD": "CHILD"}
-
-	merged := mergeRuntimeEnv(parentEnv, overrides)
-
-	got := map[string]string{}
-	for _, entry := range merged {
-		idx := strings.IndexByte(entry, '=')
-		if idx < 0 {
-			continue
-		}
-		got[entry[:idx]] = entry[idx+1:]
-	}
-	if got["BEADS_POSTGRES_PASSWORD"] != "CHILD" {
-		t.Errorf("BEADS_POSTGRES_PASSWORD = %q, want CHILD", got["BEADS_POSTGRES_PASSWORD"])
-	}
-	for _, key := range projectedPostgresEnvKeys {
-		if key == "BEADS_POSTGRES_PASSWORD" {
-			continue
-		}
-		if value, ok := got[key]; ok {
-			t.Errorf("env[%q] = %q, want absent (parent value not stripped)", key, value)
-		}
-	}
-}
-
-func TestApplyResolvedScopePostgresEnv_NoPasswordResolvable(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	cityPath := t.TempDir()
-	scopeRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	env := map[string]string{}
-	meta := contract.MetadataState{
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads",
-	}
-	err := applyResolvedScopePostgresEnv(env, cityPath, scopeRoot, meta)
-	if err == nil {
-		t.Fatal("applyResolvedScopePostgresEnv = nil error, want resolver exhaustion")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err = %v", err)
-	}
-	if !strings.Contains(err.Error(), "resolving postgres credentials for ") {
-		t.Errorf("err.Error() = %q, want prefix %q", err.Error(), "resolving postgres credentials for ")
-	}
-	if !strings.Contains(err.Error(), scopeRoot) {
-		t.Errorf("err.Error() = %q, want scope path %q embedded", err.Error(), scopeRoot)
-	}
-}
-
-func TestBdCommandRunnerForRigSurfacesPostgresProjectionError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-
-	origRunner := beadsExecCommandRunnerWithEnv
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rigDir := filepath.Join(cityPath, "rigs", "pg")
-	writePGScopeFixture(t, rigDir, "")
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
-
-	attempts := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
-		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			attempts++
-			return []byte("should not run"), nil
-		}
-	}
-
-	runner := bdCommandRunnerForRig(cityPath, cfg, rigDir)
-	_, err := runner(rigDir, "bd", "list", "--json")
-
-	if err == nil {
-		t.Fatal("runner err = nil, want postgres projection error")
-	}
-	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
-		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
-	}
-	if attempts != 0 {
-		t.Fatalf("attempts = %d, want 0 because env projection failed before bd invocation", attempts)
-	}
-}
-
-func TestBdCommandRunnerEnsuresProjectedPostgresEnvExplicit(t *testing.T) {
-	t.Setenv("GC_POSTGRES_PASSWORD", "ambient-gc-pg")
-	t.Setenv("BEADS_POSTGRES_PASSWORD", "ambient-beads-pg")
-	t.Setenv("BEADS_POSTGRES_HOST", "ambient-host")
-
-	origRunner := beadsExecCommandRunnerWithEnv
-	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
-
-	var captured map[string]string
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
-		captured = map[string]string{}
-		for key, value := range env {
-			captured[key] = value
-		}
-		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			return []byte("ok"), nil
-		}
-	}
-
-	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
-		return map[string]string{}
-	})
-	if _, err := runner(t.TempDir(), "bd", "list", "--json"); err != nil {
-		t.Fatalf("runner err = %v, want nil", err)
-	}
-
-	for _, key := range projectedPostgresEnvKeys {
-		if value, ok := captured[key]; !ok || value != "" {
-			t.Errorf("captured[%q] = %q, present=%v; want explicit empty override", key, value, ok)
-		}
-	}
-}
-
-func TestPGTransportError_MetadataReadErrorSkipsManagedRecovery(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-
-	origRunner := beadsExecCommandRunnerWithEnv
-	origRecover := recoverManagedBDCommand
-	t.Cleanup(func() {
-		beadsExecCommandRunnerWithEnv = origRunner
-		recoverManagedBDCommand = origRecover
-	})
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "devpw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
-	originalErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
-	attempts := 0
-	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
-		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			attempts++
-			if err := os.WriteFile(metadataPath, []byte(`{"backend":`), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			return nil, originalErr
-		}
-	}
-	recoverManagedBDCommand = func(_ string) error {
-		recoverCalls++
-		return nil
-	}
-
-	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		return map[string]string{"GC_DOLT_PORT": "3307"}
-	})
-	_, err := runner(cityPath, "bd", "list", "--json")
-
-	if err == nil {
-		t.Fatal("runner err = nil, want backend classification error")
-	}
-	if !strings.Contains(err.Error(), "classifying scope backend (bd error:") {
-		t.Fatalf("err = %q, want classification context", err.Error())
-	}
-	if !strings.Contains(err.Error(), "invalid metadata.json") {
-		t.Fatalf("err = %q, want metadata parse error", err.Error())
-	}
-	if !errors.Is(err, originalErr) {
-		t.Fatalf("errors.Is(err, originalErr) = false, want original bd error preserved")
-	}
-	if attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", attempts)
-	}
-	if recoverCalls != 0 {
-		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
-	}
-}
-
-func TestPGTransportError_NoManagedRecovery(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-
-	origRunner := beadsExecCommandRunnerWithEnv
-	origRecover := recoverManagedBDCommand
-	t.Cleanup(func() {
-		beadsExecCommandRunnerWithEnv = origRunner
-		recoverManagedBDCommand = origRecover
-	})
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "devpw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	originalErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
-	attempts := 0
-	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
-		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			attempts++
-			return nil, originalErr
-		}
-	}
-	recoverManagedBDCommand = func(_ string) error {
-		recoverCalls++
-		return nil
-	}
-
-	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		return map[string]string{}
-	})
-	_, err := runner(cityPath, "bd", "list", "--json")
-
-	if err == nil {
-		t.Fatal("runner err = nil, want wrapped transport error")
-	}
-	if !strings.Contains(err.Error(), "postgres at ") {
-		t.Errorf("err = %q, want substring %q", err.Error(), "postgres at ")
-	}
-	if !strings.Contains(err.Error(), "gc does not manage external PG endpoints (no managed recovery attempted)") {
-		t.Errorf("err = %q, want managed-recovery hint substring", err.Error())
-	}
-	if strings.Contains(err.Error(), "is unreachable") {
-		t.Errorf("err = %q, want no unreachable claim", err.Error())
-	}
-	if !errors.Is(err, originalErr) {
-		t.Errorf("errors.Is(err, originalErr) = false, want true (wrap chain broken)")
-	}
-	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1 (no retry for PG)", attempts)
-	}
-	if recoverCalls != 0 {
-		t.Errorf("recoverCalls = %d, want 0 (managed recovery must not run for PG)", recoverCalls)
-	}
-}
-
-func TestPostgresBackedScopeWrapsAnyBdErrorWithNoManagedRecoveryHint(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-
-	origRunner := beadsExecCommandRunnerWithEnv
-	origRecover := recoverManagedBDCommand
-	t.Cleanup(func() {
-		beadsExecCommandRunnerWithEnv = origRunner
-		recoverManagedBDCommand = origRecover
-	})
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "devpw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	originalErr := errors.New("context deadline exceeded")
-	attempts := 0
-	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
-		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			attempts++
-			return []byte("partial bd output"), originalErr
-		}
-	}
-	recoverManagedBDCommand = func(_ string) error {
-		recoverCalls++
-		return nil
-	}
-
-	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
-		return map[string]string{}
-	})
-	out, err := runner(cityPath, "bd", "list", "--json")
-
-	if err == nil {
-		t.Fatal("runner err = nil, want wrapped postgres error")
-	}
-	if !strings.Contains(err.Error(), "gc does not manage external PG endpoints (no managed recovery attempted)") {
-		t.Fatalf("err = %q, want managed-recovery hint substring", err.Error())
-	}
-	if !errors.Is(err, originalErr) {
-		t.Fatalf("errors.Is(err, originalErr) = false, want true")
-	}
-	if string(out) != "partial bd output" {
-		t.Fatalf("runner output = %q, want first-attempt output preserved", out)
-	}
-	if attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", attempts)
-	}
-	if recoverCalls != 0 {
-		t.Fatalf("recoverCalls = %d, want 0", recoverCalls)
-	}
-}
-
-func TestPGTransportError_InheritedCityPostgresNoManagedRecovery(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-
-	origRunner := beadsExecCommandRunnerWithEnv
-	origRecover := recoverManagedBDCommand
-	t.Cleanup(func() {
-		beadsExecCommandRunnerWithEnv = origRunner
-		recoverManagedBDCommand = origRecover
-	})
-
-	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "citypw")
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rigDir := filepath.Join(cityPath, "rigs", "pg-inherited")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg-inherited", Prefix: "pg"}}}
-
-	originalErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
-	attempts := 0
-	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
-		if got := env["BEADS_POSTGRES_PASSWORD"]; got != "citypw" {
-			t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want inherited city password", got)
-		}
-		return func(_ string, _ string, _ ...string) ([]byte, error) {
-			attempts++
-			return nil, originalErr
-		}
-	}
-	recoverManagedBDCommand = func(_ string) error {
-		recoverCalls++
-		return nil
-	}
-
-	runner := bdCommandRunnerForRig(cityPath, cfg, rigDir)
-	_, err := runner(rigDir, "bd", "list", "--json")
-
-	if err == nil {
-		t.Fatal("runner err = nil, want wrapped transport error")
-	}
-	if !strings.Contains(err.Error(), "gc does not manage external PG endpoints (no managed recovery attempted)") {
-		t.Errorf("err = %q, want managed-recovery hint substring", err.Error())
-	}
-	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1 (no retry for inherited PG)", attempts)
-	}
-	if recoverCalls != 0 {
-		t.Errorf("recoverCalls = %d, want 0 (managed recovery must not run for inherited PG)", recoverCalls)
-	}
-}
-
-func TestMixedBackendCity_PerScopeDispatch(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD"} {
-		t.Setenv(key, "")
-		_ = os.Unsetenv(key)
-	}
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pgRig := filepath.Join(cityPath, "rigs", "pg")
-	writePGScopeFixture(t, pgRig, "pgpw")
-	if err := os.WriteFile(filepath.Join(pgRig, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	defaultRig := filepath.Join(cityPath, "rigs", "default")
-	if err := os.MkdirAll(filepath.Join(defaultRig, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(defaultRig, ".beads", "config.yaml"), []byte(`issue_prefix: default
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.City{Rigs: []config.Rig{
-		{Name: "pg", Path: "rigs/pg", Prefix: "pg"},
-		{Name: "default", Path: "rigs/default", Prefix: "default"},
-	}}
-
-	pgEnv, err := bdRuntimeEnvForRigWithError(cityPath, cfg, pgRig)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError(pg) error = %v", err)
-	}
-	if got := pgEnv["BEADS_POSTGRES_PASSWORD"]; got != "pgpw" {
-		t.Errorf("pg rig BEADS_POSTGRES_PASSWORD = %q, want pgpw", got)
-	}
-	if got := pgEnv["BEADS_POSTGRES_HOST"]; got != "db.example.test" {
-		t.Errorf("pg rig BEADS_POSTGRES_HOST = %q, want db.example.test", got)
-	}
-
-	defaultEnv, err := bdRuntimeEnvForRigWithError(cityPath, cfg, defaultRig)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError(default) error = %v", err)
-	}
-	if value, ok := defaultEnv["BEADS_POSTGRES_PASSWORD"]; ok && value != "" {
-		t.Errorf("default rig BEADS_POSTGRES_PASSWORD = %q, want absent (no PG leak across scopes)", value)
-	}
-	if value, ok := defaultEnv["BEADS_POSTGRES_HOST"]; ok && value != "" {
-		t.Errorf("default rig BEADS_POSTGRES_HOST = %q, want absent", value)
-	}
-}
-
-func TestBdRuntimeEnvForRig_PostgresRigOverridesDoltliteCityBackend(t *testing.T) {
-	clearAmbientPostgresEnv(t)
-	t.Setenv("GC_BEADS", "bd")
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_BEADS_BACKEND", "")
-	_ = os.Unsetenv("GC_BEADS_BACKEND")
-	t.Setenv("BEADS_BACKEND", "")
-	_ = os.Unsetenv("BEADS_BACKEND")
-
-	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[beads]
-provider = "bd"
-backend = "doltlite"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
-gc.endpoint_origin: managed_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pgRig := filepath.Join(cityPath, "rigs", "pg")
-	writePGScopeFixture(t, pgRig, "pgpw")
-	if err := os.WriteFile(filepath.Join(pgRig, ".beads", "config.yaml"), []byte(`issue_prefix: pg
-gc.endpoint_origin: inherited_city
-gc.endpoint_status: verified
-dolt.auto-start: false
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
-
-	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, pgRig)
-	if err != nil {
-		t.Fatalf("bdRuntimeEnvForRigWithError(pg) error = %v", err)
-	}
-	if got := env["BEADS_POSTGRES_PASSWORD"]; got != "pgpw" {
-		t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want pgpw", got)
-	}
-	if got := env["BEADS_POSTGRES_HOST"]; got != "db.example.test" {
-		t.Fatalf("BEADS_POSTGRES_HOST = %q, want db.example.test", got)
-	}
-	for _, key := range []string{"GC_BEADS_BACKEND", "BEADS_BACKEND"} {
-		if got := env[key]; got == "doltlite" {
-			t.Fatalf("%s = %q, want Postgres rig to override DoltLite city backend", key, got)
-		}
-	}
-}
-
 func TestProjectedKeysCoverage(t *testing.T) {
-	parentKeys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedPostgresEnvKeys)+len(projectedDoltEnvKeys))
+	parentKeys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedDoltEnvKeys))
 	for _, key := range projectedBeadsBackendEnvKeys {
-		parentKeys = append(parentKeys, key+"=PARENT")
-	}
-	for _, key := range projectedPostgresEnvKeys {
 		parentKeys = append(parentKeys, key+"=PARENT")
 	}
 	for _, key := range projectedDoltEnvKeys {
@@ -5622,11 +5108,6 @@ func TestProjectedKeysCoverage(t *testing.T) {
 	for _, key := range projectedBeadsBackendEnvKeys {
 		if !projectedKeyStripped(key) {
 			t.Errorf("projectedBeadsBackendEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
-		}
-	}
-	for _, key := range projectedPostgresEnvKeys {
-		if !pgKeyStripped(key) {
-			t.Errorf("projectedPostgresEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
 	}
 	for _, key := range projectedDoltEnvKeys {
@@ -5668,10 +5149,6 @@ func TestMergeRuntimeEnvStripsInheritedBeadsBackend(t *testing.T) {
 	if !slices.Contains(result, "PATH=/usr/bin") {
 		t.Fatalf("PATH was not preserved in merged runtime env: %v", result)
 	}
-}
-
-func pgKeyStripped(key string) bool {
-	return projectedKeyStripped(key)
 }
 
 func projectedKeyStripped(key string) bool {
@@ -5737,10 +5214,10 @@ func TestBdRuntimeEnvDisablesAutoExport(t *testing.T) {
 	}
 }
 
-// TestScopeIsGCManagedRecognizesExplicitAutoOff verifies that a config with
+// TestScopeJSONLIsReapableRecognizesExplicitAutoOff verifies that a config with
 // export.auto:false is recognized as gc-managed even when gc.endpoint_origin
 // is absent. This is the steady-state signal post-PR-1965.
-func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesExplicitAutoOff(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5751,17 +5228,17 @@ func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for explicit export.auto:false")
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for explicit export.auto:false")
 	}
 }
 
-// TestScopeIsGCManagedRecognizesManagedOrigin verifies that a long-lived
+// TestScopeJSONLIsReapableRecognizesManagedOrigin verifies that a long-lived
 // city whose config still pre-dates PR 1965 (export.auto absent) is still
 // recognized as gc-managed because gc.endpoint_origin proves it. This is
 // the transitional signal — without it the jsonl reaper would refuse to
 // clean up samtown-style cities until they hit a canonicalization event.
-func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesManagedOrigin(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5772,16 +5249,32 @@ func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for gc.endpoint_origin: managed_city")
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for gc.endpoint_origin: managed_city")
 	}
 }
 
-// TestScopeIsGCManagedDoesNotClaimExplicitOptOut verifies the carve-out
+func TestScopeJSONLIsReapableHonorsCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for city export.auto:true opt-out")
+	}
+}
+
+// TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut verifies the carve-out
 // for rigs that deliberately keep JSONL-based sharing. Per PR 1965 docs,
 // gc.endpoint_origin: explicit is the supported opt-out path; issues.jsonl
-// there is load-bearing, not stale, so scopeIsGCManaged must return false.
-func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
+// there is load-bearing, not stale, so scopeJSONLIsReapable must return false.
+func TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5792,19 +5285,19 @@ func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out")
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out")
 	}
 }
 
-// TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse verifies the
+// TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse verifies the
 // precedence contract: when a scope has gc.endpoint_origin: explicit
 // (deliberate opt-out, JSONL is load-bearing) AND also has export.auto:
 // false (left over from a prior canonicalization, or hand-set), the
 // endpoint_origin signal wins. Without this ordering, a stale
 // export.auto value could trick the reaper into deleting issues.jsonl
 // on an opt-out rig.
-func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
+func TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5815,8 +5308,8 @@ func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
 	}
 }
 
@@ -5844,6 +5337,123 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestReapStaleBdExportJSONLLeavesFileOnCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl removed despite city export.auto:true opt-out; stat err = %v", err)
+	}
+}
+
+// TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse pins the
+// runbook's warning: appending export.auto: true below the canonical
+// export.auto: false is not an opt-in. gc honors the first key, so the
+// managed scope's stale export is still reaped.
+func TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: false\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after reap despite a duplicate export.auto key; stat err = %v, want IsNotExist", err)
+	}
+}
+
+// configReadFaultFS fails the listed ReadFile calls (1-based) of one
+// config.yaml and passes every other call through to the real filesystem. A
+// fault that clears between two reads is the window in which an export.auto
+// opt-in could be misread as absent.
+type configReadFaultFS struct {
+	fsys.OSFS
+	path      string
+	failCalls map[int]bool
+	calls     int
+}
+
+func (f *configReadFaultFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path {
+		f.calls++
+		if f.failCalls[f.calls] {
+			return nil, fmt.Errorf("injected read failure of %s (call %d)", name, f.calls)
+		}
+	}
+	return f.OSFS.ReadFile(name)
+}
+
+// TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto verifies that an
+// export.auto read failure leaves the JSONL alone even when the endpoint
+// origin reads fine a moment later: the value that could not be read may be
+// the city's explicit true. The quoted spelling is valid YAML that bd honors
+// but the line scanner cannot read, so the fault must not be retried through
+// it.
+func TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath,
+		[]byte("issue_prefix: zz\nexport.auto: \"true\"\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// ReadExportAuto's read fails; any later read succeeds.
+	fs := &configReadFaultFS{path: configPath, failCalls: map[int]bool{1: true}}
+
+	if scopeJSONLIsReapable(fs, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false when export.auto could not be read")
+	}
+	if fs.calls < 1 {
+		t.Fatalf("injected fault never reached ReadExportAuto (%d config reads)", fs.calls)
+	}
+}
+
+// TestScopeJSONLIsReapableReapsUnparseableManagedConfig verifies that only a
+// read failure fails closed. A config.yaml that reads but does not parse, with
+// no export.auto line, holds no opt-in to protect, so a managed scope's stale
+// export is still reaped (sa-41j3kp).
+func TestScopeJSONLIsReapableReapsUnparseableManagedConfig(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n: not yaml\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for an unparseable managed_city config without export.auto")
 	}
 }
 
@@ -6157,6 +5767,124 @@ func TestMirrorBeadsDoltScopeEnvReadsAmbientTLSViaNativeOpenGuard(t *testing.T) 
 	}
 }
 
+// stubAmbientNativeDoltOpenEnv replaces the guarded ambient reader with one that
+// answers from ambient, the restored ambient environment. Paired with t.Setenv
+// of a different value, standing in for the transient projection a concurrent
+// scope's native open holds in the process env, it shows which read an env build
+// took: a bare os.Getenv sees the projection, the guarded read sees ambient.
+func stubAmbientNativeDoltOpenEnv(t *testing.T, ambient map[string]string) {
+	t.Helper()
+	orig := ambientNativeDoltOpenEnv
+	ambientNativeDoltOpenEnv = func(key string) string { return ambient[key] }
+	t.Cleanup(func() { ambientNativeDoltOpenEnv = orig })
+}
+
+// TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard pins that every
+// ambient BEADS_* fallback on the scope env-build path, and the ambient BD_BIN
+// pin, reads through the native-open env guard. gc ready opens its rig stores
+// concurrently, and a native open projects its scope's socket, credential
+// command and credentials file into the process env under nativeDoltOpenEnvMu
+// for the whole library open; a proxied native open withholds every BD_* key
+// for that window instead. A bare os.Getenv in a second scope's concurrent env
+// build would adopt the first scope's endpoint or credentials, or lose the
+// operator's bd pin. Each BEADS_* case holds another scope's projection in the
+// process env and asserts the build carries this scope's own ambient value, or
+// nothing when there is none.
+func TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard(t *testing.T) {
+	const (
+		otherSocket    = "/run/other-rig/dolt.sock"
+		operatorSocket = "/run/operator/dolt.sock"
+		otherHelper    = "/run/other-rig/credential-helper"
+		operatorHelper = "/opt/operator/credential-helper"
+	)
+	type ambientCase struct{ name, value string }
+	writeCredentials := func(t *testing.T, password string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "credentials")
+		if err := os.WriteFile(path, []byte("[127.0.0.1:3307]\npassword="+password+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for _, ambient := range []ambientCase{{"no ambient socket", ""}, {"ambient socket", operatorSocket}} {
+		t.Run("external override/"+ambient.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", otherSocket)
+			t.Setenv("GC_DOLT_HOST", "")
+			t.Setenv("GC_DOLT_PORT", "")
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_SERVER_SOCKET": ambient.value})
+			target, ok := externalDoltEnvOverrideTarget()
+			if ok != (ambient.value != "") || target.Socket != ambient.value {
+				t.Fatalf("externalDoltEnvOverrideTarget() = %+v, %v; want socket %q (another scope's projected socket is not an override)", target, ok, ambient.value)
+			}
+		})
+		t.Run("pending provider endpoint/"+ambient.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", otherSocket)
+			t.Setenv("GC_DOLT_HOST", "")
+			t.Setenv("GC_DOLT_PORT", "")
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_SERVER_SOCKET": ambient.value})
+			env := map[string]string{}
+			applyPendingProviderExternalEndpoint(t.TempDir(), providerScopeIntent{}, env)
+			if got := env["BEADS_DOLT_SERVER_SOCKET"]; got != ambient.value {
+				t.Fatalf("BEADS_DOLT_SERVER_SOCKET = %q, want %q (another scope's projected socket is not a retry input)", got, ambient.value)
+			}
+		})
+	}
+	for _, ambient := range []ambientCase{{"no ambient helper", ""}, {"ambient helper", operatorHelper}} {
+		t.Run("credential command/"+ambient.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT_CRED_CMD", "")
+			t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", otherHelper)
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ambient.value})
+			hostedEnv := map[string]string{}
+			if err := applyHostedBeadsCredentialEnv(hostedEnv, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			mirroredEnv := map[string]string{}
+			mirrorBeadsDoltServerEnv(mirroredEnv, false)
+			for name, env := range map[string]map[string]string{"applyHostedBeadsCredentialEnv": hostedEnv, "mirrorBeadsDoltServerEnv": mirroredEnv} {
+				if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != ambient.value {
+					t.Errorf("%s: BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (another scope's projected helper is not this scope's)", name, got, ambient.value)
+				}
+			}
+		})
+	}
+	for _, ambient := range []ambientCase{{"no ambient credentials file", ""}, {"ambient credentials file", "operator"}} {
+		t.Run("scoped auth/"+ambient.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("GC_DOLT_USER", "")
+			t.Setenv("GC_DOLT_PASSWORD", "")
+			t.Setenv("BEADS_DOLT_PASSWORD", "")
+			t.Setenv("BEADS_CREDENTIALS_FILE", writeCredentials(t, "other-rig-secret"))
+			ambientFile, wantPassword := "", ""
+			if ambient.value != "" {
+				ambientFile, wantPassword = writeCredentials(t, "operator-secret"), "operator-secret"
+			}
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_CREDENTIALS_FILE": ambientFile})
+			env := map[string]string{"GC_DOLT_HOST": "127.0.0.1", "GC_DOLT_PORT": "3307"}
+			applyResolvedDoltAuthEnv(env, t.TempDir(), "root")
+			if got := env["BEADS_CREDENTIALS_FILE"]; got != ambientFile {
+				t.Errorf("BEADS_CREDENTIALS_FILE = %q, want %q", got, ambientFile)
+			}
+			if got := env["GC_DOLT_PASSWORD"]; got != wantPassword {
+				t.Errorf("GC_DOLT_PASSWORD = %q, want %q (resolved from another scope's projected credentials file)", got, wantPassword)
+			}
+		})
+	}
+	t.Run("workspace bd pin/withheld by a proxied open", func(t *testing.T) {
+		cityDir, _, _ := writeAmbientBdBinCity(t, "")
+		operatorBd := filepath.Join(t.TempDir(), "bd")
+		writeExecutable(t, operatorBd, "#!/bin/sh\nexit 0\n")
+		t.Setenv("BD_BIN", "")
+		stubAmbientNativeDoltOpenEnv(t, map[string]string{"BD_BIN": operatorBd})
+		env := map[string]string{}
+		if err := applyWorkspacePinnedBdBinary(env, cityDir); err != nil {
+			t.Fatal(err)
+		}
+		if got := env["BD_BIN"]; got != operatorBd {
+			t.Fatalf("BD_BIN = %q, want the operator's pin %q (a proxied open withholding BD_* is not an unset pin)", got, operatorBd)
+		}
+	})
+}
+
 // TestBeadsDoltServerTLSIsPassthroughNotProjected documents the intentional
 // separation: BEADS_DOLT_SERVER_TLS is an ambient hosted-gateway credential
 // passthrough (preserved for gc-spawned bd via preserveHostedBeadsCredentialEnv),
@@ -6351,4 +6079,390 @@ func TestProjectGitHubTokenExecEnv(t *testing.T) {
 			t.Fatalf("GITHUB_TOKEN = %q, want unset (empty ambient)", got)
 		}
 	})
+}
+
+// TestResolveBdBinaryForScope pins which scope decides the bd binary. The
+// scope the command targets owns the decision: it is the scope whose store
+// the command reads and writes, and only its binding says which build speaks
+// the backend. A scope that never reads the city's binding must not be taken
+// offline by a fault in it.
+func TestResolveBdBinaryForScope(t *testing.T) {
+	const complete = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432","storage_database":"beads_pg"}`
+	const partial = `{"backend":"postgres","storage_endpoint":"postgres://beads@db.example.test:5432"}`
+
+	// newPinnedCity stages a city pinning its own bd on the workspace PATH,
+	// with a different bd on the ambient PATH, and returns the two paths.
+	newPinnedCity := func(t *testing.T, cityMetadata string) (cityDir, pinned, ambient string) {
+		t.Helper()
+		cityDir = t.TempDir()
+		pinDir := t.TempDir()
+		pinned = filepath.Join(pinDir, "bd")
+		writeExecutable(t, pinned, "#!/bin/sh\nexit 0\n")
+		ambientDir := t.TempDir()
+		ambient = filepath.Join(ambientDir, "bd")
+		writeExecutable(t, ambient, "#!/bin/sh\nexit 0\n")
+		t.Setenv("PATH", ambientDir)
+		cityTOML := "[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = " + strconv.Quote(pinDir) + "\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if cityMetadata != "" {
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(cityMetadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return cityDir, pinned, ambient
+	}
+	writeRig := func(t *testing.T, cityDir, name, metadata string) string {
+		t.Helper()
+		rigDir := filepath.Join(cityDir, "rigs", name)
+		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.WriteFile(scopeMetadataJSONPath(rigDir), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return rigDir
+	}
+
+	t.Run("city scope surfaces its own partial binding", func(t *testing.T) {
+		cityDir, _, _ := newPinnedCity(t, partial)
+		got, err := resolveBdBinaryForScope(cityDir, cityDir)
+		if err == nil || !strings.Contains(err.Error(), "partial beads storage binding") {
+			t.Fatalf("resolveBdBinaryForScope(city, city) = (%q, %v), want the partial-binding error", got, err)
+		}
+	})
+
+	t.Run("managed city scope resolves the workspace pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, "")
+		got, err := resolveBdBinaryForScope(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, city) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, city) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("rig overriding the city backend survives a partial city binding", func(t *testing.T) {
+		cityDir, _, ambient := newPinnedCity(t, partial)
+		rigDir := writeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v, want the ambient bd", err)
+		}
+		if got != ambient {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q", got, ambient)
+		}
+	})
+
+	t.Run("rig carrying its own binding resolves the pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, "")
+		rigDir := writeRig(t, cityDir, "frontend", complete)
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("rig inheriting the city binding resolves the pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, complete)
+		rigDir := writeRig(t, cityDir, "inherit", "")
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("rig inheriting the managed city backend resolves the pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, "")
+		rigDir := writeRig(t, cityDir, "inherit", "")
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
+	t.Run("rig overriding the city backend keeps the ambient bd", func(t *testing.T) {
+		cityDir, _, ambient := newPinnedCity(t, complete)
+		rigDir := writeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != ambient {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN", got, ambient)
+		}
+	})
+}
+
+func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": "stale", "GC_DOLT_PORT": "3306", "BEADS_DOLT_SERVER_SOCKET": "stale.sock"}
+	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
+	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
+		t.Fatalf("env = %#v", env)
+	}
+}
+
+// TestBdStoreForCityWithConfigSkipsLoad pins the city-scope bd open split:
+// bdStoreForCityWithConfig reads the issue prefix and store options from the
+// cfg it is handed (a nil cfg still loads), the one-shot bd opener reuses the
+// caller's cfg, and the shared openBdStoreAtWithConfig keeps reloading because
+// long-lived callers (order dispatch, API) can hand it a stale or empty cfg.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nbd_compatibility = \"bd-1.0.5\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	store := bdStoreForCityWithConfig(cityDir, cityDir, cfg)
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("bdStoreForCityWithConfig re-parsed city config %d times despite a non-nil cfg", grew)
+	}
+	if got := store.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() = %q, want the supplied config's prefix mc", got)
+	}
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCityWithConfig dropped the supplied config's bd-1.0.5 store options")
+	}
+
+	before = loadCityConfigCalls.Load()
+	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg, beads.NativeTransportUnset); err != nil {
+		t.Fatalf("openOneShotBdStoreAtWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("openOneShotBdStoreAtWithConfig re-parsed city config %d times at the city scope despite a non-nil cfg", grew)
+	}
+
+	// The shared path must ignore even an empty stand-in cfg (what the order
+	// dispatcher substitutes for nil) and read the prefix from disk.
+	before = loadCityConfigCalls.Load()
+	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{}, beads.NativeTransportUnset)
+	if err != nil {
+		t.Fatalf("openBdStoreAtWithConfig(empty cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("shared openBdStoreAtWithConfig parsed city config %d times at the city scope, want exactly 1: long-lived callers must keep the reload", grew)
+	}
+	if bd, ok := shared.(*beads.BdStore); ok && bd.IDPrefix() != "mc" {
+		t.Fatalf("shared open IDPrefix() = %q, want mc from disk, not the empty cfg", bd.IDPrefix())
+	}
+
+	before = loadCityConfigCalls.Load()
+	store = bdStoreForCityWithConfig(cityDir, cityDir, nil)
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("bdStoreForCityWithConfig(nil cfg) parsed city config %d times, want exactly 1 (fallback load)", grew)
+	}
+	if got := store.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() after fallback load = %q, want mc", got)
+	}
+}
+
+// TestSharedStoreOpenKeepsBdCityReload pins the split one layer up, through
+// the full store open: openStoreAtForCityWithConfig is what the order
+// dispatcher calls (controller tick, API webhook) with the controller's
+// possibly stale cfg, so a bd city-scope open there must still reload config
+// from disk. openCityStoreAtWithConfig (the one-shot entry point used by gc
+// ready, gc hook, drain-ack) must not.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestSharedStoreOpenKeepsBdCityReload(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Skip native preflight so the open goes straight to the bd store.
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nprovider = \"bd\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	if _, err := openStoreAtForCityWithConfig(cityDir, cityDir, cfg); err != nil {
+		t.Fatalf("openStoreAtForCityWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("shared openStoreAtForCityWithConfig parsed city config %d times on a bd city scope, want exactly 1: the order dispatcher's open must keep re-reading config from disk", grew)
+	}
+
+	before = loadCityConfigCalls.Load()
+	if _, err := openCityStoreAtWithConfig(cityDir, cfg); err != nil {
+		t.Fatalf("openCityStoreAtWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("one-shot openCityStoreAtWithConfig parsed city config %d times on a bd city scope, want 0", grew)
+	}
+}
+
+// captureAmbientBdBinWarnings redirects the ignored-ambient-BD_BIN warning to
+// a buffer and resets its per-process dedupe so each test sees its own line.
+func captureAmbientBdBinWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := ambientBdBinWarnOut
+	ambientBdBinWarnOut = &buf
+	ambientBdBinWarned.Clear()
+	t.Cleanup(func() {
+		ambientBdBinWarnOut = old
+		ambientBdBinWarned.Clear()
+	})
+	return &buf
+}
+
+// writeAmbientBdBinCity writes a managed city (no bound store) whose
+// city.toml carries extraTOML, and puts a working bd that records its
+// invocation on a PATH containing only that bd. It returns the city dir, the
+// PATH bd, and the marker file the PATH bd writes when run.
+func writeAmbientBdBinCity(t *testing.T, extraTOML string) (cityDir, pathBd, marker string) {
+	t.Helper()
+	cityDir = t.TempDir()
+	binDir := t.TempDir()
+	pathBd = filepath.Join(binDir, "bd")
+	marker = filepath.Join(t.TempDir(), "path-bd-ran")
+	writeExecutable(t, pathBd, "#!/bin/sh\nprintf ran > \""+marker+"\"\n")
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"+extraTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, pathBd, marker
+}
+
+// TestAmbientInvalidBdBinIsIgnoredNotFatal pins ga-weekw: an inherited
+// BD_BIN that is relative, or absolute but stale, is not a declared workspace
+// pin. It must not take the city scope offline; the resolver ignores it with a
+// one-line warning naming the value, the managed child env masks it with an
+// empty BD_BIN, and the exec runner therefore runs the PATH bd instead of
+// exec'ing the stale inherited path.
+func TestAmbientInvalidBdBinIsIgnoredNotFatal(t *testing.T) {
+	for _, ambient := range []string{"bd", "./bin/bd", "/nonexistent/bin/bd"} {
+		t.Run(ambient, func(t *testing.T) {
+			warnings := captureAmbientBdBinWarnings(t)
+			cityDir, pathBd, marker := writeAmbientBdBinCity(t, "")
+			t.Setenv("BD_BIN", ambient)
+
+			got, err := resolveBdBinaryForScope(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("resolveBdBinaryForScope(city) error = %v, want PATH bd", err)
+			}
+			if got != pathBd {
+				t.Fatalf("resolveBdBinaryForScope(city) = %q, want PATH bd %q", got, pathBd)
+			}
+			if err := requireBdBinaryForCity(cityDir); err != nil {
+				t.Fatalf("requireBdBinaryForCity() error = %v, want nil", err)
+			}
+			env := map[string]string{}
+			if err := applyWorkspacePinnedBdBinary(env, cityDir); err != nil {
+				t.Fatalf("applyWorkspacePinnedBdBinary() error = %v, want nil", err)
+			}
+			if v, ok := env["BD_BIN"]; !ok || v != "" {
+				t.Fatalf("env[BD_BIN] = %q (present=%v), want present and empty to mask the inherited value", v, ok)
+			}
+			if _, err := beads.ExecCommandRunnerWithEnv(env)(cityDir, "bd", "version"); err != nil {
+				t.Fatalf("exec bd with composed env: %v (stale ambient BD_BIN must not be exec'd)", err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("PATH bd did not run: %v", err)
+			}
+
+			msg := warnings.String()
+			if strings.Count(msg, "\n") != 1 {
+				t.Fatalf("warning output = %q, want exactly one line across all resolutions", msg)
+			}
+			if !strings.Contains(msg, strconv.Quote(ambient)) || !strings.Contains(msg, "BD_BIN") {
+				t.Fatalf("warning = %q, want it to name ignored BD_BIN %q", msg, ambient)
+			}
+		})
+	}
+}
+
+// TestWorkspacePathWithoutBdStillFailsClosedWithValidAmbientBdBin pins that
+// the ga-weekw relaxation is ambient-only: a declared workspace.env PATH that
+// contains no bd stays a configuration error even when a perfectly valid
+// ambient BD_BIN is available, so gc never substitutes a different bd for the
+// declared one.
+func TestWorkspacePathWithoutBdStillFailsClosedWithValidAmbientBdBin(t *testing.T) {
+	warnings := captureAmbientBdBinWarnings(t)
+	emptyDir := t.TempDir()
+	cityDir, _, _ := writeAmbientBdBinCity(t, "[workspace.env]\nPATH = "+strconv.Quote(emptyDir)+"\n")
+	validAmbient := filepath.Join(t.TempDir(), "bd")
+	writeExecutable(t, validAmbient, "#!/bin/sh\nexit 0\n")
+	t.Setenv("BD_BIN", validAmbient)
+
+	got, err := resolveBdBinaryForScope(cityDir, cityDir)
+	if err == nil || !strings.Contains(err.Error(), "workspace.env PATH is configured but contains no executable bd") {
+		t.Fatalf("resolveBdBinaryForScope(city) = %q, %v; want workspace.env PATH error", got, err)
+	}
+	if err := requireBdBinaryForCity(cityDir); err == nil {
+		t.Fatal("requireBdBinaryForCity() = nil, want workspace.env PATH error")
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("unexpected ambient warning %q: the declared workspace PATH wins", warnings.String())
+	}
+}
+
+// TestInvalidWorkspaceBdBinStillFailsClosed pins that a declared
+// workspace.env BD_BIN that is relative or not executable is still an error,
+// even with a valid ambient BD_BIN and a bd on PATH: only the ambient value is
+// relaxed by ga-weekw.
+func TestInvalidWorkspaceBdBinStillFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "relative", value: "./bin/bd", wantErr: "workspace.env BD_BIN must be an absolute executable path"},
+		{name: "missing", value: "/nonexistent/bin/bd", wantErr: "workspace.env BD_BIN \"/nonexistent/bin/bd\" is not executable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captureAmbientBdBinWarnings(t)
+			cityDir, _, _ := writeAmbientBdBinCity(t, "[workspace.env]\nBD_BIN = "+strconv.Quote(tc.value)+"\n")
+			validAmbient := filepath.Join(t.TempDir(), "bd")
+			writeExecutable(t, validAmbient, "#!/bin/sh\nexit 0\n")
+			t.Setenv("BD_BIN", validAmbient)
+
+			if _, err := resolveBdBinaryForScope(cityDir, cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("resolveBdBinaryForScope(city) error = %v, want %q", err, tc.wantErr)
+			}
+			if err := requireBdBinaryForCity(cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("requireBdBinaryForCity() error = %v, want %q", err, tc.wantErr)
+			}
+			if err := applyWorkspacePinnedBdBinary(map[string]string{}, cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("applyWorkspacePinnedBdBinary() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
 }

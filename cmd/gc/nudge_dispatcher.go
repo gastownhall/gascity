@@ -8,12 +8,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -29,12 +31,18 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // are intentionally silent: the patrol-tick fallback in supervisor mode
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
-func pingNudgeWakeSocket(cityPath string) {
+//
+// It dials through dialCitySocket, so on a worker site it sends nothing.
+//
+// It is a variable so the file queue's characterization tests can count the
+// pings a queue verb sends without opening a listener; tests that replace it
+// must stay serial.
+var pingNudgeWakeSocket = func(cityPath string) {
 	if cityPath == "" {
 		return
 	}
 	path := nudgequeue.WakeSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
+	conn, err := dialCitySocket(cityPath, path, pingNudgeWakeSocketDialTimeout)
 	if err != nil {
 		return
 	}
@@ -112,45 +120,55 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 //
 // This is a no-op when the dispatcher is configured for "legacy" mode —
 // the per-session `gc nudge poll` processes own delivery in that case.
-func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot) (int, error) {
+//
+// debugOut receives one GC_DEBUG-gated line per silently-skipped target (see
+// logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
+// into the persisted queue state's DispatchSkips regardless of debugOut, so
+// `gc nudge status` stays informative even with GC_DEBUG unset).
+func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	state, err := nudgequeue.LoadState(cityPath)
-	if err != nil {
-		return 0, fmt.Errorf("loading nudge queue: %w", err)
-	}
-	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
-		return 0, nil
-	}
+	return dispatchQueuedNudges(openNudgeQueue(cityPath, beads.NudgesStore{Store: store}), cityPath, cfg, store, sessStore, sp, sessionBeads, debugOut)
+}
+
+// dispatchQueuedNudges is the dispatcher pass of dispatchAllQueuedNudges over
+// queue. A DueKeys read that comes back partial still dispatches the agents it
+// read, and the pass reports its error.
+func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
 	now := time.Now()
-	pendingAgents := make(map[string]bool, len(state.Pending))
-	for _, item := range state.Pending {
-		if item.Agent == "" {
-			continue
-		}
-		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
+	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
+	// independent of whether any item below matches an open session. The
+	// per-session loop's only path to recover/prune is a successful claim in
+	// claimDueQueuedNudgesForTarget, which a structurally orphaned item
+	// (target agent has no open session, and never will again) can never
+	// reach — leaving it in Pending past its ExpiresAt forever. See
+	// ra-oudpha finding-3.
+	if _, err := queue.Queue.Maintain(context.Background(), now); err != nil {
+		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
 	}
-	// In-flight items with expired leases are recoverable on the next
-	// claim attempt. Including their agents lets us retry without waiting
-	// for the patrol tick to discover them.
-	for _, item := range state.InFlight {
-		if item.Agent == "" {
-			continue
+	// The agents with a due pending item, or with an in-flight item whose
+	// lease has expired: that one is recoverable on the next claim attempt,
+	// so including its agent retries without waiting for the patrol tick.
+	// A record DueKeys cannot decode costs only its own agent this pass: the
+	// agents it did read are dispatched, and the partial result is reported.
+	var firstErr error
+	dueKeys, err := queue.Queue.DueKeys(now)
+	if err != nil {
+		if !beads.IsPartialResult(err) {
+			return 0, fmt.Errorf("loading nudge queue: %w", err)
 		}
-		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
+		firstErr = fmt.Errorf("loading nudge queue: %w", err)
 	}
-	if len(pendingAgents) == 0 {
-		return 0, nil
+	if len(dueKeys) == 0 {
+		return 0, firstErr
+	}
+	pendingAgents := make(map[string]bool, len(dueKeys))
+	for _, key := range dueKeys {
+		pendingAgents[key] = true
 	}
 
 	// The dispatcher receives the nudges-class store (store) PLUS the session-class
@@ -162,10 +180,19 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// (deriving sessStore from the nudges base would mis-resolve session beads once
 	// nudges relocates independently of sessions).
 	delivered := 0
-	var firstErr error
+	// skipCounts accumulates this tick's silent-skip reasons in memory; it is
+	// merged into the persisted queue state's running totals once, after the
+	// loop, rather than on every skip — recordNudgeDispatchSkips takes the
+	// queue flock, and taking it once per matched info instead of once per
+	// tick would multiply lock contention against the claim path below for
+	// no benefit (the counters only need tick-granularity, not per-item).
+	skipCounts := make(map[string]int64)
+	snapshotCensus := nudgeFenceCensusFromSnapshot(sessionBeads)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
+			skipCounts["no-target"]++
+			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
@@ -182,6 +209,20 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			}
 		}
 		if !matched {
+			// Routine: this open session simply has no pending queue item
+			// targeting it. Counted (not just logged) so an operator can
+			// tell "nothing queued for anyone" apart from the anomalous
+			// skip reasons below at a glance.
+			skipCounts["not-matched"]++
+			logNudgeDispatchSkip(debugOut, "not-matched", target.agentKey(), target.sessionName, "")
+			continue
+		}
+		if sessionpkg.IsKillPendingInfo(info, now) {
+			// A `gc session kill` is tearing this runtime down. Delivering now
+			// would type into a process that is about to die and ack the item
+			// as delivered; leave it queued for the next incarnation.
+			skipCounts["kill-pending"]++
+			logNudgeDispatchSkip(debugOut, "kill-pending", target.agentKey(), target.sessionName, "")
 			continue
 		}
 		obs, err := workerObserveNudgeTarget(target, sessStore, sp)
@@ -189,18 +230,105 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			if firstErr == nil {
 				firstErr = err
 			}
+			skipCounts["observe-error"]++
+			logNudgeDispatchSkip(debugOut, "observe-error", target.agentKey(), target.sessionName, err.Error())
 			continue
 		}
 		if !obs.Running {
+			skipCounts["not-running"]++
+			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		// The pass's snapshot census only lets the target skip: when, judged
+		// by it, the target may claim nothing, the claim is not tried, and an
+		// adoption the snapshot denies waits for the next pass. A claim that
+		// is tried reads its own live census before it adopts, since the
+		// snapshot, or a census an earlier claim of the pass read, misses a
+		// session another process created after it. The starvation check of a
+		// busy target judges with the snapshot census too, so holding a busy
+		// session back reads no store (nudgeTarget.starvationCensus).
+		ok := false
+		if nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, time.Now()) {
+			target.starvationCensus = snapshotCensus
+			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if ok {
 			delivered++
+			continue
 		}
+		// Matched a live, running session, yet nothing was claimed/delivered
+		// this tick — e.g. the poller quiescence gate (pollerSessionIdleEnough)
+		// hasn't cleared and the queue hasn't starved past
+		// queuedNudgeStarvedAfter yet (a busy session's next delivery waits
+		// only until it starves, then until a turn look, on a leaf that takes
+		// one, says idle), or claimDueQueuedNudgesForTarget found nothing
+		// claimable (already claimed by a concurrent drain path). Either way
+		// this is the class of skip ra-oudpha finding-3 could not otherwise
+		// distinguish from "not matched" or "not running" without a trace.
+		reason := "not-delivered"
+		if err != nil {
+			reason = "not-delivered-error"
+		}
+		skipCounts[reason]++
+		detail := ""
+		if err != nil {
+			detail = err.Error()
+		}
+		logNudgeDispatchSkip(debugOut, reason, target.agentKey(), target.sessionName, detail)
+	}
+	if err := queue.Skips.RecordDispatchSkips(skipCounts); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// nudgeFenceCensusFromSnapshot is a dispatch pass's skip-only Leg-B census:
+// the open sessions of the pass's snapshot that still hold a nudge fence
+// (sessionHoldsNudgeFence), built at most once. The snapshot reads through the
+// controller's bead cache, which sees another process's session only after its
+// own reconcile pass, so it may skip a claim, or judge a busy target's
+// starvation (queuedNudgeStarvedForTarget), but never license an adoption
+// (nudgeTargetMayClaimPerSnapshot).
+func nudgeFenceCensusFromSnapshot(snapshot *sessionBeadSnapshot) func() (map[string]struct{}, bool) {
+	var once sync.Once
+	var live map[string]struct{}
+	return func() (map[string]struct{}, bool) {
+		once.Do(func() {
+			live = make(map[string]struct{})
+			for _, info := range snapshot.OpenInfos() {
+				if sessionHoldsNudgeFence(info) {
+					live[info.ID] = struct{}{}
+				}
+			}
+		})
+		return live, true
+	}
+}
+
+// nudgeTargetMayClaimPerSnapshot reports whether a claim for target, judged
+// with the pass's snapshot census, would claim anything: a lock-free dry run
+// (WouldClaimBatch) that reads no store. A dry run that fails answers yes, so
+// the authoritative claim decides.
+func nudgeTargetMayClaimPerSnapshot(queue nudgeQueueHandle, target nudgeTarget, snapshotCensus func() (map[string]struct{}, bool), now time.Time) bool {
+	target.fenceCensus = snapshotCensus
+	would, err := queue.Probe.WouldClaimBatch(target.claimTarget(target.cityPath), now)
+	return err != nil || would
+}
+
+// logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one
+// silently-skipped target from the dispatchAllQueuedNudges loop. w may be
+// nil, in which case this is a no-op (callers that don't have a debug sink,
+// e.g. most existing tests, pass nil).
+func logNudgeDispatchSkip(w io.Writer, reason, agent, session, detail string) {
+	if w == nil {
+		return
+	}
+	extra := []string{"agent", agent, "session", session}
+	if detail != "" {
+		extra = append(extra, "detail", detail)
+	}
+	logRoute(w, "nudge-dispatch-tick", "skip", reason, extra...)
 }

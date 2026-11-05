@@ -740,8 +740,26 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 	return blockers, heldUntil, quarantinedUntil
 }
 
+// unobservedCreatingTimeout bounds how long a creating bead may sit when the
+// runtime could not be observed at all. Deliberately much longer than
+// StaleCreatingAfter: an unobserved runtime may simply be a transient probe
+// failure over a live session, so this must not fire on a normal hiccup —
+// only on a create that is definitively abandoned (ga-pofwv9).
+//
+// Reachability at this head: Runtime.Observed == false is entered in production
+// via zero-value LifecycleInput construction (cmd/gc/cmd_session.go,
+// cmd/gc/compute_awake_bridge.go, wait_store.go, manager.go), but the only
+// consumer of the fields this branch sets (RuntimeProjection, ReconciledState,
+// ResetContinuation) is cmd/gc/session_reconcile.go, which sets Observed: true.
+// So the branch is inert here rather than unreachable — defense in depth for a
+// future consumer that reads a projection built without runtime facts.
+const unobservedCreatingTimeout = 15 * time.Minute
+
 func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
 	if !input.Runtime.Observed {
+		if base == BaseStateCreating && creatingUnobservedExpired(input) {
+			return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+		}
 		return RuntimeProjectionUnknown, compat, false
 	}
 	if input.Runtime.Alive {
@@ -781,7 +799,12 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 
 func creatingStateIsStale(input LifecycleInput) bool {
 	if input.StaleCreatingAfter <= 0 {
-		return false
+		// StaleCreatingAfter is assigned in exactly one construction path
+		// (cmd/gc/session_reconcile.go). Every other path — including
+		// LifecycleInputFromMetadata, used by the wake path — leaves it
+		// unset, which must not mean "never stale" (ga-pofwv9, second gap).
+		// Fall back to the same bound used when the runtime is unobservable.
+		return creatingUnobservedExpired(input)
 	}
 	now := input.Now
 	if now.IsZero() {
@@ -799,22 +822,60 @@ func creatingStateIsStale(input LifecycleInput) bool {
 	return !now.Before(startedAt.Add(input.StaleCreatingAfter))
 }
 
+// creatingUnobservedExpired reports whether a creating bead has aged past
+// unobservedCreatingTimeout, independent of StaleCreatingAfter. It anchors on
+// PendingCreateStartedAt, then CreatedAt, matching creatingStateIsStale.
+//
+// A zero input.Now means the caller has no clock at all (e.g.
+// healStatePatchWithRollbackInfo with clk == nil) — that must mean "cannot
+// assess staleness," not "assume the current wall-clock time," or a
+// deliberately clockless caller would see old-but-otherwise-fine creating
+// beads reported as expired against whatever moment the test happens to run.
+func creatingUnobservedExpired(input LifecycleInput) bool {
+	if input.Now.IsZero() {
+		return false
+	}
+	now := input.Now
+	startedAt := input.CreatedAt
+	if v := strings.TrimSpace(input.PendingCreateStartedAt); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+			startedAt = t
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(unobservedCreatingTimeout))
+}
+
 func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason string) bool {
 	if strings.TrimSpace(input.SessionKey) == "" && strings.TrimSpace(input.StartedConfigHash) == "" {
 		return false
 	}
-	// This list deliberately diverges from IsDeliberateSleepReason's near-identical
-	// list (this one has "runtime-missing" and lacks "failed-create"): that one
-	// decides churn suppression, this one decides continuation reset on wake — do
-	// not merge the lists.
-	switch SleepReason(strings.TrimSpace(sleepReason)) {
-	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
-		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
-		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
-		SleepReasonRuntimeMissing:
+	if SleepReasonKeepsContinuation(sleepReason) {
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating
+}
+
+// SleepReasonKeepsContinuation reports whether a session that slept for
+// reason keeps its continuation when its runtime is found missing: the
+// heal resets session_key and started_config_hash otherwise. "killed" is the
+// gc session kill operator stop (SleepReasonKilled, kill_fence.go): like
+// drained and city-stop it is deliberate and keeps the conversation. This list
+// deliberately diverges from IsDeliberateSleepReason's near-identical list
+// (this one has "runtime-missing" and lacks "failed-create"): that one
+// decides churn suppression, this one decides continuation reset on wake —
+// do not merge the lists.
+func SleepReasonKeepsContinuation(reason string) bool {
+	switch SleepReason(strings.TrimSpace(reason)) {
+	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
+		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
+		SleepReasonKilled, SleepReasonUserHold, SleepReasonWaitHold,
+		SleepReasonRateLimit, SleepReasonRuntimeMissing:
+		return true
+	}
+	return false
 }
 
 func projectWakeCauses(input LifecycleInput) []WakeCause {
@@ -896,4 +957,22 @@ func hasWakeCause(causes []WakeCause, cause WakeCause) bool {
 		}
 	}
 	return false
+}
+
+// PreserveConversationOnRuntimeLoss reports whether healing a missing runtime
+// must retain its conversation identity. It does not decide explicit resets.
+func PreserveConversationOnRuntimeLoss(info Info) bool {
+	if info.ConfiguredNamedSession && NamedSessionModeInfo(info) == "always" {
+		return true
+	}
+	// A committed manual conversation survives a lost process. A preallocated
+	// key without a successful start must still follow failed-create recovery.
+	return HasStartedManualConversation(info)
+}
+
+// HasStartedManualConversation identifies a committed interactive conversation.
+// Failure accounting may quarantine it, but must not silently replace it.
+func HasStartedManualConversation(info Info) bool {
+	return isManualSessionInfo(info) && strings.TrimSpace(info.SessionKey) != "" &&
+		strings.TrimSpace(info.StartedConfigHash) != ""
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -48,6 +49,12 @@ type liveWorkerHandleHarness struct {
 	store      beads.Store       // the manager's bead store (shared city store for city-backed profiles)
 	sessionEnv map[string]string // env the provider session (and its gc children) receives
 	adapter    workerpkg.SessionLogAdapter
+	city       sessionpkg.CityDir // the manager's city, whose runtime dir holds the lease
+}
+
+// as is an Actor of kind on the harness's city.
+func (h *liveWorkerHandleHarness) as(kind sessionpkg.ActorKind) sessionpkg.Actor {
+	return sessionpkg.Actor{Kind: kind, City: h.city}
 }
 
 func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) {
@@ -74,6 +81,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", gcHome)
+	applyLiveBDBinaryEnv(env)
 
 	authSource, err := stageProviderAuth(gcHome, env, liveSetup.Profile)
 	if err != nil {
@@ -129,7 +137,11 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	tmuxCfg.SocketName = socketName
 
 	provider := runtimetmux.NewProviderWithConfig(tmuxCfg)
-	manager := sessionpkg.NewManagerWithOptions(store, provider)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), provider, sessionpkg.WithCityPath(root))
+	city, err := sessionpkg.NewCityDir(root)
+	if err != nil {
+		return nil, err
+	}
 	sessionEnv := mergeStringMaps(envMapFromAcceptanceEnv(env), resolved.Env)
 	handle, err := workerpkg.NewSessionHandle(workerpkg.SessionHandleConfig{
 		Manager: manager,
@@ -167,6 +179,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		workDir:    root,
 		gcHome:     gcHome,
 		cityDir:    cityDir,
+		city:       city,
 		store:      store,
 		sessionEnv: sessionEnv,
 		adapter: workerpkg.SessionLogAdapter{
@@ -174,7 +187,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		},
 	}
 	t.Cleanup(func() {
-		_ = harness.handle.Stop(context.Background())
+		_ = harness.handle.Stop(context.Background(), harness.as(sessionpkg.ActorOperator))
 		if harness.cityDir != "" {
 			// Reap any runtime started against the city (e.g. nudge-poller
 			// sidecars spawned by gc prime --hook) before removing it.
@@ -190,6 +203,8 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 
 func installLiveHandleProviderHooks(workDir, gcHome string, profile workerpkg.Profile) error {
 	switch profile {
+	case workerpkg.ProfileCursorTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"cursor"})
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
 	case workerpkg.ProfileMimoCodeTmuxCLI:
@@ -218,8 +233,8 @@ func installLiveHandleProviderHooks(workDir, gcHome string, profile workerpkg.Pr
 // the overlay command (`python3 .kimi/hooks/gascity-session-start.py`) is
 // workdir-relative and hooks.Install above still materializes the script
 // into the work dir. Production appends `--config-file .kimi/config.toml`
-// to the kimi launch command (appendKimiHookConfigArg in
-// cmd/gc/template_resolve.go) and relies on kimi's managed OAuth for auth;
+// to the kimi launch command (config.ProviderTemplateCommand, via
+// appendKimiHookConfigArg) and relies on kimi's managed OAuth for auth;
 // the harness instead stages auth as providers/models in the share-dir
 // config (stageKimiAuth), which a hooks-only --config-file would replace
 // wholesale. Appending the overlay [[hooks]] block to the staged share
@@ -362,7 +377,7 @@ func seedLiveProviderStateFor(profile workerpkg.Profile, gcHome, workDir string)
 func (h *liveWorkerHandleHarness) start() (workerpkg.State, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()
-	err := h.handle.Start(ctx)
+	err := h.handle.Start(ctx, h.as(sessionpkg.ActorAgent))
 	state, stateErr := h.handle.State(ctx)
 	evidence = h.withStateEvidence(evidence, state, stateErr)
 	liveWorkerDebugf("start work_dir=%s phase=%s session_id=%s session_name=%s err=%v state_err=%v", h.workDir, state.Phase, state.SessionID, state.SessionName, err, stateErr)
@@ -375,7 +390,7 @@ func (h *liveWorkerHandleHarness) start() (workerpkg.State, map[string]string, e
 func (h *liveWorkerHandleHarness) stop() (workerpkg.State, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()
-	err := h.handle.Stop(ctx)
+	err := h.handle.Stop(ctx, h.as(sessionpkg.ActorOperator))
 	state, stateErr := h.handle.State(ctx)
 	evidence = h.withStateEvidence(evidence, state, stateErr)
 	liveWorkerDebugf("stop work_dir=%s phase=%s session_id=%s session_name=%s err=%v state_err=%v", h.workDir, state.Phase, state.SessionID, state.SessionName, err, stateErr)
@@ -394,7 +409,7 @@ func (h *liveWorkerHandleHarness) submitAndWaitForFile(prompt, outputRel string,
 	actualPrompt := prompt + "\n\nWrite the requested output file at this exact path: " + outputPath
 	evidence["prompt"] = actualPrompt
 
-	result, err := h.handle.Message(ctx, workerpkg.MessageRequest{
+	result, err := h.handle.Message(ctx, h.as(sessionpkg.ActorAgent), workerpkg.MessageRequest{
 		Text:     actualPrompt,
 		Delivery: delivery,
 	})
@@ -422,7 +437,7 @@ func (h *liveWorkerHandleHarness) submit(prompt string, delivery workerpkg.Deliv
 	evidence["prompt"] = prompt
 	evidence["submit_delivery"] = string(delivery)
 
-	result, err := h.handle.Message(ctx, workerpkg.MessageRequest{
+	result, err := h.handle.Message(ctx, h.as(sessionpkg.ActorAgent), workerpkg.MessageRequest{
 		Text:     prompt,
 		Delivery: delivery,
 	})
@@ -582,7 +597,10 @@ func livePaneShowsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "esc to interrupt") ||
 			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
-			strings.Contains(line, "[current working directory ") {
+			strings.Contains(line, "[current working directory ") ||
+			// The zcode adapter runs each turn as a headless call, so its pane
+			// has no TUI spinner; it announces the in-flight turn instead.
+			strings.Contains(line, "zcode-repl turn in flight") {
 			return true
 		}
 	}

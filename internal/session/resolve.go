@@ -27,7 +27,7 @@ var (
 //
 // Returns ErrSessionNotFound if no live match is found, or ErrAmbiguous
 // (wrapped with details) if multiple sessions match the identifier.
-func ResolveSessionID(store beads.Store, identifier string) (string, error) {
+func ResolveSessionID(store beads.SessionStore, identifier string) (string, error) {
 	return resolveSessionID(store, identifier, false)
 }
 
@@ -35,12 +35,12 @@ func ResolveSessionID(store beads.Store, identifier string) (string, error) {
 // When no live identifier claims the requested identifier, it falls back to
 // closed exact alias and session_name matches so closed sessions remain
 // inspectable by their stable current handles.
-func ResolveSessionIDAllowClosed(store beads.Store, identifier string) (string, error) {
+func ResolveSessionIDAllowClosed(store beads.SessionStore, identifier string) (string, error) {
 	return resolveSessionID(store, identifier, true)
 }
 
 // ResolveSessionIDByExactID resolves only direct bead ID matches.
-func ResolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
+func ResolveSessionIDByExactID(store beads.SessionStore, identifier string) (string, error) {
 	_, id, err := ResolveSessionBeadByExactID(store, identifier)
 	return id, err
 }
@@ -48,8 +48,8 @@ func ResolveSessionIDByExactID(store beads.Store, identifier string) (string, er
 // ResolveSessionBeadByExactID is like ResolveSessionIDByExactID but also
 // returns the loaded session bead, so callers that immediately need it can
 // avoid a second store.Get.
-func ResolveSessionBeadByExactID(store beads.Store, identifier string) (beads.Bead, string, error) {
-	if store == nil {
+func ResolveSessionBeadByExactID(store beads.SessionStore, identifier string) (beads.Bead, string, error) {
+	if store == (beads.SessionStore{}) {
 		return beads.Bead{}, "", fmt.Errorf("session store unavailable")
 	}
 	b, err := store.Get(identifier)
@@ -72,8 +72,8 @@ func ResolveSessionBeadByExactID(store beads.Store, identifier string) (beads.Be
 // of returning a raw beads.Bead. It keeps the worker-boundary resolve+construct
 // path (cmd/gc/worker_handle.go) at a single store Get while removing the raw
 // bead from the interior. Pair it with worker.Factory.SessionByRecord.
-func ResolveSessionRecordByExactID(store beads.Store, identifier string) (Info, PersistedResponse, error) {
-	if store == nil {
+func ResolveSessionRecordByExactID(store beads.SessionStore, identifier string) (Info, PersistedResponse, error) {
+	if store == (beads.SessionStore{}) {
 		return Info{}, PersistedResponse{}, fmt.Errorf("session store unavailable")
 	}
 	b, err := store.Get(identifier)
@@ -87,7 +87,7 @@ func ResolveSessionRecordByExactID(store beads.Store, identifier string) (Info, 
 	return Info{}, PersistedResponse{}, fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }
 
-func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (string, error) {
+func resolveSessionID(store beads.SessionStore, identifier string, allowClosed bool) (string, error) {
 	if id, err := ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
 	} else if !errors.Is(err, ErrSessionNotFound) {
@@ -146,16 +146,22 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }
 
-func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClosed bool) ([]beads.Bead, error) {
+func listSessionBeadsByMetadata(store beads.SessionStore, key, value string, allowClosed bool) ([]beads.Bead, error) {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	if key == "" || value == "" {
 		return nil, nil
 	}
-	raw, err := store.List(beads.ListQuery{
+	query := beads.ListQuery{
 		Metadata:      map[string]string{key: value},
 		IncludeClosed: allowClosed,
-	})
+	}
+	if !allowClosed {
+		// Session bead status is open/closed; richer lifecycle states live in
+		// metadata. Treat any other raw status as invalid for live resolution.
+		query.Status = "open"
+	}
+	raw, err := store.List(query)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +274,7 @@ func IsSessionBeadOrRepairableInfo(i Info) bool {
 // instead. This is a best-effort repair — if the store update fails,
 // the failure is logged and the in-memory bead is still patched so the
 // current operation can proceed.
-func RepairEmptyType(store beads.Store, b *beads.Bead) {
+func RepairEmptyType(store beads.SessionStore, b *beads.Bead) {
 	if b.Type != "" {
 		return
 	}

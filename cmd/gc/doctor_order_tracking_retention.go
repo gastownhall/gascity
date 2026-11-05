@@ -54,22 +54,38 @@ func (c *orderTrackingRetentionCheck) Run(_ *doctor.CheckContext) *doctor.CheckR
 		res.Message = fmt.Sprintf("order-tracking retention unknown: opening city bead store: %v", err)
 		return res
 	}
-	entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Status:   "closed",
-		Label:    labelOrderTracking,
-		TierMode: beads.TierBoth,
-		Limit:    orderTrackingRetentionCheckListLimit,
-	})
-	if err != nil {
-		res.Status = doctor.StatusWarning
-		res.Message = fmt.Sprintf("order-tracking retention unknown: listing closed beads: %v", err)
-		return res
+	// The city work store holds the pre-cutover backlog; the orders binding
+	// holds everything a split city has written since. Counting only one of them
+	// reports a healthy 0 on exactly the city whose backlog is growing.
+	stores := []beads.Store{store}
+	if ordersStore := relocatedOrdersClassStore(c.cityPath, nil); ordersStore != nil && ordersStore != store {
+		stores = append(stores, ordersStore)
 	}
-	count := len(entries)
+	count := 0
+	capped := false
+	for _, s := range stores {
+		entries, err := beads.HandlesFor(s).Live.List(beads.ListQuery{
+			Status:   "closed",
+			Label:    labelOrderTracking,
+			TierMode: beads.TierBoth,
+			Limit:    orderTrackingRetentionCheckListLimit,
+		})
+		if err != nil {
+			res.Status = doctor.StatusWarning
+			res.Message = fmt.Sprintf("order-tracking retention unknown: listing closed beads: %v", err)
+			return res
+		}
+		count += len(entries)
+		// Each store's read is capped independently, so "at least this many"
+		// has to be tracked per store rather than inferred from the total.
+		if len(entries) >= orderTrackingRetentionCheckListLimit {
+			capped = true
+		}
+	}
 	if count >= orderTrackingRetentionCheckThreshold {
 		countStr := fmt.Sprintf("%d", count)
-		if count >= orderTrackingRetentionCheckListLimit {
-			countStr = "≥" + fmt.Sprintf("%d", orderTrackingRetentionCheckListLimit)
+		if capped {
+			countStr = "≥" + countStr
 		}
 		res.Status = doctor.StatusWarning
 		res.Message = fmt.Sprintf("%s closed order-tracking beads: retention watchdog will prune automatically (7d TTL default; configure [beads.policies.order_tracking].delete_after_close)", countStr)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -17,13 +18,13 @@ func newBeadsCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage the beads provider",
 		Long: `Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, and
-read-only list/show routed through the supervisor API with transparent
-fallback to direct bd reads.`,
+Subcommands for topology operations, health checking, diagnostics, exact-store
+metadata compare-and-set, and read-only list/show routed through the supervisor
+API with transparent fallback to direct bd reads.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, show)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, metadata-cas, show)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -34,6 +35,7 @@ fallback to direct bd reads.`,
 		newBeadsCityCmd(stdout, stderr),
 		newBeadsHealthCmd(stdout, stderr),
 		newBeadsListCmd(stdout, stderr),
+		newBeadsMetadataCASCmd(stdout, stderr),
 		newBeadsShowCmd(stdout, stderr),
 	)
 	return cmd
@@ -41,8 +43,8 @@ fallback to direct bd reads.`,
 
 func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		label, status, format string
-		all                   bool
+		label, status, assignee, format string
+		all                             bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -51,16 +53,43 @@ func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
-JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
-it). The bare --json flag is reserved by the CLI's JSON-contract layer
-and is not wired for this command; use --format=json.`,
+Supports --label, --status, --assignee, --all, and --format.
+--format=json prints a JSON array of beads, the same on every route
+for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
+GC_CITY_CONTEXT, or the context selected by gc context use) it prints
+{"beads": [...], "_cache_age_s": N}, where _cache_age_s is the age in
+seconds of the remote supervisor's bead cache.
+
+For a local city the array carries no cache age: when the supervisor
+API answers, the beads come from the supervisor's bead cache, which can
+lag the stores, so a bare array is not evidence of an uncached read. Set
+GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
+
+A city or rig bead store that cannot be opened or read fails the command
+(exit 1, naming the store) rather than being left out of the list. For
+a local city whose relocated class binding cannot be read, the command
+warns on stderr, lists the remaining stores and exits 0.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.
+
+--assignee is the cross-ledger form of "bd list --assignee". Bare bd
+reads a single ledger, so a bead that lives on a RIG ledger but is
+assigned to a city-scoped agent is invisible to it; this command sweeps
+every rig store plus the city store, so it answers "what is assigned to
+this agent anywhere in town" in one call. Use it when an agent's own
+startup work check comes back empty but work is genuinely assigned to
+it. The match is an exact comparison against the bead's stored assignee
+— no identity resolution happens, so pass the identity form the work is
+actually assigned under.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
-  gc beads list --status open --format=json`,
+  gc beads list --status open --format=json
+  gc beads list --assignee city.agent-a --status in_progress`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdBeadsList(format, beadFilters{label: label, status: status, all: all}, stdout, stderr) != 0 {
+			if cmdBeadsList(format, beadFilters{label: label, status: status, assignee: assignee, all: all}, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -68,7 +97,8 @@ and is not wired for this command; use --format=json.`,
 	}
 	cmd.Flags().StringVar(&label, "label", "", "filter to beads carrying this label")
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
-	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: open only)")
+	cmd.Flags().StringVar(&assignee, "assignee", "", "filter to beads whose stored assignee matches this string exactly (across every rig and the city)")
+	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: all nonclosed statuses)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
@@ -82,10 +112,21 @@ func newBeadsShowCmd(stdout, stderr io.Writer) *cobra.Command {
 controller is alive and falling back to a direct multi-store lookup
 otherwise.
 
-Supports --format. --format=json emits JSON (API-path JSON includes
-_cache_age_s; fallback-path JSON omits it). The bare --json flag is
-reserved by the CLI's JSON-contract layer and is not wired for this
-command; use --format=json.`,
+Supports --format. --format=json prints the bead as a JSON object, the
+same on every route for a local city. For a remote city (--context,
+--city-url/--city-name, GC_CITY_URL, GC_CITY_CONTEXT, or the context
+selected by gc context use) it prints {"bead": {...}, "_cache_age_s": N},
+where _cache_age_s is the age in seconds of the remote supervisor's bead
+cache.
+
+For a local city the object carries no cache age: when the supervisor
+API answers, the bead comes from the supervisor's bead cache, which can
+lag the stores, so a bare object is not evidence of an uncached read.
+Set GC_NO_API=1 to read the stores directly, or name the city with
+--city-url and --city-name to get the envelope with its _cache_age_s.
+
+The bare --json flag is reserved by the CLI's JSON-contract layer and is
+not wired for this command; use --format=json.`,
 		Example: `  gc beads show ga-abc
   gc beads show ga-abc --format=json`,
 		// MaximumNArgs(1), not ExactArgs(1): a missing id must reach the internal
@@ -133,8 +174,27 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // routeBeadsList dispatches `beads list` to the supervisor API when a
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
+//
+// A partial API answer (the server could not read one of the city's stores) is
+// an error, not a shorter list: the direct read fails the same way on a store it
+// cannot open or read, so neither route prints part of the city as the whole.
+//
+// --assignee is deliberately NOT sent as a query parameter. The endpoint does
+// accept ?assignee (BeadListInput.Assignee), but the server resolves that term
+// against session beads and expands it across every identity form of the
+// resolved session — bead ID, session_name, alias, configured name, prior
+// aliases — via beadListAssigneeTerms. Both CLI lanes instead match the stored
+// assignee exactly: filterBeads on the API lane, ListQuery.Assignee on the
+// fallback lane. Forwarding the term and trusting the server's answer would
+// make the API lane return that expanded set while the fallback lane returned
+// only exact matches, so the same command would answer differently depending on
+// whether the controller was up. renderBeadsListFromAPI re-applies every filter
+// through filterBeads, so the API lane over-fetches and narrows on the client,
+// which is exact because ListBeads follows next_cursor to completion rather than
+// truncating to page 1. Forwarding ?assignee is therefore a pure efficiency
+// change and must keep filterBeads as the authority.
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	var cr api.CachedRead[[]beads.Bead]
+	var cr api.CachedRead[api.BeadListView]
 	return routeRead(c, "beads list", nilReason, stderr,
 		func() error {
 			var err error
@@ -143,27 +203,55 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 				Status: filters.status,
 				All:    filters.all,
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			if cr.Body.Partial {
+				return errorAfterFetch{Detail: beadsListPartialErrorDetail(cr.Body.PartialErrors, c.IsRemote())}
+			}
+			return nil
 		},
-		func() int { return renderBeadsListFromAPI(cr, format, filters, stdout) },
+		func() int {
+			return renderBeadsListFromAPI(cr.Body.Beads, cr.AgeSeconds, cr.Refresh, format, filters, c.IsRemote(), stdout, stderr)
+		},
 		func() int { return doBeadsListFallback(cityPath, format, filters, stdout, stderr) },
 	)
 }
 
+// beadsListPartialErrorDetail is the error gc beads list prints when the API
+// could build the list only from some of the city's stores. For a local target
+// it adds the remedy: the store itself may be broken (gc doctor finds it), or
+// only the supervisor's view of it may be stale (a store that failed to open
+// when the supervisor started stays failed there), and then GC_NO_API=1 reads
+// the stores directly. A remote target has neither remedy on this host.
+func beadsListPartialErrorDetail(errs []string, remote bool) string {
+	detail := "incomplete bead list from the API, not printed: the server reported a failed bead store without naming it"
+	if len(errs) > 0 {
+		detail = "incomplete bead list from the API, not printed: " + strings.Join(errs, "; ")
+	}
+	if remote {
+		return detail
+	}
+	return detail + "\n" + `hint: run "gc doctor" to find the broken store; if it is healthy and only the supervisor's view of it is stale, GC_NO_API=1 gc beads list reads the stores directly`
+}
+
 // renderBeadsListFromAPI formats the API-sourced bead list using the same
-// bead_format.go helpers as the fallback path. JSON output adds the
-// _cache_age_s envelope field; human output appends a staleness banner
-// when cache age > 30s.
-func renderBeadsListFromAPI(cr api.CachedRead[[]beads.Bead], format string, filters beadFilters, stdout io.Writer) int {
-	filtered := filterBeads(cr.Body, filters)
+// bead_format.go helpers as the fallback path. JSON output is the bare array
+// the fallback prints, except for a remote target (remote), which gets the
+// {beads, _cache_age_s} envelope; human output is followed by the cache-age
+// footer on stderr when the server's cache is behind (writeCacheAgeFooter).
+func renderBeadsListFromAPI(bs []beads.Bead, cacheAgeS float64, refresh api.CacheRefresh, format string, filters beadFilters, remote bool, stdout, stderr io.Writer) int {
+	filtered := filterBeads(bs, filters)
 	sortBeadsForList(filtered)
 	if format == "json" {
-		writeBeadsJSONWithCache(filtered, cr.AgeSeconds, stdout)
+		if remote {
+			writeBeadsJSONWithCache(filtered, cacheAgeS, stdout)
+		} else {
+			writeBeadsJSON(filtered, stdout)
+		}
 	} else {
 		writeBeadTable(filtered, stdout, true)
-		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-		}
+		writeCacheAgeFooter(stderr, cacheAgeS, refresh)
 	}
 	return 0
 }
@@ -175,11 +263,19 @@ func renderBeadsListFromAPI(cr api.CachedRead[[]beads.Bead], format string, filt
 // This lane is UNBOUNDED: the store list uses Limit 0 (unlimited), so every
 // matching bead is returned. api.Client.ListBeads follows next_cursor to match
 // this coverage on the API/remote lanes (previously it truncated to page 1).
+//
+// A city or rig store that cannot be opened or read fails the listing, naming
+// the store: the supervisor reports the same store as a partial answer, which
+// the API route refuses, so both routes fail rather than print part of the
+// city. An unreadable relocated class binding only warns
+// (convoyStoreViewsForRead), so reads keep working while a city's storage
+// configuration is mid-repair.
 func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads list")
+	stores, code := openEveryStoreAt(cityPath, stderr, "gc beads list", "bead", false)
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc beads list")
 	all, err := collectBeadsAcrossStores(stores, filters)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -235,24 +331,57 @@ func routeBeadsShow(cityPath string, c *api.Client, nilReason, beadID, format st
 			cr, err = c.GetBead(beadID)
 			return err
 		},
-		func() int { return renderBeadsShowFromAPI(cr, format, stdout) },
+		func() int { return renderBeadsShowFromAPI(cr, format, c.IsRemote(), stdout, stderr) },
 		func() int { return doBeadsShowFallback(cityPath, beadID, format, stdout, stderr) },
 	)
 }
 
-func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, stdout io.Writer) int {
+// renderBeadsShowFromAPI formats the API-sourced bead. JSON output is the bare
+// object the fallback prints, except for a remote target (remote), which gets
+// the {bead, _cache_age_s} envelope; human output is followed by the cache-age
+// footer on stderr when the server's cache is behind (writeCacheAgeFooter).
+func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, remote bool, stdout, stderr io.Writer) int {
 	if format == "json" {
-		writeBeadJSONWithCache(cr.Body, cr.AgeSeconds, stdout)
+		if remote {
+			writeBeadJSONWithCache(cr.Body, cr.AgeSeconds, stdout)
+		} else {
+			writeBeadJSON(cr.Body, stdout)
+		}
 	} else {
 		writeBeadDetail(cr.Body, stdout)
-		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-		}
+		writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	}
 	return 0
 }
 
+// doBeadsShowFallback serves `gc beads show` from the stores directly when the
+// API is unreachable.
+//
+// The relocated class binding is asked first, through the shared residency
+// contract, because it is not one of the directories the scan below walks: on a
+// converged city an infrastructure bead would otherwise be shown from the copy
+// `gc storage migrate` retained in the city store, frozen at migration time and
+// reported as though it were current.
 func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writer) int {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if ownedByBinding {
+		b, err := beadForOwner(owner, beadID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if format == "json" {
+			writeBeadJSON(b, stdout)
+		} else {
+			writeBeadDetail(b, stdout)
+		}
+		return 0
+	}
+
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc beads show")
 	if stores == nil {
 		return code
@@ -282,22 +411,37 @@ func doBeadsShowFallback(cityPath, beadID, format string, stdout, stderr io.Writ
 // for sorting. --all maps to IncludeClosed (matching `bd list --all`); the
 // CLI always opts into AllowScan because an unfiltered list is a valid
 // default UX.
+//
+// The merge is mergeConvoyViewRows, so a relocated class binding's rows
+// supersede the frozen copies the migration retained in the city store — asked
+// of the binding by id rather than read off these filtered results, because a
+// filter the caller chose must not decide which store owns a bead. Rows from two
+// scanned stores that happen to share an id are two different beads and both
+// survive.
+//
+// Assignee is pushed down into the per-store query rather than filtered after
+// the merge: every backend honors ListQuery.Assignee (the bd store forwards it
+// as `--assignee`, the native and caching stores match it in memory), so the
+// stores return only the caller's rows instead of every bead in town. Because
+// the store set spans each rig plus the city, this is the cross-ledger assignee
+// read that bare `bd list --assignee` cannot do (ga-rp4k).
 func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]beads.Bead, error) {
 	q := beads.ListQuery{
 		Label:         filters.label,
 		Status:        filters.status,
+		Assignee:      filters.assignee,
 		IncludeClosed: filters.all,
 		AllowScan:     true,
 	}
-	all := make([]beads.Bead, 0)
-	for _, candidate := range stores {
+	rows := make([][]beads.Bead, len(stores))
+	for i, candidate := range stores {
 		list, err := candidate.store.List(q)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("listing beads in %s: %w", candidate.path, err)
 		}
-		all = append(all, list...)
+		rows[i] = list
 	}
-	return all, nil
+	return mergeConvoyViewRows(stores, rows, func(b beads.Bead) string { return b.ID })
 }
 
 // sortBeadsForList orders beads by ID so output is stable across store

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
@@ -43,7 +44,7 @@ func claudeKeyedFixture(t *testing.T) (*SessionHandle, string, string) {
 		Provider: "claude",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -75,6 +76,78 @@ func TestSessionHandleWritesKeyedTranscriptSidecar(t *testing.T) {
 	}
 	if strings.TrimSpace(string(got)) != id {
 		t.Fatalf("sidecar = %q, want session bead id %q", strings.TrimSpace(string(got)), id)
+	}
+}
+
+// TestSessionHandleRetriesSidecarAfterTranscriptAppears proves the delivery
+// path retries a keyed sidecar miss once the provider creates its transcript.
+// The scheduler is injected so the test controls retry delivery without wall
+// time or polling.
+func TestSessionHandleRetriesSidecarAfterTranscriptAppears(t *testing.T) {
+	transcriptmeta.SetEnabled(true)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+
+	handle, id, transcript := claudeKeyedFixture(t)
+	if err := os.Remove(transcript); err != nil {
+		t.Fatalf("remove initial transcript: %v", err)
+	}
+	retries := make(chan func(), 1)
+	handle.sidecarRetrySchedule = func(_ time.Duration, retry func()) { retries <- retry }
+
+	handle.recordTranscriptSessionMetaAfterTurn()
+	if got := len(retries); got != 1 {
+		t.Fatalf("scheduled retries = %d, want 1 after the initial keyed-path miss", got)
+	}
+	if err := os.WriteFile(transcript, []byte("transcript body\n"), 0o644); err != nil {
+		t.Fatalf("create transcript after delivery: %v", err)
+	}
+
+	(<-retries)()
+	got, err := os.ReadFile(transcript + transcriptmeta.Suffix)
+	if err != nil {
+		t.Fatalf("read retried sidecar: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != id {
+		t.Fatalf("retried sidecar = %q, want session bead id %q", strings.TrimSpace(string(got)), id)
+	}
+}
+
+// TestSessionHandleDoesNotScheduleSidecarRetryWhenDisabled protects the
+// one-shot CLI path: it leaves transcriptmeta disabled and must not create
+// background retry work.
+func TestSessionHandleDoesNotScheduleSidecarRetryWhenDisabled(t *testing.T) {
+	handle, _, transcript := claudeKeyedFixture(t)
+	if err := os.Remove(transcript); err != nil {
+		t.Fatalf("remove initial transcript: %v", err)
+	}
+	retries := make(chan func(), 1)
+	handle.sidecarRetrySchedule = func(_ time.Duration, retry func()) { retries <- retry }
+
+	handle.recordTranscriptSessionMetaAfterTurn()
+	if got := len(retries); got != 0 {
+		t.Fatalf("scheduled retries = %d, want none when transcript metadata is disabled", got)
+	}
+}
+
+// TestSessionHandleBoundsSidecarRetry verifies a permanently absent transcript
+// cannot leave a supervisor handle scheduling retry work indefinitely.
+func TestSessionHandleBoundsSidecarRetry(t *testing.T) {
+	transcriptmeta.SetEnabled(true)
+	t.Cleanup(func() { transcriptmeta.SetEnabled(false) })
+
+	handle, _, transcript := claudeKeyedFixture(t)
+	if err := os.Remove(transcript); err != nil {
+		t.Fatalf("remove initial transcript: %v", err)
+	}
+	retries := make(chan func(), transcriptSessionMetaRetryAttempts)
+	handle.sidecarRetrySchedule = func(_ time.Duration, retry func()) { retries <- retry }
+
+	handle.recordTranscriptSessionMetaAfterTurn()
+	for range transcriptSessionMetaRetryAttempts {
+		(<-retries)()
+	}
+	if got := len(retries); got != 0 {
+		t.Fatalf("scheduled retries = %d after retry limit, want 0", got)
 	}
 }
 
@@ -159,7 +232,7 @@ func TestSessionHandleWritesCodexSidecarByID(t *testing.T) {
 		Provider: "codex",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -235,7 +308,7 @@ func TestSessionHandleCodexSidecarIgnoresOutOfWindowDuplicate(t *testing.T) {
 		Provider: "codex",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -290,7 +363,7 @@ func TestSessionHandleSkipsSidecarForWorkdirOnlyProvider(t *testing.T) {
 		Provider: "gemini",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()

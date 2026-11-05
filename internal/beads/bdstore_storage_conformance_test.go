@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -331,10 +332,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 			wantIDs: []string{"bd-history", "bd-no-history"},
 		},
 		{
-			name:                  "issues tier applies limit after client storage filtering",
-			query:                 beads.ListQuery{Label: "scope", Limit: 1},
-			wantIDs:               []string{"bd-history"},
-			wantUnlimitedPrelimit: true,
+			// gc-i4j3y: issues-tier bd list never returns ephemeral rows (no
+			// --include-templates), so the Go-side matchesTier filter is a
+			// no-op backstop here — a bounded caller Limit is safe to push
+			// down to bd list directly instead of forcing --limit 0.
+			name:    "issues tier applies limit after client storage filtering",
+			query:   beads.ListQuery{Label: "scope", Limit: 1},
+			wantIDs: []string{"bd-history"},
 		},
 		{
 			name:                  "wisps tier keeps no-history and ephemeral rows",
@@ -355,10 +359,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var callsMu sync.Mutex
 			var calls []string
 			runner := func(_, name string, args ...string) ([]byte, error) {
 				cmd := name + " " + strings.Join(args, " ")
+				callsMu.Lock()
 				calls = append(calls, cmd)
+				callsMu.Unlock()
 				switch {
 				case strings.HasPrefix(cmd, "bd list "):
 					return []byte(listRows), nil
@@ -393,10 +400,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 }
 
 func TestBdStoreListBothTiersUnionsEphemeralQueryConformance(t *testing.T) {
+	var callsMu sync.Mutex
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		cmd := name + " " + strings.Join(args, " ")
+		callsMu.Lock()
 		calls = append(calls, cmd)
+		callsMu.Unlock()
 		if strings.Contains(cmd, "--include-ephemeral") {
 			t.Fatalf("bd list command = %q, --include-ephemeral is only valid for bd ready", cmd)
 		}

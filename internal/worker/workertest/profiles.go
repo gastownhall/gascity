@@ -8,10 +8,12 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	// Profile* identify the canonical worker profiles used by conformance tests.
 	ProfileClaudeTmuxCLI      ProfileID = "claude/tmux-cli"
 	ProfileCodexTmuxCLI       ProfileID = "codex/tmux-cli"
+	ProfileCursorTmuxCLI      ProfileID = "cursor/tmux-cli"
 	ProfileGeminiTmuxCLI      ProfileID = "gemini/tmux-cli"
 	ProfileKimiTmuxCLI        ProfileID = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    ProfileID = "opencode/tmux-cli"
 	ProfileMimoCodeTmuxCLI    ProfileID = "mimocode/tmux-cli"
+	ProfileZCodeTmuxCLI       ProfileID = "zcode/tmux-cli"
 	ProfilePiTmuxCLI          ProfileID = "pi/tmux-cli"
 	ProfileAntigravityTmuxCLI ProfileID = "antigravity/tmux-cli"
 )
@@ -63,6 +65,9 @@ type Profile struct {
 	Fixtures     ProfileFixtureSet
 	Continuation ContinuationOracle
 	Usage        UsageExpectation
+	// ProgramStatus is the profile's OSC 7501 program-status declaration,
+	// held to the WC-PSTAT rows (ProgramStatusCatalog).
+	ProgramStatus ProgramStatusExpectation
 }
 
 // Phase1Profiles returns the canonical phase-1 worker-core profiles.
@@ -92,8 +97,20 @@ func Phase1Profiles() []Profile {
 				Model:             "claude-sonnet-4-6",
 				DefaultCostPriced: true,
 			},
+			// Claude Code reports only after its support probe is answered,
+			// so it runs under the relay. Recorded under gc's tmux against a
+			// local mock API: the probe, then BEL-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "claude-code", Relay: true},
+				Verified:                 "Claude Code 2.1.311",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"term bel", "raw " + osc7501ProbeBELHex, "report state=idle:app=claude-code"},
+					TurnStart:   []string{"term bel", "report state=working:app=claude-code"},
+					TurnEnd:     []string{"term bel", "report state=done:app=claude-code"},
+				},
+			},
 		},
-		// codex and gemini below are covered by the Phase 1 transcript/
+		// codex, cursor, and gemini below are covered by the Phase 1 transcript/
 		// continuation requirements and by the WC-STRUCT-* structured family
 		// (see structured_conformance_test.go).
 		{
@@ -119,6 +136,34 @@ func Phase1Profiles() []Profile {
 				CacheReadTokens:   10,
 				Model:             "gpt-5-codex",
 				DefaultCostPriced: false,
+			},
+			// Codex reports unprompted (it never probes), so capture needs
+			// no relay. Recorded under gc's tmux against a local mock API:
+			// ST-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "codex", HoldMidTurn: true},
+				Verified:                 "codex-cli 0.165.0",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=codex"},
+					TurnStart:   []string{"report state=working:app=codex"},
+					TurnEnd:     []string{"report state=done:app=codex"},
+				},
+			},
+		},
+		{
+			ID:       ProfileCursorTmuxCLI,
+			Provider: "cursor/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/cursor",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/cursor/fresh",
+				ContinuationRoot: "testdata/fixtures/cursor/continuation",
+				ResetRoot:        "testdata/fixtures/cursor/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "Cursor phase 1 validates the captured JSONL transcript contract.",
+				RecallPromptContains:   "Repeat the exact Cursor phase-1 summary from earlier before answering.",
+				RecallResponseContains: "Cursor phase 1 validates the captured JSONL transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier Cursor summary because this session started fresh.",
 			},
 		},
 		{
@@ -172,6 +217,17 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "OpenCode phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier OpenCode summary because this session started fresh.",
 			},
+			Usage: UsageExpectation{
+				Supported:       true,
+				Invocations:     1,
+				InputTokens:     100,
+				OutputTokens:    40,
+				CacheReadTokens: 10,
+				Model:           "deepseek/deepseek-v4.1-flash",
+				// OpenCode records its own per-call cost, so the default price
+				// table carries no rate for it.
+				DefaultCostPriced: false,
+			},
 		},
 		{
 			ID:       ProfileMimoCodeTmuxCLI,
@@ -190,6 +246,26 @@ func Phase1Profiles() []Profile {
 			},
 		},
 		{
+			ID:       ProfileZCodeTmuxCLI,
+			Provider: "zcode/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/zcode",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/zcode/fresh",
+				ContinuationRoot: "testdata/fixtures/zcode/continuation",
+				ResetRoot:        "testdata/fixtures/zcode/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "ZCode phase 1 validates the tmux CLI transcript contract.",
+				RecallPromptContains:   "Repeat the exact ZCode phase-1 summary from earlier before answering.",
+				RecallResponseContains: "ZCode phase 1 validates the tmux CLI transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier ZCode summary because this session started fresh.",
+			},
+			// No Usage expectation: the worker registers no invocation-usage
+			// extractor for the zcode family, so WC-TX-USAGE-001 /
+			// WC-USAGE-COST-001 report Unsupported. The export mirror does
+			// carry the CLI's usage block for provenance.
+		},
+		{
 			ID:       ProfilePiTmuxCLI,
 			Provider: "pi/tmux-cli",
 			WorkDir:  "/tmp/gascity/phase1/pi",
@@ -203,6 +279,19 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact Pi phase-1 summary from earlier before answering.",
 				RecallResponseContains: "Pi phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier Pi summary because this session started fresh.",
+			},
+			// pi reports only after a 7501 reply, which tmux never sends; its
+			// declared PI_PROGRAM_STATUS=1 forces reports and skips the probe,
+			// so capture needs no relay. Recorded under gc's tmux with that env
+			// against a local mock API: ST-terminated reports.
+			ProgramStatus: ProgramStatusExpectation{
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "pi"},
+				Verified:                 "pi 1.4.0",
+				Emission: ProgramStatusEmission{
+					FirstReport: []string{"report state=idle:app=pi"},
+					TurnStart:   []string{"report state=working:app=pi"},
+					TurnEnd:     []string{"report state=done:app=pi"},
+				},
 			},
 		},
 		{

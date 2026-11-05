@@ -295,7 +295,7 @@ Table-form fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `description` | string | What the variable is for; shown by `gc formula show` |
-| `default` | string | Value used when none is provided. An explicit empty string is a valid default |
+| `default` | string | Value used when none is provided. An explicit empty string is a valid default. A default may reference other variables with `{{name}}`: values supplied for the invocation (explicit `--var`, rig `formula_vars`, and the injected names below) or other defaults. Supplied values are used verbatim and never re-expanded |
 | `required` | bool | The variable must be provided at instantiation. Declaring `required = true` together with a `default` fails validation: `vars.<name>: cannot have both required:true and default` |
 | `enum` | []string | Allowed values; enforced at instantiation |
 | `pattern` | string | Regex the value must match; enforced at instantiation |
@@ -322,6 +322,17 @@ Precedence, highest first: explicit `--var` > rig `formula_vars` >
 routing-injected values > formula-level `default`s. Under v2 the `issue`
 injection is replaced by the reserved `{{convoy_id}}` derivation, and
 `issue` survives there only as a deprecated compat alias.
+
+A formula order (`[order] formula = ...`, fired by the orchestrator or by
+`gc order run`) gets the same invocation context, with the same
+precedence: its dispatch args (`gc order run --var`) win, then the
+`formula_vars` of the order's rig, then `rig_name` (the order's rig, empty
+for a city order) and `binding_name` / `binding_prefix` for the import
+binding of the pack that declared the order. The binding variables are set
+only when that pack has exactly one binding; a pack imported under two
+bindings is discovered as one order, so those names stay unset and a
+reference to them fails to resolve. These describe the order instance, not
+its pool, and they do not satisfy a declared `[order.params]` entry.
 
 ### 1.5. Conditions
 
@@ -548,7 +559,12 @@ The v1 compiler must emit a molecule tree:
   (recipe ID `<formula>.gate-<step>`, type `gate`, title
   `Gate: <type> <id>`) that is a child of the step's container, plus a
   `blocks` edge from the gated step to it: the step stays blocked until
-  the gate bead is closed.
+  the gate bead is closed. The declared `type` is stamped verbatim on the
+  gate bead as `gc.gate_type` metadata. The core pack's human-gate orders
+  mail the addressee of a `human` gate when it is created and re-nudge it
+  while it stays open; close it with `gc bd close <id>`. The gate bead is
+  created with the rest of the recipe at instantiation, so the addressee
+  can be asked before the gated step's `needs` finish.
 - **Root.** The recipe root is type `molecule`, priority 2. Its title is
   the formula name, or the `{{title}}` placeholder when a `title` var is
   declared; its description is the formula description, or `{{desc}}` when
@@ -610,6 +626,24 @@ pancakes.wet -> mc-k1b
 under an existing bead as a sub-DAG; the attach target gains a blocking
 dependency on the sub-DAG root, so it cannot close until the sub-DAG
 completes.
+
+A graft is GRAPH class even for a v1 formula: the attach path stamps
+`gc.root_bead_id` on every bead it materializes, which is what makes a bead
+graph class, so the sub-DAG is graph class regardless of what the same recipe
+would compile to standalone. On a city that serves the graph class from its
+own `[storage]` binding, `--attach` is therefore served for an attach bead
+the BINDING owns, in CITY and RIG scope alike; grafting onto a bead in a work
+store is refused, because the sub-DAG would either be stranded in the work
+ledger or leave a `blocks` row naming an id the work store cannot resolve.
+That includes a RIG scope's own store (`--rig`, `GC_RIG`, or a cwd inside a
+rig), which holds only work on such a city; launch the formula against a
+work bead with `gc sling <target> <bead> --on <formula>` instead. The one
+graft a rig's own store still serves is onto a graph bead of an older tree,
+one the rig created before its graph beads moved to the binding: the graft
+extends that tree where it lives. Single-store cities are unaffected.
+See formula-spec-v2 §3 and `gc formula cook --help` for the full residence
+table; the cross-class membership edge that lifts the refusal is tracked as
+`ga-2orlf`.
 
 `gc sling <target> <formula> --formula` instantiates the formula as an
 ephemeral wisp and routes the root bead to the target:
@@ -675,10 +709,12 @@ them; they are documented to prevent silent surprise.
   reads that label. An `until` loop therefore runs exactly one iteration.
 - **Gate `type` vocabulary.** `[steps.gate]` synthesizes a real gate bead
   that blocks its step until the gate bead is closed (manually or by an
-  external watcher), but the `type` values `gh:run`, `gh:pr`, `timer`,
-  `human`, and `mail` are doc-comment vocabulary in
-  `internal/formula/types.go` — the parser never validates them and no
-  bundled watcher acts on them. Zero bundled formulas use `gate`.
+  external watcher), and records the declared `type` as `gc.gate_type`
+  metadata. The values `gh:run`, `gh:pr`, `timer`, `human`, and `mail` are
+  doc-comment vocabulary in `internal/formula/types.go` — the parser never
+  validates them. Only `human` has a bundled consumer: the core pack's
+  human-gate orders announce and re-nudge it. No bundled watcher resolves any
+  gate type. Zero bundled formulas use `gate`.
 - **`waits_for` gate modes.** `waits_for` compiles to a readiness-blocking
   `waits-for` dependency edge plus a recorded gate mode, but no current
   component interprets the `all-children` / `any-children` distinction.

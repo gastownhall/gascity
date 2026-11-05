@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './Agents';
 import { AttentionProvider } from '../attention/context';
@@ -14,7 +14,7 @@ import { resetSupervisorApiForTests } from '../supervisor/client';
 //
 // 1. Peek button errored with "invalid session id" because the modal passed
 //    `agent.session.name` (a friendly alias like "mayor") to a route that
-//    validates against SESSION_ID_RE (`gc-XXX` format). The fix maps
+//    validates the session id (`gc-XXX` format). The fix maps
 //    agent.session.name -> session.id through the sessions cache.
 //
 // 2. The agent name column rendered `display_name ?? name`, so the
@@ -213,7 +213,7 @@ afterEach(() => {
 describe('AgentsPage (post-ay6 regressions)', () => {
   it('renders the alias as primary label and display_name as secondary (Orchestration shows "mayor", not "Claude (Account 5)")', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -270,7 +270,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
 
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -308,7 +308,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
 
     const { container } = render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -324,7 +324,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('Peek resolves agent.session.name -> session.id via direct supervisor sessions and fetches the right transcript', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -360,7 +360,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     });
 
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -381,7 +381,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('responds to pending interactions through the generated supervisor respond endpoint', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -408,7 +408,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('disables the pending Approve/Deny controls in read-only mode (gascity-dashboard-uzhr)', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <ReadOnlyProvider readOnly={true}>
             <AgentsPage />
@@ -435,7 +435,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('orphan agent name-link carries a different title tooltip than a session-bound one (ay6.2)', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -467,7 +467,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('marks rows that match composed agent attention without hiding other agents', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AttentionProvider
             contributors={[
@@ -501,7 +501,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
 
   it('lists agents needing the operator with reason and next step, excluding calm agents', async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter>
         <NowProvider intervalMs={1_000_000}>
           <AgentsPage />
         </NowProvider>
@@ -519,7 +519,73 @@ describe('AgentsPage (post-ay6 regressions)', () => {
     // The asleep orphan is calm; it must never appear in the needs-you list.
     expect(section.queryByText(/control-dispatcher/i)).toBeNull();
   });
+
+  it('refetches the roster on a session change, never on the program-status shadow observing one', async () => {
+    FakeCityEventSource.instances.length = 0;
+    vi.stubGlobal('EventSource', FakeCityEventSource);
+    render(
+      <MemoryRouter>
+        <NowProvider intervalMs={1_000_000}>
+          <AgentsPage />
+        </NowProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByRole('link', { name: /mayor/i });
+    const stream = FakeCityEventSource.instances[0];
+    expect(stream).toBeDefined();
+    const rosterReads = () =>
+      fetchUrls().filter((url) => url === '/v0/city/test-city/agents').length;
+    const before = rosterReads();
+
+    // The shadow records a comparison at every decision point, and the page's
+    // reads record some: a refetch on one would feed the next.
+    act(() => stream?.emit({ type: 'session.program_status_shadow' }));
+    await expect(
+      waitFor(() => expect(rosterReads()).toBeGreaterThan(before), { timeout: 200 }),
+    ).rejects.toThrow();
+
+    act(() => stream?.emit({ type: 'session.updated' }));
+    await waitFor(() => expect(rosterReads()).toBe(before + 1));
+  });
 });
+
+// FakeCityEventSource is the city event stream the page subscribes to, fed
+// by the test: emit delivers a gc event as the supervisor names it.
+class FakeCityEventSource {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+  static readonly instances: FakeCityEventSource[] = [];
+
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  readyState = FakeCityEventSource.CONNECTING;
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  constructor(readonly url: string | URL) {
+    FakeCityEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  close(): void {
+    this.readyState = FakeCityEventSource.CLOSED;
+  }
+
+  emit(payload: { type: string }): void {
+    const event = new MessageEvent<string>('event', { data: JSON.stringify(payload) });
+    this.listeners.get('event')?.forEach((listener) => listener(event));
+  }
+}
 
 // The Agents view boots with the 'running' checkbox checked. Tests that
 // assert on non-running agents (orphans/asleep) uncheck it to reveal the

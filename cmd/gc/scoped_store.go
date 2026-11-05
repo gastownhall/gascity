@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"reflect"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // scopedBdStoreForCity returns a throwaway BdStore for cityPath whose bd
@@ -27,7 +29,11 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
+	if err != nil {
+		return nil, err
+	}
+	return beads.NewBdStore(cityPath, runner), nil
 }
 
 // scopedBdStoreForRig is scopedBdStoreForCity for a rig-scoped store.
@@ -39,7 +45,27 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(rigDir, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
+	if err != nil {
+		return nil, err
+	}
+	return beads.NewBdStore(rigDir, runner), nil
+}
+
+func beadsCommandRunnerWithContextForHostedCity(ctx context.Context, cityPath string, env map[string]string) (beads.CommandRunner, error) {
+	if env == nil {
+		env = make(map[string]string)
+	}
+	// Store opens degrade rather than refuse: see pinBdGCEnvironmentBestEffort.
+	pinBdGCEnvironmentBestEffort(env)
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return beads.ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx, env), nil
+	}
+	return beads.ExecCommandRunnerWithEnvContext(ctx, env), nil
 }
 
 // bdStoreBacking unwraps store through any CachingStore/beadPolicyStore
@@ -54,6 +80,40 @@ func bdStoreBacking(store beads.Store) (*beads.BdStore, bool) {
 		switch v := store.(type) {
 		case *beads.BdStore:
 			return v, v != nil
+		case beads.ProxiedStoreView:
+			// The proxied-native split store, and the answer depends on which
+			// leaf is serving RIGHT NOW.
+			//
+			// While the native leaf serves there is no subprocess to bind: the
+			// reads are library calls over bd's proxy, and returning a bd store
+			// here would make gc status rebuild a clone that forks once per read
+			// — turning the lane's zero-fork property into two forks, silently.
+			//
+			// After a stand-down the wrapper's reads ARE bd forks, and they are
+			// the ones ga-cdmx6x is about: gc status runs them under a 3s
+			// deadline, so a clone that is not ctx-bound abandons a live child
+			// instead of killing it. Unwrapping to the bd leaf is what lets the
+			// caller rebuild it bound to the request.
+			//
+			// One-way, like the demotion itself: a store that was native when
+			// this was asked and demotes a millisecond later simply keeps
+			// serving through the wrapper for this command.
+			// The interface arm guards a TYPED nil as well as an untyped one
+			// (council A-F10). `v == nil` is false for an interface holding a
+			// nil *ProxiedStore, and (*ProxiedStore).Demoted takes
+			// s.mu.RLock() on the nil receiver and panics — in gc status's
+			// snapshot path. The two neighboring arms both guard their typed
+			// nils explicitly, so this was an inconsistency rather than a
+			// choice.
+			if v == nil || isNilProxiedStoreView(v) || !v.Demoted() {
+				return nil, false
+			}
+			leaf := v.BdLeaf()
+			if leaf == nil {
+				return nil, false
+			}
+			store = leaf
+			continue
 		case *beads.CachingStore:
 			if v == nil {
 				return nil, false
@@ -96,11 +156,19 @@ func beadPolicyConfig(store beads.Store) (*config.City, bool) {
 // backed store: cancellation kills the backend bd subprocess instead of
 // abandoning it past ctx's deadline. Returns (nil, nil) when existing is
 // not bd-CLI backed — callers should keep reading through existing
-// directly in that case (gascity ga-cdmx6x).
+// directly in that case (gascity ga-cdmx6x). Under the split-strict gate an
+// existing that is one of the gate's views is cloned from the store under the
+// view, and the clone is returned behind the same side of the same projection.
 func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, existing beads.Store) (beads.Store, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Under the split-strict gate existing may be one of the gate's views,
+	// which hides the bd backing: rebuild from the store under the view and
+	// put the clone back behind the same side, so its reads stay policed and
+	// its child stays ctx-bound (ga-ylpbsy.94.1). splitStrictSeam is nil in
+	// production, where this returns existing unchanged.
+	existing, regate := storeref.Unview(splitStrictSeam, existing)
 	bs, ok := bdStoreBacking(existing)
 	if !ok {
 		return nil, nil
@@ -120,5 +188,27 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 	if policyWrapped {
 		scoped = wrapStoreWithBeadPolicies(scoped, policyCfg)
 	}
-	return scoped, nil
+	return regate(scoped), nil
+}
+
+// isNilProxiedStoreView reports whether view is an interface holding a nil
+// pointer.
+//
+// A nil *beads.ProxiedStore stored in a beads.ProxiedStoreView is not `== nil`:
+// the interface has a type. Every method on it that takes the store's mutex
+// panics, and bdStoreBacking is reached from gc status's snapshot path, where a
+// panic is the whole command (council A-F10).
+//
+// reflect rather than a type switch on *beads.ProxiedStore, because the arm is
+// keyed on the INTERFACE on purpose — beadPolicyStore and the class wrappers
+// participate in it through ProxiedStoreFrom — and a concrete-type check here
+// would guard the one implementation that exists today and miss the next one.
+func isNilProxiedStoreView(view beads.ProxiedStoreView) bool {
+	value := reflect.ValueOf(view)
+	switch value.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return value.IsNil()
+	default:
+		return false
+	}
 }

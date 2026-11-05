@@ -34,7 +34,16 @@ var contractCoverage = map[string]classification{
 	"Stop_MakesSessionNotRunning":    {Code: ReqLifecycleStopNotRunning},
 	"Stop_Idempotent_NotRunning":     {Code: ReqLifecycleStopIdempotent},
 	"Stop_Idempotent_AlreadyStopped": {Code: ReqLifecycleStopIdempotent},
+	"StopForCleanup_NeverStarted":    {Code: ReqLifecycleStopIdempotent},
 	"IsRunning_UnknownSession":       {Code: ReqLifecycleUnknownNotRunning},
+
+	// --- Optional error-bearing capabilities (deferred: in-process provider
+	// interfaces that the exec provider does not implement over the wire) ---
+	"ObserveLivenessWithError_StoppedIsAbsent": {Code: ReqObserveAbsentAfterStop},
+	"Start_FreshOnlyRefusesAHeldName":          {Code: ReqObserveFreshOnlyRefuses},
+	"ListRunning_AttestedAfterStartAndStop":    {Code: ReqObserveInventoryComplete},
+	"IsAttachedWithError_UnattachedSession":    {Deferred: "optional capability; no error-bearing attachment op on the wire"},
+	"IsAttachedWithError_MissingSession":       {Deferred: "optional capability; no error-bearing attachment op on the wire"},
 
 	// --- Concurrency (deferred: a cross-cutting property, ported once the
 	// single-session behaviors of each group are gated) ---
@@ -59,6 +68,7 @@ var contractCoverage = map[string]classification{
 	"SetGetMeta_RoundTrip":           {Deferred: "metadata group not yet ported"},
 	"GetMeta_UnsetKey":               {Deferred: "metadata group not yet ported"},
 	"RemoveMeta_ThenGetReturnsEmpty": {Deferred: "metadata group not yet ported"},
+	"SetMeta_EmptyValueOverwrites":   {Deferred: "metadata group not yet ported"},
 	"SetMeta_OverwritesPrevious":     {Deferred: "metadata group not yet ported"},
 	"Meta_MultipleKeys":              {Deferred: "metadata group not yet ported"},
 
@@ -75,6 +85,33 @@ var contractCoverage = map[string]classification{
 	"Interrupt_MissingSession": {Deferred: "signaling group not yet ported"},
 	"Nudge_RunningSession":     {Deferred: "signaling group not yet ported"},
 	"Nudge_MissingSession":     {Deferred: "signaling group not yet ported"},
+
+	// --- Fenced input (deferred: an optional in-process capability) ---
+	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_MismatchedFenceRefusesEveryInput": {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_AbsentSessionRefuses":             {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+}
+
+// wireOnlyCodes are the observe group's requirements that no
+// runtime.Provider method backs: the `observe`, `inventory` and
+// `kill-object` wire shapes (an exec pack's own ops, which the exec
+// provider maps), the attach answer's exact form, the fault and city-scope
+// tokens and the probe latency. The rest of the group (absent after stop,
+// FreshOnly, the attested listing) back RunProviderTests cases.
+var wireOnlyCodes = map[Code]bool{
+	ReqObserveDeclaredOpsRespond:   true,
+	ReqObserveAbsentNeverStarted:   true,
+	ReqObserveRunningWithIdentity:  true,
+	ReqObserveObjectStable:         true,
+	ReqObserveAgentLiveness:        true,
+	ReqObserveMetaIsIdentity:       true,
+	ReqObserveKillObjectExact:      true,
+	ReqObserveAttachedIsStrict:     true,
+	ReqObserveFaultsReadUnknown:    true,
+	ReqObserveWithinBound:          true,
+	ReqObserveCityScoped:           true,
+	ReqObserveInventoryHasActivity: true,
+	ReqObservePeekNoScreen:         true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this
@@ -155,6 +192,11 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 		}
 	}
 	for _, req := range catalog {
+		if wireOnlyCodes[req.Code] {
+			// The observe group's wire shapes, tokens and latency, which no
+			// runtime.Provider method backs; see wireOnlyCodes.
+			continue
+		}
 		if req.Group == GroupProtocol || req.Group == GroupConnection || req.Group == GroupProvision {
 			// Wire-only groups: no runtime.Provider method to contract-test.
 			// protocol is the handshake; connection (exec) is the slim wire

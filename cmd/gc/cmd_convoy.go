@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -238,7 +239,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 	// Ensure metadata is persisted on all backends. MemStore carries Metadata
 	// through Create, but BdStore/exec.Store may not. setConvoyFields uses
 	// SetMetadata which works across all backends.
-	if err := setConvoyFields(store, convoy.ID, opts.Fields); err != nil {
+	if err := setConvoyFields(beads.WorkStore{Store: store}, convoy.ID, opts.Fields); err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: warning: setting fields: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: convoy already created and event will be emitted.
 	}
@@ -259,7 +260,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := convoycore.TrackItem(childStore, convoy.ID, id); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: childStore}}, convoy.ID, id); err != nil {
 			fmt.Fprintf(stderr, "gc convoy create: tracking %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -284,30 +285,71 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 }
 
 func newConvoyListCmd(stdout, stderr io.Writer) *cobra.Command {
-	var jsonOut bool
+	var opts convoyListOptions
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List open convoys with progress",
 		Long: `List all open convoys with completion progress.
 
 Shows each convoy's ID, title, and the number of closed vs total
-child issues.`,
+child issues.
+
+Synthetic convoys (metadata gc.synthetic=true) are hidden by default:
+the system mints one per formula launch on a single bead and per
+drained work unit, so a busy city holds thousands of them. The output
+says how many were hidden; --include-synthetic lists them too.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdConvoyList(jsonOut, stdout, stderr) != 0 {
+			if cmdConvoyList(opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().BoolVar(&opts.includeSynthetic, "include-synthetic", false, "also list synthetic convoys (gc.synthetic=true), minted for formula launches and drained work units")
 	return cmd
 }
 
+// convoyListOptions carries gc convoy list's flags.
+type convoyListOptions struct {
+	jsonOut          bool
+	includeSynthetic bool
+}
+
+// withoutSyntheticConvoys drops the synthetic convoys (convoycore.IsSynthetic)
+// from convoys unless include is set, and reports how many it dropped. Callers
+// filter before reading any convoy's members, so a hidden convoy costs no
+// membership read.
+func withoutSyntheticConvoys[T any](convoys []T, beadOf func(T) beads.Bead, include bool) (kept []T, hidden int) {
+	if include {
+		return convoys, 0
+	}
+	kept = make([]T, 0, len(convoys))
+	for _, c := range convoys {
+		if convoycore.IsSynthetic(beadOf(c)) {
+			hidden++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept, hidden
+}
+
+// writeHiddenSyntheticNote tells a human reader how many synthetic convoys
+// the listing left out, so a short or empty table is not mistaken for every
+// open convoy in the city.
+func writeHiddenSyntheticNote(stdout io.Writer, hidden int) {
+	if hidden == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "(%d synthetic convoy(s) hidden; --include-synthetic lists them)\n", hidden) //nolint:errcheck // best-effort stdout
+}
+
 // cmdConvoyList is the CLI entry point for listing convoys.
-func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
+func cmdConvoyList(opts convoyListOptions, stdout, stderr io.Writer) int {
 	return routeReadCmd("convoy list", stderr, convoyListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
-		return routeConvoyList(cityPath, c, nilReason, jsonOut, stdout, stderr)
+		return routeConvoyList(cityPath, c, nilReason, opts, stdout, stderr)
 	})
 }
 
@@ -326,25 +368,85 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 //
-// The API path queries /convoys for the convoy list and /convoy/{id}/check
-// for each convoy's progress counts. If the per-convoy check returns a
+// The API path queries every page of /convoys for the convoy list and
+// /convoy/{id}/check for the progress counts of each convoy it lists (not of
+// the synthetic convoys it hides). If the per-convoy check returns a
 // fallbackable error, the whole operation falls back to local reads so
 // output is consistent (partial failure would produce surprising gaps).
-func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+//
+// Rows are sorted by ID (sortConvoysForListing) and rendered by the local
+// route's writer, so both routes print the same output. A /convoys answer the
+// server marks partial is an error (exit 1), as a failed store read is on the
+// local route. A local target whose server predates child_ids falls back to
+// the local read (reason convoy-check-predates-child-ids); a remote target,
+// which has no local read, prints without them (renderConvoyListFromAPI).
+//
+// Two stores' convoys under one ID are both listed, as the local route lists
+// them, but /convoy/{id}/check answers an ID from one store, so it cannot give
+// each its own progress. A local target then reads the stores directly
+// (reason convoy-id-in-several-stores), before any check; a remote target
+// prints the one answer for each and says so.
+func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts convoyListOptions, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]beads.Bead]
+	var hidden int
 	var progress []api.ConvoyCheckView
+	var sharedIDs []string
 	return routeRead(c, "convoy list", nilReason, stderr,
 		func() error {
 			var err error
 			if cr, err = c.ListConvoys(); err != nil {
 				return err
 			}
-			progress, err = fetchConvoyProgress(c, cr.Body)
-			return err
+			if sharedIDs = repeatedConvoyIDs(cr.Body); len(sharedIDs) > 0 && !c.IsRemote() {
+				return fallbackAfterFetch{Reason: "convoy-id-in-several-stores"}
+			}
+			beadOf := func(b beads.Bead) beads.Bead { return b }
+			cr.Body, hidden = withoutSyntheticConvoys(cr.Body, beadOf, opts.includeSynthetic)
+			sortConvoysForListing(cr.Body, beadOf)
+			if progress, err = fetchConvoyProgress(c, cr.Body); err != nil {
+				return err
+			}
+			if !c.IsRemote() && convoyChecksLackChildIDs(progress) {
+				return fallbackAfterFetch{Reason: "convoy-check-predates-child-ids"}
+			}
+			return nil
 		},
-		func() int { return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr) },
-		func() int { return doConvoyListFallback(cityPath, jsonOut, stdout, stderr) },
+		func() int {
+			return renderConvoyListFromAPI(cr, progress, hidden, sharedIDs, opts.jsonOut, stdout, stderr)
+		},
+		func() int { return doConvoyListFallback(cityPath, opts, stdout, stderr) },
 	)
+}
+
+// repeatedConvoyIDs returns, sorted, each ID more than one of convoys carries.
+// ListConvoys returns an identical row once, so these are different convoys
+// that different stores hold under one ID.
+func repeatedConvoyIDs(convoys []beads.Bead) []string {
+	rows := make(map[string]int, len(convoys))
+	for _, convoy := range convoys {
+		rows[convoy.ID]++
+	}
+	var repeated []string
+	for id, n := range rows {
+		if n > 1 {
+			repeated = append(repeated, id)
+		}
+	}
+	sort.Strings(repeated)
+	return repeated
+}
+
+// convoyChecksLackChildIDs reports whether a /convoy/{id}/check answer came
+// from a server that predates child_ids: such a server leaves the field out
+// even for a convoy with members, while a current one lists every member
+// Total counts.
+func convoyChecksLackChildIDs(checks []api.ConvoyCheckView) bool {
+	for _, check := range checks {
+		if check.Total > 0 && len(check.ChildIDs) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchConvoyProgress calls /convoy/{id}/check for each convoy in list and
@@ -362,66 +464,67 @@ func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheck
 	return out, nil
 }
 
-// renderConvoyListFromAPI formats the API-sourced convoy list to match
-// doConvoyListAcrossStores output. Stale banner appends when cache age > 30s.
-func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, jsonOut bool, stdout, stderr io.Writer) int {
-	if jsonOut {
-		items := make([]convoySummaryJSON, 0, len(cr.Body))
-		for i, convoy := range cr.Body {
-			items = append(items, convoySummaryFromAPI(convoy, progress[i]))
-		}
-		if err := writeCLIJSONLine(stdout, convoyListResultJSON{
-			SchemaVersion: "1",
-			Convoys:       items,
-			Summary:       convoyListSummaryJSON{Total: len(items)},
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		return 0
+// renderConvoyListFromAPI renders the API-sourced convoy list through the
+// same writer as the local route (writeConvoyList), so both print one schema
+// with one content. hidden is the number of synthetic convoys left out. A
+// non-empty human listing is followed by the cache-age footer on stderr when
+// the server's cache is behind (writeCacheAgeFooter). Two cases reach it only on a remote target, which
+// has no local route, and each is named on stderr: a server that predates
+// child_ids, and sharedIDs, the IDs that more than one store's convoy carries,
+// whose rows all show the one store's progress /convoy/{id}/check reports.
+func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, hidden int, sharedIDs []string, jsonOut bool, stdout, stderr io.Writer) int {
+	if convoyChecksLackChildIDs(progress) {
+		fmt.Fprintln(stderr, "gc convoy list: this city's API predates child_ids; child_ids and dangling-track counts are left out") //nolint:errcheck // best-effort stderr
 	}
-	if len(cr.Body) == 0 {
-		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
-		return 0
+	for _, id := range sharedIDs {
+		fmt.Fprintf(stderr, "gc convoy list: more than one store holds a convoy %s; this city's API checks one of them, so every %s row shows that convoy's progress\n", id, id) //nolint:errcheck // best-effort stderr
 	}
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
+	rows := make([]convoySummaryJSON, 0, len(cr.Body))
 	for i, convoy := range cr.Body {
-		p := progress[i]
-		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", convoy.ID, convoy.Title, p.Closed, p.Total) //nolint:errcheck // best-effort stdout
+		rows = append(rows, convoySummaryFromAPI(convoy, progress[i]))
 	}
-	tw.Flush() //nolint:errcheck // best-effort stdout
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if code := writeConvoyList(rows, hidden, jsonOut, stdout, stderr); code != 0 {
+		return code
+	}
+	if !jsonOut && len(rows) > 0 {
+		writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	}
 	return 0
 }
 
-func convoySummaryFromAPI(convoy beads.Bead, progress api.ConvoyCheckView) convoySummaryJSON {
+func convoySummaryFromAPI(convoy beads.Bead, check api.ConvoyCheckView) convoySummaryJSON {
 	return convoySummaryJSON{
 		ID:       convoy.ID,
 		Title:    convoy.Title,
 		Status:   convoy.Status,
-		Progress: convoyProgressFromAPI(progress),
+		Progress: convoyProgressFromAPI(check),
 		Owned:    hasLabel(convoy.Labels, "owned"),
 		Fields:   convoyFieldsFromBead(convoy),
+		ChildIDs: check.ChildIDs,
 	}
 }
 
-func convoyProgressFromAPI(progress api.ConvoyCheckView) convoyProgressJSON {
+func convoyProgressFromAPI(check api.ConvoyCheckView) convoyProgressJSON {
 	return convoyProgressJSON{
-		Closed: progress.Closed,
-		Total:  progress.Total,
+		Closed:         check.Closed,
+		Total:          check.Total,
+		DanglingTracks: check.DanglingTracks,
 	}
 }
 
-// doConvoyListFallback is the direct-bd path for "gc convoy list".
-func doConvoyListFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy list")
+// doConvoyListFallback is the direct-bd path for "gc convoy list". A store it
+// cannot open or list fails the listing, naming the store: the supervisor
+// reports the same store as a partial answer, which the API route refuses, so
+// both routes fail rather than print part of the city's convoys as all of them.
+// A store only suspended rigs reach is left out, and its rigs named, on both
+// routes (openEveryStoreAt), so a suspended rig fails neither.
+func doConvoyListFallback(cityPath string, opts convoyListOptions, stdout, stderr io.Writer) int {
+	stores, code := openEveryStoreAt(cityPath, stderr, "gc convoy list", "convoy", true)
 	if stores == nil {
 		return code
 	}
-	return doConvoyListAcrossStores(stores, jsonOut, stdout, stderr)
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy list")
+	return doConvoyListAcrossStores(stores, opts, stdout, stderr)
 }
 
 func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
@@ -485,23 +588,282 @@ func convoyStoreCandidatesWithProvider(cfg *config.City, cityPath, beadID string
 type convoyStoreView struct {
 	path  string
 	store beads.Store
+	role  convoyViewRole
+}
+
+// convoyViewRole says how a view's rows relate to the other views' rows. It is
+// the only thing a fan-out merge needs to know about where a store came from.
+type convoyViewRole int
+
+const (
+	// convoyViewOrdinary is a store the directory scan enumerated. Its ids are
+	// its own: a city and a rig that each mint "gc-1" hold two different beads,
+	// and a merge that collapsed them would delete one from the output.
+	convoyViewOrdinary convoyViewRole = iota
+	// convoyViewClassBinding is the city's relocated class binding — the store
+	// `gc storage migrate` moved the infrastructure classes INTO, and the one
+	// the city has gone on mutating since.
+	convoyViewClassBinding
+	// convoyViewMigrationSource is the city store the migration copied OUT of.
+	// The copies it retained are frozen at cutover and share their ids with the
+	// binding's live rows, so they are the one duplicate a merge can safely
+	// collapse.
+	convoyViewMigrationSource
+)
+
+// convoyBindingViewPath is what the class binding is called in fan-out output.
+//
+// It is deliberately not a directory. No `bd` invocation can be rooted there
+// and no lock can be taken on it, so a caller that treats a view's path as a
+// working directory has to check the view's role first.
+const convoyBindingViewPath = "city (class binding)"
+
+// isClassBinding reports whether this view is the city's relocated class
+// binding rather than one of the directories the scan enumerated.
+func (v convoyStoreView) isClassBinding() bool {
+	return v.role == convoyViewClassBinding
+}
+
+// classBindingStore is the store of the class-binding view among views, or nil
+// when they federate none: a city that relocates no class.
+func classBindingStore(views []convoyStoreView) beads.Store {
+	for _, view := range views {
+		if view.isClassBinding() {
+			return view.store
+		}
+	}
+	return nil
+}
+
+// scopePath is the directory whose SCOPE owns the view's rows.
+//
+// Every view but the class binding is itself a scope root, so this is usually
+// the view's own path. The binding is not a directory at all — it is where the
+// city's infrastructure classes were relocated to — and its rows belong to the
+// city scope, which is the answer three separate questions need: which store ref
+// a workflow root implies when it carries none, which scope a source-workflow
+// lock is keyed on, and whether two matched views are one scope or two.
+func (v convoyStoreView) scopePath(cityPath string) string {
+	if v.isClassBinding() {
+		return cityPath
+	}
+	return v.path
+}
+
+// convoyStoreViewsWithBinding federates a directory scan's views with the
+// city's relocated class binding, and reports a refusal rather than deciding
+// what to do about it.
+//
+// The scan enumerates DIRECTORIES, and a relocated binding is not one of them.
+// On a converged city that makes every fan-out read the copies `gc storage
+// migrate` retained — frozen at cutover, never mutated since — while the rows
+// the city actually works are invisible. Appending the binding as one more view
+// is what closes that, and marking the city's view as the migration source is
+// what lets the merge collapse the resulting duplicate.
+//
+// A REFUSED binding comes back as an error with the views unchanged, because
+// the two kinds of caller need opposite things from it. A read can print what
+// it has and say what is missing; a destructive sweep cannot, because reaching
+// only some of the rows it was asked to delete is worse than deleting nothing.
+// Deciding that here would force one of them to be wrong.
+//
+// Both shapes of refusal arrive as an error and neither arrives as "this city
+// relocates nothing". A city configured for a binding it has not converged on
+// resolves to a refusedClassStore carrying the boot gate's sentence; a city
+// serving its classes from more than one binding is a topology this build
+// refuses outright, and that is a STANDING verdict about the city rather than a
+// fault this read ran into, so it is marked as one. Reporting either as
+// unrelocated would send the fan-out to the directory scan alone — the retained
+// pre-migration copies, printed as live rows — which is the confidently stale
+// answer this federation exists to close.
+func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]convoyStoreView, error) {
+	relocated, isRelocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return views, standingStorageRefusal{err: err}
+	}
+	binding := relocated.Store
+	if !isRelocated || binding == nil {
+		return views, nil
+	}
+	if refusal, refused := binding.(refusedClassStore); refused {
+		return views, refusal.err
+	}
+	for _, view := range views {
+		// The scan already opened this exact store, so the binding is not a
+		// second leg — it is the one that is there. Adding it would duplicate
+		// every row against itself. This is relocatedGraphLegFrom's identity
+		// gate, applied to a list of views.
+		//
+		// Both operands are pointer-typed HERE, which is what keeps the `==`
+		// away from the non-comparable dynamic type that panics an interface
+		// compare: the scan side is whatever opener openConvoyStores was handed,
+		// and every production opener ends in a pointer store —
+		// openStoreAtForCity and openOneShotStoreAtForCityWithConfig through
+		// wrapStoreWithBeadPolicies, openControlStoreAtForCity through
+		// that or the *beads.BdStore control factory — while the binding side is
+		// constructor-opened and its one value-typed route, refusedClassStore,
+		// already returned above. relocatedGraphLegFrom carries the same
+		// argument, but its own doc says production no longer calls it, so the
+		// operand set is named here rather than only by reference to a function
+		// documented as dead.
+		if view.store == binding {
+			return views, nil
+		}
+	}
+
+	merged := make([]convoyStoreView, 0, len(views)+1)
+	for _, view := range views {
+		if samePath(view.path, cityPath) {
+			view.role = convoyViewMigrationSource
+		}
+		merged = append(merged, view)
+	}
+	return append(merged, convoyStoreView{
+		path:  convoyBindingViewPath,
+		store: binding,
+		role:  convoyViewClassBinding,
+	}), nil
+}
+
+// convoyStoreViewsForRead is convoyStoreViewsWithBinding for the surfaces that
+// only READ, which continue past a refusal and say so.
+//
+// A refused city still serves work from its work ledger, so failing the whole
+// listing would take `gc beads list` and `gc convoy list` away from every city
+// whose storage configuration is mid-repair. The rows the binding holds are
+// missing from that output, though, so the omission is announced — every run,
+// not once per process, because each invocation is a fresh answer and has to
+// carry its own caveat.
+//
+// The caveat says both halves, because on a converged city the omission is not
+// the whole hazard. The migration RETAINED a frozen copy of every row it moved,
+// and it is the binding's answer that supersedes those copies — so while the
+// refusal stands they are no longer superseded and print as live rows in place
+// of the ones that are missing. A convoy the city closed in the binding lists
+// open again for exactly as long as the binding cannot be read.
+//
+// "Only READ" is the whole precondition, so the caller set is named rather than
+// assumed: `gc beads list`, `gc convoy list`, and `gc convoy stranded`, none of
+// which write. A caller that mutates takes convoyStoreViewsWithBinding directly
+// and refuses — doConvoyCheckFallback does, and federateSweepViews does it for
+// the sweeps — because the frozen rows this tolerates printing are rows a
+// mutation would act on.
+func convoyStoreViewsForRead(cityPath string, views []convoyStoreView, stderr io.Writer, cmdName string) []convoyStoreView {
+	merged, err := convoyStoreViewsWithBinding(cityPath, views)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: the city's relocated class binding is unreadable, so any beads it holds are missing from this output and retained pre-migration copies of them may appear in their place as stale open rows: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+	}
+	return merged
+}
+
+// convoyOwnershipProbeBatch bounds how many ids one ownership probe puts on the
+// wire, because an unbounded IN-list is a query no sqlite binding can run.
+//
+// The IDs filter compiles to one bound variable per id (`b.id IN (?,...,?)` in
+// sqliteListSQL, with no chunking of its own) and modernc sqlite refuses any
+// statement carrying more than 32766 of them. The candidate set is every
+// migration-source row matching the caller's query and `gc beads list` runs
+// unbounded, so on a converged city with a long history the probe would carry
+// the whole work ledger and come back "too many SQL variables" — failing the
+// read outright on exactly the large migrated cities the federation exists for.
+// Batching under the cap keeps the probe O(candidates/batch) round trips rather
+// than the one-per-row it replaced.
+const convoyOwnershipProbeBatch = 30000
+
+// convoyBindingOwnedIDs asks the class binding which of these ids it HOLDS.
+//
+// This is deliberately not "which of these ids did the binding return for the
+// caller's query". Those are different questions, and answering the second one
+// is how a migrated city ends up serving frozen rows: `gc convoy list` asks
+// every store for its OPEN convoys, so the moment the city closes a relocated
+// convoy in the binding — the normal end of every migrated workflow, not an edge
+// case — the binding stops answering for that id, the retained copy stops
+// looking superseded, and a convoy the city finished prints open forever.
+//
+// So the ownership probe carries only the ids it is asking about and
+// IncludeClosed, and no filter of the caller's reaches it. ListQuery.IDs is the
+// IN-list form of a batch of Gets and counts as a filter, so it needs no
+// AllowScan and costs one query per batch rather than one per row.
+//
+// A probe that FAILS is an error, never an empty answer. Reading a fault as "the
+// binding holds none of these" would serve every frozen twin as live data and
+// say nothing about why.
+func convoyBindingOwnedIDs(binding beads.Store, ids []string) (map[string]bool, error) {
+	owned := make(map[string]bool, len(ids))
+	if binding == nil || len(ids) == 0 {
+		return owned, nil
+	}
+	for start := 0; start < len(ids); start += convoyOwnershipProbeBatch {
+		batch := ids[start:min(start+convoyOwnershipProbeBatch, len(ids))]
+		held, err := binding.List(beads.ListQuery{IDs: batch, IncludeClosed: true})
+		if err != nil {
+			return nil, fmt.Errorf("asking %s which ids it holds: %w", convoyBindingViewPath, err)
+		}
+		for _, b := range held {
+			owned[b.ID] = true
+		}
+	}
+	return owned, nil
+}
+
+// mergeConvoyViewRows folds one row set per view into one, dropping the frozen
+// copies a class binding supersedes.
+//
+// Ids are unique only WITHIN a store, so this is not an id dedupe: a city and a
+// rig that each mint "gc-1" hold two different beads and both belong in the
+// output. The one place an id means the same bead twice is the migration, which
+// copies a class into the binding with ids preserved and deletes nothing — so
+// the migration source's copy is a frozen duplicate of a row the binding now
+// owns. That pair, and only that pair, collapses, with the binding winning.
+//
+// Which is why the supersede question is asked of the BINDING and only about the
+// migration source's ids, rather than read off the two row sets. A rig's id is
+// never put to the binding at all, so the role scoping is structural; and the
+// answer does not depend on whether the binding's own row happened to survive
+// the caller's filter, so a relocated bead the city has since closed still
+// supersedes its twin.
+func mergeConvoyViewRows[T any](views []convoyStoreView, rows [][]T, idOf func(T) string) ([]T, error) {
+	var binding beads.Store
+	for i, view := range views {
+		if view.role == convoyViewClassBinding && len(rows) > i {
+			binding = view.store
+		}
+	}
+	var candidates []string
+	for i, view := range views {
+		if view.role != convoyViewMigrationSource || len(rows) <= i {
+			continue
+		}
+		for _, row := range rows[i] {
+			candidates = append(candidates, idOf(row))
+		}
+	}
+	owned, err := convoyBindingOwnedIDs(binding, candidates)
+	if err != nil {
+		return nil, err
+	}
+	merged := make([]T, 0)
+	for i, view := range views {
+		if len(rows) <= i {
+			continue
+		}
+		for _, row := range rows[i] {
+			if view.role == convoyViewMigrationSource && owned[idOf(row)] {
+				continue
+			}
+			merged = append(merged, row)
+		}
+	}
+	return merged, nil
 }
 
 func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) ([]convoyStoreView, error) {
-	var (
-		stores   []convoyStoreView
-		firstErr error
-	)
-	for _, dir := range convoyStoreCandidates(cfg, cityPath, beadID) {
-		store, err := openStore(dir)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+	var firstErr error
+	stores := openConvoyStoreDirs(convoyStoreCandidates(cfg, cityPath, beadID), openStore, func(_ string, err error) {
+		if firstErr == nil {
+			firstErr = err
 		}
-		stores = append(stores, convoyStoreView{path: dir, store: store})
-	}
+	})
 	if len(stores) > 0 {
 		return stores, nil
 	}
@@ -509,6 +871,22 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 		return nil, firstErr
 	}
 	return nil, fmt.Errorf("no convoy stores available")
+}
+
+// openConvoyStoreDirs opens each of dirs as an ordinary convoy store view and
+// hands every dir that fails to open to onErr, so each caller states its own
+// policy for a store it could not open.
+func openConvoyStoreDirs(dirs []string, openStore func(string) (beads.Store, error), onErr func(dir string, err error)) []convoyStoreView {
+	var stores []convoyStoreView
+	for _, dir := range dirs {
+		store, err := openStore(dir)
+		if err != nil {
+			onErr(dir, err)
+			continue
+		}
+		stores = append(stores, convoyStoreView{path: dir, store: store, role: convoyViewOrdinary})
+	}
+	return stores
 }
 
 func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, error) {
@@ -530,7 +908,44 @@ func resolveConvoyStore(convoyID string, cfg *config.City, cityPath string, open
 // contract. A candidate's not-found probe is skipped; any other error is
 // returned immediately. The returned directory maps back to the owning
 // candidate.
+//
+// A suspended rig's store is not probed unless beadID routes to that rig (see
+// byIDStoreOpener): uniqueness is enforced among the stores something awake
+// reads, and suspension stays quiescence for every by-id caller.
+//
+// # The binding leg comes first, and it short-circuits the uniqueness contract
+//
+// A relocated class binding is not one of the city's directories, so the scan
+// below cannot reach it. On a converged city that means an infrastructure bead
+// is answered by the copy `gc storage migrate` RETAINED in the city store —
+// frozen at migration time — and the caller then writes through it. So the
+// binding is resolved first, through the shared residency contract.
+//
+// A binding hit returns without consulting the ambiguity rule, deliberately.
+// Dual residency is not ambiguity: the migration copies with ids preserved and
+// deletes nothing, so a relocated bead is SUPPOSED to exist twice and there is
+// a known winner. Refusing it as ambiguous would break every convoy command on
+// exactly the cities that completed the migration.
+//
+// The directory reported for a binding hit is the CITY's, not the binding's,
+// and that is not a fudge. Callers map this directory to a store-ref
+// ("city:<name>" / "rig:<name>") that scopes molecule-root lookups. These beads
+// lived in the city store and carried the city's ref before the migration moved
+// them; a binding is not a rig and has no ref of its own, and inventing one
+// would strand every root recorded before the move.
 func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) (beads.Store, string, error) {
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, beadID)
+	if err != nil {
+		return nil, "", err
+	}
+	openStore = byIDStoreOpener(cfg, cityPath, beadID, openStore)
+	if ownedByBinding {
+		if err := refuseBindingRigCollision(beadID, cfg, cityPath, openStore); err != nil {
+			return nil, "", err
+		}
+		return owner.Store, cityPath, nil
+	}
+
 	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
 	if err != nil {
 		return nil, "", err
@@ -561,18 +976,88 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 	return foundStore, foundDir, nil
 }
 
-func openAllConvoyStores(stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+// byIDStoreOpener wraps openStore for a by-id probe so that a suspended rig's
+// store is left closed: the wrapped opener returns a nil store for it, which
+// the probes skip. A store the city or an awake rig also reads stays open, as
+// in convoyCheckStoreCandidates.
+//
+// By-id resolution runs unattended — bd's on-close autoclose hooks, the
+// supervisor's autoclose sweep, execution-fact emission on a primary-store
+// miss, and gc convoy status run by orders — and its uniqueness probe reads
+// every candidate. On a bd-owned proxied rig that read restarts the pair the
+// controller stopped when the rig was suspended (beads_quiescence.go), so the
+// probe alone would keep a suspended rig warm. An id whose prefix routes to a
+// suspended rig is a question about that rig's bead, so that rig's store is
+// still read.
+func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) func(string) (beads.Store, error) {
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
+		return openStore
 	}
-	return openAllConvoyStoresAt(cityPath, stderr, cmdName)
+	if rd := rigDirForBead(cfg, beadID); rd != "" {
+		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
+	}
+	return func(dir string) (beads.Store, error) {
+		if len(asleep[normalizePathForCompare(dir)]) > 0 {
+			return nil, nil
+		}
+		return openStore(dir)
+	}
 }
 
-// openAllConvoyStoresAt is openAllConvoyStores with a pre-resolved cityPath,
+// refuseBindingRigCollision restores the uniqueness contract to the one case
+// the binding short-circuit takes it away from without meaning to.
+//
+// A binding hit returns before the scan runs, and the scan is where "this id
+// exists in more than one store" is refused. Skipping it is right for the CITY
+// store, whose copy of a relocated id is the migration working as designed, and
+// wrong for a RIG: a rig is never a migration target, so it has no retained copy
+// to be excused, and one holding the same id is two ledgers disagreeing by
+// accident. Answering that silently from the binding means whichever caller
+// follows — a close, a land, a convoy walk — acts on one copy while the other
+// stays open forever, which is the failure the contract was written for.
+//
+// So the probe is the rigs and only the rigs, and only for an id no reserved
+// class prefix claims. A reserved prefix is minted by the binding and by nothing
+// else, so a rig cannot hold one legitimately and the walk would cost every
+// reserved-id resolution — bd's on-close hook among them, and it closes in
+// bursts — to learn nothing.
+//
+// Read faults are refusals, not skips. This fronts resolveOwningStoreDir, whose
+// callers are the mutations reached through resolveConvoyStore — `gc convoy
+// target`/`add`/`close`/`land` — and autocloseOwningStore, which absorbs the
+// refusal into its own ok=false, but ALSO the pure read `gc convoy status`. It
+// refuses there too: a rig that cannot answer has not established the id is
+// uniquely addressable, and a read served from one of two disagreeing ledgers is
+// the same wrong answer whether or not a write follows it. The error policy is
+// the scan's own, one function down, for the same probe.
+func refuseBindingRigCollision(beadID string, cfg *config.City, cityPath string, openStore func(string) (beads.Store, error)) error {
+	if bdIDIsClassReserved(beadID) {
+		return nil
+	}
+	candidates, err := openConvoyStores(cfg, cityPath, beadID, openStore)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if candidate.store == nil || samePath(candidate.path, cityPath) {
+			continue
+		}
+		if _, err := candidate.store.Get(beadID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return err
+		}
+		return fmt.Errorf("bead %s exists in multiple stores (%s and %s); resolution requires a uniquely addressable bead id", beadID, convoyBindingViewPath, candidate.path)
+	}
+	return nil
+}
+
+// openAllConvoyStoresAt opens every convoy store for a pre-resolved cityPath,
 // used by routed callers that already resolved the city before dispatching
-// to the fallback path.
+// to the fallback path. A store it cannot open is skipped, so gc beads show's
+// lookup by id and gc convoy stranded still read the healthy stores.
 func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([]convoyStoreView, int) {
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -580,8 +1065,10 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
+	// Each open reuses this invocation's cfg rather than reloading city.toml
+	// and every pack include once per store.
 	stores, err := openConvoyStores(cfg, cityPath, "", func(storeDir string) (beads.Store, error) {
-		return openStoreAtForCity(storeDir, cityPath)
+		return openOneShotStoreAtForCityWithConfig(storeDir, cityPath, cfg)
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -589,6 +1076,129 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	return stores, 0
+}
+
+// openEveryStoreAt is openAllConvoyStoresAt for a listing that must not come
+// out short (gc convoy list, gc beads list). Any store it cannot open is named
+// on stderr, as the storeNoun store at its directory, and fails the command: a
+// listing that silently left out a rig's rows would read as the city's
+// complete answer, while the supervisor reports that same store as a partial
+// answer the API route refuses. With skipSuspendedRigs, a store only suspended
+// rigs reach is left unopened and its rigs named on stderr, as gc convoy check
+// leaves it (convoyCheckStoreCandidates): the supervisor's /convoys leaves the
+// same stores out, while its /beads still reads them. It opens through
+// openStoreForCity, which adds no raw-store debt but loads the city config
+// again for each store it opens.
+func openEveryStoreAt(cityPath string, stderr io.Writer, cmdName, storeNoun string, skipSuspendedRigs bool) ([]convoyStoreView, int) {
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	emitLoadCityConfigWarnings(stderr, prov)
+	var candidates, suspended []string
+	if skipSuspendedRigs {
+		candidates, suspended = convoyCheckStoreCandidates(cfg, cityPath)
+	} else {
+		candidates = convoyStoreCandidates(cfg, cityPath, "") // residency:allow — openAllConvoyStoresAt's own enumeration, re-walked so a store that cannot open fails the listing instead of vanishing from it (the supervisor reports the same store as a partial answer)
+	}
+	for _, rig := range suspended {
+		fmt.Fprintf(stderr, "%s: rig %q is suspended; its %ss are listed once it resumes\n", cmdName, rig, storeNoun) //nolint:errcheck // best-effort stderr
+	}
+	failed := 0
+	stores := openConvoyStoreDirs(candidates, openStoreForCity(cityPath), func(dir string, err error) {
+		fmt.Fprintf(stderr, "%s: opening the %s store at %s: %v\n", cmdName, storeNoun, dir, err) //nolint:errcheck // best-effort stderr
+		failed++
+	})
+	if failed == 0 && len(stores) > 0 {
+		return stores, 0
+	}
+	if failed == 0 {
+		fmt.Fprintf(stderr, "%s: no %s stores available\n", cmdName, storeNoun) //nolint:errcheck // best-effort stderr
+	}
+	fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+	return nil, 1
+}
+
+// convoyCheckStoreCandidates is convoyStoreCandidates without the suspended
+// rigs' stores, which it names in skipped. A store the city or an awake rig
+// also reads stays in: suspension retires a rig, not a store something awake
+// reads from. gc convoy check and gc convoy list both read this set.
+func convoyCheckStoreCandidates(cfg *config.City, cityPath string) (candidates, skipped []string) {
+	candidates = convoyStoreCandidates(cfg, cityPath, "") // residency:allow — the list openConvoyStores walks, minus suspended rigs; decides no binding, namespace or leg order
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
+		return candidates, nil
+	}
+	kept := make([]string, 0, len(candidates))
+	for _, dir := range candidates {
+		if names := asleep[normalizePathForCompare(dir)]; len(names) > 0 {
+			skipped = append(skipped, names...)
+			continue
+		}
+		kept = append(kept, dir)
+	}
+	return kept, skipped
+}
+
+// suspendedRigStoreRoots maps the normalized store root of each suspended rig
+// to the suspended rigs rooted there, leaving out a root the city or an awake
+// rig also reads: suspension retires a rig, not a store something awake reads
+// from. It returns an empty map when no rig is suspended.
+func suspendedRigStoreRoots(cfg *config.City, cityPath string) map[string][]string {
+	asleep := map[string][]string{}
+	suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
+	if len(suspended) == 0 {
+		return asleep
+	}
+	awake := map[string]bool{normalizePathForCompare(cityPath): true}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		root := normalizePathForCompare(resolveStoreScopeRoot(cityPath, rig.Path))
+		if suspended[rig.Name] {
+			asleep[root] = append(asleep[root], rig.Name)
+		} else {
+			awake[root] = true
+		}
+	}
+	for root := range awake {
+		delete(asleep, root)
+	}
+	return asleep
+}
+
+// openConvoyCheckStoresAt opens the stores gc convoy check walks: it is
+// openAllConvoyStoresAt for a command that also runs unattended (the core
+// pack's convoy-autoclose-backstop order, hourly). A suspended rig's store is
+// left unopened and named on stderr, since suspension is quiescence
+// (beads_quiescence.go). A store that fails to open is named and counted in
+// unopened rather than dropped, so the check reports itself incomplete instead
+// of claiming a sweep it did not make.
+func openConvoyCheckStoresAt(cityPath string, stderr io.Writer) (stores []convoyStoreView, unopened, code int) {
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil, 0, 1
+	}
+	emitLoadCityConfigWarnings(stderr, prov)
+	candidates, suspended := convoyCheckStoreCandidates(cfg, cityPath)
+	for _, rig := range suspended {
+		fmt.Fprintf(stderr, "gc convoy check: rig %q is suspended; its convoys are checked once it resumes\n", rig) //nolint:errcheck // best-effort stderr
+	}
+	stores = openConvoyStoreDirs(candidates, func(dir string) (beads.Store, error) {
+		return openStoreAtForCity(dir, cityPath)
+	}, func(dir string, err error) {
+		fmt.Fprintf(stderr, "gc convoy check: opening the store at %s: %v\n", dir, err) //nolint:errcheck // best-effort stderr
+		unopened++
+	})
+	if len(stores) == 0 {
+		fmt.Fprintln(stderr, "gc convoy check: no convoy store could be opened") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics")          //nolint:errcheck // best-effort stderr
+		return nil, unopened, 1
+	}
+	return stores, unopened, 0
 }
 
 type convoyWithStore struct {
@@ -621,6 +1231,9 @@ type convoySummaryJSON struct {
 
 type convoyListSummaryJSON struct {
 	Total int `json:"total"`
+	// HiddenSynthetic counts the synthetic convoys left out of Convoys;
+	// --include-synthetic lists them.
+	HiddenSynthetic int `json:"hidden_synthetic,omitempty"`
 }
 
 type convoyListResultJSON struct {
@@ -654,24 +1267,70 @@ type convoyStatusResultJSON struct {
 	Children      []convoyChildJSON  `json:"children"`
 }
 
+// collectOpenConvoys lists the open convoys across stores, failing at the
+// first store whose list fails.
 func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
-	convoys := make([]convoyWithStore, 0)
-	for _, candidate := range stores {
+	return collectConvoysAcross(stores, func(view convoyStoreView, err error) error {
+		return fmt.Errorf("listing convoys in %s: %w", view.path, err)
+	})
+}
+
+// collectConvoysForCheck is collectOpenConvoys for gc convoy check, which goes
+// on past an ordinary store whose list fails: it names the store on stderr,
+// counts it in unlisted and leaves its convoys out, so nothing in it is
+// closed. A class binding whose list fails still fails the check, as
+// doConvoyCheckFallback refuses a binding it cannot read: the binding holds the
+// city's relocated convoys and is what supersedes the migration source's
+// frozen copies of them, so the check does not run without it.
+func collectConvoysForCheck(stores []convoyStoreView, stderr io.Writer) (convoys []convoyWithStore, unlisted int, err error) {
+	convoys, err = collectConvoysAcross(stores, func(view convoyStoreView, listErr error) error {
+		if view.isClassBinding() {
+			return fmt.Errorf("listing convoys in %s: %w", view.path, listErr)
+		}
+		fmt.Fprintf(stderr, "gc convoy check: listing convoys in the store at %s: %v\n", view.path, listErr) //nolint:errcheck // best-effort stderr
+		unlisted++
+		return nil
+	})
+	return convoys, unlisted, err
+}
+
+// collectConvoysAcross lists the open convoys in every store, merges them
+// across the views (mergeConvoyViewRows) and sorts them by ID. A store whose
+// list fails goes to onListErr: a nil return leaves that store's convoys out,
+// and an error ends the collection with it.
+func collectConvoysAcross(stores []convoyStoreView, onListErr func(convoyStoreView, error) error) ([]convoyWithStore, error) {
+	rows := make([][]convoyWithStore, len(stores))
+	for i, candidate := range stores {
 		all, err := candidate.store.List(beads.ListQuery{Type: "convoy"})
 		if err != nil {
-			return nil, err
+			if stop := onListErr(candidate, err); stop != nil {
+				return nil, stop
+			}
+			continue
 		}
 		for _, b := range all {
-			convoys = append(convoys, convoyWithStore{store: candidate.store, bead: b})
+			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b})
 		}
 	}
-	sort.SliceStable(convoys, func(i, j int) bool {
-		if convoys[i].bead.ID == convoys[j].bead.ID {
-			return convoys[i].bead.Title < convoys[j].bead.Title
-		}
-		return convoys[i].bead.ID < convoys[j].bead.ID
-	})
+	convoys, err := mergeConvoyViewRows(stores, rows, func(c convoyWithStore) string { return c.bead.ID })
+	if err != nil {
+		return nil, err
+	}
+	sortConvoysForListing(convoys, func(c convoyWithStore) beads.Bead { return c.bead })
 	return convoys, nil
+}
+
+// sortConvoysForListing orders convoys the way every convoy listing prints
+// them, on every route: by ID, then by title for two stores' convoys that
+// share an ID.
+func sortConvoysForListing[T any](convoys []T, beadOf func(T) beads.Bead) {
+	sort.SliceStable(convoys, func(i, j int) bool {
+		a, b := beadOf(convoys[i]), beadOf(convoys[j])
+		if a.ID == b.ID {
+			return a.Title < b.Title
+		}
+		return a.ID < b.ID
+	})
 }
 
 func convoyProgressFromChildren(children []beads.Bead) convoyProgressJSON {
@@ -718,8 +1377,9 @@ func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName 
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
+	// Each probed store reuses this invocation's cfg; see openAllConvoyStoresAt.
 	store, err := resolveConvoyStore(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
-		return openStoreAtForCity(storeDir, cityPath)
+		return openOneShotStoreAtForCityWithConfig(storeDir, cityPath, cfg)
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -731,63 +1391,69 @@ func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName 
 
 // doConvoyList lists open convoys with progress counts.
 func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
-	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, false, stdout, stderr)
+	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{}, stdout, stderr)
 }
 
 func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
-	return convoycore.Members(store, convoyID, includeClosed)
+	return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, includeClosed)
 }
 
-func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
-	convoys, err := collectOpenConvoys(stores)
+func doConvoyListAcrossStores(stores []convoyStoreView, opts convoyListOptions, stdout, stderr io.Writer) int {
+	openConvoys, err := collectOpenConvoys(stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	if jsonOut {
-		return writeConvoyListJSON(convoys, stdout, stderr)
-	}
-
-	if len(convoys) == 0 {
-		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
-		return 0
-	}
-
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		progress := convoyProgressFromChildren(children)
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, c.bead.Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
-	}
-	tw.Flush() //nolint:errcheck // best-effort stdout
-	return 0
-}
-
-func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) int {
-	items := make([]convoySummaryJSON, 0, len(convoys))
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		item := convoySummaryFromBead(c.bead, children)
-		items = append(items, item)
-	}
-	if err := writeCLIJSONLine(stdout, convoyListResultJSON{
-		SchemaVersion: "1",
-		Convoys:       items,
-		Summary:       convoyListSummaryJSON{Total: len(items)},
-	}); err != nil {
-		fmt.Fprintf(stderr, "gc convoy list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+	convoys, hidden := withoutSyntheticConvoys(openConvoys, func(c convoyWithStore) beads.Bead { return c.bead }, opts.includeSynthetic)
+	rows, err := convoyListRows(convoys)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	return writeConvoyList(rows, hidden, opts.jsonOut, stdout, stderr)
+}
+
+// convoyListRows reads each convoy's members from the store it was listed
+// from and summarizes it as a gc convoy list row.
+func convoyListRows(convoys []convoyWithStore) ([]convoySummaryJSON, error) {
+	rows := make([]convoySummaryJSON, 0, len(convoys))
+	for _, c := range convoys {
+		children, err := listConvoyChildren(c.store, c.bead.ID, true)
+		if err != nil {
+			return nil, fmt.Errorf("children of %s: %w", c.bead.ID, err)
+		}
+		rows = append(rows, convoySummaryFromBead(c.bead, children))
+	}
+	return rows, nil
+}
+
+// writeConvoyList prints gc convoy list's rows: the schema-v1 JSON result, or
+// the ID/TITLE/PROGRESS table followed by the hidden-synthetic note. Both
+// routes render through it, so they print the same thing for the same rows.
+func writeConvoyList(rows []convoySummaryJSON, hidden int, jsonOut bool, stdout, stderr io.Writer) int {
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, convoyListResultJSON{
+			SchemaVersion: "1",
+			Convoys:       rows,
+			Summary:       convoyListSummaryJSON{Total: len(rows), HiddenSynthetic: hidden},
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc convoy list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
+		writeHiddenSyntheticNote(stdout, hidden)
+		return 0
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
+	for _, row := range rows {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", row.ID, row.Title, formatConvoyProgress(row.Progress)) //nolint:errcheck // best-effort stdout
+	}
+	tw.Flush() //nolint:errcheck // best-effort stdout
+	writeHiddenSyntheticNote(stdout, hidden)
 	return 0
 }
 
@@ -881,56 +1547,21 @@ func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason strin
 	)
 }
 
-// renderConvoyStatusFromAPI formats the API-sourced convoy detail to match
-// doConvoyStatus output. Stale banner appends when cache age > 30s.
+// renderConvoyStatusFromAPI renders the API-sourced convoy detail through the
+// same writers as the local route. Progress is summarized from the members the
+// server returned, exactly as the local route summarizes its own read
+// (convoyProgressFromChildren), so it carries dangling_tracks too. The human
+// output is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
 func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut bool, stdout, stderr io.Writer) int {
 	convoy := cr.Body.Convoy
 	children := cr.Body.Children
-	progress := cr.Body.Progress
+	progress := convoyProgressFromChildren(children)
 	if jsonOut {
-		return writeConvoyStatusJSON(convoy, children, convoyProgressFromAPI(api.ConvoyCheckView{
-			Closed: progress.Closed,
-			Total:  progress.Total,
-		}), stdout, stderr)
+		return writeConvoyStatusJSON(convoy, children, progress, stdout, stderr)
 	}
-
-	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
-	w(fmt.Sprintf("Convoy:   %s", convoy.ID))
-	w(fmt.Sprintf("Title:    %s", convoy.Title))
-	w(fmt.Sprintf("Status:   %s", convoy.Status))
-	w(fmt.Sprintf("Progress: %d/%d closed", progress.Closed, progress.Total))
-	fields := getConvoyFields(convoy)
-	if hasLabel(convoy.Labels, "owned") {
-		w("Lifecycle: owned")
-	}
-	if fields.Target != "" {
-		w(fmt.Sprintf("Target:   %s", fields.Target))
-	}
-	if fields.Owner != "" {
-		w(fmt.Sprintf("Owner:    %s", fields.Owner))
-	}
-	if fields.Notify != "" {
-		w(fmt.Sprintf("Notify:   %s", fields.Notify))
-	}
-	if fields.Merge != "" {
-		w(fmt.Sprintf("Merge:    %s", fields.Merge))
-	}
-	if len(children) > 0 {
-		w("")
-		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tASSIGNEE") //nolint:errcheck // best-effort stdout
-		for _, ch := range children {
-			assignee := ch.Assignee
-			if assignee == "" {
-				assignee = "-"
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ch.ID, ch.Title, ch.Status, assignee) //nolint:errcheck // best-effort stdout
-		}
-		tw.Flush() //nolint:errcheck // best-effort stdout
-	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
-	}
+	writeConvoyStatusText(stdout, convoy, children, progress)
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
@@ -976,7 +1607,13 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 	if jsonOut {
 		return writeConvoyStatusJSON(convoy, children, progress, stdout, stderr)
 	}
+	writeConvoyStatusText(stdout, convoy, children, progress)
+	return 0
+}
 
+// writeConvoyStatusText prints gc convoy status's human output for a convoy
+// and its members. Both routes render through it.
+func writeConvoyStatusText(stdout io.Writer, convoy beads.Bead, children []beads.Bead, progress convoyProgressJSON) {
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w(fmt.Sprintf("Convoy:   %s", convoy.ID))
 	w(fmt.Sprintf("Title:    %s", convoy.Title))
@@ -998,21 +1635,20 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 	if fields.Merge != "" {
 		w(fmt.Sprintf("Merge:    %s", fields.Merge))
 	}
-
-	if len(children) > 0 {
-		w("")
-		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tASSIGNEE") //nolint:errcheck // best-effort stdout
-		for _, ch := range children {
-			assignee := ch.Assignee
-			if assignee == "" {
-				assignee = "-"
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ch.ID, ch.Title, ch.Status, assignee) //nolint:errcheck // best-effort stdout
-		}
-		tw.Flush() //nolint:errcheck // best-effort stdout
+	if len(children) == 0 {
+		return
 	}
-	return 0
+	w("")
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tASSIGNEE") //nolint:errcheck // best-effort stdout
+	for _, ch := range children {
+		assignee := ch.Assignee
+		if assignee == "" {
+			assignee = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ch.ID, ch.Title, ch.Status, assignee) //nolint:errcheck // best-effort stdout
+	}
+	tw.Flush() //nolint:errcheck // best-effort stdout
 }
 
 func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress convoyProgressJSON, stdout, stderr io.Writer) int {
@@ -1117,7 +1753,7 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 		fmt.Fprintf(stderr, "gc convoy target: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := setConvoyFields(store, id, ConvoyFields{Target: target}); err != nil {
+	if err := setConvoyFields(beads.WorkStore{Store: store}, id, ConvoyFields{Target: target}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1204,7 +1840,7 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 		return 1
 	}
 
-	if err := convoycore.TrackItem(store, convoyID, issueID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, issueID); err != nil {
 		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1312,7 +1948,16 @@ func newConvoyCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Scan open convoys and auto-close any where all child issues are resolved.
 
 Evaluates each open convoy's children. If all children have status
-"closed", the convoy is automatically closed and an event is recorded.`,
+"closed", the convoy is automatically closed and an event is recorded.
+
+The check skips a suspended rig's store, naming the rig on stderr, and
+checks its convoys once the rig resumes. A store it cannot open or list,
+or a convoy it cannot read or close, is named on stderr and the check
+goes on with the rest, then exits 1. The exception is a city whose
+convoys moved to a class binding: if the binding cannot be read, the
+check closes nothing and exits 1. A convoy that changed or disappeared
+after the check listed it is left for the next run and does not fail
+the check.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			code := 0
@@ -1362,13 +2007,31 @@ func routeConvoyCheck(cityPath string, _ *api.Client, nilReason string, jsonOut 
 }
 
 // doConvoyCheckFallback is the direct-bd path for "gc convoy check".
+//
+// It federates through convoyStoreViewsWithBinding rather than through
+// convoyStoreViewsForRead, because this command CLOSES convoys. A refusal hands
+// back the views unchanged, which leaves the city's retained pre-migration
+// copies unsuperseded and walks them as live rows — and their children were
+// frozen at cutover, so a convoy the city is still working reads as complete.
+// Degrading here would auto-close it and report that as success while the
+// binding's open row went untouched, so the check refuses instead: a mutation
+// on a view this build could not prove is worse than no mutation.
+//
+// It walks every store but a suspended rig's (openConvoyCheckStoresAt), and a
+// store it could not open makes the check exit non-zero once the stores it did
+// open have been checked.
 func doConvoyCheckFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy check")
+	stores, unopened, code := openConvoyCheckStoresAt(cityPath, stderr)
 	if stores == nil {
 		return code
 	}
+	stores, err := convoyStoreViewsWithBinding(cityPath, stores)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy check: the city's relocated class binding is unreadable, so this refuses rather than auto-close convoys from the retained pre-migration copies it cannot supersede: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	rec := openCityRecorderAt(cityPath, stderr)
-	return doConvoyCheckAcrossStoresJSON(stores, rec, jsonOut, stdout, stderr)
+	return doConvoyCheckAcrossStoresJSON(stores, unopened, rec, jsonOut, stdout, stderr)
 }
 
 // hasLabel reports whether the labels slice contains the target label.
@@ -1395,26 +2058,11 @@ type explicitReasonCloser interface {
 	CloseWithReason(id, reason string) error
 }
 
-// closeConvoyWithReason stamps a close_reason metadata key on the
-// convoy bead before closing it. BdStore can receive the same reason
-// directly as `bd close --reason ...`, which lets cities
-// running with validation.on-close=error accept system-driven
-// auto-closes (whose default reason "Closed" would otherwise be
-// rejected as terse). For stores whose Close path does not consult
-// the metadata, the field still serves as a permanent audit trail of
-// why the convoy was closed.
+// closeConvoyWithReason closes a convoy bead with an auditable reason. The
+// behavior lives in the convoy domain package so the sling reap path and this
+// CLI projection share one implementation.
 func closeConvoyWithReason(store beads.Store, id, reason string) error {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return store.Close(id)
-	}
-	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
-		return fmt.Errorf("stamping convoy %s close reason: %w", id, err)
-	}
-	if closer, ok := store.(explicitReasonCloser); ok {
-		return closer.CloseWithReason(id, reason)
-	}
-	return store.Close(id)
+	return convoycore.CloseWithReason(beads.WorkStore{Store: store}, id, reason)
 }
 
 // doConvoyCheck auto-closes convoys where all children are closed.
@@ -1425,41 +2073,39 @@ func doConvoyCheck(store beads.Store, rec events.Recorder, stdout, stderr io.Wri
 }
 
 func doConvoyCheckAcrossStores(stores []convoyStoreView, rec events.Recorder, stdout, stderr io.Writer) int {
-	return doConvoyCheckAcrossStoresJSON(stores, rec, false, stdout, stderr)
+	return doConvoyCheckAcrossStoresJSON(stores, 0, rec, false, stdout, stderr)
 }
 
-func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder, jsonOut bool, stdout, stderr io.Writer) int {
-	convoys, err := collectOpenConvoys(stores)
+// doConvoyCheckAcrossStoresJSON auto-closes the completed convoys in stores.
+// unopened counts the stores the caller could not open. An ordinary store whose
+// convoys cannot be listed, or a convoy that cannot be checked, is named on
+// stderr and the walk goes on to the next one; the check then exits non-zero,
+// writing no JSON result, if any convoy or store went unchecked. A class
+// binding whose convoys cannot be listed fails the check before it closes
+// anything (collectConvoysForCheck).
+//
+// A convoy's legacy children are counted in the class binding too, when stores
+// federate one: on a split city a graph root poured under a work convoy lives
+// there, and the convoy is not complete while that root is open. The reactive
+// autoclose counts them the same way (doConvoyAutocloseWith).
+func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec events.Recorder, jsonOut bool, stdout, stderr io.Writer) int {
+	convoys, unlisted, err := collectConvoysForCheck(stores, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	closed := 0
+	binding := classBindingStore(stores)
+	closed, failed := 0, 0
 	for _, item := range convoys {
-		if hasLabel(item.bead.Labels, "owned") {
-			continue
-		}
-		children, err := listConvoyChildren(item.store, item.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy check: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if len(children) == 0 {
-			continue
-		}
-		allClosed := true
-		for _, ch := range children {
-			if !convoycore.IsTerminalStatus(ch.Status) {
-				allClosed = false
-				break
-			}
-		}
-		if allClosed {
-			if err := closeConvoyWithReason(item.store, item.bead.ID, convoyAutocloseReason); err != nil {
-				fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+		ok, err := closeCompletedConvoyAcross(item.store, binding, item.bead)
+		switch {
+		case errors.Is(err, errAutocloseRefused), errors.Is(err, beads.ErrNotFound):
+			// The convoy changed or went away after the list; the next check decides it again.
+		case err != nil:
+			fmt.Fprintf(stderr, "gc convoy check: %v\n", err) //nolint:errcheck // best-effort stderr
+			failed++
+		case ok:
 			rec.Record(events.Event{
 				Type:    events.ConvoyClosed,
 				Actor:   eventActor(),
@@ -1472,13 +2118,18 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 		}
 	}
 
+	if !jsonOut {
+		fmt.Fprintf(stdout, "%d convoy(s) auto-closed\n", closed) //nolint:errcheck // best-effort stdout
+	}
+	if unchecked := unopened + unlisted; failed > 0 || unchecked > 0 {
+		fmt.Fprintf(stderr, "gc convoy check: incomplete: %d convoy(s) and %d store(s) could not be checked\n", failed, unchecked) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.check", Action: "check", Closed: intRef(closed)}); err != nil {
 			fmt.Fprintf(stderr, "gc convoy check: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	} else {
-		fmt.Fprintf(stdout, "%d convoy(s) auto-closed\n", closed) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
@@ -1516,10 +2167,28 @@ func cmdConvoyStranded(stdout, stderr io.Writer) int {
 }
 
 func cmdConvoyStrandedJSON(jsonOut bool, stdout, stderr io.Writer) int {
-	stores, code := openAllConvoyStores(stderr, "gc convoy stranded")
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy stranded: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doConvoyStrandedFallback(cityPath, jsonOut, stdout, stderr)
+}
+
+// doConvoyStrandedFallback is the direct-bd path for "gc convoy stranded".
+//
+// This is a pure read, so it takes the tolerant helper its list sibling takes.
+// It needs the helper at all because an unfederated stranded query is wrong in
+// both directions at once on a migrated city: a retained copy still carries the
+// assignees and open children it had at cutover and reports work that is not
+// stranded, while a convoy living in the binding is never walked and genuinely
+// stranded work stays invisible.
+func doConvoyStrandedFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
+	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy stranded")
 	if stores == nil {
 		return code
 	}
+	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy stranded")
 	return doConvoyStrandedAcrossStoresJSON(stores, jsonOut, stdout, stderr)
 }
 
@@ -1774,8 +2443,15 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// actually owns the bead — prefix-aware, across the city and every rig —
 	// so rig-store closes autoclose their convoys instead of silently
 	// no-op'ing (#3411).
+	//
+	// The hook passes no cross-store homes (convoyAutocloseHomes{}): bd runs
+	// it for the stores bd serves, which on a split city are the work ledgers,
+	// and resolving a parent's or a binding child's store here would open a
+	// second handle on the binding per close. The controller's reactive
+	// autoclose and its sweep (beadCloseAutoclose) cover binding rows and the
+	// cross-store convoy children on a split city.
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+		doConvoyAutocloseWith(store, convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
 		return
 	}
 
@@ -1787,7 +2463,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doConvoyAutocloseWith(store, rec, beadID, stdout, stderr)
+	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
 }
 
 // autocloseOwningStore resolves the store that owns beadID, and the store
@@ -1796,6 +2472,10 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 // city config cannot be loaded or no candidate store holds the bead, so the
 // caller can fall back to cwd-rooted resolution. The store directory lets
 // molecule autoclose derive the matching store-ref label.
+//
+// A resolution that FAILED is still ok=false — the hooks cannot be made fatal
+// without wedging every close on a city with a sick store — but it is announced
+// first. See warnAutocloseResolutionFault.
 func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -1805,9 +2485,37 @@ func autocloseOwningStore(beadID, cityPath string) (beads.Store, string, bool) {
 		return openStoreAtForCity(storeDir, cityPath)
 	})
 	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			warnAutocloseResolutionFault(beadID, err)
+		}
 		return nil, "", false
 	}
 	return store, dir, true
+}
+
+// autocloseFaultOnce bounds warnAutocloseResolutionFault to one line per
+// process.
+var autocloseFaultOnce sync.Once
+
+// warnAutocloseResolutionFault announces a by-id resolution that failed rather
+// than missed, once per process.
+//
+// The autoclose hooks are best-effort by design: bd's on_close must not fail
+// because a molecule root could not be found, so every error here is swallowed
+// and the caller falls back to the cwd-rooted store. That is right for absence
+// and wrong for a fault. A binding that cannot be read, or an id the scan
+// refuses as ambiguous, makes the fallback close a root in a ledger that may
+// not hold it — the silent wrong-store write this lane exists to end — and it
+// cannot be made fatal without wedging closes on a city whose binding is sick.
+// So it is made LOUD instead.
+//
+// Once per process, because bd closes beads in bursts: a persistent fault would
+// otherwise print the same line on every close of a drain and bury the hook log
+// it is trying to be seen in.
+func warnAutocloseResolutionFault(beadID string, err error) {
+	autocloseFaultOnce.Do(func() {
+		fmt.Fprintf(cliStorageStderr, "gc autoclose: resolving the store that owns %s failed (%v); falling back to the cwd-rooted store, which may not hold it. Further occurrences this process are not repeated.\n", beadID, err) //nolint:errcheck // best-effort stderr
+	})
 }
 
 func convoyAutocloseStoreRoot(cwd string) string {
@@ -1821,7 +2529,13 @@ func convoyAutocloseStoreRoot(cwd string) string {
 		if !filepath.IsAbs(beadsDir) {
 			beadsDir = filepath.Join(cwd, beadsDir)
 		}
-		return filepath.Clean(filepath.Dir(beadsDir))
+		// Clean beadsDir BEFORE taking Dir: filepath.Dir on a trailing-slash
+		// path (e.g. "/root/.beads/") does not strip the final element the
+		// way a shell's dirname would, so an uncleaned beadsDir yields
+		// beadsDir itself instead of its parent. filepath.Join above already
+		// cleans the relative-path case; Clean here also covers an
+		// already-absolute BEADS_DIR passed in with a trailing slash.
+		return filepath.Dir(filepath.Clean(beadsDir))
 	}
 	return cwd
 }
@@ -1846,54 +2560,180 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 	return cityForStoreDir(storeRoot)
 }
 
+// convoyAutocloseHomes tells doConvoyAutocloseWith where a split city keeps
+// what the closed bead's own store does not hold. The zero value is a store
+// that holds everything: the bd on_close hook path and a single-store city.
+type convoyAutocloseHomes struct {
+	// parent names the WORK store a legacy parent id belongs to, read when
+	// the closed bead's own store does not hold the parent; nil, or a nil
+	// answer, means the parent shares the closed bead's store.
+	parent func(id string) beads.Store
+	// children is the class binding whose legacy children of a work convoy
+	// are counted too, or nil when the city relocates no class.
+	children beads.Store
+}
+
 // doConvoyAutocloseWith checks whether the closed bead's legacy parent or
 // tracks dependents are convoys with all children closed, and if so closes
-// them. All errors are silently swallowed — this is best-effort
-// infrastructure called from a bd hook script.
-func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) {
+// them. All errors are swallowed — this is best-effort infrastructure called
+// from a bd hook script — but reported in the returned run, so the controller
+// can retry a run a read failure or a refused close left undecided.
+//
+// A convoy is work class, so on a split city it stays on the work ledger while
+// a graph row parented under it (a graph root poured with a parent) lives in
+// the class binding. The parent is read from the closed bead's own store first
+// and then from its work home (homes.parent), and the convoy is decided and
+// closed where it lives. The own store leads as every by-id read on a split
+// city reads the binding before the work ledger: a relic (a row migrated into
+// the binding under its work-ledger id) keeps the parent it migrated with, and
+// so does a row minted beside it since (a retry copies its predecessor's
+// parent), so a frozen pre-migration copy or a reused id on the work ledger
+// must not answer for that parent. The convoy's legacy children are counted in
+// the binding too (homes.children), so a child still open there keeps a
+// work-ledger convoy open, whichever child closed last.
+func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
+	var run autocloseRun
 	bead, err := store.Get(beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 
 	seen := make(map[string]bool)
 	if bead.ParentID != "" {
-		parent, err := store.Get(bead.ParentID)
+		var home beads.Store
+		if homes.parent != nil {
+			home = homes.parent(bead.ParentID)
+		}
+		parent, parentStore, err := autocloseLocate(bead.ParentID, store, home)
+		run.note(err)
 		if err == nil {
 			seen[parent.ID] = true
-			autocloseConvoyIfComplete(store, rec, parent, stdout)
+			autocloseConvoyIfCompleteAcross(parentStore, convoyChildStore(parentStore, store, homes), rec, parent, stdout, &run)
 		}
 	}
 
-	trackingConvoys, err := convoycore.TrackingConvoysForItem(store, beadID)
+	// store is the closed bead's store, which the autoclose callers hand over
+	// as the graph store: convoys are work class, so this read can miss them
+	// (typed-store design misroute #3; T9(d)).
+	trackingConvoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 	for _, convoy := range trackingConvoys {
 		if seen[convoy.ID] {
 			continue
 		}
 		seen[convoy.ID] = true
-		autocloseConvoyIfComplete(store, rec, convoy, stdout)
+		autocloseConvoyIfCompleteAcross(store, convoyChildStore(store, store, homes), rec, convoy, stdout, &run)
 	}
+	return run
 }
 
-func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
-	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
-		return
+// convoyChildStore is the second store a convoy in convoyStore has legacy
+// children in: the closed bead's own store when the convoy lives elsewhere
+// (a class row closed under a work convoy), else the class binding. nil when
+// that is the convoy's own store.
+func convoyChildStore(convoyStore, rowStore beads.Store, homes convoyAutocloseHomes) beads.Store {
+	other := homes.children
+	if !sameBeadStore(convoyStore, rowStore) {
+		other = rowStore
 	}
+	if other == nil || sameBeadStore(other, convoyStore) {
+		return nil
+	}
+	return other
+}
 
-	children, err := listConvoyChildren(store, convoy.ID, true)
-	if err != nil || len(children) == 0 {
-		return
+// convoyStillAutocloses is autoclose's premise about the convoy row itself.
+func convoyStillAutocloses(convoy beads.Bead) bool {
+	return convoy.Type == "convoy" && !convoycore.IsTerminalStatus(convoy.Status) && !hasLabel(convoy.Labels, "owned")
+}
+
+// closeCompletedConvoyAcross closes convoy, which lives in store, when it still
+// autocloses and every member is terminal, for the reactive autoclose and gc
+// convoy check alike. Its legacy children may also sit in childStore (nil, or
+// store itself: none elsewhere); a child in either store that is not terminal
+// keeps the convoy open. The row it decided from may be stale (a cached row; a
+// convoy labeled owned or closed by an operator since), so the close goes
+// through the autoclose fence, which re-reads the convoy live first. It
+// reports whether this call closed it; a fenced close that lost its CAS
+// returns errAutocloseRefused.
+func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead) (bool, error) {
+	if !convoyStillAutocloses(convoy) {
+		return false, nil
+	}
+	across := childStore != nil && !sameBeadStore(childStore, store)
+	var children []beads.Bead
+	var err error
+	if across {
+		// The convoy's own leg of a two-store child union: a legacy child
+		// that lives in childStore is counted below.
+		err = beads.FederatedRead(func() error {
+			var listErr error
+			children, listErr = listConvoyChildren(store, convoy.ID, true)
+			return listErr
+		})
+	} else {
+		children, err = listConvoyChildren(store, convoy.ID, true)
+	}
+	if err != nil {
+		return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 	}
 	for _, ch := range children {
 		if !convoycore.IsTerminalStatus(ch.Status) {
-			return
+			return false, nil
 		}
 	}
+	// The second store is read only once every child here is terminal: on
+	// the common path (an open sibling) it costs nothing.
+	if across {
+		var elsewhere []beads.Bead
+		// The second leg of the union: children that live in the convoy's
+		// own store were counted above. It states its tier, as every leg of
+		// a federation does (beads.FederatedReadTier): the class binding is
+		// the raw engine, with no policy layer to widen a TierIssues list,
+		// and an open ephemeral child it left out would close the convoy.
+		err := beads.FederatedRead(func() error {
+			var listErr error
+			elsewhere, listErr = childStore.List(beads.ListQuery{
+				ParentID:      convoy.ID,
+				IncludeClosed: true,
+				Sort:          beads.SortCreatedAsc,
+				TierMode:      beads.FederatedReadTier,
+			})
+			return listErr
+		})
+		if err != nil {
+			return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
+		}
+		for _, ch := range elsewhere {
+			if !convoycore.IsTerminalStatus(ch.Status) {
+				return false, nil
+			}
+		}
+		children = append(children, elsewhere...)
+	}
+	if len(children) == 0 {
+		return false, nil
+	}
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
+	})
+	if err != nil {
+		return false, fmt.Errorf("closing %s: %w", convoy.ID, err)
+	}
+	return closed, nil
+}
 
-	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
+// autocloseConvoyIfCompleteAcross closes convoy when it is complete, counting
+// its legacy children in childStore too (closeCompletedConvoyAcross; nil: in
+// store only), and announces the close.
+func autocloseConvoyIfCompleteAcross(store, childStore beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
+	closed, err := closeCompletedConvoyAcross(store, childStore, convoy)
+	run.note(err)
+	if err != nil || !closed {
 		return
 	}
 

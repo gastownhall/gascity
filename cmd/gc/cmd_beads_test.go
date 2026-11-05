@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestDoBeadsHealth_FileProvider(t *testing.T) {
@@ -448,46 +450,162 @@ func TestCmdBeadsShow_MissingID_DoesNotProbeAPIClient(t *testing.T) {
 	}
 }
 
-func TestRouteBeadsList_APIJSONIncludesCacheAge(t *testing.T) {
-	t.Setenv("GC_DEBUG", "0")
+// beadsTestRemoteClient builds the client a remote target (--city-url,
+// --context, GC_CITY_URL) gets, pointed at srv.
+func beadsTestRemoteClient(t *testing.T, srv *httptest.Server) *api.Client {
+	t.Helper()
+	c, err := api.NewRemoteCityScopedClient(srv.URL, "test-city", api.RemoteOptions{})
+	if err != nil {
+		t.Fatalf("NewRemoteCityScopedClient: %v", err)
+	}
+	return c
+}
+
+// beadsTestEnvelopeKeys decodes stdout as a JSON object and returns its keys.
+func beadsTestEnvelopeKeys(t *testing.T, stdout []byte) map[string]json.RawMessage {
+	t.Helper()
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(stdout, &out); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
+	}
+	return out
+}
+
+// TestRouteBeadsList_JSONEnvelopeOnlyForRemoteTargets pins the #8453 shape
+// contract: a local city prints the bare array on every route, the API route
+// included, and only a remote target prints the {beads,_cache_age_s} envelope.
+func TestRouteBeadsList_JSONEnvelopeOnlyForRemoteTargets(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
 	cityPath := writeBeadsTestCity(t)
 	srv := httptest.NewServer(okBeadsListHandler(t))
 	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeBeadsList(cityPath, c, "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	if code := routeBeadsList(cityPath, api.NewCityScopedClient(srv.URL, "test-city"), "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("local-target exit = %d, stderr=%q", code, stderr.String())
 	}
-	var out map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		t.Fatalf("unmarshal stdout: %v\n%s", err, stdout.String())
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("local-target run did not take the API route: %q", stderr.String())
 	}
-	if _, ok := out["_cache_age_s"]; !ok {
-		t.Errorf("_cache_age_s missing from API --json:\n%s", stdout.String())
+	var arr []beads.Bead
+	if err := json.Unmarshal(stdout.Bytes(), &arr); err != nil {
+		t.Fatalf("local-target API JSON must be a bare array: %v\n%s", err, stdout.String())
+	}
+	if len(arr) != 1 || arr[0].ID != "ga-abc" || strings.Contains(stdout.String(), "_cache_age_s") {
+		t.Fatalf("local-target API JSON = %s, want [ga-abc] without _cache_age_s", stdout.String())
 	}
 
-	// Fallback path must omit the envelope field.
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeBeadsList("", beadsTestRemoteClient(t, srv), "", "json", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remote exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("remote run did not take the API route: %q", stderr.String())
+	}
+	env := beadsTestEnvelopeKeys(t, stdout.Bytes())
+	if len(env) != 2 || env["beads"] == nil || string(env["_cache_age_s"]) != "2" {
+		t.Fatalf("remote JSON = %s, want exactly {beads, _cache_age_s: 2}", stdout.String())
+	}
+
 	stdout.Reset()
 	stderr.Reset()
 	if code := routeBeadsList(cityPath, nil, "controller-down", "json", beadFilters{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
 	}
-	// Fallback path writes a bare JSON array (writeBeadsJSON) — no envelope.
-	trimmed := strings.TrimSpace(stdout.String())
-	if !strings.HasPrefix(trimmed, "[") {
-		t.Errorf("fallback JSON must be a bare array, got:\n%s", stdout.String())
-	}
-	if strings.Contains(stdout.String(), "_cache_age_s") {
-		t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+	if trimmed := strings.TrimSpace(stdout.String()); !strings.HasPrefix(trimmed, "[") || strings.Contains(trimmed, "_cache_age_s") {
+		t.Fatalf("fallback JSON must be a bare array, got:\n%s", stdout.String())
 	}
 }
 
-func TestRouteBeadsList_StaleBannerOver30s(t *testing.T) {
+// TestRouteBeadsShow_JSONEnvelopeOnlyForRemoteTargets is the show twin: a local
+// city prints the bare object on the API route; a remote target keeps
+// {bead,_cache_age_s}.
+func TestRouteBeadsShow_JSONEnvelopeOnlyForRemoteTargets(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeBeadsTestCity(t)
+	srv := httptest.NewServer(okBeadsShowHandler(t))
+	defer srv.Close()
+
+	var stdout, stderr bytes.Buffer
+	if code := routeBeadsShow(cityPath, api.NewCityScopedClient(srv.URL, "test-city"), "", "ga-abc", "json", &stdout, &stderr); code != 0 {
+		t.Fatalf("local-target exit = %d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("local-target run did not take the API route: %q", stderr.String())
+	}
+	obj := beadsTestEnvelopeKeys(t, stdout.Bytes())
+	if string(obj["id"]) != `"ga-abc"` || obj["_cache_age_s"] != nil || obj["bead"] != nil {
+		t.Fatalf("local-target API JSON = %s, want the bare bead object", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := routeBeadsShow("", beadsTestRemoteClient(t, srv), "", "ga-abc", "json", &stdout, &stderr); code != 0 {
+		t.Fatalf("remote exit = %d, stderr=%q", code, stderr.String())
+	}
+	env := beadsTestEnvelopeKeys(t, stdout.Bytes())
+	if len(env) != 2 || env["bead"] == nil || string(env["_cache_age_s"]) != "3" {
+		t.Fatalf("remote JSON = %s, want exactly {bead, _cache_age_s: 3}", stdout.String())
+	}
+}
+
+// TestRouteBeadsList_PartialAPIAnswerFailsTheListing proves a partial answer
+// (the server could not read a rig's store) is an error naming the failed
+// store, not a silently shortened list, for local and remote targets alike.
+// Only a local target gets the remedy hint (gc doctor, then GC_NO_API=1 for a
+// stale supervisor view): a remote target has neither remedy on this host.
+func TestRouteBeadsList_PartialAPIAnswerFailsTheListing(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeBeadsTestCity(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":          []map[string]any{{"id": "ga-abc", "title": "survivor", "issue_type": "task", "status": "open"}},
+			"partial":        true,
+			"partial_errors": []string{"rig omega: ledger unreadable"},
+		})
+	}))
+	defer srv.Close()
+
+	clients := map[string]struct {
+		cityPath string
+		c        *api.Client
+		hint     bool
+	}{
+		"local-target": {cityPath, api.NewCityScopedClient(srv.URL, "test-city"), true},
+		"remote":       {"", beadsTestRemoteClient(t, srv), false},
+	}
+	for name, tc := range clients {
+		for _, format := range []string{"text", "json"} {
+			t.Run(name+"/"+format, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				if code := routeBeadsList(tc.cityPath, tc.c, "", format, beadFilters{}, &stdout, &stderr); code != 1 {
+					t.Fatalf("exit = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout = %q, want empty", stdout.String())
+				}
+				for _, want := range []string{"rig omega: ledger unreadable", "route=api reason=error"} {
+					if !strings.Contains(stderr.String(), want) {
+						t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+					}
+				}
+				for _, remedy := range []string{`hint: run "gc doctor" to find the broken store`, "GC_NO_API=1 gc beads list reads the stores directly"} {
+					if got := strings.Contains(stderr.String(), remedy); got != tc.hint {
+						t.Fatalf("stderr contains %q = %v, want %v; stderr=%q", remedy, got, tc.hint, stderr.String())
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRouteBeadsList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeBeadsTestCity(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
 	}))
@@ -498,8 +616,41 @@ func TestRouteBeadsList_StaleBannerOver30s(t *testing.T) {
 	if code := routeBeadsList(cityPath, c, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
+}
+
+// A supervisor that reports only X-GC-Cache-Age-S gets the conservative bound
+// of twice the slowest interval a cache has used (240 s), past which the
+// footer says the server does not report why.
+func TestRouteBeadsList_CacheAgeFooterFromAnOlderSupervisor(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeBeadsTestCity(t)
+	for _, tc := range []struct {
+		age, want string
+	}{
+		{"200", ""},
+		{"250", "(cache age: 250s — this read is over 240s old, and the server does not report why)\n"},
+	} {
+		t.Run(tc.age, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("X-GC-Cache-Age-S", tc.age)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 0})
+			}))
+			defer srv.Close()
+			c := api.NewCityScopedClient(srv.URL, "test-city")
+
+			var stdout, stderr bytes.Buffer
+			if code := routeBeadsList(cityPath, c, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+			}
+			if stderr.String() != tc.want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if strings.Contains(stdout.String(), "(cache age:") {
+				t.Errorf("stdout carries a cache-age footer:\n%s", stdout.String())
+			}
+		})
 	}
 }
 
@@ -701,6 +852,85 @@ func TestRun_BeadsListRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+// TestRun_UsageErrorsPrintShortPointerNotFullUsage locks issue #5359: every
+// flag/arg/command error path funnels through printCommandUsage, which used
+// to dump cmd.UsageString() in full (30+ lines, burying the actual error).
+// It now prints a single `Run "<path> --help" for usage.` pointer instead.
+func TestRun_UsageErrorsPrintShortPointerNotFullUsage(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantStderr  []string
+		notWantSubs []string
+	}{
+		{
+			name:       "unknown flag",
+			args:       []string{"mail", "list", "--definitely-invalid"},
+			wantStderr: []string{"gc: unknown flag: --definitely-invalid", `Run "gc mail --help" for usage.`},
+		},
+		{
+			name:       "unknown command",
+			args:       []string{"totally-bogus-command"},
+			wantStderr: []string{`gc: unknown command "totally-bogus-command"`, `Run "gc --help" for usage.`},
+		},
+		{
+			name:       "flag group validation error",
+			args:       []string{"mail", "send", "--to", "mayor", "--all", "hi"},
+			wantStderr: []string{"if any flags in the group", `Run "gc mail send --help" for usage.`},
+		},
+		{
+			name:       "--city empty value",
+			args:       []string{"--city="},
+			wantStderr: []string{"gc: --city and --rig require non-empty values", `Run "gc --help" for usage.`},
+		},
+		{
+			name:       "--rig empty value",
+			args:       []string{"--rig="},
+			wantStderr: []string{"gc: --city and --rig require non-empty values", `Run "gc --help" for usage.`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearGCEnv(t)
+			var out, errb bytes.Buffer
+			code := run(test.args, &out, &errb)
+			if code == 0 {
+				t.Fatalf("exit = 0, want non-zero; stderr = %q", errb.String())
+			}
+			for _, want := range test.wantStderr {
+				if !strings.Contains(errb.String(), want) {
+					t.Fatalf("stderr = %q, want it to contain %q", errb.String(), want)
+				}
+			}
+			// The full cobra usage block (flag listings, "Available Commands:",
+			// child command names) must no longer appear on error paths.
+			for _, notWant := range append([]string{"Available Commands:", "Flags:"}, test.notWantSubs...) {
+				if strings.Contains(errb.String(), notWant) {
+					t.Fatalf("stderr = %q, want it to NOT contain %q (full usage leaked)", errb.String(), notWant)
+				}
+			}
+		})
+	}
+}
+
+// TestRun_HelpStillPrintsFullUsage locks that --help (unlike error paths) is
+// untouched by #5359: it calls cmd.Help() directly and must keep showing the
+// full usage block, including the command's available flags and children.
+func TestRun_HelpStillPrintsFullUsage(t *testing.T) {
+	clearGCEnv(t)
+	var out, errb bytes.Buffer
+	code := run([]string{"mail", "--help"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("--help exit = %d, want 0; stderr = %q", code, errb.String())
+	}
+	combined := out.String() + errb.String()
+	for _, want := range []string{"Usage:", "Available Commands:", "gc mail"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("--help output = %q, want it to still contain %q", combined, want)
+		}
+	}
+}
+
 // TestRun_BeadsListHelpNotSwallowed locks that `gc beads list --help` now prints
 // help. DisableFlagParsing used to swallow --help (and `beads show --help` even
 // tried to resolve a bead literally named "--help").
@@ -758,5 +988,83 @@ func TestRun_BeadsShowRejectsExtraArgs(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "accepts at most 1 arg") {
 		t.Fatalf("stderr = %q, want an at-most-1-arg error", errb.String())
+	}
+}
+
+// TestBeadsListFallbackReadsTheRelocatedBinding is the ga-efyq4 regression on
+// the beads-list arm.
+//
+// The fan-out enumerates the city's DIRECTORIES, and a relocated class binding
+// is not one of them. On a migrated city that makes the list doubly wrong: the
+// binding's live rows are absent, and the copies `gc storage migrate` retained
+// in the work ledger — frozen at cutover, never mutated again — are printed in
+// their place. The reader cannot tell the two apart, because the migration
+// preserves ids and only the titles here differ.
+func TestBeadsListFallbackReadsTheRelocatedBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	frozen, err := work.Create(beads.Bead{Title: "the retained frozen copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the retained copy in the work store: %v", err)
+	}
+	_, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
+	mustCreateClassBead(t, classStore, beads.Bead{Title: "minted in the binding after the migration", Type: "task"})
+	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {
+		t.Fatalf("seeding the work-only control: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc beads list exited %d: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if got := strings.Count(out, "the binding's live row"); got != 1 {
+		t.Errorf("the binding's row appears %d times, want exactly 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "the retained frozen copy") {
+		t.Errorf("the list printed the frozen work copy of %s; the binding is the truth for reads:\n%s", frozen.ID, out)
+	}
+	if !strings.Contains(out, "a work bead the binding never held") {
+		t.Errorf("a work-only bead vanished from the list; the merge dropped rows the binding never claimed:\n%s", out)
+	}
+	// The discriminator between the two ways this can be broken. A bead the
+	// binding minted after the migration has no retained copy anywhere, so it
+	// survives a merge that picks the wrong winner and disappears only when the
+	// binding is not read at all.
+	if !strings.Contains(out, "minted in the binding after the migration") {
+		t.Errorf("a bead that exists only in the binding is missing; the fan-out never read it:\n%s", out)
+	}
+}
+
+// TestBeadsListFallbackWarnsEveryRunOnARefusedBinding pins the list surface's
+// half of the refusal policy.
+//
+// A list is a read, and a refused city still serves work from its work ledger,
+// so failing the whole command would take `gc beads list` away from every city
+// whose storage config is mid-repair. The rows the binding holds are missing
+// from that output, though, and a listing that silently omits them is the
+// stale-answer failure this lane exists to close — so the omission is said out
+// loud EVERY run. Not once per process: each `gc beads list` is a fresh answer
+// and has to carry its own caveat.
+func TestBeadsListFallbackWarnsEveryRunOnARefusedBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	work := workStoreFor(t, cityPath)
+	if _, err := work.Create(beads.Bead{Title: "a work bead the binding never held", Type: "task"}); err != nil {
+		t.Fatalf("seeding the work-only control: %v", err)
+	}
+	failClassBindingReads(t, cityPath, errors.New("the class binding is having a bad day"))
+
+	for run := 1; run <= 2; run++ {
+		var stdout, stderr bytes.Buffer
+		if code := doBeadsListFallback(cityPath, "", beadFilters{}, &stdout, &stderr); code != 0 {
+			t.Fatalf("run %d: a refused binding failed the whole list (exit %d); a refused city still serves work: %s", run, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "a work bead the binding never held") {
+			t.Errorf("run %d: the work ledger's own rows went missing:\n%s", run, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "bad day") {
+			t.Errorf("run %d: the refusal was not announced with its own cause: %q", run, stderr.String())
+		}
 	}
 }

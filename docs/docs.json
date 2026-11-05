@@ -149,6 +149,7 @@
         "pages": [
           "index",
           "getting-started/installation",
+          "getting-started/upgrading",
           "getting-started/quickstart",
           "getting-started/dashboard",
           "getting-started/how-gas-city-works",
@@ -191,6 +192,7 @@
               "guides/registry-showcase",
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
+              "guides/sharing-a-rig-store",
               "guides/connected-clients",
               "guides/multi-agent-engineering-environment"
             ]
@@ -213,7 +215,10 @@
             "group": "Operate",
             "pages": [
               "runbooks/managed-city-endpoints",
-              "runbooks/remote-hardened-city"
+              "runbooks/remote-hardened-city",
+              "runbooks/split-storage-classes",
+              "runbooks/dolt-compact",
+              "runbooks/events-mirror"
             ]
           }
         ]
@@ -246,7 +251,8 @@
               "reference/specs/pack-spec",
               "reference/specs/formula-spec-v1",
               "reference/specs/formula-spec-v2",
-              "reference/specs/service-protocol-v0"
+              "reference/specs/service-protocol-v0",
+              "reference/specs/identity-separator-contract-v1"
             ]
           },
           {

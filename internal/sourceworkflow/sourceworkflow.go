@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -66,14 +67,50 @@ const WorkflowSpecSidecarClosedReason = "workflow cleanup: generated spec sideca
 // validator; gc.outcome carries the semantic.
 const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed via skip directive"
 
+// RunCanceledCloseReason is the close_reason POST /runs/{id}/cancel stamps on
+// every open bead of the run's workflow subtrees it winds down, distinguishing
+// an operator cancel from a skip-directive teardown. It lives here, beside the
+// other subtree-close reasons, so a reader that must tell a controller close
+// from an operator close (dispatch's cross-store gates) can name it.
+const RunCanceledCloseReason = "run canceled via POST /runs/{id}/cancel"
+
+// HookSkipDoneWorkflowCloseReason is the close_reason `gc hook --claim`
+// stamps on every open bead under a workflow root (by gc.root_bead_id) whose
+// input convoy work is already terminal (cmd/gc skipDoneWorkflow, which keeps
+// its own copy; a cmd/gc test pins that the two agree).
+const HookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
+
+// StaleOrderWispCloseReason is the close_reason the order-tracking sweep
+// stamps on every bead of a stale order wisp subtree it closes (cmd/gc
+// closeStaleOrderWispIDs, which keeps its own copy; a cmd/gc test pins that
+// the two agree).
+const StaleOrderWispCloseReason = "order-tracking sweep: stale order wisp subtree exceeded retention window"
+
 // IsWorkflowRoot reports whether a bead is a source-workflow root. It must
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
 // legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.
 // Queries that only match one label miss graph.v2-only roots and allow
-// --force to spawn duplicates.
+// --force to spawn duplicates. A controller-owned row (a session row, a
+// startup-health episode, a convergence root) is never one, whatever marks
+// it carries: no workflow lookup, teardown or cancel takes it (architecture
+// B).
 func IsWorkflowRoot(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
+	return (strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)) &&
+		!coordclass.ControllerOwned(b)
+}
+
+// KeyedRoots lists the workflow roots (IsWorkflowRoot) carrying metadata
+// key=value, every match read (opts as ListByMetadata's): a lookup by an
+// idempotence key (gc.graphv2_root_key, a drain's item-root key) takes only
+// a root, so another bead carrying the key (a task's) neither stands in for
+// the root a launch would mint nor makes it ambiguous (architecture B).
+func KeyedRoots(store beads.MoleculeTarget, key, value string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	matches, err := store.ListByMetadata(map[string]string{key: value}, 0, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(matches, func(b beads.Bead) bool { return !IsWorkflowRoot(b) }), nil
 }
 
 func (e *ConflictError) Error() string {
@@ -99,6 +136,70 @@ func NormalizeSourceBeadID(sourceBeadID string) string {
 // NormalizeSourceStoreRef trims whitespace from a store ref for comparison.
 func NormalizeSourceStoreRef(sourceStoreRef string) string {
 	return strings.TrimSpace(sourceStoreRef)
+}
+
+// CanonicalSourceStoreRef returns the comparison form of a store ref inside
+// the city named cityName.
+//
+// A bare "city:" names this city's store. Callers that build the ref from
+// city.toml alone stamp and select that form when the city has no
+// [workspace] name, while gc renders the same store as "city:<name>" from the
+// effective city name (the city directory's basename when unnamed). Both
+// spellings mean the same store, so the bare form canonicalizes to
+// "city:<cityName>", falling back to "city:city" the same way gc renders an
+// unnamed city store. A ref naming another city keeps its name and stays
+// distinct. The name part of city and rig refs is trimmed, matching how the
+// store-ref resolver reads it. A bare "rig:" has no store to name and stays
+// as it is; other schemes are only whitespace-normalized.
+func CanonicalSourceStoreRef(sourceStoreRef, cityName string) string {
+	ref := NormalizeSourceStoreRef(sourceStoreRef)
+	scheme, name, ok := strings.Cut(ref, ":")
+	if !ok {
+		return ref
+	}
+	name = strings.TrimSpace(name)
+	switch scheme {
+	case "city":
+		if name == "" {
+			name = strings.TrimSpace(cityName)
+		}
+		if name == "" {
+			name = "city"
+		}
+		return "city:" + name
+	case "rig":
+		return "rig:" + name
+	default:
+		return ref
+	}
+}
+
+// SameSourceStoreRef reports whether two store refs name the same store inside
+// the city named cityName. See CanonicalSourceStoreRef. An empty ref names no
+// store and never matches.
+func SameSourceStoreRef(a, b, cityName string) bool {
+	canonical := CanonicalSourceStoreRef(a, cityName)
+	return canonical != "" && canonical == CanonicalSourceStoreRef(b, cityName)
+}
+
+// GraphStoreRefPrefix tags a city's relocated graph binding in a store ref, the
+// way "city" and "rig" tag a scope root. It is not a scope kind — graph roots
+// carry scope metadata of their own — only a store-identity tag, so a singleton
+// scan that consults both the binding and the city work store never conflates
+// them. internal/api mints and round-trips the same spelling for the workflow
+// snapshot scan (workflowGraphStoreRefPrefix), and this is that constant: one
+// spelling, or the store_ref a conflict reports cannot be parsed back.
+const GraphStoreRefPrefix = "graph"
+
+// GraphStoreRef returns the source-workflow store ref for a city's relocated
+// graph binding. An unnamed city falls back to "graph:city" so the ref is never
+// the bare prefix, which would parse as a scope-less sentinel.
+func GraphStoreRef(cityName string) string {
+	cityName = strings.TrimSpace(cityName)
+	if cityName == "" {
+		cityName = "city"
+	}
+	return GraphStoreRefPrefix + ":" + cityName
 }
 
 // LockScopeForStoreRef returns the filesystem scope used for source-workflow
@@ -145,6 +246,23 @@ func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath f
 // roots without SourceStoreRefMetadataKey are treated as belonging to the
 // store they physically live in (rootStoreRef).
 func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string) bool {
+	return workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+}
+
+// WorkflowMatchesSourceInCity is WorkflowMatchesSource with store refs
+// compared by SameSourceStoreRef inside the city named cityName, so a bare
+// "city:" on either side matches "city:<cityName>".
+func WorkflowMatchesSourceInCity(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) bool {
+	return workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+}
+
+func exactStoreRefs(a, b string) bool { return a == b }
+
+func cityStoreRefs(cityName string) func(a, b string) bool {
+	return func(a, b string) bool { return SameSourceStoreRef(a, b, cityName) }
+}
+
+func workflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) bool {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if sourceBeadID == "" {
 		return false
@@ -158,25 +276,36 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 	}
 	rootSourceStoreRef := NormalizeSourceStoreRef(root.Metadata[SourceStoreRefMetadataKey])
 	if rootSourceStoreRef != "" {
-		return rootSourceStoreRef == sourceStoreRef
+		return sameStoreRef(rootSourceStoreRef, sourceStoreRef)
 	}
 	rootStoreRef = NormalizeSourceStoreRef(rootStoreRef)
 	if rootStoreRef == "" {
 		return false
 	}
-	return rootStoreRef == sourceStoreRef
+	return sameStoreRef(rootStoreRef, sourceStoreRef)
 }
 
 // ListLiveRoots returns the live (not-closed) workflow roots in store that
 // belong to sourceBeadID, scoped to sourceStoreRef when set. The query
 // indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
 // legacy gc.kind=workflow roots and graph.v2-only roots are visible.
-func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+func ListLiveRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+}
+
+// ListLiveRootsInCity is ListLiveRoots with store refs compared by
+// SameSourceStoreRef inside the city named cityName (see
+// WorkflowMatchesSourceInCity).
+func ListLiveRootsInCity(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
+	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+}
+
+func listLiveRoots(store beads.MoleculeTarget, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
-	if store == nil || sourceBeadID == "" {
+	if store.Absent() || sourceBeadID == "" {
 		return nil, nil
 	}
-	roots, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	roots, err := beads.LiveFor(store).List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
 		},
@@ -188,7 +317,7 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 		if !IsWorkflowRoot(root) {
 			return true
 		}
-		return !WorkflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef)
+		return !workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, sameStoreRef)
 	})
 	slices.SortFunc(roots, func(a, b beads.Bead) int {
 		return strings.Compare(a.ID, b.ID)
@@ -375,12 +504,12 @@ func isStoreScopeSentinel(ref string) bool {
 // ListWorkflowBeads returns the root and all descendant beads tagged with
 // gc.root_bead_id=rootID (closed included). Used by CloseWorkflowSubtree
 // and force-replacement snapshot/restore.
-func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
+func ListWorkflowBeads(store beads.MoleculeTarget, rootID string) ([]beads.Bead, error) {
 	rootID = strings.TrimSpace(rootID)
-	if store == nil || rootID == "" {
+	if store.Absent() || rootID == "" {
 		return nil, nil
 	}
-	reader := beads.HandlesFor(store).Live
+	reader := beads.LiveFor(store)
 	root, err := reader.Get(rootID)
 	if err != nil {
 		return nil, err
@@ -410,12 +539,84 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	return out, nil
 }
 
+// maxNestedDrainDepth bounds WorkflowTree. Real drain nesting is a handful of
+// levels deep, so a deeper chain is a corrupt or cyclic link.
+const maxNestedDrainDepth = 16
+
+// WorkflowTreeNode is one workflow of a run tree: its root and the members
+// ListWorkflowBeads read for it, the root included.
+type WorkflowTreeNode struct {
+	Root    beads.Bead
+	Members []beads.Bead
+}
+
+// WorkflowTree returns the workflow rooted at rootID together with every drain
+// item workflow nested under it at any depth, closed ones included, each with
+// its members, deepest first and rootID's own workflow last. A drain item
+// workflow is a root of its own: its steps carry ITS id in gc.root_bead_id, so
+// ListWorkflowBeads(rootID) never reaches them. Its only link to the parent is
+// gc.drain_control_id, naming a drain control that is a member of the parent
+// workflow. Deepest-first is the order a terminal sweep must close them in, so
+// an interrupted sweep leaves the outer levels open for its retry to find. The
+// members are the walk's own reads, so a caller that needs them (to find the
+// work in progress, say) reads each workflow once.
+func WorkflowTree(store beads.MoleculeTarget, rootID string) ([]WorkflowTreeNode, error) {
+	rootID = strings.TrimSpace(rootID)
+	if store.Absent() || rootID == "" {
+		return nil, nil
+	}
+	reader := beads.LiveFor(store)
+	var out []WorkflowTreeNode
+	seen := map[string]bool{rootID: true}
+	var walk func(id string, depth int) error
+	walk = func(id string, depth int) error {
+		members, err := ListWorkflowBeads(store, id)
+		if err != nil {
+			return err
+		}
+		node := WorkflowTreeNode{Members: members}
+		for _, member := range members {
+			if member.ID == id {
+				node.Root = member
+			}
+			if depth >= maxNestedDrainDepth || member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+				continue
+			}
+			items, err := reader.List(beads.ListQuery{
+				IncludeClosed: true,
+				Metadata:      map[string]string{beadmeta.DrainControlIDMetadataKey: member.ID},
+			})
+			if err != nil {
+				return err
+			}
+			slices.SortFunc(items, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+			for _, item := range items {
+				// The unit convoys a drain creates carry the same link; only
+				// workflow roots are nested runs.
+				if !IsWorkflowRoot(item) || seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+				if err := walk(item.ID, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		out = append(out, node)
+		return nil
+	}
+	if err := walk(rootID, 0); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CloseWorkflowSubtree closes the root and every open descendant of a
 // workflow, marking each gc.outcome=skipped. It closes descendants before the
 // root and honors in-batch "blocks" dependencies so strict stores can close
 // workflow step chains without rejecting blocked-before-blocker order. Returns
 // the count of newly closed beads.
-func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
+func CloseWorkflowSubtree(store beads.MoleculeTarget, rootID string) (int, error) {
 	return CloseWorkflowSubtreeAs(store, rootID, beadmeta.OutcomeSkipped, WorkflowSubtreeClosedReason, nil)
 }
 
@@ -432,8 +633,21 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 // durably records the marker, so the caller's returned error is a retryable
 // signal that completes the wind-down rather than losing the intent. Returns
 // the count of newly closed beads.
-func CloseWorkflowSubtreeAs(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string) (int, error) {
-	ordered, err := orderedOpenWorkflowSubtree(store, rootID)
+func CloseWorkflowSubtreeAs(store beads.MoleculeTarget, rootID, outcome, reason string, rootExtra map[string]string) (int, error) {
+	return CloseWorkflowSubtreeAsExcept(store, rootID, outcome, reason, rootExtra, nil)
+}
+
+// CloseWorkflowSubtreeAsExcept is CloseWorkflowSubtreeAs with an exclusion
+// predicate: any member for which exclude reports true is left untouched, even
+// when it is otherwise open. A nil predicate closes the whole subtree, matching
+// CloseWorkflowSubtreeAs.
+//
+// The exclusion exists for members that stay executable after the workflow
+// reaches a terminal state — the teardown tail, which by contract runs after
+// the root settles or is canceled (see molecule.TeardownTailExclusion). Callers
+// own the policy; this function only skips.
+func CloseWorkflowSubtreeAsExcept(store beads.MoleculeTarget, rootID, outcome, reason string, rootExtra map[string]string, exclude func(beads.Bead) bool) (int, error) {
+	ordered, err := orderedOpenWorkflowSubtree(store, rootID, exclude)
 	if err != nil {
 		return 0, err
 	}
@@ -491,13 +705,14 @@ func CloseWorkflowSubtreeAs(store beads.Store, rootID, outcome, reason string, r
 // records the marker so a retry can complete the wind-down. Returns 1 if the root
 // was newly closed, 0 if it was already closed — matching CloseAll's count of
 // newly closed beads.
-func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]string) (int, error) {
-	if !beads.StoreSupportsAtomicTx(store) {
+func closeRootWithMarker(store beads.MoleculeTarget, rootID string, rootMeta map[string]string) (int, error) {
+	if atomic, ok := beads.As[beads.AtomicTxStore](store); !ok || !atomic.AtomicTx() {
 		return store.CloseAll([]string{rootID}, rootMeta)
 	}
 	// Re-read as close to the write as possible and skip an already-closed root,
-	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
-	// applies per id before it writes.
+	// so a concurrently finalized root is not re-stamped. CloseAll is no such
+	// guard: whether it stamps a closed id is store-specific (see the
+	// beads.Store CloseAll doc).
 	current, err := store.Get(rootID)
 	if err != nil {
 		return 0, err
@@ -520,8 +735,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 // rootID (root included) ordered deepest-descendant-first and then blocker-first
 // via closeorder.Order, so a strict store accepts the close batch and the root
 // sorts last. Closed beads are excluded so an already-terminal member keeps its
-// recorded outcome.
-func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, error) {
+// recorded outcome. A non-nil exclude also drops any member it reports true
+// for, even though it is open.
+func orderedOpenWorkflowSubtree(store beads.MoleculeTarget, rootID string, exclude func(beads.Bead) bool) ([]string, error) {
 	matched, err := ListWorkflowBeads(store, rootID)
 	if err != nil {
 		return nil, err
@@ -567,7 +783,14 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, err
 	})
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" {
+		// A controller-owned row (a session row, a startup-health episode,
+		// a convergence root) is never a workflow member to close, whatever
+		// gc.root_bead_id or gc.kind it carries: its owner closes it
+		// (mc-dkblm, architecture B).
+		if bead.ID == "" || bead.Status == "closed" || coordclass.ControllerOwned(bead) {
+			continue
+		}
+		if exclude != nil && exclude(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)
@@ -580,8 +803,8 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, err
 
 // CloseSpecSidecarsForRoot closes open generated spec sidecars owned by the
 // workflow root. It is safe to call after the root has already been closed.
-func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, error) {
-	if store == nil {
+func CloseSpecSidecarsForRoot(store beads.MoleculeTarget, rootID, reason string) (int, error) {
+	if store.Absent() {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
 	rootID = strings.TrimSpace(rootID)
@@ -593,7 +816,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 		reason = WorkflowSpecSidecarClosedReason
 	}
 
-	matched, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	matched, err := beads.LiveFor(store).List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey: rootID,
@@ -605,7 +828,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 	}
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) {
+		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) || coordclass.ControllerOwned(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)
@@ -627,8 +850,8 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 // CloseSpecSidecarsForClosedRoots closes generated spec sidecars whose owning
 // workflow root is already closed. It repairs residues left by older workflow
 // finalizers and source-bead close hooks.
-func CloseSpecSidecarsForClosedRoots(store beads.Store, reason string) (int, error) {
-	if store == nil {
+func CloseSpecSidecarsForClosedRoots(store beads.MoleculeTarget, reason string) (int, error) {
+	if store.Absent() {
 		return 0, fmt.Errorf("bead store unavailable")
 	}
 	specs, err := generatedSpecSidecarCandidates(store)
@@ -672,7 +895,7 @@ func CloseSpecSidecarsForClosedRoots(store beads.Store, reason string) (int, err
 	return closed, nil
 }
 
-func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
+func generatedSpecSidecarCandidates(store beads.MoleculeTarget) ([]beads.Bead, error) {
 	seen := map[string]struct{}{}
 	var out []beads.Bead
 	appendUnique := func(items []beads.Bead) {
@@ -688,7 +911,7 @@ func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
 		}
 	}
 
-	typed, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	typed, err := beads.LiveFor(store).List(beads.ListQuery{
 		Type:          "spec",
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
@@ -698,7 +921,7 @@ func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
 	}
 	appendUnique(typed)
 
-	marked, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	marked, err := beads.LiveFor(store).List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.KindMetadataKey: beadmeta.KindSpec},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
@@ -733,7 +956,7 @@ type WorkflowBeadSnapshot struct {
 // SnapshotOpenWorkflowBeads records the status/assignee/outcome of every
 // open bead in a workflow subtree, used to roll back a force-replacement
 // on finalize failure.
-func SnapshotOpenWorkflowBeads(store beads.Store, rootID string) ([]WorkflowBeadSnapshot, error) {
+func SnapshotOpenWorkflowBeads(store beads.MoleculeTarget, rootID string) ([]WorkflowBeadSnapshot, error) {
 	matched, err := ListWorkflowBeads(store, rootID)
 	if err != nil {
 		return nil, err
@@ -758,7 +981,7 @@ func SnapshotOpenWorkflowBeads(store beads.Store, rootID string) ([]WorkflowBead
 // RestoreWorkflowBeads re-applies a prior WorkflowBeadSnapshot set.
 // Continues past individual failures and joins them into one error so the
 // caller sees every restoration problem at once.
-func RestoreWorkflowBeads(store beads.Store, snapshots []WorkflowBeadSnapshot) error {
+func RestoreWorkflowBeads(store beads.MoleculeTarget, snapshots []WorkflowBeadSnapshot) error {
 	var restoreErr error
 	for _, snapshot := range snapshots {
 		if strings.TrimSpace(snapshot.ID) == "" {

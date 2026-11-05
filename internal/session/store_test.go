@@ -197,70 +197,75 @@ func TestGetReflectsApplyPatch(t *testing.T) {
 	}
 }
 
-// TestSleepEmitsSleepPatch proves the typed Sleep method emits exactly the bead
-// write that SleepPatch produces — the same write the reconciler raw op did.
+// TestSleepEmitsSleepPatch proves the typed Sleep method writes the row
+// SleepPatch produces, keeping an operator's user-hold intent and a wait's
+// intent the row carries (ApplySleep, D-J 3).
 func TestSleepEmitsSleepPatch(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingStore(t, b)
-
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
-		t.Fatalf("Sleep: %v", err)
-	}
-	calls := rec.CallsForOp("SetMetadataBatch")
-	if len(calls) != 1 {
-		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
-	}
-	want := map[string]string(SleepPatch(now, "idle-timeout"))
-	if !reflect.DeepEqual(calls[0].Metadata, want) {
-		t.Errorf("Sleep batch = %#v, want %#v", calls[0].Metadata, want)
+	for intent, want := range map[string]string{"": "", "idle-stop-pending": "", "user-hold": "user-hold", "wait-hold": "wait-hold"} {
+		b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active", "sleep_intent": intent})
+		is, _ := recordingStore(t, b)
+		if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
+			t.Fatalf("Sleep: %v", err)
+		}
+		got, err := is.Get("s-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.MetadataState != "asleep" || got.SleepReason != "idle-timeout" || got.SleptAt != now.Format(time.RFC3339) || got.SleepIntent != want {
+			t.Errorf("intent %q: state=%q sleep_reason=%q slept_at=%q sleep_intent=%q, want SleepPatch with sleep_intent %q",
+				intent, got.MetadataState, got.SleepReason, got.SleptAt, got.SleepIntent, want)
+		}
 	}
 }
 
-// TestSetWaitHoldClearWritesEmptyStrings proves clearing wait-hold emits the
-// empty-string writes the raw cmd_wait.go clear did.
+// TestSetWaitHoldClearWritesEmptyStrings proves clearing a wait hold writes
+// the WaitEnd cell's move, fenced on a fresh read: the wait and its own
+// intent, as empty strings, and no other key.
 func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "x"})
+	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "wait-hold"})
 	is, rec := recordingStore(t, b)
 
 	if err := is.SetWaitHold("s-1", false, ""); err != nil {
 		t.Fatalf("SetWaitHold: %v", err)
 	}
-	calls := rec.CallsForOp("SetMetadataBatch")
+	calls := rec.CallsForOp("Update")
 	if len(calls) != 1 {
-		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
+		t.Fatalf("want 1 Update, got %d", len(calls))
 	}
 	want := map[string]string{"wait_hold": "", "sleep_intent": ""}
-	if !reflect.DeepEqual(calls[0].Metadata, want) {
-		t.Errorf("clear batch = %#v, want %#v", calls[0].Metadata, want)
+	if !reflect.DeepEqual(calls[0].Opts.Metadata, want) {
+		t.Errorf("clear batch = %#v, want %#v", calls[0].Opts.Metadata, want)
 	}
 }
 
 // TestCloseEmitsClosePatchThenClose proves Close stamps ClosePatch metadata and
-// then closes the bead — the byte-identical replacement for closeBead's
-// SetMetadataBatch(ClosePatch)+Close, WITHOUT any work-reassignment side effect
-// (that is Phase 6).
+// then closes the bead, in one transaction on a store without the atomic
+// close (CommitClose), WITHOUT any work-reassignment side effect (that is
+// Phase 6).
 func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
 	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	closed, err := is.Close("s-1", "gc_swept", now)
+	closed, err := is.Close(infoFromPersistedBead(b), "gc_swept", now)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if !closed {
 		t.Fatalf("Close reported not-closed for an open bead")
 	}
-
-	gotOps := opsOf(rec.Calls())
-	wantOps := []string{"SetMetadataBatch", "Close"}
-	if !reflect.DeepEqual(gotOps, wantOps) {
-		t.Fatalf("Close ops = %v, want %v", gotOps, wantOps)
+	got, err := rec.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := map[string]string(ClosePatch(now, "gc_swept"))
-	if !reflect.DeepEqual(rec.CallsForOp("SetMetadataBatch")[0].Metadata, want) {
-		t.Errorf("close patch = %#v, want %#v", rec.CallsForOp("SetMetadataBatch")[0].Metadata, want)
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	for k, v := range ClosePatch(now, "gc_swept") {
+		if got.Metadata[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got.Metadata[k], v)
+		}
 	}
 }
 
@@ -269,7 +274,7 @@ func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", nil)
 	is, rec := recordingStore(t, b)
 
-	closed, err := is.Close("s-1", "gc_swept", time.Now())
+	closed, err := is.Close(infoFromPersistedBead(b), "gc_swept", time.Now())
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -352,6 +357,124 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	}
 }
 
+// TestSetCurrentClaimEmitsSingleKeySetMetadata proves SetCurrentClaim stamps the
+// claimed work-bead id as a single-key SetMetadata of
+// beadmeta.CurrentClaimBeadIDMetadataKey — the same shape as RecordCurrentBead,
+// and deliberately a DIFFERENT key so the self-claim lane and the reconciler's
+// wake-time assignment lane cannot clobber each other.
+func TestSetCurrentClaimEmitsSingleKeySetMetadata(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	is, rec := recordingStore(t, b)
+
+	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
+	if err != nil {
+		t.Fatalf("SetCurrentClaim: %v", err)
+	}
+	if !wrote {
+		t.Fatal("SetCurrentClaim reported no write for a fresh stamp")
+	}
+	c := rec.CallsForOp("SetMetadata")
+	if len(c) != 1 {
+		t.Fatalf("SetMetadata calls = %d, want 1 (ops=%v)", len(c), opsOf(rec.Calls()))
+	}
+	if c[0].ID != "s-1" || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "gcg-42" {
+		t.Errorf("SetCurrentClaim call = (%q,%q,%q), want (s-1,%q,gcg-42)",
+			c[0].ID, c[0].Key, c[0].Value, beadmeta.CurrentClaimBeadIDMetadataKey)
+	}
+	if c[0].Key == CurrentBeadIDKey {
+		t.Errorf("SetCurrentClaim wrote the reconciler's %q key", CurrentBeadIDKey)
+	}
+	if n := len(rec.CallsForOp("SetMetadataBatch")); n != 0 {
+		t.Errorf("SetCurrentClaim emitted %d batch writes, want a single-key write", n)
+	}
+}
+
+// TestSetCurrentClaimSkipsWhenUnchanged pins the idempotence guard: the claim
+// path re-stamps on every hook tick through its adoption branches, so an
+// already-current value must issue no write at all.
+func TestSetCurrentClaimSkipsWhenUnchanged(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
+	is, rec := recordingStore(t, b)
+
+	wrote, err := is.SetCurrentClaim("s-1", "gcg-42")
+	if err != nil {
+		t.Fatalf("SetCurrentClaim: %v", err)
+	}
+	if wrote {
+		t.Error("SetCurrentClaim reported a write for an unchanged value")
+	}
+	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
+		t.Errorf("unchanged stamp emitted %d writes, want 0", n)
+	}
+}
+
+// TestSetCurrentClaimClearsWithEmptyValue proves the release side of the stamp:
+// clearing writes an empty value through the same single-key op, so a session
+// that no longer owns work stops naming a bead it cannot close.
+func TestSetCurrentClaimClearsWithEmptyValue(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"})
+	is, rec := recordingStore(t, b)
+
+	if _, err := is.SetCurrentClaim("s-1", ""); err != nil {
+		t.Fatalf("SetCurrentClaim clear: %v", err)
+	}
+	c := rec.CallsForOp("SetMetadata")
+	if len(c) != 1 || c[0].Key != beadmeta.CurrentClaimBeadIDMetadataKey || c[0].Value != "" {
+		t.Fatalf("clear = %#v, want one SetMetadata(%s,\"\")", c, beadmeta.CurrentClaimBeadIDMetadataKey)
+	}
+	got, err := is.CurrentClaimBeadID("s-1")
+	if err != nil {
+		t.Fatalf("CurrentClaimBeadID: %v", err)
+	}
+	if got != "" {
+		t.Errorf("CurrentClaimBeadID after clear = %q, want empty", got)
+	}
+}
+
+// TestCurrentClaimBeadIDReadsTheStampedValue proves the read half of the
+// back-channel returns the stamped id verbatim, and empty when nothing is
+// stamped.
+func TestCurrentClaimBeadIDReadsTheStampedValue(t *testing.T) {
+	is, _ := recordingStore(t, sessionBeadFixture("s-1", "open",
+		map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: "gcg-42"}))
+	got, err := is.CurrentClaimBeadID("s-1")
+	if err != nil {
+		t.Fatalf("CurrentClaimBeadID: %v", err)
+	}
+	if got != "gcg-42" {
+		t.Errorf("CurrentClaimBeadID = %q, want gcg-42", got)
+	}
+
+	bare, _ := recordingStore(t, sessionBeadFixture("s-2", "open", nil))
+	got, err = bare.CurrentClaimBeadID("s-2")
+	if err != nil {
+		t.Fatalf("CurrentClaimBeadID (unstamped): %v", err)
+	}
+	if got != "" {
+		t.Errorf("CurrentClaimBeadID (unstamped) = %q, want empty", got)
+	}
+}
+
+// TestCurrentClaimRefusesANonSessionBead proves both halves route through
+// validatedBead: a present-but-non-session bead is refused with
+// ErrSessionNotFound BEFORE any write, so bd's fuzzy id resolver cannot redirect
+// the claim stamp onto a foreign bead.
+func TestCurrentClaimRefusesANonSessionBead(t *testing.T) {
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "wb-1", Status: "open", Title: "work"}}, nil)
+	rec := beadstest.NewRecordingStore(mem)
+	is := NewStore(beads.SessionStore{Store: rec})
+
+	if _, err := is.SetCurrentClaim("wb-1", "gcg-42"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("SetCurrentClaim on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+	if n := len(rec.CallsForOp("SetMetadata")); n != 0 {
+		t.Errorf("refused stamp still wrote %d times", n)
+	}
+	if _, err := is.CurrentClaimBeadID("wb-1"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("CurrentClaimBeadID on a non-session bead = %v, want ErrSessionNotFound", err)
+	}
+}
+
 // TestCloseWithoutReasonEmitsSingleClose proves CloseWithoutReason emits exactly
 // one Close op and no metadata write — byte-identical to closeBead's raw
 // store.Close(id) after it stamps ClosePatch separately.
@@ -372,8 +495,8 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 }
 
 // TestSetStatusOpenEmitsStatusOnlyUpdate proves SetStatusOpen emits exactly one
-// Update with only Status="open" set — byte-identical to the raw
-// store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
+// Update with Status="open" and the runtime lease clear (a reopened row holds
+// no lease), and nothing else.
 func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
 	is, rec := recordingStore(t, b)
@@ -392,8 +515,8 @@ func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	if c.Opts.Status == nil || *c.Opts.Status != "open" {
 		t.Errorf("Update Status = %v, want open", c.Opts.Status)
 	}
-	if c.Opts.Type != nil || c.Opts.Metadata != nil || c.Opts.Labels != nil {
-		t.Errorf("Update set fields beyond Status: %#v", c.Opts)
+	if c.Opts.Type != nil || c.Opts.Labels != nil || !reflect.DeepEqual(c.Opts.Metadata, map[string]string(RuntimeLeaseClearPatch())) {
+		t.Errorf("Update set fields beyond Status and the runtime lease clear: %#v", c.Opts)
 	}
 }
 
@@ -472,16 +595,17 @@ func TestCircuitResetGenerationSurfacesStoreError(t *testing.T) {
 }
 
 // TestPersistedMarkersReturnsVerbatimValues proves the typed read returns the
-// persisted session_name / continuation_epoch / sleep_reason metadata values
-// verbatim — equivalent to the raw store.Get(id) + read .Metadata[...] the
+// persisted session_name / continuation_epoch / sleep_reason /
+// continuation_reset_pending metadata values verbatim — equivalent to the raw store.Get(id) + read .Metadata[...] the
 // cmd_wait registration and retry/clear paths performed. It performs no bead
 // validation (matching the raw reads) and emits no mutating op.
 func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{
-		"__title":            "My Session",
-		"session_name":       "polecat-1",
-		"continuation_epoch": "4",
-		"sleep_reason":       "wait-hold",
+		"__title":                    "My Session",
+		"session_name":               "polecat-1",
+		"continuation_epoch":         "4",
+		"sleep_reason":               "wait-hold",
+		"continuation_reset_pending": "true",
 	})
 	is, rec := recordingStore(t, b)
 
@@ -490,10 +614,11 @@ func TestPersistedMarkersReturnsVerbatimValues(t *testing.T) {
 		t.Fatalf("PersistedMarkers: %v", err)
 	}
 	want := PersistedMarkers{
-		Title:             "My Session",
-		SessionName:       "polecat-1",
-		ContinuationEpoch: "4",
-		SleepReason:       "wait-hold",
+		Title:                    "My Session",
+		SessionName:              "polecat-1",
+		ContinuationEpoch:        "4",
+		SleepReason:              "wait-hold",
+		ContinuationResetPending: "true",
 	}
 	if got != want {
 		t.Errorf("PersistedMarkers = %#v, want %#v (the raw read values)", got, want)
@@ -641,5 +766,20 @@ func TestUpdateMetadataInfoFailedWritePersistsNothingAndReturnsInputUnchanged(t 
 		if v := after.Metadata[k]; v != "" {
 			t.Errorf("durable row key %q = %q after failed Update, want unset (all-or-nothing)", k, v)
 		}
+	}
+}
+
+// TestStoreBacked: a front door over a store is backed; a nil door and a door
+// over the zero handle are not.
+func TestStoreBacked(t *testing.T) {
+	if !NewStore(beadstest.Sessions(beads.NewMemStore())).Backed() {
+		t.Error("a door over a store reports unbacked")
+	}
+	if NewStore(beads.SessionStore{}).Backed() {
+		t.Error("a door over the zero handle reports backed")
+	}
+	var nilDoor *Store
+	if nilDoor.Backed() {
+		t.Error("a nil door reports backed")
 	}
 }

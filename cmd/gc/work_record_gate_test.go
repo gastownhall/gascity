@@ -124,6 +124,17 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindRun}},
 			want: false,
 		},
+		{
+			name: "workflow step with step metadata is not gated",
+			bead: beads.Bead{
+				Type: "task",
+				Metadata: map[string]string{
+					beadmeta.StepIDMetadataKey:  "mol-do-work.drain",
+					beadmeta.StepRefMetadataKey: "mol-do-work.drain",
+				},
+			},
+			want: false,
+		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
 	}
@@ -161,6 +172,8 @@ func TestWorkRecordCloseTargets(t *testing.T) {
 	}{
 		{"close subcommand", []string{"close", "wr-1"}, []string{"wr-1"}, true},
 		{"close multiple", []string{"close", "wr-1", "wr-2"}, []string{"wr-1", "wr-2"}, true},
+		{"close with reason", []string{"close", "wr-1", "--reason", "Done: x"}, []string{"wr-1"}, true},
+		{"close with -r", []string{"close", "wr-1", "-r", "Done: x"}, []string{"wr-1"}, true},
 		{"update status=closed", []string{"update", "wr-1", "--status=closed"}, []string{"wr-1"}, true},
 		{"update --status closed", []string{"update", "wr-1", "--status", "closed"}, []string{"wr-1"}, true},
 		{"update -s closed", []string{"update", "wr-1", "-s", "closed"}, []string{"wr-1"}, true},
@@ -211,6 +224,9 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
+		// mol-do-work stamps the record with a plain update, then closes with a reason.
+		{"no-op close with reason passes", []string{"close", "wr-noop", "--reason", "No-op: already satisfied"}, true, false, ""},
+		{"close with reason is still gated", []string{"close", "wr-missing", "--reason", "Done: x"}, true, true, "close of wr-missing"},
 		{"update --status=closed is gated", []string{"update", "wr-shipped-nocommit", "--status=closed"}, true, true, "close of wr-shipped-nocommit"},
 		{
 			"atomic update validates submitted metadata",
@@ -321,7 +337,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr strings.Builder
-			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), tc.enforce, &stderr)
+			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, workRecordRepoDirs{legacy: t.TempDir()}, tc.enforce, &stderr)
 			if block != tc.wantBlock {
 				t.Fatalf("block = %v, want %v; stderr=%s", block, tc.wantBlock, stderr.String())
 			}
@@ -368,7 +384,7 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 		"--status=closed",
 	}
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, store, nil, workRecordRepoDirs{legacy: repoDir}, true, &stderr); block {
 		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -392,7 +408,7 @@ func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
 		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 	}
 	var stderr strings.Builder
-	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, t.TempDir(), true, &stderr)
+	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, workRecordRepoDirs{legacy: t.TempDir()}, true, &stderr)
 	if !block {
 		t.Fatalf("expected block=true for shipped-without-commit, got false; stderr=%s", stderr.String())
 	}

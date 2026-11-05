@@ -114,7 +114,7 @@ func TestReapClosedBeadWorktrees_ReapsIdleNestedWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true}) // scanned, but no live cwds
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-idle01" {
 		t.Fatalf("Reaped = %+v, want exactly ga-idle01\nstderr:\n%s", report.Reaped, stderr.String())
@@ -141,7 +141,7 @@ func TestReapClosedBeadWorktrees_ProtectsLiveWorktree(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(wt)}})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a live worktree\nstderr:\n%s", report.Reaped, stderr.String())
@@ -165,7 +165,7 @@ func TestReapClosedBeadWorktrees_ProtectsViaActiveSessionDir(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true}) // no live cwds
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, []string{wt}, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, []string{wt}, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when an active session claims the worktree", report.Reaped)
@@ -189,7 +189,7 @@ func TestReapClosedBeadWorktrees_FailsClosedWhenLivenessUnavailable(t *testing.T
 	injectLiveness(t, liveWorktreeState{scanned: false}) // liveness indeterminate
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when liveness scan is unavailable (fail closed)", report.Reaped)
@@ -213,7 +213,7 @@ func TestReapClosedBeadWorktrees_DryRunRemovesNothing(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, true, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, true, events.Discard, nil, &stderr)
 
 	if !report.DryRun {
 		t.Fatal("report.DryRun = false, want true")
@@ -229,6 +229,86 @@ func TestReapClosedBeadWorktrees_DryRunRemovesNothing(t *testing.T) {
 	}
 }
 
+// TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot locks in
+// the other half of ga-1xaqgo.1: now that discoverWorktreeLiveness (used by
+// this function) reports liveness for every worktree git knows about,
+// including ones outside .gc/worktrees, the reaper's own scope restriction
+// must still keep such a worktree completely untouched — not reaped, and not
+// even listed as protected, since it was never a candidate this rig owns.
+func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	// Mirrors a worktree Claude Code's own EnterWorktree tool would create:
+	// registered with git, but outside any .gc/worktrees convention.
+	foreign := filepath.Join(t.TempDir(), ".claude", "worktrees", "some-session")
+	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
+		t.Fatalf("mkdir foreign worktree parent: %v", err)
+	}
+	mustGit(t, rigRoot, "worktree", "add", "-b", "foreign-branch", foreign)
+	store := beads.NewMemStoreFrom(1, nil, nil) // no beads — the foreign worktree names none
+	cfg := reapTestConfig(rigRoot)
+	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(foreign)}})
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+
+	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
+		t.Fatalf("reaper acted on or reported a worktree outside its owned root: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("foreign worktree %s was removed or unstattable: %v", foreign, err)
+	}
+}
+
+// TestReapClosedBeadWorktrees_UnrelatedStashDoesNotBlock is the reaper mirror
+// of TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock: a real-git
+// regression test for the repo-global stash aliasing bug (ga-pyp2oh).
+// refs/stash lives in the shared git-common-dir, not per-worktree, so
+// `git stash list` answered "does anyone in this repo have a stash", never
+// "does this worktree" — and `git worktree remove` never touches the shared
+// refs the stash lives in, so that worktree's own stashed work was never at
+// risk either way. The reaper no longer probes stashes at all; this proves an
+// unrelated stash elsewhere in the shared repo does not protect an otherwise
+// reapable worktree.
+func TestReapClosedBeadWorktrees_UnrelatedStashDoesNotBlock(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+
+	// A stash rooted at the rig root — some unrelated agent session having
+	// stashed work anywhere in the shared repo.
+	if err := os.WriteFile(filepath.Join(rigRoot, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatalf("write wip file: %v", err)
+	}
+	mustGit(t, rigRoot, "add", "wip.txt")
+	mustGit(t, rigRoot, "stash")
+
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-stsh01")
+
+	// Sanity: prove the aliasing precondition. The stash created at rigRoot
+	// must be visible from the worktree too, or this test proves nothing
+	// about the bug.
+	if out := runGit(t, wt, "stash", "list"); strings.TrimSpace(out) == "" {
+		t.Fatalf("test setup invalid: rig-root stash not visible from %s — aliasing precondition not met", wt)
+	}
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-stsh01", Status: "closed"}}, nil)
+	cfg := reapTestConfig(rigRoot)
+	injectLiveness(t, liveWorktreeState{scanned: true}) // scanned, but no live cwds
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+
+	for _, p := range report.Protected {
+		if strings.Contains(p.Reason, "unsafe git state") {
+			t.Errorf("worktree protected by the git-safety gate merely because an unrelated stash exists elsewhere in the shared repo: %+v", p)
+		}
+	}
+	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-stsh01" {
+		t.Fatalf("Reaped = %+v, want exactly ga-stsh01\nProtected: %+v\nstderr:\n%s", report.Reaped, report.Protected, stderr.String())
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree %s still present after reap (stat err=%v)", wt, err)
+	}
+}
+
 // TestReapClosedBeadWorktrees_SkipsOpenBead confirms a worktree whose bead is
 // still open is untouched and not reported as reaped or protected.
 func TestReapClosedBeadWorktrees_SkipsOpenBead(t *testing.T) {
@@ -239,7 +319,7 @@ func TestReapClosedBeadWorktrees_SkipsOpenBead(t *testing.T) {
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("open bead touched: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)

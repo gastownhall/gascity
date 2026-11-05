@@ -62,7 +62,17 @@ func (s listErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 type deleteTrackStore struct {
 	*beads.MemStore
 	failDelete map[string]error
-	deleted    []string
+	// getErrors injects a live-read failure for a specific ID so tests can
+	// exercise the pre-delete re-verify's error branch.
+	getErrors map[string]error
+	deleted   []string
+}
+
+func (s *deleteTrackStore) Get(id string) (beads.Bead, error) {
+	if err, ok := s.getErrors[id]; ok {
+		return beads.Bead{}, err
+	}
+	return s.MemStore.Get(id)
 }
 
 func (s *deleteTrackStore) Delete(id string) error {
@@ -262,6 +272,156 @@ func TestCountReadMessagesBefore_LimitCapsCount(t *testing.T) {
 	}
 }
 
+// unreadMailSeed builds an open message bead without the "read" label.
+func unreadMailSeed(id string, createdAt time.Time) beads.Bead {
+	return readMailSeed(id, createdAt, func(b *beads.Bead) { b.Labels = nil })
+}
+
+func TestCountUnreadMessagesBefore_CountsWithoutMutating(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+	fresh := now.Add(time.Minute)
+
+	seed := []beads.Bead{
+		unreadMailSeed("old-1", old),
+		unreadMailSeed("old-2", old),
+		unreadMailSeed("fresh", fresh),
+		readMailSeed("read", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+
+	// No mutation: every seeded bead is still open.
+	for _, id := range []string{"old-1", "old-2", "fresh", "read"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "open" {
+			t.Errorf("%s status = %q, count must not mutate", id, b.Status)
+		}
+	}
+}
+
+func TestCountUnreadMessagesBefore_LimitCapsCount(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+	seed := []beads.Bead{
+		unreadMailSeed("old-1", old),
+		unreadMailSeed("old-2", old),
+		unreadMailSeed("old-3", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2 (limit)", count)
+	}
+}
+
+func TestSweepUnreadMessagesBefore_PerBeadCloseErrorIsCollected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+
+	// good is older so the created_asc sweep visits it first; both are aged.
+	seed := []beads.Bead{
+		unreadMailSeed("good", old.Add(-time.Minute)),
+		unreadMailSeed("bad", old),
+	}
+	base := beads.NewMemStoreFrom(100, seed, nil)
+	store := closeErrStore{MemStore: base, failClose: map[string]error{"bad": errors.New("close boom")}}
+	mailStore := beads.MailStore{Store: store}
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 0, UnreadRetentionSweepCloseReason)
+	if listErr != nil {
+		t.Fatalf("unexpected list error: %v", listErr)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 (good only)", closed)
+	}
+	if len(closeErrs) != 1 {
+		t.Fatalf("closeErrs = %v, want exactly one", closeErrs)
+	}
+	if got := closeErrs[0].Error(); !strings.Contains(got, "bad") || !strings.Contains(got, "close boom") {
+		t.Fatalf("closeErrs[0] = %q, want it to name the bead and the close failure", got)
+	}
+}
+
+func TestSweepUnreadMessagesBefore_ListErrorIsFatal(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := listErrStore{MemStore: beads.NewMemStore(), err: errors.New("store down")}
+	mailStore := beads.MailStore{Store: store}
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 0, UnreadRetentionSweepCloseReason)
+	if listErr == nil {
+		t.Fatal("expected fatal list error")
+	}
+	if closed != 0 || len(closeErrs) != 0 {
+		t.Fatalf("closed=%d closeErrs=%v, want zero on list failure", closed, closeErrs)
+	}
+}
+
+// TestSweepUnreadMessagesBefore_OlderReadBeadsDoNotStarveUnread guards the
+// candidate query against applying limit before the in-memory "read"
+// exclusion: three aged open read beads older than the only aged unread bead
+// must not fill a limit=3 fetch window and hide the unread bead from the sweep.
+func TestSweepUnreadMessagesBefore_OlderReadBeadsDoNotStarveUnread(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Hour)
+	seed := []beads.Bead{
+		readMailSeed("read-1", old.Add(-3*time.Minute)),
+		readMailSeed("read-2", old.Add(-2*time.Minute)),
+		readMailSeed("read-3", old.Add(-time.Minute)),
+		unreadMailSeed("unread", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 3)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1 (unread bead must not be starved)", count)
+	}
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 3, UnreadRetentionSweepCloseReason)
+	if listErr != nil || len(closeErrs) != 0 {
+		t.Fatalf("sweep listErr=%v closeErrs=%v", listErr, closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	got, err := store.Get("unread")
+	if err != nil {
+		t.Fatalf("Get(unread): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("unread status = %q, want closed", got.Status)
+	}
+	for _, id := range []string{"read-1", "read-2", "read-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "open" {
+			t.Errorf("%s status = %q, unread sweep must not close read mail", id, b.Status)
+		}
+	}
+}
+
 func TestPurgeReadMessageWisps_DeletesAgedReadWisps(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.Add(-time.Hour)
@@ -298,6 +458,125 @@ func TestPurgeReadMessageWisps_DeletesAgedReadWisps(t *testing.T) {
 		if _, err := store.Get(id); err != nil {
 			t.Errorf("%s should be preserved: %v", id, err)
 		}
+	}
+}
+
+// staleListStore returns a fixed, caller-supplied snapshot from List
+// regardless of the underlying store's current state, modeling a
+// CachingStore whose enumeration answers from a stale cached view while
+// Get/Delete (via the embedded store) stay live. This lets tests put List and
+// Get/Delete out of sync the way a real cache-window race would.
+type staleListStore struct {
+	*deleteTrackStore
+	snapshot []beads.Bead
+}
+
+func (s *staleListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return s.snapshot, nil
+}
+
+// TestPurgeReadMessageWisps_SkipsMessageUnreadAfterSnapshot is the regression
+// test for ra-nxppyo: the candidate List() can answer from the CachingStore's
+// stale view. A message the user un-read inside the cache window — after the
+// read:true snapshot was taken but before the purge sweep reaches it — must
+// not be destructively deleted on the strength of that stale snapshot.
+func TestPurgeReadMessageWisps_SkipsMessageUnreadAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "unread-after-snapshot", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	// Simulate the user un-reading the message inside the cache window: the
+	// live store now disagrees with the stale read:true snapshot List returns.
+	if err := underlying.Update("unread-after-snapshot", beads.UpdateOpts{
+		RemoveLabels: []string{"read"},
+		Metadata:     map[string]string{mail.ReadMetadataKey: "false"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (message was un-read after the snapshot)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
+	}
+	if _, err := underlying.Get("unread-after-snapshot"); err != nil {
+		t.Fatalf("message should be preserved: %v", err)
+	}
+}
+
+// TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot asserts a candidate
+// that no longer exists live (deleted by a concurrent path between the
+// snapshot and this sweep) is skipped rather than erroring the whole sweep.
+func TestPurgeReadMessageWisps_SkipsMessageGoneAfterSnapshot(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "gone-after-snapshot", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{MemStore: beads.NewMemStoreFrom(100, seed, nil), failDelete: map[string]error{}}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	// Simulate a concurrent delete inside the cache window: the live store no
+	// longer has the bead the stale snapshot still lists.
+	if err := underlying.MemStore.Delete("gone-after-snapshot"); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (message already gone)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
+	}
+}
+
+// TestPurgeReadMessageWisps_SurfacesLiveRecheckError asserts that a transient
+// live-read failure during the pre-delete re-verify is reported rather than
+// silently swallowed as "already gone" — and still never deletes.
+func TestPurgeReadMessageWisps_SurfacesLiveRecheckError(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-time.Hour)
+	aged := now.Add(-2 * time.Hour)
+
+	seed := []beads.Bead{
+		{ID: "boom", Type: "message", Status: "open", CreatedAt: aged, Labels: []string{"read"}, Metadata: map[string]string{mail.ReadMetadataKey: "true"}, Ephemeral: true},
+	}
+	underlying := &deleteTrackStore{
+		MemStore:   beads.NewMemStoreFrom(100, seed, nil),
+		failDelete: map[string]error{},
+		getErrors:  map[string]error{"boom": errors.New("backend down")},
+	}
+	store := &staleListStore{deleteTrackStore: underlying, snapshot: seed}
+
+	mailStore := beads.MailStore{Store: store}
+	purged, err := PurgeReadMessageWisps(mailStore, cutoff)
+	if err == nil {
+		t.Fatal("PurgeReadMessageWisps: want error, got nil (a live-read failure must not be swallowed)")
+	}
+	if purged != 0 {
+		t.Fatalf("purged = %d, want 0 (live re-verify failed)", purged)
+	}
+	if len(underlying.deleted) != 0 {
+		t.Fatalf("deleted = %v, want none", underlying.deleted)
 	}
 }
 
@@ -376,7 +655,7 @@ func TestIsMessageBead(t *testing.T) {
 // silently diverge the retention path from the read path.
 func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "aged", "read long ago")
 	if err != nil {
@@ -455,6 +734,67 @@ func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
 	}
 	if _, err := p.Reply(removed.ID, "bob", "too late", "must not create"); !errors.Is(err, mail.ErrNotFound) {
 		t.Errorf("Reply(non-retention closed) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestRetentionSweptUnreadMailStaysAddressable is the unread twin of
+// TestRetentionSweptReadMailStaysAddressableUntilPurge. It guards the same
+// isRemovedMessageBead drift on the unread arm: SweepUnreadMessagesBefore
+// closes never-read mail past its (much longer) TTL stamping
+// UnreadRetentionSweepCloseReason, and during that closed state the message
+// must stay addressable by direct ID exactly as read-swept mail does. Unlike
+// the read path there is no purge arm behind it, so "stays addressable" here
+// has no "until purge" bound.
+func TestRetentionSweptUnreadMailStaysAddressable(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+
+	sent, err := p.Send("alice", "bob", "aged", "never read by anyone")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// Deliberately no p.Read: this bead never carries the "read" label, which
+	// is why the read-mail sweep can never be its collector.
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(
+		beads.MailStore{Store: store}, time.Now().Add(time.Hour), 0, UnreadRetentionSweepCloseReason)
+	if listErr != nil {
+		t.Fatalf("sweep list error: %v", listErr)
+	}
+	if len(closeErrs) != 0 {
+		t.Fatalf("sweep per-bead errors: %v", closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("swept %d beads, want 1", closed)
+	}
+
+	raw, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get after sweep: %v", err)
+	}
+	if raw.Status != "closed" || raw.Metadata["close_reason"] != UnreadRetentionSweepCloseReason {
+		t.Fatalf("swept bead status=%q close_reason=%q, want closed / %q",
+			raw.Status, raw.Metadata["close_reason"], UnreadRetentionSweepCloseReason)
+	}
+
+	// Unread-retention-swept mail stays addressable by direct ID.
+	if _, err := p.Get(sent.ID); err != nil {
+		t.Errorf("Get(unread-retention-swept) = %v, want addressable", err)
+	}
+	if _, err := p.Read(sent.ID); err != nil {
+		t.Errorf("Read(unread-retention-swept) = %v, want addressable", err)
+	}
+
+	// But it is retired from the active list views, which gate on open status
+	// — the whole point of the sweep.
+	inbox, err := p.Inbox("bob")
+	if err != nil {
+		t.Fatalf("Inbox after sweep: %v", err)
+	}
+	for _, m := range inbox {
+		if m.ID == sent.ID {
+			t.Errorf("Inbox surfaced unread-retention-swept message %q", sent.ID)
+		}
 	}
 }
 

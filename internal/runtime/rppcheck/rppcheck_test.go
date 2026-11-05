@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -589,4 +591,148 @@ func TestRun_ExecutableNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run with missing executable should error")
 	}
+}
+
+// The following RequireNudge tests express FR5 (ga-s5y62b.2): a pack can
+// declare prompt_delivery = "nudge-fallback" on a runtime, but nothing
+// verifies the claim is true. RequireNudge lets a caller that has
+// independently determined nudge support is required — e.g. cmd/gc, for a
+// runtime declaring that strategy — escalate the nudge probe from an
+// optional SKIP-on-absence check to a FAIL-on-absence one.
+
+func TestRun_RequireNudgeFailsWhenNudgeUnimplemented(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, minimalScript(state), Options{RequireNudge: true})
+
+	if !res.Failed() {
+		t.Fatal("Failed() = false, want true when RequireNudge is set and nudge is unimplemented")
+	}
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusFail {
+		t.Errorf("required: nudge = %s (%s), want FAIL", c.Status, c.Detail)
+	}
+	if hasCheck(res, "optional: nudge") {
+		t.Error("optional: nudge should not appear when RequireNudge is set")
+	}
+}
+
+func TestRun_RequireNudgeFailsWhenNudgeErrors(t *testing.T) {
+	state := t.TempDir()
+	body := strings.Replace(conformantScript(state),
+		"nudge)             cat > /dev/null ;;",
+		`nudge)             echo "boom" >&2; exit 1 ;;`, 1)
+	res := runScript(t, body, Options{RequireNudge: true})
+
+	if !res.Failed() {
+		t.Fatal("Failed() = false, want true when RequireNudge is set and nudge errors")
+	}
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusFail {
+		t.Errorf("required: nudge = %s (%s), want FAIL", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "boom") {
+		t.Errorf("nudge failure detail %q should include script stderr", c.Detail)
+	}
+}
+
+func TestRun_RequireNudgePassesWhenNudgeWorks(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, conformantScript(state), Options{RequireNudge: true})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true for conformant script with RequireNudge: %+v", res.Checks)
+	}
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusPass {
+		t.Errorf("required: nudge = %s (%s), want PASS", c.Status, c.Detail)
+	}
+	if hasCheck(res, "optional: nudge") {
+		t.Error("optional: nudge should not appear when RequireNudge is set")
+	}
+}
+
+func TestRun_RequireNudgeStartFailureSkipsWithRequiredName(t *testing.T) {
+	state := t.TempDir()
+	body := strings.Replace(conformantScript(state),
+		`start)             cat > /dev/null; touch "$state/$name.running"`,
+		`start)             echo "boom" >&2; exit 1`, 1)
+	res := runScript(t, body, Options{RequireNudge: true})
+
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusSkip {
+		t.Errorf("required: nudge = %s (%s), want SKIP when start fails", c.Status, c.Detail)
+	}
+	if hasCheck(res, "optional: nudge") {
+		t.Error("optional: nudge should not appear when RequireNudge is set, even after a start failure")
+	}
+}
+
+// observeReference writes the runtimecontract golden reference, which
+// declares observe.v1, with bodies overriding its ops.
+func observeReference(t *testing.T, bodies map[string]string) string {
+	t.Helper()
+	all := reference.Bodies()
+	for op, body := range bodies {
+		all[op] = body
+	}
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), all)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Kills a smoke check that does not run, or does not gate, the observe.v1
+// ops a script declares: the golden passes all four; a script whose
+// observe, inventory, kill-object or post-stop observe misbehaves fails
+// exactly that check.
+func TestRun_ObserveV1Smoke(t *testing.T) {
+	checks := []string{observeCheck, inventoryCheck, killObjectCheck, observeAbsentCheck}
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range checks {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	for check, bodies := range map[string]map[string]string{
+		observeCheck:                       {"observe": `exit 2`},
+		observeCheck + " (no object)":      {"observe": `cat >/dev/null; if [ -d "$box" ]; then echo '{"state":"running","identity":null}'; else echo '{"state":"absent"}'; fi`},
+		inventoryCheck + " (not complete)": {"inventory": `printf '{"complete":false,"sessions":[{"name":"%s","state":"running","object":{"id":"a","created":"b"}}]}' "$(basename "$B"/*)"`},
+		inventoryCheck:                     {"inventory": `echo '{"complete":true,"sessions":[]}'`},
+		killObjectCheck:                    {"kill-object": `cat >/dev/null; echo killed`},
+		observeAbsentCheck:                 {"stop": `if [ -d "$box" ]; then : > "$box/stopped"; fi`, "is-running": `if [ -d "$box" ] && [ ! -f "$box/stopped" ]; then echo true; else echo false; fi`},
+	} {
+		res, err := Run(context.Background(), observeReference(t, bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, strings.SplitN(check, " (", 2)[0]); c.Status != StatusFail {
+			t.Errorf("mutant for %s: %s (%s), want FAIL", check, c.Status, c.Detail)
+		}
+	}
+}
+
+// A script declaring observe.v1 whose start fails reports the observe.v1
+// checks as skipped, so the report carries the full check set.
+func TestRun_ObserveV1ChecksSkippedWhenStartFails(t *testing.T) {
+	res, err := Run(context.Background(), observeReference(t, map[string]string{"start": `cat >/dev/null; exit 1`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{observeCheck, inventoryCheck, killObjectCheck, observeAbsentCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusSkip {
+			t.Errorf("%s = %s, want SKIP after a failed start", name, c.Status)
+		}
+	}
+	if hasCheck(minimalResult(t), observeCheck) {
+		t.Error("a script without observe.v1 reports observe.v1 checks")
+	}
+}
+
+func minimalResult(t *testing.T) Result {
+	t.Helper()
+	return runScript(t, minimalScript(t.TempDir()), Options{})
 }

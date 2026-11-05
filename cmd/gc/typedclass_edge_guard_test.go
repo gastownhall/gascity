@@ -154,6 +154,12 @@ var typedClassCodecCensus = map[string]map[string]int{
 	// against a re-leaked / locally-redefined codec. internal/session's own white-box
 	// tests renamed WITH the codec and are not in any scan dir.
 	"ListAllSessionBeads(": {
+		// pool_detached_orphan_sweep's route-index build lists session beads
+		// (IncludeClosed) to read persisted route metadata (gc.session_id /
+		// gc.work_branch) raw when restoring gc.routed_to for fully-detached handoff
+		// orphans — the same still-raw floor as session_beads below, tracked here so the
+		// sanctioned fold-in is visible pending the W-sync typing wave.
+		"cmd/gc/pool_detached_orphan_sweep.go": 1,
 		// WI-7 W-delete zeroed session_bead_snapshot (1→0, the raw-half load edge flipped
 		// to ListAllForReconcile) and doctor_session_model (1→0, doctor issues its own two
 		// raw store.List legs inline rather than calling the policed helper — its §5
@@ -301,11 +307,11 @@ func formatCodecCensusLiteral(needles []codecNeedle, got map[string]map[string]i
 }
 
 func TestTypedClassCodecCensusRatchet(t *testing.T) {
-	_, currentFile, _, ok := runtime.Caller(0)
+	_, _, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	repoRoot := filepath.Dir(filepath.Dir(filepath.Dir(currentFile))) // cmd/gc -> cmd -> repo root
+	repoRoot := gcRepoRootFromEnv() // cmd/gc -> cmd -> repo root
 
 	// Typo protection: every census key must be a policed needle.
 	needleSet := map[string]bool{}

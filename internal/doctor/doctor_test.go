@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -71,8 +72,11 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&CustomTypesCheck{},
 		&DeprecatedAttachmentFieldsCheck{},
 		&DoltConfigCheck{},
+		&DoltCorruptAsideCheck{},
+		&DoltLogSizeCheck{},
 		&DoltNomsSizeCheck{},
 		&DoltServerCheck{},
+		&DoltUnboundDatabasesCheck{},
 		&DoltVersionCheck{},
 		&DurationRangeCheck{},
 		&EventLogSizeCheck{},
@@ -81,6 +85,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&NestedWorktreePruneCheck{},
 		&OrphanSessionsCheck{},
 		&OrderFiringCurrentCheck{},
+		&OrderOutcomeHealthyCheck{},
 		&PackCacheCheck{},
 		&PreStartScriptsCheck{},
 		&ProviderParityCheck{},
@@ -221,6 +226,86 @@ func TestDoctor_FixFails(t *testing.T) {
 	}
 }
 
+// hintedFixCheck fails with a FixHint and a fixable remediation whose Fix
+// returns fixErr.
+type hintedFixCheck struct {
+	fixErr error
+}
+
+func (c *hintedFixCheck) Name() string { return "hinted-fix" }
+func (c *hintedFixCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:    "hinted-fix",
+		Status:  StatusError,
+		Message: "imports out of sync",
+		FixHint: "run the sync",
+	}
+}
+func (c *hintedFixCheck) CanFix() bool              { return true }
+func (c *hintedFixCheck) Fix(_ *CheckContext) error { return c.fixErr }
+func (c *hintedFixCheck) WarmupEligible() bool      { return false }
+
+func TestDoctor_FixHintErrorReplacesHint(t *testing.T) {
+	cause := errors.New("sync failed")
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: fmt.Errorf("syncing: %w", &FixHintError{
+		Err:  cause,
+		Hint: "register a pack credential:\n  gc import credential add github.com/acme",
+	})})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if len(r.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(r.Results))
+	}
+	res := r.Results[0]
+	if res.FixError != "syncing: sync failed" {
+		t.Errorf("FixError = %q, want the wrapped error text unchanged", res.FixError)
+	}
+	if want := "register a pack credential:\n  gc import credential add github.com/acme"; res.FixHint != want {
+		t.Errorf("FixHint = %q, want %q", res.FixHint, want)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "      fix failed: syncing: sync failed\n") {
+		t.Errorf("output missing fix error: %q", out)
+	}
+	if !strings.Contains(out, "      hint: register a pack credential:\n              gc import credential add github.com/acme\n") {
+		t.Errorf("output missing replaced, aligned hint: %q", out)
+	}
+	if strings.Contains(out, "run the sync") {
+		t.Errorf("pre-fix hint must be replaced: %q", out)
+	}
+}
+
+func TestDoctor_PlainFixErrorKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: errors.New("lockfile write")})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	res := r.Results[0]
+	if res.FixError != "lockfile write" || res.FixHint != "run the sync" {
+		t.Errorf("FixError/FixHint = %q/%q, want %q/%q", res.FixError, res.FixHint, "lockfile write", "run the sync")
+	}
+	if out := buf.String(); strings.Contains(out, "credential") {
+		t.Errorf("non-auth fix failure printed a credential hint: %q", out)
+	}
+}
+
+func TestDoctor_FixHintErrorEmptyHintKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: &FixHintError{Err: errors.New("sync failed")}})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if got := r.Results[0].FixHint; got != "run the sync" {
+		t.Errorf("FixHint = %q, want the pre-fix hint kept", got)
+	}
+}
+
 func TestDoctor_FixSucceedsButCheckStillFails(t *testing.T) {
 	d := &Doctor{}
 	d.Register(&unchangedFixCheck{})
@@ -344,6 +429,25 @@ func TestDoctor_FixHint(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "hint: try this") {
 		t.Errorf("output missing fix hint: %q", buf.String())
+	}
+}
+
+// TestPrintResultIndentsMultiLineFixHint keeps every line of a multi-line
+// hint under its "hint:" label.
+func TestPrintResultIndentsMultiLineFixHint(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, &CheckResult{
+		Name:    "hint-check",
+		Status:  StatusWarning,
+		Message: "problem",
+		FixHint: "Fix, either:\n  - one\n  - two",
+	}, false)
+
+	want := "      hint: Fix, either:\n" +
+		"              - one\n" +
+		"              - two\n"
+	if !strings.HasSuffix(buf.String(), want) {
+		t.Errorf("printResult output =\n%s\nwant it to end with\n%s", buf.String(), want)
 	}
 }
 
@@ -635,6 +739,43 @@ func TestRunCheckTimeoutFlushesCompletedCheckOutput(t *testing.T) {
 	}
 }
 
+func TestRunCheckPanicBecomesReportedError(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			d := &Doctor{CheckTimeout: timeout}
+			d.Register(&panickingCheck{name: "panicking"})
+
+			report := d.RunCollect(&CheckContext{}, false)
+
+			if len(report.Results) != 1 {
+				t.Fatalf("Results = %d, want 1", len(report.Results))
+			}
+			result := report.Results[0]
+			if result.Name != "panicking" || result.Status != StatusError || result.Severity != SeverityBlocking {
+				t.Fatalf("panic result = %+v, want named blocking error", result)
+			}
+			if !strings.Contains(result.Message, "panic: check exploded") {
+				t.Fatalf("panic message = %q, want recovered panic detail", result.Message)
+			}
+			if report.Failed != 1 || report.BlockingFailed != 1 {
+				t.Fatalf("report = %+v, want one blocking failure", report)
+			}
+		})
+	}
+}
+
+type panickingCheck struct {
+	name string
+}
+
+func (c *panickingCheck) Name() string { return c.name }
+func (c *panickingCheck) Run(_ *CheckContext) *CheckResult {
+	panic("check exploded")
+}
+func (c *panickingCheck) CanFix() bool              { return false }
+func (c *panickingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *panickingCheck) WarmupEligible() bool      { return false }
+
 // outputWritingCheck writes to ctx.Output during Run, like checks that
 // surface fix-time diagnostics.
 type outputWritingCheck struct{ mockCheck }
@@ -826,6 +967,43 @@ func TestRunCheckTimeoutIsolatesLateOutputAndSkipsRenderExtras(t *testing.T) {
 	}
 }
 
+func TestDoctorWaitKeepsTimedOutCheckOwnedUntilCompletion(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &lateWritingCheck{
+		name:      "owned-after-timeout",
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		wroteLate: make(chan struct{}),
+	}
+	d.Register(check)
+
+	runDone := make(chan *Report, 1)
+	go func() { runDone <- d.RunCollect(&CheckContext{}, false) }()
+	<-check.started
+	report := <-runDone
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want one timed-out result", report.Results)
+	}
+
+	waitStarted := make(chan struct{})
+	waitDone := make(chan struct{})
+	go func() {
+		close(waitStarted)
+		d.Wait()
+		close(waitDone)
+	}()
+	<-waitStarted
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned while the timed-out check was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(check.release)
+	<-check.wroteLate
+	<-waitDone
+}
+
 // lateWritingCheck blocks inside Run until released, then writes to
 // ctx.Output — modeling an abandoned check whose goroutine keeps running and
 // emits output after the doctor timeout fired. It implements Renderer so the
@@ -933,3 +1111,152 @@ func (c *lateWritingOnFixCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 func (c *lateWritingOnFixCheck) WarmupEligible() bool { return false }
+
+// panickingFixCheck fails its Run and panics inside Fix, modeling a
+// pack-authored remediation that blows up mid-run.
+type panickingFixCheck struct{}
+
+func (panickingFixCheck) Name() string { return "panicking-fix" }
+func (panickingFixCheck) CanFix() bool { return true }
+func (panickingFixCheck) Fix(*CheckContext) error {
+	panic("fix exploded")
+}
+
+func (panickingFixCheck) Run(*CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:     "panicking-fix",
+		Status:   StatusError,
+		Severity: SeverityBlocking,
+		Message:  "needs fixing",
+	}
+}
+
+// A panicking Fix must fail its own check, not crash the doctor process. Run
+// once unbounded and once timed, because boundedFix takes a different path for
+// each and only one of them was recovered before.
+func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		d := &Doctor{CheckTimeout: timeout}
+		d.Register(panickingFixCheck{})
+		report := d.RunCollect(&CheckContext{}, true)
+		d.Wait()
+		if len(report.Results) != 1 {
+			t.Fatalf("CheckTimeout=%s: Results = %+v, want one result", timeout, report.Results)
+		}
+		if report.Results[0].Status != StatusError {
+			t.Errorf("CheckTimeout=%s: Status = %v, want StatusError", timeout, report.Results[0].Status)
+		}
+		if !report.Results[0].FixAttempted {
+			t.Errorf("CheckTimeout=%s: FixAttempted = false, want the panicking fix recorded as attempted", timeout)
+		}
+		if !strings.Contains(report.Results[0].FixError, "panicked") {
+			t.Errorf("CheckTimeout=%s: FixError = %q, want it to report the panic", timeout, report.Results[0].FixError)
+		}
+	}
+}
+
+func (panickingFixCheck) WarmupEligible() bool { return false }
+
+// eventCheck records the order of its Run and Fix calls into a shared log.
+type eventCheck struct {
+	mockCheck
+	log *[]string
+}
+
+func (e *eventCheck) Run(ctx *CheckContext) *CheckResult {
+	*e.log = append(*e.log, "run "+e.name)
+	return e.mockCheck.Run(ctx)
+}
+
+func (e *eventCheck) Fix(ctx *CheckContext) error {
+	*e.log = append(*e.log, "fix "+e.name)
+	return e.mockCheck.Fix(ctx)
+}
+
+// BeforeFix must run before every remediation and before the re-run that
+// verifies it, and never on a run without --fix, so a caller sharing reads
+// across one run never answers a fix or its verification from pre-fix data.
+func TestDoctorBeforeFixPrecedesFixAndVerify(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		t.Run(fmt.Sprintf("timeout=%s", timeout), func(t *testing.T) {
+			var log []string
+			d := &Doctor{CheckTimeout: timeout, BeforeFix: func() { log = append(log, "before-fix") }}
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "ok", status: StatusOK, canFix: true}, log: &log})
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "broken", status: StatusError, canFix: true}, log: &log})
+
+			d.Run(&CheckContext{}, io.Discard, false)
+			if want := "run ok,run broken"; strings.Join(log, ",") != want {
+				t.Fatalf("without --fix: events = %v, want %s", log, want)
+			}
+
+			log = nil
+			report := d.Run(&CheckContext{}, io.Discard, true)
+			want := "run ok,run broken,before-fix,fix broken,before-fix,run broken"
+			if got := strings.Join(log, ","); got != want {
+				t.Fatalf("with --fix: events = %s, want %s", got, want)
+			}
+			if report.Fixed != 1 {
+				t.Fatalf("Fixed = %d, want 1", report.Fixed)
+			}
+		})
+	}
+}
+
+// abandonObservingCheck blocks until the runner signals abandonment through
+// CheckContext.Done, then records what Canceled reported.
+type abandonObservingCheck struct {
+	sawCancel chan bool
+}
+
+func (c *abandonObservingCheck) Name() string { return "abandon-observer" }
+func (c *abandonObservingCheck) Run(ctx *CheckContext) *CheckResult {
+	if ctx.Canceled() {
+		c.sawCancel <- false // canceled before the timeout fired: wrong
+		return &CheckResult{Name: c.Name(), Status: StatusOK}
+	}
+	select {
+	case <-ctx.Done:
+		c.sawCancel <- ctx.Canceled()
+	case <-time.After(5 * time.Second):
+		c.sawCancel <- false
+	}
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *abandonObservingCheck) CanFix() bool              { return false }
+func (c *abandonObservingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *abandonObservingCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutSignalsAbandonedCheck: when the runner abandons a check at
+// the per-check timeout it closes CheckContext.Done, so a check that issues
+// many store calls can stop issuing them instead of running on unobserved.
+func TestRunCheckTimeoutSignalsAbandonedCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &abandonObservingCheck{sawCancel: make(chan bool, 1)}
+	d.Register(check)
+
+	report := d.Run(&CheckContext{}, io.Discard, false)
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("report = %+v, want the check to time out", report)
+	}
+	select {
+	case canceled := <-check.sawCancel:
+		if !canceled {
+			t.Fatal("abandoned check did not observe cancellation through CheckContext.Done/Canceled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned check never observed CheckContext.Done closing")
+	}
+	d.Wait()
+}
+
+// TestCheckContextCanceledNilSafe: an unbounded run leaves Done nil, and a nil
+// context is never canceled.
+func TestCheckContextCanceledNilSafe(t *testing.T) {
+	var nilCtx *CheckContext
+	if nilCtx.Canceled() {
+		t.Fatal("nil CheckContext reported canceled")
+	}
+	if (&CheckContext{}).Canceled() {
+		t.Fatal("CheckContext without Done reported canceled")
+	}
+}

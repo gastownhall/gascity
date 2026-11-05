@@ -47,11 +47,17 @@ var (
 )
 
 // humaHandleRigList is the Huma-typed handler for GET /v0/rigs.
+//
+// It reports no cache age (X-GC-Cache-Age-S is 0): the rows come from config,
+// the suspension state and runtime probes, not from the bead cache, so the
+// cache's age says nothing about them. The session snapshot a pool seat's
+// lookup may read only names the session to probe.
 func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*ListOutput[rigResponse], error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -62,23 +68,31 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	}
 	wantGit := input.Git
 
+	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
+	pools := newRequestSessionListing(sp)
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		resp := s.buildRigResponse(cfg, rig, sp, cityName, s.state.CityPath())
+		resp := s.buildRigResponse(cfg, rig, sp, pools, runtimeSessions, cityName, s.state.CityPath())
 		if wantGit {
 			resp.Git = fetchGitStatus(rig.Path)
 		}
 		rigs = append(rigs, resp)
 	}
+	partialErrors := runtimeSessions.partialErrors()
 	return &ListOutput[rigResponse]{
-		Index:     s.latestIndex(),
-		CacheAgeS: cacheAgeSeconds(store),
-		Body:      ListBody[rigResponse]{Items: rigs, Total: len(rigs)},
+		Index: index,
+		Body: ListBody[rigResponse]{
+			Items:         rigs,
+			Total:         len(rigs),
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		},
 	}, nil
 }
 
 // humaHandleRigGet is the Huma-typed handler for GET /v0/rig/{name}.
-func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
+func (s *Server) humaHandleRigGet(ctx context.Context, input *RigGetInput) (*IndexOutput[rigResponse], error) {
+	index := s.latestIndex()
 	name := input.Name
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -86,12 +100,14 @@ func (s *Server) humaHandleRigGet(_ context.Context, input *RigGetInput) (*Index
 
 	for _, rig := range cfg.Rigs {
 		if rig.Name == name {
-			resp := s.buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
+			cityName := s.state.CityName()
+			runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
+			resp := s.buildRigResponse(cfg, rig, sp, newRequestSessionListing(sp), runtimeSessions, cityName, s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}
 			return &IndexOutput[rigResponse]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body:  resp,
 			}, nil
 		}
@@ -588,7 +604,7 @@ func (s *Server) humaHandleRigRestart(name string) (*RigActionResponse, error) {
 		if workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs) != name {
 			continue
 		}
-		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
+		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
 			if err := sp.Stop(sessionName); err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestRepairStrandedPoolWorkerBead_ReopensAfterConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	repaired := repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr)
+	repaired := repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr)
 	if !repaired {
 		t.Fatalf("expected repair to close the session bead; stderr=%q", stderr.String())
 	}
@@ -83,7 +84,7 @@ func TestRepairStrandedPoolWorkerBead_DefersInsideConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339) // just observed
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair inside the confirmation window")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -119,7 +120,7 @@ func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
 		t.Fatal("repair must return false when an unassign does not land")
 	}
 	gotWork, _ := base.Get(work.ID)
@@ -135,6 +136,119 @@ func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails
 	}
 }
 
+// strandedDetachedSpec is the gc.detached probe detachStrandedWork stamps.
+const strandedDetachedSpec = "tmux:gctest-repair:soak-loop"
+
+// detachStrandedWork stamps strandedDetachedSpec on work and returns it as
+// the store now holds it.
+func detachStrandedWork(t *testing.T, store beads.Store, work beads.Bead) beads.Bead {
+	t.Helper()
+	if err := store.SetMetadata(work.ID, detachedProbeMetadataKey, strandedDetachedSpec); err != nil {
+		t.Fatalf("stamp gc.detached: %v", err)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("reload work bead: %v", err)
+	}
+	return got
+}
+
+// The repair releases nothing whose detached runtime may still run: a claim
+// whose probe reports it alive, or observes nothing, stays assigned with its
+// gc.detached, and the session bead stays open with it, tick after tick.
+// Closed, the bead would leave that work assigned to a retired session.
+func TestRepairStrandedPoolWorkerBead_HoldsDetachedWorkItsProbeDoesNotAttestDead(t *testing.T) {
+	for _, p := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"alive", func(t *testing.T) { installFakeTmuxServer(t, "gctest-repair", fakeTmuxListSessions("soak-loop")) }},
+		{"error: no server socket", func(t *testing.T) {
+			t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+			installFakeTmux(t, "exit 1")
+		}},
+		{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-repair", "exit 2") }},
+		{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-repair", "sleep 2") }},
+	} {
+		t.Run(p.name, func(t *testing.T) {
+			store, session, work := strandedRepairFixture(t)
+			work = detachStrandedWork(t, store, work)
+			p.setup(t)
+			now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+			session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+			for tick := 1; tick <= 2; tick++ {
+				var stderr bytes.Buffer
+				if repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
+					t.Fatalf("tick %d: repair closed the session bead over a held claim; stderr=%q", tick, stderr.String())
+				}
+				got, _ := store.Get(work.ID)
+				if got.Status != "in_progress" || got.Assignee != session.ID || got.Metadata[detachedProbeMetadataKey] != strandedDetachedSpec {
+					t.Fatalf("tick %d: work status=%q assignee=%q gc.detached=%q, want the held claim untouched", tick, got.Status, got.Assignee, got.Metadata[detachedProbeMetadataKey])
+				}
+				if row, _ := store.Get(session.ID); row.Status != "open" {
+					t.Fatalf("tick %d: session status = %q, want open while its claim is held", tick, row.Status)
+				}
+			}
+		})
+	}
+}
+
+// A held claim keeps the session bead open even after the repair released the
+// slot's other work.
+func TestRepairStrandedPoolWorkerBead_ReleasesTheRestButKeepsTheSlotForAHeldClaim(t *testing.T) {
+	store, session, plain := strandedRepairFixture(t)
+	held, err := store.Create(beads.Bead{
+		Title:    "detached work",
+		Type:     "task",
+		Assignee: session.ID,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", detachedProbeMetadataKey: strandedDetachedSpec},
+	})
+	if err != nil {
+		t.Fatalf("create detached work bead: %v", err)
+	}
+	installFakeTmuxServer(t, "gctest-repair", "exit 2")
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+	var stderr bytes.Buffer
+	if repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("repair closed the session bead over a held claim; stderr=%q", stderr.String())
+	}
+	if got, _ := store.Get(plain.ID); got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("unprobed work status=%q assignee=%q, want released", got.Status, got.Assignee)
+	}
+	if got, _ := store.Get(held.ID); got.Assignee != session.ID {
+		t.Fatalf("held work assignee = %q, want %s", got.Assignee, session.ID)
+	}
+	if row, _ := store.Get(session.ID); row.Status != "open" {
+		t.Fatalf("session status = %q, want open while its claim is held", row.Status)
+	}
+}
+
+// Work whose detached probe attests its runtime dead is stranded: the repair
+// releases it, clearing gc.detached in the release so the reopened bead
+// carries no dead probe into its next claim, then closes the session bead.
+func TestRepairStrandedPoolWorkerBead_ReleasesDeadDetachedWorkClearingTheProbe(t *testing.T) {
+	store, session, work := strandedRepairFixture(t)
+	work = detachStrandedWork(t, store, work)
+	installFakeTmuxServer(t, "gctest-repair", fakeTmuxListSessions())
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+	var stderr bytes.Buffer
+	if !repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("expected repair to close the session bead; stderr=%q", stderr.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Status != "open" || got.Assignee != "" || got.Metadata[detachedProbeMetadataKey] != "" {
+		t.Fatalf("work status=%q assignee=%q gc.detached=%q, want released with gc.detached cleared", got.Status, got.Assignee, got.Metadata[detachedProbeMetadataKey])
+	}
+	if row, _ := store.Get(session.ID); row.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", row.Status)
+	}
+}
+
 // Without a stranded marker the leak has not been confirmed this generation, so
 // the repair defers even if the caller reached it — the diagnostic gates the
 // destructive clear.
@@ -143,7 +257,7 @@ func TestRepairStrandedPoolWorkerBead_DefersWithoutStrandedMarker(t *testing.T) 
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(store, nil, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair without a stranded marker")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -182,11 +296,12 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 
 	released := releaseOrphanedPoolAssignments(
 		store,
+		beads.SessionStore{Store: store},
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		"",
 		sessionInfosFromBeads([]beads.Bead{live}),
 		[]beads.Bead{work},
-		nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("live assignee must not be released, got %v", released)
@@ -194,6 +309,62 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
 	got, _ := store.Get(work.ID)
 	if got.Assignee == "" {
 		t.Fatalf("live assignee cleared — should stay assigned")
+	}
+}
+
+// releaseOrphanedPoolAssignments takes the session-class store separately from
+// the work store, and falls back to the work store when the caller passes nil.
+// That fallback is the whole safety margin for a caller that has not been
+// threaded through the session front door yet: without it the live re-read runs
+// against a nil store, answers "no live session", and a running agent's work is
+// unassigned out from under it.
+//
+// Reaching that leg takes an empty session snapshot — with the live session in
+// the snapshot, openSessionOwnsWork skips the bead two gates earlier and the
+// re-read never happens. That is the shape a session minted after the snapshot
+// load has, which is the race the re-read exists to close.
+func TestReleaseOrphanedPoolAssignments_NilSessionsStoreFallsBackToWorkStore(t *testing.T) {
+	store := beads.NewMemStore()
+	live, err := store.Create(beads.Bead{
+		Title:    "live worker",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-mc-live"},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "routed work",
+		Assignee: live.Metadata["session_name"],
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	work, _ = store.Get(work.ID)
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		beads.SessionStore{}, // unset session-class store: the work store has to answer the liveness re-read
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil, // empty snapshot: the two snapshot gates miss, so the live re-read decides
+		[]beads.Bead{work},
+		nil, nil, nil, nil, nil, nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("a live assignee was released with a nil sessions store, got %v; "+
+			"the nil fallback to the work store is what keeps this re-read able to see the session bead", released)
+	}
+	got, _ := store.Get(work.ID)
+	if got.Assignee != live.Metadata["session_name"] {
+		t.Fatalf("assignee = %q, want %q — the live session's work was unassigned under it", got.Assignee, live.Metadata["session_name"])
 	}
 }
 
@@ -236,4 +407,61 @@ func TestEmitDeadAssigneeReopenedEvents_NoOpOnEmpty(t *testing.T) {
 	if len(rec.events) != 0 {
 		t.Fatalf("expected no events, got %d", len(rec.events))
 	}
+}
+
+// The stranded repair releases under the seat's ReleaseScope: a claim held
+// under its stable namepool alias is released with the rest.
+func TestRepairStrandedPoolWorkerBead_ReleasesUnderTheStableAlias(t *testing.T) {
+	mem := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", NamepoolNames: []string{"ada"}, MaxActiveSessions: intPtr(2)}}}
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	seat, err := mem.Create(beads.Bead{Title: "worker session", Type: sessionBeadType, Status: "open", Metadata: map[string]string{
+		"session_name": "worker-1", "template": "worker", "alias": "ada", "pool_managed": "true", "pool_slot": "1",
+		strandedEventEmittedKey: now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias := stableAssignmentAliasForConfig(seat, cfg); alias != "ada" {
+		t.Fatalf("fixture alias = %q, want the stable namepool alias ada", alias)
+	}
+	claim, err := mem.Create(beads.Bead{Title: "held under the alias", Type: "task", Assignee: "ada", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := mem.Update(claim.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The alias claim's release fails: the repair saw it, so it defers the
+	// close rather than retire a seat that still holds work.
+	failing := releaseFailsStore{Store: mem, id: claim.ID}
+	var stderr bytes.Buffer
+	if repairStrandedPoolWorkerBead(testSeatWork("", cfg, failing, nil), failing, seedSessionInfo(seat), &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("repair closed the seat over a failed release of its alias claim; stderr=%q", stderr.String())
+	}
+	if got, _ := mem.Get(seat.ID); got.Status == "closed" {
+		t.Fatal("seat closed over its alias claim")
+	}
+
+	if !repairStrandedPoolWorkerBead(testSeatWork("", cfg, mem, nil), mem, seedSessionInfo(seat), &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("repair did not close the seat; stderr=%q", stderr.String())
+	}
+	if got, _ := mem.Get(claim.ID); got.Assignee != "" || got.Status != "open" {
+		t.Fatalf("alias claim = %q/%q, want released", got.Status, got.Assignee)
+	}
+}
+
+// releaseFailsStore fails every write to the bead id.
+type releaseFailsStore struct {
+	beads.Store
+	id string
+}
+
+func (s releaseFailsStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.id {
+		return errors.New("release refused")
+	}
+	return s.Store.Update(id, opts)
 }

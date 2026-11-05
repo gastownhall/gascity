@@ -28,37 +28,50 @@ func (s setMetadataBatchFailStore) SetMetadataBatch(string, map[string]string) e
 // healOracleCase is a heal fixture plus the runtime/clock/lease knobs the heal
 // patch reads and the exact batch the Info form must return.
 type healOracleCase struct {
-	name     string
-	status   string
-	created  time.Duration // relative to clk.Now(); 0 = zero time
-	meta     map[string]string
-	alive    bool
-	timeout  time.Duration
-	rollback bool
-	want     map[string]string
+	name    string
+	status  string
+	created time.Duration // relative to clk.Now(); 0 = zero time
+	meta    map[string]string
+	alive   bool
+	// unobserved marks the liveness probe itself as failed (RuntimeFacts.Observed
+	// = false), distinct from alive=false (probe succeeded, runtime confirmed
+	// dead). Zero value (false) preserves every existing case's prior hardcoded-
+	// Observed:true behavior unchanged.
+	unobserved bool
+	timeout    time.Duration
+	rollback   bool
+	want       map[string]string
 }
 
 // TestHealStatePatchWithRollbackInfo pins healStatePatchWithRollbackInfo against
 // explicit expected batches across every heal branch (drained fast path,
 // start-request, failed-create preserve/clear, stale-creating rollback,
-// reset-continuation clears, named-session mode guard, deferred-rollback). Each
-// row is load-bearing: a mutation of the corresponding non-trivial branch flips
-// the batch. The expected batches were captured from the WI-6-R2 raw
-// healStatePatchWithRollback before it was deleted in R3 (byte-identical oracle).
+// reset-continuation clears, named-session mode guard, deferred-rollback, a
+// claimed active row kept active). Each row is load-bearing: a mutation of the
+// corresponding non-trivial branch flips the batch. The deferred-rollback row pins the corrected atomic transition:
+// state and lease remain together until rollback is available. The other
+// expected batches were captured from the WI-6-R2 raw healStatePatchWithRollback
+// before it was deleted in R3.
 func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	rfc := func(d time.Duration) string { return clk.Now().Add(d).UTC().Format(time.RFC3339) }
-	// S19 stage 2: every started_config_hash clear also clears the priming keys
-	// (pinned by the write-site/priming-lifetime gates), so the reset batches
-	// carry the primed_at/priming_attempted_at/prompt_hash clears.
+	// S19 stage 2: every started_config_hash clear also clears the priming keys,
+	// so the reset batches carry the primed_at/priming_attempted_at/prompt_hash
+	// clears.
 	resetBatch := map[string]string{
 		"continuation_reset_pending": "true", "pending_create_claim": "", "pending_create_started_at": "",
-		"primed_at": "", "priming_attempted_at": "", "prompt_hash": "",
+		"primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "resume_failures": "", "resume_launch": "",
 		"session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep",
 	}
 
 	cases := []healOracleCase{
 		{name: "asleep-alive", meta: map[string]string{"state": "asleep"}, alive: true, rollback: true, want: map[string]string{"state": "awake"}},
+		{name: "active-alive", meta: map[string]string{"state": "active"}, alive: true, rollback: true, want: map[string]string{"state": "awake"}},
+		// A live active row whose claim outlived its commit stays active until
+		// the claim is cleared: awake would let the next tick roll it back.
+		// Dead, the claim requests its restart as for any other row.
+		{name: "active-claim-alive-keeps-active", meta: map[string]string{"state": "active", "pending_create_claim": "true"}, alive: true, rollback: true, want: nil},
+		{name: "active-claim-dead-requests-start", meta: map[string]string{"state": "active", "pending_create_claim": "true"}, alive: false, rollback: true, want: map[string]string{"state": "start-pending"}},
 		{name: "active-dead-drains", meta: map[string]string{"state": "active"}, alive: false, rollback: true, want: map[string]string{"state": "asleep"}},
 		{name: "asleep-dead-noop", meta: map[string]string{"state": "asleep", "sleep_reason": "idle"}, alive: false, rollback: true, want: nil},
 		{
@@ -78,12 +91,12 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			want:     resetBatch,
 		},
 		{
-			name:     "stale-creating-rollback-deferred",
+			name:     "stale-creating-rollback-deferred-preserves",
 			created:  -2 * time.Minute,
 			meta:     map[string]string{"state": "creating", "pending_create_claim": "true", "last_woke_at": rfc(-2 * time.Minute)},
 			alive:    false,
 			rollback: false,
-			want:     map[string]string{"state": "asleep"},
+			want:     nil,
 		},
 		{
 			name:     "never-started-inflight",
@@ -138,7 +151,21 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			meta:     map[string]string{"state": "active", "configured_named_session": "true", "configured_named_identity": "mayor", "configured_named_mode": "singleton", "session_name": "mayor", "session_key": "sk", "started_config_hash": "h"},
 			alive:    false,
 			rollback: true,
-			want:     map[string]string{"continuation_reset_pending": "true", "primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep"},
+			want:     map[string]string{"continuation_reset_pending": "true", "primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "resume_failures": "", "resume_launch": "", "session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep"},
+		},
+		{
+			// gascity#5121: a failed liveness probe (Observed=false) must not be
+			// treated as a confirmed-dead runtime. Before the fix this produced
+			// the same drain batch as a genuinely observed-dead alive=false case
+			// ({"sleep_reason": "runtime-missing", "state": "asleep"}), silently
+			// respawning a healthy long-lived session on every transient probe
+			// failure.
+			name:       "unobserved-liveness-preserves-active",
+			meta:       map[string]string{"state": "active"},
+			alive:      false,
+			unobserved: true,
+			rollback:   true,
+			want:       nil,
 		},
 	}
 
@@ -152,7 +179,7 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			if tc.created != 0 {
 				b.CreatedAt = clk.Now().Add(tc.created)
 			}
-			got := healStatePatchWithRollbackInfo(seedSessionInfo(b), tc.alive, clk, tc.timeout, tc.rollback)
+			got := healStatePatchWithRollbackInfo(seedSessionInfo(b), tc.alive, !tc.unobserved, clk, tc.timeout, tc.rollback)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("healStatePatchWithRollbackInfo = %#v, want %#v", got, tc.want)
 			}
@@ -175,7 +202,7 @@ func TestHealStateWithRollbackInfoClosedGuardAndWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed, _ = store.Get(closed.ID)
-	batch, err := healStateWithRollbackInfo(sessiontest.SeedBead(t, closed), false, sessionFrontDoor(store), clk, 0, true)
+	batch, err := healStateWithRollbackInfo(sessiontest.SeedBead(t, closed), false, true, sessionFrontDoor(store), clk, 0, true)
 	if err != nil {
 		t.Fatalf("heal closed bead: %v", err)
 	}
@@ -187,7 +214,7 @@ func TestHealStateWithRollbackInfoClosedGuardAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, err = healStateWithRollbackInfo(sessiontest.SeedBead(t, live), false, sessionFrontDoor(store), clk, 0, true)
+	batch, err = healStateWithRollbackInfo(sessiontest.SeedBead(t, live), false, true, sessionFrontDoor(store), clk, 0, true)
 	if err != nil {
 		t.Fatalf("heal live bead: %v", err)
 	}
@@ -306,7 +333,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-recovers", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "sleep_intent": "idle-stop-pending", "sleep_policy_fingerprint": "fp"})
-		if !recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) == nil {
 			t.Fatal("recoverPendingIdleSleepInfo = false, want true")
 		}
 		persisted, _ := store.Get(b.ID)
@@ -319,7 +346,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-noop", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
-		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) != nil {
 			t.Fatal("recoverPendingIdleSleepInfo = true, want false (no pending intent)")
 		}
 	})
@@ -327,7 +354,10 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "detached_at": clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339)})
 		// A NonInteractive policy takes the early clear branch (no runtime probe).
 		policy := resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}
-		got := reconcileDetachedAtInfo(sessiontest.SeedBead(t, b), store, policy, true, runtime.NewFake(), clk)
+		got, err := reconcileDetachedAtInfo(sessiontest.SeedBead(t, b), store, policy, true, runtime.NewFake(), clk)
+		if err != nil {
+			t.Fatalf("reconcileDetachedAtInfo: %v", err)
+		}
 		if !reflect.DeepEqual(got, map[string]string{"detached_at": ""}) {
 			t.Fatalf("detach batch = %#v, want detached_at cleared", got)
 		}
@@ -339,7 +369,11 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	t.Run("reconcileDetachedAt-noop-when-absent", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
 		policy := resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}
-		if got := reconcileDetachedAtInfo(sessiontest.SeedBead(t, b), store, policy, true, runtime.NewFake(), clk); got != nil {
+		got, err := reconcileDetachedAtInfo(sessiontest.SeedBead(t, b), store, policy, true, runtime.NewFake(), clk)
+		if err != nil {
+			t.Fatalf("reconcileDetachedAtInfo: %v", err)
+		}
+		if got != nil {
 			t.Fatalf("detach batch = %#v, want nil (nothing to clear)", got)
 		}
 	})

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,7 +36,11 @@ func TestInitScrubsLeakVectors(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run=^TestInitScrubsLeakVectors$", "-test.v")
 	cmd.Env = []string{
 		"GC_TESTENV_CHILD=1",
+		"TEST_SRCDIR=bazel",
 		"GC_FAST_UNIT=should-survive",
+		// Bazel names test binaries without the .test suffix; isGoTestBinary
+		// detects them via TEST_SRCDIR, so the child env must carry it.
+		"TEST_SRCDIR=bazel",
 	}
 	for _, name := range testenv.LeakVectorVars {
 		cmd.Env = append(cmd.Env, name+"=leaked-"+name)
@@ -52,6 +57,57 @@ func TestInitScrubsLeakVectors(t *testing.T) {
 	}
 	if !strings.Contains(got, "GC_FAST_UNIT=should-survive") {
 		t.Errorf("GC_FAST_UNIT was scrubbed but should not be; child output:\n%s", got)
+	}
+}
+
+// TestMetricsOptOutVarsAreLeakVectors pins DO_NOT_TRACK and
+// GC_DISABLE_USAGE_METRICS into LeakVectorVars. TestInitScrubsLeakVectors
+// proves whatever is on the list gets scrubbed, which is tautological about
+// membership — dropping a name from the list would silently satisfy it.
+//
+// Membership is the load-bearing part here. Agent fleets that export
+// GC_DISABLE_USAGE_METRICS=1 into every session leak it into bare `go test`
+// while `make test` (env -i) does not. internal/productmetrics then reported
+// environment-disabled instead of the state under test, and whether a test
+// passed depended on which shell ran it — which invented merge-gate
+// rejections of clean branches and could equally mask a real
+// misclassification regression.
+func TestMetricsOptOutVarsAreLeakVectors(t *testing.T) {
+	for _, name := range []string{"DO_NOT_TRACK", "GC_DISABLE_USAGE_METRICS"} {
+		if !slices.Contains(testenv.LeakVectorVars, name) {
+			t.Errorf("%s missing from LeakVectorVars; an ambient value would reach test code and flip the productmetrics state projection", name)
+		}
+	}
+}
+
+// TestInitDisablesDoltEventFlush verifies init() sets DOLT_DISABLE_EVENT_FLUSH
+// for every go-test binary. dolt forks a detached `dolt send-metrics` after
+// each command unless the variable is present, whatever metrics.disabled says,
+// so a test that runs dolt, directly or through gc or bd, inherits the switch
+// from the process instead of from a per-test Setenv.
+func TestInitDisablesDoltEventFlush(t *testing.T) {
+	if got := os.Getenv("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q after testenv init, want %q", got, "1")
+	}
+}
+
+// TestLaneFailpointIsALeakVector pins GC_LANE_FAILPOINT into
+// LeakVectorVars: a value leaked from a developer's shell would make a
+// test-hooks gc child (or a unit test that enables the stamp) SIGKILL itself
+// at a lane stage, so the scrub must own it.
+func TestLaneFailpointIsALeakVector(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_LANE_FAILPOINT") {
+		t.Error("GC_LANE_FAILPOINT missing from LeakVectorVars; an ambient value would make a test's gc child kill itself")
+	}
+}
+
+// TestOpsFailpointIsALeakVector pins GC_OPS_FAILPOINT into LeakVectorVars: a
+// value leaked from a developer's shell would make a test-hooks gc child kill
+// itself, park a request or fail an op's closes at an op recording crash
+// point, so the scrub must own it.
+func TestOpsFailpointIsALeakVector(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_OPS_FAILPOINT") {
+		t.Error("GC_OPS_FAILPOINT missing from LeakVectorVars; an ambient value would make a test's gc child kill itself")
 	}
 }
 
@@ -78,6 +134,8 @@ func TestInitPassthroughPreservesNamed(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run=^TestInitPassthroughPreservesNamed$", "-test.v")
 	cmd.Env = []string{
 		"GC_TESTENV_CHILD=1",
+		"TEST_SRCDIR=bazel",
+		"TEST_SRCDIR=bazel",
 		testenv.PassthroughVar + "=" + strings.Join(keep, ","),
 	}
 	for _, name := range testenv.LeakVectorVars {
@@ -118,6 +176,7 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 		for _, name := range testenv.LeakVectorVars {
 			lines = append(lines, name+"="+os.Getenv(name))
 		}
+		lines = append(lines, "DOLT_DISABLE_EVENT_FLUSH="+os.Getenv("DOLT_DISABLE_EVENT_FLUSH"))
 		os.Stdout.WriteString(strings.Join(lines, "\n") + "\n") //nolint:errcheck
 		os.Exit(0)
 	}
@@ -148,6 +207,11 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 		if !strings.Contains(got, name+"=kept-"+name) {
 			t.Errorf("%s was scrubbed but should survive in subcommand mode; child output:\n%s", name, got)
 		}
+	}
+	// Testscript owns the env of the gc or bd it re-invokes, so init() must not
+	// decide dolt's behavior for it either.
+	if !strings.Contains(got, "DOLT_DISABLE_EVENT_FLUSH=\n") {
+		t.Errorf("init() set DOLT_DISABLE_EVENT_FLUSH in subcommand mode; child output:\n%s", got)
 	}
 }
 
@@ -460,9 +524,25 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := append([]string{"GC_TESTENV_CHILD=1"}, tc.env...)
+			// The real test binary scrubs under bazel via TEST_SRCDIR; the
+			// renamed fakeGC exercises subcommand mode and must not see it.
+			if tc.bin == exe {
+				env = append(env, "TEST_SRCDIR=bazel")
+			}
 			assertRefusesDoltPort(t, tc.bin, "TestInitRefusesProdDoltPort", "", env, tc.wantPanic, tc.wantOutput)
 		})
 	}
+}
+
+// runTestenvChild re-execs a named test under exactly env, optionally in dir.
+// Dolt-port and git-template contracts share this subprocess boundary.
+func runTestenvChild(bin, testName, dir string, env []string) ([]byte, error) {
+	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = env
+	return cmd.Output()
 }
 
 // assertRefusesDoltPort re-execs bin under testName's -test.run pattern (with
@@ -472,15 +552,11 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 // TestInitRefusesProdDoltPort and TestInitRefusesAmbientCityDoltPort so the
 // hardcoded-port and ambient-city detection arms exercise a single re-exec
 // call site instead of two, keeping this package's tracked subprocess census
-// unchanged (see internal/testpolicy/resourcecensus and test/test-resources.toml).
+// unchanged (see internal/testpolicy/resourcecensus and
+// test/test-resource-counts.toml).
 func assertRefusesDoltPort(t *testing.T, bin, testName, dir string, env []string, wantPanic bool, wantOutput []string) {
 	t.Helper()
-	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = env
-	out, err := cmd.Output()
+	out, err := runTestenvChild(bin, testName, dir, env)
 	if wantPanic {
 		if err == nil {
 			t.Fatalf("child succeeded but should have refused the Dolt port; output:\n%s", out)

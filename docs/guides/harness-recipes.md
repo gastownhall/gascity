@@ -33,7 +33,7 @@ Two things hold for every recipe:
 | Grok | `grok` | — · `XAI_API_KEY` | yes |
 | Kimi Code | `kimi` | `KIMI_BASE_URL` · `KIMI_API_KEY` | yes |
 | Kiro | `kiro` | — · `KIRO_API_KEY` | — |
-| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | — |
+| Cursor Agent | `cursor` | — · `CURSOR_API_KEY` | yes |
 | GitHub Copilot | `copilot` | `COPILOT_PROVIDER_BASE_URL` · `COPILOT_PROVIDER_API_KEY` / `COPILOT_GITHUB_TOKEN` | — |
 | Sourcegraph AMP | `amp` | `AMP_URL` · `AMP_API_KEY` | — |
 | OpenCode | `opencode` | gateway (per-upstream) | yes |
@@ -42,7 +42,7 @@ Two things hold for every recipe:
 | Pi | `pi` | login | yes |
 | Auggie | `auggie` | login | — |
 | Oh My Pi | `omp` | login | — |
-| Antigravity | `antigravity` | login | — |
+| Antigravity | `antigravity` | login | yes |
 
 "—" under base URL means the harness has no standard base-URL env var: for a
 custom endpoint, supply it through the upstream's raw [`env`](/guides/configuring-an-agent#axis-3-upstream-who-serves-the-model)
@@ -66,7 +66,9 @@ bearer-token gateways).
 # Direct: your existing Claude login or ambient ANTHROPIC_API_KEY
 # agents/dev/agent.toml
 provider        = "claude"
-option_defaults = { model = "sonnet" }     # opus · sonnet · haiku · opus-4-7 · fable-5
+option_defaults = { model = "sonnet", effort = "high" }
+# model:  opus · sonnet · haiku · opus-4-7 · fable-5
+# effort: low · medium · high · xhigh · max (builtin default: max)
 ```
 
 ```toml
@@ -89,8 +91,14 @@ Reads `OPENAI_BASE_URL` and `OPENAI_API_KEY`.
 ```toml
 # Direct
 provider        = "codex"
-option_defaults = { model = "gpt-5.5" }    # gpt-5.6-sol · gpt-5.6-terra · gpt-5.6-luna · gpt-5.5 · gpt-5.3-codex · o3 · o4-mini
+option_defaults = { model = "gpt-5.5" }    # any Codex model id; omit to use ~/.codex/config.toml
 ```
+
+With no `model` or `effort` set, `codex` runs on the model and reasoning
+effort from your own Codex configuration; Gas City passes no `--model` or
+`model_reasoning_effort` flag. Which models are available depends on how Codex
+is logged in (a ChatGPT-account login serves a different set than an API key),
+so pin a model only when you know the account can use it.
 
 ```toml
 # Custom endpoint (an OpenAI-compatible proxy / Azure OpenAI / vLLM)
@@ -136,7 +144,9 @@ Reads `XAI_API_KEY` (key only — no standard base-URL var).
 
 ```toml
 provider        = "grok"
-option_defaults = { model = "grok-build" }  # grok-build · grok-composer-2.5 · grok-composer-2.5-fast
+option_defaults = { model = "grok-4.6" }  # grok-4.7 · grok-4.6 · grok-build · grok-composer-2.5 · grok-composer-2.5-fast
+# `model` and `effort` are open: an id not listed above is passed through to the
+# CLI rather than dropped, so a newly released model works without a gc upgrade.
 
 # direct: just set XAI_API_KEY in the controller environment
 [upstreams.xai]
@@ -148,11 +158,16 @@ api_key = "$XAI_API_KEY"
 
 ### Cursor Agent — `provider = "cursor"`
 
-Reads `CURSOR_API_KEY` (`cursor-agent`; no built-in `model` option — Cursor picks
-the model).
+Reads `CURSOR_API_KEY` (`cursor-agent`).
 
 ```toml
-provider = "cursor"
+provider        = "cursor"
+option_defaults = { model = "auto" }  # auto · composer-2.5 · gpt-5.3-codex · cursor-grok-4.6-high · claude-opus-5-thinking-high · claude-sonnet-5-thinking-high
+# `model` is open: an id not listed above is passed through to the CLI rather
+# than dropped. Cursor's catalog is account-scoped — run `cursor-agent
+# --list-models` to see yours — and accepts parameterized ids such as
+# `claude-opus-4-8[context=1m,effort=high]`.
+
 [upstreams.cursor]
 api_key = "$CURSOR_API_KEY"
 ```
@@ -254,6 +269,64 @@ api_key     = "$MY_PROVIDER_KEY"
 api_key_env = "OPENROUTER_API_KEY"   # whatever env var the chosen provider reads
 ```
 
+### Permissions
+
+An unattended session that stops at a permission prompt stalls until someone
+answers it. To prevent that, the `opencode`, `groq`, and `cerebras` presets
+launch OpenCode with `OPENCODE_PERMISSION={"*":"allow"}`.
+
+OpenCode merges `OPENCODE_PERMISSION` over every config file and applies the
+last matching rule. The preset's catch-all therefore overrides the permission
+rules in the project's `opencode.json`, including one an overlay stages into
+the work directory (for example
+`agents/<name>/overlay/per-provider/opencode/opencode.json`). Pick one place
+for the policy.
+
+**Recipe A — the policy lives in `opencode.json`.** Withhold the preset
+default with an empty value:
+
+```toml
+# agents/worker/agent.toml
+provider = "opencode"
+env      = { OPENCODE_PERMISSION = "" }
+
+# or, for every agent on the harness, in city.toml:
+# [providers.opencode]   (or [providers.groq], [providers.cerebras])
+# env = { OPENCODE_PERMISSION = "" }
+```
+
+Then the `opencode.json` that reaches the work directory carries the rules:
+
+```json
+{
+  "permission": {
+    "*": "allow",
+    "bash": { "git push*": "deny" },
+    "edit": "deny"
+  }
+}
+```
+
+**Recipe B — the policy lives in the env.** Replace the preset default with
+the full rule set, and leave the `permission` block out of `opencode.json`:
+
+```toml
+# agents/worker/agent.toml
+provider = "opencode"
+env      = { OPENCODE_PERMISSION = '{"*":"allow","bash":{"git push*":"deny"},"edit":"deny"}' }
+```
+
+If both the env and the file carry rules, OpenCode merges the env over the
+file and its catch-all wins again.
+
+In both recipes, start the policy with `"*": "allow"`. Without it, OpenCode's
+own defaults ask before reading `.env` files or touching paths outside the work
+directory, and an unattended session waits at that prompt; any rule that
+resolves to `ask` stops the session the same way. Rules match command text, so
+treat them as guardrails rather than a security boundary. See OpenCode's
+[permissions documentation](https://opencode.ai/docs/permissions/) for the
+rule syntax.
+
 ---
 
 ## Login-based harnesses
@@ -266,8 +339,26 @@ upstream env. Set `provider` and run their normal `login` once on the box; no
 provider = "pi"          # Pi Coding Agent     — has a model option (ollama-cloud-gpt-oss-20b)
 # provider = "auggie"    # Augment Auggie CLI
 # provider = "omp"       # Oh My Pi
-# provider = "antigravity"   # Antigravity (agy)
+# provider = "antigravity"   # Antigravity (agy) — effort + plan/accept-edits modes
 ```
+
+Antigravity also takes `model` and `effort` options (`low` · `medium` ·
+`high`) and `plan` / `accept-edits` permission modes, mapped to agy's
+`--model`, `--effort`, and `--mode` flags. Model values are agy's stable
+slugs (`agy models` lists them):
+
+```toml
+provider        = "antigravity"
+option_defaults = { model = "gemini-3.1-pro-high" }
+# also: gemini-3.6-flash-high/-medium/-low · gemini-3.5-flash-high/-medium/-low
+#       gemini-3.1-pro-low · claude-sonnet-4-6 · claude-opus-4-6-thinking
+#       gpt-oss-120b-medium
+```
+
+<Note>
+`model` and `effort` need agy **1.1.10 or newer** — older versions silently
+ignore both flags at launch and run on the persisted default model.
+</Note>
 
 If one of these later needs a custom endpoint, give it a raw upstream `env` block
 with whatever vars its CLI documents — the same escape hatch shown for Grok

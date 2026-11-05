@@ -28,6 +28,10 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// borrowed marks a handle over a store the invocation memo owns
+	// (invocation_store_memo.go). closeBeadStoreHandle leaves its store open;
+	// the memo closes it when the invocation ends.
+	borrowed bool
 }
 
 type beadPolicyGraphStore struct {
@@ -51,17 +55,36 @@ var (
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
-	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
-	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)
+	_ beads.BatchDeleter           = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter           = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataReader      = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataReader      = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataBatchReader = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataBatchReader = (*beadPolicyGraphStore)(nil)
+	_ beads.DepBatchRemover        = (*beadPolicyStore)(nil)
+	_ beads.DepBatchRemover        = (*beadPolicyGraphStore)(nil)
+	_ beads.ParentProjectionWaiter = (*beadPolicyStore)(nil)
+	_ beads.ParentProjectionWaiter = (*beadPolicyGraphStore)(nil)
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, false)
+}
+
+// borrowedStoreWithBeadPolicies is wrapStoreWithBeadPolicies for a store the
+// invocation memo owns: the handle's close leaves the store open.
+func borrowedStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, true)
+}
+
+func wrapStoreWithBeadPoliciesOwnership(store beads.Store, cfg *config.City, borrowed bool) beads.Store {
 	if store == nil {
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:    store,
+		cfg:      cfg,
+		borrowed: borrowed,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{
@@ -70,6 +93,24 @@ func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store 
 		}
 	}
 	return policyStore
+}
+
+// ProxiedStore hands back the proxied-native split store underneath this policy
+// layer, if there is one.
+//
+// The policy wrapper is the OUTERMOST thing every caller holds — it is applied
+// after the factory, outside the cache — and it embeds the beads.Store
+// interface, which strips everything the interface does not name. That is what
+// left `gc doctor` reporting a handle as native half an hour after it stood
+// down: the wrapper could not be asked. Participating in the seam costs one
+// forward and makes the question answerable from any layer.
+//
+// beadPolicyGraphStore inherits this through its embedded *beadPolicyStore.
+func (s *beadPolicyStore) ProxiedStore() (beads.ProxiedStoreView, bool) {
+	if s == nil {
+		return nil, false
+	}
+	return beads.ProxiedStoreFrom(s.Store)
 }
 
 func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bool) {
@@ -108,6 +149,34 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 	return reader.ReadyContext(ctx, expandPolicyReadyQuery(query...))
 }
 
+// DepMetadata forwards the inner store's edge-payload read. The policy layer
+// shapes creation and reads by tier; it has nothing to say about what an edge
+// carries, so the answer passes through untouched.
+//
+// Forwarded explicitly for the same reason as Count and ReadyContext — the
+// embedded Store interface strips optional capabilities — but the stakes here
+// are higher than a fallback: a caller that refuses on uncertainty, as the
+// infra-class migration does, would read the wrapper as UNABLE TO ANSWER and
+// refuse a city whose leaf store answers fine. An inner store without the read
+// gets an error rather than ("", false, nil), because "cannot be asked" and
+// "carries nothing" are different answers and collapsing them is what let the
+// migration drop edge payloads silently.
+func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	reader, ok := s.Store.(beads.DepMetadataReader)
+	if !ok {
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T: %w", issueID, dependsOnID, s.Store, beads.ErrDepMetadataUnsupported)
+	}
+	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// DepMetadataAbsentByProtocol forwards what the inner store declares about its
+// protocol, for the reason DepMetadata is forwarded: the embedded Store
+// interface strips the declaration, and the migration would read a generic
+// exec store under this wrapper as one it cannot ask.
+func (s *beadPolicyStore) DepMetadataAbsentByProtocol() (string, bool) {
+	return beads.DepMetadataAbsent(s.Store)
+}
+
 // Count implements beads.Counter with the same read-tier expansion as List.
 // The embedded Store interface does not promote optional capabilities, so
 // the delegation must be explicit. Inner stores without a Counter report
@@ -134,6 +203,194 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 		return beads.ErrBatchDeleteUnsupported
 	}
 	return deleter.DeleteBatch(ids)
+}
+
+// WaitForParentProjection preserves the wrapped store's optional projection
+// wait. An inner store without that capability keeps the existing no-wait
+// behavior. beadPolicyGraphStore inherits this method through its embedding.
+func (s *beadPolicyStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	waiter, ok := s.Store.(beads.ParentProjectionWaiter)
+	if !ok {
+		return nil
+	}
+	return waiter.WaitForParentProjection(ctx, id, oldParentID, newParentID)
+}
+
+// GetExactBatch forwards the exact batch read to the wrapped store. The policy
+// layer shapes creation and listing, not exact reads by id.
+func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var (
+	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+)
+
+var (
+	_ beads.RowWitness = (*beadPolicyStore)(nil)
+	_ beads.RowWitness = (*beadPolicyGraphStore)(nil)
+)
+
+// SawRows implements beads.RowWitness by forwarding to the wrapped store. Like
+// Count and DeleteBatch, the delegation must be explicit, and here the cost of
+// omitting it is silent rather than loud: an absent optional capability reads
+// to a caller as "this store cannot witness itself", which is a supported
+// state. The store-health row count would keep certifying a zero it has the
+// evidence to refuse, on every controller-opened city, because both the store
+// opener and wrapWithCachingStore hand the API server its city store through
+// this wrapper. Inner stores that cannot witness themselves report no
+// evidence, which leaves the caller on its prior behavior rather than
+// refusing a count. beadPolicyGraphStore embeds *beadPolicyStore, so it
+// forwards through this too.
+func (s *beadPolicyStore) SawRows() bool {
+	witness, ok := s.Store.(beads.RowWitness)
+	return ok && witness.SawRows()
+}
+
+// DepListBatch forwards the batched dep-edge read to the wrapped store.
+//
+// The policy layer shapes which BEADS are visible — Create, List, Ready,
+// Children, ListByLabel and the rest are filtered here. It does not shape DEP
+// EDGES: DepList is already answered by the embedded store with no policy
+// applied, and this is DepList's batch shape, so forwarding it keeps the two
+// answers identical rather than giving the batch a reach the single read
+// does not have.
+//
+// It is explicit for the reason DeleteBatch above is: the embedded Store
+// interface does not promote optional capabilities, so a silent wrapper makes
+// the batch unreachable and the caller takes the per-anchor path with no
+// diagnostic. That is exactly what happened on a live hosted city, where the
+// recovery walk asked this wrapper for the batch, was told no by a failed type
+// assertion, and read a few hundred beads one round trip at a time over a link
+// that drops handshakes (ga-50tsx). beadPolicyGraphStore embeds
+// *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
+}
+
+// DepMetadataBatch forwards the inner store's batched edge-payload read
+// (beads.DepMetadataBatchReader), for the reason DepListBatch is forwarded. An
+// inner store without it reports beads.ErrDepMetadataUnsupported, and the
+// caller reads edge by edge through DepMetadata.
+func (s *beadPolicyStore) DepMetadataBatch(ids []string) (map[beads.DepPair]string, error) {
+	reader, ok := beads.As[beads.DepMetadataBatchReader](s.Store)
+	if !ok {
+		return nil, beads.ErrDepMetadataUnsupported
+	}
+	return reader.DepMetadataBatch(ids)
+}
+
+// DepRemoveBatch forwards the inner store's batched edge removal
+// (beads.DepBatchRemover), for the reason DepMetadataBatch is forwarded. An
+// inner store without it reports beads.ErrDepRemoveBatchUnsupported, and the
+// caller removes edge by edge through DepRemove.
+func (s *beadPolicyStore) DepRemoveBatch(pairs []beads.DepPair) error {
+	remover, ok := beads.As[beads.DepBatchRemover](s.Store)
+	if !ok {
+		return beads.ErrDepRemoveBatchUnsupported
+	}
+	return remover.DepRemoveBatch(pairs)
+}
+
+// ReadyPreferCache forwards the cache-preferred ready read with the policy's
+// expanded read tier, exactly as Ready and both handles do. An inner store
+// with no ready cache is read live, as beads.ReadyPreferCache reads any
+// cache-less store. Explicit for the reason DeleteBatch is: the embedded Store
+// interface does not promote optional capabilities.
+func (s *beadPolicyStore) ReadyPreferCache(query beads.ReadyQuery) ([]beads.Bead, error) {
+	return beads.ReadyPreferCache(s.Store, expandPolicyReadyQuery(query))
+}
+
+// ReadyOrdered forwards a bounded ordered ready read (beads.OrderedReadyReader)
+// with the policy's expanded read tier, exactly as Ready does. Explicit for the
+// reason DeleteBatch is: the embedded Store interface does not promote optional
+// capabilities, and a silent wrapper would send every bounded read down the
+// whole-set path.
+func (s *beadPolicyStore) ReadyOrdered(query beads.ReadyQuery, order beads.ReadyOrder) ([]beads.Bead, bool, error) {
+	return beads.ReadyOrdered(s.Store, expandPolicyReadyQuery(query), order)
+}
+
+var (
+	_ beads.AbsentBlockedReader = (*beadPolicyStore)(nil)
+	_ beads.AbsentBlockedReader = (*beadPolicyGraphStore)(nil)
+)
+
+// StrandsAbsentTargets answers for the wrapped store
+// (beads.AbsentBlockedReader): the policy layer strands nothing of its own.
+// Over bd/Dolt, which reads an absent target as external, it is false, so a
+// federated reader re-judges every row this store serves instead of taking it
+// as already judged (#8360 review, Finding 1).
+func (s *beadPolicyStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
+// ReadyBlockedByAbsent forwards the absent-blocker listing
+// (beads.AbsentBlockedReader) at the policy's expanded read tier, exactly as
+// Ready reads. Explicit for the reason DeleteBatch is: the embedded Store
+// interface does not promote optional capabilities, and a silent wrapper would
+// hide from `gc ready` every work row a file- or SQLite-backed ledger strands
+// behind a blocker held in the class binding. An inner store without the
+// listing strands nothing and reports none.
+func (s *beadPolicyStore) ReadyBlockedByAbsent(query beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	if !ok {
+		return nil, nil
+	}
+	return reader.ReadyBlockedByAbsent(expandPolicyReadyQuery(query))
+}
+
+var (
+	_ beads.ChildrenBatchLister = (*beadPolicyStore)(nil)
+	_ beads.ChildrenBatchLister = (*beadPolicyGraphStore)(nil)
+)
+
+// ChildrenOfAny forwards the batched children read to the wrapped store, at
+// the tier this layer's own Children reads. Children widens a TierIssues read
+// to TierBoth, so the forwarded batch asks for both tiers too; otherwise a
+// wrapped bd store would answer the batch without the ephemeral children the
+// per-parent read returns. A wrapped store without the batch is read one
+// parent at a time through this layer's Children.
+//
+// Explicit for the reason DepListBatch above is: the embedded Store interface
+// does not promote optional capabilities, so a silent wrapper sends
+// molecule.ListSubtree back to one `bd list --parent` plus one `bd query` per
+// member. beadPolicyGraphStore embeds *beadPolicyStore, so it forwards through
+// this too.
+func (s *beadPolicyStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	batch, ok := s.Store.(beads.ChildrenBatchLister)
+	if !ok {
+		return beads.ChildrenOfAnyPerParent(s, parentIDs, opts...)
+	}
+	return batch.ChildrenOfAny(parentIDs, policyTierQueryOpts(opts)...)
+}
+
+// policyTierQueryOpts restates opts' tier as the policy layer reads it
+// (policyTierFromOpts), keeping every other option.
+func policyTierQueryOpts(opts []beads.QueryOpt) []beads.QueryOpt {
+	out := make([]beads.QueryOpt, 0, len(opts)+1)
+	for _, opt := range opts {
+		if opt == beads.WithBothTiers || opt == beads.WithEphemeral {
+			continue
+		}
+		out = append(out, opt)
+	}
+	switch policyTierFromOpts(opts) {
+	case beads.TierBoth:
+		out = append(out, beads.WithBothTiers)
+	case beads.TierWisps:
+		out = append(out, beads.WithEphemeral)
+	}
+	return out
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
@@ -168,6 +425,24 @@ func (r beadPolicyLiveReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, er
 	return r.LiveReader.Ready(expandPolicyReadyQuery(query...))
 }
 
+// GetExactBatch forwards the wrapped live handle's exact batch read, as the
+// store's own GetExactBatch forwards the store's: the policy layer shapes
+// creation and listing, not exact reads by id. It must be explicit, because the
+// embedded LiveReader interface does not promote it, and beads.GetMany reads
+// every cross-store verdict through it: without it, each by-id read of a
+// controller leg (this policy over a CachingStore over bd or native Dolt) is a
+// Get per id (#8360 review, iteration 2). A live handle without the batch
+// reports beads.ErrExactBatchGetUnsupported, and the caller reads per id.
+func (r beadPolicyLiveReader) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := r.LiveReader.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var _ beads.ExactBatchGetter = beadPolicyLiveReader{}
+
 func (s *beadPolicyStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	return s.List(beads.ListQuery{
 		ParentID:      parentID,
@@ -182,7 +457,10 @@ func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.Que
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
-		TierMode:      policyTierFromOpts(opts),
+		// Newest-first like every unwrapped ListByLabel; SortDefault leaves a
+		// caching store's map order, so a limit would keep an arbitrary slice.
+		Sort:     beads.SortCreatedDesc,
+		TierMode: policyTierFromOpts(opts),
 	})
 }
 
@@ -222,6 +500,23 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// Claim forwards the two-argument compare-and-swap claim to the wrapped
+// store, the same plain pass-through ReleaseIfCurrent just above uses: the
+// policy layer shapes creation and reads, and has no claim policy of its own
+// to apply, so the inner store's ok/error idiom (a conflict is ok=false with a
+// nil error; a missing bead is ErrNotFound) travels unmodified.
+// beadPolicyGraphStore inherits this via its embedded *beadPolicyStore,
+// matching ConditionalWritesResolveTarget's comment above.
+func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
+	}
+	return claimer.Claim(id, assignee)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
@@ -272,7 +567,7 @@ func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.G
 // which decides only store routing. It is the verbatim pre-lift classifier.
 func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 	for _, node := range plan.Nodes {
-		if isWispPolicyMetadata(node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
+		if isWispPolicyBead(node.Type, node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
 			return beadPolicyWisp
 		}
 	}
@@ -292,7 +587,7 @@ func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 // keyed on these names, not on the coordination class.
 func policyNameForBead(b beads.Bead) string {
 	switch {
-	case isWispPolicyMetadata(b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
+	case isWispPolicyBead(b.Type, b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
 		return beadPolicyWisp
 	case hasBeadLabel(b.Labels, labelOrderTracking):
 		return beadPolicyOrderTracking
@@ -311,6 +606,20 @@ func policyNameForBead(b beads.Bead) string {
 
 func isWispPolicyMetadata(metadata map[string]string) bool {
 	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
+}
+
+// isWispPolicyBead reports whether a bead of beadType with metadata takes the
+// wisp storage policy (the ephemeral tier under bd-1.0.5 semantics).
+//
+// An ATTACHED root-only wisp does not. sling's privatizeAttachedRootOnlyWisp
+// keeps its gc.kind=wisp marker (it is graph class) but types it as a
+// molecule container, and it lives exactly as long as the source bead it is
+// attached to. On the ephemeral tier it would be reapable by bd's own wisp
+// GC (`gc bd mol wisp gc --age`) while that source is still live, so it stays
+// on the durable tier like the molecule container it is. A standalone
+// root-only wisp is an executable task, and keeps the wisp policy.
+func isWispPolicyBead(beadType string, metadata map[string]string) bool {
+	return isWispPolicyMetadata(metadata) && !beads.IsMoleculeType(beadType)
 }
 
 func isWorkflowPolicyMetadata(metadata map[string]string) bool {
@@ -420,7 +729,13 @@ func beadStorageClass(storage string) beads.StorageClass {
 }
 
 func applyBeadStorage(b beads.Bead, storage string) beads.Bead {
-	switch beadStorageClass(storage) {
+	return applyStorageClass(b, beadStorageClass(storage))
+}
+
+// applyStorageClass sets the bead's own storage flags to storage, for a store
+// that has no storage-class create. StorageDefault leaves them as they are.
+func applyStorageClass(b beads.Bead, storage beads.StorageClass) beads.Bead {
+	switch storage {
 	case beads.StorageEphemeral:
 		b.Ephemeral = true
 		b.NoHistory = false

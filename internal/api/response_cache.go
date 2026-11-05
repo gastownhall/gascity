@@ -7,19 +7,22 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 var responseCacheTTL = 2 * time.Second
 
 // timeBucketResponseCacheTTL bounds how long a built body is reused by the
 // endpoints that key their response-cache entry on a TIME bucket rather than
-// the event sequence: /status (gascity#3186), /formulas/feed, and bounded
-// all=true /beads reads (#3208). The shared index-keyed cache misses on every
-// poll of a busy city — the sequence advances each tick — so O(store-size)
-// bodies were rebuilt per request. These are coarse views where a few seconds
-// of staleness is acceptable (responses report X-GC-Cache-Age-S where a
-// CachingStore backs them); strict-freshness callers (blocking ?index=&wait=
-// requests) bypass the time cache at each handler.
+// the event sequence: /status (gascity#3186), /formulas/feed, bounded
+// all=true /beads reads (#3208), and the agent list (#7149). The shared
+// index-keyed cache misses on every poll of a busy city — the sequence
+// advances each tick — so O(store-size) bodies were rebuilt per request.
+// These are coarse views where a few seconds of staleness is acceptable
+// (responses report X-GC-Cache-Age-S where a CachingStore backs them);
+// strict-freshness callers (blocking ?index=&wait= requests, and /status's
+// ?fresh=true reads) bypass the time cache at each handler.
 var timeBucketResponseCacheTTL = 2 * time.Second
 
 // responseCacheTimeBucket returns a monotonically increasing generation that
@@ -140,6 +143,23 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 	}
 }
 
+// configGeneration returns a counter that advances whenever the state serves a
+// different config snapshot than the previous call saw. A config swap (an API
+// config mutation, or a reload) does not advance the event index, so caches of
+// config-derived projections must key on this as well as the index. Snapshots
+// are told apart by pointer, which relies on State.Config serving a changed
+// config as a new snapshot. Holding the last snapshot keeps its address from
+// being reused by a later one.
+func (s *Server) configGeneration(cfg *config.City) uint64 {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if cfg != s.responseCacheCfg {
+		s.responseCacheCfg = cfg
+		s.responseCacheCfgGen++
+	}
+	return s.responseCacheCfgGen
+}
+
 // cachedResponse returns the cached typed value for (key, index) if present
 // and unexpired. Callers type-assert the returned any to the concrete type
 // they stored.
@@ -164,6 +184,14 @@ func (s *Server) cachedResponse(key string, index uint64) (any, bool) {
 // cachedResponseAs. The map is capped at responseCacheMaxEntries with
 // TTL-based eviction on insert.
 func (s *Server) storeResponse(key string, index uint64, v any) {
+	s.storeResponseUnless(key, index, v, nil)
+}
+
+// storeResponseUnless is storeResponse that leaves the entry already cached
+// under key in place, and drops v, when keep reports true for that entry.
+// keep runs under the cache mutex, so no other store lands between its check
+// and the write; it must not block.
+func (s *Server) storeResponseUnless(key string, index uint64, v any, keep func(cached responseCacheEntry) bool) {
 	if key == "" {
 		return
 	}
@@ -172,8 +200,12 @@ func (s *Server) storeResponse(key string, index uint64, v any) {
 	if s.responseCacheEntries == nil {
 		s.responseCacheEntries = make(map[string]responseCacheEntry)
 	}
+	cached, exists := s.responseCacheEntries[key]
+	if exists && keep != nil && keep(cached) {
+		return
+	}
 	now := time.Now()
-	if _, exists := s.responseCacheEntries[key]; !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
+	if !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
 		s.evictResponseCache(now)
 	}
 	s.responseCacheEntries[key] = responseCacheEntry{
@@ -227,6 +259,83 @@ func (s *Server) cachedResponseWithinAge(key string, maxAge time.Duration) (any,
 		return nil, false
 	}
 	return entry.value, true
+}
+
+// staleResponse returns the cached value for key regardless of its age,
+// together with how old it is. Unlike cachedResponse / cachedResponseWithinAge
+// this never rejects an entry on staleness — it is the last-resort read for
+// callers implementing stale-while-revalidate (ra-4u2eqc): when both the
+// index/bucket-keyed and age-bounded lookups miss, this is what lets a
+// handler serve the last-known-good body instead of blocking on a rebuild.
+// Returns ok=false only when nothing has ever been cached under key (the
+// genuine cold-start case, where there is no stale value to serve).
+func (s *Server) staleResponse(key string) (value any, age time.Duration, ok bool) {
+	if key == "" {
+		return nil, 0, false
+	}
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEntries == nil {
+		return nil, 0, false
+	}
+	entry, found := s.responseCacheEntries[key]
+	if !found {
+		return nil, 0, false
+	}
+	return entry.value, time.Since(entry.storedAt), true
+}
+
+// staleResponseAs is staleResponse for typed callers: deep-copies the cached
+// value via a JSON roundtrip the same way cachedResponseAs does.
+func staleResponseAs[T any](s *Server, key string) (T, time.Duration, bool) {
+	v, age, ok := s.staleResponse(key)
+	if !ok {
+		var zero T
+		return zero, 0, false
+	}
+	body, ok := cloneCachedValue[T](v)
+	if !ok {
+		var zero T
+		return zero, 0, false
+	}
+	return body, age, true
+}
+
+// beginResponseRefresh reports whether the caller won the right to run a
+// background stale-while-revalidate refresh for key. Returns false when a
+// refresh for key is already in flight, so concurrent cache-miss requests
+// for the same key coalesce onto a single background rebuild instead of
+// each launching their own (ra-4u2eqc). Pair with endResponseRefresh, which
+// the refresh must call on every exit path (including panics via defer).
+func (s *Server) beginResponseRefresh(key string) bool {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseRefreshing == nil {
+		s.responseRefreshing = make(map[string]bool)
+	}
+	if s.responseRefreshing[key] {
+		return false
+	}
+	s.responseRefreshing[key] = true
+	return true
+}
+
+// endResponseRefresh releases the in-flight guard beginResponseRefresh took
+// for key, so the next cache-miss request may trigger another refresh.
+func (s *Server) endResponseRefresh(key string) {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	delete(s.responseRefreshing, key)
+}
+
+// indexedResponse pairs a cached body with the event index captured before
+// the body was built. A cache hit or an Idempotency-Key replay must report
+// that index, not the current head: X-GC-Index tells a client where to resume
+// or block, and a head newer than the body would skip the changes the body
+// lacks.
+type indexedResponse[T any] struct {
+	Index uint64 `json:"index"`
+	Body  T      `json:"body"`
 }
 
 // cachedResponseAs is a generic helper: retrieve the cached value and

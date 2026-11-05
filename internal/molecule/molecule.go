@@ -8,6 +8,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -58,7 +60,15 @@ type Options struct {
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
 
+	// RootMetadata is written onto the root bead only, atomically with its
+	// creation, after the formula's own root metadata so the caller's value
+	// wins. Sling uses it for server-owned facts about the launch (such as
+	// who initiated it) that must be present before any worker can claim
+	// the work.
+	RootMetadata map[string]string
+
 	nativeStepTopologyPrepared bool
+	stampAttachRootID          bool
 }
 
 const (
@@ -137,26 +147,76 @@ type FragmentResult struct {
 	Created   int
 }
 
+// StoreChooser picks the store a compiled recipe's molecule belongs in.
+//
+// It exists because the destination is a property of the COMPILED recipe, not
+// of the call site: on a city that has relocated its coordination classes, a
+// recipe whose root classifies as infrastructure belongs in the binding and one
+// that classifies as work belongs in the work store, and nothing before compile
+// can tell which. A caller with one store for every recipe passes a chooser that
+// ignores its argument.
+//
+// A chooser is a pure classification of the recipe. It must not mutate the
+// recipe, take locks, or do I/O — CookChoosingStore calls it once, between
+// validation and the first bead write, with no way to undo either side.
+type StoreChooser func(recipe *formula.Recipe) beads.MoleculeTarget
+
 // Cook compiles a formula by name and instantiates it as a molecule.
 // This is the convenience wrapper that most callers should use.
-func Cook(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
+func Cook(ctx context.Context, store beads.MoleculeTarget, formulaName string, searchPaths []string, opts Options) (*Result, error) {
+	// Refused here rather than left to the chooser's nil check, so a Cook caller
+	// reads an error about the argument it passed instead of one naming a store
+	// chooser it never wrote.
+	if store.Absent() {
+		return nil, fmt.Errorf("cooking formula %q: nil store", formulaName)
+	}
+	result, _, err := CookChoosingStore(ctx, formulaName, searchPaths, opts, func(*formula.Recipe) beads.MoleculeTarget { return store })
+	return result, err
+}
+
+// CookChoosingStore is Cook for a caller that cannot name the store until the
+// recipe is compiled. It compiles, validates runtime vars, calls choose exactly
+// once, and instantiates into what choose returned — which it also returns, so a
+// caller that stamps metadata on the new root writes to the store that holds it
+// rather than to one that has never seen it. The target is the zero target when
+// err is not, and a nil chooser or an absent choice is an error before anything
+// is written.
+//
+// The three capabilities this deliberately does NOT have, because each would
+// require reordering the steps above: deriving Options from the compiled recipe
+// (an idempotency key computed off the recipe), holding a lock past the return,
+// and decorating the recipe through the chosen store. One live call site needs
+// all three — the graph.v2 arm of `gc formula cook` — and it writes the sequence
+// out rather than calling this.
+func CookChoosingStore(ctx context.Context, formulaName string, searchPaths []string, opts Options, choose StoreChooser) (*Result, beads.MoleculeTarget, error) {
+	if choose == nil {
+		return nil, beads.MoleculeTarget{}, errors.New("CookChoosingStore requires a StoreChooser")
+	}
 	compileVars := opts.Vars
 	if compileVars == nil {
 		compileVars = map[string]string{}
 	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
-		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+		return nil, beads.MoleculeTarget{}, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}
 	if err := ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-		return nil, err
+		return nil, beads.MoleculeTarget{}, err
 	}
-	return Instantiate(ctx, store, recipe, opts)
+	store := choose(recipe)
+	if store.Absent() {
+		return nil, beads.MoleculeTarget{}, fmt.Errorf("choosing the store for formula %q: store chooser returned nil", formulaName)
+	}
+	result, err := Instantiate(ctx, store, recipe, opts)
+	if err != nil {
+		return nil, beads.MoleculeTarget{}, err
+	}
+	return result, store, nil
 }
 
 // CookOn compiles a formula and attaches it to an existing bead.
 // Shorthand for Cook with opts.ParentID set.
-func CookOn(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
+func CookOn(ctx context.Context, store beads.MoleculeTarget, formulaName string, searchPaths []string, opts Options) (*Result, error) {
 	if opts.ParentID == "" {
 		return nil, fmt.Errorf("CookOn requires Options.ParentID")
 	}
@@ -230,7 +290,7 @@ type AttachResult struct {
 // gc.control_epoch matches before proceeding. On success, the epoch is
 // incremented. This prevents concurrent processors from spawning duplicate
 // attempts.
-func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, attachBeadID string, opts AttachOptions) (*AttachResult, error) {
+func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Recipe, attachBeadID string, opts AttachOptions) (*AttachResult, error) {
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
 	}
@@ -243,18 +303,31 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("attach bead %s: %w", attachBeadID, err)
 	}
 
-	// Resolve the sub-DAG's workflow root through the canonical run chain
-	// (workflow_id -> molecule_id -> gc.root_bead_id -> the parent's own id),
-	// not gc.root_bead_id alone. A wisp/source bead grafted mid-workflow carries
-	// the true top root in workflow_id/molecule_id (written by sling) but no
-	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
-	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
-	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong
-	// root>) and burned ralph attempts (maintainer-city incident,
-	// gcg-wisp-y785sz). A genuine top-level head with no run chain still
-	// self-roots via its own id (ResolveRunID's selfID fallback).
-	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+	// Resolve the sub-DAG's workflow root from the keys that name a container of
+	// the parent (workflow_id -> gc.root_bead_id -> the parent's own id). A
+	// wisp/source bead grafted mid-workflow carries the true top root in
+	// workflow_id but no gc.root_bead_id of its own; ignoring workflow_id would
+	// root the sub-DAG at the parent and stamp a wrong gc.root_bead_id on every
+	// child, burning ralph attempts (maintainer-city incident gcg-wisp-y785sz).
+	// molecule_id is deliberately not consulted: sling writes it on a source bead
+	// as a forward pointer to that bead's own v1 attachment, never to a container
+	// of it, so nesting there would adopt an unrelated molecule (ga-crz5ege). A
+	// genuine top-level head with no container key self-roots via its own id.
+	rootBeadID := beadmeta.ResolveNestingRootID(parentBead.Metadata, attachBeadID)
+
+	// A resolved container root may point at a molecule that has since fully
+	// closed (e.g. re-attaching a content bead to a fresh formula after its
+	// prior review round-trip closed cleanly) -- a dead pointer, not a live
+	// upstream workflow to honor. Only a still-open chain root is trusted;
+	// anything else (closed, or no longer resolvable) falls back to self-root,
+	// exactly like the no-chain case (ga-yov1rr). A live chain
+	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	if rootBeadID != attachBeadID {
+		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+			rootBeadID = attachBeadID
+		}
+	}
+
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.
@@ -341,6 +414,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		PreserveRootType:           true,
 		DeferAssignees:             fencedDeferred,
 		nativeStepTopologyPrepared: true,
+		stampAttachRootID:          true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -397,8 +471,8 @@ const (
 // writer), so a missing writer here means a mixed-fleet artifact; the
 // fallback is the legacy racy read-check-set, which is no worse than the
 // pre-claim behavior.
-func claimAttachCandidate(store beads.Store, rootID, from, to string) (bool, error) {
-	if writer, ok := beads.ConditionalWriterFor(store); ok {
+func claimAttachCandidate(store beads.MoleculeTarget, rootID, from, to string) (bool, error) {
+	if writer, ok := beads.As[beads.ConditionalWriter](store); ok {
 		return writer.CompareAndSetMetadataKey(rootID, beadmeta.AttachFencePendingMetadataKey, from, to)
 	}
 	b, err := store.Get(rootID)
@@ -416,13 +490,14 @@ func claimAttachCandidate(store beads.Store, rootID, from, to string) (bool, err
 
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
-func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
+func findExistingAttach(store beads.MoleculeTarget, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.IdempotencyKeyMetadataKey: key,
 			beadmeta.RootBeadIDMetadataKey:     rootBeadID,
 		},
-		TierMode: beads.TierBoth,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -531,7 +606,7 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 // adoptExistingAttach returns an existing sub-DAG root as the idempotent
 // duplicate: it re-wires the blocking edge when missing, advances the epoch
 // for the recovered duplicate when still needed, and rebuilds the ID mapping.
-func adoptExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID string, expectedEpoch int, b beads.Bead) (*AttachResult, error) {
+func adoptExistingAttach(store beads.MoleculeTarget, recipe *formula.Recipe, rootBeadID, attachBeadID string, expectedEpoch int, b beads.Bead) (*AttachResult, error) {
 	deps, err := store.DepList(attachBeadID, "down")
 	if err != nil {
 		return nil, err
@@ -563,7 +638,7 @@ func adoptExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, 
 	}, nil
 }
 
-func advanceAttachEpochIfNeeded(store beads.Store, attachBeadID string, expectedEpoch int) error {
+func advanceAttachEpochIfNeeded(store beads.MoleculeTarget, attachBeadID string, expectedEpoch int) error {
 	if expectedEpoch <= 0 {
 		return nil
 	}
@@ -637,7 +712,7 @@ func advanceAttachEpochIfNeeded(store beads.Store, attachBeadID string, expected
 // indistinguishable from a competitor's increment), so the sub-DAG is left
 // live and the error surfaces as transient — tolerable only because the
 // retry's idempotency check runs first.
-func advanceAttachEpochFence(store beads.Store, writer beads.ConditionalWriter, attachBeadID string, expectedEpoch int, result *Result) error {
+func advanceAttachEpochFence(store beads.MoleculeTarget, writer beads.ConditionalWriter, attachBeadID string, expectedEpoch int, result *Result) error {
 	nextEpoch := strconv.Itoa(expectedEpoch + 1)
 	if writer == nil {
 		if err := store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, nextEpoch); err != nil {
@@ -687,7 +762,11 @@ func advanceAttachEpochFence(store beads.Store, writer beads.ConditionalWriter, 
 	return ErrEpochConflict
 }
 
-func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {
+// existingAttachIDMapping maps each recipe step to its bead in the existing
+// attach rooted at root, matching step refs among the beads whose
+// AttachRootIDMetadataKey names root when any do (two for one step is an
+// error), else among the unstamped open beads a pre-stamp attach left.
+func existingAttachIDMapping(store beads.MoleculeTarget, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {
 	idMapping := map[string]string{}
 	if recipe == nil {
 		return idMapping, nil
@@ -706,14 +785,30 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 		return idMapping, nil
 	}
 	all, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootBeadID},
-		TierMode: beads.TierBoth,
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootBeadID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
 	}
+	scoped := false
+	for _, bead := range all {
+		if strings.TrimSpace(bead.Metadata[beadmeta.AttachRootIDMetadataKey]) == root.ID {
+			scoped = true
+			break
+		}
+	}
+	matched := map[string]string{}
 	for _, bead := range all {
 		if bead.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
+			continue
+		}
+		owner := strings.TrimSpace(bead.Metadata[beadmeta.AttachRootIDMetadataKey])
+		if scoped && owner != root.ID {
+			continue
+		}
+		if !scoped && (owner != "" || bead.Status == "closed") {
 			continue
 		}
 		ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
@@ -724,10 +819,18 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 			continue
 		}
 		for _, stepID := range wantedRefs[ref] {
-			if idMapping[stepID] == "" {
-				idMapping[stepID] = bead.ID
+			prior := matched[stepID]
+			if prior == "" {
+				matched[stepID] = bead.ID
+				continue
+			}
+			if scoped && prior != bead.ID {
+				return nil, fmt.Errorf("attach root %s: step %q matches beads %s and %s", root.ID, stepID, prior, bead.ID)
 			}
 		}
+	}
+	for stepID, beadID := range matched {
+		idMapping[stepID] = beadID
 	}
 	return idMapping, nil
 }
@@ -759,19 +862,22 @@ func attachStepRefs(step formula.RecipeStep) []string {
 // Dependencies are wired after all beads exist. On partial failure,
 // already-created beads are marked with "molecule_failed" metadata
 // for cleanup.
-func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe, opts Options) (*Result, error) {
+func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Recipe, opts Options) (*Result, error) {
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
 	}
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write: a refused recipe creates nothing
+	}
 	if !opts.nativeStepTopologyPrepared {
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
-		if applier, ok := beads.GraphApplyFor(store); ok {
+		if applier, ok := beads.As[beads.GraphApplyStore](store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
 			if err == nil {
 				return result, nil
@@ -796,7 +902,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			}
 			graphApplyTracef("graph-apply transient-error fallback recipe=%s first_err=%v retry_err=%v", recipe.Name, err, retryErr)
 		} else {
-			graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
+			graphApplyTracef("graph-apply unavailable recipe=%s store=%s", recipe.Name, beads.PhysicalStoreKey(store))
 		}
 	}
 
@@ -879,7 +985,11 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.IdempotencyKey != "" {
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			if graphWorkflow && !recipe.RootOnly {
+				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
+			}
 			stampFormulaVars(vars, &b)
+			b.Metadata = withRootMetadata(b.Metadata, opts.RootMetadata)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -910,6 +1020,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			}
 			if b.Metadata[beadmeta.StepRefMetadataKey] == "" {
 				b.Metadata[beadmeta.StepRefMetadataKey] = step.ID
+			}
+			if opts.stampAttachRootID {
+				b.Metadata[beadmeta.AttachRootIDMetadataKey] = idMapping[recipe.Steps[0].ID]
 			}
 
 			if graphWorkflow || step.Metadata[beadmeta.KindMetadataKey] != "" {
@@ -949,20 +1062,21 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		// as agent-readable templates resolved at claim time.
 		if strings.Contains(b.Title, "{{") {
 			if residual := formula.CheckResidualVars(b.Title); len(residual) > 0 {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", ")))
 			}
 		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			return nil, failInstantiation(markFailed(store, createdIDs), err)
+		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
-			markFailed(store, createdIDs)
-			return nil, err
+			return nil, failInstantiation(markFailed(store, createdIDs), err)
 		}
 
 		created, err := store.Create(b)
 		if err != nil {
 			// Best-effort cleanup: mark already-created beads as failed.
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("creating bead for step %q: %w", step.ID, err)
+			return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("creating bead for step %q: %w", step.ID, err))
 		}
 
 		idMapping[step.ID] = created.ID
@@ -985,14 +1099,12 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if dep.Type == "parent-child" && createdParentByStep[dep.StepID] != toID {
 				parentID := toID
 				if err := store.Update(fromID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-					markFailed(store, createdIDs)
-					return nil, fmt.Errorf("setting parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+					return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("setting parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 				}
 				createdParentByStep[dep.StepID] = toID
 			}
 			if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("wiring dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("wiring dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 			}
 		}
 	}
@@ -1009,8 +1121,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				continue
 			}
 			if err := store.DepAdd(fromID, dep.DependsOnID, dep.Type); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("wiring external dep %s->%s: %w", stepID, dep.DependsOnID, err)
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("wiring external dep %s->%s: %w", stepID, dep.DependsOnID, err))
 			}
 		}
 	}
@@ -1025,8 +1136,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				continue
 			}
 			if err := store.Update(beadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("assigning graph step %q: %w", stepID, err)
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("assigning graph step %q: %w", stepID, err))
 			}
 		}
 	}
@@ -1038,8 +1148,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				continue
 			}
 			if err := activateFencedGraphWorkflowBead(store, beadID); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("activating graph step %q: %w", step.ID, err)
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("activating graph step %q: %w", step.ID, err))
 			}
 		}
 	}
@@ -1059,7 +1168,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 
 // InstantiateFragment creates beads from a rootless recipe fragment and stamps
 // them onto an existing workflow root.
-func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
+func InstantiateFragment(ctx context.Context, store beads.MoleculeTarget, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
 	_ = ctx
 
 	if recipe == nil {
@@ -1070,6 +1179,9 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	}
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
+	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write
 	}
 	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
@@ -1085,11 +1197,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		priorityOverride = clonePriority(root.Priority)
 	}
 	if IsGraphApplyEnabled() {
-		if applier, ok := beads.GraphApplyFor(store); ok {
+		if applier, ok := beads.As[beads.GraphApplyStore](store); ok {
 			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
 		}
-		graphApplyTracef("graph-apply fragment-unavailable root=%s store=%T", opts.RootID, store)
+		graphApplyTracef("graph-apply fragment-unavailable root=%s store=%s", opts.RootID, beads.PhysicalStoreKey(store))
 	}
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
@@ -1181,19 +1293,20 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		// Same residual-var guard as Instantiate — see #618.
 		if strings.Contains(b.Title, "{{") {
 			if residual := formula.CheckResidualVars(b.Title); len(residual) > 0 {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", ")))
 			}
 		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			return nil, failInstantiation(markFailed(store, createdIDs), err)
+		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
-			markFailed(store, createdIDs)
-			return nil, err
+			return nil, failInstantiation(markFailed(store, createdIDs), err)
 		}
 
 		created, err := store.Create(b)
 		if err != nil {
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("creating fragment bead for step %q: %w", step.ID, err)
+			return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("creating fragment bead for step %q: %w", step.ID, err))
 		}
 		idMapping[step.ID] = created.ID
 		createdParentByStep[step.ID] = created.ParentID
@@ -1212,14 +1325,12 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		if dep.Type == "parent-child" && createdParentByStep[dep.StepID] != toID {
 			parentID := toID
 			if err := store.Update(fromID, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("setting fragment parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("setting fragment parent for dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 			}
 			createdParentByStep[dep.StepID] = toID
 		}
 		if err := store.DepAdd(fromID, toID, dep.Type); err != nil {
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("wiring fragment dep %s->%s: %w", dep.StepID, dep.DependsOnID, err)
+			return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("wiring fragment dep %s->%s: %w", dep.StepID, dep.DependsOnID, err))
 		}
 	}
 	for stepID, deps := range externalDepsByStep {
@@ -1235,8 +1346,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				continue
 			}
 			if err := store.DepAdd(fromID, dep.DependsOnID, dep.Type); err != nil {
-				markFailed(store, createdIDs)
-				return nil, fmt.Errorf("wiring external fragment dep %s->%s: %w", stepID, dep.DependsOnID, err)
+				return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("wiring external fragment dep %s->%s: %w", stepID, dep.DependsOnID, err))
 			}
 		}
 	}
@@ -1250,8 +1360,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 			continue
 		}
 		if err := store.Update(beadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
-			markFailed(store, createdIDs)
-			return nil, fmt.Errorf("assigning fragment step %q: %w", stepID, err)
+			return nil, failInstantiation(markFailed(store, createdIDs), fmt.Errorf("assigning fragment step %q: %w", stepID, err))
 		}
 	}
 
@@ -1316,6 +1425,27 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
 }
 
+// refuseSessionSteps refuses a recipe a step of which would make an owned
+// row, a substituted variable's included, before anything is written: a
+// controller-owned row (coordclass.ControllerOwned: a session row, a
+// startup-health episode, a convergence root) or a coordination row
+// (coordclass.CoordinationOwned: a mail message, a session wait, a queued
+// nudge, an order's run record, an extmsg row). Only its owner mints one
+// (mc-okw9n, mc-lp7zb, architecture B, the #7766 review). The compile
+// refuses the literal marks (formula.Validate).
+func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
+	for _, step := range steps {
+		b := stepToBead(step, vars, nil)
+		switch {
+		case coordclass.ControllerOwned(b):
+			return fmt.Errorf("formula step %q would make a controller-owned row (type %q, labels %v: a session row, a startup-health episode or a convergence root), which only its owner creates", step.ID, b.Type, b.Labels)
+		case coordclass.CoordinationOwned(b):
+			return fmt.Errorf("formula step %q would make a coordination row (type %q, labels %v: a mail message, a session wait, a queued nudge, an order's run record or an extmsg row), which only its owning route creates", step.ID, b.Type, b.Labels)
+		}
+	}
+	return nil
+}
+
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
 func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverride *int) beads.Bead {
 	stepType := step.Type
@@ -1325,7 +1455,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	b := beads.Bead{
 		Title:       formula.Substitute(step.Title, vars),
-		Description: formula.Substitute(step.Description, vars),
+		Description: substituteStepDescription(step, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      substituteLabels(step.Labels, vars),
@@ -1344,6 +1474,22 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func substituteStepDescription(step formula.RecipeStep, vars map[string]string) string {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		return formula.Substitute(step.Description, vars)
+	}
+
+	// A source-spec description is serialized JSON. Runtime values must be
+	// escaped for their JSON string context before placeholder substitution;
+	// otherwise newlines, quotes, or backslashes corrupt the retry snapshot.
+	escaped := make(map[string]string, len(vars))
+	for name, value := range vars {
+		encoded, _ := json.Marshal(value) // strings are always JSON-marshalable
+		escaped[name] = string(encoded[1 : len(encoded)-1])
+	}
+	return formula.Substitute(step.Description, escaped)
 }
 
 func preserveExecutableRootType(step formula.RecipeStep) bool {
@@ -1400,7 +1546,7 @@ func fenceGraphWorkflowBead(b *beads.Bead) {
 	deferBeadRouting(b)
 }
 
-func activateFencedGraphWorkflowBead(store beads.Store, id string) error {
+func activateFencedGraphWorkflowBead(store beads.MoleculeTarget, id string) error {
 	b, err := store.Get(id)
 	if err != nil {
 		return err
@@ -1481,6 +1627,22 @@ func stampFormulaVars(vars map[string]string, b *beads.Bead) {
 	}
 }
 
+// withRootMetadata returns meta with every entry of rootMeta set on it,
+// allocating meta when it is nil. Both root-creation paths (per-bead create
+// and graph-apply) share it so Options.RootMetadata lands identically.
+func withRootMetadata(meta, rootMeta map[string]string) map[string]string {
+	if len(rootMeta) == 0 {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]string, len(rootMeta))
+	}
+	for k, v := range rootMeta {
+		meta[k] = v
+	}
+	return meta
+}
+
 // substituteLabels applies variable substitution to each label.
 func substituteLabels(labels []string, vars map[string]string) []string {
 	if len(labels) == 0 {
@@ -1511,16 +1673,7 @@ func clonePriority(v *int) *int {
 // applyVarDefaults merges formula variable defaults with caller-provided
 // vars. Caller values take precedence over defaults.
 func applyVarDefaults(vars map[string]string, defs map[string]*formula.VarDef) map[string]string {
-	result := make(map[string]string)
-	for name, def := range defs {
-		if def != nil && def.Default != nil {
-			result[name] = *def.Default
-		}
-	}
-	for k, v := range vars {
-		result[k] = v
-	}
-	return result
+	return formula.ApplyVarDefaults(defs, vars)
 }
 
 // ValidateRecipeRuntimeVars validates runtime variables for a compiled recipe.
@@ -1596,7 +1749,7 @@ func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Option
 // and the root's fence-pending marker cleared (marker last, so a crash
 // mid-activation leaves a pending root that recovery re-activates
 // idempotently — activation updates are no-ops once applied).
-func activateAttachCandidate(store beads.Store, rootID string, idMapping map[string]string) error {
+func activateAttachCandidate(store beads.MoleculeTarget, rootID string, idMapping map[string]string) error {
 	// Claim the candidate before touching any step: only the claim winner
 	// (or a co-activator finishing an idempotent activation) may proceed. A
 	// candidate settled as "failed" was neutralized — activating it now
@@ -1645,33 +1798,61 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 	return nil
 }
 
-// markFailedReporting is markFailed with the first metadata-write error
-// surfaced instead of swallowed: the fence loser path must know when its
-// candidate was NOT neutralized, because an unmarked candidate could
-// otherwise be selected by idempotency recovery.
-func markFailedReporting(store beads.Store, ids []string) error {
-	var firstErr error
-	for _, id := range ids {
-		if err := store.SetMetadataBatch(id, map[string]string{
-			beadmeta.MoleculeFailedMetadataKey: "true",
-			InstantiatingMetadataKey:           "",
-		}); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("marking %s molecule_failed: %w", id, err)
-		}
-	}
-	return firstErr
+// markFailedReporting stamps ids as failed via markFailed and surfaces
+// every metadata-write error instead of swallowing them: the fence loser
+// path must know when its candidate was NOT neutralized, because an
+// unmarked candidate could otherwise be selected by idempotency recovery.
+func markFailedReporting(store beads.MoleculeTarget, ids []string) error {
+	return errors.Join(markFailed(store, ids).errs...)
 }
 
-// markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
-// Best-effort: errors are silently ignored since we're already in an
-// error path.
-func markFailed(store beads.Store, ids []string) {
-	for _, id := range ids {
-		_ = store.SetMetadataBatch(id, map[string]string{
-			beadmeta.MoleculeFailedMetadataKey: "true",
-			InstantiatingMetadataKey:           "",
-		})
+// failInstantiation returns the mint's cause once markFailed has stamped the
+// created beads. When every stamp landed it returns cause itself; otherwise it
+// appends the ids of the beads whose stamp it could not confirm. The stamp
+// faults stay out of the error, text included: the controller classifies a
+// spawn failure by its message as well as its identity, and a stamp refused
+// with a transient store fault must not turn a hard mint failure into a retry
+// that adopts the bead the stamp could not mark.
+func failInstantiation(stamps unconfirmedStamps, cause error) error {
+	if len(stamps.ids) == 0 {
+		return cause
 	}
+	return fmt.Errorf("%w (failure stamp not confirmed on %s)", cause, strings.Join(stamps.ids, ", "))
+}
+
+// unconfirmedStamps names the beads whose failure stamp markFailed could not
+// confirm, with one error per bead.
+type unconfirmedStamps struct {
+	ids  []string
+	errs []error
+}
+
+// markFailed sets beadmeta.MoleculeFailedMetadataKey and clears the
+// instantiation fence on every id. A bead whose stamp is refused is retried
+// once, after every other bead has been stamped, so a transient fault on the
+// row that just failed the mint has the whole loop to clear. The batch is
+// idempotent, so the retry also completes a batch a key-by-key store
+// half-applied. It returns the beads whose retry was refused too, and one
+// error per such bead.
+func markFailed(store beads.MoleculeTarget, ids []string) unconfirmedStamps {
+	stamp := map[string]string{
+		beadmeta.MoleculeFailedMetadataKey: "true",
+		InstantiatingMetadataKey:           "",
+	}
+	var refused []string
+	for _, id := range ids {
+		if err := store.SetMetadataBatch(id, stamp); err != nil {
+			refused = append(refused, id)
+		}
+	}
+	var unconfirmed unconfirmedStamps
+	for _, id := range refused {
+		if err := store.SetMetadataBatch(id, stamp); err != nil {
+			unconfirmed.ids = append(unconfirmed.ids, id)
+			unconfirmed.errs = append(unconfirmed.errs, fmt.Errorf("marking %s molecule_failed: %w", id, err))
+		}
+	}
+	return unconfirmed
 }
 
 func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
@@ -1688,18 +1869,20 @@ func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
 				return trimmed, true
 			}
 		case "retry-run":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		case "retry-eval":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		}
 
 		// v2 patterns: attempt/iteration suffix stripping.
-		// v2 beads keep their original kind but have gc.attempt set.
-		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+attempt); ok {
+		// v2 beads keep their original kind but have gc.attempt set. A retry
+		// attempt's ".attempt.<n>" suffix names its retry counter, which inside
+		// a ralph body differs from gc.attempt (the iteration).
+		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 			return trimmed, true
 		}
 		if trimmed, ok := trimAttemptSuffix(step.ID, ".iteration."+attempt); ok {
@@ -1730,7 +1913,7 @@ func trimAttemptSuffix(id, suffix string) (string, bool) {
 	return strings.TrimSuffix(id, suffix), true
 }
 
-func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]string, error) {
+func existingLogicalBeadIDIndex(store beads.MoleculeTarget, rootID string) (map[string]string, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
@@ -1756,4 +1939,33 @@ func existingLogicalBeadIDIndex(store beads.Store, rootID string) (map[string]st
 		}
 	}
 	return index, nil
+}
+
+// RecipeClass returns the coordination class of the beads instantiating recipe
+// produces, which decides the store its molecule belongs in.
+//
+// Instantiate materializes a recipe as one atomic plan, so the plan is
+// classified wholesale, as coordclass.ClassifyGraphPlan does: a single
+// graph-marked step makes the whole molecule graph class, which keeps its
+// intra-plan edges inside one store. Steps a RootOnly recipe never creates are
+// skipped, matching Instantiate's own RootOnly cut. A graph.v2 workflow or a
+// root-only wisp is graph class; a v1 POURED recipe (a molecule container plus
+// plain steps) is work class and belongs on the work ledger.
+func RecipeClass(recipe *formula.Recipe) coordclass.Class {
+	if recipe == nil {
+		return coordclass.ClassWork
+	}
+	for i, step := range recipe.Steps {
+		if recipe.RootOnly && i > 0 {
+			break
+		}
+		stepType := step.Type
+		if stepType == "" {
+			stepType = "task"
+		}
+		if coordclass.Classify(beads.Bead{Type: stepType, Labels: step.Labels, Metadata: step.Metadata}) == coordclass.ClassGraph {
+			return coordclass.ClassGraph
+		}
+	}
+	return coordclass.ClassWork
 }

@@ -126,6 +126,35 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 	if md.IsDefined("formulas", "dir") {
 		return fmt.Errorf("[formulas].dir is no longer supported; use the well-known formulas/ directory")
 	}
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
+		return err
+	}
+	if err := validateRigFederationPatchSurface(md); err != nil {
+		return err
+	}
+	return validateStorageAuthoringSurface(md)
+}
+
+// validateRigFederationPatchSurface refuses federation settings in
+// [[patches.rigs]]. RigPatch deliberately has no such fields, so without this
+// the keys would decode to nothing and a rig an operator meant to guard would
+// stay unguarded behind a mere unknown-field warning.
+func validateRigFederationPatchSurface(md toml.MetaData) error {
+	for _, key := range md.Undecoded() {
+		// The decoder matches struct fields case-insensitively, so any
+		// spelling of the key counts.
+		switch strings.ToLower(key.String()) {
+		case "patches.rigs." + rigFederationKey, "patches.rigs." + rigNamespaceKey:
+			return fmt.Errorf("[[patches.rigs]] cannot set %q; set it on the rig's own [[rigs]] entry", key[len(key)-1])
+		}
+	}
+	return nil
+}
+
+func validateDoltModeAuthoringSurface(md toml.MetaData) error {
+	if md.IsDefined("dolt", "mode") {
+		return fmt.Errorf("[dolt].mode is not supported; Beads persists the initialized Dolt topology in its scope metadata")
+	}
 	return nil
 }
 
@@ -257,14 +286,17 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(ProviderSpec{}),
 		reflect.TypeOf(UpstreamSpec{}),
 		reflect.TypeOf(UpstreamEnvBinding{}),
+		reflect.TypeOf(ProgramStatusBinding{}),
 		reflect.TypeOf(AgentPatch{}),
 		reflect.TypeOf(AgentOverride{}),
 		reflect.TypeOf(BeadsConfig{}),
 		reflect.TypeOf(BeadPolicyConfig{}),
+		reflect.TypeOf(OpsConfig{}),
 		reflect.TypeOf(SessionConfig{}),
 		reflect.TypeOf(MailConfig{}),
 		reflect.TypeOf(EventsConfig{}),
 		reflect.TypeOf(EventsRotationConfig{}),
+		reflect.TypeOf(EventsMirrorConfig{}),
 		reflect.TypeOf(DoltConfig{}),
 		reflect.TypeOf(FormulasConfig{}),
 		reflect.TypeOf(DaemonConfig{}),

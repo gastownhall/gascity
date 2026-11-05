@@ -187,6 +187,7 @@ type serviceDependencies struct {
 	getenv                      func(string) string
 	newUUID                     func() (string, error)
 	now                         func() time.Time
+	withDeadline                func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	beforeRecordOperation       func(recordOperation)
 	verifyTTY                   func(io.Writer) bool
 	storageHooks                storageTestHooks
@@ -398,6 +399,9 @@ func openWithDependencies(deps serviceDependencies) (*Service, error) {
 	}
 	if deps.now == nil {
 		deps.now = time.Now
+	}
+	if deps.withDeadline == nil {
+		deps.withDeadline = context.WithTimeout
 	}
 	if deps.verifyTTY == nil {
 		return nil, errors.New("productmetrics: TTY verifier dependency is nil")
@@ -849,7 +853,7 @@ func (service *Service) bindDisableExpectation(expected stateVersion) (stateVers
 	if expected.recordLease != nil {
 		return expected, func() {}, nil
 	}
-	loaded := service.readStateReadOnly()
+	loaded := service.readStateReadOnlyWithHooks(service.deps.storageHooks)
 	if !loaded.present {
 		_ = loaded.Close()
 		if loaded.err != nil {
@@ -863,6 +867,12 @@ func (service *Service) bindDisableExpectation(expected stateVersion) (stateVers
 	if loaded.lease == nil {
 		err := loaded.err
 		_ = loaded.Close()
+		if errors.Is(err, errStorageRecordReplaced) {
+			// This read holds no lock, and every config writer holds state.lock.
+			// A replacement that tore the read landed after the caller's
+			// observation, so that observation is already stale.
+			return stateVersion{}, func() {}, errors.Join(ErrStateChangedConcurrently, err)
+		}
 		if err == nil {
 			err = errors.New("productmetrics: present config has no exact-record lease")
 		}
@@ -1180,11 +1190,29 @@ func persistStateMutation(root *storageRoot, state persistedState, allowAppliedA
 	installed := loadStateFromDirectory(root)
 	if installed.err != nil || !installed.present || installed.state != state || !bytes.Equal(installed.raw, data) {
 		err := errors.Join(installed.err, errors.New("productmetrics: applied state did not read back exactly"))
+		if installed.err == nil {
+			// A cleanly readable record that is absent or differs from the
+			// content this mutation just installed means a peer changed state
+			// inside the rename→read-back window — the same concurrency the
+			// incarnation check below reports for byte-identical replacement.
+			// An unreadable record stays unlabeled: it cannot be attributed.
+			err = errors.Join(ErrStateChangedConcurrently, err)
+		}
 		_ = installed.Close()
 		if result.state == storageWriteAppliedSyncPending {
 			err = errors.Join(errStateAppliedSyncPending, writeErr, err)
 		}
 		return loadedState{}, err
+	}
+	if installed.lease == nil || installed.lease.incarnation() != result.record {
+		// The path re-open read back the exact bytes this mutation wrote, but
+		// from a different file than the one this write installed: a peer
+		// replaced the record inside the rename→read-back window. Authority
+		// must bind to the record this process installed — adopting the
+		// peer's file would leave two holders revalidating successfully
+		// against the same incarnation.
+		_ = installed.Close()
+		return loadedState{}, ErrStateChangedConcurrently
 	}
 	if result.state == storageWriteAppliedSyncPending {
 		if !allowAppliedActivation {

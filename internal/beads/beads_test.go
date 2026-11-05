@@ -3,9 +3,12 @@ package beads
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 var (
@@ -69,6 +72,8 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"agent", true},
 		{"role", true},
 		{"rig", true},
+		{"startup-health-episode", true}, // bookkeeping record; never actionable Ready work (ga-o04bfr.1.1)
+		{"op", true},                     // conversation operation journal rows (internal/opjournal)
 		{"task", false},
 		{"wisp", false},
 		{"", false},
@@ -77,6 +82,41 @@ func TestIsReadyExcludedType(t *testing.T) {
 	for _, tt := range tests {
 		if got := IsReadyExcludedType(tt.typ); got != tt.want {
 			t.Errorf("IsReadyExcludedType(%q) = %v, want %v", tt.typ, got, tt.want)
+		}
+	}
+}
+
+// A bookkeeping label excludes a bead from Ready whatever its type.
+func TestHasReadyExcludedLabel(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"session continuity", []string{"gc:session"}, true},
+		{"order tracking", []string{"gc:order-tracking"}, true},
+		{"legacy order tracking", []string{"order-tracking"}, true},
+		{"op journal op row", []string{"gc:op", "gc:op-conv:gc-7"}, true},       // internal/opjournal
+		{"op journal fact row", []string{"gc:fact", "gc:fact-conv:gc-7"}, true}, // internal/opjournal
+		{"op journal runtime row", []string{"gc:rt", "gc:rt-conv:gc-7"}, true},  // internal/opjournal
+		{"op conversation label alone", []string{"gc:op-conv:gc-7"}, false},
+		{"fact conversation label alone", []string{"gc:fact-conv:gc-7"}, false},
+		{"runtime conversation label alone", []string{"gc:rt-conv:gc-7"}, false},
+		{"unrelated label", []string{"priority:high"}, false},
+		{"no labels", nil, false},
+		{"case-sensitive", []string{"GC:OP"}, false},
+	}
+	for _, tt := range tests {
+		b := Bead{Status: "open", Type: "task", Labels: tt.labels}
+		if got := HasReadyExcludedLabel(b); got != tt.want {
+			t.Errorf("%s: HasReadyExcludedLabel(%v) = %v, want %v", tt.name, tt.labels, got, tt.want)
+		}
+		if got := IsReadyExcludedBead(b); got != tt.want {
+			t.Errorf("%s: IsReadyExcludedBead(task %v) = %v, want %v", tt.name, tt.labels, got, tt.want)
+		}
+		if got := IsReadyCandidate(b, now); got == tt.want {
+			t.Errorf("%s: IsReadyCandidate(open task %v) = %v, want %v", tt.name, tt.labels, got, !tt.want)
 		}
 	}
 }
@@ -141,6 +181,69 @@ func TestIsReadyCandidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsReadyCandidate(tt.bead, now); got != tt.want {
 				t.Fatalf("IsReadyCandidate(%+v) = %v, want %v", tt.bead, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDependencySatisfied pins the exact truth table a blocking dependency
+// must satisfy before its dependent can be considered ready: a dependency
+// that is still open never satisfies (regardless of any work_outcome value
+// left over from a prior close/reopen cycle), and a closed dependency
+// satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
+// closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
+// case) must still satisfy — that's the backward-compat guarantee.
+func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{"no metadata", nil, ""},
+		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+		// A plain work bead (no gc.step_ref) is not a control-plane step: the
+		// core mol-do-work formula stamps gc.outcome=pass on the work bead
+		// itself, including blocked/abandoned closes, so gc.outcome must not
+		// mask its blocked work outcome.
+		{"work bead with pass keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ReadinessWorkOutcome(tt.metadata); got != tt.want {
+				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
+			}
+			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
+				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+			}
+		})
+	}
+}
+
+func TestDependencySatisfied(t *testing.T) {
+	tests := []struct {
+		name           string
+		depStatus      string
+		depWorkOutcome string
+		want           bool
+	}{
+		{"open dependency never satisfies", "open", "", false},
+		{"open dependency with shipped outcome still never satisfies", "open", beadmeta.WorkOutcomeShipped, false},
+		{"in_progress dependency never satisfies", "in_progress", beadmeta.WorkOutcomeBlocked, false},
+		{"closed with no work_outcome satisfies (legacy backward-compat)", "closed", "", true},
+		{"closed shipped satisfies", "closed", beadmeta.WorkOutcomeShipped, true},
+		{"closed no-op satisfies", "closed", beadmeta.WorkOutcomeNoOp, true},
+		{"closed abandoned satisfies", "closed", beadmeta.WorkOutcomeAbandoned, true},
+		{"closed blocked does NOT satisfy", "closed", beadmeta.WorkOutcomeBlocked, false},
+		{"closed with unrecognized work_outcome satisfies", "closed", "some-future-value", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DependencySatisfied(tt.depStatus, tt.depWorkOutcome); got != tt.want {
+				t.Fatalf("DependencySatisfied(%q, %q) = %v, want %v", tt.depStatus, tt.depWorkOutcome, got, tt.want)
 			}
 		})
 	}
@@ -419,16 +522,31 @@ func TestBeadRevisionWireInvisible(t *testing.T) {
 	}
 }
 
-// TestBdIssueDecodesRevision proves the store-internal revision is carried by the
-// bd decode envelope (bdIssue) and stamped onto Bead by toBead — the population
-// path that survives Bead's json:"-" wire tag. Pre-#4682 bd omits the key → 0.
+// TestBdIssueDecodesRevision proves the store-internal revision is carried
+// losslessly by the bd decode envelope (bdIssue) and stamped onto Bead by
+// toBead — the population path that survives Bead's json:"-" wire tag.
 func TestBdIssueDecodesRevision(t *testing.T) {
-	var present bdIssue
-	if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":7}`), &present); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		raw  string
+		want int64
+	}{
+		{name: "decimal string beyond JS safe integer", raw: `"9007199254740993"`, want: 9007199254740993},
+		{name: "maximum signed decimal string", raw: `"9223372036854775807"`, want: math.MaxInt64},
+		{name: "minimum signed decimal string", raw: `"-9223372036854775808"`, want: math.MinInt64},
+		{name: "legacy integer", raw: `7`, want: 7},
+		{name: "json null is the no-revision sentinel", raw: `null`, want: 0},
 	}
-	if got := present.toBead().Revision; got != 7 {
-		t.Fatalf("toBead().Revision (present) = %d, want 7", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var issue bdIssue
+			if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":`+tt.raw+`}`), &issue); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+			if got := issue.toBead().Revision; got != tt.want {
+				t.Fatalf("toBead().Revision = %d, want %d", got, tt.want)
+			}
+		})
 	}
 
 	var absent bdIssue
@@ -437,5 +555,22 @@ func TestBdIssueDecodesRevision(t *testing.T) {
 	}
 	if got := absent.toBead().Revision; got != 0 {
 		t.Fatalf("toBead().Revision (absent) = %d, want 0", got)
+	}
+}
+
+func TestBdIssueRejectsInvalidRevision(t *testing.T) {
+	for _, raw := range []string{
+		`"not-a-revision"`,
+		`"1.5"`,
+		`1.5`,
+		`"9223372036854775808"`,
+		`"-9223372036854775809"`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			var issue bdIssue
+			if err := json.Unmarshal([]byte(`{"id":"gc-1","revision":`+raw+`}`), &issue); err == nil {
+				t.Fatalf("json.Unmarshal revision %s succeeded, want error", raw)
+			}
+		})
 	}
 }

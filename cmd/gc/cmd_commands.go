@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -326,7 +328,9 @@ func runDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName str
 		return 1
 	}
 	cmd.Env = pinInvokingGCBinary(cmd.Env, exe)
+	cmd.Env = pinSupervisorURL(cmd.Env, cityPath, stderr)
 	cmd.Env = mergeCanonicalScopeDoltEnv(cmd.Env, cityPath)
+	cmd.Env = applyCityDoltSettingsEnv(cmd.Env, cityPath)
 	disableProductMetricsForChild(cmd)
 
 	if err := cmd.Run(); err != nil {
@@ -346,6 +350,56 @@ func pinInvokingGCBinary(env []string, executable string) []string {
 		return env
 	}
 	return append(env, "GC_BIN="+executable)
+}
+
+// supervisorURLEnv names the variable that hands a pack command the base URL
+// of the supervisor API serving its city, so packs can call the API without
+// re-implementing the CLI's lookup of $GC_HOME/supervisor.toml.
+const supervisorURLEnv = "GC_SUPERVISOR_URL"
+
+// pinSupervisorURL sets GC_SUPERVISOR_URL for a pack command to the
+// supervisor base URL from packCommandSupervisorURL, or leaves it unset when
+// there is none. An ambient value is always dropped so a command never sees a
+// URL for some other supervisor. A registry or supervisor config that cannot
+// be read is reported on stderr; the command still runs without the URL.
+func pinSupervisorURL(env []string, cityPath string, stderr io.Writer) []string {
+	env = removeEnvKey(env, supervisorURLEnv)
+	baseURL, err := packCommandSupervisorURL(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: warning: not setting %s: %v\n", supervisorURLEnv, err) //nolint:errcheck // best-effort stderr
+		return env
+	}
+	if baseURL == "" {
+		return env
+	}
+	return append(env, supervisorURLEnv+"="+baseURL)
+}
+
+// packCommandSupervisorURL returns the supervisor API base URL for the city
+// at cityPath, the one the CLI itself dials (supervisorAPIBaseURL), when the
+// city is registered with the supervisor and that URL is plain http on a
+// loopback address. It returns "" when the city is not supervisor-managed or
+// the supervisor binds a non-loopback address.
+func packCommandSupervisorURL(cityPath string) (string, error) {
+	_, registered, err := registeredCityEntry(cityPath)
+	if err != nil {
+		return "", fmt.Errorf("reading city registry: %w", err)
+	}
+	if !registered {
+		return "", nil
+	}
+	baseURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		return "", fmt.Errorf("reading supervisor config: %w", err)
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing supervisor URL %q: %w", baseURL, err)
+	}
+	if u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
+		return "", nil
+	}
+	return baseURL, nil
 }
 
 // mergeCanonicalScopeDoltEnv projects the city's canonical Dolt
@@ -412,6 +466,69 @@ func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 		out = append(out, key+"="+resolved[key])
 	}
 	return out
+}
+
+// applyCityDoltSettingsEnv projects the city's [dolt] block into a pack
+// command's environment, the same set the provider-lifecycle path projects when
+// it starts the managed server (providerLifecycleProcessEnvFromBase).
+//
+// mergeCanonicalScopeDoltEnv above carries the canonical Dolt *connection* so a
+// directly invoked pack command talks to the same server as its scheduled order.
+// The rest of the [dolt] block was never carried, and for the managed-server
+// commands that is not cosmetic: gc-beads-bd.sh rebuilds dolt-config.yaml purely
+// from GC_DOLT_* and defaults auto-GC ON and read_timeout to 120000 when they are
+// absent. So `gc dolt restart` run from an operator shell wrote a *different*
+// server config than the supervisor writes from the same city.toml — silently
+// reverting a city's configured read/write timeouts and auto-GC state as a side
+// effect of a restart.
+//
+// Resolution is delegated to resolveManagedDoltConfigForStart so precedence
+// matches the start path exactly rather than being reimplemented: city.toml wins
+// wherever it speaks, and ambient GC_DOLT_* fills only the gaps it leaves.
+//
+// Nil/zero fields are left unprojected so an unset city value keeps inheriting
+// whatever the caller's environment already carries; doltlite cities are skipped
+// entirely, mirroring the lifecycle path's clearProjectedDoltEnv.
+func applyCityDoltSettingsEnv(environ []string, cityPath string) []string {
+	if strings.TrimSpace(cityPath) == "" {
+		return environ
+	}
+	if cityUsesDoltliteBeadsBackend(cityPath) {
+		return environ
+	}
+	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, -1)
+	if err != nil {
+		// A city whose config cannot be read is the start path's problem to
+		// report; degrade to the previous behavior rather than blocking the
+		// command here.
+		return environ
+	}
+	set := func(env []string, key, value string) []string {
+		return append(removeEnvKey(env, key), key+"="+value)
+	}
+	if doltConfig.ArchiveLevel != nil {
+		environ = set(environ, "GC_DOLT_ARCHIVE_LEVEL", strconv.Itoa(*doltConfig.ArchiveLevel))
+	}
+	if doltConfig.AutoGCEnabled != nil {
+		environ = set(environ, "GC_DOLT_AUTO_GC_ENABLED", strconv.FormatBool(*doltConfig.AutoGCEnabled))
+	}
+	if doltConfig.MaxConnections > 0 {
+		environ = set(environ, "GC_DOLT_MAX_CONNECTIONS", strconv.Itoa(doltConfig.MaxConnections))
+	}
+	if doltConfig.ReadTimeoutMillis > 0 {
+		environ = set(environ, "GC_DOLT_READ_TIMEOUT_MILLIS", strconv.Itoa(doltConfig.ReadTimeoutMillis))
+	}
+	if doltConfig.WriteTimeoutMillis > 0 {
+		environ = set(environ, "GC_DOLT_WRITE_TIMEOUT_MILLIS", strconv.Itoa(doltConfig.WriteTimeoutMillis))
+	}
+	if doltConfig.WaitTimeoutSeconds > 0 {
+		environ = set(environ, "GC_DOLT_WAIT_TIMEOUT", strconv.Itoa(doltConfig.WaitTimeoutSeconds))
+	}
+	if strings.TrimSpace(doltConfig.DoltLockReleaseTimeout) != "" {
+		ms := doltConfig.DoltLockReleaseTimeoutDuration().Milliseconds()
+		environ = set(environ, "GC_DOLT_LOCK_RELEASE_TIMEOUT_MS", strconv.FormatInt(ms, 10))
+	}
+	return environ
 }
 
 func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath string, stdout, stderr io.Writer) packCommandAction {

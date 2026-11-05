@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
@@ -352,6 +355,55 @@ func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
 	}
 }
 
+// TestResolveStoreByPrefixKeepsRigRouteResolution pins the non-class routing
+// behavior: a self-route ("ga" -> ".") resolves to the rig that owns the routes
+// file, and a cross-rig route ("gb" -> "../beta") resolves to the rig it points
+// at. Both must stay exactly as they are.
+func TestResolveStoreByPrefixKeepsRigRouteResolution(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("ga"); got != beads.Store(alphaStore) {
+		t.Errorf("resolveStoreByPrefix(ga) = %p, want alpha store %p", got, alphaStore)
+	}
+	if got := s.resolveStoreByPrefix("gb"); got != beads.Store(betaStore) {
+		t.Errorf("resolveStoreByPrefix(gb) = %p, want beta store %p", got, betaStore)
+	}
+}
+
+// TestResolveStoreByPrefixDoesNotCaptureForeignRoute pins that a rig route
+// resolving to a path which is NOT a registered rig no longer answers with that
+// rig's store. The route says the prefix lives elsewhere, so resolution falls
+// through to the by-id candidate scan — which still contains every store, so the
+// bead stays reachable instead of being pinned to the wrong one.
+func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
+	state, alphaStore, betaStore := configureBeadRouteState(t)
+	cityStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	alphaPath := filepath.Join(state.cityPath, "rigs", "alpha")
+	routes := `{"prefix":"ga","path":"."}` + "\n" +
+		`{"prefix":"gb","path":"../beta"}` + "\n" +
+		`{"prefix":"gz","path":"../../elsewhere"}`
+	if err := os.WriteFile(filepath.Join(alphaPath, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("WriteFile(routes.jsonl): %v", err)
+	}
+	s := New(state)
+
+	if got := s.resolveStoreByPrefix("gz"); got != nil {
+		t.Fatalf("resolveStoreByPrefix(gz) = %p, want nil (route resolves outside every rig); alpha is %p", got, alphaStore)
+	}
+	got := s.beadStoresForID("gz-1")
+	want := []beads.Store{cityStore, alphaStore, betaStore}
+	if len(got) != len(want) {
+		t.Fatalf("beadStoresForID(gz-1) = %v (len %d), want the full candidate scan %v", got, len(got), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("beadStoresForID(gz-1)[%d] = %p, want %p", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	created, err := rigStore.Create(beads.Bead{Title: "close me"})
@@ -551,6 +603,35 @@ func (s *projectionConflictStore) WaitForParentProjection(_ context.Context, _, 
 	return beads.ErrParentProjectionSuperseded
 }
 
+type projectionWaitErrorStore struct {
+	beads.Store
+	err         error
+	hasDeadline bool
+	// budget is the time left before the wait's deadline when it started.
+	budget time.Duration
+}
+
+func (s *projectionWaitErrorStore) WaitForParentProjection(ctx context.Context, _, _, _ string) error {
+	var deadline time.Time
+	deadline, s.hasDeadline = ctx.Deadline()
+	s.budget = time.Until(deadline)
+	return s.err
+}
+
+// projectionWaitClientGoneStore models a client that disconnects mid-wait
+// after a backend read had already failed with its own timeout: the returned
+// error carries both context errors.
+type projectionWaitClientGoneStore struct {
+	beads.Store
+	disconnect func()
+}
+
+func (s *projectionWaitClientGoneStore) WaitForParentProjection(ctx context.Context, id, _, _ string) error {
+	s.disconnect()
+	<-ctx.Done()
+	return fmt.Errorf("updating bead %q: waiting for parent projection: %w (last check error: %w)", id, ctx.Err(), fmt.Errorf("bd list: %w", context.DeadlineExceeded))
+}
+
 // TestBeadListBoundedReadIsStableOrderedPrefixAcrossRigs pins the #3208
 // contract: a limit-bounded GET /beads returns a deterministic prefix of one
 // global (created_at DESC, id DESC) total order across rig stores — not a
@@ -669,6 +750,10 @@ func TestBeadListFiltering(t *testing.T) {
 func TestBeadListCrossRig(t *testing.T) {
 	state := newFakeState(t)
 	store2 := beads.NewMemStore()
+	// Two rigs mint under different prefixes (config.Rig.EffectivePrefix); two
+	// MemStores left on the default prefix would both mint "gc-1", i.e. one bead
+	// co-resident in two legs rather than two beads.
+	store2.IDPrefix = "r2"
 	state.stores["rig2"] = store2
 
 	state.stores["myrig"].Create(beads.Bead{Title: "Bead from rig1"}) //nolint:errcheck
@@ -920,49 +1005,6 @@ func TestBeadListInProgressUsesLiveLookup(t *testing.T) {
 	}
 	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != work.ID {
 		t.Fatalf("in_progress beads = %+v, want only %s", resp.Items, work.ID)
-	}
-}
-
-func TestBeadReadyUsesLiveLookup(t *testing.T) {
-	state := newFakeState(t)
-	backing := beads.NewMemStore()
-	blocker, err := backing.Create(beads.Bead{Title: "blocker"})
-	if err != nil {
-		t.Fatalf("Create(blocker): %v", err)
-	}
-	ready, err := backing.Create(beads.Bead{Title: "ready"})
-	if err != nil {
-		t.Fatalf("Create(ready): %v", err)
-	}
-	if err := backing.DepAdd(ready.ID, blocker.ID, "blocks"); err != nil {
-		t.Fatalf("DepAdd: %v", err)
-	}
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	state.stores["myrig"] = cache
-	if err := backing.Close(blocker.ID); err != nil {
-		t.Fatalf("Close(blocker): %v", err)
-	}
-
-	h := newTestCityHandler(t, state)
-	req := httptest.NewRequest("GET", cityURL(state, "/beads/ready"), nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-
-	var resp struct {
-		Items []beads.Bead `json:"items"`
-		Total int          `json:"total"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != ready.ID {
-		t.Fatalf("ready beads = %+v, want only %s", resp.Items, ready.ID)
 	}
 }
 
@@ -1352,6 +1394,68 @@ func TestBeadUpdateSkipsParentProjectionWaitForClosedBead(t *testing.T) {
 	}
 }
 
+// TestBeadUpdateParentProjectionWaitSkipsOnlyAnUpdateThatCloses pins the wait
+// gate to the update's own close intent, spelled as the close gate reads it:
+// reparenting a bead that is already closed still waits, since the stores'
+// projection checks count closed children, and a closing status in any case
+// skips the wait just as it takes the close gate.
+func TestBeadUpdateParentProjectionWaitSkipsOnlyAnUpdateThatCloses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		closeFirst bool
+		status     string
+		wantWaits  int
+	}{
+		"reparenting an already-closed bead": {closeFirst: true, wantWaits: 1},
+		"closing in another case":            {status: "Closed ", wantWaits: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := newLaggyParentProjectionStore()
+			state.stores["myrig"] = store
+			parent, err := store.Create(beads.Bead{Title: "Parent"})
+			if err != nil {
+				t.Fatalf("Create(parent): %v", err)
+			}
+			child, err := store.Create(beads.Bead{Title: "Child"})
+			if err != nil {
+				t.Fatalf("Create(child): %v", err)
+			}
+			if tc.closeFirst {
+				if err := store.Close(child.ID); err != nil {
+					t.Fatalf("Close(child): %v", err)
+				}
+			}
+			h := newTestCityHandler(t, state)
+
+			fields := map[string]string{"parent": parent.ID}
+			if tc.status != "" {
+				fields["status"] = tc.status
+			}
+			body, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatalf("Marshal(body): %v", err)
+			}
+			req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			got, err := store.Get(child.ID)
+			if err != nil {
+				t.Fatalf("Get(child): %v", err)
+			}
+			if got.ParentID != parent.ID {
+				t.Fatalf("parent after update = %q, want %q", got.ParentID, parent.ID)
+			}
+			if store.waitCalls != tc.wantWaits {
+				t.Fatalf("waitCalls = %d, want %d", store.waitCalls, tc.wantWaits)
+			}
+		})
+	}
+}
+
 func TestBeadUpdateReturnsConflictWhenParentProjectionIsSuperseded(t *testing.T) {
 	state := newFakeState(t)
 	store := &projectionConflictStore{Store: beads.NewMemStore()}
@@ -1375,6 +1479,89 @@ func TestBeadUpdateReturnsConflictWhenParentProjectionIsSuperseded(t *testing.T)
 	}
 	if store.waitCalls != 1 {
 		t.Fatalf("waitCalls = %d, want 1", store.waitCalls)
+	}
+}
+
+func TestBeadUpdateParentProjectionWaitHasDeadlineAndMapsErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		waitErr    error
+		wantStatus int
+	}{
+		{name: "deleted", waitErr: beads.ErrNotFound, wantStatus: http.StatusConflict},
+		{name: "timed out", waitErr: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout},
+		// The shape the backend waiters return: the deadline plus the last
+		// failed check, both wrapped.
+		{name: "timed out after failed check", waitErr: fmt.Errorf("updating bead %q: waiting for parent projection: %w (last check error: %w)", "b", context.DeadlineExceeded, errors.New("bd list: invalid connection")), wantStatus: http.StatusGatewayTimeout},
+		{name: "canceled", waitErr: fmt.Errorf("updating bead %q: waiting for parent projection: %w", "b", context.Canceled), wantStatus: http.StatusServiceUnavailable},
+		{name: "failed", waitErr: errors.New("bd list: invalid connection"), wantStatus: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			defer captureLog(t, &logs)()
+			state := newFakeState(t)
+			store := &projectionWaitErrorStore{Store: beads.NewMemStore(), err: tc.waitErr}
+			state.stores["myrig"] = store
+			parent, err := store.Create(beads.Bead{Title: "Parent"})
+			if err != nil {
+				t.Fatalf("Create(parent): %v", err)
+			}
+			child, err := store.Create(beads.Bead{Title: "Child"})
+			if err != nil {
+				t.Fatalf("Create(child): %v", err)
+			}
+			h := newTestCityHandler(t, state)
+			req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d, body: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !store.hasDeadline {
+				t.Fatal("parent projection wait had no deadline")
+			}
+			// The lower bound only rules out a much shorter wait; it leaves
+			// room for a slow test host.
+			if store.budget <= beadParentProjectionWaitTimeout/2 || store.budget > beadParentProjectionWaitTimeout {
+				t.Fatalf("parent projection wait budget = %v, want at most %v and more than half of it", store.budget, beadParentProjectionWaitTimeout)
+			}
+			if tc.wantStatus == http.StatusConflict {
+				return
+			}
+			// Every non-409 failure is logged: the 503/504 bodies are fixed
+			// sentences, so the log is where an operator sees why the wait
+			// stopped.
+			if !slices.ContainsFunc(strings.Split(logs.String(), "\n"), func(line string) bool {
+				return strings.Contains(line, child.ID) && strings.Contains(line, tc.waitErr.Error())
+			}) {
+				t.Fatalf("log = %q, want a line with bead %s and the waiter error %q", logs.String(), child.ID, tc.waitErr)
+			}
+		})
+	}
+}
+
+// The status comes from why this request's wait stopped, not from an earlier
+// backend timeout that the waiter's error also carries.
+func TestBeadUpdateClientDisconnectDuringWaitIs503(t *testing.T) {
+	state := newFakeState(t)
+	reqCtx, disconnect := context.WithCancel(t.Context())
+	defer disconnect()
+	store := &projectionWaitClientGoneStore{Store: beads.NewMemStore(), disconnect: disconnect}
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":"`+parent.ID+`"}`)).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a client that went away, body: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1775,16 +1962,28 @@ func TestPhase2BeadAssignNormalizesCurrentSessionAlias(t *testing.T) {
 	}
 }
 
-func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
+// TestPhase2BeadListAssigneeAliasServesEveryRigsBeads pins that resolving an
+// assignee alias into several identity terms does not cost a rig its rows: every
+// bead assigned to the session, in every rig, is in the response exactly once.
+//
+// The rigs mint under different prefixes because that is the only shape a
+// running city can have — config.ValidateRigs rejects a colliding rig prefix on
+// every start, reload and config-edit path, so two rigs cannot mint the same id.
+// (Its ancestor left both MemStores on the default prefix, which made "two beads"
+// and "one bead resident in two legs" the same fixture; the fan-out reads bead
+// ids as identity, the way GET /v0/beads/ready and every by-id endpoint do.)
+func TestPhase2BeadListAssigneeAliasServesEveryRigsBeads(t *testing.T) {
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.stores["otherrig"] = beads.NewMemStore()
-	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig"})
+	otherStore := beads.NewMemStore()
+	otherStore.IDPrefix = "or"
+	state.stores["otherrig"] = otherStore
+	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "or"})
 	sessionBead := createPhase2APISessionBead(t, state.cityBeadStore)
 	workA, _ := state.stores["myrig"].Create(beads.Bead{Title: "Task A", Assignee: sessionBead.ID})
-	workB, _ := state.stores["otherrig"].Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
-	if workA.ID != workB.ID {
-		t.Fatalf("test setup expected duplicate local IDs, got %q and %q", workA.ID, workB.ID)
+	workB, _ := otherStore.Create(beads.Bead{Title: "Task B", Assignee: sessionBead.ID})
+	if workA.ID == workB.ID {
+		t.Fatalf("test setup expected distinct per-rig IDs, got %q twice", workA.ID)
 	}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
@@ -1805,6 +2004,17 @@ func TestPhase2BeadListAssigneeAliasKeepsCrossRigDuplicateIDs(t *testing.T) {
 	}
 	if listed.Total != 2 || len(listed.Items) != 2 {
 		t.Fatalf("list by alias total/items = %d/%d, want 2/2: %#v", listed.Total, len(listed.Items), listed.Items)
+	}
+	for _, want := range []string{workA.ID, workB.ID} {
+		found := false
+		for _, b := range listed.Items {
+			if b.ID == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("alias fan-out dropped %q: %#v", want, listed.Items)
+		}
 	}
 }
 
@@ -1890,7 +2100,7 @@ func TestPhase2BeadAssignMaterializesExactConfiguredNamedIdentity(t *testing.T) 
 	if got.Assignee == "" {
 		t.Fatalf("assignee = %q, want materialized session identity", got.Assignee)
 	}
-	sessionID, err := session.ResolveSessionID(state.cityBeadStore, got.Assignee)
+	sessionID, err := session.ResolveSessionID(beadstest.Sessions(state.cityBeadStore), got.Assignee)
 	if err != nil {
 		t.Fatalf("ResolveSessionID(materialized assignee %q): %v", got.Assignee, err)
 	}

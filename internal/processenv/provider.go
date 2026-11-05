@@ -5,6 +5,7 @@ package processenv
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -37,6 +38,7 @@ import (
 //	VERTEX_      Vertex AI direct
 //	XAI_         xAI / Grok
 //	XIAOMI_      Xiaomi MiMo
+//	ZCODE_       Z.ai ZCode (GLM harness)
 var providerCredentialEnvPrefixes = []string{
 	"ANTHROPIC_",
 	"AZURE_",
@@ -55,6 +57,7 @@ var providerCredentialEnvPrefixes = []string{
 	"VERTEX_",
 	"XAI_",
 	"XIAOMI_",
+	"ZCODE_",
 }
 
 // providerCredentialEnvKeys lists exact provider credential/config env vars for
@@ -83,6 +86,93 @@ var providerCredentialEnvKeys = map[string]bool{
 	"AWS_WEB_IDENTITY_TOKEN_FILE":            true,
 }
 
+// ControllerOnlyEnvKeys are controller-scope variables that must never reach a
+// session. Today that is the controller token (convergence.TokenEnvVar), which
+// authorizes writes to the protected convergence.*/var.* metadata an agent is
+// deliberately not allowed to set for itself; an agent holding it can drive its
+// own convergence loop.
+//
+// These are SEEDED EMPTY rather than omitted, because the map this package
+// returns is an overlay on an environment the child already inherits, not the
+// whole environment. A tmux pane starts from the tmux server's global env, which
+// holds whatever the controller exported when the server started; the
+// subprocess and ACP runtimes exec with os.Environ() plus the overlay appended.
+// On every one of those paths, declining to re-export a key leaves the
+// controller's value visible to the child. Only an explicit KEY="" overrides it
+// — and on tmux an empty value is stronger than it looks, because the adapter
+// turns it into an `env -u KEY` prefix on the pane command
+// (tmux.NewSessionWithCommandAndEnv).
+//
+// Exact names, never a prefix: a GC_ prefix match would swallow the identity
+// anchors and the Dolt vars that agents legitimately need.
+var ControllerOnlyEnvKeys = []string{
+	"GC_CONTROLLER_TOKEN",
+}
+
+// DemandSpawnEnvKeys are the variables that describe one session's spawn: the
+// presence-only GC_SPAWN_ORIGIN=demand marker, and the GC_TRIGGER_* ids no
+// session shell carries (gastownhall/gascity#5738). A copy in the controller's
+// own environment describes some other session's spawn (a supervisor started
+// from an agent's pane carries that pane's), so ProviderProcessPassthroughEnv
+// pins every one of them empty, the same overlay withholding
+// ControllerOnlyEnvKeys get. Only a launch whose own session row is stamped
+// sets the marker back, on top.
+var DemandSpawnEnvKeys = []string{
+	"GC_SPAWN_ORIGIN",
+	"GC_TRIGGER_BEAD_ID",
+	"GC_TRIGGER_WORK_BEAD_ID",
+	"GC_TRIGGER_BEAD_STORE_REF",
+	"GC_TRIGGER_WORK_STORE_REF",
+}
+
+// IsDemandSpawnEnv reports whether key is one of DemandSpawnEnvKeys, by exact
+// name.
+func IsDemandSpawnEnv(key string) bool {
+	return slices.Contains(DemandSpawnEnvKeys, key)
+}
+
+// ControllerOnlyEnvOverlay returns ControllerOnlyEnvKeys pinned to the empty
+// string, for use as the last layer of a session-env merge — after every
+// config-authored layer, so a city.toml entry naming one of these keys cannot
+// overwrite the pin ProviderProcessPassthroughEnv established.
+func ControllerOnlyEnvOverlay() map[string]string {
+	m := make(map[string]string, len(ControllerOnlyEnvKeys))
+	for _, key := range ControllerOnlyEnvKeys {
+		m[key] = ""
+	}
+	return m
+}
+
+// IsControllerOnlyEnv reports whether key is controller scope, i.e. a value that
+// must not survive into any process an agent runtime starts. Runtime adapters
+// use it to tell a WITHHELD CREDENTIAL apart from the other empty-valued keys a
+// session env carries (the Claude/Codex nesting flags), which are withheld for
+// tidiness rather than containment and need no durable enforcement.
+func IsControllerOnlyEnv(key string) bool {
+	for _, controllerOnly := range ControllerOnlyEnvKeys {
+		if key == controllerOnly {
+			return true
+		}
+	}
+	return false
+}
+
+// ExpandSessionEnvValue expands $VAR references in a config-authored env value
+// against the controller process, with ControllerOnlyEnvKeys masked to empty.
+// Pinning the keys themselves is not enough: a value such as
+// `FOO = "$GC_CONTROLLER_TOKEN"` copies the controller's value into a
+// differently-named session variable, which no key-level guard can catch.
+func ExpandSessionEnvValue(value string) string {
+	return os.Expand(value, func(key string) string {
+		for _, controllerOnly := range ControllerOnlyEnvKeys {
+			if key == controllerOnly {
+				return ""
+			}
+		}
+		return os.Getenv(key)
+	})
+}
+
 // IsProviderCredentialEnv reports whether key belongs to the curated provider
 // credential/config allowlist.
 func IsProviderCredentialEnv(key string) bool {
@@ -99,7 +189,9 @@ func IsProviderCredentialEnv(key string) bool {
 
 // ProviderProcessPassthroughEnv returns non-GC process context that provider
 // sessions need to start reliably: user/home, provider auth/config, locale,
-// time zone, XDG, telemetry, and Claude nesting resets.
+// time zone, XDG, telemetry, and Claude nesting resets. It also pins
+// ControllerOnlyEnvKeys and DemandSpawnEnvKeys empty, so every session-env
+// builder that starts here withholds them without having to know they exist.
 func ProviderProcessPassthroughEnv() map[string]string {
 	m := make(map[string]string)
 	if v := os.Getenv("PATH"); v != "" {
@@ -165,5 +257,11 @@ func ProviderProcessPassthroughEnv() map[string]string {
 	m["CLAUDE_CODE_ENTRYPOINT"] = ""
 	m["CODEX_THREAD_ID"] = ""
 	m["CODEX_CI"] = ""
+	for key, val := range ControllerOnlyEnvOverlay() {
+		m[key] = val
+	}
+	for _, key := range DemandSpawnEnvKeys {
+		m[key] = ""
+	}
 	return m
 }

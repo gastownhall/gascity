@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"strings"
@@ -32,6 +33,9 @@ import (
 // session resolves to this binary rather than a colliding one, and
 // GC_CONTROLLER_TOKEN is scrubbed so the controller-only token never reaches a
 // managed session even when a workspace/provider env entry expands to it.
+// Scrubbed means PINNED EMPTY, not absent: a managed session inherits the
+// controller's environment, so an omitted key is an inherited key
+// (processenv.ControllerOnlyEnvKeys).
 //
 // Without these anchors, sessions spawned or restarted via the API code
 // paths cannot locate their city. Rig-scoped env remains a separate
@@ -45,22 +49,47 @@ import (
 // regress per-dispatcher trace files for control-dispatcher sessions
 // restarted through the API. Dispatcher-trace handling stays the
 // responsibility of the caller that knows the qualified agent name.
+//
+// If the merged baseline+workspace+provider env already targets a remote
+// city (GC_CITY_URL or GC_CITY_CONTEXT set), the local city anchors are
+// PINNED EMPTY — withheld, not absent. Seeding them alongside a remote
+// target makes the nested gc binary in that session fail closed with
+// "conflicting targets" (cmd/gc/remote_target.go's local-vs-remote guard),
+// but merely omitting them does not clear them: this env is an overlay on
+// an environment the session already inherits (the tmux server's global env,
+// or os.Environ() on the subprocess path), so an omitted key is an inherited
+// key. An empty value is what the adapters honor as withholding — the tmux
+// adapter turns it into an `env -u KEY` prefix, and the subprocess adapter
+// drops the inherited entry. GC_CITY_ROOT is pinned too even though
+// citylayout.CityIdentityEnvMap never seeds it, because the guard trips on it
+// and nothing else clears an inherited value.
 func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
-	anchors := citylayout.CityIdentityEnvMap(cityPath)
 	gcBin, _ := os.Executable()
-	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
-		return nil
-	}
-	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+len(anchors)+1)
+
+	out := make(map[string]string, len(baseline)+len(workspaceEnv)+len(providerEnv)+4)
 	for k, v := range baseline {
 		out[k] = v
 	}
 	for k, v := range workspaceEnv {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
 	}
 	for k, v := range providerEnv {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
+	}
+
+	remoteTargeted := strings.TrimSpace(out["GC_CITY_URL"]) != "" || strings.TrimSpace(out["GC_CITY_CONTEXT"]) != ""
+	anchors := citylayout.CityIdentityEnvMap(cityPath)
+	if remoteTargeted {
+		anchors = map[string]string{
+			"GC_CITY":             "",
+			"GC_CITY_PATH":        "",
+			"GC_CITY_ROOT":        "",
+			"GC_CITY_RUNTIME_DIR": "",
+		}
+	}
+	if len(baseline) == 0 && len(workspaceEnv) == 0 && len(providerEnv) == 0 && len(anchors) == 0 && gcBin == "" {
+		return nil
 	}
 	for k, v := range anchors {
 		out[k] = v
@@ -92,7 +121,33 @@ func (s *Server) sessionLogPaths() []string {
 	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
-func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig) runtime.Config {
+// configuredProgramStatusMode is the city's [session] program_status switch;
+// a nil config reads as off.
+func configuredProgramStatusMode(cfg *config.City) runtime.ProgramStatusMode {
+	if cfg == nil {
+		return runtime.ProgramStatusOff
+	}
+	return cfg.Session.ProgramStatusMode()
+}
+
+// sessionProgramStatus derives a session's program-status capture arm and its
+// provider-authored env layer: the resolved provider env followed, when armed,
+// by the binding's forced env. The city anchors cityAnchoredSessionEnv writes
+// after this layer cannot collide with it, because config rejects binding env
+// keys in gc's own namespaces (GC_*, BEADS_*, BD_*, GT_ROOT). The resolved
+// provider is never mutated.
+func sessionProgramStatus(mode runtime.ProgramStatusMode, resolved *config.ResolvedProvider, transport string) (runtime.ProgramStatusArm, map[string]string) {
+	arm, env := resolved.ProgramStatus.Arm(mode, transport == config.SessionTransportACP)
+	if len(env) == 0 {
+		return arm, resolved.Env
+	}
+	merged := make(map[string]string, len(resolved.Env)+len(env))
+	maps.Copy(merged, resolved.Env)
+	maps.Copy(merged, env)
+	return arm, merged
+}
+
+func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, programStatus runtime.ProgramStatusArm) runtime.Config {
 	return runtime.Config{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
@@ -108,9 +163,10 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		// but they are CreateModeDeferred and re-resolved mouse-off by the
 		// reconciler, so this unconditional default never enables mouse on a
 		// polled agent (ga-c4w).
-		MouseOn:    true,
-		Env:        sessionEnv,
-		MCPServers: mcpServers,
+		MouseOn:       true,
+		Env:           sessionEnv,
+		MCPServers:    mcpServers,
+		ProgramStatus: programStatus,
 	}
 }
 
@@ -135,7 +191,7 @@ func legacySessionKind(metadata map[string]string) string {
 // never routes through template_resolve.go), so an unconditional MouseOn=true
 // leaked mouse-on onto resumed pool agents and broke ga-c4w's controller-poll
 // -safety invariant (regression ga-g7go).
-func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool) runtime.Config {
+func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool, programStatus runtime.ProgramStatusArm) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
@@ -147,6 +203,7 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		MouseOn:                interactive,
 		Env:                    sessionEnv,
 		MCPServers:             mcpServers,
+		ProgramStatus:          programStatus,
 	}
 }
 
@@ -209,7 +266,7 @@ func (s *Server) providerSessionMCPServers(providerName, identity, workDir, tran
 		return nil, nil
 	}
 	synthetic := &config.Agent{Provider: providerName}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, s.state.CityPath(), synthetic, firstNonEmptyString(identity, providerName), workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, s.state.CityPath(), synthetic, firstNonEmptyString(identity, providerName), workDir, queryTopology(s.state))
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -229,6 +286,7 @@ func (s *Server) sessionMCPServers(template, providerName, identity, workDir, tr
 			&agentCfg,
 			firstNonEmptyString(identity, template),
 			workDir,
+			queryTopology(s.state),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)
@@ -376,8 +434,9 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
-	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
+	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm), nil
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
@@ -494,13 +553,23 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 			resumeCommand = command
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	// This resolver builds the launch hints for every API resume, so the startup
+	// prompt must be delivered through them: without a payload and the delivered
+	// marker, the SessionStart hook is the only carrier and the provider
+	// truncates a large prompt (ga-4k4zfk).
+	hints, err := s.state.ApplyStartupPrompt(info, resolved, transport,
+		sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm))
+	if err != nil {
+		return nil, err
+	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
+		Hints:      hints,
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const defaultTouchDebounce = 30 * time.Second
@@ -41,7 +41,8 @@ type bindingMembershipEnsurer interface {
 }
 
 type bindingService struct {
-	store         beads.Store
+	store         beads.MailStore
+	sessions      session.AddressDirectory
 	delivery      bindingCleaner
 	transcript    bindingMembershipEnsurer
 	touchDebounce time.Duration
@@ -60,9 +61,14 @@ func WithBindingTouchDebounce(d time.Duration) BindingServiceOption {
 	}
 }
 
-func newBindingService(store beads.Store, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
+func newBindingService(store beads.MailStore, sessions beads.SessionStore, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
+	return newBindingServiceWithSessionDirectory(store, session.NewStore(sessions), delivery, transcript, locks, opts...)
+}
+
+func newBindingServiceWithSessionDirectory(store beads.MailStore, sessions session.AddressDirectory, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
 	svc := &bindingService{
 		store:         store,
+		sessions:      sessions,
 		touchDebounce: defaultTouchDebounce,
 		locks:         locks,
 	}
@@ -111,11 +117,16 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		return SessionBindingRecord{}, fmt.Errorf("%w: session_id and agent_name are mutually exclusive", ErrInvalidInput)
 	}
 	// Capture the target's stable session name so the binding survives respawn.
-	// Best-effort: empty when the selector resolves to no session bead.
+	// An absent session intentionally retains legacy pure-ID behavior, but an
+	// indeterminate directory failure must stop before any Messaging mutation.
+	sessionName, err := sessionNameForSelector(s.sessions, sessionID)
+	if err != nil {
+		return SessionBindingRecord{}, newSafeOperationError("resolve binding session address", err)
+	}
 	target := bindTarget{
 		sessionID:   sessionID,
 		agentName:   agentName,
-		sessionName: sessionNameForSelector(s.store, sessionID),
+		sessionName: sessionName,
 	}
 	now := zeroNow(input.Now)
 
@@ -315,7 +326,7 @@ func (s *bindingService) handoffActiveBindingLocked(ctx context.Context, caller 
 		}
 	}
 
-	if beads.StoreSupportsAtomicTx(s.store) {
+	if atomic, ok := beads.As[beads.AtomicTxStore](s.store); ok && atomic.AtomicTx() {
 		out, err := s.createBindingLocked(caller, ref, target, input, history, now, displaced.ID)
 		if err != nil {
 			// The swap rolled back, so the displaced binding is still active —
@@ -375,7 +386,9 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 	if err != nil || record == nil {
 		return record, err
 	}
-	overlayLiveSession(s.store, record)
+	if err := overlayLiveSession(s.sessions, record); err != nil {
+		return nil, newSafeOperationError("resolve binding live session", err)
+	}
 	return record, nil
 }
 
@@ -389,8 +402,8 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 // interval. The reaper's persistent write is still needed to update the
 // labelBindingSessionPrefix label (indexed on the volatile ID) and keep
 // label-based lookups correct across ticks.
-func overlayLiveSession(store beads.Store, record *SessionBindingRecord) {
-	overlayLiveSessionID(store, record.SessionName, record.SessionID, &record.SessionID)
+func overlayLiveSession(sessions session.AddressDirectory, record *SessionBindingRecord) error {
+	return overlayLiveSessionID(sessions, record.SessionName, record.SessionID, &record.SessionID)
 }
 
 func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error) {
@@ -588,11 +601,11 @@ func (s *bindingService) Unbind(ctx context.Context, caller Caller, input Unbind
 
 // ReassignSessionBindings moves active bindings from one session bead ID to
 // another during canonical session repair.
-func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionID, newSessionID string, now time.Time) error {
+func ReassignSessionBindings(ctx context.Context, store beads.MailStore, oldSessionID, newSessionID string, now time.Time) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if store == nil {
+	if store == (beads.MailStore{}) {
 		return nil
 	}
 	oldSessionID = strings.TrimSpace(oldSessionID)
@@ -704,8 +717,8 @@ func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionI
 // newReassignmentTranscript constructs the transcript syncer used by
 // ReassignSessionParticipants. It is a package-level var so tests can substitute
 // a flaky transcript and exercise retry idempotence after a membership-migration
-// failure (mirrors resolveLiveSessionID and timeNow).
-var newReassignmentTranscript = func(store beads.Store, locks *bindingLockPool) groupTranscriptSync {
+// failure (mirrors resolveLiveSession and timeNow).
+var newReassignmentTranscript = func(store beads.MailStore, locks *bindingLockPool) groupTranscriptSync {
 	return newTranscriptService(store, locks)
 }
 
@@ -729,11 +742,11 @@ var newReassignmentTranscript = func(store beads.Store, locks *bindingLockPool) 
 // participantReassignmentPending, so a later ReassignSessionParticipants call (or
 // the participant reaper) finishes the handover instead of stranding the
 // group-owned membership on the dead session.
-func ReassignSessionParticipants(ctx context.Context, store beads.Store, oldSessionID, newSessionID string) error {
+func ReassignSessionParticipants(ctx context.Context, store beads.MailStore, oldSessionID, newSessionID string) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if store == nil {
+	if store == (beads.MailStore{}) {
 		return nil
 	}
 	oldSessionID = strings.TrimSpace(oldSessionID)
@@ -832,11 +845,11 @@ func ReassignSessionParticipants(ctx context.Context, store beads.Store, oldSess
 // gc:extmsg-participant beads themselves stay open and remain visible to
 // ResolveInbound / ResolveOutbound, so group routing can still target the
 // dead session. Sweep both explicitly.
-func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID string, now time.Time) error {
+func CloseSessionBindings(ctx context.Context, store beads.MailStore, sessions beads.SessionStore, sessionID string, now time.Time) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if store == nil {
+	if store == (beads.MailStore{}) {
 		return nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -844,7 +857,7 @@ func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID stri
 		return nil
 	}
 	caller := Caller{Kind: CallerController, ID: "session-retirement"}
-	svc := NewServices(store)
+	svc := NewServices(store, sessions)
 	if _, err := svc.Bindings.Unbind(ctx, caller, UnbindInput{
 		SessionID: sessionID,
 		Now:       now,
@@ -860,7 +873,7 @@ func CloseSessionBindings(ctx context.Context, store beads.Store, sessionID stri
 // closeSessionParticipants closes every gc:extmsg-participant bead labeled
 // for sessionID by delegating to RemoveParticipant, which also cleans up the
 // group-owned portion of the corresponding membership.
-func closeSessionParticipants(ctx context.Context, store beads.Store, svc Services, caller Caller, sessionID string) error {
+func closeSessionParticipants(ctx context.Context, store beads.MailStore, svc Services, caller Caller, sessionID string) error {
 	items, err := store.List(beads.ListQuery{Label: groupParticipantSessionLabel(sessionID)})
 	if err != nil {
 		return fmt.Errorf("list residual participants for retired session %s: %w", sessionID, err)
@@ -933,7 +946,7 @@ func closeSessionMemberships(ctx context.Context, svc Services, caller Caller, s
 	return nil
 }
 
-func activeBindingExistsForSession(store beads.Store, ref ConversationRef, currentID, sessionID string) (bool, error) {
+func activeBindingExistsForSession(store beads.MailStore, ref ConversationRef, currentID, sessionID string) (bool, error) {
 	items, err := store.List(beads.ListQuery{
 		Label:         bindingConversationLabel(ref),
 		IncludeClosed: true,
@@ -1142,7 +1155,7 @@ func bindingExpired(record SessionBindingRecord, now time.Time) bool {
 	return record.ExpiresAt != nil && !record.ExpiresAt.After(now)
 }
 
-func resolveActiveBinding(ctx context.Context, locks *bindingLockPool, store beads.Store, delivery bindingCleaner, transcript bindingMembershipEnsurer, ref ConversationRef, now time.Time) (*SessionBindingRecord, error) {
+func resolveActiveBinding(ctx context.Context, locks *bindingLockPool, store beads.MailStore, delivery bindingCleaner, transcript bindingMembershipEnsurer, ref ConversationRef, now time.Time) (*SessionBindingRecord, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -1155,7 +1168,7 @@ func resolveActiveBinding(ctx context.Context, locks *bindingLockPool, store bea
 	return out, err
 }
 
-func resolveActiveBindingLocked(ctx context.Context, store beads.Store, delivery bindingCleaner, transcript bindingMembershipEnsurer, ref ConversationRef, now time.Time) (*SessionBindingRecord, error) {
+func resolveActiveBindingLocked(ctx context.Context, store beads.MailStore, delivery bindingCleaner, transcript bindingMembershipEnsurer, ref ConversationRef, now time.Time) (*SessionBindingRecord, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -1255,7 +1268,7 @@ func newBindingLockPool() *bindingLockPool {
 	return &bindingLockPool{locks: map[string]*bindingLockEntry{}}
 }
 
-func sharedBindingLockPool(store beads.Store) *bindingLockPool {
+func sharedBindingLockPool(store beads.MailStore) *bindingLockPool {
 	key := bindingLockPoolKey(store)
 	if existing, ok := sharedBindingLockPools.Load(key); ok {
 		return existing.(*bindingLockPool)
@@ -1265,17 +1278,11 @@ func sharedBindingLockPool(store beads.Store) *bindingLockPool {
 	return actual.(*bindingLockPool)
 }
 
-func bindingLockPoolKey(store beads.Store) string {
-	if store == nil {
-		return "<nil>"
-	}
-	value := reflect.ValueOf(store)
-	switch value.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
-		return fmt.Sprintf("%T:%x", store, value.Pointer())
-	default:
-		return fmt.Sprintf("%T:%v", store, store)
-	}
+// bindingLockPoolKey is the shared pool's key for store: the identity of the
+// physical store below its class handle, so every service over one store
+// shares one pool whatever handle it was given.
+func bindingLockPoolKey(store beads.MailStore) string {
+	return beads.PhysicalStoreKey(store)
 }
 
 func (p *bindingLockPool) acquire(key string) *bindingLockEntry {

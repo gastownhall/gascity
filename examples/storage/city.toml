@@ -1,0 +1,53 @@
+# Storage — assigning the six semantic storage classes to bindings.
+#
+# Every city stores six kinds of state: the work ledger plus five
+# infrastructure classes (graph, sessions, messaging, orders, nudges).
+# Omitting [storage] entirely keeps all six on the reserved `work` binding,
+# which is what every pre-existing city does. This example shows the one split
+# this build serves: work stays on the work ledger, and the five infrastructure
+# classes move to one local SQLite bead engine.
+#
+# The move is not automatic. Authoring this section on a city that already
+# holds infrastructure beads makes it refuse to start until an operator runs
+# `gc storage migrate --from-work`; a brand-new city creates the binding on
+# first boot and moves nothing.
+#
+# The class map lives here and the binding it names is defined in the
+# storage-bindings.toml fragment. Either half may live in either file —
+# storage composes across include layers like the rest of city.toml, and is
+# validated for completeness only after every layer is merged.
+#
+# This city carries nothing but the storage authoring surface, so it stays
+# readable as a reference; a working city also imports the builtin core and bd
+# packs, which `gc doctor --fix` adds.
+#
+# To use: gc init --from examples/storage ~/storage-city
+
+include = ["storage-bindings.toml"]
+
+[workspace]
+name = "storage"
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+# All six class assignments are required once [storage] is authored. Each one
+# names either the reserved `work` binding or a binding some layer defines.
+# This build serves the whole split or none of it: either every class stays on
+# `work`, or work stays there and all five infrastructure classes share one
+# non-work binding. Any other arrangement is refused at startup rather than
+# routed halfway.
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[daemon]
+patrol_interval = "30s"
+max_restarts = 5
+restart_window = "1h"
+shutdown_timeout = "5s"

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -18,10 +19,9 @@ type execStoreTarget struct {
 }
 
 func execProjectedBackendEnvKeys() []string {
-	keys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys)+len(bdAutoBackupOptOutEnvKeys))
+	keys := make([]string, 0, len(projectedBeadsBackendEnvKeys)+len(projectedDoltEnvKeys)+len(bdCLIRemoteSyncOptOutEnvKeys)+len(bdAutoBackupOptOutEnvKeys))
 	keys = append(keys, projectedBeadsBackendEnvKeys...)
 	keys = append(keys, projectedDoltEnvKeys...)
-	keys = append(keys, projectedPostgresEnvKeys...)
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
 	keys = appendBdAutoBackupOptOutEnvKeys(keys)
 	keys = appendBdContributorRoutingOptOutEnvKeys(keys)
@@ -55,7 +55,10 @@ func setExecProjectedBackendEnvEmpty(env map[string]string) {
 // set so it never blanks an ambient credential command for providers that skip
 // the copy.
 func execProjectedBackendCopyKeys() []string {
-	return append(execProjectedBackendEnvKeys(), "BEADS_DOLT_CREDENTIAL_COMMAND")
+	return append(execProjectedBackendEnvKeys(),
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+		registryCredentialProviderEnv,
+	)
 }
 
 func copyExecProjectedBackendEnv(dst, src map[string]string) {
@@ -79,7 +82,11 @@ func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) ma
 	env["BEADS_DOLT_AUTO_START"] = ""
 	env["GC_BIN"] = ""
 	if execProviderUsesCanonicalBdScopeFiles(provider) {
-		if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
+		// Best effort: this env opens a store for a read or a write, and a gc
+		// whose own on-disk path was removed by an upgrade must still serve the
+		// dashboard and its supervisor's reconciler. The provider-owned lifecycle
+		// env keeps the strict pin.
+		if gcBin := bestEffortProviderLifecycleGCBinary(); gcBin != "" {
 			env["GC_BIN"] = gcBin
 		}
 	}
@@ -125,6 +132,14 @@ func execProviderBase(provider string) string {
 
 func execProviderNeedsScopedDoltInit(provider string) bool {
 	return execProviderBase(provider) == "gc-beads-k8s"
+}
+
+// execProviderIsBdBacked reports an exec provider whose rows live in bd: the
+// managed gc-beads-bd and gc-beads-k8s, whose pods write the cluster's Dolt
+// through bd. bd stores the dependency payloads graph plans write, which the
+// exec protocol cannot read, so such a store is never payload-blind.
+func execProviderIsBdBacked(provider string) bool {
+	return contract.ProviderUsesBDContract(provider) || execProviderNeedsScopedDoltInit(provider)
 }
 
 func execProviderUsesCanonicalBdScopeFiles(provider string) bool {

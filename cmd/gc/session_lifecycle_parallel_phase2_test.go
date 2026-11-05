@@ -23,7 +23,7 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 	// guard's missing-transcript behavior is covered by TestStaleResumeKeyProbe
 	// and the transcript layer's TestHasKeyedTranscript.
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	for _, tc := range selectedPhase2ProviderCases(t) {
@@ -47,8 +47,8 @@ func TestPhase2InitialInputDelivery(t *testing.T) {
 
 			t.Run(string(workertest.RequirementInputOverrideDefaults), func(t *testing.T) {
 				prepared := preparePhase2Start(t, tc, "", map[string]string{
-					"initial_message": "Ship it.",
-					"model":           tc.wantModelOverride,
+					"initial_message":        "Ship it.",
+					phase2OverrideOption(tc): tc.overrideValue,
 				})
 
 				reporter.Require(t, inputOverrideDefaultsResult(tc, prepared))
@@ -145,8 +145,8 @@ func TestPhase2InputResultFailureClassification(t *testing.T) {
 
 	t.Run("missing resolved provider fails without panic", func(t *testing.T) {
 		prepared := preparePhase2Start(t, tc, "", map[string]string{
-			"initial_message": "Ship it.",
-			"model":           tc.wantModelOverride,
+			"initial_message":        "Ship it.",
+			phase2OverrideOption(tc): tc.overrideValue,
 		})
 		prepared.candidate.tp.ResolvedProvider = nil
 

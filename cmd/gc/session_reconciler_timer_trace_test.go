@@ -20,34 +20,46 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 		TraceReasonIdleTimeout:           true,
 		TraceReasonUserHold:              true,
 		TraceReasonQuarantine:            true,
+		TraceReasonPinned:                true,
 		TraceReasonPending:               true,
+		TraceReasonPendingUnknown:        true,
 		TraceReasonAssignedWork:          true,
 		TraceReasonAssignedWorkExhausted: true,
+		TraceReasonMinFloorIdleWorker:    true,
 	}
 	namedOutcomes := map[TraceOutcomeCode]bool{
 		TraceOutcomeStop:               true,
 		TraceOutcomeDeferredUserHold:   true,
 		TraceOutcomeDeferredQuarantine: true,
+		TraceOutcomeDeferredPinned:     true,
 		TraceOutcomeDeferredPending:    true,
 		TraceOutcomeDeferredBusy:       true,
 		TraceOutcomeStopDeferExhausted: true,
+		TraceOutcomeDeferredMinFloor:   true,
 	}
 
-	blockers := []string{"", "user_hold", "quarantine"}
+	blockers := []string{"", "user_hold", "quarantine", "pinned"}
 	pendings := []sessionpkg.PendingFact{
 		sessionpkg.PendingUnknown, sessionpkg.PendingNo, sessionpkg.PendingYes,
 	}
 	assigned := []sessionpkg.AssignedWorkFact{
 		sessionpkg.AssignedWorkUnknown, sessionpkg.AssignedWorkNone, sessionpkg.AssignedWorkHas,
 	}
+	minfloors := []sessionpkg.MinFloorFact{
+		sessionpkg.MinFloorUnknown, sessionpkg.MinFloorNo, sessionpkg.MinFloorYes,
+	}
 
 	var decisions []sessionpkg.TimerDecision
 	for _, b := range blockers {
 		for _, p := range pendings {
 			for _, a := range assigned {
-				facts := sessionpkg.TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: a}
-				decisions = append(decisions, sessionpkg.DecideMaxSessionAge(facts))
-				decisions = append(decisions, sessionpkg.DecideIdleTimeout(facts))
+				for _, m := range minfloors {
+					facts := sessionpkg.TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: a, MinFloor: m}
+					for _, hold := range []pendingInteractionAnswer{pendingInteractionNo, pendingInteractionYes, pendingInteractionUnknown} {
+						decisions = append(decisions, pendingHoldTimerDecision(sessionpkg.DecideMaxSessionAge(facts), hold))
+						decisions = append(decisions, pendingHoldTimerDecision(sessionpkg.DecideIdleTimeout(facts), hold))
+					}
+				}
 			}
 		}
 	}

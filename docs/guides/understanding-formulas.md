@@ -104,6 +104,9 @@ Three verbs create formula instances:
   formula, writes its beads into the current scope's store, and stops.
   Nothing wakes up. Cook to inspect the beads first, route the work
   yourself, or graft a sub-DAG onto existing work with `--attach <bead-id>`.
+  `--attach` is limited on a **split city** — one that serves the graph
+  class from its own `[storage]` binding. See
+  [Grafting on a split city](#grafting-on-a-split-city).
 - **Sling creates and routes.** `gc sling <target> <name> --formula` cooks
   and routes in one motion: a v2 formula starts a workflow, a v1 formula
   starts a single-bead run (a *wisp*), both routed to the target. The
@@ -780,13 +783,52 @@ The two frameworks above compose. Find your situation, read across:
 | Ordered steps worked by one agent | v1 or v2 | `gc sling --formula` | v1 run (a *molecule*) or v2 workflow |
 | Steps spread across agents or pools | v2 | `gc sling --formula` | workflow |
 | Inspect or route the beads yourself | either | `gc formula cook` | unrouted run (v1) or workflow (v2) |
-| A sub-DAG grafted onto existing work | either | `gc formula cook --attach` | steps blocking the given bead |
+| A sub-DAG grafted onto existing work | either | `gc formula cook --attach` | steps blocking the given bead (see [Grafting on a split city](#grafting-on-a-split-city)) |
 | One run per convoy member | v2 | `gc sling --on` (targeted) | workflow with drain units |
 | Verified or hardened steps | v2 | any | workflow with check or retry controls |
 | Recurring work on a trigger | either; v2 for pools | order | one instance per firing |
 | Bounded iterative refinement | v2 | `[steps.check]` loop (or v1 `gc converge create`) | orchestrator re-runs until the check passes |
 | Reuse a base, change one detail | either | `extends` + same-id override | child graph with the overridden step spliced in |
 | Iterating multi-lane review | v2 | expansion with `[template.check]` | lanes → synthesize → fix subtree, re-run until the verdict passes |
+
+### Grafting On A Split City
+
+A **split city** serves the graph coordination class from its own `[storage]`
+binding: workflow roots, step beads and control beads live in a second
+database, and ordinary work stays in the work ledger. Most of
+`gc formula cook --attach` is **not supported yet** there, in city and rig
+scope alike, and refuses rather than serving.
+
+The reason is that a graft is graph class whatever the formula's version.
+Every bead an attach materializes carries `gc.root_bead_id`, which is what
+classifies a bead as graph — so the sub-DAG belongs in the binding while the
+blocking dependency belongs beside the attach bead, and a split city cannot
+have both ends in one store.
+
+| Scope | Attach bead lives in | Formula | Outcome |
+|---|---|---|---|
+| city | the city's work ledger | v1 or v2 | **refused** — writing the sub-DAG beside the attach bead strands graph-class beads in the work store; writing it into the binding leaves an unresolvable `blocks` row that never clears |
+| city or rig | the binding | v2 | **refused** — a v2 invocation mints a work-class input convoy, which can live in neither store |
+| city or rig | the binding | v1 | served — the sub-DAG and its blocking dependency are both written to the binding |
+| rig | that rig's own store, as a work bead | v1 or v2 | **refused** — a rig's own store holds only work, so the graft fails for the same reason as in the city's work ledger; launch the formula with `gc sling <target> <bead> --on <formula>` instead |
+| rig | that rig's own store, as a graph bead of an older tree | v1 | served — the graft extends that tree where it lives |
+| rig | that rig's own store, as a graph bead of an older tree | v2 | **refused** — a v2 formula starts a new workflow root, which is created in the binding, so its attach edge would cross stores |
+
+A **rig scope** — `--rig`, the `GC_RIG` the orchestrator sets on every rig
+agent, or a cwd inside a rig — follows the same rule. Every rig's graph beads
+live in the binding, recorded with the rig as their scope, so a rig's own
+store holds only work. The exception is an older tree: one the rig created
+before its graph beads moved to the binding stays in the rig's own store, and
+a v1 graft onto one of its beads extends it there.
+
+Single-store cities — every city that authors no `[storage]` section — are
+unaffected: `--attach` behaves exactly as it always has, on both contracts.
+
+Lifting the refusals needs a cross-class membership edge, tracked as
+`ga-2orlf`. If an earlier cook already stranded beads in a split city's work
+store, `gc storage status` names them and
+`gc storage recover-stranded --from-work --fleet-stopped` copies them into
+the binding.
 
 ### Convergence Loops
 

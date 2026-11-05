@@ -75,6 +75,7 @@ type beadWire struct {
 	CreatedBy   string                     `json:"created_by,omitempty"`
 	Owner       string                     `json:"owner,omitempty"`
 	Notes       string                     `json:"notes,omitempty"`
+	CloseReason string                     `json:"close_reason,omitempty"`
 }
 
 // marshalCreate converts a Bead to JSON for the exec script's create operation.

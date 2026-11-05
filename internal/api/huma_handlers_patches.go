@@ -7,17 +7,38 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// rawConfig returns the state's raw (pre-composition) config, or nil when the
+// state does not provide one (see RawConfigProvider).
+func (s *Server) rawConfig() *config.City {
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		return rcp.RawConfig()
+	}
+	return nil
+}
+
+// patchConfig returns the config the patch read paths serve. Patches are
+// declared in city.toml and composition clears them from the composed config
+// once applied, so reads use the raw (pre-composition) config when the state
+// provides one — the same document the patch write paths edit.
+func (s *Server) patchConfig() *config.City {
+	if raw := s.rawConfig(); raw != nil {
+		return raw
+	}
+	return s.state.Config()
+}
+
 // --- Agent patches ---
 
 // humaHandleAgentPatchList is the Huma-typed handler for GET /v0/patches/agents.
 func (s *Server) humaHandleAgentPatchList(_ context.Context, _ *AgentPatchListInput) (*ListOutput[config.AgentPatch], error) {
-	cfg := s.state.Config()
+	index := s.latestIndex()
+	cfg := s.patchConfig()
 	patches := cfg.Patches.Agents
 	if patches == nil {
 		patches = []config.AgentPatch{}
 	}
 	return &ListOutput[config.AgentPatch]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[config.AgentPatch]{Items: patches, Total: len(patches)},
 	}, nil
 }
@@ -35,12 +56,12 @@ func (s *Server) humaHandleAgentPatchGetQualified(_ context.Context, input *Agen
 }
 
 func (s *Server) agentPatchByName(name string) (*IndexOutput[config.AgentPatch], error) {
-	cfg := s.state.Config()
-	dir, base := config.ParseQualifiedName(name)
+	index := s.latestIndex()
+	cfg := s.patchConfig()
 	for _, p := range cfg.Patches.Agents {
-		if p.Dir == dir && p.Name == base {
+		if p.TargetQualifiedName() == name {
 			return &IndexOutput[config.AgentPatch]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body:  p,
 			}, nil
 		}
@@ -57,6 +78,7 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 
 	patch := config.AgentPatch{
 		Dir:       input.Body.Dir,
+		Rig:       input.Body.Rig,
 		Name:      input.Body.Name,
 		Provider:  input.Body.Provider,
 		WorkDir:   input.Body.WorkDir,
@@ -66,18 +88,20 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 		Env:       input.Body.Env,
 	}
 
-	if patch.Name == "" {
-		return nil, apierr.InvalidRequest.Msg("name is required")
+	// Validate at the edge so a patch that would hard-fail the next config
+	// load — a missing name, or a mutually-exclusive dir+rig combination
+	// (including rig="*") — is rejected fail-fast rather than persisted and
+	// deferred to composition. This mirrors the guard in Editor.SetAgentPatch
+	// so the HTTP and CLI write paths reject the same invalid patches.
+	if err := patch.Validate(); err != nil {
+		return nil, apierr.InvalidRequest.Msg(err.Error())
 	}
 
 	if err := sm.SetAgentPatch(patch); err != nil {
 		return nil, mutationError(err)
 	}
 
-	qn := patch.Name
-	if patch.Dir != "" {
-		qn = patch.Dir + "/" + patch.Name
-	}
+	qn := patch.TargetQualifiedName()
 	resp := &PatchOKResponse{}
 	resp.Body.Status = "ok"
 	resp.Body.AgentPatch = qn
@@ -114,25 +138,27 @@ func (s *Server) deleteAgentPatchByName(name string) (*PatchDeletedResponse, err
 
 // humaHandleRigPatchList is the Huma-typed handler for GET /v0/patches/rigs.
 func (s *Server) humaHandleRigPatchList(_ context.Context, _ *RigPatchListInput) (*ListOutput[config.RigPatch], error) {
-	cfg := s.state.Config()
+	index := s.latestIndex()
+	cfg := s.patchConfig()
 	patches := cfg.Patches.Rigs
 	if patches == nil {
 		patches = []config.RigPatch{}
 	}
 	return &ListOutput[config.RigPatch]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[config.RigPatch]{Items: patches, Total: len(patches)},
 	}, nil
 }
 
 // humaHandleRigPatchGet is the Huma-typed handler for GET /v0/patches/rig/{name}.
 func (s *Server) humaHandleRigPatchGet(_ context.Context, input *RigPatchGetInput) (*IndexOutput[config.RigPatch], error) {
+	index := s.latestIndex()
 	name := input.Name
-	cfg := s.state.Config()
+	cfg := s.patchConfig()
 	for _, p := range cfg.Patches.Rigs {
 		if p.Name == name {
 			return &IndexOutput[config.RigPatch]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body:  p,
 			}, nil
 		}
@@ -189,25 +215,27 @@ func (s *Server) humaHandleRigPatchDelete(_ context.Context, input *RigPatchDele
 
 // humaHandleProviderPatchList is the Huma-typed handler for GET /v0/patches/providers.
 func (s *Server) humaHandleProviderPatchList(_ context.Context, _ *ProviderPatchListInput) (*ListOutput[config.ProviderPatch], error) {
-	cfg := s.state.Config()
+	index := s.latestIndex()
+	cfg := s.patchConfig()
 	patches := cfg.Patches.Providers
 	if patches == nil {
 		patches = []config.ProviderPatch{}
 	}
 	return &ListOutput[config.ProviderPatch]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[config.ProviderPatch]{Items: patches, Total: len(patches)},
 	}, nil
 }
 
 // humaHandleProviderPatchGet is the Huma-typed handler for GET /v0/patches/provider/{name}.
 func (s *Server) humaHandleProviderPatchGet(_ context.Context, input *ProviderPatchGetInput) (*IndexOutput[config.ProviderPatch], error) {
+	index := s.latestIndex()
 	name := input.Name
-	cfg := s.state.Config()
+	cfg := s.patchConfig()
 	for _, p := range cfg.Patches.Providers {
 		if p.Name == name {
 			return &IndexOutput[config.ProviderPatch]{
-				Index: s.latestIndex(),
+				Index: index,
 				Body:  p,
 			}, nil
 		}

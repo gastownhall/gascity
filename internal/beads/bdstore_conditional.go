@@ -119,11 +119,11 @@ func (s *BdStore) markConditionalWritesUnsupported() {
 }
 
 // Machine body codes bd emits (or, per beads #4682, will emit) for conditional
-// writes. The codes are provisional until #4682 lands; the //go:build integration
-// conformance row against a #4682-capable bd is the authoritative guard.
+// writes. The //go:build integration conformance row against a CAS-capable bd
+// is the authoritative guard.
 const (
-	bdConditionalCodePreconditionFailed = "precondition-failed"
-	bdConditionalCodeUnsupported        = "conditional-write-unsupported"
+	bdConditionalCodePreconditionFailed = "precondition_failed"
+	bdConditionalCodeUnsupported        = "conditional_write_unsupported"
 )
 
 // bdConditionalErrorBody is the machine JSON bd attaches to a failed conditional
@@ -323,7 +323,6 @@ func isBdConditionalPrecondition(body bdConditionalErrorBody, msg string) bool {
 	}
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "precondition failed") ||
-		strings.Contains(lower, "precondition-failed") ||
 		strings.Contains(lower, "revision mismatch")
 }
 
@@ -334,19 +333,7 @@ func isBdConditionalPrecondition(body bdConditionalErrorBody, msg string) bool {
 // "contains if-revision" check would latch a CAPABLE bd the moment gascity passed
 // some unrelated unknown flag — the exact silent-degrade the latch must avoid.
 func isBdUnknownIfRevisionFlag(msg string) bool {
-	lower := strings.ToLower(msg)
-	for _, anchor := range []string{
-		"unknown flag: --if-revision",
-		"unknown flag: -if-revision",
-		"unknown flag '--if-revision'",
-		"flag provided but not defined: -if-revision",
-		"flag provided but not defined: --if-revision",
-	} {
-		if strings.Contains(lower, anchor) {
-			return true
-		}
-	}
-	return false
+	return isBdUnknownFlagError(msg, "--if-revision")
 }
 
 // conditionalRawDetail returns a bounded forensic snapshot of a failed
@@ -400,16 +387,42 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // from the stores that can. If this store cannot fence, it returns
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
+//
+// An assignee edit carries --force, as the native store's waives its
+// assignee-transfer guard (ForceAssigneeTransfer): the revision fence already
+// proves the caller decided on the row as it stands, so bd's anti-steal
+// refusal of another actor's live in_progress claim would only turn a fenced
+// release of a dead claim into a hard error. A stale revision still refuses
+// (bd exits 13 under --force). An edit that also closes the bead does not
+// carry it: bd's --force also waives the close policy (open children, a live
+// blocker), which no assignee edit asked to override.
+//
+// The native store waives more, deliberately: each guard has a request member
+// of its own there, and its UpdateIfMatch waives the transfer guard on every
+// assignee edit and the close policy on every status edit, closing edits
+// included, as its unconditional Update does; bd's one flag cannot waive the
+// transfer guard without the close policy. The exclusion keys on "closed",
+// the done status Gas City writes: bd's close policy covers every status that
+// crosses into the workspace's done category, which this store does not read,
+// so a fenced assignee edit to another done status still carries --force, and
+// with it the close-policy waiver.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if isEmptyUpdateOpts(opts) {
-		return fmt.Errorf("conditional update %s: %w", id, ErrEmptyConditionalUpdate)
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
+	if err := validateConditionalUpdateOpts(opts, false); err != nil {
+		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
+	if err := bdSplitSafeUpdate(opts); err != nil {
+		return err
+	}
 	args := bdUpdateArgs(id, opts)
 	if len(args) == 3 {
 		return nil
+	}
+	if opts.Assignee != nil && (opts.Status == nil || *opts.Status != "closed") {
+		args = append(args, "--force")
 	}
 	args = append(args, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
 	return s.runConditionalWrite(id, expectedRevision, args...)
@@ -452,7 +465,7 @@ func (s *BdStore) DeleteIfMatch(id string, expectedRevision int64) error {
 //     would misreport a landed write as a precondition.
 //   - SERIALIZATION-class transient (transient AND not ambiguous: the txn rolled
 //     back) → re-read the revision; if it moved, the fence is permanently stale
-//     (revisions are monotonic and never reused) so return a precondition
+//     (the observed token is no longer current) so return a precondition
 //     immediately rather than replaying a doomed fence; otherwise back off and
 //     retry the SAME argv with the SAME expectedRevision. Re-fencing with a
 //     freshly-read revision would silently downgrade CAS to last-writer-wins.
@@ -540,6 +553,10 @@ func (s *BdStore) finalizeConditionalWrite(id, verb string, expectedRevision int
 // genuine value loss ((false,nil)) or a precondition — so consumers re-enter
 // level-triggered instead of stranding a reservation (DESIGN §8.4).
 func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := bdSplitSafeKeys(map[string]string{key: next}); err != nil {
+		return false, err
+	}
+	noteSessionKeysByID(s.Get, id, map[string]string{key: next})
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return false, ErrConditionalWriteUnsupported
 	}

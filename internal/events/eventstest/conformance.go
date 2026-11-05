@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -15,6 +16,17 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+// hangBudget is the wall-clock ceiling for hang-detector waits in this file.
+// It is a HANG DETECTOR, not a latency assertion: nextWithin returns the
+// instant the watcher yields an event, so raising this value would not slow
+// a passing run and lowering it would not make the suite stricter — it only
+// changes how long a genuinely wedged watcher takes to report.
+//
+// testutil.GoroutineRaceTimeout is a FLOOR, not a target (TESTING.md "Floors,
+// ceilings, and inputs"). Mirrors the reference implementation in
+// cmd/gc/hangbudget_test.go (hangBudget = 6 * testutil.GoroutineRaceTimeout).
+const hangBudget = 6 * testutil.GoroutineRaceTimeout
 
 // rotatableProvider is the small interface a Provider must satisfy
 // for the rotation subtest. Providers that don't expose rotation
@@ -767,7 +779,7 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		seen := make([]events.Event, 0, 5)
 		for i := 0; i < 5; i++ {
-			e, err := nextWithin(testutil.GoroutineRaceTimeout)
+			e, err := nextWithin(hangBudget)
 			if err != nil {
 				t.Fatalf("Next pre %d: %v", i, err)
 			}
@@ -800,7 +812,7 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		// (c) The watcher should yield the anchor + the post-rotate
 		// events without gap.
 		for i := 0; i < 4; i++ { // 1 anchor + 3 post-rotate
-			e, err := nextWithin(testutil.GoroutineRaceTimeout)
+			e, err := nextWithin(hangBudget)
 			if err != nil {
 				t.Fatalf("Next post %d: %v", i, err)
 			}
@@ -867,6 +879,46 @@ func RunConcurrencyTests(t *testing.T, newProvider func(t *testing.T) (events.Pr
 				t.Errorf("duplicate seq: %d", e.Seq)
 			}
 			seen[e.Seq] = true
+		}
+	})
+}
+
+// RunSinceOrderingTests checks that a Since filter matches each event on its
+// own Ts, in whatever order the events were recorded. A provider keeps a
+// caller-supplied Ts, so an event recorded after others can carry an older Ts
+// than theirs, and a reader must not take it as the end of the window.
+func RunSinceOrderingTests(t *testing.T, newProvider func(t *testing.T) (events.Provider, func())) {
+	t.Helper()
+
+	t.Run("ListFilterBySinceAroundBackdatedEvent", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		// UTC for the same reason as ListFilterBySince.
+		now := time.Now().UTC()
+		since := now.Add(-1 * time.Hour)
+		listTypes := func() []string {
+			t.Helper()
+			got, err := p.List(events.Filter{Since: since})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			types := make([]string, 0, len(got))
+			for _, e := range got {
+				types = append(types, e.Type)
+			}
+			return types
+		}
+
+		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"}) // auto-filled = now
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Ts: now.Add(-2 * time.Hour)})
+		if got, want := listTypes(), []string{events.SessionWoke}; !slices.Equal(got, want) {
+			t.Fatalf("List(Since) after a backdated last event = %v, want %v", got, want)
+		}
+
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "gc"}) // auto-filled = now
+		if got, want := listTypes(), []string{events.SessionWoke, events.BeadClosed}; !slices.Equal(got, want) {
+			t.Errorf("List(Since) around a backdated event = %v, want %v", got, want)
 		}
 	})
 }

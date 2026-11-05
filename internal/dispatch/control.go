@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -29,7 +31,8 @@ const (
 	// attemptPass closes the control as passed.
 	attemptPass attemptDisposition = iota
 	// attemptHardFail closes the control as a terminal hard failure regardless
-	// of attempts remaining (only the retry classifier produces this).
+	// of attempts remaining: a retry attempt classified hard, or a ralph
+	// iteration that failed hard (ralphIterationHardFailure).
 	attemptHardFail
 	// attemptContinue spawns the next attempt when attempts remain, or disposes
 	// of the exhausted control via the strategy when max_attempts is reached.
@@ -50,19 +53,23 @@ type attemptEvaluation struct {
 // The two live implementations (retry, ralph) differ only in how they classify
 // a closed attempt, what extra metadata a pass carries, and how an exhausted
 // attempt is disposed. kind/subjectNoun/missingNoun carry the control-kind
-// trace and error wording (control kinds, not role names).
+// trace and error wording (control kinds, not role names). evaluate may
+// return ErrControlPending to defer the verdict while a precondition outside
+// the attempt itself settles (a still-running member of a closed ralph
+// iteration): the control re-enters evaluation and the attempt is neither
+// logged nor spent until a verdict lands.
 type controlAttemptStrategy struct {
 	kind        string // "retry" | "ralph" — trace text only
 	subjectNoun string // "attempt" | "iteration" — error/trace text
 	missingNoun string // "no attempt found" | "no iteration found"
-	evaluate    func(store beads.Store, bead, attempt beads.Bead, attemptNum int, opts ProcessOptions) (attemptEvaluation, error)
+	evaluate    func(store beads.GraphStore, bead, attempt beads.Bead, attemptNum int, opts ProcessOptions) (attemptEvaluation, error)
 	onPass      func(closeMetadata map[string]string, attempt beads.Bead)
-	exhaust     func(store beads.Store, beadID string, attemptNum int, reason, attemptLog string) (ControlResult, error)
+	exhaust     func(store beads.GraphStore, beadID string, attemptNum int, reason, attemptLog string) (ControlResult, error)
 }
 
 // processRetryControl handles a retry control bead when it becomes ready
 // (its blocking dep on the latest attempt has resolved).
-func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+func processRetryControl(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	onExhausted := bead.Metadata[beadmeta.OnExhaustedMetadataKey]
 	if onExhausted == "" {
 		onExhausted = beadmeta.DispositionHardFail
@@ -75,7 +82,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		onPass: func(closeMetadata map[string]string, attempt beads.Bead) {
 			copyNonGCMetadata(closeMetadata, attempt.Metadata)
 		},
-		exhaust: func(store beads.Store, beadID string, attemptNum int, reason, attemptLog string) (ControlResult, error) {
+		exhaust: func(store beads.GraphStore, beadID string, attemptNum int, reason, attemptLog string) (ControlResult, error) {
 			return handleRetryExhaustion(store, beadID, attemptNum, reason, onExhausted, attemptLog)
 		},
 	}
@@ -83,13 +90,13 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 }
 
 // processRalphControl handles a ralph control bead when it becomes ready.
-func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+func processRalphControl(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	strategy := controlAttemptStrategy{
 		kind:        "ralph",
 		subjectNoun: "iteration",
 		missingNoun: "no iteration found",
 		evaluate:    evaluateRalphIteration,
-		exhaust: func(store beads.Store, beadID string, iterationNum int, _, attemptLog string) (ControlResult, error) {
+		exhaust: func(store beads.GraphStore, beadID string, iterationNum int, _, attemptLog string) (ControlResult, error) {
 			closeMetadata := map[string]string{
 				beadmeta.AttemptLogMetadataKey:    attemptLog,
 				beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
@@ -110,14 +117,14 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 // pending attempt to convergence, then classify the closed attempt via the
 // strategy and pass / hard-fail / spawn-next / exhaust accordingly. The three
 // per-kind seams live in controlAttemptStrategy.
-func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptions, strategy controlAttemptStrategy) (ControlResult, error) {
+func processAttemptControl(store beads.GraphStore, bead beads.Bead, opts ProcessOptions, strategy controlAttemptStrategy) (ControlResult, error) {
 	maxAttempts, err := strconv.Atoi(bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	if err != nil || maxAttempts < 1 {
 		return ControlResult{}, fmt.Errorf("%s: invalid gc.max_attempts %q", bead.ID, bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	}
 
 	// Find the most recent attempt.
-	attempt, err := findLatestAttempt(store, bead)
+	attempt, err := findLatestAttemptInView(store, bead, opts)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: finding latest %s: %w", bead.ID, strategy.subjectNoun, err)
 	}
@@ -135,7 +142,11 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		return ensurePendingAttemptConverges(store, bead, attempt, strategy, opts)
 	}
 
-	attemptNum, _ := strconv.Atoi(attempt.Metadata[beadmeta.AttemptMetadataKey])
+	// A retry attempt counts in gc.retry_attempt; a ralph iteration root never
+	// carries that key, so it falls back to gc.attempt, which there IS the
+	// iteration. RetryAttemptNumber encodes both, plus the legacy fallback for
+	// retry attempts minted before the key existed.
+	attemptNum := beadmeta.RetryAttemptNumber(attempt.Metadata)
 	eval, err := strategy.evaluate(store, bead, attempt, attemptNum, opts)
 	if err != nil {
 		return ControlResult{}, err
@@ -158,10 +169,12 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if strategy.onPass != nil {
 			strategy.onPass(closeMetadata, attempt)
 		}
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		closed, err := closeWithMetadata(store, bead.ID, closeMetadata)
+		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
+		noteWrite(opts, bead.ID, closed)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -177,10 +190,12 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		closed, err := closeWithMetadata(store, bead.ID, closeMetadata)
+		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
+		noteWrite(opts, bead.ID, closed)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -229,7 +244,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 // recovered attempt, and closes any generated spec beads, returning
 // ErrControlPending. Each store boundary error is classified through the
 // controller spawn boundary so transient failures stay open for retry.
-func ensurePendingAttemptConverges(store beads.Store, bead, attempt beads.Bead, strategy controlAttemptStrategy, opts ProcessOptions) (ControlResult, error) {
+func ensurePendingAttemptConverges(store beads.GraphStore, bead, attempt beads.Bead, strategy controlAttemptStrategy, opts ProcessOptions) (ControlResult, error) {
 	if err := ensureBlockingDependency(store, bead.ID, attempt.ID); err != nil {
 		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 			return ControlResult{}, ErrControlPending
@@ -254,7 +269,7 @@ func ensurePendingAttemptConverges(store beads.Store, bead, attempt beads.Bead, 
 // evaluateRetryAttempt classifies a closed retry attempt via its worker-result
 // postconditions. classifyRetryAttempt only emits pass/hard/transient, so the
 // default branch is defensive.
-func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, opts ProcessOptions) (attemptEvaluation, error) {
+func evaluateRetryAttempt(store beads.GraphStore, bead, attempt beads.Bead, _ int, opts ProcessOptions) (attemptEvaluation, error) {
 	result, err := classifyRetryAttemptWithPostconditions(store, attempt, opts)
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: evaluating retry postconditions for %s: %w", bead.ID, attempt.ID, err)
@@ -275,15 +290,55 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
-// runs the check script. A GatePass closes the control; anything else spawns
-// the next iteration or exhausts.
-func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
+// runs the check script. An iteration that failed hard closes the control as a
+// hard failure without running the check; a GatePass closes the control; a
+// run without a verdict re-runs the check attempt-free while the
+// infrastructure budget lasts (spendCheckInfraRetry); anything else spawns the
+// next iteration or exhausts.
+func evaluateRalphIteration(store beads.GraphStore, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
+	// The iteration boundary is a gate: no verdict — and no next iteration —
+	// until every member of this iteration has stopped. A closed body is not
+	// evidence the iteration finished: the abort path can close it while a
+	// claimed sibling is still running (the abort's skip set counts only
+	// unclaimed members), and a scope-check-exempt control settles it
+	// forcibly on every store. Block on each live member and defer the
+	// verdict; the member's close re-runs the control (gastownhall/gascity#2519).
+	live, err := ralphIterationLiveMembers(store, bead, iteration, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: reading live members of iteration %s: %w", bead.ID, iteration.ID, err)
+	}
+	if len(live) > 0 {
+		for _, member := range live {
+			if err := ensureBlockingDependencyWithRetry(store, bead.ID, member.ID); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return attemptEvaluation{}, ErrControlPending
+				}
+				return attemptEvaluation{}, fmt.Errorf("%s: blocking iteration drain on %s: %w", bead.ID, member.ID, err)
+			}
+		}
+		liveIDs := make([]string, 0, len(live))
+		for _, member := range live {
+			liveIDs = append(liveIDs, member.ID+":"+member.Status)
+		}
+		opts.tracef("ralph iteration-drain-pending bead=%s iteration=%s attempt=%d live=%s",
+			bead.ID, iteration.ID, iterationNum, strings.Join(liveIDs, ","))
+		return attemptEvaluation{}, ErrControlPending
+	}
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
 	// review.verdict) visible on the ralph bead for check scripts that read
-	// $GC_BEAD_ID metadata.
+	// $GC_BEAD_ID metadata, and keeps it as diagnostics on a hard failure.
 	if err := propagateRetrySubjectMetadata(store, bead.ID, iteration); err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: propagating iteration metadata: %w", bead.ID, err)
+	}
+	culprit, hard, err := ralphIterationHardFailure(store, bead, iteration, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: classifying failed %s: %w", bead.ID, iteration.ID, err)
+	}
+	if hard {
+		reason := retryFailureReason(culprit)
+		opts.tracef("ralph hard-fail bead=%s iteration=%s attempt=%d culprit=%s reason=%s", bead.ID, iteration.ID, iterationNum, culprit.ID, reason)
+		return attemptEvaluation{disposition: attemptHardFail, logOutcome: "hard", logDetail: reason, reason: reason}, nil
 	}
 	// Reload the control bead after propagation so the check sees updated values.
 	reloaded, err := store.Get(bead.ID)
@@ -296,6 +351,25 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
+	// A check that ran past its timeout, or read blind (exit 75 or a typed
+	// stderr marker), produced no verdict: re-run it on a later sweep against
+	// this same iteration, charged to the control's infrastructure budget
+	// instead of an attempt. Returning before the attempt log is written
+	// leaves the control untouched. A GateError is a failed start
+	// (formula-spec-v2 §3.1) and is graded like any failure, as is a blind
+	// read once the budget is spent: the outcome itself is left as the gate
+	// reported it.
+	infra := checkResult.Outcome == convergence.GateTimeout
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s",
+			bead.ID, iterationNum, reason, formatGateExitCode(checkResult.ExitCode))
+		infra = true
+	}
+	if infra {
+		if err := spendCheckInfraRetry(store, reloaded, checkResult.Outcome, iterationNum, opts); err != nil {
+			return attemptEvaluation{}, err
+		}
+	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
 	if checkResult.Outcome == convergence.GatePass {
 		eval.disposition = attemptPass
@@ -305,7 +379,97 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	return eval, nil
 }
 
-func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) error {
+// ralphIterationLiveMembers returns the work members of a ralph iteration
+// that are still running: the same selection a scope abort skips, keyed by
+// "not closed" instead of "open" so a claimed sibling counts, minus
+// controller machinery. Only the dispatcher closes a control, one per root at
+// a time, so an open control inside a closed iteration is mid-settlement and
+// completes on a later sweep; blocking the verdict on it would leave a
+// blocks edge no clean run mints (the abort settles within its cycle, but a
+// crash-restarted serve can evaluate the control in between) and end in a
+// different ledger than an uninterrupted one. Claimed work is the other side
+// of that line: only its worker closes it, and that is the #2519 boundary
+// this gate holds. A childless ralph's iteration is the work bead itself and
+// has no members. The candidate pool is the root view the control loop
+// already loaded, so the gate adds no store read; rootID mirrors
+// ralphIterationHardFailure for controls minted before gc.root_bead_id was
+// stamped.
+func ralphIterationLiveMembers(store beads.GraphStore, control, iteration beads.Bead, opts ProcessOptions) ([]beads.Bead, error) {
+	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope {
+		return nil, nil
+	}
+	iterationRef := strings.TrimSpace(iteration.Metadata[beadmeta.StepRefMetadataKey])
+	if iterationRef == "" {
+		return nil, nil
+	}
+	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := rootViewMembers(store, rootID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("reading members of root %s: %w", rootID, err)
+	}
+	pending := scopeUnsettledMembers(iterationScopeMembers(all, rootID, iterationRef), all, "",
+		func(b beads.Bead) bool { return b.Status != "closed" })
+	live := make([]beads.Bead, 0, len(pending))
+	for _, member := range pending {
+		if !beadmeta.IsControlKind(member.Metadata[beadmeta.KindMetadataKey]) {
+			live = append(live, member)
+		}
+	}
+	slices.SortFunc(live, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	return live, nil
+}
+
+// ralphIterationHardFailure returns the bead whose hard failure ended a failed
+// ralph iteration: the iteration itself when it closed hard (a childless
+// ralph's work bead, or a scope body whose abort kept its member's record), or
+// else a hard-failed member of the iteration's scope. The member scan covers
+// iteration bodies aborted before abortScope kept that record. Only an explicit
+// hard class counts, matching the retry classifier and the legacy check path;
+// an empty or transient class leaves the loop to iterate.
+func ralphIterationHardFailure(store beads.GraphStore, control, iteration beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
+	if strings.TrimSpace(iteration.Metadata[beadmeta.OutcomeMetadataKey]) != beadmeta.OutcomeFail {
+		return beads.Bead{}, false, nil
+	}
+	if closedWithHardFailure(iteration) {
+		return iteration, true, nil
+	}
+	iterationRef := strings.TrimSpace(iteration.Metadata[beadmeta.StepRefMetadataKey])
+	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope || iterationRef == "" {
+		return beads.Bead{}, false, nil
+	}
+	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := rootViewMembers(store, rootID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("reading members of root %s: %w", rootID, err)
+	}
+	culprit, ok := firstHardFailedMember(iterationScopeMembers(all, rootID, iterationRef), iteration.ID)
+	return culprit, ok, nil
+}
+
+// iterationScopeMembers returns the members of the scope whose body carries
+// iterationRef as its gc.step_ref: the beads whose gc.scope_ref names it,
+// exactly or as the un-namespaced suffix matchesScopeRef also accepts.
+func iterationScopeMembers(all []beads.Bead, rootID, iterationRef string) []beads.Bead {
+	var members []beads.Bead
+	for _, bead := range all {
+		scopeRef := strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey])
+		if scopeRef == "" || bead.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID {
+			continue
+		}
+		if scopeRef == iterationRef || strings.HasSuffix(iterationRef, "."+scopeRef) {
+			members = append(members, bead)
+		}
+	}
+	return members
+}
+
+func ensureBlockingDependency(store beads.GraphStore, issueID, dependsOnID string) error {
 	deps, err := store.DepList(issueID, "down")
 	if err != nil {
 		return err
@@ -318,20 +482,37 @@ func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) er
 	return store.DepAdd(issueID, dependsOnID, "blocks")
 }
 
-func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
+// ensureBlockingDependencyWithRetry is ensureBlockingDependency with one
+// immediate re-issue of the write after a transient store failure. The ralph
+// drain gate's edge is how the verdict is parked, and the member it blocks on
+// can close during the failure window (a dispatched worker finishing while
+// the store blips): the next sweep would then find nothing to wait on and
+// end the hold without the edge a clean run always minted, so a
+// crash-restarted serve and an uninterrupted one would end in different
+// ledgers. One retry closes the window with no loop; a failure that persists
+// returns to the caller's spawn-boundary classification unchanged.
+func ensureBlockingDependencyWithRetry(store beads.GraphStore, issueID, dependsOnID string) error {
+	err := ensureBlockingDependency(store, issueID, dependsOnID)
+	if err == nil || !IsTransientControllerError(err) {
+		return err
+	}
+	return ensureBlockingDependency(store, issueID, dependsOnID)
+}
+
+func controllerSpawnBoundaryPending(store beads.GraphStore, beadID string, err error, opts ProcessOptions) bool {
 	if err == nil {
 		return false
 	}
 	return markControllerSpawnError(store, beadID, err, opts)
 }
 
-func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) error {
+func syncControlEpochToAttempt(store beads.GraphStore, control, attempt beads.Bead) error {
 	current, err := strconv.Atoi(strings.TrimSpace(control.Metadata[beadmeta.ControlEpochMetadataKey]))
 	if err != nil || current < 1 {
 		return nil
 	}
-	attemptNum, err := strconv.Atoi(strings.TrimSpace(attempt.Metadata[beadmeta.AttemptMetadataKey]))
-	if err != nil || attemptNum <= current {
+	attemptNum := beadmeta.RetryAttemptNumber(attempt.Metadata)
+	if attemptNum <= current {
 		return nil
 	}
 	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
@@ -370,7 +551,7 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	return fmt.Errorf("syncing control epoch on %s: conditional advance kept conflicting below attempt %d", control.ID, attemptNum)
 }
 
-func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
+func markControllerSpawnError(store beads.GraphStore, beadID string, err error, opts ProcessOptions) bool {
 	metadata := map[string]string{
 		beadmeta.ControllerErrorMetadataKey: err.Error(),
 	}
@@ -389,13 +570,19 @@ func markControllerSpawnError(store beads.Store, beadID string, err error, opts 
 	if writeErr := store.SetMetadataBatch(beadID, metadata); writeErr != nil {
 		opts.tracef("controller-spawn-error bead=%s recording hard failure metadata failed err=%v", beadID, writeErr)
 	}
-	if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
-	}
-	// Reconcile any enclosing scope so a controller_error terminal closure
-	// does not leave the scope body stalled.
-	if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+	// Settle any enclosing scope before the bead closes so a controller_error
+	// terminal closure does not leave the scope body stalled: once the bead is
+	// closed nothing re-drives that settle.
+	if _, settleErr := closeScopedControl(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}, "", opts); settleErr != nil {
+		opts.tracef("controller-spawn-error bead=%s settling enclosing scope before close failed err=%v", beadID, settleErr)
+		// The hard error is terminal regardless: close the bead and reconcile
+		// the scope best-effort, as before the settle-first order.
+		if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
+		}
+		if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+		}
 	}
 	return false
 }
@@ -404,6 +591,19 @@ func clearControllerSpawnErrorMetadata(metadata map[string]string) {
 	metadata[beadmeta.ControllerErrorMetadataKey] = ""
 	metadata[beadmeta.ControllerErrorClassMetadataKey] = ""
 	metadata[beadmeta.ControllerRetryableMetadataKey] = ""
+	// The Tier-B budget anchor rides with the error it bounds: a bead that
+	// reached a clean disposition must not carry an expired deadline into a
+	// later life (re-mint, reopen) and quarantine itself on its first refusal.
+	metadata[beadmeta.ControllerRetryFirstSeenMetadataKey] = ""
+	metadata[beadmeta.ControllerRetryCountMetadataKey] = ""
+	// The pending budget rides along for the same reason, plus one of its own:
+	// gc.control_pending_stalled is a one-shot latch, so a bead that carried it
+	// into a later life would never escalate a second, genuinely never-healing
+	// pending wait.
+	metadata[beadmeta.ControlPendingReasonMetadataKey] = ""
+	metadata[beadmeta.ControlPendingCountMetadataKey] = ""
+	metadata[beadmeta.ControlPendingFirstSeenMetadataKey] = ""
+	metadata[beadmeta.ControlPendingStalledMetadataKey] = ""
 }
 
 func isPartialAttemptAttachError(err error) bool {
@@ -420,19 +620,146 @@ func markTransientControllerBoundaryError(err error) error {
 	return fmt.Errorf("%w: %w", errTransientControllerBoundary, err)
 }
 
-// IsTransientControllerError is the dispatch/store transient classifier for
+// ControllerErrorTier classifies a control-dispatch failure by what the bead
+// store DID, which is the only distinction that decides whether retrying may be
+// unbounded.
+//
+// Before this split, "transient" answered one question — retry? — and every yes
+// meant retry forever. That is how a control bead and the bead it must close
+// blocked each other for three days across six cities while every health metric
+// stayed green: the store was answering, and answering "no", 353 times an hour.
+//
+// The tier boundary is also exactly the line where a persisted retry budget is
+// implementable. A store that never answered cannot be asked to record how long
+// we have been asking it, so Tier A must stay unbounded and stateless. A store
+// that answered and refused is by construction available to hold the deadline.
+type ControllerErrorTier int
+
+const (
+	// TierUndeclared is the zero value and is never a valid classification of a
+	// real error. It exists so that an entry appended to transientNeedles
+	// without a tier is an INVALID state rather than a silent default into the
+	// unbounded tier: the classifier refuses to match such an entry, and
+	// TestEveryTransientNeedleDeclaresATier fails the build. Adding a needle is
+	// how this class of outage gets reintroduced, so adding one must not be
+	// possible without answering "bounded or not?".
+	TierUndeclared ControllerErrorTier = iota
+	// TierNone means the error is not transient at all: the caller takes its
+	// terminal path (quarantine).
+	TierNone
+	// TierAvailability is Tier A: the store never answered — timeouts, refused
+	// or reset connections, lock contention, a tripped Dolt breaker. These
+	// self-clear when the outage does, so retry is unbounded, exactly as it was
+	// before the tier split.
+	TierAvailability
+	// TierSemantic is Tier B: the store answered and REFUSED on the current
+	// graph state. Repeating the question cannot change the answer, so a
+	// refusal that outlives its budget is a graph bug, not weather, and the
+	// caller escalates it loudly instead of retrying forever.
+	TierSemantic
+)
+
+// String renders the tier for trace lines and bead metadata.
+func (t ControllerErrorTier) String() string {
+	switch t {
+	case TierNone:
+		return "none"
+	case TierAvailability:
+		return "availability"
+	case TierSemantic:
+		return "semantic"
+	default:
+		return "undeclared"
+	}
+}
+
+// transientNeedle pairs a lowercased error-message substring with the tier it
+// classifies into. The tier is a required field in practice: its zero value
+// (TierUndeclared) is rejected by both the classifier and
+// TestEveryTransientNeedleDeclaresATier.
+type transientNeedle struct {
+	needle string
+	tier   ControllerErrorTier
+}
+
+// transientNeedles is the string fallback for wrapped Dolt/MySQL/sqlite/bd
+// messages that arrive through the bead store CLI boundary with no typed error
+// to match on.
+var transientNeedles = []transientNeedle{
+	{needle: "i/o timeout", tier: TierAvailability},
+	{needle: "context deadline exceeded", tier: TierAvailability},
+	{needle: "invalid connection", tier: TierAvailability},
+	{needle: "connection refused", tier: TierAvailability},
+	{needle: "connection reset by peer", tier: TierAvailability},
+	{needle: "broken pipe", tier: TierAvailability},
+	{needle: "bad connection", tier: TierAvailability},
+	{needle: "server has gone away", tier: TierAvailability},
+	{needle: "too many connections", tier: TierAvailability},
+	{needle: "lock wait timeout", tier: TierAvailability},
+	{needle: "deadlock found", tier: TierAvailability},
+	// Dolt's own 1213/40001 text ("serialization failure: this transaction
+	// conflicts with a committed transaction from another client, try
+	// restarting transaction") shares the MySQL error number with "Deadlock
+	// found" but none of its words. It is the same lock contention, and it only
+	// reaches this classifier once the store layer's bounded write retry has
+	// already lost the race — so it is Tier A, never a hard quarantine.
+	{needle: "serialization failure", tier: TierAvailability},
+	{needle: "conflicts with a committed transaction", tier: TierAvailability},
+	{needle: "database is locked", tier: TierAvailability},
+	{needle: "database table is locked", tier: TierAvailability},
+	{needle: "sqlite_busy", tier: TierAvailability},
+	// The store answered and refused: the target's blocker set is non-empty
+	// right now. #5020 classified this as transient on the premise that "a
+	// workflow root may remain blocked briefly while sibling work closes" —
+	// but in all seven pairs of its own motivating evidence
+	// (gastownhall/gascity#4975) the bead being quarantined IS the bead named
+	// as the blocker, so no sibling was ever going to close it. The premise
+	// holds for a genuine sibling race, which is why the classification stays;
+	// what it must never imply again is UNBOUNDED, which is why it is Tier B.
+	{needle: "cannot close blocked issue", tier: TierSemantic},
+	// bd's client-side Dolt breaker fails fast while the server is down.
+	// These errors are recoverable, so a long-running control dispatcher
+	// must keep sweeping rather than exit permanently during the outage.
+	{needle: "dolt circuit breaker is open", tier: TierAvailability},
+	{needle: "server appears down, failing fast", tier: TierAvailability},
+	{needle: "dolt server unreachable", tier: TierAvailability},
+	// A store read that times out never answered, so it is Tier A wherever it
+	// is raised. isTransientWorkQueryFailure already said so for the drain
+	// work-query path (6d74360fc5); scoping it to that one message prefix left
+	// every other caller quarantining on the first refusal — most visibly
+	// processWorkflowFinalize's outcome read, whose wrapper is "resolving
+	// workflow outcome" (gastownhall/gascity#5729).
+	{needle: "timed out after", tier: TierAvailability},
+	// bd cancels its root context only on SIGINT/SIGTERM/SIGHUP, so this text
+	// means a stop cut a bd command short — typically a drain signaling the
+	// dispatcher's children before the dispatcher itself. A command that never
+	// finished never answered, which is Tier A wherever it is raised (the same
+	// reasoning as "timed out after"); the control kinds are level-triggered,
+	// so a canceled write re-enters like any other ambiguous write here.
+	{needle: "context canceled", tier: TierAvailability},
+}
+
+// ClassifyControllerError is the dispatch/store transient classifier for
 // control spawn and spawn-state update boundaries. Prefer typed checks when
 // callers expose them; the string fallback covers wrapped Dolt/MySQL/tmux
 // messages that arrive through the bead store CLI boundary.
-func IsTransientControllerError(err error) bool {
+//
+// When an error matches needles from both tiers, Tier A wins: a store that is
+// also unreachable must never have a semantic budget burned against it.
+func ClassifyControllerError(err error) ControllerErrorTier {
 	if err == nil {
-		return false
+		return TierNone
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return true
+		return TierAvailability
+	}
+	// The typed twin of the "context canceled" needle: a source-workflow lock
+	// wait cut short by the dispatcher's stop signal returns ctx.Err() itself.
+	if errors.Is(err, context.Canceled) {
+		return TierAvailability
 	}
 	if errors.Is(err, errTransientControllerBoundary) {
-		return true
+		return TierAvailability
 	}
 	// Conditional-write contention and capability loss are level-triggered
 	// re-entry classes, never terminal dispositions: exhaustion means the
@@ -442,43 +769,38 @@ func IsTransientControllerError(err error) bool {
 	// (ConditionalWritesRequiredError) is deliberately NOT here: it is a
 	// persistent policy refusal and stays hard/fail-closed.
 	if beads.IsCASRetriesExhausted(err) || beads.IsConditionalWriteUnsupported(err) {
-		return true
+		return TierAvailability
 	}
 	msg := strings.ToLower(err.Error())
 	if isTransientWorkQueryFailure(msg) {
-		return true
+		return TierAvailability
 	}
-	transientNeedles := []string{
-		"i/o timeout",
-		"context deadline exceeded",
-		"invalid connection",
-		"connection refused",
-		"connection reset by peer",
-		"broken pipe",
-		"bad connection",
-		"server has gone away",
-		"too many connections",
-		"lock wait timeout",
-		"deadlock found",
-		"database is locked",
-		"database table is locked",
-		"sqlite_busy",
-		// A workflow root may remain blocked briefly while sibling work closes.
-		// Retrying preserves the open finalize bead for the next serve cycle.
-		"cannot close blocked issue",
-		// bd's client-side Dolt breaker fails fast while the server is down.
-		// These errors are recoverable, so a long-running control dispatcher
-		// must keep sweeping rather than exit permanently during the outage.
-		"dolt circuit breaker is open",
-		"server appears down, failing fast",
-		"dolt server unreachable",
-	}
-	for _, needle := range transientNeedles {
-		if strings.Contains(msg, needle) {
-			return true
+	tier := TierNone
+	for _, entry := range transientNeedles {
+		// An undeclared tier fails closed: the needle stops matching, so the
+		// error escalates on its own instead of inheriting unbounded retry.
+		if entry.tier == TierUndeclared || !strings.Contains(msg, entry.needle) {
+			continue
 		}
+		if entry.tier == TierAvailability {
+			return TierAvailability
+		}
+		tier = entry.tier
 	}
-	return false
+	return tier
+}
+
+// IsTransientControllerError reports whether the controller should retry rather
+// than quarantine. It is tier-blind on purpose: callers that only need "retry?"
+// keep using it, and callers that must bound the retry ask
+// ClassifyControllerError for the tier.
+func IsTransientControllerError(err error) bool {
+	switch ClassifyControllerError(err) {
+	case TierAvailability, TierSemantic:
+		return true
+	default:
+		return false
+	}
 }
 
 func isTransientWorkQueryFailure(msg string) bool {
@@ -500,7 +822,7 @@ func isTransientWorkQueryFailure(msg string) bool {
 	return false
 }
 
-func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
+func handleRetryExhaustion(store beads.GraphStore, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
 	if onExhausted == beadmeta.DispositionSoftFail {
 		closeMetadata := map[string]string{
 			beadmeta.AttemptLogMetadataKey:       attemptLog,
@@ -534,7 +856,7 @@ func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, rea
 
 // spawnNextAttempt deserializes the frozen step spec, builds an attempt recipe,
 // and calls molecule.Attach to graft it onto the control bead.
-func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead, attemptNum int, opts ProcessOptions) error {
+func spawnNextAttempt(ctx context.Context, store beads.GraphStore, control beads.Bead, attemptNum int, opts ProcessOptions) error {
 	specJSON := control.Metadata[beadmeta.SourceStepSpecMetadataKey]
 	if specJSON == "" {
 		// New path: look up the spec bead.
@@ -597,10 +919,11 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if target == "" {
 			target = executionRoute
 		} else {
-			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+			stepRigContext := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey])
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, stepRigContext, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata[beadmeta.KindMetadataKey]) {
-			if err := applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store); err != nil {
+			if err := applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, opts.Sessions); err != nil {
 				return fmt.Errorf("routing attempt control step %s: %w", recipe.Steps[i].ID, err)
 			}
 			continue
@@ -608,7 +931,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if target == "" {
 			continue
 		}
-		applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg, store)
+		applyAttemptStepRoute(&recipe.Steps[i], target, routeCfg, opts.Sessions)
 	}
 
 	epoch := 0
@@ -616,7 +939,15 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		epoch, _ = strconv.Atoi(raw)
 	}
 
-	result, err := molecule.Attach(ctx, store, recipe, control.ID, molecule.AttachOptions{
+	// The attempt molecule lives in the control's own store, labeled with the
+	// recipe's class (molecule.RecipeClass). A work-class attempt is a v1
+	// molecule poured into that store, so its work label is a relabel of the
+	// graph store until the T7 Molecule intent.
+	target := beads.GraphMolecule(store)
+	if molecule.RecipeClass(recipe) != coordclass.ClassGraph {
+		target = beads.WorkMolecule(beads.WorkStore(store))
+	}
+	result, err := molecule.Attach(ctx, target, recipe, control.ID, molecule.AttachOptions{
 		IdempotencyKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 		ExpectedEpoch:  epoch,
 	})
@@ -672,12 +1003,12 @@ func (e *failedAttemptAttachLookupError) Unwrap() []error {
 	return []error{e.lookupErr, e.err}
 }
 
-func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum int) (string, error) {
+func failedAttemptAttachRootID(store beads.GraphStore, control beads.Bead, attemptNum int) (string, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		rootID = control.ID
 	}
-	matches, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	matches, err := beads.LiveFor(store).List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.IdempotencyKeyMetadataKey: fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
 			beadmeta.RootBeadIDMetadataKey:     rootID,
@@ -693,21 +1024,103 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 	return matches[0].ID, nil
 }
 
-func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute, rigContext string, cfg *config.City) string {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.Contains(target, "/") || cfg == nil {
 		return target
 	}
 	sourceRoute = strings.TrimSpace(sourceRoute)
-	slash := strings.IndexByte(sourceRoute, '/')
-	if slash <= 0 {
-		return target
+	if slash := strings.IndexByte(sourceRoute, '/'); slash > 0 {
+		if candidate := qualifyBareTargetWithRigPrefix(target, sourceRoute[:slash], cfg); candidate != "" {
+			return candidate
+		}
 	}
-	candidate := sourceRoute[:slash] + "/" + target
-	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+	// The source route carried no rig qualifier of its own (for example a
+	// nested/runtime-minted retry control, which never gets
+	// gc.execution_routed_to stamped — only compile-time graphroute
+	// decoration does). Fall back to the step's own execution rig context,
+	// which is always backfilled onto attempt-spawned steps, so a
+	// rig-scoped bare target does not lose its rig qualifier on retry.
+	if candidate := qualifyBareTargetWithRigPrefix(target, rigContext, cfg); candidate != "" {
 		return candidate
 	}
 	return target
+}
+
+// setIterationMetadata records gc.iteration, or removes it when the step has no
+// iteration to speak of. A plain retry outside any loop is the second case, and
+// leaving a stale key there would name a directory that belongs to some other
+// molecule's loop.
+func setIterationMetadata(meta map[string]string, iteration string) {
+	if iteration == "" {
+		delete(meta, beadmeta.IterationMetadataKey)
+		return
+	}
+	meta[beadmeta.IterationMetadataKey] = iteration
+}
+
+// attemptIteration returns which loop iteration an attempt's sub-DAG belongs to,
+// tracked separately from gc.attempt. A ralph step's attempts ARE its
+// iterations, so it defines the value; every other step inherits it from its
+// control, which is the only way a retry nested inside a ralph body learns which
+// iteration it is retrying within. Derived from the live control chain and never
+// from the frozen spec, so a stale copy in step.Metadata cannot survive.
+func attemptIteration(step *formula.Step, control beads.Bead, attemptNum int) string {
+	if step.Ralph != nil {
+		return strconv.Itoa(attemptNum)
+	}
+	return strings.TrimSpace(control.Metadata[beadmeta.IterationMetadataKey])
+}
+
+// applyRalphBodyChildControls rewrites the counters and lineage a ralph body
+// child must take from the live control chain instead of its frozen spec. The
+// iteration is inherited so a retry nested in the body knows which iteration it
+// is retrying within; setIterationMetadata clears it for a non-loop child. A
+// ralph body child additionally resets its retry counter to the child's own
+// spec attempt each iteration (RalphBodyChildAttempt), so an iteration-N child
+// is not born exhausted, and namespaces a bare gc.control_for under this attempt
+// so sibling attempt roots stop colliding on a shared gc.step_id across
+// iterations.
+func applyRalphBodyChildControls(childMeta map[string]string, step, child *formula.Step, attemptNum int, iteration, attemptPrefix string) {
+	setIterationMetadata(childMeta, iteration)
+	if step.Ralph == nil {
+		return
+	}
+	childMeta[beadmeta.AttemptMetadataKey] = formula.RalphBodyChildAttempt(child, attemptNum)
+	if retryAttempt := formula.RalphBodyChildRetryAttempt(child); retryAttempt != "" {
+		childMeta[beadmeta.RetryAttemptMetadataKey] = retryAttempt
+	} else {
+		delete(childMeta, beadmeta.RetryAttemptMetadataKey)
+	}
+	// Same S38 rewrite namespaceRalphBodySteps applies at compile time, extended
+	// to the shape it missed. A frozen ralph body arrives already retry-expanded,
+	// so a nested control's attempt root carries gc.control_for as the BARE child
+	// id — identical in every outer iteration. Left bare, each iteration's
+	// control matches all its siblings' attempt roots through the shared
+	// gc.step_id identity member, and only max(gc.attempt) told them apart. That
+	// tiebreak was the iteration index being stamped as an attempt number, so it
+	// disappears with the counter split; the ref has to carry the distinction it
+	// was always supposed to carry. buildNestedControlSeed already yields this
+	// form for nested ralphs, whose synthetic control is keyed by the namespaced
+	// child ref.
+	if cf := strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
+		childMeta[beadmeta.ControlForMetadataKey] = attemptPrefix + "." + cf
+	}
+}
+
+// qualifyBareTargetWithRigPrefix returns rigPrefix+"/"+target when that
+// qualified identity resolves to a configured agent or named session, or ""
+// when rigPrefix is empty or the candidate does not resolve.
+func qualifyBareTargetWithRigPrefix(target, rigPrefix string, cfg *config.City) string {
+	rigPrefix = strings.TrimSpace(rigPrefix)
+	if rigPrefix == "" {
+		return ""
+	}
+	candidate := rigPrefix + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return ""
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -732,6 +1145,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		attemptPrefix = fmt.Sprintf("%s.attempt.%d", stepRef, attemptNum)
 	}
 
+	iteration := attemptIteration(step, control, attemptNum)
+
 	// Root step for the attempt sub-DAG.
 	// For ralph iterations with children, the root is a scope bead.
 	// For simple retries, it's the work bead itself (no wrapper).
@@ -745,7 +1160,6 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[k] = v
 	}
 	rootMeta[beadmeta.KindMetadataKey] = rootKind
-	rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
 	rootMeta[beadmeta.StepIDMetadataKey] = stepID
 	rootMeta[beadmeta.StepRefMetadataKey] = attemptPrefix
 	// gc.control_for is the durable lineage pointer back to the control bead.
@@ -755,6 +1169,25 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	// (buildNestedControlSeed) — both are covered by findLatestAttempt's
 	// identity set.
 	rootMeta[beadmeta.ControlForMetadataKey] = control.ID
+	// gc.logical_bead_id mirrors gc.control_for so isRetryAttemptSubject (v1
+	// pattern check via runtime.go) recognizes this attempt root as
+	// retry-managed. Without it, a deliverable attempt that bare-closes with
+	// no flat gc.outcome (its result is carried by the logical retry/iteration
+	// evaluation, not the attempt itself) is misclassified as an
+	// abort_scope-triggering failure by beadOutcomeFailed instead of being
+	// exempted as a retry attempt. See gc-yydp6f.
+	rootMeta[beadmeta.LogicalBeadIDMetadataKey] = control.ID
+	setIterationMetadata(rootMeta, iteration)
+	// Counters are written after gc.iteration so StampRetryAttempt can see it.
+	// A ralph iteration root counts iterations in gc.attempt and has no retry
+	// counter; a retry attempt root counts in gc.retry_attempt and keeps the
+	// enclosing iteration (if any) in gc.attempt.
+	if step.Ralph != nil {
+		rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
+		delete(rootMeta, beadmeta.RetryAttemptMetadataKey)
+	} else {
+		beadmeta.StampRetryAttempt(rootMeta, attemptNum)
+	}
 	if step.OnComplete != nil {
 		rootMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
@@ -765,13 +1198,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[beadmeta.RalphStepIDMetadataKey] = stepID
 	}
 	rootStep := formula.RecipeStep{
-		ID:       attemptPrefix,
-		Title:    step.Title,
-		Type:     step.Type,
-		IsRoot:   true,
-		Labels:   append([]string{}, step.Labels...),
-		Assignee: step.Assignee,
-		Metadata: rootMeta,
+		ID:          attemptPrefix,
+		Title:       step.Title,
+		Description: step.Description,
+		Type:        step.Type,
+		IsRoot:      true,
+		Labels:      append([]string{}, step.Labels...),
+		Assignee:    step.Assignee,
+		Metadata:    rootMeta,
 	}
 	if step.Type == "" {
 		rootStep.Type = "task"
@@ -783,6 +1217,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
+	var fanoutControls []formula.RecipeStep
+	fanoutControlByStep := make(map[string]string)
 	var nestedSeedSteps []formula.RecipeStep
 	var nestedSeedDeps []formula.RecipeDep
 
@@ -821,6 +1257,11 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 					childMeta[k] = v
 				}
 			}
+			// Rewrite the counters and lineage a ralph body child must take from
+			// the live control chain rather than its frozen spec. Applied after
+			// the copy loop, for the same reason gc.control_for is on the root: a
+			// value carried in a frozen spec must not shadow them.
+			applyRalphBodyChildControls(childMeta, step, child, attemptNum, iteration, attemptPrefix)
 			if child.OnComplete != nil {
 				childMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 			}
@@ -872,6 +1313,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			// Validation forbids combining drain with retry/ralph, so this
 			// never overwrites the nested-control kinds above.
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
+			// A plain child (none of Retry/Ralph/Drain) reaches here with no
+			// gc.kind at all, unlike the root above which always gets one.
+			// Default it to task, mirroring rootMeta's unconditional stamp, so
+			// its control-plane identity remains explicit and it stays out of
+			// the ADR-0009 work-record close gate. See gastownhall/gascity#5246.
+			if childMeta[beadmeta.KindMetadataKey] == "" {
+				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
+			}
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,
@@ -888,6 +1337,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
 				fanoutSteps = append(fanoutSteps, fanoutStep)
 				fanoutDeps = append(fanoutDeps, fanoutDep)
+				fanoutControls = append(fanoutControls, fanoutStep)
+				fanoutControlByStep[childStep.ID] = fanoutStep.ID
 			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
@@ -906,7 +1357,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		}
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	// Fanout convergence gates downstream work in the re-spawned attempt
+	// recipe exactly as it does at compile time: point every dep on an
+	// on_complete child at its <child>-fanout control before the scope-check
+	// pass, so a sibling that needs the child waits for the fanout children
+	// instead of racing them. The fanout controls themselves are appended
+	// after this rewrite and the scope-check pass, so their own
+	// fanout→source edge is never rewritten into a self-block.
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, fanoutControls, fanoutControlByStep)
+	applyAttemptRecipeScopeChecks(recipe, fanoutControlByStep)
 	recipe.Steps = append(recipe.Steps, fanoutSteps...)
 	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 	// Nested-control seed steps are appended after the outer scope-check pass so
@@ -1011,8 +1470,14 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // scoped steps of a re-spawned attempt recipe, mirroring the compile-time
 // shape injected by formula.ApplyGraphControls: each scope-check blocks on
 // its subject step, and deps that waited on the subject are rewritten to
-// wait on the scope-check instead.
-func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
+// wait on the scope-check instead — except the one edge that would leave a
+// node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
+//
+// fanoutControlByStep maps an on_complete subject step ID to its minted
+// <subject>-fanout control. When present, the scope-check also blocks on that
+// fanout control so scope finalization waits for the spawned children, exactly
+// as the compile path's scopeCheckNeeds does.
+func applyAttemptRecipeScopeChecks(recipe *formula.Recipe, fanoutControlByStep map[string]string) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
 	}
@@ -1057,17 +1522,20 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 			DependsOnID: step.ID,
 			Type:        "blocks",
 		})
+		if fanoutID := fanoutControlByStep[step.ID]; fanoutID != "" {
+			controlDeps = append(controlDeps, formula.RecipeDep{
+				StepID:      controlID,
+				DependsOnID: fanoutID,
+				Type:        "blocks",
+			})
+		}
 	}
 
 	if len(controls) == 0 {
 		return
 	}
 
-	for i := range recipe.Deps {
-		if replacement, ok := replacements[recipe.Deps[i].DependsOnID]; ok {
-			recipe.Deps[i].DependsOnID = replacement
-		}
-	}
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, controls, replacements)
 	recipe.Steps = append(recipe.Steps, controls...)
 	recipe.Deps = append(recipe.Deps, controlDeps...)
 }
@@ -1097,11 +1565,11 @@ func loadAttemptRouteConfigE(cityPath string) (*config.City, error) {
 	return cfg, nil
 }
 
-func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.City, store beads.Store) {
+func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.City, sessions beads.SessionStore) {
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
-	if binding, ok := resolveAttemptRouteBinding(target, cfg, store); ok {
+	if binding, ok := resolveAttemptRouteBinding(target, cfg, sessions); ok {
 		if binding.directSessionID != "" {
 			delete(step.Metadata, beadmeta.RoutedToMetadataKey)
 			delete(step.Metadata, beadmeta.ExecutionRoutedToMetadataKey)
@@ -1118,10 +1586,20 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
+			if binding.independentSteps {
+				// A one-shot runtime exits after one bounded invocation. Clear the
+				// pinned affinity pair the frozen step spec carried forward — it
+				// names a session that already exited, and a stale group
+				// re-vacuums this re-attempt onto an unrelated claiming session.
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					delete(step.Metadata, key)
+				}
+			}
 			step.Assignee = ""
 			return
 		}
-		step.Assignee = binding.sessionName
+		// Config-agent work is routed by alias; a concrete session binds on claim.
+		step.Assignee = ""
 		return
 	}
 
@@ -1133,7 +1611,7 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 	step.Assignee = ""
 }
 
-func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City, store beads.Store) error {
+func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget string, cfg *config.City, sessions beads.SessionStore) error {
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
@@ -1144,7 +1622,7 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 		rigContext = storeRigContext
 		scopeKnown = true
 	}
-	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
+	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, sessions); ok {
 		switch {
 		case binding.qualifiedName != "":
 			resolvedExecutionTarget = binding.qualifiedName
@@ -1212,21 +1690,21 @@ func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
 }
 
 type attemptRouteBinding struct {
-	qualifiedName   string
-	metadataOnly    bool
-	sessionName     string
-	directSessionID string
+	qualifiedName    string
+	metadataOnly     bool
+	independentSteps bool
+	directSessionID  string
 }
 
-func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
+func resolveAttemptRouteBinding(target string, cfg *config.City, sessions beads.SessionStore) (attemptRouteBinding, bool) {
 	if strings.TrimSpace(target) == "" {
 		return attemptRouteBinding{}, false
 	}
 	if cfg != nil {
 		if named := config.FindNamedSession(cfg, target); named != nil {
 			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
-				if store != nil {
-					if candidates, err := session.NamedSessionResolutionCandidates(store, spec); err == nil {
+				if sessions != (beads.SessionStore{}) {
+					if candidates, err := session.NamedSessionResolutionCandidates(sessions, spec); err == nil {
 						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
@@ -1243,14 +1721,21 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
 			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
 				binding.metadataOnly = true
+				// A one-shot runtime exits after a single bounded invocation, so
+				// no session survives between attempts to carry continuation.
+				// The compile-time analog is graphroute.ApplyGraphRouteBinding's
+				// pool branch, which clears the same pinned pair — but keys it on
+				// whether the authored recipe declared a continuation group. The
+				// retry path has no authored binding to read, so it keys on the
+				// target agent's lifecycle instead.
+				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
-			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
 			return binding, true
 		}
 	}
-	if store != nil {
-		if id, err := session.ResolveSessionID(store, target); err == nil {
+	if sessions != (beads.SessionStore{}) {
+		if id, err := session.ResolveSessionID(sessions, target); err == nil {
 			return attemptRouteBinding{directSessionID: id}, true
 		}
 	}
@@ -1308,7 +1793,7 @@ func removeAttemptPoolLabels(labels []string) []string {
 // findSpecBead locates the spec bead for a control (retry/ralph) bead.
 // The spec bead has gc.kind=spec and gc.spec_for matching the control's
 // step ID, under the same workflow root.
-func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
+func findSpecBead(store beads.GraphStore, control beads.Bead) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		return beads.Bead{}, fmt.Errorf("missing gc.root_bead_id")
@@ -1322,7 +1807,7 @@ func findSpecBead(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	}
 	stepRef := control.Metadata[beadmeta.StepRefMetadataKey]
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, err
 	}
@@ -1362,7 +1847,7 @@ func newSpecRecipeStep(childID string, child *formula.Step) *formula.RecipeStep 
 	}
 }
 
-func closeAttachedSpecBeads(store beads.Store, recipe *formula.Recipe, result *molecule.AttachResult) error {
+func closeAttachedSpecBeads(store beads.GraphStore, recipe *formula.Recipe, result *molecule.AttachResult) error {
 	if recipe == nil || len(recipe.Steps) == 0 || result == nil {
 		return nil
 	}
@@ -1390,7 +1875,7 @@ func closeAttachedSpecBeads(store beads.Store, recipe *formula.Recipe, result *m
 	return nil
 }
 
-func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads.Bead) error {
+func closeGeneratedSpecBeadsForAttempt(store beads.GraphStore, control, attempt beads.Bead) error {
 	attemptRef := strings.TrimSpace(attempt.Metadata[beadmeta.StepRefMetadataKey])
 	if attemptRef == "" {
 		attemptRef = strings.TrimSpace(attempt.Ref)
@@ -1402,7 +1887,7 @@ func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads
 	if rootID == "" {
 		rootID = control.ID
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1424,7 +1909,7 @@ func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads
 	return nil
 }
 
-func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error {
+func closeSpecBeadsByRefs(store beads.GraphStore, rootID string, refs []string) error {
 	wanted := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
 		if ref = strings.TrimSpace(ref); ref != "" {
@@ -1434,7 +1919,7 @@ func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error
 	if len(wanted) == 0 {
 		return nil
 	}
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -1468,33 +1953,51 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control
-// bead. It lists beads under the workflow root and, on empty result, walks the
-// control's blocks-dependencies; both feed latestAttemptFromCandidates, which
-// matches the durable gc.control_for lineage stamp (with a legacy ref-string
-// fallback for pre-S38 molecules) and returns the max gc.attempt.
-func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
+// bead from live reads; see findLatestAttemptInView.
+func findLatestAttempt(store beads.GraphStore, control beads.Bead) (beads.Bead, error) {
+	return findLatestAttemptInView(store, control, ProcessOptions{})
+}
+
+// findLatestAttemptInView finds the most recent attempt/iteration child of a
+// control bead, reading the workflow root's members from the invocation's root
+// view (rootViewMembers) when opts carries one. Both candidate sources feed
+// latestAttemptFromCandidates, which matches the durable gc.control_for lineage
+// stamp (with a legacy ref-string fallback for pre-S38 molecules) and returns
+// the max gc.attempt.
+//
+// The root's members answer alone only for a root known to be open (the gate
+// root ProcessControl read). Otherwise their answer is unioned with the targets
+// of the control's dependency edges: once the root closes, molecule.Attach
+// roots each new attempt at the control, so only the control's blocks edge
+// reaches it. A dependency walk error is therefore returned, never answered
+// with the root's candidate: that candidate can be an attempt the walk would
+// have superseded, and acting on it retries the control on every pass without
+// ever evaluating the newer attempt.
+func findLatestAttemptInView(store beads.GraphStore, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		rootID = control.ID
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := rootViewMembers(store, rootID, opts)
+	rootLatest := beads.Bead{}
 	if err == nil {
-		latest := latestAttemptFromCandidates(control, all)
-		if latest.ID != "" {
-			return latest, nil
+		rootLatest = latestAttemptFromCandidates(control, all)
+		rootKnownOpen := opts.gateRoot != nil && opts.gateRoot.ID == rootID && opts.gateRoot.Status != "closed"
+		if rootKnownOpen && rootLatest.ID != "" {
+			return rootLatest, nil
 		}
 	}
 
-	latest, depErr := latestAttemptFromDependencies(store, control)
+	latest, depErr := latestAttemptFromDependencies(store, control, all)
 	if depErr != nil {
 		if err != nil {
 			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
 		}
 		return beads.Bead{}, depErr
 	}
-	if latest.ID != "" {
-		return latest, nil
+	if combined := latestAttemptFromCandidates(control, []beads.Bead{rootLatest, latest}); combined.ID != "" {
+		return combined, nil
 	}
 	if err != nil {
 		return beads.Bead{}, err
@@ -1502,20 +2005,46 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 	return beads.Bead{}, nil
 }
 
-func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads.Bead, error) {
+// latestAttemptFromDependencies selects the latest attempt among the targets of
+// the control's dependency edges, reusing the beads in known (the root's
+// members) instead of reading them again. A target that is an "external:"
+// reference or no longer exists is skipped: it cannot be an attempt, and
+// failing the walk on it would turn one dangling edge into an error on every
+// pass. Any other read error is returned.
+func latestAttemptFromDependencies(store beads.GraphStore, control beads.Bead, known []beads.Bead) (beads.Bead, error) {
 	deps, err := store.DepList(control.ID, "down")
 	if err != nil {
-		return beads.Bead{}, err
+		return beads.Bead{}, fmt.Errorf("listing dependencies: %w", err)
+	}
+	knownByID := make(map[string]beads.Bead, len(known))
+	for _, b := range known {
+		knownByID[b.ID] = b
 	}
 	candidates := make([]beads.Bead, 0, len(deps))
 	for _, dep := range deps {
+		if isExternalDependencyRef(dep.DependsOnID) {
+			continue
+		}
+		if candidate, ok := knownByID[dep.DependsOnID]; ok {
+			candidates = append(candidates, candidate)
+			continue
+		}
 		candidate, err := store.Get(dep.DependsOnID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
 		if err != nil {
-			return beads.Bead{}, err
+			return beads.Bead{}, fmt.Errorf("reading dependency %s: %w", dep.DependsOnID, err)
 		}
 		candidates = append(candidates, candidate)
 	}
 	return latestAttemptFromCandidates(control, candidates), nil
+}
+
+// isExternalDependencyRef reports whether a dependency target is an
+// "external:" reference, which has no bead on its far end.
+func isExternalDependencyRef(id string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "external:")
 }
 
 // latestAttemptFromCandidates selects the control's latest attempt/iteration
@@ -1528,32 +2057,44 @@ func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads
 // candidate carries a matching stamp (in-flight molecules minted before S38),
 // it falls back to the deprecated ref-string cascade.
 func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) beads.Bead {
-	identity := controlIdentitySet(control)
+	precise, bare := controlIdentitySets(control)
 
-	var latest beads.Bead
-	latestAttempt := 0
+	var preciseLatest, bareLatest beads.Bead
+	preciseAttempt, bareAttempt := 0, 0
 	for _, b := range candidates {
 		if isFailedPartialMolecule(b) {
 			continue
 		}
-		// Skip beads that are control infrastructure, not actual work. On the
-		// primary path only this control's own attempt roots carry its identity,
-		// so no scope-unless-ralph skip is needed (see legacy fallback).
+		// Skip beads that are control infrastructure, not actual work. This runs
+		// before the precision ranking below so a scope-check carrying the same
+		// namespaced ref cannot pose as the precise match and starve a real
+		// attempt root of its fallback.
 		if latestAttemptCandidateIsControlInfrastructure(b.Metadata[beadmeta.KindMetadataKey]) {
 			continue
 		}
 		cf := strings.TrimSpace(b.Metadata[beadmeta.ControlForMetadataKey])
-		if cf == "" || !identity[cf] {
+		if cf == "" {
 			continue
 		}
-		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
-		if attemptNum > latestAttempt {
-			latestAttempt = attemptNum
-			latest = b
+		attemptNum := beadmeta.RetryAttemptNumber(b.Metadata)
+		switch {
+		case precise[cf]:
+			if attemptNum > preciseAttempt {
+				preciseAttempt = attemptNum
+				preciseLatest = b
+			}
+		case bare[cf]:
+			if attemptNum > bareAttempt {
+				bareAttempt = attemptNum
+				bareLatest = b
+			}
 		}
 	}
-	if latest.ID != "" {
-		return latest
+	if preciseLatest.ID != "" {
+		return preciseLatest
+	}
+	if bareLatest.ID != "" {
+		return bareLatest
 	}
 	return latestAttemptFromCandidatesLegacyRefSurgery(control, candidates)
 }
@@ -1563,18 +2104,38 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 // gc.control_for stamp equal to any member points at this control (bead-ID
 // stamps come from runtime top-level mints; step-ref/step-id stamps come from
 // compile-time and nested seeds — see S38).
-func controlIdentitySet(control beads.Bead) map[string]bool {
-	identity := make(map[string]bool, 3)
+// controlIdentitySets splits the values an attempt root may carry in
+// gc.control_for by how precisely each one names THIS control.
+//
+// The store bead ID and the namespaced gc.step_ref belong to exactly one
+// control. The bare gc.step_id does not: every outer ralph iteration mints an
+// inner control with the same step id, so a bare stamp names all of them at
+// once. Attempt roots minted before the namespaced stamp existed carry only the
+// bare form, which is why it is still matched — but it has to rank below a
+// precise match, because a molecule that spans a deploy holds both shapes and
+// the older siblings are the ones with the bare stamp.
+//
+// max(gc.attempt) used to paper over the ambiguity: body children were stamped
+// with their outer iteration index, so a later iteration always outscored an
+// earlier one. Splitting the iteration and attempt counters removes that
+// accident — a current iteration's first attempt is now 1, which loses to a
+// stale sibling's 3 — so the precedence has to be stated rather than inferred
+// from a number that no longer means what it did (S38, ga-v7pu5).
+func controlIdentitySets(control beads.Bead) (precise, bare map[string]bool) {
+	precise = make(map[string]bool, 2)
 	for _, v := range []string{
 		control.ID,
 		control.Metadata[beadmeta.StepRefMetadataKey],
-		control.Metadata[beadmeta.StepIDMetadataKey],
 	} {
 		if v = strings.TrimSpace(v); v != "" {
-			identity[v] = true
+			precise[v] = true
 		}
 	}
-	return identity
+	bare = make(map[string]bool, 1)
+	if v := strings.TrimSpace(control.Metadata[beadmeta.StepIDMetadataKey]); v != "" && !precise[v] {
+		bare[v] = true
+	}
+	return precise, bare
 }
 
 // legacyAttemptLineageHits counts attempt-lineage recoveries served by the
@@ -1670,7 +2231,7 @@ func latestAttemptFromCandidatesLegacyRefSurgery(control beads.Bead, candidates 
 			continue
 		}
 
-		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
+		attemptNum := beadmeta.RetryAttemptNumber(b.Metadata)
 		if attemptNum > latestAttempt {
 			latestAttempt = attemptNum
 			latest = b
@@ -1684,7 +2245,7 @@ func latestAttemptFromCandidatesLegacyRefSurgery(control beads.Bead, candidates 
 
 // appendAttemptLog records a retry/ralph decision to the control bead's
 // gc.attempt_log metadata.
-func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome, reason string) error {
+func appendAttemptLog(store beads.GraphStore, controlID string, attempt int, outcome, reason string) error {
 	control, err := store.Get(controlID)
 	if err != nil {
 		return err
@@ -1757,24 +2318,41 @@ func copyNonGCMetadata(dst, src map[string]string) {
 	}
 }
 
-func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
-	status := "closed"
-	if err := store.Update(beadID, beads.UpdateOpts{
-		Status:   &status,
-		Metadata: metadata,
-	}); err != nil {
-		return err
-	}
-	bead, err := store.Get(beadID)
-	if err != nil {
-		return fmt.Errorf("verifying close of %s: %w", beadID, err)
-	}
-	if bead.Status == "closed" {
-		return nil
-	}
-	return store.Close(beadID)
+func updateMetadataAndClose(store beads.GraphStore, beadID string, metadata map[string]string) error {
+	_, err := closeWithMetadata(store, beadID, metadata)
+	return err
 }
 
-// Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,
+// closeWithMetadata closes beadID with metadata in one update and returns the
+// closed row. The update reports the row it wrote where the store can
+// (beads.UpdateAndReadBack), so confirming the close costs no extra read. A
+// store that took the metadata but not the status gets an explicit Close.
+func closeWithMetadata(store beads.GraphStore, beadID string, metadata map[string]string) (beads.UpdatedRow, error) {
+	status := "closed"
+	row, err := beads.UpdateAndReadBack(store, beadID, beads.UpdateOpts{
+		Status:   &status,
+		Metadata: metadata,
+	})
+	if err != nil {
+		return beads.UpdatedRow{}, err
+	}
+	if row.Status == "closed" {
+		return row, nil
+	}
+	if err := store.Close(beadID); err != nil {
+		return beads.UpdatedRow{}, err
+	}
+	row.Status = "closed"
+	return row, nil
+}
+
+// withWrittenRow is bead as it stands after a write that reported row.
+func withWrittenRow(bead beads.Bead, row beads.UpdatedRow) beads.Bead {
+	bead.Status = row.Status
+	bead.Metadata = row.Metadata
+	return bead
+}
+
+// Note: setOutcomeAndClose, propagateRetrySubjectMetadata,
 // classifyRetryAttempt, retryPreservedAssigneeWithConfig, and runRalphCheck are
 // defined in runtime.go, retry.go, and ralph.go respectively.

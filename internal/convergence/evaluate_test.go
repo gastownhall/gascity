@@ -20,10 +20,9 @@ func TestResolveEvaluateStep_DefaultPath(t *testing.T) {
 	if step.Name != EvaluateStepName {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
+	// production paths are NormalizePathForCompare form; compare firmlink-aware (#4934)
 	want := filepath.Join("/home/user/city", DefaultEvaluatePromptPath)
-	if step.PromptPath != want {
-		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
-	}
+	testutil.AssertSamePath(t, step.PromptPath, want)
 }
 
 func TestResolveEvaluateStep_CustomPath(t *testing.T) {
@@ -40,9 +39,7 @@ func TestResolveEvaluateStep_CustomPath(t *testing.T) {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
 	want := filepath.Join("/home/user/city", "custom/my-evaluate.md")
-	if step.PromptPath != want {
-		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
-	}
+	testutil.AssertSamePath(t, step.PromptPath, want)
 }
 
 func TestResolveEvaluateStep_PathTraversal(t *testing.T) {
@@ -138,9 +135,7 @@ func TestResolveEvaluateStep_RelativeCityPathReturnsAbsolutePromptPath(t *testin
 		t.Fatalf("PromptPath = %q, want an absolute path — cityPath must be canonicalized to absolute before joining, not left relative", step.PromptPath)
 	}
 	want := filepath.Join(dir, DefaultEvaluatePromptPath)
-	if step.PromptPath != want {
-		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
-	}
+	testutil.AssertSamePath(t, step.PromptPath, want)
 }
 
 // Pins the symlink-presence rejection itself, which the comparison above sits

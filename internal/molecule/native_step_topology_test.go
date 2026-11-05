@@ -9,8 +9,10 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -130,8 +132,13 @@ func TestCompiledReviewQuorumCollapsesRetryMachineryIntoNativeSteps(t *testing.T
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	searchDir := filepath.Join(cwd, "..", "bootstrap", "packs", "core", "formulas")
-	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
+	searchBase := bazeltest.OverrideRoot()
+	if searchBase == "" {
+		searchBase = filepath.Clean(filepath.Join(cwd, "..", ".."))
+	}
+	searchDir := filepath.Join(searchBase, "internal", "bootstrap", "packs", "core", "formulas")
+	// Fed to both calls below, like sling.go threads a single opts.Vars.
+	vars := map[string]string{
 		"subject":           "PR-123",
 		"lane_one_id":       "primary",
 		"lane_one_provider": "provider-a",
@@ -142,12 +149,13 @@ func TestCompiledReviewQuorumCollapsesRetryMachineryIntoNativeSteps(t *testing.T
 		"lane_two_model":    "model-b",
 		"lane_two_target":   "target-b",
 		"synthesis_target":  "review-synthesis",
-	})
+	}
+	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, vars)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
 
-	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{Vars: vars})
 	if err != nil {
 		t.Fatalf("buildRecipeApplyPlan: %v", err)
 	}
@@ -191,7 +199,7 @@ func TestNativeStepDependenciesMaterializeThroughGraphAndSequentialPaths(t *test
 	}
 
 	store := beads.NewMemStore()
-	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
 	if err != nil {
 		t.Fatalf("Instantiate: %v", err)
 	}
@@ -230,7 +238,7 @@ func TestAttachPreservesNativeStepDependenciesAcrossRetryAttempts(t *testing.T) 
 		}},
 	}
 
-	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -268,7 +276,7 @@ func TestAttachKeepsRetryTopologyUnknownWhenParentTopologyIsUnknown(t *testing.T
 		}},
 	}
 
-	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	result, err := Attach(context.Background(), beadstest.GraphMolecule(store), recipe, control.ID, AttachOptions{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -311,7 +319,7 @@ func TestInstantiateFragmentIncludesCompleteExternalNativeStepDependencies(t *te
 			Type:        "blocks",
 		}},
 	}
-	plan, err := buildFragmentApplyPlan(store, fragment, opts)
+	plan, err := buildFragmentApplyPlan(beadstest.GraphMolecule(store), fragment, opts)
 	if err != nil {
 		t.Fatalf("buildFragmentApplyPlan: %v", err)
 	}
@@ -319,7 +327,7 @@ func TestInstantiateFragmentIncludesCompleteExternalNativeStepDependencies(t *te
 		t.Fatalf("graph fragment topology = %q, want %q", got, want)
 	}
 
-	result, err := InstantiateFragment(context.Background(), store, fragment, opts)
+	result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, opts)
 	if err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}
@@ -371,7 +379,7 @@ func TestInstantiateFragmentOmitsExternalTopologyOutsideExactRoot(t *testing.T) 
 				}},
 			}
 
-			plan, err := buildFragmentApplyPlan(store, fragment, opts)
+			plan, err := buildFragmentApplyPlan(beadstest.GraphMolecule(store), fragment, opts)
 			if err != nil {
 				t.Fatalf("buildFragmentApplyPlan: %v", err)
 			}
@@ -379,7 +387,7 @@ func TestInstantiateFragmentOmitsExternalTopologyOutsideExactRoot(t *testing.T) 
 				t.Fatalf("graph fragment topology = %q, want omitted UNKNOWN", got)
 			}
 
-			result, err := InstantiateFragment(context.Background(), store, fragment, opts)
+			result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, opts)
 			if err != nil {
 				t.Fatalf("InstantiateFragment: %v", err)
 			}
@@ -418,7 +426,7 @@ func TestInstantiateFragmentOmitsTopologyWhenExternalNativeStepIsUnknown(t *test
 			Type:        "blocks",
 		}},
 	}
-	plan, err := buildFragmentApplyPlan(store, fragment, opts)
+	plan, err := buildFragmentApplyPlan(beadstest.GraphMolecule(store), fragment, opts)
 	if err != nil {
 		t.Fatalf("buildFragmentApplyPlan: %v", err)
 	}
@@ -426,7 +434,7 @@ func TestInstantiateFragmentOmitsTopologyWhenExternalNativeStepIsUnknown(t *test
 		t.Fatalf("graph fragment topology = %q, want omitted UNKNOWN", got)
 	}
 
-	result, err := InstantiateFragment(context.Background(), store, fragment, opts)
+	result, err := InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, opts)
 	if err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}

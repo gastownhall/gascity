@@ -104,7 +104,7 @@ func isGraphApplyErrorText(text string) bool {
 		strings.Contains(text, "adding edge ")
 }
 
-func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
+func instantiateFragmentViaGraphApply(ctx context.Context, store beads.MoleculeTarget, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
 	graphApplyTracef("graph-apply fragment-enter root=%s applier=%T", opts.RootID, applier)
 	plan, err := buildFragmentApplyPlan(store, recipe, opts)
 	if err != nil {
@@ -125,6 +125,28 @@ func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, ap
 		IDMapping: applied.IDs,
 		Created:   len(applied.IDs),
 	}, nil
+}
+
+// Routing fields the title-only guard below (#618) never covered — #5060.
+var residualVarRoutingMetadataKeys = []string{
+	beadmeta.RunTargetMetadataKey,
+	beadmeta.RoutedToMetadataKey,
+	beadmeta.ExecutionRoutedToMetadataKey,
+	DeferredRoutedToMetadataKey,
+	DeferredExecutionRoutedToMetadataKey,
+}
+
+func validateResidualRoutingVars(stepID string, metadata map[string]string) error {
+	for _, key := range residualVarRoutingMetadataKeys {
+		value := metadata[key]
+		if !strings.Contains(value, "{{") {
+			continue
+		}
+		if residual := formula.CheckResidualVars(value); len(residual) > 0 {
+			return fmt.Errorf("step %q: metadata %s contains unresolved variable(s) %s — missing or misspelled --var(s)?", stepID, key, strings.Join(residual, ", "))
+		}
+	}
+	return nil
 }
 
 func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApplyPlan, bool, string, error) {
@@ -206,6 +228,13 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				}
 				node.Metadata[beadmeta.FormulaSourceMetadataKey] = recipe.FormulaSource
 			}
+			if graphWorkflow && !recipe.RootOnly {
+				if node.Metadata == nil {
+					node.Metadata = make(map[string]string, 1)
+				}
+				node.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
+			}
+			node.Metadata = withRootMetadata(node.Metadata, opts.RootMetadata)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
 			// use step beads as independently routable actionable work, not
@@ -225,6 +254,12 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 					node.MetadataRefs = make(map[string]string, 1)
 				}
 				node.MetadataRefs[beadmeta.RootBeadIDMetadataKey] = rootKey
+			}
+			if opts.stampAttachRootID {
+				if node.MetadataRefs == nil {
+					node.MetadataRefs = make(map[string]string, 1)
+				}
+				node.MetadataRefs[beadmeta.AttachRootIDMetadataKey] = rootKey
 			}
 			if logicalStepID, ok := logicalRecipeStepID(step); ok {
 				if node.MetadataRefs == nil {
@@ -254,6 +289,10 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
 				return nil, false, "", fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, node.Metadata); err != nil {
+			return nil, false, "", err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, false, "", err
@@ -295,15 +334,15 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Key == rootKey {
 				continue
 			}
-			// Single-step workflows deadlock if the generated workflow-finalize
-			// gains a "tracks" edge back to the root: the compiler already emits
-			// root --blocks--> workflow-finalize (addWorkflowRootDeps), so a
-			// workflow-finalize --tracks--> root edge closes a mutual finalize
-			// <-> root cycle that neither controller-managed bead can ever
-			// break — both stay open forever (su-mla5h). The root already
-			// reaches the finalizer through that blocks edge and the finalizer
-			// carries gc.root_bead_id, so the ownership tracks edge is redundant
-			// here. Multi-step workflows keep the tracks edge unchanged.
+			// Single-step workflows deadlocked when the generated
+			// workflow-finalize gained a "tracks" edge back to the root on top
+			// of the compiler's own root -> workflow-finalize edge
+			// (addWorkflowRootDeps): the pair closed a mutual finalize <-> root
+			// cycle that neither controller-managed bead could break — both
+			// stayed open forever (su-mla5h). The root already reaches the
+			// finalizer through that edge and the finalizer carries
+			// gc.root_bead_id, so the ownership tracks edge is redundant here.
+			// Multi-step workflows keep the tracks edge unchanged.
 			if singleStep && node.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 				continue
 			}
@@ -387,7 +426,7 @@ func graphApplyPlanHasEdgeFromKeyToTarget(edges []beads.GraphApplyEdge, fromKey,
 	return false
 }
 
-func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, opts FragmentOptions) (*beads.GraphApplyPlan, error) {
+func buildFragmentApplyPlan(store beads.MoleculeTarget, recipe *formula.FragmentRecipe, opts FragmentOptions) (*beads.GraphApplyPlan, error) {
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
 	}
@@ -477,6 +516,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 			if residual := formula.CheckResidualVars(node.Title); len(residual) > 0 {
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, node.Metadata); err != nil {
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, node.Metadata); err != nil {
 			return nil, err

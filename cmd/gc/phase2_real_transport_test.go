@@ -19,9 +19,18 @@ import (
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
+// phase2RealTransportBound and phase2RealTransportMarkerBound gate a real
+// tmux session start (ctx timeout, post-start file polling, and the
+// StartElapsed proof below). WC-TRANSPORT-001 proves real transport
+// delivery, not startup speed, so these are hang detectors, not latency
+// assertions — reuse this package's existing hangBudget (ga-cv2tf0) rather
+// than a bespoke deadline sized for an idle box. See
+// TestPhase2RealTransportBoundsStayAHangDetector for the guard and
+// TESTING.md's "Test deadline rule" for why a sub-floor fixed value here is
+// a CI reliability defect, not just tightness.
 const (
-	phase2RealTransportBound       = 5 * time.Second
-	phase2RealTransportMarkerBound = 500 * time.Millisecond
+	phase2RealTransportBound       = hangBudget
+	phase2RealTransportMarkerBound = hangBudget
 )
 
 func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
@@ -39,6 +48,20 @@ func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
 			reporter.Require(t, phase2RealTransportResult(tc, run))
 		})
 	}
+}
+
+// phase2ObservedNudgeText is the nudge TEXT a provider received, with the
+// submit keystrokes stripped.
+//
+// This proof is about delivery of the configured nudge, not about how the
+// carrier submits it. Since upstream #4706 a codex pane's submit sequence is
+// Escape then Enter (nudgeSubmitKeySequences), so the ESC byte lands on the
+// provider's stdin right behind the text and a whitespace-only trim leaves
+// "nudge-codex\x1b" — a keystroke, not content. Strip the ASCII control bytes
+// the submit sequence can contribute; a nudge body never legitimately carries a
+// bare ESC.
+func phase2ObservedNudgeText(observed string) string {
+	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(observed), "\x1b\r\n"))
 }
 
 type phase2RealTransportRun struct {
@@ -271,7 +294,7 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		ErrorStage:               errorStage,
 		Error:                    errorDetail,
 		ExpectedInput:            materialized.Nudge,
-		ObservedInput:            strings.TrimSpace(observedInput),
+		ObservedInput:            phase2ObservedNudgeText(observedInput),
 		ExpectedSessionOrigin:    materialized.Env["GC_SESSION_ORIGIN"],
 		ObservedSessionOrigin:    strings.TrimSpace(observedSessionOrigin),
 		ExpectedStartupDelivered: materialized.Env[startupPromptDeliveredEnv],

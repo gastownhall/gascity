@@ -5,28 +5,23 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-func testConvoyDeps(store beads.Store) ConvoyDeps {
+func testConvoyDeps() ConvoyDeps {
 	return ConvoyDeps{
-		Cfg: &config.City{},
-		GetStore: func(_ string) (beads.Store, error) {
-			return store, nil
-		},
-		FindStore: func(_ string) (beads.Store, error) {
-			return store, nil
-		},
+		Cfg:      &config.City{},
 		Recorder: events.NewFake(),
 	}
 }
 
 func TestConvoyCreateOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
-	result, err := ConvoyCreate(deps, store, ConvoyCreateInput{
+	result, err := ConvoyCreate(deps, MemberClasses{Convoy: beadstest.Work(store)}, ConvoyCreateInput{
 		Title: "my convoy",
 		Fields: ConvoyFields{
 			Owner:  "mayor",
@@ -60,14 +55,14 @@ func TestConvoyCreateOps(t *testing.T) {
 
 func TestConvoyCreateWithItemsOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	// Create child beads first.
 	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 	b2, _ := store.Create(beads.Bead{Title: "task 2"})
 
-	result, err := ConvoyCreate(deps, store, ConvoyCreateInput{
+	result, err := ConvoyCreate(deps, MemberClasses{Convoy: beadstest.Work(store)}, ConvoyCreateInput{
 		Title: "linked convoy",
 		Items: []string{b1.ID, b2.ID},
 	})
@@ -89,7 +84,7 @@ func TestConvoyCreateWithItemsOps(t *testing.T) {
 
 func TestConvoyProgressOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: convoy.ID})
@@ -100,7 +95,7 @@ func TestConvoyProgressOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +112,7 @@ func TestConvoyProgressOps(t *testing.T) {
 
 func TestConvoyProgressCompleteOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: convoy.ID})
@@ -125,7 +120,7 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +131,7 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 
 func TestConvoyProgressTracksDepsOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1"})
@@ -151,7 +146,7 @@ func TestConvoyProgressTracksDepsOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +163,7 @@ func TestConvoyProgressTracksDepsOps(t *testing.T) {
 
 func TestConvoyProgressTreatsTombstoneAsCompleteOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1"})
@@ -180,7 +175,7 @@ func TestConvoyProgressTreatsTombstoneAsCompleteOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	progress, err := ConvoyProgress(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +198,7 @@ func TestConvoyMembersKeepsDanglingTracksUnknownOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	members, err := Members(store, convoy.ID, true)
+	members, err := MembersIn(MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +222,7 @@ func TestConvoyMembersKeepsMalformedTrackedItemUnknownOps(t *testing.T) {
 	}
 	store := metadataParseErrorStore{Store: backing, corruptID: item.ID}
 
-	members, err := Members(store, convoy.ID, true)
+	members, err := MembersIn(MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,13 +239,13 @@ func TestConvoyMembersKeepsMalformedTrackedItemUnknownOps(t *testing.T) {
 
 func TestConvoyAddItemsOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 
-	err := ConvoyAddItems(deps, store, convoy.ID, []string{b1.ID})
+	err := ConvoyAddItems(deps, MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, []string{b1.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +268,7 @@ func TestUntrackItemFailsOnAmbiguousMixedDependencyTypes(t *testing.T) {
 		t.Fatalf("DepAdd(tracks): %v", err)
 	}
 
-	if err := UntrackItem(store, convoy.ID, item.ID); err == nil {
+	if err := UntrackItem(beadstest.Work(store), convoy.ID, item.ID); err == nil {
 		t.Fatal("UntrackItem succeeded for mixed dependency types, want error")
 	}
 	requireTracksDep(t, store, convoy.ID, item.ID)
@@ -281,11 +276,11 @@ func TestUntrackItemFailsOnAmbiguousMixedDependencyTypes(t *testing.T) {
 
 func TestConvoyCloseOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 
-	err := ConvoyClose(deps, store, convoy.ID)
+	err := ConvoyClose(deps, beadstest.Work(store), convoy.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,9 +305,9 @@ func TestConvoyCloseOps(t *testing.T) {
 
 func TestConvoyCloseNotFoundOps(t *testing.T) {
 	store := beads.NewMemStore()
-	deps := testConvoyDeps(store)
+	deps := testConvoyDeps()
 
-	err := ConvoyClose(deps, store, "nonexistent")
+	err := ConvoyClose(deps, beadstest.Work(store), "nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent convoy")
 	}

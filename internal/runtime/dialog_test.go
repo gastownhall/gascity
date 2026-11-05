@@ -51,6 +51,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "codex 0.156 trust dialog",
+			content: codex0156TrustDialog,
+			want:    true,
+		},
+		{
 			name:    "gemini trust dialog",
 			content: "Do you trust the files in this folder?\n1. Trust folder",
 			want:    true,
@@ -91,6 +96,32 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 				return "Do you trust the contents of this directory?", nil
 			}
 			return "user@host $", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsCodex0156TrustDialogDespitePrompt(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return codex0156TrustDialog, nil
+			}
+			return "› Ask Codex to do anything", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -972,6 +1003,35 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	}
 }
 
+// TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog covers the
+// exec provider's stream path with the trust row pre-selected: the frame
+// shows the cursor on the trust row, so the stream confirms it with Enter
+// even though the composer line above the dialog reads as a ready prompt.
+func TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codex0156TrustDialog
+	snapshots <- "› Ask Codex to do anything"
+	close(snapshots)
+
+	observed, err := AcceptStartupDialogsFromStreamWithStatus(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStreamWithStatus() error = %v", err)
+	}
+	if !observed || !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("observed = %v sent keys = %v, want observed with [Enter]", observed, sent)
+	}
+}
+
 func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testing.T) {
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
 	stream.publish("Do you trust the contents of this directory?")
@@ -1410,6 +1470,221 @@ func TestAcceptStartupDialogsDismissesRateLimitDialog(t *testing.T) {
 	}
 }
 
+// claudeThemePickerPane is the first screen Claude Code v2.1.197 draws in a box
+// with no ~/.claude config, captured from a Crucible sandbox. Container runtimes
+// hand every session a fresh box, so this is not a once-per-machine prompt — it
+// blocks EVERY start until something answers it.
+const claudeThemePickerPane = `Welcome to Claude Code v2.1.197
+
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+   1. Auto (match terminal)
+ ❯ 2. Dark mode ✔
+   3. Light mode
+   4. Dark mode (colorblind-friendly)
+   5. Light mode (colorblind-friendly)
+   6. Dark mode (ANSI colors only)
+   7. Light mode (ANSI colors only)
+`
+
+func TestAcceptStartupDialogsAcceptsClaudeThemePicker(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return claudeThemePickerPane, nil
+			}
+			return "user@host $", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter] to accept the pre-selected theme", sent)
+	}
+}
+
+// TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker covers the theme
+// picker on the production stream path
+// (AcceptStartupDialogsFromStreamWithStatus, dialog.go:150), which the
+// polling-path twin TestAcceptStartupDialogsAcceptsClaudeThemePicker does not
+// exercise. It proves the picker is accepted with Enter and — because the
+// picker must not be mistaken for readiness — the next startup dialog in the
+// same stream (here the Claude resume selector) still advances afterward.
+func TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	snapshots := make(chan string, 2)
+	snapshots <- claudeThemePickerPane
+	snapshots <- strings.Join([]string{
+		"This session is 1h 55m old and 212.7k tokens.",
+		"",
+		"❯ 1. Resume from summary (recommended)",
+		"  2. Resume full session as-is",
+		"  3. Don't ask me again",
+		"",
+		"Enter to confirm · Esc to cancel",
+	}, "\n")
+	close(snapshots)
+
+	var sent []string
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter", "Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter Down Enter] (accept theme, then advance the resume dialog)", sent)
+	}
+}
+
+func TestContainsThemeSelectionDialog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "captured first-run picker", content: claudeThemePickerPane, want: true},
+		{
+			name:    "prose mentioning a text style is not the picker",
+			content: "I'll choose the text style used by the docs theme.",
+			want:    false,
+		},
+		{
+			name:    "slash-command help is not the picker",
+			content: "  /theme    Change the color theme",
+			want:    false,
+		},
+		{name: "ordinary prompt", content: "user@host $", want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containsThemeSelectionDialog(tt.content); got != tt.want {
+				t.Fatalf("containsThemeSelectionDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// The theme picker's cursor row ("❯ 2. Dark mode ✔") wears the same glyph as a
+// ready input prompt. If readiness detection accepted it, every phase would
+// early-return on a session that is still blocked and the picker would never be
+// answered.
+func TestClaudeThemePickerIsNotMistakenForAReadyPrompt(t *testing.T) {
+	t.Parallel()
+	if containsPromptIndicator(claudeThemePickerPane) {
+		t.Fatal("theme picker pane reads as a ready prompt; the session is still blocked")
+	}
+}
+
+// TestAcceptStartupDialogsWithTimeoutBoundsBlankPaneToOneTimeout pins the whole
+// sequence to a single timeout when the pane never renders anything
+// recognizable — the shape an agent that exits at launch leaves behind, where
+// the in-box tmux server is gone and every capture comes back empty.
+//
+// Per-dialog timeouts made that cost timeout x the number of dialog classes.
+// With the 8s default that is 72s, past the 60s default [session]
+// startup_timeout, so the caller's context expired mid-sequence and a session
+// whose agent had simply died failed as "<some dialog>: context deadline
+// exceeded" — naming whichever dialog the wall-clock landed in.
+func TestAcceptStartupDialogsWithTimeoutBoundsBlankPaneToOneTimeout(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollInterval = 5 * time.Millisecond
+
+	const timeout = 150 * time.Millisecond
+	var sent []string
+	start := time.Now()
+	err := AcceptStartupDialogsWithTimeout(
+		context.Background(),
+		timeout,
+		func(_ int) (string, error) { return "", nil },
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsWithTimeout() error = %v, want nil", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none on a blank pane", sent)
+	}
+	if elapsed >= 2*timeout {
+		t.Fatalf("blank pane took %v with a %v budget; the sequence is still spending a timeout per dialog class", elapsed, timeout)
+	}
+}
+
+// TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress guards the other
+// half of the budget: a dialog that only renders after the sequence has already
+// dismissed an earlier one must still be handled. Every dismissal grants a fresh
+// timeout, so a chain of slow-rendering dialogs is not cut off by the bound that
+// stops a dead pane.
+func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollInterval = 5 * time.Millisecond
+
+	const timeout = 500 * time.Millisecond
+	const renderDelay = 300 * time.Millisecond
+
+	var sent []string
+	start := time.Now()
+	var trustAccepted time.Time
+	err := AcceptStartupDialogsWithTimeout(
+		context.Background(),
+		timeout,
+		func(_ int) (string, error) {
+			if trustAccepted.IsZero() {
+				if time.Since(start) < renderDelay {
+					return "", nil // agent still booting: nothing on screen yet
+				}
+				return "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel", nil
+			}
+			if time.Since(trustAccepted) < renderDelay {
+				return "", nil // next dialog has not rendered yet
+			}
+			return "Bypass Permissions mode", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			if keys[0] == "Enter" && trustAccepted.IsZero() {
+				trustAccepted = time.Now()
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsWithTimeout() error = %v, want nil", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter", "Down", "Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter Down Enter] (trust accepted, then bypass warning)", sent)
+	}
+}
+
 func TestContainsRateLimitDialog(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1466,6 +1741,10 @@ scrollback line unrelated to any modal
 scrollback line unrelated to any modal
 comment: and a third names Wait for limit to reset as the confirm arm`
 
+// claudeSpendLimitModal is Claude's spend-limit modal, a rate-limit screen
+// with a reset rather than a terminal error.
+const claudeSpendLimitModal = "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel"
+
 func TestContainsProviderRateLimitScreen(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1477,7 +1756,7 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
-		{name: "claude spend limit modal", content: "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel", want: true},
+		{name: "claude spend limit modal", content: claudeSpendLimitModal, want: true},
 		{name: "spend limit words without reset option", content: "notes mention Adjust monthly spend limit and Usage credit balance while documenting billing", want: false},
 		{name: "spend limit tokens scattered across unrelated scrollback", content: spendLimitTokensScatteredScrollback, want: false},
 		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
@@ -1490,6 +1769,32 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 				t.Errorf("ContainsProviderRateLimitScreen(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+// Kills a resume-refusal classifier that misses claude's refusal of the
+// resumed key, in an error's last pane output or a dead pane's screen, or
+// that fires on anything else: the picker's "No conversations found", the
+// refusal of another key, the phrase split from the key, the phrase in the
+// conversation's history, other startup deaths, and no key (mc-bm1af).
+func TestProviderResumeRefusalReason(t *testing.T) {
+	const key = "0f9c2a1e-77aa-4b1d-9e0f-1a2b3c4d5e6f"
+	for _, c := range []struct {
+		name, content, key, want string
+	}{
+		{"the refusal in the last pane output", "session \"s\" died during startup; last pane output:\nNo conversation found with session ID: " + key, key, "conversation_not_found"},
+		{"the refusal, any case", "no conversation found with session id: " + strings.ToUpper(key) + "\n", key, "conversation_not_found"},
+		{"the picker", "No conversations found", key, ""},
+		{"the picker beside the key", "No conversations found matching " + key, key, ""},
+		{"another key's refusal", "No conversation found with session ID: 11111111-2222-3333-4444-555555555555", key, ""},
+		{"the phrase and the key on different lines", "No conversation found with session ID:\n" + key, key, ""},
+		{"the phrase in history", "> why does it say No conversation found?\nkilled: out of memory", key, ""},
+		{"another death", "Error: model not found", key, ""},
+		{"no key", "No conversation found with session ID: " + key, "", ""},
+	} {
+		if got := ProviderResumeRefusalReason(c.content, c.key); got != c.want {
+			t.Errorf("%s: ProviderResumeRefusalReason = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
@@ -1548,5 +1853,198 @@ func TestContainsCustomAPIKeyDialog(t *testing.T) {
 				t.Fatalf("containsCustomAPIKeyDialog(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+// feedbackSurveySessionFixture is a byte-accurate capture of Claude Code's
+// post-turn "How is Claude doing this session?" feedback survey (ga-zg7fjq).
+const feedbackSurveySessionFixture = `⏺ Done — pushed the branch and replied on the PR.
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯                                                        │
+╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+// feedbackSurveyMemoryFixture is a byte-accurate capture of the memory-
+// recollection variant of the same survey, mounted with showNotSure:true so
+// it carries an extra "4: Unsure" cell and an embedded recalled-memory line
+// instead of a stable title (ga-zg7fjq).
+const feedbackSurveyMemoryFixture = `⏺ Reading the config.
+
+● Claude recalled a memory:
+
+  The user prefers tabs over spaces.
+
+  How was Claude's recollection? (optional)
+  1: Bad    2: Fine   3: Good   4: Unsure  0: Dismiss
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯                                                        │
+╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+func TestContainsFeedbackSurveyModal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "session feedback variant",
+			content: feedbackSurveySessionFixture,
+			want:    true,
+		},
+		{
+			name:    "memory recollection variant",
+			content: feedbackSurveyMemoryFixture,
+			want:    true,
+		},
+		{
+			name: "labels scattered across lines is not a match",
+			content: "⏺ The survey asks 1: Bad or 3: Good — I picked Fine.\n" +
+				"  Dismiss is 0, per the docs.",
+			want: false,
+		},
+		{
+			name:    "normal output",
+			content: "Starting Claude Code...",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			content: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsFeedbackSurveyModal(tt.content); got != tt.want {
+				t.Fatalf("ContainsFeedbackSurveyModal(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProviderTerminalErrorReasonCreditBalance pins the exhausted-credit arm:
+// Claude Code's credit stop, shown as its own error line, is a terminal
+// quota_exceeded error, while text that only quotes the phrasing is not.
+// Multi-line fixtures are joined from quoted strings so viewing this file in a
+// pane never renders a matching stop line itself.
+func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
+	t.Parallel()
+	const apiCreditError = `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
+	const tuiStop = "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing"
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "tui stop after a tool call", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			tuiStop,
+			"",
+			"╭──────────────────────────────╮",
+			"│ >                            │",
+			"╰──────────────────────────────╯",
+			"  ? for shortcuts",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "tui stop alone", content: tuiStop, want: "quota_exceeded"},
+		{name: "tui stop with ascii marker padding", content: "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop without marker", content: "Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop with url clipped", content: "  ⎿  Credit balance too low · Add fu", want: "quota_exceeded"},
+		{name: "tui stop clipped at separator", content: "  ⎿  Credit balance too low ·", want: "quota_exceeded"},
+		{name: "tui stop upper case", content: "  ⎿  CREDIT BALANCE TOO LOW · ADD FUNDS", want: "quota_exceeded"},
+		{name: "headless stop alone", content: "Credit balance is too low", want: "quota_exceeded"},
+		{name: "headless stop after output", content: strings.Join([]string{
+			"Reading files...",
+			"Credit balance is too low",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "headless stop under marker", content: "  ⎿  Credit balance is too low", want: "quota_exceeded"},
+		{name: "startup death error", content: strings.Join([]string{
+			`session died during startup: session "worker"; last pane output:`,
+			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "startup death error with diagnostic", content: strings.Join([]string{
+			`session died during startup: session "worker"; diagnostic written to /tmp/city/.gc/crash/worker.log; last pane output:`,
+			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+			"",
+			"> ",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error on one line under marker", content: "  ⎿  " + apiCreditError, want: "quota_exceeded"},
+		{name: "api error wrapped between words", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			`     "message":"Your credit balance is too low to`,
+			`     access the Anthropic API. Please go to Plans & Billing to upgrade or`,
+			`     purchase credits."}}`,
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error wrapped mid-word", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			`     "message":"Your credit balance is too lo`,
+			`     w to access the Anthropic API. Please go to Plans & Billing to upgrade `,
+			`     or purchase credits."}}`,
+			"",
+			"> ",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "grep hit on the tui stop", content: "internal/runtime/x.go:12:  // Credit balance too low · Add funds", want: ""},
+		{name: "grep hit on the headless stop", content: "docs/x.md:3:Credit balance is too low", want: ""},
+		{name: "mid-line prose with the headless phrase", content: "The run stopped: credit balance is too low on that key.", want: ""},
+		{name: "mid-line prose with the tui phrase", content: "I saw Credit balance too low earlier", want: ""},
+		{name: "wrapped prose starting a line with the tui phrase", content: strings.Join([]string{
+			"The alert went out because the",
+			"credit balance too low warning fired",
+		}, "\n"), want: ""},
+		{name: "wrapped prose starting a line with the headless phrase", content: strings.Join([]string{
+			"I doubt the",
+			"credit balance is too low to matter here",
+		}, "\n"), want: ""},
+		{name: "api sentence in prose", content: "The docs say: Your credit balance is too low to access the Anthropic API.", want: ""},
+		{name: "api sentence on an unindented line after an api error", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence after a blank line following an api error", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"",
+			"     Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence past the continuation bound", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"     one",
+			"     two",
+			"     three",
+			"     four",
+			"     five",
+			"     Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence under a 5xx api error", content: "  ⎿  API Error: 529 Your credit balance is too low to access the Anthropic API.", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ProviderTerminalErrorReason(tt.content); got != tt.want {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal pins that the
+// credit-balance arm leaves Claude's spend-limit modal ("Usage credit balance")
+// to the rate-limit classifier: callers check terminal first, so a terminal hit
+// would permanently steal a screen that resets on its own.
+func TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	if got := ProviderTerminalErrorReason(claudeSpendLimitModal); got != "" {
+		t.Errorf("ProviderTerminalErrorReason(spend-limit modal) = %q, want \"\"", got)
+	}
+	if !ContainsProviderRateLimitScreen(claudeSpendLimitModal) {
+		t.Error("ContainsProviderRateLimitScreen(spend-limit modal) = false, want true")
 	}
 }

@@ -68,3 +68,95 @@ func TestResolveBuildMetadataUsesVCSSettings(t *testing.T) {
 		t.Fatalf("date = %q, want %q", date, "2026-03-17T00:00:00Z")
 	}
 }
+
+// TestResolveBuildMetadataDirtinessFollowsCommitIdentity pins the rule that
+// keeps a foreign repository's working-tree state out of our build stamp: the
+// toolchain's vcs.modified flag is trusted only when its companion
+// vcs.revision describes the same commit the binary was linked against.
+//
+// The concrete failure this guards (ga-u7fb): Go's buildvcs looks for a `.git`
+// *directory*, so inside a git worktree — where `.git` is a gitdir *file* — it
+// keeps walking up and stamps whichever repository encloses the worktree. A
+// polecat worktree sits inside the city directory, itself a git repo, so a
+// pristine checkout at dc8327db3 was stamped with the city's 251dc9e0f9 and
+// the city's dirtiness, and `gc version --long` reported `dc8327db3-dirty`.
+// That lie propagates to the supervisor's /health build_id and to binary-drift
+// detection, so it must not survive.
+func TestResolveBuildMetadataDirtinessFollowsCommitIdentity(t *testing.T) {
+	const (
+		worktreeShort = "dc8327db3"
+		worktreeFull  = "dc8327db335c0c99ad0be57dca851f51eae2f01b"
+		cityFull      = "251dc9e0f9caf16320cda9e02460c9c867057d12"
+	)
+	tests := []struct {
+		name        string
+		stamped     string
+		vcsRevision string
+		vcsModified string
+		want        string
+	}{
+		{
+			name:        "foreign revision cannot dirty our stamp",
+			stamped:     worktreeShort,
+			vcsRevision: cityFull,
+			vcsModified: "true",
+			want:        worktreeShort,
+		},
+		{
+			name:        "abbreviated stamp matches full revision",
+			stamped:     worktreeShort,
+			vcsRevision: worktreeFull,
+			vcsModified: "true",
+			want:        worktreeShort + "-dirty",
+		},
+		{
+			name:        "full stamp matches full revision",
+			stamped:     worktreeFull,
+			vcsRevision: worktreeFull,
+			vcsModified: "true",
+			want:        worktreeFull + "-dirty",
+		},
+		{
+			name:        "matching revision on a clean tree stays clean",
+			stamped:     worktreeShort,
+			vcsRevision: worktreeFull,
+			vcsModified: "false",
+			want:        worktreeShort,
+		},
+		{
+			name:        "already-stamped dirtiness is not doubled",
+			stamped:     worktreeShort + "-dirty",
+			vcsRevision: worktreeFull,
+			vcsModified: "true",
+			want:        worktreeShort + "-dirty",
+		},
+		{
+			name:        "unstamped build still adopts the toolchain revision",
+			stamped:     "unknown",
+			vcsRevision: worktreeFull,
+			vcsModified: "true",
+			want:        worktreeFull + "-dirty",
+		},
+		{
+			name:        "abbreviation too short to identify a commit is not trusted",
+			stamped:     "dc83",
+			vcsRevision: worktreeFull,
+			vcsModified: "true",
+			want:        "dc83",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &debug.BuildInfo{
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: tt.vcsRevision},
+					{Key: "vcs.modified", Value: tt.vcsModified},
+				},
+			}
+			_, commit, _ := resolveBuildMetadata("dev", tt.stamped, "unknown", true, info)
+			if commit != tt.want {
+				t.Fatalf("commit = %q, want %q", commit, tt.want)
+			}
+		})
+	}
+}

@@ -46,11 +46,13 @@ func TestReadinessRegistrySync(t *testing.T) {
 		}
 	}
 
-	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode"}
+	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode", "pi", "zcode"}
 	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviderKeys) {
 		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviderKeys)
 	}
-	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "antigravity"}
+	// Order follows BuiltinProviderOrder, where zcode sits after mimocode and
+	// before pi.
+	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "zcode", "pi", "antigravity"}
 	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviderOrder) {
 		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviderOrder)
 	}
@@ -79,6 +81,110 @@ func stageMimoProbeBinary(t *testing.T, homeDir string) {
 		t.Fatalf("mkdir user bin: %v", err)
 	}
 	writeExecutable(t, userBin, "mimo", "#!/bin/sh\nexit 0\n")
+}
+
+// stagePiProbeBinary installs a stub pi executable into homeDir's
+// ~/.local/bin so findProbeBinary resolves it.
+func stagePiProbeBinary(t *testing.T, homeDir string) {
+	t.Helper()
+	userBin := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(userBin, 0o755); err != nil {
+		t.Fatalf("mkdir user bin: %v", err)
+	}
+	writeExecutable(t, userBin, "pi", "#!/bin/sh\nexit 0\n")
+}
+
+// stageZCodeProbeBinary installs a stub zcode-repl adapter into homeDir's
+// ~/.local/bin so findProbeBinary resolves it.
+func stageZCodeProbeBinary(t *testing.T, homeDir string) {
+	t.Helper()
+	userBin := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(userBin, 0o755); err != nil {
+		t.Fatalf("mkdir user bin: %v", err)
+	}
+	writeExecutable(t, userBin, "zcode-repl", "#!/bin/sh\nexit 0\n")
+}
+
+func TestProbeZCodeNotInstalled(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+
+	result := probeZCode(homeDir)
+	if result.status != probeStatusNotInstalled {
+		t.Fatalf("probeZCode status = %q, want %q (detail %q)", result.status, probeStatusNotInstalled, result.detail)
+	}
+}
+
+func TestProbeZCodeNeedsBundleAndKey(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageZCodeProbeBinary(t, homeDir)
+
+	t.Setenv("ZCODE_CJS", "")
+	t.Setenv("ZCODE_API_KEY", "")
+	if result := probeZCode(homeDir); result.status != probeStatusInvalidConfiguration {
+		t.Fatalf("missing bundle status = %q, want %q", result.status, probeStatusInvalidConfiguration)
+	}
+
+	t.Setenv("ZCODE_CJS", filepath.Join(homeDir, "absent.cjs"))
+	if result := probeZCode(homeDir); result.status != probeStatusInvalidConfiguration {
+		t.Fatalf("absent bundle status = %q, want %q", result.status, probeStatusInvalidConfiguration)
+	}
+
+	bundle := filepath.Join(homeDir, "zcode.cjs")
+	if err := os.WriteFile(bundle, []byte("// bundle\n"), 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	t.Setenv("ZCODE_CJS", bundle)
+	if result := probeZCode(homeDir); result.status != probeStatusNeedsAuth {
+		t.Fatalf("missing key status = %q, want %q", result.status, probeStatusNeedsAuth)
+	}
+
+	t.Setenv("ZCODE_API_KEY", "not-a-real-key")
+	writeExecutable(t, filepath.Join(homeDir, ".local", "bin"), "node", "#!/bin/sh\necho v22.5.0\n")
+	if result := probeZCode(homeDir); result.status != probeStatusConfigured {
+		t.Fatalf("configured status = %q, want %q (detail %q)", result.status, probeStatusConfigured, result.detail)
+	}
+}
+
+// The bundle imports node:sqlite, so a node below 22.5 kills the pane at the
+// first turn. Readiness should say so instead.
+func TestProbeZCodeChecksTheNodeFloor(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stageZCodeProbeBinary(t, homeDir)
+	bundle := filepath.Join(homeDir, "zcode.cjs")
+	if err := os.WriteFile(bundle, []byte("// bundle\n"), 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	t.Setenv("ZCODE_CJS", bundle)
+	t.Setenv("ZCODE_API_KEY", "not-a-real-key")
+
+	userBin := filepath.Join(homeDir, ".local", "bin")
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"v18.20.4", probeStatusInvalidConfiguration},
+		{"v22.4.0", probeStatusInvalidConfiguration},
+		{"v22.5.0", probeStatusConfigured},
+		{"v25.9.0", probeStatusConfigured},
+	} {
+		writeExecutable(t, userBin, "node", "#!/bin/sh\necho "+tc.version+"\n")
+		t.Setenv("ZCODE_NODE_BIN", filepath.Join(userBin, "node"))
+		if got := probeZCode(homeDir); got.status != tc.want {
+			t.Fatalf("node %s status = %q, want %q (detail %q)", tc.version, got.status, tc.want, got.detail)
+		}
+	}
+
+	// No node at all is a configuration answer, not a crash.
+	t.Setenv("ZCODE_NODE_BIN", "")
+	if err := os.Remove(filepath.Join(userBin, "node")); err != nil {
+		t.Fatalf("remove node stub: %v", err)
+	}
+	if got := probeZCode(homeDir); got.status != probeStatusInvalidConfiguration {
+		t.Fatalf("missing node status = %q, want %q", got.status, probeStatusInvalidConfiguration)
+	}
 }
 
 func TestProbeMimoCodeNotInstalled(t *testing.T) {
@@ -225,6 +331,46 @@ func TestProbeMimoCodeRelativeXDGDataHomeFallsBackToHome(t *testing.T) {
 	}
 }
 
+func TestProbePiNotInstalled(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+
+	result := probePi(homeDir)
+	if result.status != probeStatusNotInstalled {
+		t.Fatalf("probePi status = %q, want %q (%s)", result.status, probeStatusNotInstalled, result.detail)
+	}
+}
+
+func TestProbePiNeedsAuthWithoutAuthJson(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stagePiProbeBinary(t, homeDir)
+
+	result := probePi(homeDir)
+	if result.status != probeStatusNeedsAuth {
+		t.Fatalf("probePi status = %q, want %q (%s)", result.status, probeStatusNeedsAuth, result.detail)
+	}
+}
+
+func TestProbePiConfiguredByAuthJson(t *testing.T) {
+	homeDir := t.TempDir()
+	pinProbeSearchPath(t, homeDir)
+	stagePiProbeBinary(t, homeDir)
+
+	authDir := filepath.Join(homeDir, ".pi", "agent")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := probePi(homeDir)
+	if result.status != probeStatusConfigured {
+		t.Fatalf("probePi status = %q, want %q (%s)", result.status, probeStatusConfigured, result.detail)
+	}
+}
+
 func TestProbeCommandEnvPreservesXDGOverridesWithoutProviderSpecificEnv(t *testing.T) {
 	homeDir := t.TempDir()
 	xdgConfigHome := filepath.Join(homeDir, "xdg-config")
@@ -257,6 +403,21 @@ func TestClaudeProbeCommandEnvForwardsConfigDirAndOAuthToken(t *testing.T) {
 	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-test") {
 		t.Fatalf("claudeProbeCommandEnv missing CLAUDE_CODE_OAUTH_TOKEN forwarding: %v", env)
 	}
+}
+
+func TestClaudeProbeCommandEnvForwardsGatewayLogin(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.example/api")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+
+	env := claudeProbeCommandEnv()
+	for _, want := range []string{"ANTHROPIC_BASE_URL=https://gateway.example/api", "ANTHROPIC_AUTH_TOKEN=gateway-token"} {
+		if !slices.Contains(env, want) {
+			t.Fatalf("claudeProbeCommandEnv missing %s: %v", want, env)
+		}
+	}
+	// API-key auth stays unsupported for onboarding, so the key is not forwarded.
+	assertEnvOmitsPrefix(t, env, "ANTHROPIC_API_KEY=")
 }
 
 func TestClaudeProbeCommandEnvOmitsUnsetValues(t *testing.T) {
@@ -801,6 +962,54 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstP
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessReturnsConfiguredForClaudeGatewayLogin(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// The stub answers as Claude Code 2.1.283 does: with ANTHROPIC_BASE_URL
+	// and ANTHROPIC_AUTH_TOKEN set, `claude auth status --json` reports a
+	// logged-in oauth_token/firstParty route; with neither, loggedIn false and
+	// exit status 1.
+	writeExecutable(t, binDir, "claude", `#!/bin/sh
+if [ "$ANTHROPIC_BASE_URL" != "https://gateway.example/api" ] || [ "$ANTHROPIC_AUTH_TOKEN" != "gateway-token" ]; then
+	printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty","analyticsDisabled":false}'
+	exit 1
+fi
+printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty","analyticsDisabled":false}'
+`)
+
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	originalCommandContext := providerProbeCommandContext
+	providerProbePathEnv = binDir
+	providerProbeCommandContext = exec.CommandContext
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+		providerProbeCommandContext = originalCommandContext
+	}()
+
+	for _, tc := range []struct {
+		name           string
+		baseURL, token string
+		wantStatus     string
+	}{
+		{name: "gateway login", baseURL: "https://gateway.example/api", token: "gateway-token", wantStatus: probeStatusConfigured},
+		{name: "no login", wantStatus: probeStatusNeedsAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ANTHROPIC_BASE_URL", tc.baseURL)
+			t.Setenv("ANTHROPIC_AUTH_TOKEN", tc.token)
+			state := newFakeState(t)
+			h := newTestCityHandler(t, state)
+			assertProviderStatus(t, h, state, "/provider-readiness?providers=claude&fresh=1", "claude", tc.wantStatus)
+		})
+	}
 }
 
 func TestHandleProviderReadinessReturnsInvalidConfigurationForClaudeNonFirstPartyProvider(t *testing.T) {

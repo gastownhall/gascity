@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gastownhall/gascity/internal/runtime/runtimecapability"
@@ -45,7 +46,7 @@ any required requirement fails.`,
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 
-			target, note := resolveRuntimeCheckTarget(args[0], stderr)
+			target, note, _ := resolveRuntimeCheckTarget(args[0], stderr)
 			if note != "" && !asJSON {
 				fmt.Fprintln(stdout, note) //nolint:errcheck // best-effort stdout
 			}
@@ -73,6 +74,7 @@ any required requirement fails.`,
 				}
 				fmt.Fprintf(stdout, "\n%d requirements: %d passed, %d failed, %d skipped\n", //nolint:errcheck // best-effort stdout
 					len(report.Results), report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped)
+				fmt.Fprintln(stdout, v2ReadyLine(report)) //nolint:errcheck // best-effort stdout
 			}
 
 			failed := report.Failed()
@@ -114,4 +116,28 @@ any required requirement fails.`,
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable JSON report")
 	cmd.Flags().BoolVar(&withEnv, "env", false, "also run the environment-plane capability suite (env.* guarantees)")
 	return cmd
+}
+
+// v2ReadyLine says whether the executable is fit for reconciler v2, and
+// why not: the capabilities its handshake lacks, and the requirements it
+// failed. A handshake that lacks nothing already has gc read the
+// executable through observe.v1, whatever it failed, and the line says so.
+func v2ReadyLine(report runtimecontract.Report) string {
+	if report.V2Ready {
+		return "v2-ready: yes"
+	}
+	var why []string
+	if len(report.V2Missing) > 0 {
+		why = append(why, "missing "+strings.Join(report.V2Missing, ", "))
+	} else {
+		why = append(why, "gc already reads it through observe.v1")
+	}
+	if len(report.V2Failed) > 0 {
+		failed := make([]string, len(report.V2Failed))
+		for i, c := range report.V2Failed {
+			failed[i] = string(c)
+		}
+		why = append(why, "failed "+strings.Join(failed, ", "))
+	}
+	return fmt.Sprintf("v2-ready: no (%s)", strings.Join(why, "; "))
 }

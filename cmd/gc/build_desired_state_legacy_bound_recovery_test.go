@@ -71,6 +71,101 @@ func TestCanonicalizeLegacyBoundAssignedWorkRehomesToCanonical(t *testing.T) {
 	}
 }
 
+// TestCanonicalizeLegacyUnboundAssignedWorkRehomesToImportedBindingPrefix
+// proves the inverse import-binding migration loop: work persisted under the
+// former unbound identity is rewritten to the current binding-qualified agent
+// identity, without disturbing work still held by a live legacy session.
+func TestCanonicalizeLegacyUnboundAssignedWorkRehomesToImportedBindingPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		agent      config.Agent
+		legacy     string
+		canonical  string
+		routedTo   string
+		wantRouted string
+	}{
+		{
+			name:       "rig scoped imported binding",
+			agent:      config.Agent{Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+			legacy:     "gascity/refinery",
+			canonical:  "gascity/gastown.refinery",
+			routedTo:   "gascity/gastown.refinery",
+			wantRouted: "gascity/gastown.refinery",
+		},
+		{
+			name:       "HQ imported binding",
+			agent:      config.Agent{Name: "refinery", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+			legacy:     "refinery",
+			canonical:  "gastown.refinery",
+			routedTo:   "gastown.refinery",
+			wantRouted: "gastown.refinery",
+		},
+		{
+			name:       "live specimen with empty route",
+			agent:      config.Agent{Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+			legacy:     "gascity/refinery",
+			canonical:  "gascity/gastown.refinery",
+			routedTo:   "",
+			wantRouted: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{tc.agent}}
+			wb := workBead("wb-import", tc.routedTo, tc.legacy, "in_progress", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, newSessionBeadSnapshot(nil), io.Discard)
+
+			got, err := mem.Get("wb-import")
+			if err != nil {
+				t.Fatalf("Get(wb-import): %v", err)
+			}
+			if got.Assignee != tc.canonical {
+				t.Errorf("assignee = %q, want %q (re-homed to imported binding identity)", got.Assignee, tc.canonical)
+			}
+			if routed := got.Metadata["gc.routed_to"]; routed != tc.wantRouted {
+				t.Errorf("gc.routed_to = %q, want %q", routed, tc.wantRouted)
+			}
+
+			rehomed, _ := mem.Get("wb-import")
+			store.updates = 0
+			canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, newSessionBeadSnapshot(nil), io.Discard)
+			if store.updates != 0 {
+				t.Errorf("second pass wrote %d times, want 0 (import-binding re-home must be idempotent)", store.updates)
+			}
+		})
+	}
+
+	t.Run("live legacy owner is preserved", func(t *testing.T) {
+		cfg := &config.City{Agents: []config.Agent{{
+			Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1),
+		}}}
+		const legacy = "gascity/refinery"
+		wb := workBead("wb-live-import", "gascity/gastown.refinery", legacy, "in_progress", 5)
+		mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+		store := &updateCountingStore{Store: mem}
+		live := beads.Bead{
+			ID: "sess-legacy-import", Type: sessionBeadType, Status: "open",
+			Metadata: map[string]string{"session_name": legacy, "template": legacy, "state": "active"},
+		}
+
+		canonicalizeLegacyBoundAssignedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, newSessionBeadSnapshot([]beads.Bead{live}), io.Discard)
+
+		if store.updates != 0 {
+			t.Fatalf("re-homed work owned by a live legacy imported-binding session, got %d writes (want 0)", store.updates)
+		}
+		got, err := mem.Get("wb-live-import")
+		if err != nil {
+			t.Fatalf("Get(wb-live-import): %v", err)
+		}
+		if got.Assignee != legacy {
+			t.Errorf("assignee = %q, want %q (left for live legacy owner)", got.Assignee, legacy)
+		}
+	})
+}
+
 // TestCanonicalizeLegacyBoundAssignedWorkSkipsNonMigration covers the cases the
 // re-home must leave untouched: a live session still owns the legacy assignment
 // (resume tier), a real per-session assignee, already-canonical work, and work
@@ -272,6 +367,60 @@ func TestCanonicalizeLegacyBoundUnassignedRoutedWorkRehomesRoute(t *testing.T) {
 	canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, io.Discard)
 	if store.updates != 0 {
 		t.Errorf("second pass wrote %d times, want 0 (re-home must be idempotent)", store.updates)
+	}
+}
+
+// TestCanonicalizeLegacyUnboundUnassignedRoutedWorkRehomesToImportedBindingPrefix
+// proves the inverse import-binding demand loop: open, unassigned work routed
+// to a former unbound identity is rewritten to the current binding-qualified
+// pool identity, without assigning it to a concrete owner.
+func TestCanonicalizeLegacyUnboundUnassignedRoutedWorkRehomesToImportedBindingPrefix(t *testing.T) {
+	cases := []struct {
+		name      string
+		agent     config.Agent
+		legacy    string
+		canonical string
+	}{
+		{
+			name:      "rig scoped imported binding",
+			agent:     config.Agent{Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+			legacy:    "gascity/refinery",
+			canonical: "gascity/gastown.refinery",
+		},
+		{
+			name:      "HQ imported binding",
+			agent:     config.Agent{Name: "refinery", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+			legacy:    "refinery",
+			canonical: "gastown.refinery",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{tc.agent}}
+			wb := workBead("wb-import-route", tc.legacy, "", "open", 5)
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{wb}, nil)
+			store := &updateCountingStore{Store: mem}
+
+			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{wb}, []beads.Store{store}, io.Discard)
+
+			got, err := mem.Get("wb-import-route")
+			if err != nil {
+				t.Fatalf("Get(wb-import-route): %v", err)
+			}
+			if routed := got.Metadata["gc.routed_to"]; routed != tc.canonical {
+				t.Errorf("gc.routed_to = %q, want %q (re-homed to imported binding identity)", routed, tc.canonical)
+			}
+			if got.Assignee != "" {
+				t.Errorf("assignee = %q, want empty (unassigned work stays unassigned)", got.Assignee)
+			}
+
+			rehomed, _ := mem.Get("wb-import-route")
+			store.updates = 0
+			canonicalizeLegacyBoundUnassignedRoutedWork(cfg, []beads.Bead{rehomed}, []beads.Store{store}, io.Discard)
+			if store.updates != 0 {
+				t.Errorf("second pass wrote %d times, want 0 (import-binding route re-home must be idempotent)", store.updates)
+			}
+		})
 	}
 }
 

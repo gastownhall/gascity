@@ -65,10 +65,52 @@ func TestPinnedValues(t *testing.T) {
 		Namespace:                    "gc.",
 		OptionMetadataPrefix:         "opt_",
 		MoleculeFailedMetadataKey:    "molecule_failed",
+		// The session-bead claim back-channel: `gc hook --claim` writes it and
+		// `gc hook current` reads it back, so a value drift here would silently
+		// break the only route a pool step has to its own bead id.
+		CurrentClaimBeadIDMetadataKey: "current_claim_bead_id",
+		// The verified launcher of a piece of work: the supervisor stamps it
+		// and out-of-process credential resolvers read it by this exact name.
+		InitiatorMetadataKey: "gc.initiator",
 	}
 	for got, want := range pinned {
 		if got != want {
 			t.Errorf("pinned value drift: got %q, want %q", got, want)
+		}
+	}
+}
+
+// TestInitiatorKeyIsKnown pins the server-owned initiator key into the
+// declared vocabulary so the generic bead API's reservation and the drift guard
+// both see it.
+func TestInitiatorKeyIsKnown(t *testing.T) {
+	for _, k := range KnownMetadataKeys {
+		if k == InitiatorMetadataKey {
+			return
+		}
+	}
+	t.Fatalf("KnownMetadataKeys does not declare %q", InitiatorMetadataKey)
+}
+
+// TestValidLabel: a label is valid only when bd's CSV parse (pflag's string
+// slice) reads it back unchanged as one field.
+func TestValidLabel(t *testing.T) {
+	for label, want := range map[string]bool{
+		"gc:session":      true,
+		"pool:hw/polecat": true,
+		"a b":             true,
+		"":                false, // pflag reads no label at all
+		"note,gc:session": false,
+		`"gc:session"`:    false,
+		`a"b`:             false,
+		"gc:session\n":    false,
+		"\ngc:session":    false,
+		"gc:session\r":    false,
+		"gc:session\r\n":  false,
+		"a\nb":            false,
+	} {
+		if got := ValidLabel(label); got != want {
+			t.Errorf("ValidLabel(%q) = %v, want %v", label, got, want)
 		}
 	}
 }

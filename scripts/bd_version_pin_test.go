@@ -39,14 +39,64 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatal("deps.env missing BD_CURRENT_VERSION (the bleeding-edge contract-matrix cell)")
 	}
 
-	// The current cell has no release tarball, so it is built from a pinned beads
-	// commit. A non-deterministic ref (branch name, short SHA) would make the cell
-	// irreproducible; require a full 40-char commit SHA.
+	// The current cell is built from a pinned beads commit, which need not be a
+	// tagged release. A non-deterministic ref (branch name, short SHA) would make
+	// the cell irreproducible; require a full 40-char commit SHA.
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdCurrentRef) {
 		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdCurrentRef)
 	}
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
+	}
+	// The native Go store, the bleeding-edge contract-matrix cell, and the
+	// source-built agent image must all use the same upstream beads. A drift here
+	// can pair one schema catalog with another version's write behavior.
+	//
+	// The pin takes one of two shapes and both are checked, because upstream
+	// alternates between them: a pseudo-version, whose embedded 12-char commit
+	// must be BD_CURRENT_REF; or an exact release/prerelease tag, which must be
+	// BD_CURRENT_VERSION verbatim (BD_CURRENT_REF is then that tag's commit, which
+	// only the network could confirm -- the same trust boundary the pseudo-version
+	// form already had for its timestamp).
+	goMod := readFile(t, root, "go.mod")
+	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+)\s*$`).FindStringSubmatch(goMod)
+	if goModMatch == nil {
+		t.Fatal("go.mod missing a version pin for github.com/steveyegge/beads")
+	}
+	goModPin := goModMatch[1]
+	if pseudo := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(goModPin); pseudo != nil {
+		if got, want := pseudo[1], bdCurrentRef[:12]; got != want {
+			t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
+		}
+	} else if goModPin != bdCurrent {
+		t.Fatalf("go.mod pins github.com/steveyegge/beads to the tag %q but deps.env BD_CURRENT_VERSION = %q; a tag pin must name the same release the current matrix cell builds",
+			goModPin, bdCurrent)
+	}
+	// The integration suite installs bd from whatever go.mod names and pins the
+	// expected version in its own literal, so a bump that misses that literal
+	// leaves the suite asserting a version nobody ships. It lives in the
+	// `rest-full` shard, which is gated on `push` — so on a PR nothing catches
+	// the drift and the failure lands after merge, which is exactly how
+	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here,
+	// against the same go.mod pin the block above ties to deps.env. This test
+	// reaches PR-time CI through //scripts:scripts_test in the required Bazel
+	// lane, so drift fails before merge rather than after.
+	const integrationPinFile = "test/integration/integration_test.go"
+	integrationPin := extractGoStringConst(t, root, integrationPinFile, "wantPinnedBeadsModuleVersion")
+	if integrationPin == "" {
+		t.Fatalf("%s missing the wantPinnedBeadsModuleVersion const; it is the integration suite's beads pin anchor", integrationPinFile)
+	}
+	if integrationPin != goModPin {
+		t.Fatalf("%s pins wantPinnedBeadsModuleVersion = %q but go.mod pins github.com/steveyegge/beads to %q; the integration suite installs bd from go.mod, so the two must name the same version",
+			integrationPinFile, integrationPin, goModPin)
+	}
+
+	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
+	}
+	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
+		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly
@@ -69,27 +119,71 @@ func TestBDVersionPins(t *testing.T) {
 			bdVersion, bdPrev)
 	}
 
-	// The ready-projection feature floor (#3135's regressing surface) must exist
-	// and be strictly newer than the init floor, otherwise the gated path is dead
-	// for every supported bd. Compare semantically -- the same way the runtime
-	// gate in bdstore_ready_projection.go does (deps.CompareVersions) -- so a
-	// floor that is merely different from the init floor, including an older one,
-	// cannot pass.
+	// The init floor is what makes ReleaseIfCurrent's typed refusal safe:
+	// ReleaseIfCurrent has no path without bd's conditional-release flags
+	// (beads#5008), so every supported bd must carry them. bd 1.2.2
+	// re-released the 1.1.2 code, so the first tested release with the flags
+	// is 1.3.0, and the floor may not drop below it. The typed refusal names
+	// the same const.
+	condReleaseFloor := extractGoStringConst(t, root, "internal/beads/bdstore_conditional_release.go", "BdConditionalReleaseMinVersion")
+	if condReleaseFloor == "" {
+		t.Fatal("internal/beads/bdstore_conditional_release.go missing BdConditionalReleaseMinVersion const")
+	}
+	if deps.CompareVersions(bdMin, condReleaseFloor) < 0 {
+		t.Fatalf("bdMinVersion (%q) is below BdConditionalReleaseMinVersion (%q); a supported bd would hit ReleaseIfCurrent's old-bd refusal and release no stale assignment",
+			bdMin, condReleaseFloor)
+	}
+
+	// The ready-projection feature floor (#3135's regressing surface) must
+	// exist, and every supported bd must satisfy it, so the runtime gate in
+	// bdstore_ready_projection.go only ever refuses an unsupported bd. A floor
+	// above bdMinVersion would refuse the ready projection on the
+	// minimum-supported matrix cell, the #3135 failure mode; a floor above the
+	// newest matrix cell would refuse every supported bd.
 	readyFloor := extractGoStringConst(t, root, "internal/beads/bdstore_ready_projection.go", "bdReadyProjectionMinVersion")
 	if readyFloor == "" {
 		t.Fatal("internal/beads/bdstore_ready_projection.go missing bdReadyProjectionMinVersion const")
 	}
-	if deps.CompareVersions(readyFloor, bdMin) <= 0 {
-		t.Fatalf("bdReadyProjectionMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", readyFloor, bdMin)
+	if deps.CompareVersions(readyFloor, bdMin) > 0 {
+		t.Fatalf("bdReadyProjectionMinVersion (%q) is newer than bdMinVersion (%q); the minimum-supported bd could not serve the ready projection", readyFloor, bdMin)
+	}
+	if deps.CompareVersions(readyFloor, bdCurrent) > 0 {
+		t.Fatalf("bdReadyProjectionMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could serve the ready projection", readyFloor, bdCurrent)
 	}
 
-	// The bd_compatibility config enum is the operator-facing mirror of the two
-	// floors; both floor values must appear as enum members so they cannot diverge.
+	// The fresh provider-owned floor is the third anchor: a scope initialized
+	// through bd's persisted ownership/transport contract needs a bd that has
+	// it. It may equal the init floor (both are 1.3.0 today) but never sit
+	// below it, and it must be reachable -- no supported bd could satisfy a
+	// floor above the newest matrix cell, so a fresh `gc init` would refuse on
+	// every cell. deps.CompareVersions strips prerelease identifiers, so a
+	// v1.3.0-rc.N cell compares equal to the 1.3.0 floor rather than below it.
+	freshProviderFloor := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdFreshProviderMinVersion")
+	if freshProviderFloor == "" {
+		t.Fatal("cmd/gc/init_provider_readiness.go missing bdFreshProviderMinVersion const")
+	}
+	if deps.CompareVersions(freshProviderFloor, bdMin) < 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) is below bdMinVersion (%q); the init floor already refuses every bd it would admit", freshProviderFloor, bdMin)
+	}
+	if deps.CompareVersions(freshProviderFloor, bdCurrent) > 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could initialize a fresh provider-owned scope",
+			freshProviderFloor, bdCurrent)
+	}
+
+	// The bd_compatibility config enum selects which bd CLI semantics gc relies
+	// on (bd-1.0.4 history-backed ready vs bd-1.0.5 ready flags). It is a
+	// behavior selector, not a support floor, so neither its members nor its
+	// default track the init floor. The ready-projection floor must still be
+	// one of its members.
 	cfg := readFile(t, root, "internal/config/config.go")
-	for _, member := range []string{"enum=bd-" + bdMin, "enum=bd-" + readyFloor} {
-		if !strings.Contains(cfg, member) {
-			t.Fatalf("internal/config/config.go bd_compatibility enum missing %q (floors: init=%s ready=%s)", member, bdMin, readyFloor)
-		}
+	if member := "enum=bd-" + readyFloor; !strings.Contains(cfg, member) {
+		t.Fatalf("internal/config/config.go bd_compatibility enum missing %q (ready floor %s)", member, readyFloor)
+	}
+
+	// The bd pack's doctor check restates the init floor so `gc doctor` refuses
+	// the same bd that `gc init`/`gc start` refuse.
+	if doctor := readFile(t, root, "examples/bd/doctor/check-bd/run.sh"); !strings.Contains(doctor, `required="`+bdMin+`"`) {
+		t.Fatalf("examples/bd/doctor/check-bd/run.sh does not pin required=%q (bdMinVersion)", bdMin)
 	}
 
 	// Every released bd that the required CI paths install from a tarball must
@@ -116,6 +210,46 @@ func TestBDVersionPins(t *testing.T) {
 	// assignment in both .yml and .yaml workflows: a file-level presence check
 	// would let a stale pin ride along beside a correct one.
 	assertWorkflowPins(t, root, "BD_VERSION", bdVersion)
+
+	// The devcontainer README restates the installed version in prose, which
+	// makes it an anchor like any other -- and it was the only one no test read,
+	// so it sat at v1.0.4 through the promotion to v1.1.0. A doc anchor nothing
+	// asserts is how the next bump goes half-applied.
+	assertDocPinAnchor(t, root, ".devcontainer/README.md", "BD_VERSION", bdVersion)
+
+	// The fresh-init floor is the one an operator meets as a typed refusal from
+	// `gc init`, so the design note that explains it is an anchor too. It went
+	// stale once already -- the note said proxied was the default "on bd >=
+	// 1.3.0" while the code refused outright below it.
+	assertDocStatesVersion(t, root, "engdocs/design/beads-proxied-local-default.md",
+		"bd ≥ "+freshProviderFloor, "the fresh provider-owned init floor")
+}
+
+// assertDocStatesVersion fails when a doc no longer restates a version floor in
+// prose. Unlike assertDocPinAnchor it matches a literal phrase rather than a
+// deps.env restatement, because this floor is a Go const, not a deps.env key.
+func assertDocStatesVersion(t *testing.T, root, rel, phrase, what string) {
+	t.Helper()
+	if !strings.Contains(readFile(t, root, rel), phrase) {
+		t.Errorf("%s no longer states %s as %q; update the doc or move this assertion with it", rel, what, phrase)
+	}
+}
+
+// assertDocPinAnchor fails when a doc restates a deps.env pin as
+// "`KEY` from `deps.env` (currently VALUE)" and VALUE has drifted. The phrasing
+// is the contract: prose that names the variable without restating the value is
+// not an anchor and is not matched, so a doc can always opt out by dropping the
+// parenthetical rather than by going stale.
+func assertDocPinAnchor(t *testing.T, root, rel, key, want string) {
+	t.Helper()
+	re := regexp.MustCompile("`" + regexp.QuoteMeta(key) + "` from `deps\\.env` \\(currently ([^)]+)\\)")
+	m := re.FindStringSubmatch(readFile(t, root, rel))
+	if m == nil {
+		t.Fatalf("%s no longer restates %s as \"`%s` from `deps.env` (currently <value>)\"; either restore that phrasing or drop this assertion with the anchor", rel, key, key)
+	}
+	if got := strings.TrimSpace(m[1]); got != want {
+		t.Errorf("%s says %s is currently %q, want %q (deps.env)", rel, key, got, want)
+	}
 }
 
 // TestScanPinAssignments proves the workflow pin scanner catches the partial

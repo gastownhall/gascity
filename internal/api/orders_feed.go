@@ -99,12 +99,22 @@ func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScope
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-			},
-			IncludeClosed: true,
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): each
+		// leg lists only the roots it holds.
+		var roots []beads.Bead
+		err = beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+				IncludeClosed: true,
+			})
+			return listErr
 		})
 		if err != nil {
 			log.Printf("api: workflow run projection closed-root list failed for %s: %v", info.ref, err)
@@ -222,18 +232,28 @@ func buildWorkflowRunProjectionsRootOnly(state State, requestedScopeKind, reques
 			openChildrenByRoot[rootID] = append(openChildrenByRoot[rootID], bead)
 		}
 
-		roots, err := info.store.List(beads.ListQuery{
-			Metadata: map[string]string{
-				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
-				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
-			},
-			IncludeClosed: true,
-			// The root-only projection reads only id/status/created/metadata,
-			// never labels, so skip the per-root label hydration on this
-			// closed-history scan — same rows and order, less work per root
-			// (gascity#3253). Bounding this scan further is not contract-safe
-			// because the feed orders by computed status rank, not created_at.
-			SkipLabels: true,
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the workflowStores federation (graph, city, rigs): each
+		// leg lists only the roots it holds.
+		var roots []beads.Bead
+		err = beads.RelicRead(func() error {
+			var listErr error
+			roots, listErr = info.store.List(beads.ListQuery{
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				},
+				IncludeClosed: true,
+				// The root-only projection reads only id/status/created/metadata,
+				// never labels, so skip the per-root label hydration on this
+				// closed-history scan — same rows and order, less work per root
+				// (gascity#3253). Bounding this scan further is not contract-safe
+				// because the feed orders by computed status rank, not created_at.
+				SkipLabels: true,
+			})
+			return listErr
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
@@ -335,8 +355,14 @@ func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) 
 	return active, nil
 }
 
-func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string) (orderRunFeedResult, error) {
-	stores := workflowStores(state)
+func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string, limit int) (orderRunFeedResult, error) {
+	// The feed lists order-tracking beads, which are orders class and live in
+	// the orders binding on a split city. workflowStores leads with the GRAPH
+	// binding (its own callers scan workflow roots), so on a city that relocates
+	// only graph the tracking beads would still be missed; the orders leg is
+	// appended here and deduplicated, so a city that serves both classes from
+	// one binding — the shape this build supports — reads it once.
+	stores := appendOrdersClassStoreInfo(workflowStores(state), state, workflowCityScopeRef(state.CityName()))
 	allOrders := state.OrdersAll()
 	orderByScopedName := make(map[string]orders.Order, len(allOrders))
 	for _, order := range allOrders {
@@ -353,7 +379,17 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 		front := orders.NewStore(beads.OrdersStore{Store: info.store})
-		runs, err := front.ListTracking()
+		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
+		// rows only as pre-split copies, so beads.RelicRead counts the read as
+		// debt; on the class binding the same read is legitimate.
+		// One leg of the order-feed federation (graph, orders binding, and
+		// the city and rig scopes for pre-cutover history).
+		var runs []orders.OrderRun
+		err := beads.RelicRead(func() error {
+			var listErr error
+			runs, listErr = front.ListTracking(limit)
+			return listErr
+		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -366,13 +402,18 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 
+		// Scoped to this store's front: LatestOpenRun is a per-store lookup, so
+		// a cache keyed only by run.Scoped must not be reused across stores.
+		// Runs sharing a scoped name within this store's result (repeat runs of
+		// the same order) cost one backing lookup instead of one per run.
+		latestOpenCache := make(map[string]latestOpenRunLookup, len(runs))
 		for _, run := range runs {
 			scopeKind, scopeRef := orderTrackingScope(run.Scoped, cityScopeRef)
 			if !includeAllForCity && (scopeKind != requestedScopeKind || scopeRef != requestedScopeRef) {
 				continue
 			}
 
-			updatedAt := orderTrackingUpdatedAt(front, run)
+			updatedAt := orderTrackingUpdatedAt(front, run, latestOpenCache)
 			orderDef, ok := orderByScopedName[run.Scoped]
 			title := orderTrackingTitle(run.Scoped, orderDef, ok)
 			target := orderTrackingTarget(orderDef, ok, run)
@@ -407,18 +448,31 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	}, nil
 }
 
-func orderTrackingUpdatedAt(front *orders.Store, run orders.OrderRun) time.Time {
+// latestOpenRunLookup caches one front.LatestOpenRun result so repeat runs of
+// the same scoped order pay one backing lookup, not one per run.
+type latestOpenRunLookup struct {
+	run   orders.OrderRun
+	found bool
+	err   error
+}
+
+func orderTrackingUpdatedAt(front *orders.Store, run orders.OrderRun, cache map[string]latestOpenRunLookup) time.Time {
 	updatedAt := run.CreatedAt
-	latest, found, err := front.LatestOpenRun(run.Scoped)
-	if err != nil && !found {
-		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", run.Scoped, run.ID, err)
+	lookup, cached := cache[run.Scoped]
+	if !cached {
+		latest, found, err := front.LatestOpenRun(run.Scoped)
+		lookup = latestOpenRunLookup{run: latest, found: found, err: err}
+		cache[run.Scoped] = lookup
+	}
+	if lookup.err != nil && !lookup.found {
+		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", run.Scoped, run.ID, lookup.err)
 		return updatedAt
 	}
-	if err != nil {
-		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", run.Scoped, run.ID, err)
+	if lookup.err != nil {
+		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", run.Scoped, run.ID, lookup.err)
 	}
-	if found && latest.CreatedAt.After(updatedAt) {
-		updatedAt = latest.CreatedAt
+	if lookup.found && lookup.run.CreatedAt.After(updatedAt) {
+		updatedAt = lookup.run.CreatedAt
 	}
 	return updatedAt
 }

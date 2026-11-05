@@ -3,18 +3,23 @@
 package proctable
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+const processSnapshotTimeout = 10 * time.Second
+
 // ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
+// GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
+// with any GC_SESSION_ID reparented to launchd ([OrphanCandidate]), as on
+// Linux. Darwin reads one ps snapshot either way.
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
@@ -23,44 +28,42 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	var out []runtime.LiveRuntime
-	for _, record := range records {
-		if record.pid <= 1 {
-			continue
-		}
-		sessionID := record.env["GC_SESSION_ID"]
-		if sessionID == "" {
-			continue
-		}
-		if id != "" && sessionID != id {
-			continue
-		}
-		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
-			continue
-		}
-		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
-		city := record.env["GC_CITY_PATH"]
-		if city == "" {
-			city = record.env["GC_CITY"]
-		}
-		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       record.pid,
-		})
+	roots := scanRecordsBySessionID(records, id)
+	if id == "" {
+		roots = orphanCandidates(roots)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].PID < out[j].PID
-	})
-	if out == nil {
-		out = []runtime.LiveRuntime{}
-	}
-	return out, nil
+	return withStartIdentities(roots), nil
 }
 
-// IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
-// envelope and should be treated as an agent root.
+// withStartIdentities fills each root's StartIdentity and StartedAt from the
+// kernel's start time (ProcessIdentity: nanoseconds since the epoch). A root
+// whose identity cannot be read keeps both empty.
+func withStartIdentities(roots []runtime.LiveRuntime) []runtime.LiveRuntime {
+	for i := range roots {
+		identity, err := ProcessIdentity(roots[i].PID)
+		if err != nil {
+			continue
+		}
+		roots[i].StartIdentity = identity
+		if ns, err := strconv.ParseInt(identity, 10, 64); err == nil {
+			roots[i].StartedAt = time.Unix(0, ns).UTC()
+		}
+	}
+	return roots
+}
+
+// ScanBySessionIDSince returns the Darwin session-ID scan. Darwin collects one
+// complete ps snapshot, so it has no per-process inspection failures to bound.
+func ScanBySessionIDSince(id string, _ time.Time) ([]runtime.LiveRuntime, error) {
+	return ScanBySessionID(id)
+}
+
+// IsScanRoot reports whether pid should be treated as an agent root. A root
+// carries a GC_SESSION_ID, is neither infrastructure nor a program-status
+// companion — a tmux server or client is never a root, whoever its parent
+// is, the relay is looked through, and a tap belongs to its tmux server — and
+// sits outside its parent's envelope: the parent is gone, carries a different
+// GC_SESSION_ID, or is infrastructure or the relay.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -82,62 +85,21 @@ func IsScanRoot(pid int) bool {
 	if !ok {
 		return false
 	}
-	sessionID := record.env["GC_SESSION_ID"]
-	if sessionID == "" {
-		return false
-	}
-	parent, ok := records[record.ppid]
-	return !ok || parent.env["GC_SESSION_ID"] != sessionID || isInfrastructureCommand(parent.command)
-}
-
-type psRecord struct {
-	pid     int
-	ppid    int
-	command string
-	env     map[string]string
+	return isRecordScanRoot(records, record)
 }
 
 func psRecords() (map[int]psRecord, error) {
-	out, err := exec.Command("ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("running ps: %w", err)
 	}
 	records := make(map[int]psRecord)
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		records[pid] = psRecord{
-			pid:     pid,
-			ppid:    ppid,
-			command: darwinPSCommand(fields),
-			env:     parseInlineEnv(fields[2:]),
+		if record, ok := parsePSRecord(line); ok {
+			records[record.pid] = record
 		}
 	}
 	return records, nil
-}
-
-func parseInlineEnv(fields []string) map[string]string {
-	env := make(map[string]string)
-	for _, field := range fields {
-		key, value, ok := strings.Cut(field, "=")
-		if !ok || key == "" {
-			continue
-		}
-		env[key] = value
-	}
-	return env
 }

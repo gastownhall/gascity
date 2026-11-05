@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -157,6 +158,7 @@ func TestTopoOrderRowsMatchesTopoOrder(t *testing.T) {
 // reads session_name off Info.SessionNameMetadata. The full kill path is
 // exercised end-to-end by TestRetireDuplicateRowsMatchesBeads.
 func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
+	testCity := t.TempDir()
 	sp := runtime.NewFake()
 	cases := []struct {
 		name string
@@ -171,8 +173,8 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := wtickSessionBead("s-stop", tc.meta)
 			var rawErr, infoErr bytes.Buffer
-			raw := stopRuntimeBeforeSessionBeadMutation(nil, tc.sp, nil, b, "duplicate", &rawErr)
-			info := stopRuntimeBeforeSessionBeadMutationInfo(nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
+			raw := stopRuntimeBeforeSessionBeadMutation(testCity, nil, tc.sp, nil, b, "duplicate", &rawErr)
+			info := stopRuntimeBeforeSessionBeadMutationInfo(testCity, nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
 			if raw != info {
 				t.Fatalf("stop-runtime diverged: raw=%v info=%v", raw, info)
 			}
@@ -189,6 +191,7 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 // bead metadata + work assignee across the two stores. It fails loudly if the row
 // form skips the runtime stop, the front-door retire, or the work reassignment.
 func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
+	city := t.TempDir()
 	cfg := &config.City{
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor"}},
@@ -224,6 +227,10 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		}
 		winner := mkSession("5", spec.SessionName)         // canonical name + higher generation → wins
 		loser := mkSession("3", spec.SessionName+"-stale") // distinct session_name → runtime stop path
+		// The loser holds a wait and a quarantine, which its retire clears.
+		if err := store.SetMetadataBatch(loser, map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold", "quarantined_until": "2126-01-01T00:00:00Z"}); err != nil {
+			t.Fatalf("hold the loser: %v", err)
+		}
 		// continuity-ineligible: excluded from the group.
 		ineligible, err := store.Create(beads.Bead{
 			Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
@@ -250,7 +257,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 
 	loserName := spec.SessionName + "-stale"
 	loadOpen := func(t *testing.T, store beads.Store) []beads.Bead {
-		all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+		all, err := session.ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 		if err != nil {
 			t.Fatalf("list sessions: %v", err)
 		}
@@ -279,7 +286,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 				indexBySessionName[sn] = i
 			}
 		}
-		retireDuplicateConfiguredNamedSessionBeads(store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
+		retireDuplicateConfiguredNamedSessionBeads(city, store, testSeatWork(city, cfg, store, nil), sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
 	}
 	runRows := func(store beads.Store, sp *runtime.Fake) {
 		rowBeads := loadOpen(t, store)
@@ -287,7 +294,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		for i, b := range rowBeads {
 			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
-		retireDuplicateConfiguredNamedSessionRows(store, nil, sp, cfg, cityName, rows, now, nil)
+		retireDuplicateConfiguredNamedSessionRows(city, store, testSeatWork(city, cfg, store, nil), sp, cfg, cityName, rows, now, nil)
 	}
 
 	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {
@@ -315,6 +322,11 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 			}
 			if loserBead.Metadata["state"] != "archived" {
 				t.Fatalf("%s: loser not retired to archived: state=%q", leg.name, loserBead.Metadata["state"])
+			}
+			for _, k := range []string{"wait_hold", "sleep_intent", "quarantined_until"} {
+				if loserBead.Metadata[k] != "" {
+					t.Fatalf("%s: retired loser keeps %s=%q, want the Retire cell's clear", leg.name, k, loserBead.Metadata[k])
+				}
 			}
 			// The runtime STOP must have fired and succeeded (loser no longer running).
 			if leg.sp.IsRunning(loserName) {

@@ -24,6 +24,9 @@ func ApplyFragmentGraphControls(f *Formula) {
 
 func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 	scopeControlByStep := make(map[string]string)
+	scopeControlByID := make(map[string]*Step)
+	fanoutControlByStep := make(map[string]string)
+	fanoutControlByID := make(map[string]*Step)
 	controls := make([]*Step, 0)
 	allSteps := collectGraphSteps(f.Steps)
 
@@ -62,13 +65,16 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		if controlMetadata[beadmeta.ScopeRefMetadataKey] != "" {
 			controlMetadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 		}
-		controls = append(controls, &Step{
+		control := &Step{
 			ID:       step.ID + "-fanout",
 			Title:    "Expand fanout for " + step.Title,
 			Type:     "task",
 			Needs:    []string{step.ID},
 			Metadata: controlMetadata,
-		})
+		}
+		fanoutControlByStep[step.ID] = control.ID
+		fanoutControlByID[control.ID] = control
+		controls = append(controls, control)
 	}
 
 	for _, step := range allSteps {
@@ -88,16 +94,33 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 				controlMetadata[key] = value
 			}
 		}
-		controls = append(controls, &Step{
+		control := &Step{
 			ID:       controlID,
 			Title:    "Finalize scope for " + step.Title,
 			Type:     "task",
-			Needs:    []string{step.ID},
+			Needs:    scopeCheckNeeds(step.ID, fanoutControlByStep),
 			Metadata: controlMetadata,
-		})
+		}
+		scopeControlByID[controlID] = control
+		controls = append(controls, control)
 	}
 
-	rewriteGraphStepRefs(f.Steps, scopeControlByStep)
+	// Fanout convergence gates downstream work: point every reference to an
+	// on_complete source at its minted <source>-fanout control, so a step that
+	// needs the source waits for the spawned children to converge instead of
+	// racing them. This rewrite runs BEFORE the scope-check rewrite so a scoped
+	// on_complete source gates its downstream refs directly on the fanout
+	// control; the source's minted scope-check also blocks on the fanout
+	// control (scopeCheckNeeds above), keeping scope finalization ordered
+	// behind the children as well.
+	//
+	// The fanout control is not a self-closing kind (beadmeta.ControlClosesNode
+	// returns false), so rewriteGraphRefs leaves no cycle guard for it; safety
+	// here is structural: both the fanout and scope-check controls are minted
+	// into the pending `controls` slice and appended to f.Steps only after this
+	// rewrite, so their own Needs edges are never visited.
+	rewriteGraphStepRefs(f.Steps, fanoutControlByStep, fanoutControlByID)
+	rewriteGraphStepRefs(f.Steps, scopeControlByStep, scopeControlByID)
 
 	f.Steps = append(f.Steps, controls...)
 
@@ -135,17 +158,41 @@ func needsScopeCheck(step *Step) bool {
 	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
-func rewriteGraphRefs(in []string, replacements map[string]string) []string {
+// scopeCheckNeeds returns the blockers for a source's minted scope-check: the
+// source itself, plus its <source>-fanout control when the source carries
+// OnComplete. A scoped on_complete source must not finalize its scope until
+// the fanout children have converged, so the scope latch waits on the fanout
+// control as well as the source close.
+func scopeCheckNeeds(stepID string, fanoutControlByStep map[string]string) []string {
+	needs := []string{stepID}
+	if fanoutID := fanoutControlByStep[stepID]; fanoutID != "" {
+		needs = append(needs, fanoutID)
+	}
+	return needs
+}
+
+// rewriteGraphRefs points every reference at the control that finalizes the
+// referenced step, so downstream work waits on scope convergence rather than on
+// the raw member close. referrer is the step that owns the references: a
+// reference from the very node a control closes is left naming the raw step,
+// because a node blocked by its own closer can never converge (ga-a6zy9).
+func rewriteGraphRefs(referrer *Step, in []string, replacements map[string]string, controls map[string]*Step) []string {
 	if len(in) == 0 || len(replacements) == 0 {
 		return in
 	}
 	out := make([]string, len(in))
 	for i, id := range in {
-		if replacement, ok := replacements[id]; ok {
-			out[i] = replacement
+		replacement, ok := replacements[id]
+		if !ok {
+			out[i] = id
 			continue
 		}
-		out[i] = id
+		if control := controls[replacement]; control != nil &&
+			beadmeta.ControlClosesNode(control.Metadata, referrer.ID, referrer.Metadata) {
+			out[i] = id
+			continue
+		}
+		out[i] = replacement
 	}
 	return out
 }
@@ -178,6 +225,17 @@ func graphSinkStepIDs(steps []*Step) []string {
 	}
 	for _, step := range allSteps {
 		if step == nil {
+			continue
+		}
+		// Teardown-scoped work is post-settlement by contract: its pass
+		// condition may (and for worktree cleanup does) branch on the root
+		// outcome that only workflow-finalize produces. Sinking it here closes
+		// that loop into a settlement deadlock — finalize waits on the
+		// teardown, the teardown waits on the outcome finalize would have
+		// written. Retry/ralph controls minted from a teardown step retain
+		// gc.scope_role=teardown, so one predicate covers the raw step and
+		// every control shape derived from it.
+		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 			continue
 		}
 		switch step.Metadata[beadmeta.KindMetadataKey] {
@@ -222,15 +280,15 @@ func graphSinkStepIDs(steps []*Step) []string {
 	return sinks
 }
 
-func rewriteGraphStepRefs(steps []*Step, replacements map[string]string) {
+func rewriteGraphStepRefs(steps []*Step, replacements map[string]string, controls map[string]*Step) {
 	for _, step := range steps {
 		if step == nil {
 			continue
 		}
-		step.DependsOn = rewriteGraphRefs(step.DependsOn, replacements)
-		step.Needs = rewriteGraphRefs(step.Needs, replacements)
+		step.DependsOn = rewriteGraphRefs(step, step.DependsOn, replacements, controls)
+		step.Needs = rewriteGraphRefs(step, step.Needs, replacements, controls)
 		if len(step.Children) > 0 {
-			rewriteGraphStepRefs(step.Children, replacements)
+			rewriteGraphStepRefs(step.Children, replacements, controls)
 		}
 	}
 }

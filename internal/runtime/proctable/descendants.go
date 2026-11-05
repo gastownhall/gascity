@@ -1,21 +1,38 @@
 package proctable
 
-// ProcessRecord is one process in a host-wide snapshot used for descendant
-// liveness matching.
+// ProcessRecord is one process in a host-wide snapshot. PGID and StartTime
+// make the same record usable for identity-fenced teardown as well as
+// descendant liveness matching.
 type ProcessRecord struct {
 	PID       int
 	PPID      int
-	Name      string // basename of the process's command
-	SessionID string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)
+	PGID      int
+	StartTime string // opaque host-local process-start identity
+	// SessionLeader reports that the process leads its own session: it called
+	// setsid, which is how a daemon detaches from whatever started it.
+	SessionLeader bool
+	Name          string // basename of the process's command
+	SessionID     string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)
 }
 
-// SnapshotProcesses returns a host-wide process snapshot (pid, ppid, command
-// basename) for descendant-liveness matching. Unlike ScanBySessionID, this is
-// a plain read of the process table with no GC_SESSION_ID filtering and no
-// liveScanGuard: it powers read-only liveness checks (e.g. a runtime
-// provider's ProcessAlive), not the orphan sweep that guard protects against.
+// SnapshotProcesses returns one host-wide process snapshot. Each record
+// includes pid, ppid, process group, start identity, session leadership,
+// command basename, and any readable GC_SESSION_ID. Unlike ScanBySessionID,
+// this is a plain read of the process table with no GC_SESSION_ID filtering
+// and no liveScanGuard: it powers read-only liveness checks and
+// identity-fenced teardown, not the orphan sweep that guard protects against.
 func SnapshotProcesses() ([]ProcessRecord, error) {
 	return snapshotProcesses()
+}
+
+// SnapshotProcessTree is SnapshotProcesses without Name and SessionID: the
+// pid, ppid, process group, session leadership and start identity of every
+// process, read from the kernel's process table alone. It never reads a
+// process's environment or command, so a process wedged in its own memory
+// cannot stall it, and it runs no helper program. Use it to walk a process
+// tree on a kill path.
+func SnapshotProcessTree() ([]ProcessRecord, error) {
+	return snapshotProcessTree()
 }
 
 // DescendantAlive reports whether any process reachable from roots (each root

@@ -186,6 +186,7 @@ func (s *Server) humaHandleExtMsgOutbound(ctx context.Context, input *ExtMsgOutb
 
 // humaHandleExtMsgBindingList is the Huma-typed handler for GET /v0/extmsg/bindings.
 func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgBindingListInput) (*ListOutput[extmsg.SessionBindingRecord], error) {
+	index := s.latestIndex()
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
@@ -203,7 +204,7 @@ func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgB
 		bindings = []extmsg.SessionBindingRecord{}
 	}
 	return &ListOutput[extmsg.SessionBindingRecord]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[extmsg.SessionBindingRecord]{Items: bindings, Total: len(bindings)},
 	}, nil
 }
@@ -231,7 +232,7 @@ func (s *Server) humaHandleExtMsgBind(ctx context.Context, input *ExtMsgBindInpu
 		// the delivery layer can cold-wake a session for. Persist the
 		// configured identity so the binding stays unambiguous even when
 		// a later config change makes the bare name ambiguous.
-		spec, ok, err := s.findNamedSessionSpecForTarget(s.state.CityBeadStore(), agentName)
+		spec, ok, err := s.findNamedSessionSpecForTarget(s.state.SessionsBeadStore().Store, agentName)
 		if err != nil {
 			return nil, apierr.InvalidRequest.Msg(fmt.Sprintf("resolving agent %q: %s", agentName, err))
 		}
@@ -436,6 +437,7 @@ func (s *Server) humaHandleExtMsgParticipantRemove(ctx context.Context, input *E
 
 // humaHandleExtMsgTranscriptList is the Huma-typed handler for GET /v0/extmsg/transcript.
 func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtMsgTranscriptListInput) (*ListOutput[extmsg.ConversationTranscriptRecord], error) {
+	index := s.latestIndex()
 	svc, err := s.humaExtmsgServices()
 	if err != nil {
 		return nil, err
@@ -465,7 +467,7 @@ func (s *Server) humaHandleExtMsgTranscriptList(ctx context.Context, input *ExtM
 		entries = []extmsg.ConversationTranscriptRecord{}
 	}
 	return &ListOutput[extmsg.ConversationTranscriptRecord]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[extmsg.ConversationTranscriptRecord]{Items: entries, Total: len(entries)},
 	}, nil
 }
@@ -503,6 +505,7 @@ type extmsgAdapterInfo struct {
 
 // humaHandleExtMsgAdapterList is the Huma-typed handler for GET /v0/extmsg/adapters.
 func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapterListInput) (*ListOutput[extmsgAdapterInfo], error) {
+	index := s.latestIndex()
 	reg, err := s.humaExtmsgAdapterRegistry()
 	if err != nil {
 		return nil, err
@@ -529,7 +532,7 @@ func (s *Server) humaHandleExtMsgAdapterList(_ context.Context, _ *ExtMsgAdapter
 		})
 	}
 	return &ListOutput[extmsgAdapterInfo]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  ListBody[extmsgAdapterInfo]{Items: items, Total: len(items)},
 	}, nil
 }

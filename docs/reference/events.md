@@ -151,8 +151,21 @@ the JSON shape:
 The same rule applies to both list mode and stream mode.
 
 `--payload-match` accepts top-level fields and dotted paths into nested
-payload objects. For example, use
-`--payload-match bead.issue_type=task` to match bead events by issue type.
+payload objects. Which form matches depends on the payload's shape on the
+path you are reading, and the two paths differ for `bead.*` events:
+
+- Against a running city, `gc events` reads through the API, which re-projects
+  a registered payload into its typed variant. `bead.*` decodes to
+  `BeadEventPayload`, whose single field is `bead`, so use
+  `--payload-match bead.issue_type=task` there.
+- Against a stopped city, `gc events` falls back to reading the local event
+  journal and passes each stored payload through verbatim. `bead.*` payloads
+  are stored as a raw bead snapshot, so their fields are top level: use
+  `--payload-match issue_type=task` there.
+
+A path that does not resolve is not an error — the record simply does not
+match — so the wrong form for the path returns nothing rather than reporting
+a problem.
 
 ## Machine-Readable Schema
 
@@ -178,6 +191,19 @@ For stream mode, keep these separate:
   `bead.created`, `mail.sent`, `session.woke`, and so on.
 
 `gc events` outputs the JSON payloads and envelopes, not the raw SSE frame text.
+
+## The `actor` Field
+
+`actor` names who recorded the event, which is not always who made the change
+it reports. The orchestrator records `bead.*` events from its bead cache under
+one of two actors:
+
+| Actor | Meaning |
+|-------|---------|
+| `cache-local` | A write the orchestrator made through its cache. |
+| `cache-reconcile` | A change the cache noticed when it re-read the store, such as a bead another process closed. |
+
+Neither names the agent or person who closed or changed the bead.
 
 ## Errors
 

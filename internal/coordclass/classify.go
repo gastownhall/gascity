@@ -1,6 +1,8 @@
 package coordclass
 
 import (
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -21,9 +23,40 @@ const (
 	// labelOrderTracking marks order-dispatch tracking beads.
 	// Canonical: cmd/gc/order_dispatch.go (labelOrderTracking).
 	labelOrderTracking = "order-tracking"
+	// labelWisp and labelGCWisp mark wisps (graph class). The bare form is
+	// also an order-tracking OUTCOME marker; see classifyFields.
+	labelWisp   = "wisp"
+	labelGCWisp = "gc:wisp"
 	// labelNudge marks queued-nudge beads.
 	// Canonical: cmd/gc/nudge_beads.go (nudgeBeadLabel).
 	labelNudge = "gc:nudge"
+	// labelNudgeQueue marks the DURABLE QUEUE's own beads, a family disjoint
+	// from the gc:nudge shadow beads above.
+	// Canonical: internal/storebinding/beads_nudge_queue.go (nudgeQueueLabel);
+	// pinned behaviorally against it by classify_nudge_queue_test.go, which
+	// lives in the external test package because storebinding imports this one.
+	//
+	// It needs its own arm because the nudge arm matches EXACTLY: "gc:nudge-queue"
+	// is not "gc:nudge", so a queue bead classified as ClassWork — a bead
+	// NewBeadsNudgeQueue physically writes into the nudges-class store, answering
+	// to the class that never holds it. That mismatch is not cosmetic: the
+	// infra-class migration selects its snapshot with a not-Work filter
+	// (cmd/gc/infra_class_migrate.go readInfraSnapshot), so queue beads were
+	// excluded from the copy and left behind in the work store. Fixing the arm
+	// makes that migration carry them, and makes an already-converged city's
+	// containment re-check name the ones it stranded — which is the true report.
+	labelNudgeQueue = "gc:nudge-queue"
+	// typeOp is the conversation operation journal's row type, carried by
+	// op, fact and runtime rows alike. Canonical: internal/opjournal
+	// (BeadType).
+	typeOp = "op"
+	// labelOp marks an op row. Canonical: internal/opjournal (LabelOp).
+	labelOp = "gc:op"
+	// labelFact marks a fact row. Canonical: internal/opjournal (LabelFact).
+	labelFact = "gc:fact"
+	// labelRuntime marks a conversation's runtime row. Canonical:
+	// internal/opjournal (LabelRuntime).
+	labelRuntime = "gc:rt"
 	// typeMessage is the mail bead type.
 	// Canonical: internal/mail/beadmail/beadmail.go (Type: "message").
 	typeMessage = "message"
@@ -31,9 +64,9 @@ const (
 	// label (gc:extmsg-binding, -delivery, -group, -transcript, ...).
 	// Canonical: internal/extmsg/labels.go.
 	labelExtmsgPrefix = "gc:extmsg-"
-	// typeConvoy is the convoy bead type. Convoys are work-class UNLESS marked
-	// synthetic (graph.v2 input convoys, drain-unit convoys), which fold into
-	// ClassGraph. Canonical: internal/convoy.
+	// typeConvoy is the convoy bead type. EVERY convoy is work class, including
+	// the synthetic ones the system mints as glue (graph.v2 input convoys,
+	// drain-unit convoys). Canonical: internal/convoy.
 	typeConvoy = "convoy"
 	// typeConvergence is the convergence-loop root bead type. Convergence roots
 	// carry no graph metadata, so they need an explicit arm to fold into
@@ -58,11 +91,22 @@ const (
 // classify_test.go:
 //
 //   - ClassMessaging for type=message (mail) and gc:extmsg-* (extmsg).
-//   - ClassGraph for synthetic convoys (gc.synthetic on a type=convoy bead),
-//     so graph.v2 input convoys and drain-unit convoys travel with the graph
-//     they glue, while user convoys remain ClassWork.
+//   - ClassWork for synthetic convoys (gc.synthetic / gc.synthetic_kind on a
+//     type=convoy bead), stated as an explicit arm rather than left to the
+//     default — see isSyntheticConvoy for why the arm has to be explicit and
+//     why it has to run before the workflow arm.
 //   - ClassGraph for convergence roots (type=convergence), folding the
 //     convergence engine's state in with the graph it pours.
+//
+// Op, fact and runtime rows of the conversation operation journal (type
+// "op", or the gc:op / gc:fact / gc:rt label) route to ClassSessions, so they
+// live in the same store as the conversation rows they belong to. The arm runs
+// right after the wait arm, ahead of the nudge, synthetic-convoy and workflow
+// arms, so a stray gc.root_bead_id on an op never moves it to the graph.
+//
+// The nudge arm additionally matches the durable queue's own family
+// (gc:nudge-queue) beside the shadow family (gc:nudge). That was a defect
+// rather than a design choice — see labelNudgeQueue.
 //
 // These are net-new routing decisions and carry real behavior risk. Note that
 // Class (which backend) is orthogonal to beads.StorageClass (which tier): during
@@ -74,8 +118,37 @@ const (
 // before the broad workflow arm (which matches any bead carrying gc.root_bead_id)
 // exactly as policyNameForBead does, so a tracker or session bead is never
 // misrouted to ClassGraph.
+//
+// Classify applies CurrentGeneration; ClassifyAt applies an earlier one.
 func Classify(b beads.Bead) Class {
-	return classifyFields(b.Type, b.Labels, b.Metadata, nil)
+	return ClassifyAt(b, CurrentGeneration)
+}
+
+// Generation numbers the classifier's rules. It advances whenever a change
+// moves a bead shape that already exists off ClassWork, so a record of what an
+// earlier generation selected can be re-read under the rules it was written
+// with. The storage migration's copy manifest records the generation its copy
+// classified with, and the checks judged against that manifest select
+// work-store rows with that generation (cmd/gc/infra_copy_manifest.go): a
+// later widening cannot turn rows the copy deliberately left as work into
+// strands.
+type Generation int
+
+const (
+	// GenerationLegacy is every classifier before GenerationOwnedSessions.
+	GenerationLegacy Generation = 1
+	// GenerationOwnedSessions moves two session-owned shapes off ClassWork to
+	// ClassSessions: a startup-health episode, and a wait-typed bead whose
+	// session:<session_id> label names its own session (isOwnSessionWait).
+	GenerationOwnedSessions Generation = 2
+	// CurrentGeneration is the generation Classify applies.
+	CurrentGeneration = GenerationOwnedSessions
+)
+
+// ClassifyAt returns the class generation gen of the classifier gives b. A
+// generation this build does not know yet classifies as CurrentGeneration.
+func ClassifyAt(b beads.Bead, gen Generation) Class {
+	return classifyFields(b.Type, b.Labels, b.Metadata, nil, gen)
 }
 
 // ClassifyGraphPlan returns the [Class] for an entire graph-apply plan. A
@@ -90,7 +163,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 		return ClassWork
 	}
 	for _, node := range plan.Nodes {
-		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs) == ClassGraph {
+		if classifyFields(node.Type, node.Labels, node.Metadata, node.MetadataRefs, CurrentGeneration) == ClassGraph {
 			return ClassGraph
 		}
 	}
@@ -101,7 +174,7 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 			break
 		}
 	}
-	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs)
+	return classifyFields(root.Type, root.Labels, root.Metadata, root.MetadataRefs, CurrentGeneration)
 }
 
 // classifyFields is the shared decision used by both Classify and
@@ -111,10 +184,26 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 // for a beads.Bead, whose metadata is already merged into a single map; the
 // workflow arm consults both maps so a graph step node whose only
 // gc.root_bead_id marker lives in MetadataRefs routes to ClassGraph, matching
-// the storage-tier policyNameForGraphPlan classifier.
-func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string) Class {
+// the storage-tier policyNameForGraphPlan classifier. gen gates the arms a
+// later Generation added.
+func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string, gen Generation) Class {
 	switch {
-	case isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp"):
+	// The order-tracking exclusion is the one deliberate divergence from
+	// cmd/gc's policyNameForBead, and it fixes a real collision rather than
+	// introducing one. orders.RunOutcomeWisp / WispFailed / WispCanceled stamp
+	// the BARE "wisp" label on the tracking bead as an OUTCOME marker — it
+	// records that the run dispatched a wisp, not that the bead IS one. The
+	// dispatched wisp is its own bead, carrying gc:wisp or the wisp kind and no
+	// order-tracking label, so it still classifies as graph here.
+	//
+	// Without the exclusion the wisp arm ran first and took the tracking bead,
+	// so a wisp-dispatched run answered to the graph class while ListTracking
+	// and RecentRunsAll read the orders leg only — on a class-split city those
+	// runs were invisible to them. Excluding order-tracking is narrower than
+	// reordering the arms: every other bead the wisp arm claims still reaches it
+	// first.
+	case !hasLabel(labels, labelOrderTracking) &&
+		(isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, labelGCWisp) || hasLabel(labels, labelWisp)):
 		return ClassGraph
 	case beadType == typeMessage || hasLabelPrefix(labels, labelExtmsgPrefix):
 		return ClassMessaging
@@ -122,24 +211,63 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassOrders
 	case hasLabel(labels, labelSession) || beadType == typeSession:
 		return ClassSessions
+	// A startup-health episode is the session class's quarantine record
+	// (session.SaveStartupHealthEpisode, through the sessions store). It
+	// carries no session label, so without this arm it fell to the work
+	// default: migration left it in the work store and quarantine reset at
+	// cutover. Ahead of the workflow arm, like the session arm.
+	case gen >= GenerationOwnedSessions && beadType == typeStartupHealthEpisode:
+		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions
-	case hasLabel(labels, labelNudge):
+	case beadType == typeOp || hasLabel(labels, labelOp) || hasLabel(labels, labelFact) ||
+		hasLabel(labels, labelRuntime):
+		return ClassSessions
+	case hasLabel(labels, labelNudge) || hasLabel(labels, labelNudgeQueue):
 		return ClassNudges
-	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
-		return ClassGraph
+	// Ahead of the workflow arm on purpose: a synthetic convoy is glue for a
+	// graph and can carry that graph's markers, and the workflow arm would take
+	// it on any one of them. See isSyntheticConvoy.
 	case beadType == typeConvoy && isSyntheticConvoy(metadata):
+		return ClassWork
+	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
 		return ClassGraph
 	case beadType == typeConvergence:
 		return ClassGraph
+	// A coordination-owned session wait that carries no class label of its
+	// own (CoordinationOwnedLabel). AFTER every graph arm on purpose: a graph
+	// gate step can carry a session label, and it stays graph.
+	//
+	// There is deliberately NO arm for a bare order-run: label. Order run
+	// records also carry order-tracking (the orders arm above), roots poured
+	// by an order are graph, and agents file real work that inherits the
+	// label from the patrol that found it — 150 work beads across four
+	// single-store cities in production (or-l50geh, pl-vm0tw, tr-b6glw). An
+	// arm would move them to orders and make `gc bd create` refuse them on a
+	// split city.
+	case gen >= GenerationOwnedSessions && isOwnSessionWait(beadType, labels, metadata):
+		return ClassSessions
 	default:
 		return ClassWork
 	}
 }
 
+// isOwnSessionWait reports a durable session wait written without gc:wait
+// (session.IsWaitBead): a wait-typed bead whose session:<session_id> label
+// names its own session_id. The per-entity label on any other shape is not a
+// class signal. Both reads go through the vocabulary table, so TouchesClass
+// sees a write of either.
+func isOwnSessionWait(beadType string, labels []string, metadata map[string]string) bool {
+	if beadType != typeWait && beadType != typeWaitLegacy {
+		return false
+	}
+	sessionID := classMeta(metadata, metaSessionID)
+	return sessionID != "" && hasLabel(labels, labelSessionPrefix+sessionID)
+}
+
 // isWispMetadata mirrors bead_policy_store.isWispPolicyMetadata.
 func isWispMetadata(metadata map[string]string) bool {
-	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
+	return classMeta(metadata, beadmeta.KindMetadataKey) == beadmeta.KindWisp
 }
 
 // isWorkflowMetadata mirrors bead_policy_store.isWorkflowPolicyMetadata: a bead
@@ -151,24 +279,116 @@ func isWorkflowMetadata(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
-		metadata[beadmeta.FormulaContractMetadataKey] == formulaContractGraphV2 ||
-		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
+	return classMeta(metadata, beadmeta.KindMetadataKey) == beadmeta.KindWorkflow ||
+		classMeta(metadata, beadmeta.FormulaContractMetadataKey) == formulaContractGraphV2 ||
+		strings.TrimSpace(classMeta(metadata, beadmeta.RootBeadIDMetadataKey)) != ""
 }
 
 // isSyntheticConvoy reports whether a convoy bead is system-minted glue
 // (graph.v2 input convoy or drain-unit convoy) rather than a human/sling convoy.
+//
+// It exists to route those convoys to ClassWork, which is where the default
+// would put them anyway — so the arm looks redundant and is not. Two things
+// make it load-bearing:
+//
+// It has to run BEFORE the workflow arm. A synthetic convoy is minted as glue
+// for a specific graph and carries that graph's identifying metadata (a
+// drain-unit convoy names its control and its parent convoy; nothing stops a
+// future one from carrying gc.root_bead_id, which is all the workflow arm
+// needs). Left to the default, the classification of a convoy would depend on
+// which incidental keys happen to be stamped on it.
+//
+// And a misclassification here is not a routing preference, it is a hard
+// failure. A convoy exists to hold `tracks` edges to its members, its members
+// are work beads, and convoy.TrackItemIn refuses an edge whose member is owned
+// by another class because a dep row cannot reference an id its own store
+// cannot resolve. A synthetic convoy classified anywhere but Work is a convoy
+// that can never track anything.
 func isSyntheticConvoy(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	if strings.TrimSpace(metadata[beadmeta.SyntheticMetadataKey]) != "" {
+	if strings.TrimSpace(classMeta(metadata, beadmeta.SyntheticMetadataKey)) != "" {
 		return true
 	}
-	return strings.TrimSpace(metadata[beadmeta.SyntheticKindMetadataKey]) != ""
+	return strings.TrimSpace(classMeta(metadata, beadmeta.SyntheticKindMetadataKey)) != ""
+}
+
+// The class-relevant vocabulary: every label, label prefix and metadata key
+// Classify can see. It is the ONE table both Classify and Mutation.TouchesClass
+// read. Classify reads labels and metadata only through hasLabel,
+// hasLabelPrefix and classMeta, and each of those answers as if a label, prefix
+// or key outside the table were absent. So a new arm that reads something
+// outside the table never fires (and the golden table fails), and anything a
+// write touches outside the table cannot change a class — which is what lets
+// TouchesClass skip the before-read for it.
+//
+// The own-session-wait arm puts the session: prefix and the session_id key in
+// it. The arm matches only the label naming the bead's own session_id, but
+// which label that is depends on the bead, so TouchesClass treats every
+// session: label write as live: an over-approximation that costs a write a
+// before-read, never a missed flip.
+var (
+	classifierLabels = map[string]bool{
+		labelWisp: true, labelGCWisp: true, labelOrderTracking: true, labelSession: true,
+		labelWait: true, labelOp: true, labelFact: true, labelRuntime: true,
+		labelNudge: true, labelNudgeQueue: true,
+	}
+	classifierLabelPrefixes = []string{labelExtmsgPrefix, labelSessionPrefix}
+	classifierMetadataKeys  = map[string]bool{
+		beadmeta.KindMetadataKey: true, beadmeta.FormulaContractMetadataKey: true,
+		beadmeta.RootBeadIDMetadataKey: true, beadmeta.SyntheticMetadataKey: true,
+		beadmeta.SyntheticKindMetadataKey: true, metaSessionID: true,
+	}
+)
+
+// ClassifierLabels returns the labels Classify matches exactly. It and its two
+// siblings return copies of the class-relevant vocabulary, for tests that
+// enumerate it.
+func ClassifierLabels() []string { return sortedKeys(classifierLabels) }
+
+// ClassifierLabelPrefixes returns the label prefixes Classify matches.
+func ClassifierLabelPrefixes() []string { return append([]string(nil), classifierLabelPrefixes...) }
+
+// ClassifierMetadataKeys returns the metadata keys Classify reads.
+func ClassifierMetadataKeys() []string { return sortedKeys(classifierMetadataKeys) }
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isClassifierLabel reports whether label l is in the class-relevant
+// vocabulary.
+func isClassifierLabel(l string) bool {
+	if classifierLabels[l] {
+		return true
+	}
+	for _, p := range classifierLabelPrefixes {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// classMeta reads metadata key k as Classify sees it: "" for a key outside the
+// table.
+func classMeta(metadata map[string]string, k string) string {
+	if !classifierMetadataKeys[k] {
+		return ""
+	}
+	return metadata[k]
 }
 
 func hasLabel(labels []string, want string) bool {
+	if !isClassifierLabel(want) {
+		return false
+	}
 	for _, l := range labels {
 		if l == want {
 			return true
@@ -178,6 +398,9 @@ func hasLabel(labels []string, want string) bool {
 }
 
 func hasLabelPrefix(labels []string, prefix string) bool {
+	if !slices.Contains(classifierLabelPrefixes, prefix) {
+		return false
+	}
 	for _, l := range labels {
 		if strings.HasPrefix(l, prefix) {
 			return true

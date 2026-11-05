@@ -7,13 +7,25 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// RunMembers returns the beads that belong to the run rooted at rootID: the root
-// itself plus every child that references it by parent id, gc.root_bead_id
-// metadata, or a dotted-id prefix. It is the exported form of the member
-// selection snapshotForRun applies, so a consumer (e.g. the typed /v0 runs API)
-// can list a run's steps off a folded bead set without re-deriving the
-// membership rule. Order follows beadList (root-first is not guaranteed; callers
-// that need the root separately match on id). Returns nil for an empty rootID.
+// RunMembers returns the beads that belong to the run rooted at rootID. The
+// rule is beads.MembershipDirectRootID — the root plus every bead carrying
+// gc.root_bead_id == rootID — widened by two extras that only a run projection
+// needs:
+//
+//   - a bead whose ParentID is the root (one level, not the transitive parent
+//     closure), and
+//   - a bead whose id starts with "<rootID>.", the dotted shape run/iteration
+//     ids take.
+//
+// It is deliberately NOT beads.MembershipDepReachable: a run's spec sidecars
+// carry no dependency edges, so a dep walk would drop them and still report a
+// plausible step count. See beads.Membership for the measurement.
+//
+// It is the exported form of the member selection snapshotForRun applies, so a
+// consumer (e.g. the typed /v0 runs API) can list a run's steps off a folded
+// bead set without re-deriving the membership rule. Order follows beadList
+// (root-first is not guaranteed; callers that need the root separately match on
+// id). Returns nil for an empty rootID.
 func RunMembers(beadList []beads.Bead, rootID string) []beads.Bead {
 	if rootID == "" {
 		return nil

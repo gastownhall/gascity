@@ -1,12 +1,16 @@
 package dispatch
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
@@ -191,7 +195,7 @@ func TestRunRalphCheckPackRelativeCheckPathWorkDirFallback(t *testing.T) {
 		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
 	})
 
-	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), control, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v (the pack-relative check_path should fall back to the store root)", err)
 	}
@@ -237,7 +241,7 @@ func TestRunRalphCheckWorkDirRelativeCheckPathKeepsPrecedence(t *testing.T) {
 		Metadata: map[string]string{"gc.kind": "scope", "gc.root_bead_id": root.ID},
 	})
 
-	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), control, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v", err)
 	}
@@ -281,7 +285,7 @@ func TestRunRalphCheckEnvTracksSubject(t *testing.T) {
 		t.Fatalf("test setup: subject and control share ID %q", subject.ID)
 	}
 
-	result, err := runRalphCheck(store, control, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), control, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v", err)
 	}
@@ -326,7 +330,7 @@ func TestProcessRalphCheckHardSubjectFailureTerminatesWithoutRetry(t *testing.T)
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -351,9 +355,9 @@ func TestProcessRalphCheckHardSubjectFailureTerminatesWithoutRetry(t *testing.T)
 	}
 
 	rootID := run1.Metadata["gc.root_bead_id"]
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
-		t.Fatalf("listByWorkflowRoot: %v", err)
+		t.Fatalf("beads.DirectMembers: %v", err)
 	}
 	for _, bead := range all {
 		if bead.Metadata["gc.attempt"] == "2" {
@@ -381,7 +385,7 @@ func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -395,9 +399,9 @@ func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
 	}
 
 	rootID := run1.Metadata["gc.root_bead_id"]
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
-		t.Fatalf("listByWorkflowRoot: %v", err)
+		t.Fatalf("beads.DirectMembers: %v", err)
 	}
 	sawAttempt2 := false
 	for _, bead := range all {
@@ -408,5 +412,50 @@ func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
 	}
 	if !sawAttempt2 {
 		t.Fatalf("soft failure must clone attempt 2; none found under root %s", rootID)
+	}
+}
+
+// TestProcessRalphCheckFinishesInterruptedSettle pins the re-drive half of the
+// ga-up0tmv ordering: the check settles its logical bead before closing
+// itself, so an open check over a closed logical bead is a settle that was
+// interrupted between the two writes. Re-processing must close the check with
+// the logical bead's verdict and must not re-run the gate, which could
+// disagree with a verdict that is already durable.
+func TestProcessRalphCheckFinishesInterruptedSettle(t *testing.T) {
+	t.Parallel()
+
+	for _, outcome := range []string{beadmeta.OutcomePass, beadmeta.OutcomeFail} {
+		t.Run(outcome, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			marker := filepath.Join(cityPath, "gate-ran")
+			checkPath := writeCheckScript(t, cityPath, "check.sh", "#!/bin/bash\ntouch '"+marker+"'\nexit 0\n")
+			store, logical, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 3)
+			if err := store.Close(run1.ID); err != nil {
+				t.Fatalf("close run1: %v", err)
+			}
+			if err := store.SetMetadata(logical.ID, beadmeta.OutcomeMetadataKey, outcome); err != nil {
+				t.Fatalf("stamp logical outcome: %v", err)
+			}
+			if err := store.Close(logical.ID); err != nil {
+				t.Fatalf("close logical: %v", err)
+			}
+
+			result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl(check1): %v", err)
+			}
+			if !result.Processed || result.Action != "logical-settled" {
+				t.Fatalf("result = %+v, want processed logical-settled", result)
+			}
+			checkAfter := mustGetBead(t, store, check1.ID)
+			if checkAfter.Status != "closed" || checkAfter.Metadata[beadmeta.OutcomeMetadataKey] != outcome {
+				t.Fatalf("check = status %q outcome %q, want closed/%s", checkAfter.Status, checkAfter.Metadata[beadmeta.OutcomeMetadataKey], outcome)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("gate ran for a check whose logical bead was already settled (stat err=%v)", err)
+			}
+		})
 	}
 }

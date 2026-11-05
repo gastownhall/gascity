@@ -175,7 +175,7 @@ func TestDisableAndPurgeBoundsInitialAndPostUploaderStateLocks(t *testing.T) {
 		call := startDisableAndPurge(t, service)
 		select {
 		case <-atUploader:
-		case <-time.After(testutil.GoroutineRaceTimeout):
+		case <-time.After(hangBudget):
 			t.Fatal("off did not reach uploader phase")
 		}
 		pending := readStateFixture(t, home)
@@ -889,7 +889,7 @@ func TestConcurrentOffPendingObserverAcceptsPeerCompletionBeforeInitialStateLock
 	secondCall := startDisableAndPurge(t, serviceB)
 	select {
 	case <-enteredStateLock:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("second off did not pause before initial state lock")
 	}
 	if current := readStateFixture(t, home); current != owner {
@@ -945,7 +945,7 @@ func TestConcurrentOffPendingObserverDoesNotClaimDurabilityAfterPeerEnable(t *te
 	secondCall := startDisableAndPurge(t, serviceB)
 	select {
 	case <-enteredStateLock:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("second off did not pause before initial state lock")
 	}
 	peer, peerErr := serviceA.DisableAndPurge(context.Background())
@@ -1002,7 +1002,7 @@ func TestConcurrentOffNonPendingCASLoserIsStateConflictWithoutDurabilityClaim(t 
 			loserCall := startDisableAndPurge(t, serviceB)
 			select {
 			case <-enteredStateLock:
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("CAS loser did not pause before initial state lock")
 			}
 			serviceA := mustOpenTestService(t, defaultTestServiceDependencies(home, 2))
@@ -1060,7 +1060,7 @@ func TestDisableAndPurgeMakesBlockedUploadResponseStaleWithoutSettlement(t *test
 			}()
 			select {
 			case <-sendStarted:
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("upload did not enter sender")
 			}
 
@@ -1073,7 +1073,7 @@ func TestDisableAndPurgeMakesBlockedUploadResponseStaleWithoutSettlement(t *test
 			offDone := startDisableAndPurge(t, service)
 			select {
 			case <-offAtBarrier:
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("off did not reach uploader barrier")
 			}
 			state := readStateFixture(t, home)
@@ -1084,7 +1084,7 @@ func TestDisableAndPurgeMakesBlockedUploadResponseStaleWithoutSettlement(t *test
 			var upload uploadCallResult
 			select {
 			case upload = <-uploadDone:
-			case <-time.After(testutil.GoroutineRaceTimeout):
+			case <-time.After(hangBudget):
 				t.Fatal("timed out waiting for stale upload")
 			}
 			if !errors.Is(upload.err, ErrStateChangedConcurrently) || upload.result.outcome != uploadRunStale || upload.result.events != 1 {
@@ -1301,6 +1301,90 @@ func TestDisableAndPurgeFilesystemFailureKeepsExactOwnerForRetry(t *testing.T) {
 	requireCleanDisabledTree(t, home)
 }
 
+// A peer that re-persists the byte-identical owner record between the disable
+// write's rename and the authority-minting read-back must surface as a
+// conflict, not be silently adopted as this process's own record. Before
+// authority was bound to the installed incarnation, this window let two
+// holders revalidate successfully against the same inode — the exact hole the
+// same-numeric-ABA case guards at revalidation time, one step earlier.
+func TestDisableAndPurgeDetectsByteIdenticalRecordSwapAtAuthorityMint(t *testing.T) {
+	home, service, _ := newRecordServiceFixture(t, testEventIDThree)
+	configPath := filepath.Join(home.Root(), configFileName)
+	var swapped atomic.Bool
+	var swapErr error
+	service.deps.storageHooks.afterAtomicWrite = func(path string, outcome storageWriteState) {
+		if path != configPath || outcome != storageWriteAppliedDurable || swapped.Load() {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		state, err := decodePersistedState(data)
+		if err != nil || state.Preference != preferenceDisabled || state.CleanupKind != cleanupDisable {
+			return
+		}
+		swapped.Store(true)
+		temp := path + ".aba-swap"
+		if err := os.WriteFile(temp, data, 0o600); err != nil {
+			swapErr = err
+			return
+		}
+		swapErr = os.Rename(temp, path)
+	}
+	_, err := service.DisableAndPurge(context.Background())
+	if swapErr != nil || !swapped.Load() {
+		t.Fatalf("byte-identical swap: performed=%v err=%v", swapped.Load(), swapErr)
+	}
+	requirePurgeErrorClass(t, err, PurgeErrorStateChanged)
+}
+
+// The different-bytes variant of the mint-window race: a peer installing a
+// MUTATED record between the disable write's rename and the read-back must
+// classify as a concurrent state change, not as a generic disable-write
+// failure. This is the interleaving TestDisableAndPurgeRejectsUnprovenPeerSuccessor
+// hits nondeterministically when its unlocked successor write lands before
+// authority is minted.
+func TestDisableAndPurgeClassifiesMutatedRecordSwapAtAuthorityMint(t *testing.T) {
+	home, service, _ := newRecordServiceFixture(t, testEventIDThree)
+	configPath := filepath.Join(home.Root(), configFileName)
+	var swapped atomic.Bool
+	var swapErr error
+	service.deps.storageHooks.afterAtomicWrite = func(path string, outcome storageWriteState) {
+		if path != configPath || outcome != storageWriteAppliedDurable || swapped.Load() {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		state, err := decodePersistedState(data)
+		if err != nil || state.Preference != preferenceDisabled || state.CleanupKind != cleanupDisable {
+			return
+		}
+		swapped.Store(true)
+		state.RequiredNoticeVersion++
+		mutated, err := encodePersistedState(state)
+		if err != nil {
+			swapErr = err
+			return
+		}
+		temp := path + ".mutated-swap"
+		if err := os.WriteFile(temp, mutated, 0o600); err != nil {
+			swapErr = err
+			return
+		}
+		swapErr = os.Rename(temp, path)
+	}
+	_, err := service.DisableAndPurge(context.Background())
+	if swapErr != nil || !swapped.Load() {
+		t.Fatalf("mutated swap: performed=%v err=%v", swapped.Load(), swapErr)
+	}
+	requirePurgeErrorClass(t, err, PurgeErrorStateChanged)
+}
+
 func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -1341,7 +1425,7 @@ func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 			// Peer setup under the barrier can stretch under make test -p=N CPU
 			// contention; keep the quiescence budget above GoroutineRaceTimeout.
 			service.deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
-			call := startDisableAndPurge(t, service)
+			call := startDisableAndPurgeAtUploaderBarrier(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1666,7 +1750,7 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			}
 			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
-			call := startDisableAndPurge(t, service)
+			call := startDisableAndPurgeAtUploaderBarrier(t, service)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1743,7 +1827,7 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		return nil
 	}
 	service := mustOpenTestService(t, deps)
-	call := startDisableAndPurge(t, service)
+	call := startDisableAndPurgeAtUploaderBarrier(t, service)
 	owner := waitForMetricsState(t, home, func(state persistedState) bool {
 		return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 	})
@@ -1768,7 +1852,8 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		t.Fatalf("replace peer successor during proof: %v", replaceErr)
 	}
 	if !replaced.Load() {
-		t.Fatal("peer successor was not replaced during the clean-tree proof")
+		t.Fatalf("peer successor was not replaced during the clean-tree proof; purge outcome = %+v err = %v",
+			outcome.result, outcome.err)
 	}
 	requirePurgeErrorClass(t, outcome.err, PurgeErrorStateChanged)
 	if outcome.result.Outcome != PurgeCleanupPending || !outcome.result.DisabledDurable {
@@ -2200,10 +2285,26 @@ func startDisableAndPurge(t *testing.T, service *Service) <-chan purgeCallResult
 	return result
 }
 
-// waitForTestArm blocks until armed is closed, or until GoroutineRaceTimeout, so a
+// startDisableAndPurgeAtUploaderBarrier starts DisableAndPurge and returns
+// once it is about to wait for the uploader lock. The disable record becomes
+// visible the moment beginDisable renames it into place, but beginDisable still
+// syncs and reads it back under the state lock. A test that plays a peer by
+// writing config without that lock must wait for this point, or its write can
+// land inside beginDisable's read-back window and fail the purge at
+// disable-write instead of reaching the post-barrier peer checks.
+func startDisableAndPurgeAtUploaderBarrier(t *testing.T, service *Service) <-chan purgeCallResult {
+	t.Helper()
+	attempts := make(chan struct{}, 1)
+	service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
+	call := startDisableAndPurge(t, service)
+	receiveUploaderAttempt(t, attempts)
+	return call
+}
+
+// waitForTestArm blocks until armed is closed, or until hangBudget, so a
 // storage hook cannot inject before the test arms it under -p=N CPU starvation.
 func waitForTestArm(armed <-chan struct{}) bool {
-	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	timer := time.NewTimer(hangBudget)
 	defer timer.Stop()
 	select {
 	case <-armed:
@@ -2218,7 +2319,7 @@ func receivePurgeCall(t *testing.T, call <-chan purgeCallResult) purgeCallResult
 	select {
 	case result := <-call:
 		return result
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for DisableAndPurge")
 		return purgeCallResult{}
 	}
@@ -2228,14 +2329,14 @@ func receiveUploaderAttempt(t *testing.T, attempts <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-attempts:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for uploader-lock attempt")
 	}
 }
 
 func waitForMetricsState(t *testing.T, home gchome.ProductUsageHome, predicate func(persistedState) bool) persistedState {
 	t.Helper()
-	deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
+	deadline := time.Now().Add(hangBudget)
 	for time.Now().Before(deadline) {
 		loaded := readStateReadOnlyFixture(home)
 		if loaded.err == nil && loaded.present && predicate(loaded.state) {

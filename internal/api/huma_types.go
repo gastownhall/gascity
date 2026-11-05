@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 )
 
@@ -27,7 +28,7 @@ import (
 // silently blocking.
 type BlockingParam struct {
 	Index string `query:"index" doc:"Event sequence number; when provided, blocks until a newer event arrives." required:"false"`
-	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m." required:"false"`
+	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m." required:"false"`
 }
 
 // Resolve validates the blocking-query parameters. Implements huma.Resolver;
@@ -161,22 +162,40 @@ type ListBody[T any] struct {
 
 // ListOutput is a generic output type for list endpoints. It sets the
 // X-GC-Index header and returns items in the standard list envelope.
-// CacheAgeS reports the age of the CachingStore snapshot that produced
-// the response (0 if the handler did not read from a caching store or
-// the age is unknown); read-path CLI commands surface this as
-// _cache_age_s in --json output and as a stale-read banner > 30 s.
+// CacheAgeS and CacheRefresh report the server's bead-cache freshness
+// (cacheAgeSeconds): the seconds since the cache last took in fresh data from
+// its store (the cache's age, not each row's), its re-scan interval, and what
+// bounds the age. Only a handler whose body is read from the cache sets them,
+// and not every such handler does; they are zero when the handler does not,
+// the store has no cache, or the cache has never been primed. Read-path CLI commands surface
+// the age as _cache_age_s in --json output, and print a cache-age footer on
+// stderr once the age passes twice the reported interval.
 type ListOutput[T any] struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      ListBody[T]
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body ListBody[T]
 }
 
 // IndexOutput is a generic output type for single-resource endpoints
-// that include the X-GC-Index header. CacheAgeS mirrors ListOutput.
+// that include the X-GC-Index header. CacheAgeS and CacheRefresh mirror
+// ListOutput.
+//
+// One handler widens that meaning: /status may serve a stale-while-revalidate
+// body (ra-4u2eqc, handler_status.go). When it does, CacheAgeS reports the
+// GREATER of the bead cache's age and the age of the cached response entry
+// itself, and the refresh state is rebuilding when the entry's age is the
+// greater. Reporting only the cache's age there would let a recently lagging
+// cache under-report true staleness. A ?fresh=true read is served such a
+// body only when the build it waits for is not done statusFreshBuildWait
+// after the read arrived; otherwise its body is built for it, so CacheAgeS
+// carries only the bead cache's age (0 when that body is not read from the
+// cache) and is never rebuilding.
 type IndexOutput[T any] struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
-	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      T
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body T
 }
 
 // --- Health / Status output types ---
@@ -210,6 +229,10 @@ type StatusWorkCounts struct {
 	InProgress int `json:"in_progress" doc:"Number of in-progress work items."`
 	Ready      int `json:"ready" doc:"Number of ready work items."`
 	Open       int `json:"open" doc:"Number of open work items."`
+	// SuspendedRigsExcluded counts the rigs these counts leave out: a
+	// suspended rig's store is not read, because a read restarts its retired
+	// bd proxy.
+	SuspendedRigsExcluded int `json:"suspended_rigs_excluded,omitempty" doc:"Number of suspended rigs left out of these counts: a suspended rig's store is not read."`
 }
 
 // StatusMailCounts holds mail counts for the status endpoint.
@@ -229,6 +252,7 @@ type StatusMailCounts struct {
 // sentinels in their originating package and matched here.
 func mutationError(err error) error {
 	msg := err.Error()
+	var providerCatalogErr *config.ProviderCatalogError
 	switch {
 	case errors.Is(err, configedit.ErrNotFound):
 		return huma.Error404NotFound(msg)
@@ -237,6 +261,14 @@ func mutationError(err error) error {
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
+		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrPatchTargetNotFound):
+		// A patch named a target absent from the merged config; the edit was
+		// rolled back, so this is the client's error.
+		return huma.Error400BadRequest(msg)
+	case errors.As(err, &providerCatalogErr):
+		// The edit referenced a provider the city's catalog does not define;
+		// the config was rolled back, so this is the client's error.
 		return huma.Error400BadRequest(msg)
 	default:
 		return huma.Error500InternalServerError(msg)

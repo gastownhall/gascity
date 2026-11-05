@@ -110,6 +110,83 @@ func TestProviderProcessPassthroughEnvKeepsExplicitLocaleAndXDG(t *testing.T) {
 	}
 }
 
+// The controller token is controller scope. Every session-env builder starts
+// from this map, and the map is an OVERLAY on an environment the child already
+// inherits — the tmux server's global env, or os.Environ() on the
+// subprocess/ACP paths — so an omitted key is an inherited key.
+// Present-and-empty is the only value that withholds it.
+func TestProviderProcessPassthroughEnvPinsControllerOnlyKeysEmpty(t *testing.T) {
+	for _, key := range ControllerOnlyEnvKeys {
+		t.Setenv(key, "controller-scope-value")
+	}
+
+	got := ProviderProcessPassthroughEnv()
+
+	for _, key := range ControllerOnlyEnvKeys {
+		val, ok := got[key]
+		if !ok {
+			t.Errorf("ProviderProcessPassthroughEnv() omits %s; want present and empty so it overrides the inherited value", key)
+			continue
+		}
+		if val != "" {
+			t.Errorf("ProviderProcessPassthroughEnv()[%s] = %q, want empty", key, val)
+		}
+	}
+}
+
+// A controller started from an agent's pane carries that pane's demand-spawn
+// keys, and they describe that pane's spawn, not the session being built. The
+// keys are spelled out rather than read from DemandSpawnEnvKeys, so a key
+// dropped from the list fails here (gastownhall/gascity#5738).
+func TestProviderProcessPassthroughEnvWithholdsInheritedDemandSpawnKeys(t *testing.T) {
+	keys := []string{
+		"GC_SPAWN_ORIGIN",
+		"GC_TRIGGER_BEAD_ID",
+		"GC_TRIGGER_WORK_BEAD_ID",
+		"GC_TRIGGER_BEAD_STORE_REF",
+		"GC_TRIGGER_WORK_STORE_REF",
+	}
+	for _, key := range keys {
+		t.Setenv(key, "ga-foreign")
+	}
+
+	got := ProviderProcessPassthroughEnv()
+
+	for _, key := range keys {
+		if val, ok := got[key]; !ok || val != "" {
+			t.Errorf("ProviderProcessPassthroughEnv()[%s] = (%q, present=%v), want (\"\", true): an omitted key is an inherited key", key, val, ok)
+		}
+		if !IsDemandSpawnEnv(key) {
+			t.Errorf("IsDemandSpawnEnv(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"GC_TRIGGER", "GC_SPAWN_ORIGIN_X", "GC_BEAD_ID", "GC_SESSION_ID"} {
+		if IsDemandSpawnEnv(key) {
+			t.Errorf("IsDemandSpawnEnv(%q) = true, want false (exact names only)", key)
+		}
+	}
+}
+
+// Pinning the keys is not enough on its own: config-authored values are expanded
+// against the controller process, so "$GC_CONTROLLER_TOKEN" would copy the token
+// into a session variable no key-level guard is watching.
+func TestExpandSessionEnvValueMasksControllerOnlyKeys(t *testing.T) {
+	t.Setenv("GC_CONTROLLER_TOKEN", "super-secret-controller-token")
+	t.Setenv("GC_CONTROLLER_TRACE", "on")
+
+	for _, tc := range []struct{ in, want string }{
+		{"$GC_CONTROLLER_TOKEN", ""},
+		{"${GC_CONTROLLER_TOKEN}", ""},
+		{"Bearer $GC_CONTROLLER_TOKEN", "Bearer "},
+		{"$GC_CONTROLLER_TRACE", "on"},
+		{"trace=${GC_CONTROLLER_TRACE}", "trace=on"},
+	} {
+		if got := ExpandSessionEnvValue(tc.in); got != tc.want {
+			t.Errorf("ExpandSessionEnvValue(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TZ passes through to spawned provider sessions so in-session time
 // reasoning (e.g. `gc order check`) agrees with the supervisor's wall clock
 // instead of defaulting to UTC in the constructed env.

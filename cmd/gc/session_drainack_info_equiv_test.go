@@ -10,11 +10,11 @@ import (
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
-// refRunningSessionMatchesPendingCreate is the raw-metadata reference
-// implementation of the runningSessionMatchesPendingCreate classifier whose
-// production raw form was deleted in WI-6 R4. It is inlined here so the Info twin
-// is pinned against an independent bead read (self-sufficient oracle, not a
-// tautological Info-vs-Info compare).
+// refRunningSessionMatchesPendingCreate is a raw-metadata reference for the
+// ours verdict of attributePendingCreateRuntime, kept from the classifier whose
+// production raw form was deleted in WI-6 R4. It pins the Info form against an
+// independent bead read (self-sufficient oracle, not a tautological
+// Info-vs-Info compare) on runtimes whose identity reads succeed.
 func refRunningSessionMatchesPendingCreate(b beads.Bead, sessionName string, sp runtime.Provider) bool {
 	if sp == nil {
 		return false
@@ -163,8 +163,8 @@ func TestDrainAckClassifierInfoEquivalence(t *testing.T) {
 					t.Errorf("assignedWorkDrainCancelReason[dt]: info=%q bead=%q", got, want)
 				}
 
-				if got, want := runningSessionMatchesPendingCreateInfo(info, name, sp), refRunningSessionMatchesPendingCreate(b, name, sp); got != want {
-					t.Errorf("runningSessionMatchesPendingCreate: info=%v bead=%v", got, want)
+				if got, want := attributePendingCreateRuntime(info, name, sp) == pendingCreateRuntimeOurs, refRunningSessionMatchesPendingCreate(b, name, sp); got != want {
+					t.Errorf("attributePendingCreateRuntime ours: info=%v bead=%v", got, want)
 				}
 			})
 		}
