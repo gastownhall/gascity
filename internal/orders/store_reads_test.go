@@ -782,3 +782,39 @@ func runsContain(runs []OrderRun, id string) bool {
 	}
 	return false
 }
+
+// TestClosedRunsCreatedBeforeSkipsInWindowBeads checks the retention cutoff read:
+// retention must be able to ask the store for rows created before the cutoff
+// instead of hydrating every closed tracking bead.
+func TestClosedRunsCreatedBeforeSkipsInWindowBeads(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-24 * time.Hour)
+	mem := beads.NewMemStoreFrom(10, []beads.Bead{
+		{ID: "old", Title: "order:a", Status: "closed", CreatedAt: cutoff.Add(-time.Hour), Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "newer-old", Title: "order:a", Status: "closed", CreatedAt: cutoff.Add(-time.Minute), Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "fresh", Title: "order:a", Status: "closed", CreatedAt: cutoff.Add(time.Hour), Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "exact", Title: "order:a", Status: "closed", CreatedAt: cutoff, Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "open-old", Title: "order:a", Status: "open", CreatedAt: cutoff.Add(-2 * time.Hour), Labels: []string{"order-run:a", "order-tracking"}},
+	}, nil)
+	st := NewStore(beads.OrdersStore{Store: mem})
+
+	runs, err := st.ClosedRunsCreatedBefore(cutoff)
+	if err != nil {
+		t.Fatalf("ClosedRunsCreatedBefore: %v", err)
+	}
+	if len(runs) != 2 || runs[0].ID != "newer-old" || runs[1].ID != "old" {
+		got := make([]string, len(runs))
+		for i, run := range runs {
+			got[i] = run.ID
+		}
+		t.Fatalf("ClosedRunsCreatedBefore ids = %v, want [newer-old old]", got)
+	}
+
+	all, err := st.ClosedRunsForRetention()
+	if err != nil {
+		t.Fatalf("ClosedRunsForRetention: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("ClosedRunsForRetention returned %d runs, want the 4 closed beads", len(all))
+	}
+}
