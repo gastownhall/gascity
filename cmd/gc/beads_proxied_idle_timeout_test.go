@@ -31,7 +31,7 @@ func TestDefaultRigBdStoreInitPassesDefaultIdleTimeoutOnProxiedScopes(t *testing
 	}
 	logPath := filepath.Join(city, "bd-args")
 	fakeBd := filepath.Join(city, "bd")
-	if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
+	if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\nif [ \"$1\" = init ]; then printf '%s %s\\n' \"${BD_DOLT_SHARED_SERVER-unset}\" \"${BEADS_DOLT_SHARED_SERVER-unset}\" >> \""+logPath+".env\"; fi\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("BD_BIN", fakeBd)
@@ -51,6 +51,24 @@ func TestDefaultRigBdStoreInitPassesDefaultIdleTimeoutOnProxiedScopes(t *testing
 	want := "--proxied-server-idle-timeout " + (config.ProxiedIdleTimeout{Duration: config.DefaultProxiedIdleTimeout}).BdFlagValue() + " "
 	if !strings.Contains(invocation, want) {
 		t.Fatalf("proxied init = %s, want %q", invocation, want)
+	}
+	assertBdInitSharedServerOptOut(t, logPath)
+}
+
+// assertBdInitSharedServerOptOut checks the environment the fake bd recorded
+// for every `bd init` it was asked to run: both shared-server switches pinned
+// off, so a user-level dolt.shared-server: true cannot relocate the new scope.
+func assertBdInitSharedServerOptOut(t *testing.T, logPath string) {
+	t.Helper()
+	data, err := os.ReadFile(logPath + ".env")
+	if err != nil {
+		t.Fatalf("the fake bd recorded no environment: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, got := range lines {
+		if want := "false 0"; got != want {
+			t.Fatalf("BD_DOLT_SHARED_SERVER / BEADS_DOLT_SHARED_SERVER at bd init = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -97,7 +115,7 @@ func TestDefaultRigBdStoreKeepsDirectServerForNonBdContractCity(t *testing.T) {
 	}
 	logPath := filepath.Join(city, "bd-args")
 	fakeBd := filepath.Join(city, "bd")
-	if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
+	if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\nif [ \"$1\" = init ]; then printf '%s %s\\n' \"${BD_DOLT_SHARED_SERVER-unset}\" \"${BEADS_DOLT_SHARED_SERVER-unset}\" >> \""+logPath+".env\"; fi\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
 		t.Fatal(err)
 	}
 	t.Setenv("BD_BIN", fakeBd)
@@ -117,6 +135,7 @@ func TestDefaultRigBdStoreKeepsDirectServerForNonBdContractCity(t *testing.T) {
 	if !strings.Contains(invocation, "--server") {
 		t.Fatalf("bd was not asked for a direct server store: %s", invocation)
 	}
+	assertBdInitSharedServerOptOut(t, logPath)
 
 	// The point of keeping --server: the rig must not classify as
 	// provider-owned, because nothing here can run its lifecycle.

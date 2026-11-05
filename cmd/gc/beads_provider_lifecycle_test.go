@@ -296,6 +296,13 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 			t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want %q", key, got, expected)
 		}
 	}
+	// The shared-server opt-out belongs to the bd init paths only; a ready
+	// server-mode scope's steady-state env must not gain it.
+	for _, key := range []string{"BD_DOLT_SHARED_SERVER", "BEADS_DOLT_SHARED_SERVER"} {
+		if got, ok := env[key]; ok {
+			t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want it absent for a ready server-mode scope", key, got)
+		}
+	}
 }
 
 func TestProviderLifecycleProcessEnvUsesProxiedModeWithoutDirectLifecycle(t *testing.T) {
@@ -4551,6 +4558,18 @@ provider = %q
 			}
 			if _, ok := env["BEADS_DOLT_PROXIED_SERVER"]; ok {
 				t.Errorf("BEADS_DOLT_PROXIED_SERVER should be absent for a legacy city without provider ownership")
+			}
+			// A gc-initiated server-mode init is gc-owned by construction and
+			// has no scope pin yet, so it must carry the shared-server opt-out
+			// itself: under a user-level dolt.shared-server: true, bd init would
+			// otherwise take the host-wide gate and persist the choice.
+			for key, want := range map[string]string{
+				"BD_DOLT_SHARED_SERVER":    "false",
+				"BEADS_DOLT_SHARED_SERVER": "0",
+			} {
+				if got := env[key]; got != want {
+					t.Errorf("%s = %q, want %q on a server-mode bd init", key, got, want)
+				}
 			}
 			for _, key := range []string{"BEADS_DOLT_SERVER_HOST"} {
 				if _, ok := env[key]; ok {
