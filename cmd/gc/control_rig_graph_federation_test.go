@@ -47,8 +47,8 @@ import (
 // rigFederationFixture stands up a split city with a rig scope, a fake `bd` on
 // PATH answering for the rig leg, and a memory-backed city graph binding.
 //
-// The fake bd is what makes the scope leg observable: the shell arm of the
-// fallback reads through it, so a bead in its payload can only have come from
+// The fake bd is what makes the scope leg observable: the scope's bd-backed
+// store reads through it, so a bead in its payload can only have come from
 // the scope leg, and a bead in the binding can only have come from the graph
 // leg. Without that separation a union test cannot tell a merged answer from a
 // single leg that happened to hold both.
@@ -105,11 +105,11 @@ func containsID(items []beads.Bead, id string) bool {
 	return false
 }
 
-// TestControlReadyFallbackRigScopeFederatesTheCityGraphBinding is the readiness
+// TestControlReadyLegsRigScopeFederatesTheCityGraphBinding is the readiness
 // half: a rig-scoped scan must see the control beads a city-scoped molecule
 // routed to it, not just the ones its own rig minted.
-func TestControlReadyFallbackRigScopeFederatesTheCityGraphBinding(t *testing.T) {
-	cityPath, rigPath, binding := rigFederationFixture(t, `[{"id":"ga-rig-resident"}]`)
+func TestControlReadyLegsRigScopeFederatesTheCityGraphBinding(t *testing.T) {
+	cityPath, rigPath, binding := rigFederationFixture(t, `[{"id":"ga-rig-resident","status":"open","issue_type":"task"}]`)
 	routed, err := binding.Create(beads.Bead{Title: "check 1", Type: "task"})
 	if err != nil {
 		t.Fatalf("seed the binding: %v", err)
@@ -120,7 +120,7 @@ func TestControlReadyFallbackRigScopeFederatesTheCityGraphBinding(t *testing.T) 
 	// binding's bead the test below proves nothing: the id would be reachable
 	// through the scope leg and a union would be indistinguishable from today.
 	seedCLIStorageRoutes(t, cityPath, nil)
-	unsplit, err := controlReadyFallbackReady(rigPath, cityPath, nil, false)
+	unsplit, err := controlReadyLegsReady(rigPath, cityPath, nil)
 	if err != nil {
 		t.Fatalf("premise scan: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestControlReadyFallbackRigScopeFederatesTheCityGraphBinding(t *testing.T) 
 	}
 
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-	got, err := controlReadyFallbackReady(rigPath, cityPath, nil, false)
+	got, err := controlReadyLegsReady(rigPath, cityPath, nil)
 	if err != nil {
 		t.Fatalf("federated scan: %v", err)
 	}
@@ -147,22 +147,22 @@ func TestControlReadyFallbackRigScopeFederatesTheCityGraphBinding(t *testing.T) 
 	}
 }
 
-// TestControlReadyFallbackCityScopeStillReadsOnlyTheBinding is the control that
+// TestControlReadyLegsCityScopeStillReadsOnlyTheBinding is the control that
 // keeps the city arm from being swept into the union.
 //
 // A city scope reads the binding INSTEAD of its own store, and that asymmetry is
 // load-bearing: `gc storage migrate` retains a frozen copy of every migrated
 // control bead in the work ledger, so unioning the two legs there would re-offer
 // ids the binding has already finished and the drain loop would never return.
-func TestControlReadyFallbackCityScopeStillReadsOnlyTheBinding(t *testing.T) {
-	cityPath, _, binding := rigFederationFixture(t, `[{"id":"ga-stale-retained-copy"}]`)
+func TestControlReadyLegsCityScopeStillReadsOnlyTheBinding(t *testing.T) {
+	cityPath, _, binding := rigFederationFixture(t, `[{"id":"ga-stale-retained-copy","status":"open","issue_type":"task"}]`)
 	live, err := binding.Create(beads.Bead{Title: "check 1", Type: "task"})
 	if err != nil {
 		t.Fatalf("seed the binding: %v", err)
 	}
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
-	got, err := controlReadyFallbackReady(cityPath, cityPath, nil, false)
+	got, err := controlReadyLegsReady(cityPath, cityPath, nil)
 	if err != nil {
 		t.Fatalf("city-scoped scan: %v", err)
 	}
@@ -175,13 +175,13 @@ func TestControlReadyFallbackCityScopeStillReadsOnlyTheBinding(t *testing.T) {
 	}
 }
 
-// TestControlReadyFallbackSingleStoreRigScopeIsUnchanged pins the invisibility
+// TestControlReadyLegsSingleStoreRigScopeIsUnchanged pins the invisibility
 // rule: a city that relocates no class gets exactly the one leg it always had.
-func TestControlReadyFallbackSingleStoreRigScopeIsUnchanged(t *testing.T) {
-	cityPath, rigPath, _ := rigFederationFixture(t, `[{"id":"ga-only-leg"}]`)
+func TestControlReadyLegsSingleStoreRigScopeIsUnchanged(t *testing.T) {
+	cityPath, rigPath, _ := rigFederationFixture(t, `[{"id":"ga-only-leg","status":"open","issue_type":"task"}]`)
 	seedCLIStorageRoutes(t, cityPath, nil)
 
-	got, err := controlReadyFallbackReady(rigPath, cityPath, nil, false)
+	got, err := controlReadyLegsReady(rigPath, cityPath, nil)
 	if err != nil {
 		t.Fatalf("single-store scan: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestControlBeadLedgerRigScopeAsksTheBindingFirst(t *testing.T) {
 }
 
 // TestControlGraphRelicLegRoutingRule is the routing rule itself, stated once
-// for every scope shape, so the cache leg and the fallback leg cannot drift
+// for every scope shape, so the scan's legs and the dispatch's ledger cannot drift
 // apart the way control dispatch and convergence did.
 func TestControlGraphRelicLegRoutingRule(t *testing.T) {
 	binding := beads.NewMemStore()
@@ -629,35 +629,32 @@ func TestControlRigScopeStaysOnItsStoreWhenTheBindingRefuses(t *testing.T) {
 	})
 }
 
-// TestControlReadyLegSourcesRouteTheSameLegsAsTheFallback pins the two scan
-// arms to one routing rule.
+// TestControlReadyLegSourcesRouteByScopeShape pins the scan's routing rule.
 //
-// The serve loop reads the in-process legs on every tick; the shell fallback
-// runs only when the legs cannot be opened. So the in-process arm is the
-// production path, and the two agreeing about WHICH ledgers hold this scope's
-// queue is the whole safety property: a queue drawn from a different set of
-// stores than the dispatch mutates is exactly the divergence this defect was.
+// The serve loop reads these legs on every tick, so which ledgers hold this
+// scope's queue is the whole safety property: a queue drawn from a different set
+// of stores than the dispatch mutates is exactly the divergence this defect was.
 //
 // Asserted structurally — leg count and the binding's position — rather than by
-// comparing scan output, because only the two arms' ROUTING has to match.
-func TestControlReadyLegSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
+// comparing scan output, because only the ROUTING is under test here.
+func TestControlReadyLegSourcesRouteByScopeShape(t *testing.T) {
 	t.Run("split rig scope reads the binding AND, as a relic leg, its own store", func(t *testing.T) {
 		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
 		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
 
 		sources, owned, err := controlReadyLegSources(rigPath, cityPath, nil)
 		if err != nil {
-			t.Fatalf("controlReadyCacheSources for a split rig scope: %v", err)
+			t.Fatalf("controlReadyLegSources for a split rig scope: %v", err)
 		}
 		if len(sources) != 2 {
-			t.Fatalf("cache sources for a split rig scope = %d leg(s), want 2; "+
-				"the in-process arm reads a narrower set than the fallback and the queue flips with which arm answers", len(sources))
+			t.Fatalf("leg sources for a split rig scope = %d leg(s), want 2; "+
+				"the scan reads a narrower set than the dispatch mutates", len(sources))
 		}
 		if !sameStorePtr(sources[0], binding) {
-			t.Errorf("cache leg[0] = %T, want the city graph binding first (the S4 placement store); leg order decides which copy wins on a co-resident id", sources[0])
+			t.Errorf("leg[0] = %T, want the city graph binding first (the S4 placement store); leg order decides which copy wins on a co-resident id", sources[0])
 		}
 		if sameStorePtr(sources[1], binding) {
-			t.Errorf("cache leg[1] is the binding again, want the scope's own store as the relic leg")
+			t.Errorf("leg[1] is the binding again, want the scope's own store as the relic leg")
 		}
 		// Only the scoped leg is owned; the process-shared binding must never be
 		// closed by the per-scan cleanup.
@@ -677,10 +674,10 @@ func TestControlReadyLegSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 
 		sources, owned, err := controlReadyLegSources(cityPath, cityPath, nil)
 		if err != nil {
-			t.Fatalf("controlReadyCacheSources for a split city scope: %v", err)
+			t.Fatalf("controlReadyLegSources for a split city scope: %v", err)
 		}
 		if len(sources) != 1 || !sameStorePtr(sources[0], binding) {
-			t.Fatalf("cache sources for a split city scope = %d leg(s), want exactly the binding; "+
+			t.Fatalf("leg sources for a split city scope = %d leg(s), want exactly the binding; "+
 				"unioning the work store back in re-offers the frozen copies the migration retained", len(sources))
 		}
 		// A relocated city reads only the shared binding, which this call did not
@@ -696,10 +693,10 @@ func TestControlReadyLegSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
 
 		sources, owned, err := controlReadyLegSources(rigPath, cityPath, nil)
 		if err != nil {
-			t.Fatalf("controlReadyCacheSources for a single-store rig scope: %v", err)
+			t.Fatalf("controlReadyLegSources for a single-store rig scope: %v", err)
 		}
 		if len(sources) != 1 {
-			t.Fatalf("cache sources for a single-store rig scope = %d leg(s), want 1; "+
+			t.Fatalf("leg sources for a single-store rig scope = %d leg(s), want 1; "+
 				"a city with no [storage] section must take none of the federation", len(sources))
 		}
 		if sameStorePtr(sources[0], binding) {
@@ -743,9 +740,9 @@ func TestControlReadyLegsReadyRequiresEveryLeg(t *testing.T) {
 		installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
 			return legs, nil, nil
 		})
-		if got, opened, err := controlReadyLegsReady(dir, dir, nil); err == nil || got != nil || !opened {
-			t.Errorf("%s: controlReadyLegsReady = (%d bead(s), opened %t, err %v), want an error and no beads; "+
-				"a partial union reads as a complete queue", order, len(got), opened, err)
+		if got, err := controlReadyLegsReady(dir, dir, nil); err == nil || got != nil {
+			t.Errorf("%s: controlReadyLegsReady = (%d bead(s), err %v), want an error and no beads; "+
+				"a partial union reads as a complete queue", order, len(got), err)
 		}
 	}
 
@@ -756,9 +753,9 @@ func TestControlReadyLegsReadyRequiresEveryLeg(t *testing.T) {
 	installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{first, second}, nil, nil
 	})
-	got, opened, err := controlReadyLegsReady(dir, dir, nil)
-	if err != nil || !opened {
-		t.Fatalf("controlReadyLegsReady with every leg answering = opened %t, err %v", opened, err)
+	got, err := controlReadyLegsReady(dir, dir, nil)
+	if err != nil {
+		t.Fatalf("controlReadyLegsReady with every leg answering: %v", err)
 	}
 	if !containsID(got, firstID) || !containsID(got, secondID) {
 		t.Errorf("union = %v, want both %s and %s; one leg's beads were dropped", controlLegIDs(got), firstID, secondID)
@@ -768,7 +765,7 @@ func TestControlReadyLegsReadyRequiresEveryLeg(t *testing.T) {
 // TestControlReadyScanRigScopeFederatesTheBindingOnBothArms is the end-to-end
 // producer assertion, taken through the exact entry point the serve loop calls.
 //
-// The three fallback tests above call controlReadyFallbackReady directly, which
+// The three leg tests above call controlReadyLegsReady directly, which
 // leaves the production path — nextWorkflowServeBeads ->
 // tryControlReadyScan -> the per-leg Ready reads — unexercised for a
 // federated scope. This runs the real entry under both bd compatibility modes

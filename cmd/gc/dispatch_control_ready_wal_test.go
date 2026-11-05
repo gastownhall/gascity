@@ -66,9 +66,9 @@ func TestControlReadyPerScanReadsReleaseRealSQLiteHandlesAndLetWALCheckpoint(t *
 			}
 		}
 
-		ready, legsOpened, err := controlReadyLegsReady(ledgerDir, ledgerDir, nil)
-		if err != nil || !legsOpened {
-			t.Fatalf("scan %d: controlReadyLegsReady = opened %t, err %v", i, legsOpened, err)
+		ready, err := controlReadyLegsReady(ledgerDir, ledgerDir, nil)
+		if err != nil {
+			t.Fatalf("scan %d: controlReadyLegsReady: %v", i, err)
 		}
 		if want := i/2 + 1; len(ready) != want {
 			t.Fatalf("scan %d: ready = %d, want %d (fresh read of the writer's state)", i, len(ready), want)

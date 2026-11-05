@@ -67,14 +67,14 @@ func TestRigControlDispatchOnARealSplitCity(t *testing.T) {
 	}
 }
 
-// TestControlReadyFallbackPrefersTheBindingCopyOfATwin pins leg ORDER in the
-// shell fallback: an id both legs hold (an import's copy before its clear)
+// TestControlReadyLegsPreferTheBindingCopyOfATwin pins leg ORDER in the
+// scan: an id both legs hold (an import's copy before its clear)
 // resolves to the binding's row.
-func TestControlReadyFallbackPrefersTheBindingCopyOfATwin(t *testing.T) {
-	cityPath, rigPath, _ := rigFederationFixture(t, `[{"id":"gc-twin","title":"rig copy"}]`)
+func TestControlReadyLegsPreferTheBindingCopyOfATwin(t *testing.T) {
+	cityPath, rigPath, _ := rigFederationFixture(t, `[{"id":"gc-twin","title":"rig copy","status":"open","issue_type":"task"}]`)
 	binding := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-twin", Title: "binding copy", Type: "task", Status: "open"}}, nil)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-	got, err := controlReadyFallbackReady(rigPath, cityPath, nil, false)
+	got, err := controlReadyLegsReady(rigPath, cityPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

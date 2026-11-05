@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,23 +32,6 @@ func TestParseControlReadyQueryRecognizesGeneratedQuery(t *testing.T) {
 	}
 	if parsed.bareTarget != "fixture/control-dispatcher" {
 		t.Errorf("bareTarget = %q, want %q", parsed.bareTarget, "fixture/control-dispatcher")
-	}
-	if parsed.includeEphemeral {
-		t.Errorf("includeEphemeral = true, want false (bd-1.0.4 default)")
-	}
-}
-
-func TestParseControlReadyQueryIncludeEphemeralWhenBD105(t *testing.T) {
-	query := workflowServeControlReadyQueryForBeads(
-		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
-		config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
-	)
-	parsed, ok := parseControlReadyQuery(query)
-	if !ok {
-		t.Fatalf("parseControlReadyQuery: not recognized")
-	}
-	if !parsed.includeEphemeral {
-		t.Errorf("includeEphemeral = false, want true under bd-1.0.5 compatibility")
 	}
 }
 
@@ -423,45 +405,29 @@ esac
 	}
 }
 
-// TestControlReadyFallbackReadyLogsWhenResultHitsLimit is ga-bbj6wv Finding 1:
-// a fallback batch that comes back at exactly controlReadyFallbackLimit is a
-// truncation signal (some candidate/route may have been starved of ready
-// beads that exist but didn't fit) and must be observable, not silent.
-func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-
-	items := make([]map[string]string, controlReadyFallbackLimit)
-	for i := range items {
-		items[i] = map[string]string{"id": fmt.Sprintf("ga-fallback-%d", i)}
+// TestControlReadyLegReadyLogsWhenResultHitsLimit is ga-bbj6wv Finding 1: a
+// leg that comes back at exactly controlReadyScanLimit is a truncation signal
+// (some candidate/route may have been starved of ready beads that exist but
+// didn't fit) and must be observable, not silent.
+func TestControlReadyLegReadyLogsWhenResultHitsLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	for i := 0; i < controlReadyScanLimit; i++ {
+		if _, err := store.Create(beads.Bead{Title: fmt.Sprintf("ready-%d", i), Type: "task"}); err != nil {
+			t.Fatalf("seed ready bead %d: %v", i, err)
+		}
 	}
-	payload, err := json.Marshal(items)
-	if err != nil {
-		t.Fatalf("marshal fixture beads: %v", err)
-	}
-	payloadPath := filepath.Join(tmp, "payload.json")
-	if err := os.WriteFile(payloadPath, payload, 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	bdPath := filepath.Join(tmp, "bd")
-	script := fmt.Sprintf("#!/bin/sh\ncat %q\n", payloadPath)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_BEADS", "bd")
 
 	var logBuf bytes.Buffer
 	restore := captureLogOutput(&logBuf)
 	defer restore()
 
 	dir := t.TempDir()
-	result, err := controlReadyFallbackReady(dir, dir, nil, false)
+	result, err := controlReadyLegReady(dir, store)
 	if err != nil {
-		t.Fatalf("controlReadyFallbackReady: %v", err)
+		t.Fatalf("controlReadyLegReady: %v", err)
 	}
-	if len(result) != controlReadyFallbackLimit {
-		t.Fatalf("len(result) = %d, want %d", len(result), controlReadyFallbackLimit)
+	if len(result) != controlReadyScanLimit {
+		t.Fatalf("len(result) = %d, want %d", len(result), controlReadyScanLimit)
 	}
 	if !strings.Contains(logBuf.String(), "may be truncated") {
 		t.Fatalf("expected a truncation warning in log output, got: %q", logBuf.String())
@@ -471,27 +437,23 @@ func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
 	}
 }
 
-// TestControlReadyFallbackReadyNoWarningBelowLimit is the negative case: a
-// batch below the limit is a complete result, not a truncation signal, and
-// must not log anything.
-func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '[{\"id\":\"ga-fallback-only\"}]'\n"), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
+// TestControlReadyLegReadyNoWarningBelowLimit is the negative case: a leg below
+// the limit is a complete result, not a truncation signal, and must not log
+// anything.
+func TestControlReadyLegReadyNoWarningBelowLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Title: "only", Type: "task"}); err != nil {
+		t.Fatalf("seed ready bead: %v", err)
 	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_BEADS", "bd")
 
 	var logBuf bytes.Buffer
 	restore := captureLogOutput(&logBuf)
 	defer restore()
 
 	dir := t.TempDir()
-	result, err := controlReadyFallbackReady(dir, dir, nil, false)
+	result, err := controlReadyLegReady(dir, store)
 	if err != nil {
-		t.Fatalf("controlReadyFallbackReady: %v", err)
+		t.Fatalf("controlReadyLegReady: %v", err)
 	}
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))

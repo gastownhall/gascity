@@ -59,7 +59,7 @@ func scanControlReadyIDs(t *testing.T, cityDir string) []string {
 // a worker closes the step a retry control is blocked on, and the very next
 // scan must offer that control instead of answering from a snapshot taken
 // before the close. No bd is on PATH: the scan answers from the leg's own
-// Ready read, with no shell fallback for a control whose blocker is closed
+// Ready read, with no shell read for a control whose blocker is closed
 // (the read the primed snapshot used to decline and repeat live).
 func TestControlReadyScanObservesWorkerCloseImmediately(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)

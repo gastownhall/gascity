@@ -108,9 +108,9 @@ func TestControlReadyLegsReadyClosesOwnedSourcesPerScan(t *testing.T) {
 
 	const scans = 3
 	for i := 0; i < scans; i++ {
-		ready, opened, err := controlReadyLegsReady(dir, dir, nil)
-		if err != nil || !opened {
-			t.Fatalf("scan %d: controlReadyLegsReady = opened %t, err %v; want opened, nil", i, opened, err)
+		ready, err := controlReadyLegsReady(dir, dir, nil)
+		if err != nil {
+			t.Fatalf("scan %d: controlReadyLegsReady: %v", i, err)
 		}
 		if len(ready) != 1 {
 			t.Fatalf("scan %d: ready = %d beads, want the 1 seeded ready bead", i, len(ready))
@@ -152,8 +152,8 @@ func TestControlReadyLegsReadyNeverClosesSharedBindingLeg(t *testing.T) {
 
 	const scans = 3
 	for i := 0; i < scans; i++ {
-		if _, opened, err := controlReadyLegsReady(dir, dir, nil); err != nil || !opened {
-			t.Fatalf("scan %d: controlReadyLegsReady = opened %t, err %v; want opened, nil", i, opened, err)
+		if _, err := controlReadyLegsReady(dir, dir, nil); err != nil {
+			t.Fatalf("scan %d: controlReadyLegsReady: %v", i, err)
 		}
 	}
 
@@ -184,9 +184,9 @@ func TestControlReadyLegsReadyClosesOwnedSourcesOnReadFailure(t *testing.T) {
 		return []beads.Store{failing}, []beads.Store{failing}, nil
 	})
 
-	ready, opened, err := controlReadyLegsReady(dir, dir, nil)
-	if err == nil || !opened || ready != nil {
-		t.Fatalf("controlReadyLegsReady = (%v, %t, %v), want (nil, true, error) when a leg's read fails", ready, opened, err)
+	ready, err := controlReadyLegsReady(dir, dir, nil)
+	if err == nil || ready != nil {
+		t.Fatalf("controlReadyLegsReady = (%v, %v), want (nil, error) when a leg's read fails", ready, err)
 	}
 	if got := failing.closes(); got != 1 {
 		t.Fatalf("failing scoped leg closed %d times, want 1: the read-failure return must not leak the opened handle", got)

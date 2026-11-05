@@ -566,9 +566,9 @@ func TestControlReadyScanReadsTheBindingEngine(t *testing.T) {
 	installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{leg}, nil, nil
 	})
-	ready, opened, err := controlReadyLegsReady(dir, t.TempDir(), &config.City{})
-	if err != nil || !opened {
-		t.Fatalf("controlReadyLegsReady = opened %t, err %v", opened, err)
+	ready, err := controlReadyLegsReady(dir, t.TempDir(), &config.City{})
+	if err != nil {
+		t.Fatalf("controlReadyLegsReady: %v", err)
 	}
 	if len(ready) != 1 || ready[0].ID != seeded.ID {
 		t.Fatalf("control-ready scan = %v, want the engine's ready bead %s", ready, seeded.ID)

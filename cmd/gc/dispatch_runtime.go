@@ -816,6 +816,12 @@ func controlReadyRoutedDemandArgs() string {
 	return config.PoolDemandServeRulesForQuery().ShellArgs()
 }
 
+// workflowServeControlReadyQueryForBeads renders the control dispatcher's work
+// query. In production the text is a protocol marker answered in-process by
+// tryControlReadyScan (dispatch_control_ready.go) and never executed: the
+// emit_ready lines below are exercised only by tests that run the script
+// directly, and an external `bd ready` is blind to the gc.work_outcome=blocked
+// veto.
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
