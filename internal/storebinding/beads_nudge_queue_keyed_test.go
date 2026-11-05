@@ -301,7 +301,7 @@ func TestBeadsNudgeQueueHotVerbsNeverScanTheQueue(t *testing.T) {
 	if err := queue.Ack([]string{"n-second"}, "delivered", "", "commit"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := queue.ReleaseClaims([]string{"n-other"}); err != nil {
+	if err := queue.ReleaseClaims([]string{"n-other"}, time.Time{}); err != nil {
 		t.Fatalf("ReleaseClaims: %v", err)
 	}
 	if _, err := queue.RecordFailure([]string{"n-deferred"}, errors.New("refused"), now); err != nil {
@@ -639,7 +639,7 @@ func TestBeadsNudgeQueueReleasingAnExpiredClaimRecordsItDead(t *testing.T) {
 	if claimed := claimAll(t, queue, claimedAt); len(claimed) != 1 {
 		t.Fatalf("ClaimDue = %v, want the unexpired nudge", nudgeItemIDs(claimed))
 	}
-	if err := queue.ReleaseClaims([]string{item.ID}); err != nil {
+	if err := queue.ReleaseClaims([]string{item.ID}, time.Time{}); err != nil {
 		t.Fatalf("ReleaseClaims: %v", err)
 	}
 	record, err := store.Get(nudgeQueueBeadID(item.ID))

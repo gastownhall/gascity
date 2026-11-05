@@ -109,6 +109,30 @@ gc_harness_signal_group() {
   kill -"$sig" -- -"$pgid" 2>/dev/null || true
 }
 
+# gc_harness_kill_group ends process group pgid with SIGKILL and returns once
+# the group is empty, bounded by kill_ticks (of 0.2s each). A process the
+# group was forking when the signal was sent can miss it on macOS, whose
+# fork does not retry for a pending group signal (Linux's does): the forked
+# child lands in the group alive, orphaned, holding every descriptor it
+# inherited (mc-08rl5, the watchdog's `sleep` caught mid-fork). So the
+# group is signaled again until no member is left. leader, when given, is a
+# child of this shell, reaped first so its zombie does not read as alive.
+gc_harness_kill_group() {
+  local pgid="${1:-}" leader="${2:-}" kill_ticks="${3:-25}"
+  [[ -n "$pgid" ]] || return 0
+  gc_harness_signal_group "$pgid" KILL
+  if [[ -n "$leader" ]]; then
+    wait "$leader" 2>/dev/null || true
+  fi
+  local tick=0
+  while (( tick < kill_ticks )); do
+    gc_harness_group_alive "$pgid" || return 0
+    gc_harness_signal_group "$pgid" KILL
+    sleep 0.2
+    tick=$(( tick + 1 ))
+  done
+}
+
 # gc_harness_terminate_group ends process group pgid: SIGTERM, then SIGKILL
 # for anything still standing after the drain window. It returns immediately
 # when the group is already empty, so the happy path pays no latency.
@@ -145,10 +169,10 @@ gc_harness_terminate_supervised() {
   # that job so it is torn down like any other.
   gc_harness_launch_publish
   if [[ -n "${gc_harness_watchdog_pgid:-}" ]]; then
-    gc_harness_signal_group "$gc_harness_watchdog_pgid" KILL
-    # Reaped here, as on the normal path, so bash does not report the killed
-    # job in the run's log.
-    wait "$gc_harness_watchdog_pgid" 2>/dev/null || true
+    # Its leader reaped here, as on the normal path, so bash does not report
+    # the killed job in the run's log; a just-forked watchdog may be forking
+    # its sleep, which the group kill re-signals.
+    gc_harness_kill_group "$gc_harness_watchdog_pgid" "$gc_harness_watchdog_pgid"
     gc_harness_watchdog_pgid=""
   fi
   gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$drain_ticks"
@@ -230,8 +254,7 @@ gc_harness_run_supervised() {
   wait "$job_pgid" || status=$?
 
   if [[ -n "$watchdog_pgid" ]]; then
-    gc_harness_signal_group "$watchdog_pgid" KILL
-    wait "$watchdog_pgid" 2>/dev/null || true
+    gc_harness_kill_group "$watchdog_pgid" "$watchdog_pgid"
   fi
   gc_harness_watchdog_pgid=""
   # The group leader can exit while a descendant it spawned is still running;

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -47,10 +48,20 @@ const (
 	// move I10's bound (quietBound).
 	simQuietExtension = 15 * time.Minute
 	simCISeeds        = 64
-	simGuard          = 10 * time.Second // real time: turns a hang into a failure
-	simCityLeg        = "city"
-	simRigLeg         = "rig-a"
+	// simGuard is real time: it turns a hang into a failure that names the
+	// seed. Nothing the sim waits on is paced by real time (its clock is
+	// fake, and a deadline cancels inside the Advance that reaches it), so
+	// only a hang reaches it; it is generous because a loaded runner can
+	// stall a goroutine for seconds (seeds 130 and 834 tripped 10s on RBE,
+	// mc-gfdi5). The corpus target's own -test.timeout bounds the range.
+	simGuard   = 2 * time.Minute
+	simCityLeg = "city"
+	simRigLeg  = "rig-a"
 )
+
+// simLeafOverride, when set, is every sim's leaf that its options leave
+// unset (reconcile_sim_exec_test.go reruns scenarios on it).
+var simLeafOverride func(*simProvider) runtime.Provider
 
 // simStaleEvents lets a step deliver an event older than its row's backing:
 // a reorder, or a duplicate after a newer write (v5 §11 H2).
@@ -75,12 +86,15 @@ type simRuntime struct {
 	zombie           bool   // the pane lives; the agent died
 	attached         bool
 	probeErr         bool // a process probe errors, answering the agent not alive (v5 O3)
+	restart          bool // GC_RESTART_REQUESTED, as tmux's user-option mirror carries it (C7a-2b)
 }
 
 // simStart and simKill are the spy's records of a Start and of a
-// destructive call, with the runtime it hit.
+// destructive call, with the runtime it hit. A Start records the command it
+// launched and the work dir it launched in.
 type simStart struct {
 	Name, ID, Token              string
+	Command, WorkDir             string
 	FreshOnly, External, Created bool
 }
 
@@ -184,9 +198,32 @@ func (p *simProvider) RuntimeInventory(context.Context) (map[string]runtime.Inve
 	for name, rt := range p.rts {
 		inc := fmt.Sprintf("$%d:%d:%d", rt.object, rt.created, rt.object+1000)
 		at := p.Activity[name] // the embedded fake's, as tmux's batched read carries it
-		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at}
+		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at, RestartRequested: rt.restart}
 	}
 	return out, nil
+}
+
+// SetMeta and RemoveMeta keep the restart marker on the runtime, which the
+// marker lives and dies with, as a tmux session's environment does.
+func (p *simProvider) SetMeta(name, key, value string) error {
+	p.setRestart(name, key, value != "")
+	return p.Fake.SetMeta(name, key, value)
+}
+
+func (p *simProvider) RemoveMeta(name, key string) error {
+	err := p.Fake.RemoveMeta(name, key)
+	if err == nil { // a failed removal keeps the marker
+		p.setRestart(name, key, false)
+	}
+	return err
+}
+
+func (p *simProvider) setRestart(name, key string, set bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rt := p.rts[name]; rt != nil && key == "GC_RESTART_REQUESTED" {
+		rt.restart = set
+	}
 }
 
 func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) {
@@ -266,7 +303,7 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], FreshOnly: cfg.FreshOnly, External: p.external}
+	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], Command: cfg.Command, WorkDir: cfg.WorkDir, FreshOnly: cfg.FreshOnly, External: p.external}
 	err := p.nextStart
 	p.nextStart = nil
 	if err == nil && p.rts[name] != nil {
@@ -366,6 +403,7 @@ type sim struct {
 	obsClk   *clock.Fake
 	cfg      *config.City
 	sp       *simProvider
+	leaf     runtime.Provider // the provider v2 runs on: sp, or sp as a profiled backend (simOpts.profile)
 	legs     []*simLeg
 	env      gatherEnv
 	p        *planner
@@ -426,12 +464,16 @@ type sim struct {
 	runMu              sync.Mutex
 	running            map[effectKey]*simEffect // released, by key, for their seams
 	credit             decisionCredit           // the arm decisions the census credits (reconcile_sim_coverage_test.go)
+	envNow             *reconcileEnv            // the environment the next gather reads; a config drift replaces it
+	baseCfg            *config.City             // the seed's config, which a drift's revert restores
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
 // seed one fault into the code under test through a test seam.
 type simOpts struct {
-	rows     func(s *sim) (city, rig []beads.Bead)
+	rows func(s *sim) (city, rig []beads.Bead)
+	// deps seeds the city leg's dependencies before its cache is primed.
+	deps     []beads.Dep
 	inflight func(*inflightMap) plannerInflight
 	specs    func(map[string]effectSpec)
 	// rowLock replaces runTx's session mutation lock, unobserved.
@@ -440,6 +482,9 @@ type simOpts struct {
 	// noPendingCreates seeds no pending creates (reconcile_sim_pending_test.go):
 	// the floored corpus keeps its floor members' acks in reach.
 	noPendingCreates bool
+	// leaf, when set, is the provider v2 runs on, built over the sim's
+	// runtime (reconcile_sim_exec_test.go); otherwise it runs on sp itself.
+	leaf func(*simProvider) runtime.Provider
 }
 
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
@@ -450,6 +495,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	}
 	s.lag = s.rng.IntN(2) == 0
 	s.sp = &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: s.clk.Now}
+	s.leaf = s.sp
+	if o.leaf == nil {
+		o.leaf = simLeafOverride
+	}
+	if o.leaf != nil {
+		s.leaf = o.leaf(s.sp)
+	}
 	s.cfg = workerCity(3)
 	s.cfg.Daemon.PatrolInterval, s.cfg.Daemon.ProbeConcurrency = simPatrol.String(), intPtr(1)
 	s.cfg.Rigs = []config.Rig{{Name: simRigLeg, Path: t.TempDir()}}
@@ -460,8 +512,12 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
-		m := beads.NewMemStoreFrom(0, rows, nil)
-		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
+		var deps []beads.Dep
+		if name == simCityLeg {
+			deps = o.deps
+		}
+		m := beads.NewMemStoreFrom(0, rows, deps)
+		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
@@ -477,10 +533,10 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 
 	s.lane = newRuntimeInventoryLane(simPatrol, io.Discard, "sim")
 	s.lane.clock, s.lane.cache = s.obsClk, NewObservationCache(s.obsClk, 2*simPatrol, "sim")
-	env := &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.sp}
+	s.envNow = &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.leaf}
 	s.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
-		Env:          func() *reconcileEnv { return env },
+		Env:          func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
 		Sessions:     func() beads.Store { return s.legs[0].cache },
 		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
@@ -504,7 +560,11 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	}
 	// The executor in step mode: its goroutines are joined at teardown, and
 	// every effect parks (gated) until a step releases it.
-	s.x = newEffectExecutor(func(st settlement) { s.p.settlements.post(st); s.postCh <- st }, io.Discard)
+	s.x = newEffectExecutor(func(st settlement) {
+		countPost(st) // reconcile_sim_coverage_test.go: the census counts what the planner is told
+		s.p.settlements.post(st)
+		s.postCh <- st
+	}, io.Discard)
 	s.x.clock = s.clk
 	s.x.spawn = func(f func()) {
 		s.spawned.Add(1)
@@ -519,6 +579,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		return res
 	}
 	s.p.effects = s.x
+	// The create effects (C1, C2), on the sessions leg under the city's
+	// identifier locks, so the allocation's plans land rows (mc-i7efm).
+	creates, err := newCreateEffects(createEffectHost{cityPath: s.env.CityPath, cityName: s.env.CityName, lookPath: s.env.LookPath, now: s.clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.p.creates = creates
 	// The planner notes effects' fresh observations in the lane's cache, as
 	// production wires it (plannerRuntime.bindHost): a start's alive read
 	// and any effect's absent one (CONTRACT O4, v5.10g).
@@ -685,9 +752,7 @@ func (s *sim) pass() {
 		if it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh {
 			simDrainBegins.Add(1)
 		}
-		if it.Kind == intentSignalAck && it.Reason == decideFloorAckCancel {
-			simFloorCancels.Add(1)
-		}
+		countReason(it) // reconcile_sim_coverage_test.go: the floor-ack cancel the gate requires
 		if it.Reason == decideSquatterHeal {
 			simSquatterHeals.Add(1)
 		}
@@ -812,10 +877,10 @@ func (s *sim) inventory() {
 	l := s.lane
 	s.obsClk.Time = s.clk.Now()
 	l.seq++
-	if !sameInventoryProvider(s.sp, l.lastProvider) {
-		l.lastProvider, l.providerGen = s.sp, l.providerGen+1
+	if !sameInventoryProvider(s.leaf, l.lastProvider) {
+		l.lastProvider, l.providerGen = s.leaf, l.providerGen+1
 	}
-	listing, _ := l.listBounded(context.Background(), s.sp) // the fake answers at once
+	listing, _ := l.listBounded(context.Background(), s.leaf) // the fake answers at once
 	s.sp.listed()
 	h := heldListing{listing: listing, started: s.clk.Now(), version: s.sp.version}
 	if s.lag && s.rng.IntN(2) == 0 {
@@ -886,7 +951,7 @@ var externalOps = []struct {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if _, err := session.WriteKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
+		if _, err := session.WriteKillFence(beadstest.Sessions(l.backing), b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])
@@ -1244,12 +1309,14 @@ func (s *sim) failf(inv, format string, args ...any) {
 	}
 }
 
-// report fails t with the seed's violations and its schedule.
+// report fails t with the seed's violations, the command that reruns t's
+// top-level test on the seed, and its schedule.
 func (s *sim) report(t *testing.T) {
 	t.Helper()
 	if len(s.failures) > 0 {
-		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: GC_V2_SIM_SEED=%d go test -run TestSimCorpus ./cmd/gc/\nschedule:\n%s",
-			s.seed, s.lag, strings.Join(s.failures, "\n  "), s.seed, strings.Join(s.schedule, "\n"))
+		test, _, _ := strings.Cut(t.Name(), "/")
+		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: bazel test //cmd/gc:gc_test --test_sharding_strategy=disabled --test_filter='^%s$' --test_env=GC_V2_SIM_SEED=%d\nschedule:\n%s",
+			s.seed, s.lag, strings.Join(s.failures, "\n  "), test, s.seed, strings.Join(s.schedule, "\n"))
 	}
 }
 
@@ -1360,6 +1427,10 @@ func (s *sim) quiesce() {
 		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {
 		case s.clk.Now().Before(bound):
+		case (len(admitted) > 0 || changed) && s.attachedDriftRestamps(before, after):
+			// A14's throttled attached-deferral re-stamp on a row that stays
+			// attached and drifted (CONTRACT v5.10m): no round of progress,
+			// nor a failure.
 		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
 			var keys []rowKey
 			for _, r := range s.round {
@@ -1511,6 +1582,67 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 	return true
 }
 
+// attachedDriftRestamps reports a round whose only effects are A14's
+// attached-deferral re-stamps (decideDriftAttached), landed, each moving only
+// the stamp's two keys on a row that stays attached under the same drift,
+// at most once per sessionAttachedConfigDriftRefreshInterval: legacy's
+// throttled re-stamp, a periodic write by design (CONTRACT v5.10m).
+func (s *sim) attachedDriftRestamps(before, after map[string]beads.Bead) bool {
+	if len(s.round) == 0 || len(before) != len(after) {
+		return false
+	}
+	healed := map[string]bool{} // the rows the round's heals re-stamped, by ID
+	for _, r := range s.round {
+		if r.it.Kind != intentRowHeal || r.it.Reason != decideDriftAttached || r.res.Outcome != settledLanded {
+			return false
+		}
+		healed[r.it.Key.ID] = false
+	}
+	stamp := map[string]bool{sessionAttachedConfigDriftDeferredAtMetadata: true, sessionAttachedConfigDriftDeferredKeyMetadata: true}
+	for k, b := range after {
+		a, ok := before[k]
+		switch {
+		case !ok || a.Status != b.Status:
+			return false
+		case sameBead(a, b):
+			continue
+		}
+		for key := range keyUnion(a.Metadata, b.Metadata) {
+			if a.Metadata[key] != b.Metadata[key] && !stamp[key] {
+				return false
+			}
+		}
+		prev, err1 := time.Parse(time.RFC3339, a.Metadata[sessionAttachedConfigDriftDeferredAtMetadata])
+		next, err2 := time.Parse(time.RFC3339, b.Metadata[sessionAttachedConfigDriftDeferredAtMetadata])
+		key := b.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata]
+		attached := s.sp.IsAttached(b.Metadata["session_name"])
+		if _, ok := healed[b.ID]; !ok || err1 != nil || err2 != nil || next.Sub(prev) < sessionAttachedConfigDriftRefreshInterval || key == "" || key != a.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] || !attached {
+			return false
+		}
+		healed[b.ID] = true
+	}
+	// Every heal re-stamped its row: a landed heal that moved nothing is a
+	// busy loop, no throttled re-stamp (the #7859 review).
+	for _, moved := range healed {
+		if !moved {
+			return false
+		}
+	}
+	return true
+}
+
+// keyUnion is the keys of a and b.
+func keyUnion(a, b map[string]string) map[string]bool {
+	out := make(map[string]bool, len(a)+len(b))
+	for k := range a {
+		out[k] = true
+	}
+	for k := range b {
+		out[k] = true
+	}
+	return out
+}
+
 // withoutLeaseKeys is meta without the runtime lease record's keys.
 func withoutLeaseKeys(meta map[string]string) map[string]string {
 	out := maps.Clone(meta)
@@ -1551,6 +1683,13 @@ func (s *sim) lastTimer() time.Time {
 			last = r.Until
 		}
 	}
+	// An ambiguous create holds its identity's plan until its row shows or
+	// the hard bound passes (P5; ruling on seed 60 of the corpus, mc-i7efm).
+	for _, e := range s.inflight.creates {
+		if at := e.SettledAt.Add(inflightHardBound); e.Ambiguous && at.After(last) {
+			last = at
+		}
+	}
 	return last
 }
 
@@ -1571,6 +1710,14 @@ func (s *sim) rowTimers() time.Time {
 			if at, err := time.Parse(time.RFC3339, b.Metadata[k]); err == nil {
 				later(at.Add(grace))
 			}
+		}
+		// A fresh pool create keeps its scaled slot postCreateProtectionTimeout
+		// past its commit (poolSessionWithinPostCreateProtection), and the
+		// slot's ranking moves when it ends (ruling on seed 716 of the
+		// floored corpus, mc-i7efm).
+		if at, err := time.Parse(time.RFC3339, b.Metadata["creation_complete_at"]); err == nil && b.Status != "closed" &&
+			slices.Contains([]string{"active", "awake"}, b.Metadata["state"]) && b.Metadata["state_reason"] == "creation_complete" {
+			later(at.Add(postCreateProtectionTimeout))
 		}
 		// The churn clear is A6's at its threshold on an open committed row
 		// (SESS-540), which a patrol reaches.
@@ -1662,20 +1809,10 @@ func TestSimCorpus(t *testing.T) {
 	}
 }
 
-// simFloorCancels counts the floor-ack cancels (DRAIN-010) the sims
-// admitted.
-var simFloorCancels atomic.Int64
-
 // TestSimCorpusFloored is the corpus with a min_active_sessions floor of 1
 // or 2 (by seed), so floor members' own acks are canceled (PAR-FLOORACK)
 // beside every other path: no invariant may break.
 func TestSimCorpusFloored(t *testing.T) {
-	before := simFloorCancels.Load()
-	t.Cleanup(func() {
-		if !t.Failed() && simFloorCancels.Load() == before {
-			t.Error("the floored sim corpus admitted no floor-ack cancel")
-		}
-	})
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{noPendingCreates: true})

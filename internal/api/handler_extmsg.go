@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
@@ -94,11 +95,11 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	sessions := s.state.SessionsBeadStore()
+	if sessions == (beads.SessionStore{}) {
 		return extmsgHandleLabel(selector)
 	}
-	resolvedID, err := session.ResolveSessionIDAllowClosed(store, selector)
+	resolvedID, err := session.ResolveSessionIDAllowClosed(sessions, selector)
 	if err != nil {
 		return extmsgHandleLabel(selector)
 	}
@@ -163,7 +164,7 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+		nudge := s.extmsgNotice(extmsgNotifyReminder{
 			Provider:                conv.Provider,
 			ConversationID:          conv.ConversationID,
 			ActorDisplay:            actorDisplayName,

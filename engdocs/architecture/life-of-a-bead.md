@@ -134,6 +134,22 @@ Both ultimately call `BdStore.Ready()` (`internal/beads/bdstore.go`, line
 385), which shells out to `bd ready --json --limit=0`. For pool agents,
 the bd CLI filters by label server-side.
 
+An empty queue and a failed query are different answers. A default work
+query whose store read fails (bd missing from PATH, a store bd cannot read,
+output jq cannot parse) exits with that read's non-zero status and names the
+failure on stderr, instead of falling through to `[]`. One failed tier fails
+the whole query: a later tier's answer is only correct given the earlier
+ones. Plain `gc hook` then exits 2 rather than the no-work exit 1, and
+`gc hook --claim` reports an error rather than a `no_work` drain, so a
+worker whose tools are broken does not drain itself as idle.
+
+The same holds across stores. When the hook runs the query against several
+stores (an agent's own store plus rig or city stores) and one of them cannot
+be read, the hook still serves work that another store returned and names
+the unread store on stderr. If no store returned work, the result is the
+failed-query result above, naming the store, not "no work". Only the agent's
+own store's failure is escalated as the session's work-query failure event.
+
 ### The --inject mode
 
 `gc hook --inject` is legacy Stop-hook compatibility. It exits 0 without

@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -212,5 +214,64 @@ func TestReadFilteredWithInFlightContextAbortsBetweenArchives(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("got %d events, want exactly archive 1's 2 events: %+v", len(got), got)
+	}
+}
+
+// TestReadFilteredContextTwinsSeekPastTheCursor pins that the ctx twins skip
+// the active log's prefix at or below AfterSeq without decoding it, as
+// ReadFiltered does (activeScanStart): a line below the cursor that the
+// scanner cannot take, longer than its 1 MiB limit, fails only a read that
+// starts below it.
+func TestReadFilteredContextTwinsSeekPastTheCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	var sb strings.Builder
+	fmt.Fprintf(&sb, `{"seq":1,"type":"a","ts":"2026-08-25T00:00:00Z","actor":"t","message":%q}`+"\n", strings.Repeat("x", 2<<20))
+	for seq := 2; seq <= 5; seq++ {
+		fmt.Fprintf(&sb, `{"seq":%d,"type":"a","ts":"2026-08-25T00:00:00Z","actor":"t"}`+"\n", seq)
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	for _, read := range []struct {
+		name string
+		fn   func(context.Context, string, Filter) ([]Event, error)
+	}{
+		{"ReadFilteredContext", ReadFilteredContext},
+		{"ReadFilteredWithInFlightContext", ReadFilteredWithInFlightContext},
+	} {
+		t.Run(read.name, func(t *testing.T) {
+			got, err := read.fn(context.Background(), path, Filter{AfterSeq: 3})
+			if err != nil {
+				t.Fatalf("read after seq 3: %v", err)
+			}
+			if len(got) != 2 || got[0].Seq != 4 || got[1].Seq != 5 {
+				t.Fatalf("read after seq 3 = %+v, want seqs 4 and 5", got)
+			}
+			if _, err := read.fn(context.Background(), path, Filter{}); err == nil {
+				t.Fatal("read from the log's start succeeded; want the over-long line's scan error, or this test proves nothing")
+			}
+		})
+	}
+}
+
+// TestFileRecorderListInFlightContextStopsWhenCanceled pins that the
+// recorder's ctx-aware in-flight read returns ctx's error instead of
+// scanning its archives once the caller has gone.
+func TestFileRecorderListInFlightContextStopsWhenCanceled(t *testing.T) {
+	dir := seedArchives(t)
+	rec, err := NewFileRecorder(filepath.Join(dir, "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+
+	all, err := rec.ListInFlightContext(context.Background(), Filter{})
+	if err != nil || len(all) == 0 {
+		t.Fatalf("ListInFlightContext = %d events, %v; want the seeded history", len(all), err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := rec.ListInFlightContext(ctx, Filter{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListInFlightContext(canceled) err = %v, want context.Canceled", err)
 	}
 }

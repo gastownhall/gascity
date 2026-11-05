@@ -10,7 +10,9 @@ import (
 
 // TestTerminalRootClampMappings pins the presentation-clamp mapping for every
 // terminal root class against every non-terminal step status, plus the
-// already-terminal preservation rule. This is the direct-mapping oracle the
+// already-terminal preservation rule. Each clamped status is the one dispatch
+// durably writes when it closes the step, so a step never moves from one
+// terminal status to another. This is the direct-mapping oracle the
 // end-to-end tests below exercise through the full pipeline.
 func TestTerminalRootClampMappings(t *testing.T) {
 	cases := []struct {
@@ -18,22 +20,26 @@ func TestTerminalRootClampMappings(t *testing.T) {
 		step       string
 		want       string
 	}{
-		// Completed root: unfinished steps complete, never-started steps skip.
-		{"completed", "active", "completed"},
-		{"completed", "running", "completed"},
-		{"completed", "ready", "completed"},
-		{"completed", "blocked", "completed"},
+		// Completed root: every unfinished step is skipped — the finalizer's
+		// sweep closes it gc.outcome=skipped, started or not.
+		{"completed", "active", "skipped"},
+		{"completed", "running", "skipped"},
+		{"completed", "ready", "skipped"},
+		{"completed", "blocked", "skipped"},
 		{"completed", "pending", "skipped"},
-		// Failed root: unfinished steps cancel, never-started steps skip.
-		{"failed", "active", "canceled"},
-		{"failed", "running", "canceled"},
-		{"failed", "ready", "canceled"},
-		{"failed", "blocked", "canceled"},
+		// Failed root: the same sweep, so skipped too.
+		{"failed", "active", "skipped"},
+		{"failed", "running", "skipped"},
+		{"failed", "ready", "skipped"},
+		{"failed", "blocked", "skipped"},
 		{"failed", "pending", "skipped"},
-		// Canceled root behaves like failed.
+		// Skipped root: closed with its subtree, every member skipped.
+		{"skipped", "active", "skipped"},
+		{"skipped", "pending", "skipped"},
+		// Canceled root: the run cancel closes every unfinished step canceled.
 		{"canceled", "active", "canceled"},
 		{"canceled", "ready", "canceled"},
-		{"canceled", "pending", "skipped"},
+		{"canceled", "pending", "canceled"},
 		// Already-terminal step statuses are never altered under any terminal root.
 		{"completed", "completed", "completed"},
 		{"completed", "failed", "failed"},
@@ -77,18 +83,24 @@ func TestTerminalRootClampMappingsCoverTaxonomy(t *testing.T) {
 }
 
 // TestRootClampForResolvesBeadStatus proves rootClampFor keys off the root bead's
-// presentation status (not its raw status): a closed root activates a completed
-// clamp, a closed+gc.outcome=fail root activates a canceled clamp, an open root
-// stays inactive, and an absent (nil) root stays inactive.
+// presentation status (not its raw status): a closed or closed+gc.outcome=fail
+// root activates a skipped clamp (the finalizer's sweep), a
+// closed+gc.outcome=canceled root activates a canceled clamp (the run cancel), an
+// open root stays inactive, and an absent (nil) root stays inactive.
 func TestRootClampForResolvesBeadStatus(t *testing.T) {
 	completed := runSnapshotBead{status: "closed"}
-	if c := rootClampFor(&completed); !c.active || c.nonPendingTarget != "completed" {
-		t.Errorf("closed root: clamp = %+v, want active completed", c)
+	if c := rootClampFor(&completed); !c.active || c.target != "skipped" {
+		t.Errorf("closed root: clamp = %+v, want active skipped", c)
 	}
 
 	failed := runSnapshotBead{status: "closed", metadata: map[string]string{beadmeta.OutcomeMetadataKey: "fail"}}
-	if c := rootClampFor(&failed); !c.active || c.nonPendingTarget != "canceled" {
-		t.Errorf("closed+outcome=fail root: clamp = %+v, want active canceled", c)
+	if c := rootClampFor(&failed); !c.active || c.target != "skipped" {
+		t.Errorf("closed+outcome=fail root: clamp = %+v, want active skipped", c)
+	}
+
+	canceled := runSnapshotBead{status: "closed", metadata: map[string]string{beadmeta.OutcomeMetadataKey: "canceled"}}
+	if c := rootClampFor(&canceled); !c.active || c.target != "canceled" {
+		t.Errorf("closed+outcome=canceled root: clamp = %+v, want active canceled", c)
 	}
 
 	open := runSnapshotBead{status: "open"}
@@ -105,7 +117,8 @@ func TestRootClampForResolvesBeadStatus(t *testing.T) {
 // a completed merge-queue run whose 7 in-progress steps and 1 open step lost their
 // close events. Before the clamp the detail rendered 7 "active" + 1 "pending" step
 // under a completed root (statusCounts {completed:1, active:7, pending:1}); after
-// it, every step reads completed/skipped and the run reports terminal.
+// it, every step reads skipped — what the finalizer's sweep writes for a member
+// still open when the root settles — and the run reports terminal.
 func TestBuildRunDetailTerminalClampProductionShape(t *testing.T) {
 	beadList := []beads.Bead{clampRootBead("runq", "closed", nil)}
 	for i := 1; i <= 7; i++ {
@@ -124,19 +137,19 @@ func TestBuildRunDetailTerminalClampProductionShape(t *testing.T) {
 	}
 	for i := 1; i <= 7; i++ {
 		id := fmt.Sprintf("s%d", i)
-		if statuses[id] != "completed" {
-			t.Errorf("step %q status = %q, want completed (was in_progress under a completed root)", id, statuses[id])
+		if statuses[id] != "skipped" {
+			t.Errorf("step %q status = %q, want skipped (was in_progress under a completed root)", id, statuses[id])
 		}
 	}
 	if statuses["s8"] != "skipped" {
 		t.Errorf("open step s8 status = %q, want skipped (never started under a completed root)", statuses["s8"])
 	}
 
-	// statusCounts is computed post-clamp: root + 7 steps completed, 1 skipped.
+	// statusCounts is computed post-clamp: root completed, 8 steps skipped.
 	assertNoLiveStatuses(t, detail)
 	sc := detail.Progress.StatusCounts.counts
-	if sc["completed"] != 8 || sc["skipped"] != 1 || len(sc) != 2 {
-		t.Errorf("progress.statusCounts = %v, want {completed:8, skipped:1}", sc)
+	if sc["completed"] != 1 || sc["skipped"] != 8 || len(sc) != 2 {
+		t.Errorf("progress.statusCounts = %v, want {completed:1, skipped:8}", sc)
 	}
 	if !detail.Progress.Terminal {
 		t.Error("progress.terminal = false, want true — every visible node is terminal after the clamp")
@@ -146,7 +159,7 @@ func TestBuildRunDetailTerminalClampProductionShape(t *testing.T) {
 // TestBuildRunDetailTerminalClampPreservesRecordedOutcomes proves the clamp never
 // overwrites a real recorded step outcome under a completed root: a
 // gc.outcome=fail step stays failed, a skipped step stays skipped, a canceled step
-// stays canceled, while a still-running step collapses to completed.
+// stays canceled, while a still-running step collapses to skipped.
 func TestBuildRunDetailTerminalClampPreservesRecordedOutcomes(t *testing.T) {
 	beadList := []beads.Bead{
 		clampRootBead("runp", "closed", nil),
@@ -162,7 +175,7 @@ func TestBuildRunDetailTerminalClampPreservesRecordedOutcomes(t *testing.T) {
 	}
 
 	statuses := nodeStatusByID(detail)
-	want := map[string]string{"won": "completed", "lost": "failed", "dropped": "skipped", "aborted": "canceled"}
+	want := map[string]string{"won": "skipped", "lost": "failed", "dropped": "skipped", "aborted": "canceled"}
 	for id, wantStatus := range want {
 		if statuses[id] != wantStatus {
 			t.Errorf("step %q status = %q, want %q", id, statuses[id], wantStatus)
@@ -172,7 +185,8 @@ func TestBuildRunDetailTerminalClampPreservesRecordedOutcomes(t *testing.T) {
 
 // TestBuildRunDetailTerminalClampCannotResurrectActive proves the instance-level
 // clamp runs before aggregateStatus: a semantic node with several physical
-// instances (one still in_progress) folds to completed, never back to "active".
+// instances (one still in_progress) folds to the clamped latest attempt
+// (skipped), never back to "active".
 func TestBuildRunDetailTerminalClampCannotResurrectActive(t *testing.T) {
 	beadList := []beads.Bead{
 		clampRootBead("runr", "closed", nil),
@@ -191,8 +205,8 @@ func TestBuildRunDetailTerminalClampCannotResurrectActive(t *testing.T) {
 	if !ok {
 		t.Fatal("loop node not found")
 	}
-	if node.Status != "completed" {
-		t.Errorf("aggregated loop node status = %q, want completed", node.Status)
+	if node.Status != "skipped" {
+		t.Errorf("aggregated loop node status = %q, want skipped", node.Status)
 	}
 	if len(node.ExecutionInstances) != 3 {
 		t.Fatalf("loop node has %d instances, want 3", len(node.ExecutionInstances))
@@ -204,9 +218,11 @@ func TestBuildRunDetailTerminalClampCannotResurrectActive(t *testing.T) {
 	}
 }
 
-// TestBuildRunDetailFailedRootClampsToCanceled proves a failed root cancels its
-// unfinished steps (rather than completing them) and skips its never-started ones.
-func TestBuildRunDetailFailedRootClampsToCanceled(t *testing.T) {
+// TestBuildRunDetailFailedRootClampsToSkipped proves a failed root skips its
+// unfinished steps, started or not: the finalizer's sweep closes each
+// gc.outcome=skipped. It used to present the in-progress one as canceled, which
+// the sweep's close then contradicted.
+func TestBuildRunDetailFailedRootClampsToSkipped(t *testing.T) {
 	beadList := []beads.Bead{
 		clampRootBead("runf", "closed", map[string]string{beadmeta.OutcomeMetadataKey: "fail"}),
 		clampStepBead("runf", "runf.1", "midflight", "in_progress", nil),
@@ -220,7 +236,34 @@ func TestBuildRunDetailFailedRootClampsToCanceled(t *testing.T) {
 	}
 
 	statuses := nodeStatusByID(detail)
-	want := map[string]string{"runf": "failed", "midflight": "canceled", "never": "skipped", "finished": "completed"}
+	want := map[string]string{"runf": "failed", "midflight": "skipped", "never": "skipped", "finished": "completed"}
+	for id, wantStatus := range want {
+		if statuses[id] != wantStatus {
+			t.Errorf("node %q status = %q, want %q", id, statuses[id], wantStatus)
+		}
+	}
+	assertNoLiveStatuses(t, detail)
+}
+
+// TestBuildRunDetailCanceledRootClampsToCanceled proves a canceled root cancels
+// its unfinished steps, started or not: the run cancel closes each
+// gc.outcome=canceled. It used to present the never-started one as skipped,
+// which the cancel's close then contradicted.
+func TestBuildRunDetailCanceledRootClampsToCanceled(t *testing.T) {
+	beadList := []beads.Bead{
+		clampRootBead("runk", "closed", map[string]string{beadmeta.OutcomeMetadataKey: "canceled"}),
+		clampStepBead("runk", "runk.1", "midflight", "in_progress", nil),
+		clampStepBead("runk", "runk.2", "never", "open", nil),
+		clampStepBead("runk", "runk.3", "finished", "closed", nil),
+	}
+
+	detail, err := BuildRunDetail(beadList, "runk", 1, 100)
+	if err != nil {
+		t.Fatalf("BuildRunDetail: %v", err)
+	}
+
+	statuses := nodeStatusByID(detail)
+	want := map[string]string{"runk": "canceled", "midflight": "canceled", "never": "canceled", "finished": "completed"}
 	for id, wantStatus := range want {
 		if statuses[id] != wantStatus {
 			t.Errorf("node %q status = %q, want %q", id, statuses[id], wantStatus)
@@ -254,7 +297,7 @@ func TestBuildRunDetailOpenRootDoesNotClamp(t *testing.T) {
 }
 
 // TestBuildRunDetailTerminalClampKeepsSessionLink proves the session interaction:
-// a clamped-completed step keeps the session link it earned while running (the
+// a clamped step keeps the session link it earned while running (the
 // link is resolved from the step's real recorded status), but is not streamable
 // (nothing streams under a terminal root).
 func TestBuildRunDetailTerminalClampKeepsSessionLink(t *testing.T) {
@@ -275,21 +318,21 @@ func TestBuildRunDetailTerminalClampKeepsSessionLink(t *testing.T) {
 	if !ok {
 		t.Fatal("review node not found")
 	}
-	if node.Status != "completed" {
-		t.Errorf("review node status = %q, want completed", node.Status)
+	if node.Status != "skipped" {
+		t.Errorf("review node status = %q, want skipped", node.Status)
 	}
 	if len(node.ExecutionInstances) != 1 {
 		t.Fatalf("review node has %d instances, want 1", len(node.ExecutionInstances))
 	}
 	inst := node.ExecutionInstances[0]
 	if inst.Session.Kind != "attached" {
-		t.Fatalf("clamped-completed step session kind = %q, want attached (link preserved)", inst.Session.Kind)
+		t.Fatalf("clamped step session kind = %q, want attached (link preserved)", inst.Session.Kind)
 	}
 	if inst.Session.Link.SessionID != "gc-sess01" {
 		t.Errorf("session link id = %q, want gc-sess01", inst.Session.Link.SessionID)
 	}
 	if inst.Session.Streamable {
-		t.Error("clamped-completed step is streamable, want false — a terminal run streams nothing")
+		t.Error("clamped step is streamable, want false — a terminal run streams nothing")
 	}
 }
 
@@ -493,8 +536,8 @@ func TestBuildRunDetailClampsControlBadges(t *testing.T) {
 	if !ok {
 		t.Fatalf("finalize badge not attached to root; badges=%+v", root.ControlBadges)
 	}
-	if badge.Status != "completed" {
-		t.Errorf("finalize badge status = %q, want completed (clamped under a closed root)", badge.Status)
+	if badge.Status != "skipped" {
+		t.Errorf("finalize badge status = %q, want skipped (clamped under a closed root)", badge.Status)
 	}
 	assertNoLiveStatuses(t, detail)
 }

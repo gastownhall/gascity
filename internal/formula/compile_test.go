@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/session"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2510,6 +2511,47 @@ type = "task"
 	}
 }
 
+func TestCompile_ExtendsPropagatesChildContentHash(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := `
+formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`
+	childContent := `
+formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), []byte(parentContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, []byte(childContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := Compile(context.Background(), "mol-hash-child", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	if recipe.FormulaSource != childPath {
+		t.Fatalf("FormulaSource = %q, want child path %q", recipe.FormulaSource, childPath)
+	}
+	if want := ContentHash([]byte(childContent)); recipe.ContentHash != want {
+		t.Fatalf("ContentHash = %q, want child file hash %q", recipe.ContentHash, want)
+	}
+}
+
 func TestCompile_PropagatesRootMetadata(t *testing.T) {
 	dir := t.TempDir()
 	content := `
@@ -2704,17 +2746,21 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 }
 
 // TestValidateRefusesWhatControllerOwnedNames pins formula.Validate's
-// literal check against coordclass.ControllerOwned (architecture B, the
-// #7742 review): a step is refused exactly when the bead it compiles to
-// would be controller-owned, for every owned type and the session label in
-// any case and spacing, and for none of the work or coordination types.
+// literal check against coordclass.ControllerOwned and CoordinationOwned
+// (architecture B, the #7742 and #7766 reviews): a step is refused exactly
+// when the bead it compiles to would be owned, for every owned type, the
+// session label and the coordination labels and wait shape in any case and
+// spacing, and for none of the work types or wisps.
 func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
-	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "task", "bug", "message", "convoy", "molecule", ""} {
-		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"gc:session-x"}} {
-			f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels}}}
-			refused := f.Validate() != nil
-			if owned := coordclass.ControllerOwned(beads.Bead{Type: typ, Labels: labels}); refused != owned {
-				t.Errorf("type %q labels %q: Validate refused %t, ControllerOwned %t", typ, labels, refused, owned)
+	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "op", " OP ", "message", " Message ", "task", "bug", "convoy", "molecule", "gate", "Wait", ""} {
+		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"GC:Nudge"}, {"gc:nudge-queue"}, {"order-tracking"}, {"note", "Order-Run:digest"}, {"gc:extmsg-binding"}, {"session:s-1"}, {"session:s-2"}, {"gc:wisp"}, {"gc:session-x"}, {"extmsg:binding:conv:v1:x"}} {
+			for _, meta := range []map[string]string{nil, {"session_id": "s-1"}} {
+				f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels, Metadata: meta}}}
+				refused := f.Validate() != nil
+				b := beads.Bead{Type: typ, Labels: labels, Metadata: meta}
+				if owned := coordclass.ControllerOwned(b) || coordclass.CoordinationOwned(b); refused != owned {
+					t.Errorf("type %q labels %q meta %v: Validate refused %t, owned %t", typ, labels, meta, refused, owned)
+				}
 			}
 		}
 	}
@@ -2723,7 +2769,116 @@ func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
 // TestSessionStepMarksAreTheSessionPackages pins sessionStepType,
 // sessionStepLabel and startupHealthStepType to the session package's.
 func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
+	if opStepType != opjournal.BeadType {
+		t.Fatalf("opStepType %q, want opjournal's %q", opStepType, opjournal.BeadType)
+	}
 	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType || convergenceStepType != "convergence" {
 		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
+	}
+}
+
+func TestCompileConditionSeesDefaultBuiltFromProvidedVar(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "conditional-ref"
+version = 1
+
+[vars.review_target]
+default = "{{binding_prefix}}reviewer"
+
+[[steps]]
+id = "always"
+title = "Always runs"
+
+[[steps]]
+id = "bound-only"
+title = "Only for the ops binding"
+condition = "{{review_target}} == ops.reviewer"
+`
+	if err := os.WriteFile(filepath.Join(dir, "conditional-ref.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "conditional-ref", []string{dir}, map[string]string{"binding_prefix": "ops."})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(recipe.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3 (root, always, bound-only)", len(recipe.Steps))
+	}
+}
+
+func TestCompileComposeExpansionResolvesDefaultFromRuleVar(t *testing.T) {
+	dir := t.TempDir()
+	expansion := `
+formula = "review-expansion"
+type = "expansion"
+version = 1
+
+[vars.reviewer]
+default = "{{prefix}}reviewer"
+
+[[template]]
+id = "{target}.review"
+title = "Review by {reviewer}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "review-expansion.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := `
+formula = "review-parent"
+version = 1
+
+[[steps]]
+id = "release"
+title = "Release"
+
+[[compose.expand]]
+target = "release"
+with = "review-expansion"
+vars = { prefix = "ops." }
+`
+	if err := os.WriteFile(filepath.Join(dir, "review-parent.toml"), []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "review-parent", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	step := recipe.StepByID("review-parent.release.review")
+	if step == nil {
+		t.Fatalf("expanded review step missing; steps = %+v", recipe.Steps)
+	}
+	if step.Title != "Review by ops.reviewer" {
+		t.Fatalf("title = %q, want the expansion default resolved against the rule var", step.Title)
+	}
+}
+
+func TestCompileStandaloneExpansionResolvesDefaultFromProvidedVar(t *testing.T) {
+	dir := t.TempDir()
+	expansion := `
+formula = "standalone-review"
+type = "expansion"
+version = 1
+
+[vars.reviewer]
+default = "{{prefix}}reviewer"
+
+[[template]]
+id = "{target}.review"
+title = "Review by {reviewer}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "standalone-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := Compile(context.Background(), "standalone-review", []string{dir}, map[string]string{"prefix": "ops."})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	step := recipe.StepByID("standalone-review.main.review")
+	if step == nil {
+		t.Fatalf("expanded review step missing; steps = %+v", recipe.Steps)
+	}
+	if step.Title != "Review by ops.reviewer" {
+		t.Fatalf("title = %q, want the expansion default resolved against the provided var", step.Title)
 	}
 }

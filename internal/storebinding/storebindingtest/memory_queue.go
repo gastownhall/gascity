@@ -18,7 +18,10 @@ package storebindingtest
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -57,11 +60,32 @@ type MemoryNudgeQueue struct {
 	mu      sync.Mutex
 	entries map[string]*memoryQueueEntry
 	order   []string
+	// policy is the legacy behavior this queue reproduces; the zero value is
+	// the contract.
+	policy NudgeQueuePolicy
 }
 
-// NewMemoryNudgeQueue returns an empty in-memory queue.
+// NewMemoryNudgeQueue returns an empty in-memory queue that keeps the contract.
 func NewMemoryNudgeQueue() *MemoryNudgeQueue {
-	return &MemoryNudgeQueue{entries: map[string]*memoryQueueEntry{}}
+	return NewMemoryNudgeQueueWithPolicy(NudgeQueuePolicy{})
+}
+
+// NewMemoryNudgeQueueWithPolicy returns an empty in-memory queue that keeps the
+// legacy behaviors policy declares. It is the counterpart that lets the Nudges
+// suite prove its policy cases in both directions: a queue that keeps a legacy
+// behavior passes when it declares it and fails when it does not, and a queue
+// that keeps the contract fails when it declares a legacy behavior.
+func NewMemoryNudgeQueueWithPolicy(policy NudgeQueuePolicy) *MemoryNudgeQueue {
+	return &MemoryNudgeQueue{entries: map[string]*memoryQueueEntry{}, policy: policy}
+}
+
+// verbPrologueLocked is the whole-queue recovery a legacy queue runs inside
+// the verbs VerbsMaintain names. A contract queue runs none: recovery is
+// Maintain's alone.
+func (q *MemoryNudgeQueue) verbPrologueLocked(now time.Time) {
+	if q.policy.VerbsMaintain {
+		q.maintainLocked(now)
+	}
 }
 
 // Enqueue inserts item as pending. A duplicate ID is a no-op, matching the
@@ -69,6 +93,7 @@ func NewMemoryNudgeQueue() *MemoryNudgeQueue {
 func (q *MemoryNudgeQueue) Enqueue(item nudgequeue.Item) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.verbPrologueLocked(time.Now().UTC())
 	if _, exists := q.entries[item.ID]; exists {
 		return nil
 	}
@@ -111,7 +136,67 @@ func (q *MemoryNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.verbPrologueLocked(now)
 	var claimed []nudgequeue.Item
+	for _, entry := range q.candidatesLocked(target, now, newClaimFence(target)) {
+		claimed = append(claimed, claimEntry(entry, now, entry.item.DeliveryBatch))
+	}
+	return claimed, nil
+}
+
+// ClaimBatch claims target's next delivery batch: the first pinned batch among
+// the due candidates that can be claimed whole, or else every due unpinned
+// candidate under a newly minted key.
+func (q *MemoryNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
+	if len(target.QueueKeys) == 0 {
+		return nil, nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.verbPrologueLocked(now)
+	fence := newClaimFence(target)
+	candidates := q.candidatesLocked(target, now, fence)
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		batch := candidate.item.DeliveryBatch
+		if batch == "" || seen[batch] {
+			continue
+		}
+		seen[batch] = true
+		members, whole := q.wholeBatchLocked(batch, target, now, fence)
+		if !whole {
+			continue
+		}
+		claimed := make([]nudgequeue.Item, 0, len(members))
+		for _, member := range members {
+			claimed = append(claimed, claimEntry(member, now, batch))
+		}
+		sortByDelivery(claimed)
+		return claimed, nil
+	}
+	var claimed []nudgequeue.Item
+	batch := ""
+	for _, candidate := range candidates {
+		if candidate.item.DeliveryBatch != "" {
+			continue
+		}
+		if batch == "" {
+			minted, err := newMemoryBatchKey()
+			if err != nil {
+				return nil, err
+			}
+			batch = minted
+		}
+		claimed = append(claimed, claimEntry(candidate, now, batch))
+	}
+	return claimed, nil
+}
+
+// candidatesLocked returns the entries target may claim now, in delivery
+// order: live, unclaimed, addressed to one of its keys, due, and passing the
+// fence. An expired entry it meets is dead-lettered instead.
+func (q *MemoryNudgeQueue) candidatesLocked(target storebinding.ClaimTarget, now time.Time, fence *claimFence) []*memoryQueueEntry {
+	var candidates []*memoryQueueEntry
 	for _, id := range q.order {
 		entry := q.entries[id]
 		if entry == nil || !entry.live() || entry.inFlightAt(now) {
@@ -127,16 +212,95 @@ func (q *MemoryNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 		if entry.item.DeliverAfter.After(now) {
 			continue
 		}
-		if !passesFence(entry.item, target) {
+		if !fence.passes(entry.item) {
 			continue
 		}
-		entry.item.ClaimedAt = now.UTC()
-		entry.item.LeaseUntil = now.Add(memoryQueueClaimLease).UTC()
-		entry.state = memoryQueueInFlight
-		claimed = append(claimed, entry.item)
+		candidates = append(candidates, entry)
 	}
-	sortByDelivery(claimed)
-	return claimed, nil
+	sort.SliceStable(candidates, func(i, j int) bool { return deliveredBefore(candidates[i].item, candidates[j].item) })
+	return candidates
+}
+
+// wholeBatchLocked returns batch's live members and whether target can claim
+// them whole: none in flight, and every one due, addressed to one of target's
+// keys, and passing the fence.
+func (q *MemoryNudgeQueue) wholeBatchLocked(batch string, target storebinding.ClaimTarget, now time.Time, fence *claimFence) ([]*memoryQueueEntry, bool) {
+	var members []*memoryQueueEntry
+	for _, id := range q.order {
+		entry := q.entries[id]
+		if entry == nil || !entry.live() || entry.item.DeliveryBatch != batch || expired(entry.item, now) {
+			continue
+		}
+		if entry.inFlightAt(now) || entry.item.DeliverAfter.After(now) ||
+			!matchesQueueKeys(entry.item.Agent, target.QueueKeys) || !fence.passes(entry.item) {
+			return nil, false
+		}
+		members = append(members, entry)
+	}
+	return members, len(members) > 0
+}
+
+// claimEntry leases entry to the caller under batch and returns its view.
+func claimEntry(entry *memoryQueueEntry, now time.Time, batch string) nudgequeue.Item {
+	entry.item.ClaimedAt = now.UTC()
+	entry.item.LeaseUntil = now.Add(memoryQueueClaimLease).UTC()
+	entry.item.DeliveryBatch = batch
+	entry.state = memoryQueueInFlight
+	return entry.item
+}
+
+// newMemoryBatchKey mints a delivery batch key.
+func newMemoryBatchKey() (string, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("minting nudge delivery batch key: %w", err)
+	}
+	return "nudge-batch-" + hex.EncodeToString(buf[:]), nil
+}
+
+// claimFence applies one claim's session-generation fence. It asks the
+// target's census at most once, and only for a candidate pinned to a session
+// other than the target's.
+type claimFence struct {
+	target    storebinding.ClaimTarget
+	asked     bool
+	live      map[string]struct{}
+	available bool
+}
+
+func newClaimFence(target storebinding.ClaimTarget) *claimFence {
+	return &claimFence{target: target}
+}
+
+// passes reports whether the target may claim item. A session-pinned item is
+// claimable by its own session, or by another session the census names when
+// the census no longer names the item's; an epoch-pinned unpinned-session item
+// only by a target that carries a continuation epoch at all.
+func (f *claimFence) passes(item nudgequeue.Item) bool {
+	if item.SessionID == "" {
+		return item.ContinuationEpoch == "" || f.target.ContinuationEpoch != ""
+	}
+	if f.target.SessionID == "" {
+		return false
+	}
+	if item.SessionID == f.target.SessionID {
+		return true
+	}
+	if f.target.LiveFenceSessions == nil {
+		return false
+	}
+	if !f.asked {
+		f.asked = true
+		f.live, f.available = f.target.LiveFenceSessions()
+	}
+	if !f.available {
+		return false
+	}
+	if _, successorLive := f.live[f.target.SessionID]; !successorLive {
+		return false
+	}
+	_, stillLive := f.live[item.SessionID]
+	return !stillLive
 }
 
 // ListForAgent returns the queue buckets addressed exactly to agentName.
@@ -156,10 +320,9 @@ func (q *MemoryNudgeQueue) ListFor(target storebinding.ClaimTarget, now time.Tim
 
 // Snapshot returns every queued item in the canonical bucket order.
 func (q *MemoryNudgeQueue) Snapshot() (nudgequeue.State, error) {
-	pending, inFlight, dead, err := q.listMatching(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
-	if err != nil {
-		return nudgequeue.State{}, err
-	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	pending, inFlight, dead := q.bucketsLocked(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
 	state := nudgequeue.State{Pending: pending, InFlight: inFlight, Dead: dead}
 	nudgequeue.SortState(&state)
 	return state, nil
@@ -169,41 +332,59 @@ func (q *MemoryNudgeQueue) Snapshot() (nudgequeue.State, error) {
 func (q *MemoryNudgeQueue) Ack(ids []string, _, _, _ string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := time.Now().UTC()
+	q.verbPrologueLocked(now)
 	for _, id := range ids {
 		entry := q.entries[id]
 		if entry == nil {
 			continue
 		}
-		if entry.live() && expired(entry.item, time.Now()) {
+		if entry.live() && expired(entry.item, now) {
 			deadLetterExpired(entry)
 			continue
 		}
-		if entry.live() {
-			entry.state = memoryQueueTerminal
-			entry.terminalAt = time.Now().UTC()
-			entry.item.ClaimedAt = time.Time{}
-			entry.item.LeaseUntil = time.Time{}
+		if !entry.live() {
+			continue
 		}
+		if q.policy.ForgetsRetiredIDs {
+			q.forgetLocked(id)
+			continue
+		}
+		entry.state = memoryQueueTerminal
+		entry.terminalAt = now
+		entry.item.ClaimedAt = time.Time{}
+		entry.item.LeaseUntil = time.Time{}
 	}
 	return nil
 }
 
-// ReleaseClaims returns undelivered in-flight ids to pending.
-func (q *MemoryNudgeQueue) ReleaseClaims(ids []string) error {
+// ReleaseClaims returns undelivered in-flight ids to pending, not claimable
+// before notBefore when it is set. The delivery batch is kept. An item whose
+// lease has already run out is no longer in flight, so it is left as it is:
+// there is no claim to give back and no backoff to impose.
+func (q *MemoryNudgeQueue) ReleaseClaims(ids []string, notBefore time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := time.Now().UTC()
+	q.verbPrologueLocked(now)
 	for _, id := range ids {
 		entry := q.entries[id]
 		if entry == nil || entry.state != memoryQueueInFlight {
 			continue
 		}
-		if expired(entry.item, time.Now()) {
+		if expired(entry.item, now) {
 			deadLetterExpired(entry)
+			continue
+		}
+		if !entry.inFlightAt(now) {
 			continue
 		}
 		entry.state = memoryQueuePending
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
+		if !notBefore.IsZero() {
+			entry.item.DeliverAfter = notBefore.UTC()
+		}
 	}
 	return nil
 }
@@ -220,7 +401,9 @@ func (q *MemoryNudgeQueue) ReleaseClaims(ids []string) error {
 func (q *MemoryNudgeQueue) RecordFailure(ids []string, cause error, now time.Time) ([]nudgequeue.Item, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.verbPrologueLocked(now)
 	permanent := errors.Is(cause, storebinding.ErrNudgeSessionFenceMismatch)
+	rejected := errors.Is(cause, storebinding.ErrNudgeDeliveryRejected)
 	var dead []nudgequeue.Item
 	for _, id := range ids {
 		entry := q.entries[id]
@@ -240,6 +423,11 @@ func (q *MemoryNudgeQueue) RecordFailure(ids []string, cause error, now time.Tim
 		}
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
+		if rejected {
+			// Nothing was delivered, so the batch is no longer a delivery
+			// to repeat: the next claim pins the item under a new key.
+			entry.item.DeliveryBatch = ""
+		}
 		if permanent || entry.item.Attempts >= memoryQueueMaxAttempt {
 			entry.item.DeadAt = now.UTC()
 			entry.state = memoryQueueDead
@@ -299,6 +487,12 @@ func (q *MemoryNudgeQueue) Maintain(ctx context.Context, now time.Time) (storebi
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.maintainLocked(now)
+	return storebinding.NudgeMaintenance{}, nil
+}
+
+// maintainLocked is the whole-queue recovery pass.
+func (q *MemoryNudgeQueue) maintainLocked(now time.Time) {
 	q.expireLeases(now)
 	kept := q.order[:0]
 	for _, id := range q.order {
@@ -325,7 +519,71 @@ func (q *MemoryNudgeQueue) Maintain(ctx context.Context, now time.Time) (storebi
 		kept = append(kept, id)
 	}
 	q.order = kept
-	return storebinding.NudgeMaintenance{}, nil
+}
+
+// forgetLocked drops id from the queue entirely, as the legacy queue does when
+// it acks: nothing remembers the id afterwards.
+func (q *MemoryNudgeQueue) forgetLocked(id string) {
+	delete(q.entries, id)
+	kept := q.order[:0]
+	for _, existing := range q.order {
+		if existing != id {
+			kept = append(kept, existing)
+		}
+	}
+	q.order = kept
+}
+
+// Lookup reports the bucket each id is in as of now. Retired and unknown ids
+// are absent; an expired item reads as dead.
+func (q *MemoryNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.verbPrologueLocked(now)
+	buckets := make(map[string]nudgequeue.Bucket, len(ids))
+	for _, id := range ids {
+		entry := q.entries[id]
+		if entry == nil {
+			continue
+		}
+		if bucket, ok := entry.bucketAt(now); ok {
+			buckets[id] = bucket
+		}
+	}
+	return buckets, nil
+}
+
+// DueKeys returns, sorted and unique, the non-empty queue keys with an item
+// that reads as pending and is due at now.
+func (q *MemoryNudgeQueue) DueKeys(now time.Time) ([]string, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	seen := map[string]bool{}
+	var keys []string
+	for _, entry := range q.entries {
+		if entry.item.Agent == "" || seen[entry.item.Agent] || entry.item.DeliverAfter.After(now) {
+			continue
+		}
+		if bucket, ok := entry.bucketAt(now); !ok || bucket != nudgequeue.BucketPending {
+			continue
+		}
+		seen[entry.item.Agent] = true
+		keys = append(keys, entry.item.Agent)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// Empty reports that the queue serves no pending, in-flight or dead item.
+func (q *MemoryNudgeQueue) Empty() (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, entry := range q.entries {
+		if entry.live() || entry.state == memoryQueueDead {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) {
@@ -334,7 +592,9 @@ func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) 
 }
 
 // expireLeases records the lease recovery the reads already project: in-flight
-// items whose lease has run out return to pending. It runs only in Maintain.
+// items whose lease has run out return to pending. It runs in Maintain, and
+// under VerbsMaintain in the prologue of the verbs that policy names, where, as
+// the file queue does, the recovered item is due again from that verb's clock.
 func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 	for _, entry := range q.entries {
 		if entry.state != memoryQueueInFlight {
@@ -346,12 +606,23 @@ func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 		entry.state = memoryQueuePending
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
+		if q.policy.VerbsMaintain {
+			entry.item.DeliverAfter = now
+		}
 	}
 }
 
 func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Item) bool) (pending, inFlight, dead []nudgequeue.Item, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.verbPrologueLocked(now)
+	pending, inFlight, dead = q.bucketsLocked(now, match)
+	return pending, inFlight, dead, nil
+}
+
+// bucketsLocked sorts the entries match selects into the buckets they read as
+// at now, each in delivery order.
+func (q *MemoryNudgeQueue) bucketsLocked(now time.Time, match func(nudgequeue.Item) bool) (pending, inFlight, dead []nudgequeue.Item) {
 	for _, id := range q.order {
 		entry := q.entries[id]
 		if entry == nil || !match(entry.item) {
@@ -373,17 +644,7 @@ func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Ite
 	sortByDelivery(pending)
 	sortByDelivery(inFlight)
 	sortByDelivery(dead)
-	return pending, inFlight, dead, nil
-}
-
-// passesFence applies the claim fence: a session-pinned item is claimable only
-// by that exact session, and an epoch-pinned unpinned-session item only by a
-// target that carries a continuation epoch at all.
-func passesFence(item nudgequeue.Item, target storebinding.ClaimTarget) bool {
-	if item.SessionID != "" {
-		return target.SessionID != "" && item.SessionID == target.SessionID
-	}
-	return item.ContinuationEpoch == "" || target.ContinuationEpoch != ""
+	return pending, inFlight, dead
 }
 
 // expired reports whether item's deliver-by deadline has passed at now.
@@ -415,6 +676,23 @@ func deadLetterExpired(entry *memoryQueueEntry) {
 	entry.state = memoryQueueDead
 }
 
+// bucketAt is the bucket the entry reads as at now, or false when the queue no
+// longer serves it.
+func (e *memoryQueueEntry) bucketAt(now time.Time) (nudgequeue.Bucket, bool) {
+	switch {
+	case e.state == memoryQueueDead:
+		return nudgequeue.BucketDead, true
+	case e.live() && expired(e.item, now):
+		return nudgequeue.BucketDead, true
+	case e.inFlightAt(now):
+		return nudgequeue.BucketInFlight, true
+	case e.live():
+		return nudgequeue.BucketPending, true
+	default:
+		return "", false
+	}
+}
+
 // live reports whether the entry is still queued for delivery.
 func (e *memoryQueueEntry) live() bool {
 	return e.state == memoryQueuePending || e.state == memoryQueueInFlight
@@ -441,13 +719,16 @@ func matchesQueueKeys(agent string, keys []string) bool {
 }
 
 func sortByDelivery(items []nudgequeue.Item) {
-	sort.SliceStable(items, func(i, j int) bool {
-		if !items[i].DeliverAfter.Equal(items[j].DeliverAfter) {
-			return items[i].DeliverAfter.Before(items[j].DeliverAfter)
-		}
-		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
-			return items[i].CreatedAt.Before(items[j].CreatedAt)
-		}
-		return items[i].ID < items[j].ID
-	})
+	sort.SliceStable(items, func(i, j int) bool { return deliveredBefore(items[i], items[j]) })
+}
+
+// deliveredBefore is the canonical delivery order.
+func deliveredBefore(left, right nudgequeue.Item) bool {
+	if !left.DeliverAfter.Equal(right.DeliverAfter) {
+		return left.DeliverAfter.Before(right.DeliverAfter)
+	}
+	if !left.CreatedAt.Equal(right.CreatedAt) {
+		return left.CreatedAt.Before(right.CreatedAt)
+	}
+	return left.ID < right.ID
 }

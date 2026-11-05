@@ -30,6 +30,7 @@ import (
 //	FAKE_SYNC_STDERR         stderr line a failing sync prints (default: a closed connection)
 //	FAKE_SYNC_FIRST_STDERR   overrides FAKE_SYNC_STDERR on a database's first sync
 //	FAKE_SYNC_STARTED/FAKE_SYNC_RELEASE  block sync until the release file exists
+//	FAKE_MAIL_EXIT           exit status of every gc mail call (default 0)
 type backupFakeGC struct {
 	logPath string
 }
@@ -49,6 +50,9 @@ printf 'gc %%s\n' "$*" >> "$log"
 if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
   printf '%%s\n' "${FAKE_RIG_LIST_JSON:-{\"rigs\":[]\}}"
   exit 0
+fi
+if [ "${1:-}" = "mail" ]; then
+  exit "${FAKE_MAIL_EXIT:-0}"
 fi
 if [ "${1:-}" != "bd" ]; then
   exit 0
@@ -426,6 +430,179 @@ func TestBackupOrderAlertsWhenASyncFailureReturnsAfterRecovery(t *testing.T) {
 	}
 }
 
+// Argument parsers an escalate.sh override written to the 1.5.0 contract,
+// before incident keys, can have. Each is the shell an override runs for an
+// argument it does not take, which it sees as $1.
+const (
+	// The 1.5.0 escalate.sh's own parser, which overrides were copied from.
+	escalateRefusalV150 = `echo "escalate: unknown argument $1" >&2; exit 2`
+	// A GNU getopt parser names the option it does not know and exits 1.
+	escalateRefusalGetopt = `echo "escalate: unrecognized option '$1'" >&2; exit 1`
+	// A usage message that names no flag, under the usage-error status.
+	escalateRefusalUsage = `echo "usage: escalate.sh --subject S [--message M]" >&2; exit 2`
+	// A lenient parser skips what it does not take.
+	escalateSkipsUnknown = `shift`
+)
+
+// What an override does once it has read its arguments.
+const (
+	escalateDelivers  = `printf 'SENT %s\n' "$subject" >> "$ESCALATE_OVERRIDE_LOG"`
+	escalateSendFails = `echo "escalate: pager unreachable" >&2; exit 1`
+)
+
+// writeEscalateOverride writes an escalate.sh override and returns its path,
+// its log, and the environment that points the order at it. The override
+// takes the 1.5.0 contract's flags (--subject, --message, --severity), runs
+// refusal for any other argument, then runs deliver. Its log holds a
+// "CALL <flags>" line per call and a "SENT <subject>" line per delivered
+// alert.
+func writeEscalateOverride(t *testing.T, refusal, deliver string) (script, log string, env []string) {
+	t.Helper()
+	dir := t.TempDir()
+	script = filepath.Join(dir, "escalate.sh")
+	log = filepath.Join(dir, "escalate.log")
+	writeExecutable(t, script, `#!/usr/bin/env bash
+flags=""
+for arg in "$@"; do
+    case "$arg" in --*) flags="$flags $arg" ;; esac
+done
+printf 'CALL%s\n' "$flags" >> "$ESCALATE_OVERRIDE_LOG"
+subject=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --subject) subject="$2"; shift 2 ;;
+        --message|-m|--severity) shift 2 ;;
+        *) `+refusal+` ;;
+    esac
+done
+`+deliver+"\n")
+	return script, log, []string{"GC_ESCALATE_SCRIPT=" + script, "ESCALATE_OVERRIDE_LOG=" + log}
+}
+
+func readEscalateLog(t *testing.T, log string) string {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read escalate override log: %v", err)
+	}
+	return string(data)
+}
+
+// failingSyncRun is the environment of a backup run whose one database fails
+// its one sync attempt, followed by extra.
+func failingSyncRun(extra ...string) []string {
+	return append([]string{"FAKE_CONFIGURED_DBS=prod", "FAKE_SYNC_FAIL_UNTIL=99", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1"}, extra...)
+}
+
+// TestBackupOrderAlertsThroughAnEscalateOverrideThatPredatesIncidentKeys
+// covers a city whose escalate.sh override was written before incident keys
+// and refuses --incident-key as a usage error. The order sends the sync
+// failure again in the 1.5.0 form, so it still arrives, undeduplicated, and
+// the run says so in one line.
+func TestBackupOrderAlertsThroughAnEscalateOverrideThatPredatesIncidentKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		refusal string
+	}{
+		{"1.5.0 escalate.sh parser, exit 2", escalateRefusalV150},
+		{"getopt parser naming the flag, exit 1", escalateRefusalGetopt},
+		{"usage error naming no flag, exit 2", escalateRefusalUsage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := resolvedTempDir(t)
+			binDir := t.TempDir()
+			writeBackupFakeGC(t, binDir)
+			script, log, env := writeEscalateOverride(t, tc.refusal, escalateDelivers)
+
+			out := mustRunBackupOrder(t, binDir, cityPath, failingSyncRun(env...)...)
+
+			want := "CALL --subject --message --incident-key --fingerprint\n" +
+				"CALL --subject --message\n" +
+				"SENT Dolt backup: 1/1 databases failed to sync [MEDIUM]\n"
+			if got := readEscalateLog(t, log); got != want {
+				t.Fatalf("override calls:\n%s\nwant the refused keyed call, then one call in the 1.5.0 form that delivers:\n%s", got, want)
+			}
+			if got := strings.Count(out, "predates incident keys"); got != 1 {
+				t.Fatalf("%d warnings that the override predates incident keys, want 1:\n%s", got, out)
+			}
+			if !strings.Contains(out, script+" predates incident keys") {
+				t.Fatalf("the warning must name the override:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestBackupOrderClearsNoIncidentOnAnEscalateOverrideThatPredatesIncidentKeys:
+// such an override refuses a clean run's --resolve-incident too. It keeps no
+// incidents, so there is nothing to clear or resend: the run sends nothing
+// and reports the override in one line instead of its usage error.
+func TestBackupOrderClearsNoIncidentOnAnEscalateOverrideThatPredatesIncidentKeys(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	writeBackupFakeGC(t, binDir)
+	_, log, env := writeEscalateOverride(t, escalateRefusalV150, escalateDelivers)
+
+	out := mustRunBackupOrder(t, binDir, cityPath, append([]string{"FAKE_CONFIGURED_DBS=prod"}, env...)...)
+
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("want a clean run:\n%s", out)
+	}
+	if got, want := readEscalateLog(t, log), "CALL --resolve-incident\n"; got != want {
+		t.Fatalf("override calls:\n%s\nwant only the clean run's resolve:\n%s", got, want)
+	}
+	if got := strings.Count(out, "predates incident keys"); got != 1 {
+		t.Fatalf("%d warnings that the override predates incident keys, want 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "unknown argument") {
+		t.Fatalf("the override's usage error must be replaced by the warning:\n%s", out)
+	}
+}
+
+// TestBackupOrderDoesNotResendWhenAnEscalateOverrideFailsToSend: an override
+// that fails for a reason other than the incident flags is not sent the
+// alert again, and its own error reaches the order log.
+func TestBackupOrderDoesNotResendWhenAnEscalateOverrideFailsToSend(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	writeBackupFakeGC(t, binDir)
+	_, log, env := writeEscalateOverride(t, escalateSkipsUnknown, escalateSendFails)
+
+	out := mustRunBackupOrder(t, binDir, cityPath, failingSyncRun(env...)...)
+
+	if got, want := readEscalateLog(t, log), "CALL --subject --message --incident-key --fingerprint\n"; got != want {
+		t.Fatalf("override calls:\n%s\nwant the one keyed call:\n%s", got, want)
+	}
+	if strings.Contains(out, "predates incident keys") {
+		t.Fatalf("a failed send is not a refusal of the incident flags:\n%s", out)
+	}
+	if !strings.Contains(out, "escalate: pager unreachable") {
+		t.Fatalf("the override's error must reach the order log:\n%s", out)
+	}
+}
+
+// TestBackupOrderNeverResendsThroughTheCoreEscalateScript: the core
+// escalate.sh takes the incident flags, so its failure, even under the
+// usage-error status, is a failed send and the alert is not sent again
+// without them.
+func TestBackupOrderNeverResendsThroughTheCoreEscalateScript(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath, failingSyncRun("FAKE_MAIL_EXIT=2")...)
+
+	if got := strings.Count(gc.log(t), "gc mail send "); got != 1 {
+		t.Fatalf("%d mail sends, want the one failed keyed escalation:\n%s", got, gc.log(t))
+	}
+	if strings.Contains(out, "predates incident keys") {
+		t.Fatalf("the core escalate.sh takes the incident flags:\n%s", out)
+	}
+}
+
 // TestBackupOrderRedactsEveryCredentialShape pins the redactor against each
 // credential shape a sync error can carry. Each shape runs in its own city so
 // a match in one row cannot mask a miss in another, and both the escalation
@@ -739,12 +916,17 @@ exit %d
 func writeRecordingTimeout(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+	stub := fmt.Sprintf(`#!/bin/sh
 printf 'timeout %%s\n' "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
-`, shellQuote(logPath)))
+`, shellQuote(logPath))
+	// _bounded.sh prefers gtimeout (Homebrew coreutils on macOS) over
+	// timeout, so a host with gtimeout would bypass a timeout-only stub.
+	for _, name := range []string{"timeout", "gtimeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), stub)
+	}
 	return logPath
 }
 

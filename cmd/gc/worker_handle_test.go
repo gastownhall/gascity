@@ -1357,6 +1357,10 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
@@ -1425,6 +1429,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	backing = cliSessionStore(backing, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -1523,6 +1531,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "stub", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -2697,6 +2709,10 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// The session manager and the worker resolvers take the session-class
+	// store, as their production callers hand them (cliSessionStore): the
+	// fixture now matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{

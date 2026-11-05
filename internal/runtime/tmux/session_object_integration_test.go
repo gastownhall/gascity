@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -425,5 +426,39 @@ func TestSeamBackedPeekReadsADeadPane(t *testing.T) {
 	}
 	if raw, _ := p.Peek("rl", 40); raw != got {
 		t.Fatalf("seam-backed Peek %q differs from the raw provider's %q", got, raw)
+	}
+}
+
+// A fresh read on a real private tmux server: a name the server does not hold
+// reads absent without a process-table scan, and a live session is read from
+// the full refresh, whose scan finds its agent process (v5 O1). The agent runs
+// under a shell that cannot exec it, so only the scan can see it.
+func TestFreshReadRealTmuxAbsentNameSkipsProcessScan(t *testing.T) {
+	p := newObjectServer(t)
+	fetcher, ok := p.cache.fetcher.(*tmuxFetcher)
+	if !ok {
+		t.Fatalf("cache fetcher = %T, want *tmuxFetcher", p.cache.fetcher)
+	}
+	scans := 0
+	fetcher.snapshot = func(ctx context.Context) (processSnapshot, error) {
+		scans++
+		return fetchProcessSnapshot(ctx)
+	}
+	startObjectSession(t, p, "agent", "sh -c 'sleep 300; :'")
+
+	got, err := p.ObserveLivenessSince("missing", []string{"sleep"}, time.Now())
+	if err != nil || got != (runtime.Liveness{}) {
+		t.Fatalf("ObserveLivenessSince(missing) = (%+v, %v), want absent", got, err)
+	}
+	if scans != 0 {
+		t.Fatalf("process scans = %d, want 0 for an absent name", scans)
+	}
+
+	got, err = p.ObserveLivenessSince("agent", []string{"sleep"}, time.Now())
+	if err != nil || !got.Running || !got.Alive || got.ObjectID == "" {
+		t.Fatalf("ObserveLivenessSince(agent) = (%+v, %v), want running and alive with its object id", got, err)
+	}
+	if scans != 1 {
+		t.Fatalf("process scans = %d, want 1 (the full refresh)", scans)
 	}
 }

@@ -36,6 +36,7 @@ const (
 	decideDeadRuntimeHeal = "dead-runtime-heal"
 	decideSquatterHeal    = "squatter-heal"
 	decideAwakeHeal       = "awake-heal"
+	decideSatisfiedWake   = "satisfied-wake-clear"
 	decideSuspendHeal     = "soft-suspend-heal"
 	decideStabilityClear  = "stability-clear"
 	decideDetachedAt      = "detached-at"
@@ -399,8 +400,10 @@ func armSoftSuspendHeal(r *rowFacts) (intent, bool) {
 	return r.heal(intentRowHealFresh, decideSuspendHeal, session.MetadataPatch{"state": string(session.StateAsleep)})
 }
 
-// armAwakeHeal is legacy's heal of an asleep or soft-suspended row whose own
-// runtime is alive (ProjectLifecycle's alive projection; CONTRACT v5.9u):
+// armAwakeHeal is legacy's heal of an asleep, drained or soft-suspended row
+// whose own runtime is alive (ProjectLifecycle's alive projection, which
+// reconciles drained as it does asleep; CONTRACT v5.9u, A6 item 5; a drained
+// row the A14 generator's shifted seed 296 left alive, mc-i7efm):
 // the row reads awake again. The inventory's identity read must find the
 // row's token (O2 Current); the effect proves it again fresh. Without it a
 // runtime started outside the controller on an asleep row (`gc session
@@ -412,11 +415,44 @@ func armSoftSuspendHeal(r *rowFacts) (intent, bool) {
 // exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	asleep := strings.TrimSpace(info.MetadataState) == string(session.StateAsleep) && !session.DispositionOfInfo(info).OperatorDormant(r.w.Now)
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	asleep := (state == session.StateAsleep || state == session.StateDrained) && !session.DispositionOfInfo(info).OperatorDormant(r.w.Now)
 	if !asleep && !softSuspended(info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
-	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
+	patch := session.MetadataPatch{"state": string(session.StateAwake)}
+	if wakeRequested(info) { // the heal satisfies the wake: D7 rule 2 consumes it in the same CAS
+		maps.Copy(patch, session.ClearWakeRequestPatch())
+	}
+	return r.heal(intentRowHealFresh, decideAwakeHeal, patch)
+}
+
+// wakeRequested reports a pending explicit wake on info (D7:
+// wake_request=explicit), whatever the row's state.
+func wakeRequested(info session.Info) bool {
+	return strings.TrimSpace(info.WakeRequest) == string(session.WakeCauseExplicit)
+}
+
+// armSatisfiedWake is A6's satisfied-wake clear (CONTRACT v5.7 D7 rule 2):
+// a committed row the pass read with a pending explicit wake, whose own
+// runtime is alive and Current, has had its wake satisfied, so one CAS
+// clears {wake_request, wake_requested_at}, while wake_requested_at still
+// equals the value the pass read (the fresh heal's premise holds the
+// lifecycle facts, wake_requested_at among them). Left standing, the residue
+// keeps the row wanted and never idle-sleeping, and comes back after a later
+// runtime-missing heal to restart it (§12.2 #26; J21 C). An asleep row's
+// wake is the awake heal's; a row an operator holds dormant is never
+// touched (I15); and a row with an active stop request keeps its wake, which
+// A19 reads to cancel a requested drain (DRAIN-047).
+func armSatisfiedWake(r *rowFacts) (intent, bool) {
+	info := r.row.Info
+	if _, stopping := activeStop(r.row); stopping {
+		return intent{}, false // the wake is A19's to cancel a requested drain with (DRAIN-047), not satisfied
+	}
+	if !committed(info) || !wakeRequested(info) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
+		return intent{}, false
+	}
+	return r.heal(intentRowHealFresh, decideSatisfiedWake, session.ClearWakeRequestPatch())
 }
 
 // armStabilityClear is SESS-539/540 (clearWakeFailures, clearChurn; v5.8

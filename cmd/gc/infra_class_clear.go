@@ -57,10 +57,15 @@ package main
 //     copy that will never close;
 //   - every other cross edge is kept, re-added after the delete when the
 //     backend's delete cascaded it. A kept blocking edge then names an id the
-//     work store cannot resolve, which every Ready implementation reads as a
-//     blocker that never clears — the same answer the frozen copy gave, and
-//     the cross-class membership edge (ga-2orlf) is what lifts it. A backend
-//     that refuses the re-add is reported by edge; the edge is in the backup.
+//     work store does not hold, and the backends do NOT agree on what that
+//     means: SQLite and the in-memory stores read it as a blocker that never
+//     clears, while bd/Dolt (beads v1.3.2) classifies a cross-prefix target as
+//     external and serves the dependent as ready at once. Neither store's own
+//     answer is the rule, so gc's ready computation enforces it over both
+//     (internal/readywork crossstore.go): the dependent waits until the blocker
+//     is closed in the binding that holds it, and a blocker no store holds
+//     keeps it waiting. A backend that refuses the re-add is reported by edge;
+//     the edge is in the backup.
 //
 // # Resumability
 //
@@ -84,6 +89,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -110,6 +116,9 @@ type infraBackupEdge struct {
 	Type        string `json:"type"`
 	Payload     string `json:"payload,omitempty"`
 	Carried     bool   `json:"carried,omitempty"`
+	// Disposition is what a rig import did with the edge (rig_import.go):
+	// copied, gated or dropped. The city clear leaves it empty.
+	Disposition string `json:"disposition,omitempty"`
 }
 
 func (e infraBackupEdge) dep() beads.Dep {
@@ -137,6 +146,11 @@ type infraBackupEntry struct {
 	Class      string            `json:"class"`
 	Deps       []infraBackupEdge `json:"deps,omitempty"`
 	Dependents []infraBackupEdge `json:"dependents,omitempty"`
+	// Endpoints is which bead each far end of the row's edges was when a purge
+	// backed the row up, by id and created_at, for every far end the work store
+	// held that is not itself a backed-up row (infraPurgeBackupEntries). The
+	// clear and recover-stranded record none.
+	Endpoints []infraPurgeRowKey `json:"endpoints,omitempty"`
 }
 
 // infraClearResult is what one clear pass did.
@@ -157,6 +171,9 @@ type infraClearResult struct {
 	// LostCrossEdges is every cross-store edge any run of this city's clears
 	// could not keep, as recorded in the cleared note.
 	LostCrossEdges []string
+	// Recorded counts this run's unrestorable edges recorded on their work
+	// beads (gc.migrated_cross_edges).
+	Recorded int
 }
 
 // infraUnprovenSourceRows is the clear's refusal for work-store infrastructure
@@ -167,8 +184,22 @@ type infraUnprovenSourceRows struct {
 }
 
 func (e *infraUnprovenSourceRows) Error() string {
-	return fmt.Sprintf("the work store holds %d infrastructure bead(s) the proven copy never carried (%s), so nothing proves the binding holds them and they cannot be cleared. Copy them in with `%s` first, then run this again",
-		len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
+	return fmt.Sprintf("the work store holds %d infrastructure bead(s) the proven copy never carried (%s), so nothing proves the binding holds them and they cannot be cleared. Copy them in with `%s` first (it asks per id, --%s or --%s, about any whose id the binding holds for a different bead), then run this again",
+		len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction(), strandedReplaceBindingRowFlag, strandedDropWorkRowFlag)
+}
+
+// infraUnboundedLegacyRows is the clear's refusal for work-store rows the
+// manifest lists with no time that tells the copied bead from a later one that
+// reused its id: a legacy entry with no trustworthy bound, or a row that
+// carries no created_at for an entry to be judged against.
+type infraUnboundedLegacyRows struct {
+	IDs      []string
+	Manifest string
+}
+
+func (e *infraUnboundedLegacyRows) Error() string {
+	return fmt.Sprintf("the copy manifest %s lists %d work-store infrastructure bead(s) (%s) with no time that tells the bead it copied from a later one that reused the id: the manifest records none, or the row carries no created_at. They cannot be cleared on its word. `%s` resolves them (it records the ones the binding still holds once it proves them the same bead, moves closed ones the binding no longer holds, and asks per id about open ones: --move or --record-carried); run it, then run this again",
+		e.Manifest, len(e.IDs), infraStrandedIDList(e.IDs), storageRecoveryInstruction())
 }
 
 // Test seams for the clear's fault-injection rows.
@@ -196,7 +227,7 @@ var (
 // row is removed, so the edges a backend will drop are on record first.
 func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announce io.Writer) (infraClearResult, error) {
 	result := infraClearResult{}
-	proven, recorded, err := readInfraCopyManifest(target)
+	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		return result, err
 	}
@@ -215,7 +246,7 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
-	rows, err := readInfraSnapshot(source)
+	rows, allIDs, err := readInfraSnapshotWithIDs(source, manifest.Generation)
 	if err != nil {
 		return result, err
 	}
@@ -228,14 +259,31 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		return result, nil
 	}
 
-	var unproven, retained []beads.Bead
+	var unproven, unbounded, retained []beads.Bead
+	// Carried, by (id, created_at): a row that merely reuses a manifest id was
+	// never copied, and deleting it here would destroy the only copy. Nor is a
+	// row carried when a bare id only presumes it reused, when its legacy entry
+	// has no trustworthy bound, or when it has no created_at to judge: nothing
+	// says it is the bead the copy carried, so it is not deleted on a guess.
 	for _, b := range rows {
-		if proven[b.ID] {
+		switch manifest.Match(b) {
+		case infraManifestCarried:
 			retained = append(retained, b)
-			continue
+		case infraManifestLegacyUnbounded:
+			unbounded = append(unbounded, b)
+		default:
+			unproven = append(unproven, b)
 		}
-		unproven = append(unproven, b)
 	}
+	if len(unbounded) > 0 && len(unproven) == 0 {
+		ids := make([]string, 0, len(unbounded))
+		for _, b := range unbounded {
+			ids = append(ids, b.ID)
+		}
+		sort.Strings(ids)
+		return result, &infraUnboundedLegacyRows{IDs: ids, Manifest: target.ManifestPath()}
+	}
+	unproven = append(unproven, unbounded...)
 	if len(unproven) > 0 {
 		ids := make([]string, 0, len(unproven))
 		for _, b := range unproven {
@@ -284,17 +332,49 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 			}
 		}
 	}
+	// Each row's edges and their payloads: in batches over every row the work
+	// store holds when it lists edges so (a row's dependents are the down
+	// edges of whatever holds them), otherwise both directions row by row.
+	var fresh []beads.Bead
+	for _, b := range retained {
+		if _, ok := sessionBackup[b.ID]; !ok {
+			fresh = append(fresh, b)
+		}
+	}
+	read := make(map[string]infraBackupEntry, len(fresh))
+	if batch, ok := beads.As[beads.DependencyBatchLister](source); ok && len(fresh) > 0 {
+		down, err := readInfraDownEdges(batch, source, sortedMapKeys(allIDs))
+		if err != nil {
+			return result, err
+		}
+		payloads := map[beads.DepPair]string{}
+		if _, blind := beads.DepMetadataAbsent(source); !blind {
+			reader, _ := beads.As[beads.DepMetadataReader](source)
+			batchReader, _ := beads.As[beads.DepMetadataBatchReader](source)
+			wanted := infraBackupEdgeFilter(fresh, retainedIDs)
+			if payloads, err = readInfraPayloads(batchReader, reader, down, wanted); err != nil {
+				return result, err
+			}
+		}
+		for _, entry := range infraBackupEntriesFrom(fresh, down, payloads, retainedIDs) {
+			read[entry.Bead.ID] = entry
+		}
+	} else {
+		for _, b := range fresh {
+			entry, err := infraBackupEntryFor(source, b, retainedIDs)
+			if err != nil {
+				return result, err
+			}
+			read[b.ID] = entry
+		}
+	}
 	entries := make([]infraBackupEntry, 0, len(retained))
 	for _, b := range retained {
 		if prior, ok := sessionBackup[b.ID]; ok {
 			entries = append(entries, prior)
 			continue
 		}
-		entry, err := infraBackupEntryFor(source, b, retainedIDs)
-		if err != nil {
-			return result, err
-		}
-		entries = append(entries, entry)
+		entries = append(entries, read[b.ID])
 	}
 	merged := mergeInfraBackupEntries(previous, entries)
 	if len(entries) > 0 {
@@ -333,26 +413,81 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	// store can no longer stand in for the binding, a binding root that later
 	// reads as empty must not be mistaken for a city with nothing to move, and
 	// a run killed from here on is resumed from the session it names.
+	//
+	// Pending is written once, whole, and does not shrink as chunks go (the
+	// design's §3.3 had it shrink per chunk; that is wrong). A resumed run
+	// takes its session from Pending, and the session is what the plan above
+	// is decided over: the kept cross edges into a row an earlier chunk
+	// already removed are re-added only after the delete loop, and only a
+	// session that still names that row finds them in its backup entry. A
+	// Pending that dropped the row would resume without them, and on a
+	// cascading or bd-like store those edges would be gone for good, with no
+	// warning (TestReviewCrashResumeKeepsOpenBlockerEdgeOnCascadingBackend).
+	// The same session tells a removed row's leftover internal edges from an
+	// edge its backup does not record.
 	pending := sortedMapKeys(session)
 	note = infraClearedNote{Binding: target.Binding, Database: target.Database, Backup: target.RetainedBackupPath(), Pending: pending, LostCrossEdges: note.LostCrossEdges}
 	if err := writeInfraClearedNote(cityPath, note); err != nil {
 		return result, err
 	}
 
-	for _, entry := range entries {
-		id := entry.Bead.ID
-		if err := infraClearBeforeDelete(id); err != nil {
-			return result, err
-		}
-		for _, edge := range entry.Deps {
-			if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return result, fmt.Errorf("removing dep %s from the work store: %w", edge, err)
+	// The rows go in chunks, and every row is detached before it goes: each
+	// edge touching it is removed and the remainder proven empty
+	// (detachInfraClearedRow), so a native-Dolt or bd delete has no neighbor
+	// whose text it would rewrite (#8786). A store that deletes in batches
+	// has the whole chunk detached and then removed in one call, one commit
+	// on Dolt; any other has each row detached and deleted in turn. The budget is checked between chunks; a paused
+	// clear leaves the note pending, and the same command finishes it from
+	// the session the note names. A wrapper that forwards DeleteBatch over a
+	// store without it reports beads.ErrBatchDeleteUnsupported, and the rows
+	// then go one by one.
+	deleter, canBatch := beads.As[beads.BatchDeleter](source)
+	err = runInfraBatches(infraEngineClockFor(cityPath), "clearing", len(entries), infraClearChunk, func(start, end int) error {
+		chunk := entries[start:end]
+		if !canBatch {
+			for i, entry := range chunk {
+				if err := infraClearBeforeDelete(entry.Bead.ID); err != nil {
+					return err
+				}
+				if err := detachInfraClearedRow(source, chunk[i:i+1], session, allIDs); err != nil {
+					return err
+				}
+				if err := source.Delete(entry.Bead.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing the retained copy %s from the work store: %w", entry.Bead.ID, err)
+				}
+				result.Cleared++
 			}
+			return nil
 		}
-		if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return result, fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
+		ids := make([]string, 0, len(chunk))
+		for _, entry := range chunk {
+			if err := infraClearBeforeDelete(entry.Bead.ID); err != nil {
+				return err
+			}
+			ids = append(ids, entry.Bead.ID)
 		}
-		result.Cleared++
+		if err := detachInfraClearedRow(source, chunk, session, allIDs); err != nil {
+			return err
+		}
+		err := deleter.DeleteBatch(ids)
+		if errors.Is(err, beads.ErrBatchDeleteUnsupported) {
+			canBatch = false
+			for _, id := range ids {
+				if err := source.Delete(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing the retained copy %s from the work store: %w", id, err)
+				}
+				result.Cleared++
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("removing %d retained cop(ies) from the work store: %w", len(ids), err)
+		}
+		result.Cleared += len(ids)
+		return nil
+	})
+	if err != nil {
+		return result, err
 	}
 	for _, edge := range release {
 		if err := source.DepRemove(edge.IssueID, edge.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
@@ -360,15 +495,43 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 		}
 	}
 	result.Released = release
+	dropped := map[string][]infraBackupEdge{}
 	for _, edge := range keep {
 		if err := infraRestoreKeptEdge(source, edge); err != nil {
 			result.Unrestorable = append(result.Unrestorable, fmt.Sprintf("%s (%v)", edge, err))
+			dropped[edge.IssueID] = append(dropped[edge.IssueID], edge)
 			continue
 		}
 		result.Kept = append(result.Kept, edge)
 	}
+	// Each edge the work store refused is recorded on its work bead, in the
+	// rig importer's shape, so the bead keeps its provenance (ga-4tnypl). One
+	// metadata write per work bead; a resumed run adds nothing twice.
+	movedStatus := make(map[string]string, len(merged))
+	for _, entry := range merged {
+		movedStatus[entry.Bead.ID] = entry.Bead.Status
+	}
+	for _, workID := range sortedMapKeys(dropped) {
+		work, err := source.Get(workID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return result, fmt.Errorf("reading %s to record the cross-store edges the work store dropped: %w", workID, err)
+		}
+		value, changed, err := mergeCrossEdgeRecords(work.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], infraDroppedCrossEdgeRecords(dropped[workID], movedStatus))
+		if err != nil {
+			return result, fmt.Errorf("recording the cross-store edges the work store dropped on %s: %w", workID, err)
+		}
+		if changed {
+			if err := source.SetMetadata(workID, beadmeta.MigratedCrossEdgesMetadataKey, value); err != nil {
+				return result, fmt.Errorf("recording the cross-store edges the work store dropped on %s: %w", workID, err)
+			}
+		}
+		result.Recorded += len(dropped[workID])
+	}
 
-	after, err := readInfraSnapshot(source)
+	after, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
 		return result, fmt.Errorf("re-reading the work store after the clear: %w", err)
 	}
@@ -391,6 +554,82 @@ func clearRetainedInfraCopies(cityPath string, target infraBindingTarget, announ
 	}
 	result.LostCrossEdges = note.LostCrossEdges
 	return result, nil
+}
+
+// detachInfraClearedRow removes every edge touching a chunk of rows before
+// they are deleted, so the delete has no neighbor to follow. A native-Dolt or
+// bd work store's delete rewrites each linked neighbor's mention of the
+// deleted id to "[deleted:<id>]" (ga-w4p3pw); the rows are moved, not deleted,
+// and a work bead that cites one must keep its text. Each row's own edges and
+// its dependents outside the session are in its backup entry; a dependent
+// inside the session is a row this clear also removes, whose edge its own
+// entry records. The kept cross edges are re-added after the delete loop
+// (infraRestoreKeptEdge). An edge the backup does not record refuses the
+// delete rather than lose it. listed is every row the work store's list
+// returned, which the batched backup read the dependents from.
+//
+// The edges go in beads.DepBatchRemover calls of infraDetachEdgeBatch, one
+// commit each on Dolt, where the store has one: DepRemove commits once per
+// edge. On native Dolt that
+// halves the cost (measured on a loaded host: about 130 ms an edge one by
+// one, 60 ms in one transaction, where the library re-derives the blocked
+// state the edge touched). The remainder is then read row by row, and the
+// session-internal edges it finds go in further calls.
+func detachInfraClearedRow(source beads.Store, chunk []infraBackupEntry, session, listed map[string]bool) error {
+	batch, canBatch := beads.As[beads.DepBatchRemover](source)
+	remove := func(pairs []beads.DepPair) error {
+		for start := 0; start < len(pairs); start += infraDetachEdgeBatch {
+			sub := pairs[start:min(start+infraDetachEdgeBatch, len(pairs))]
+			if canBatch {
+				err := batch.DepRemoveBatch(sub)
+				if !errors.Is(err, beads.ErrDepRemoveBatchUnsupported) {
+					if err != nil {
+						return fmt.Errorf("removing %d dep(s) of the retained copies from the work store: %w", len(sub), err)
+					}
+					continue
+				}
+				canBatch = false
+			}
+			for _, p := range sub {
+				if err := source.DepRemove(p.IssueID, p.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+					return fmt.Errorf("removing dep %s -> %s from the work store: %w", p.IssueID, p.DependsOnID, err)
+				}
+			}
+		}
+		return nil
+	}
+	var recorded []beads.DepPair
+	for _, entry := range chunk {
+		for _, edges := range [][]infraBackupEdge{entry.Deps, entry.Dependents} {
+			for _, edge := range edges {
+				recorded = append(recorded, beads.DepPair{IssueID: edge.IssueID, DependsOnID: edge.DependsOnID})
+			}
+		}
+	}
+	if err := remove(recorded); err != nil {
+		return err
+	}
+	var internal []beads.DepPair
+	for _, entry := range chunk {
+		id := entry.Bead.ID
+		for _, dir := range []string{"down", "up"} {
+			live, err := source.DepList(id, dir)
+			if err != nil {
+				return fmt.Errorf("listing the remaining edges of %s: %w", id, err)
+			}
+			for _, d := range live {
+				if dir == "up" && session[d.IssueID] {
+					internal = append(internal, beads.DepPair{IssueID: d.IssueID, DependsOnID: d.DependsOnID})
+					continue
+				}
+				if dir == "up" && !listed[d.IssueID] {
+					return fmt.Errorf("removing the retained copy %s from the work store: %s depends on it -[%s]->, and the work store's list does not return %s (a row whose metadata does not parse is left out of the list), so the backup could not record the edge; deleting %s would drop it and rewrite the text of %s. Repair or remove %s, then run the command again. The row stays in the work store", id, d.IssueID, d.Type, d.IssueID, id, d.IssueID, d.IssueID)
+				}
+				return fmt.Errorf("removing the retained copy %s from the work store: it still has the edge %s -[%s]-> %s, which its backup entry does not record; deleting it would drop the edge and rewrite the text of %s. The row stays in the work store", id, d.IssueID, d.Type, d.DependsOnID, d.IssueID)
+			}
+		}
+	}
+	return remove(internal)
 }
 
 // announceInfraCrossEdges prints, before any row is removed, every edge from a
@@ -504,7 +743,10 @@ func sortInfraBackupEdges(edges []infraBackupEdge) {
 		if edges[i].IssueID != edges[j].IssueID {
 			return edges[i].IssueID < edges[j].IssueID
 		}
-		return edges[i].DependsOnID < edges[j].DependsOnID
+		if edges[i].DependsOnID != edges[j].DependsOnID {
+			return edges[i].DependsOnID < edges[j].DependsOnID
+		}
+		return edges[i].Type < edges[j].Type
 	})
 }
 
@@ -555,10 +797,16 @@ func mergeInfraBackupEntries(previous, current []infraBackupEntry) []infraBackup
 // rename, directory fsync. A crash leaves either the previous backup or the
 // new one, never a truncated file read as complete.
 func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEntry) error {
-	if err := os.MkdirAll(target.Root, 0o755); err != nil {
+	return writeInfraRetainedBackupAt(target.Root, target.RetainedBackupPath(), target.Binding, entries)
+}
+
+// writeInfraRetainedBackupAt is writeInfraRetainedBackup for the backup at
+// path in dir, labeled with binding: the city's, or a rig's.
+func writeInfraRetainedBackupAt(dir, path, binding string, entries []infraBackupEntry) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
-	tmp, err := os.CreateTemp(target.Root, infraRetainedBackupName+".tmp-*")
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
@@ -570,7 +818,7 @@ func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEn
 	}
 	writer := bufio.NewWriter(tmp)
 	encoder := json.NewEncoder(writer)
-	if err := encoder.Encode(infraBackupHeader{Format: infraRetainedBackupFormat, Binding: target.Binding, Beads: len(entries), WrittenAt: time.Now().UTC()}); err != nil {
+	if err := encoder.Encode(infraBackupHeader{Format: infraRetainedBackupFormat, Binding: binding, Beads: len(entries), WrittenAt: time.Now().UTC()}); err != nil {
 		return fail(err)
 	}
 	for _, entry := range entries {
@@ -588,45 +836,47 @@ func writeInfraRetainedBackup(target infraBindingTarget, entries []infraBackupEn
 		_ = os.Remove(name)
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
-	if err := infraMigrationRename(name, target.RetainedBackupPath()); err != nil {
+	if err := infraMigrationRename(name, path); err != nil {
 		_ = os.Remove(name)
 		return fmt.Errorf("writing the retained-source backup: %w", err)
 	}
-	if dir, err := os.Open(target.Root); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
+	syncInfraDir(dir)
 	return nil
 }
 
 // readInfraRetainedBackup reads the backup. present=false with no error means
 // nothing was ever cleared from this city.
 func readInfraRetainedBackup(target infraBindingTarget) ([]infraBackupEntry, bool, error) {
-	contents, err := os.ReadFile(target.RetainedBackupPath())
+	return readInfraRetainedBackupAt(target.RetainedBackupPath())
+}
+
+// readInfraRetainedBackupAt reads the backup at path.
+func readInfraRetainedBackupAt(path string) ([]infraBackupEntry, bool, error) {
+	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("reading the retained-source backup %s: %w", target.RetainedBackupPath(), err)
+		return nil, false, fmt.Errorf("reading the retained-source backup %s: %w", path, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	var header infraBackupHeader
 	if err := decoder.Decode(&header); err != nil {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: header: %w", target.RetainedBackupPath(), err)
+		return nil, true, fmt.Errorf("reading the retained-source backup %s: header: %w", path, err)
 	}
 	if header.Format != infraRetainedBackupFormat {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: format %q, want %q", target.RetainedBackupPath(), header.Format, infraRetainedBackupFormat)
+		return nil, true, fmt.Errorf("reading the retained-source backup %s: format %q, want %q", path, header.Format, infraRetainedBackupFormat)
 	}
 	var entries []infraBackupEntry
 	for decoder.More() {
 		var entry infraBackupEntry
 		if err := decoder.Decode(&entry); err != nil {
-			return nil, true, fmt.Errorf("reading the retained-source backup %s: entry %d: %w", target.RetainedBackupPath(), len(entries)+1, err)
+			return nil, true, fmt.Errorf("reading the retained-source backup %s: entry %d: %w", path, len(entries)+1, err)
 		}
 		entries = append(entries, entry)
 	}
 	if len(entries) != header.Beads {
-		return nil, true, fmt.Errorf("reading the retained-source backup %s: header records %d bead(s), file holds %d", target.RetainedBackupPath(), header.Beads, len(entries))
+		return nil, true, fmt.Errorf("reading the retained-source backup %s: header records %d bead(s), file holds %d", path, header.Beads, len(entries))
 	}
 	return entries, true, nil
 }
@@ -634,12 +884,18 @@ func readInfraRetainedBackup(target infraBindingTarget) ([]infraBackupEntry, boo
 // verifyInfraRetainedBackup re-reads the backup from disk and proves it holds
 // every entry this pass is about to remove, byte-for-byte in its encoded form.
 func verifyInfraRetainedBackup(target infraBindingTarget, want []infraBackupEntry) error {
-	got, present, err := readInfraRetainedBackup(target)
+	return verifyInfraRetainedBackupAt(target.RetainedBackupPath(), want)
+}
+
+// verifyInfraRetainedBackupAt is verifyInfraRetainedBackup for the backup at
+// path.
+func verifyInfraRetainedBackupAt(path string, want []infraBackupEntry) error {
+	got, present, err := readInfraRetainedBackupAt(path)
 	if err != nil {
 		return fmt.Errorf("proving the retained-source backup: %w", err)
 	}
 	if !present {
-		return fmt.Errorf("proving the retained-source backup: %s is missing after it was written", target.RetainedBackupPath())
+		return fmt.Errorf("proving the retained-source backup: %s is missing after it was written", path)
 	}
 	byID := make(map[string]infraBackupEntry, len(got))
 	for _, e := range got {
@@ -648,7 +904,7 @@ func verifyInfraRetainedBackup(target infraBindingTarget, want []infraBackupEntr
 	for _, w := range want {
 		g, ok := byID[w.Bead.ID]
 		if !ok {
-			return fmt.Errorf("proving the retained-source backup: %s does not hold %s; nothing was removed", target.RetainedBackupPath(), w.Bead.ID)
+			return fmt.Errorf("proving the retained-source backup: %s does not hold %s; nothing was removed", path, w.Bead.ID)
 		}
 		wantJSON, err := json.Marshal(w)
 		if err != nil {
@@ -659,14 +915,15 @@ func verifyInfraRetainedBackup(target infraBindingTarget, want []infraBackupEntr
 			return fmt.Errorf("proving the retained-source backup: encoding %s: %w", w.Bead.ID, err)
 		}
 		if !bytes.Equal(wantJSON, gotJSON) {
-			return fmt.Errorf("proving the retained-source backup: %s holds a different %s than the work store; nothing was removed", target.RetainedBackupPath(), w.Bead.ID)
+			return fmt.Errorf("proving the retained-source backup: %s holds a different %s than the work store; nothing was removed", path, w.Bead.ID)
 		}
 	}
 	return nil
 }
 
 // infraBackupSourceStore serves a retained-source backup as a migration
-// source: the rows and their within-backup edges in a MemStore, plus the edge
+// source: the rows, their within-backup edges and their blocking edges onto
+// work in a MemStore, plus the edge
 // payloads the backup recorded, so the copy carries them exactly as it would
 // from the work store.
 type infraBackupSourceStore struct {
@@ -699,7 +956,10 @@ func openInfraBackupSource(target infraBindingTarget) (beads.Store, error) {
 	for _, e := range entries {
 		rows = append(rows, e.Bead)
 		for _, edge := range e.Deps {
-			if !held[edge.DependsOnID] {
+			// An edge onto a bead outside the backup is a hold on work the copy
+			// carries as a cross-store gate (infra_class_holds.go); the rest
+			// stay out, as the copy leaves them.
+			if !held[edge.DependsOnID] && !beads.IsReadyBlockingDependencyType(edge.Type) {
 				continue
 			}
 			deps = append(deps, edge.dep())
@@ -724,7 +984,21 @@ func describeInfraClear(result infraClearResult) string {
 	if len(result.Kept) > 0 {
 		fmt.Fprintf(&b, "; %d cross-store edge(s) kept", len(result.Kept))
 	}
+	if result.Recorded > 0 {
+		fmt.Fprintf(&b, "; %d dropped cross-store edge(s) recorded on their work bead(s) (%s)", result.Recorded, beadmeta.MigratedCrossEdgesMetadataKey)
+	}
 	return b.String()
+}
+
+// infraDroppedCrossEdgeRecords is the gc.migrated_cross_edges entry for each
+// edge from a work bead into a moved bead that the work store refused. status
+// is each moved bead's status at the clear.
+func infraDroppedCrossEdgeRecords(edges []infraBackupEdge, status map[string]string) []rigCrossEdgeRecord {
+	out := make([]rigCrossEdgeRecord, 0, len(edges))
+	for _, e := range edges {
+		out = append(out, rigCrossEdgeRecord{Dir: "out", Type: e.Type, Other: e.DependsOnID, OtherStatus: status[e.DependsOnID], Payload: e.Payload, Action: rigEdgeDropped})
+	}
+	return out
 }
 
 // infraClearedNote is the city-side record that this city's work store was
@@ -761,23 +1035,34 @@ func infraClearedNotePath(cityPath string) string {
 // readInfraClearedNote reads the cleared note. An unreadable or undecodable
 // note is an error, never an absence.
 func readInfraClearedNote(cityPath string) (infraClearedNote, bool, error) {
-	data, err := os.ReadFile(infraClearedNotePath(cityPath))
+	return readInfraClearedNoteAt(infraClearedNotePath(cityPath))
+}
+
+// readInfraClearedNoteAt reads a cleared note at path: the city's, or a rig's
+// (rigGraphClearedNotePath), which share one format.
+func readInfraClearedNoteAt(path string) (infraClearedNote, bool, error) {
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return infraClearedNote{}, false, nil
 	}
 	if err != nil {
-		return infraClearedNote{}, true, fmt.Errorf("reading the cleared note %s: %w", infraClearedNotePath(cityPath), err)
+		return infraClearedNote{}, true, fmt.Errorf("reading the cleared note %s: %w", path, err)
 	}
 	var note infraClearedNote
 	if err := json.Unmarshal(data, &note); err != nil {
-		return infraClearedNote{}, true, fmt.Errorf("decoding the cleared note %s: %w", infraClearedNotePath(cityPath), err)
+		return infraClearedNote{}, true, fmt.Errorf("decoding the cleared note %s: %w", path, err)
 	}
 	return note, true, nil
 }
 
 // writeInfraClearedNote records the cleared note atomically.
 func writeInfraClearedNote(cityPath string, note infraClearedNote) error {
-	path := infraClearedNotePath(cityPath)
+	return writeInfraClearedNoteAt(infraClearedNotePath(cityPath), note)
+}
+
+// writeInfraClearedNoteAt records a cleared note at path atomically: the
+// city's, or a rig's (rigGraphClearedNotePath).
+func writeInfraClearedNoteAt(path string, note infraClearedNote) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("recording the cleared note: %w", err)
 	}
@@ -785,7 +1070,7 @@ func writeInfraClearedNote(cityPath string, note infraClearedNote) error {
 	if err != nil {
 		return fmt.Errorf("recording the cleared note: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "storage-infra-cleared.json.tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("recording the cleared note: %w", err)
 	}

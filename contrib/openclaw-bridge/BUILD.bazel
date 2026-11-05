@@ -25,6 +25,10 @@ exports_files([
 
 # `npm test` is `node --test`, which runs every test/*.test.mjs; each file is
 # one js_test under the rules_nodejs toolchain, gathered by the suite.
+# Only openclaw_loader_test loads the installed openclaw packages (through
+# lib/openclaw.mjs), so it alone takes :node_modules; the other three use node
+# builtins and lib/*.mjs only, and :node_modules is 37k files that a remote
+# worker must fetch and hardlink for every action that lists it (ga-v1wkoqh).
 _TESTS = [
     "entrypoints",
     "gc-client",
@@ -39,10 +43,7 @@ _TESTS = [
             "*.mjs",
             "fake-imsg/**",
             "lib/**",
-        ]) + [
-            "package.json",
-            ":node_modules",
-        ],
+        ]) + ["package.json"] + ([":node_modules"] if t == "openclaw-loader" else []),
         entry_point = "test/%s.test.mjs" % t,
         node_options = ["--test"],
     )

@@ -9,12 +9,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -32,7 +34,7 @@ func openLeaseStore(t *testing.T, dir string) beads.Store {
 	}
 	s := opened.(*beads.SQLiteStore)
 	t.Cleanup(func() { _ = s.CloseStore() })
-	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s, "SQLiteStore", gate.Require, false, nil, nil); err != nil {
 		t.Fatalf("StampOpenedStore: %v", err)
 	}
 	return s
@@ -506,6 +508,60 @@ func TestRuntimeLeaseWatch(t *testing.T) {
 	}
 }
 
+// TestRuntimeLeaseWatchCancelWaitsForItsRead (mc-rj2fc). Kills a cancel
+// that returns while the watch's read is still in flight: the caller then
+// closes the store under the read (CI's nil-DB panic in TestRuntimeLeaseWatch,
+// whose deferred cancel runs before the store's cleanup closes it). A cancel
+// over a blocked read returns only once that read has.
+func TestRuntimeLeaseWatchCancelWaitsForItsRead(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	store := &blockingReadStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	var unblock sync.Once
+	unblockReads := func() { unblock.Do(func() { store.block.Store(false); close(store.release) }) }
+	f := leaseFixtureOver(t, store)
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	defer unblockReads() // before the Release, which reads too
+	store.block.Store(true)
+	_, cancel, err := l.Watch(context.Background(), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-store.entered // the watch's read is in flight
+	canceled := make(chan struct{})
+	go func() { cancel(); close(canceled) }()
+	select {
+	case <-canceled:
+		t.Fatal("cancel returned while the watch's read was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblockReads()
+	<-canceled
+}
+
+// blockingReadStore blocks every read while block is set, until release
+// closes, signaling entered as each blocked read starts.
+type blockingReadStore struct {
+	*rowWriteRecorder
+	block   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingReadStore) Get(id string) (beads.Bead, error) {
+	if s.block.Load() {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		<-s.release
+	}
+	return s.rowWriteRecorder.Get(id)
+}
+
 // failingReadStore fails every read while fail is set.
 type failingReadStore struct {
 	*rowWriteRecorder
@@ -962,7 +1018,7 @@ func TestRuntimeLeaseRecordTakenAfterAClone(t *testing.T) {
 func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	f := newLeaseFixture(t)
 	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "h/1/n", RuntimeLeaseEpochKey: "3", RuntimeLeaseTTLKey: "240"})
-	if err := ClearRuntimeLeaseForReopen(f.store, f.id); err != nil {
+	if err := ClearRuntimeLeaseForReopen(beadstest.Sessions(f.store), f.id); err != nil {
 		t.Fatal(err)
 	}
 	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseTTLKey] != "" || m[RuntimeLeaseEpochKey] != "3" {
@@ -972,7 +1028,7 @@ func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ClearRuntimeLeaseForReopen(f.store, other.ID); err != nil {
+	if err := ClearRuntimeLeaseForReopen(beadstest.Sessions(f.store), other.ID); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := f.store.Get(other.ID); b.Metadata[RuntimeLeaseHolderKey] != "h/1/n" {
@@ -1068,4 +1124,100 @@ func mustBead(t *testing.T, s beads.Store, id string) beads.Bead {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// clearRefusingStore refuses a runtime lease record's clear, and passes the
+// rest. It hides conditional writes, so the clear is a plain batch write.
+type clearRefusingStore struct{ beads.Store }
+
+func (s clearRefusingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if h, ok := kvs[RuntimeLeaseHolderKey]; ok && h == "" {
+		return errors.New("store unavailable")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestRuntimeLeaseReleaseChecked (CONTRACT v5.10p). Kills a release that
+// hides a failed clear from the kill (which then lifts its fence over the
+// record), or that reports a record another holder took as a failure (the
+// fence would stay for nothing), and a Release that stops logging what it
+// cannot report: ReleaseChecked returns the failed clear once, nil for a
+// lost record; Release logs the failed clear.
+func TestRuntimeLeaseReleaseChecked(t *testing.T) {
+	onHost(t, "host-a")
+	city := t.TempDir()
+	f := leaseFixtureOver(t, beads.NewMemStore())
+	refusing := NewStore(beads.SessionStore{Store: clearRefusingStore{f.store}})
+	l, err := TryRuntimeLease(refusing, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ReleaseChecked(); err == nil || f.meta(t)[RuntimeLeaseHolderKey] == "" {
+		t.Fatalf("ReleaseChecked = %v over a refused clear, record %v; want the error and the record left", err, f.meta(t))
+	}
+	if err := l.ReleaseChecked(); err != nil {
+		t.Fatalf("a second ReleaseChecked = %v, want nil: only the release reports", err)
+	}
+
+	f.write(t, RuntimeLeaseClearPatch())
+	lost, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "host-b/1/other", RuntimeLeaseEpochKey: "9"}) // another host took it
+	if err := lost.ReleaseChecked(); err != nil || f.meta(t)[RuntimeLeaseHolderKey] != "host-b/1/other" {
+		t.Fatalf("ReleaseChecked of a lost record = %v, record %v; want nil and the taker's record kept", err, f.meta(t))
+	}
+
+	f.write(t, RuntimeLeaseClearPatch())
+	logged, err := TryRuntimeLease(refusing, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	logged.Release()
+	if !strings.Contains(buf.String(), "clearing the record at release") {
+		t.Fatalf("Release over a refused clear logged %q, want the failure", buf.String())
+	}
+}
+
+// TestRuntimeLeaseHeldAt: a record lease is held until SafeUntil on the
+// holder's clock and not once released; a flock-only lease is held until
+// released; a nil lease is not held.
+func TestRuntimeLeaseHeldAt(t *testing.T) {
+	f := newLeaseFixture(t)
+	city := t.TempDir()
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.HeldAt(leaseT0) || !l.HeldAt(l.SafeUntil().Add(-time.Second)) {
+		t.Fatal("a record lease reads not held before SafeUntil")
+	}
+	if l.HeldAt(l.SafeUntil()) || l.HeldAt(l.Expires()) {
+		t.Fatal("a record lease reads held at or past SafeUntil, where another holder may take it")
+	}
+	l.Release()
+	if l.HeldAt(leaseT0) {
+		t.Fatal("a released record lease reads held")
+	}
+
+	flock, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-flock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !flock.HeldAt(leaseT0.Add(24 * time.Hour)) {
+		t.Fatal("a flock-only lease reads not held before release")
+	}
+	flock.Release()
+	if flock.HeldAt(leaseT0) {
+		t.Fatal("a released flock-only lease reads held")
+	}
+	var none *RuntimeLease
+	if none.HeldAt(leaseT0) {
+		t.Fatal("a nil lease reads held")
+	}
 }

@@ -6,6 +6,12 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// MCPLayerAgent labels servers declared in an agent's own mcp/ directory. It
+// is the only layer that targets a single agent; every other layer (the city
+// and rig packs, imports, implicit and bootstrap packs) is shared by every
+// agent in its scope.
+const MCPLayerAgent = "agent"
+
 // MCPPackSourcesForAgent returns the effective MCP directory stack for one
 // agent, ordered from lowest to highest precedence. Later sources win.
 //
@@ -71,7 +77,7 @@ func MCPPackSourcesForAgent(cfg *config.City, agent *config.Agent) []MCPDirSourc
 		}
 	}
 	if agent.MCPDir != "" {
-		sources = append(sources, MCPDirSource{Dir: agent.MCPDir, Label: "agent", Origin: "agent"})
+		sources = append(sources, MCPDirSource{Dir: agent.MCPDir, Label: MCPLayerAgent, Origin: MCPLayerAgent})
 	}
 	return dedupeMCPSources(sources)
 }

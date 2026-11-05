@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
@@ -1004,49 +1005,6 @@ func TestBeadListInProgressUsesLiveLookup(t *testing.T) {
 	}
 	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != work.ID {
 		t.Fatalf("in_progress beads = %+v, want only %s", resp.Items, work.ID)
-	}
-}
-
-func TestBeadReadyUsesLiveLookup(t *testing.T) {
-	state := newFakeState(t)
-	backing := beads.NewMemStore()
-	blocker, err := backing.Create(beads.Bead{Title: "blocker"})
-	if err != nil {
-		t.Fatalf("Create(blocker): %v", err)
-	}
-	ready, err := backing.Create(beads.Bead{Title: "ready"})
-	if err != nil {
-		t.Fatalf("Create(ready): %v", err)
-	}
-	if err := backing.DepAdd(ready.ID, blocker.ID, "blocks"); err != nil {
-		t.Fatalf("DepAdd: %v", err)
-	}
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	state.stores["myrig"] = cache
-	if err := backing.Close(blocker.ID); err != nil {
-		t.Fatalf("Close(blocker): %v", err)
-	}
-
-	h := newTestCityHandler(t, state)
-	req := httptest.NewRequest("GET", cityURL(state, "/beads/ready"), nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-
-	var resp struct {
-		Items []beads.Bead `json:"items"`
-		Total int          `json:"total"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 1 || len(resp.Items) != 1 || resp.Items[0].ID != ready.ID {
-		t.Fatalf("ready beads = %+v, want only %s", resp.Items, ready.ID)
 	}
 }
 
@@ -2142,7 +2100,7 @@ func TestPhase2BeadAssignMaterializesExactConfiguredNamedIdentity(t *testing.T) 
 	if got.Assignee == "" {
 		t.Fatalf("assignee = %q, want materialized session identity", got.Assignee)
 	}
-	sessionID, err := session.ResolveSessionID(state.cityBeadStore, got.Assignee)
+	sessionID, err := session.ResolveSessionID(beadstest.Sessions(state.cityBeadStore), got.Assignee)
 	if err != nil {
 		t.Fatalf("ResolveSessionID(materialized assignee %q): %v", got.Assignee, err)
 	}

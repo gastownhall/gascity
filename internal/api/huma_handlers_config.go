@@ -185,6 +185,9 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		errors = append(errors, err.Error())
 	}
+	if err := config.ValidateRigFederationLayout(s.state.CityPath(), cfg); err != nil {
+		errors = append(errors, err.Error())
+	}
 	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
 		errors = append(errors, err.Error())
 	}
@@ -196,6 +199,7 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 
 	warnings := config.ValidateSemantics(cfg, "city.toml")
 	warnings = append(warnings, config.ValidateDurations(cfg, "city.toml")...)
+	warnings = append(warnings, config.RigFederationWarnings(cfg.Rigs)...)
 
 	valid := len(errors) == 0
 

@@ -264,7 +264,7 @@ type teardown struct {
 // ownTeardown is the teardown of v's pending create on its fresh read, or
 // the cause that holds the rollback (rollbackRuntime).
 func ownTeardown(v txView) (teardown, string) {
-	stop, cause := rollbackRuntime(v.Row, v.RT)
+	stop, cause := rollbackRuntime(v.Row, v.RT, sessionMayWork(v))
 	switch {
 	case cause != "":
 		return teardown{}, cause
@@ -277,25 +277,62 @@ func ownTeardown(v txView) (teardown, string) {
 	return teardown{stop: &verdict, names: processNamesFor(v.World, v.Row)}, ""
 }
 
+// causeLiveIncarnation holds a pending create's rollback over a live older
+// incarnation of its own session (#2081); a newer one holds causeNewerSelf.
+const causeLiveIncarnation = "live-incarnation"
+
+// rollbackNeeds are the rollback's fresh reads: the runtime under its lease,
+// and L5 for a Workless rollback (#2081), whose pass matched the session's
+// work on the cached demand read: a claim since, or one that read missed, is
+// the live read's to find before the rollback stops or closes over a live
+// incarnation of the row's session (sessionMayWork).
+func rollbackNeeds(_ *World, it intent) needs {
+	n := needs{Runtime: true, Lease: true}
+	if it.Workless {
+		n.Legs = legWork
+	}
+	return n
+}
+
+// sessionMayWork reports work of the row's session that may be in flight on
+// a live incarnation of it (#2081), which holds its rollback: unless the
+// pass read none (Workless) and the effect's live read (L5: in-progress
+// work under the seat's RefuseScope, readWork) proves none either.
+func sessionMayWork(v txView) bool {
+	return !v.It.Workless || v.Fence.workHeld()
+}
+
 // rollbackRuntime is C3's attribution of a pending create's fresh read: stop
 // for its own runtime (O2's own-runtime test, or C8.2(a)'s bead-scoped name,
-// stopped whatever its identity, SESS-091); neither for nothing running, a
-// corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
-// without a stop, a stale epoch included, S7); else the cause that holds.
-// A corpse counts stopped; the teardown removes it (ownTeardown), so a
-// crash-looping pool create's corpses do not pile up.
-func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
-	switch rt.Class {
-	case rtUnsupported:
+// stopped whatever else runs there, SESS-091); while the row's session may
+// have work in flight (working: sessionMayWork), hold over a live older or
+// newer incarnation of that session, even under its bead-scoped name, since
+// the work runs there (#2081); neither for nothing running, a corpse (C8.8
+// counts it stopped) or another row's runtime (F3: rolled back without a
+// stop, a stale epoch's zombie included, S7); else the cause that holds. An
+// alive read whose session object changed around its identity read
+// attributes nothing, as for a start (runtimeCause). A corpse counts
+// stopped; the teardown removes it (ownTeardown), so a crash-looping pool
+// create's corpses do not pile up.
+func rollbackRuntime(row session.Info, rt *txRuntime, working bool) (stop bool, cause string) {
+	switch {
+	case rt.Class == rtUnsupported:
 		return false, causeLivenessUnsupported
-	case rtAbsent, rtCorpse:
+	case rt.Class == rtAbsent, rt.Class == rtCorpse:
 		return false, ""
-	case rtUnknown:
+	case rt.Class == rtUnknown, rt.Class == rtAlive && !rt.Same:
 		return false, causeLivenessUnknown
 	}
 	v := compareIdentity(row, rt.Identity)
+	held := working && rt.Class == rtAlive
 	switch {
-	case ownsName(row, row.SessionName), ownRuntime(v, row, rt.Identity):
+	case ownRuntime(v, row, rt.Identity):
+		return true, ""
+	case held && v == identityNewerSelf:
+		return false, causeNewerSelf
+	case held && liveIncarnation(row, rt.Identity):
+		return false, causeLiveIncarnation
+	case ownsName(row, row.SessionName):
 		return true, ""
 	case v == identityForeign, v == identityStaleSelf:
 		return false, ""
@@ -326,7 +363,7 @@ func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error
 // the Call stopped is gone by design.
 func rollbackClose(v txView) txStep {
 	td, err := callResult[teardown](v)
-	stop, cause := rollbackRuntime(v.Row, v.RT)
+	stop, cause := rollbackRuntime(v.Row, v.RT, sessionMayWork(v))
 	switch {
 	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}

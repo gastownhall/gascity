@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -153,6 +154,7 @@ var (
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
+	supervisorParentPID                                 = pidutil.ParentPID
 	supervisorGetpgid                                   = syscall.Getpgid
 	supervisorGetpgrp                                   = syscall.Getpgrp
 	supervisorKill                                      = syscall.Kill
@@ -623,6 +625,10 @@ StandardOutput=journal).`,
 var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
 }
@@ -669,6 +675,10 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 // starting — means: success for a caller that only needs one running, or the
 // operator-facing "already running" failure.
 func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -713,6 +723,9 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		if handled, code := startSupervisorViaInstalledLaunchd(supervisorStartLaunchdPlistPath(), gcPath, stdout, stderr, jsonOut); handled {
 			return code
 		}
+	}
+	if refuseForkedSupervisorTmuxSocketDirMove(supervisorRuntimeGOOS, stderr) {
+		return 1
 	}
 
 	logPath := supervisorLogPath()
@@ -933,6 +946,11 @@ func supervisorLogTail(path string, n int) string {
 // runtime (ga-s434i0) — a bare `gc supervisor run` with no session of its own
 // then becomes a kill target the next time that session bead pre-starts.
 //
+// Nor may it inherit the pane's demand-spawn keys
+// (processenv.DemandSpawnEnvKeys): they describe that pane's spawn, and a
+// supervisor carrying them starts a tmux server that holds them for every
+// session it later starts.
+//
 // With GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1 in the parent environment the
 // child also drops every provider-credential variable, the same opt-out the
 // launchd plist and systemd unit honor (#6966).
@@ -955,7 +973,7 @@ func supervisorForkEnv(parent []string) []string {
 		if strings.HasPrefix(kv, "GC_SESSION_ID=") || strings.HasPrefix(kv, hookDeadlineEnv+"=") {
 			continue
 		}
-		if key, _, ok := strings.Cut(kv, "="); ok && omitProviderCreds && isProviderCredentialEnv(key) {
+		if key, _, ok := strings.Cut(kv, "="); ok && (processenv.IsDemandSpawnEnv(key) || (omitProviderCreds && isProviderCredentialEnv(key))) {
 			continue
 		}
 		if strings.HasPrefix(kv, supervisorPreserveSessionsOnSignalEnv+"=") {
@@ -998,18 +1016,27 @@ func supervisorPreForkOwnershipWarning() string {
 // supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
 // gc's own systemd user unit, for `gc supervisor status` and the doctor
 // check. Status is one of:
-//   - "owned": the unit is installed and active, and its MainPID equals the
-//     live supervisor PID — systemd's Restart=always is protecting it.
-//   - "outside_unit": the unit is installed but does not own the live PID
-//     (inactive, or a MainPID mismatch) — the ga-s434i0 defect shape.
+//   - "owned": the unit is installed and active, and the live supervisor PID
+//     is its MainPID or a descendant of it (a wrapper such as sg can be
+//     MainPID with gc as its child) — systemd's Restart=always is protecting
+//     it.
+//   - "outside_unit": the unit is installed but the live PID is neither its
+//     MainPID nor a descendant of it: the unit is inactive, the supervisor was
+//     forked from a tmux pane, or its parent exited and it was reparented —
+//     the ga-s434i0 defect shape. Sitting in the unit's cgroup does not count,
+//     because KillMode=process leaves such processes behind in it.
 //   - "no_unit": no unit is installed; the supervisor is intentionally
 //     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
 //     `gc supervisor install`).
+//
+// ProbeErr is set when the live PID's ancestry could not be read, so an
+// "outside_unit" result is unverified rather than proven.
 type supervisorUnitOwnershipStatus struct {
 	Status     string
 	Unit       string
 	UnitActive bool
 	UnitPID    int
+	ProbeErr   error
 }
 
 func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus {
@@ -1024,10 +1051,42 @@ func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus
 	if !ok {
 		pid = 0
 	}
-	if ok && pid != 0 && pid == livePID {
+	owned, err := supervisorProcessDescendsFrom(livePID, pid)
+	if owned {
 		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
 	}
-	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid}
+	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: err}
+}
+
+// supervisorUnitAncestryMaxHops bounds the parent walk in
+// supervisorProcessDescendsFrom. A wrapper ExecStart puts gc one or two hops
+// below MainPID; the bound only guards against malformed /proc data.
+const supervisorUnitAncestryMaxHops = 8
+
+// supervisorProcessDescendsFrom reports whether pid is the ancestor itself or
+// descends from it within supervisorUnitAncestryMaxHops parent hops. A
+// process whose parent exited was reparented to init or to a subreaper such
+// as systemd --user, so it no longer descends from the MainPID that started
+// it. The walk stops at PID 1, and an ancestor of 1 or less never matches
+// because it cannot be a unit's MainPID. A failed parent read ends the walk
+// and is returned, because the answer is then unknown rather than false.
+func supervisorProcessDescendsFrom(pid, ancestor int) (bool, error) {
+	if pid <= 0 || ancestor <= 1 {
+		return false, nil
+	}
+	for hops := 0; ; hops++ {
+		if pid == ancestor {
+			return true, nil
+		}
+		if pid <= 1 || hops == supervisorUnitAncestryMaxHops {
+			return false, nil
+		}
+		parent, err := supervisorParentPID(pid)
+		if err != nil {
+			return false, fmt.Errorf("reading the parent of PID %d: %w", pid, err)
+		}
+		pid = parent
+	}
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
@@ -1065,15 +1124,17 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+		// The override only blocks installing or starting a platform unit;
+		// a supervisor that is already running needs neither.
+		if supervisorAliveHook() != 0 {
+			return 0
+		}
 		if !supervisorIsolatedHome() {
 			fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		// An isolated run gets a bare supervisor: a platform unit would
 		// run under the real HOME, not the one this run isolates.
-		if supervisorAliveHook() != 0 {
-			return 0
-		}
 		return startBareSupervisor(stdout, stderr, false, true)
 	}
 	// Always regenerate the service file so upgrades pick up template
@@ -1534,6 +1595,10 @@ starts on login.`,
 }
 
 func doSupervisorInstall(stdout, stderr io.Writer) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1555,16 +1620,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	switch goruntime.GOOS {
-	case "darwin":
-		return installSupervisorLaunchd(data, stdout, stderr)
-	case "linux":
-		return installSupervisorSystemd(data, stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "gc supervisor install: not supported on %s\n", goruntime.GOOS) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	return installSupervisorService(goruntime.GOOS, data, stdout, stderr)
 }
 
 func newSupervisorUninstallCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1659,6 +1715,10 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if supervisor.UsesIsolatedGCHomeOverride() {
 		xdgRuntimeDir = ""
 	}
+	extraEnv, err := withRecordedTmuxTmpdir(supervisorServiceExtraEnv())
+	if err != nil {
+		return nil, err
+	}
 	return &supervisorServiceData{
 		GCPath:            gcPath,
 		LogPath:           supervisorLogPath(),
@@ -1667,7 +1727,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		LaunchdLabel:      supervisorLaunchdLabel(),
 		SafeName:          sanitizeServiceName(filepath.Base(home)),
 		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:          supervisorServiceExtraEnv(),
+		ExtraEnv:          extraEnv,
 		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
@@ -1775,6 +1835,7 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"LC_CTYPE":                                 true,
 	"LOGNAME":                                  true,
 	"SHELL":                                    true,
+	"TMUX_TMPDIR":                              true,
 	"USER":                                     true,
 	"XDG_CONFIG_HOME":                          true,
 	"XDG_STATE_HOME":                           true,
@@ -2208,12 +2269,19 @@ type plistValue struct {
 }
 
 func launchdSupervisorHome(data []byte) (string, bool) {
+	gcHome, ok := launchdPlistEnvValue(data, "GC_HOME")
+	if !ok || gcHome == "" {
+		return "", false
+	}
+	return filepath.Clean(gcHome), true
+}
+
+// launchdPlistEnvValue is the value the plist data holds sets key to in its
+// EnvironmentVariables, and whether it sets key there.
+func launchdPlistEnvValue(data []byte, key string) (string, bool) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		tok, err := dec.Token()
-		if errors.Is(err, io.EOF) {
-			return "", false
-		}
 		if err != nil {
 			return "", false
 		}
@@ -2225,15 +2293,8 @@ func launchdSupervisorHome(data []byte) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		env, ok := root["EnvironmentVariables"]
-		if !ok || env.dict == nil {
-			return "", false
-		}
-		gcHome, ok := env.dict["GC_HOME"]
-		if !ok || gcHome.text == "" {
-			return "", false
-		}
-		return filepath.Clean(gcHome.text), true
+		value, ok := root["EnvironmentVariables"].dict[key]
+		return value.text, ok
 	}
 }
 
@@ -2307,17 +2368,28 @@ func skipXMLElement(dec *xml.Decoder) error {
 }
 
 func systemdSupervisorHome(data []byte) (string, bool) {
+	gcHome, ok := systemdUnitEnvValue(data, "GC_HOME")
+	if !ok {
+		return "", false
+	}
+	return filepath.Clean(gcHome), true
+}
+
+// systemdUnitEnvValue is the value the first Environment= line of the unit
+// data holds sets key to, unquoted as gc writes it (systemdEnv), and whether
+// a line sets key.
+func systemdUnitEnvValue(data []byte, key string) (string, bool) {
+	prefix := "Environment=" + key + "="
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "Environment=GC_HOME=") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(scanner.Text()), prefix)
+		if !ok {
 			continue
 		}
-		value := strings.TrimPrefix(line, "Environment=GC_HOME=")
 		if unquoted, err := strconv.Unquote(value); err == nil {
-			return filepath.Clean(unquoted), true
+			return unquoted, true
 		}
-		return filepath.Clean(value), true
+		return value, true
 	}
 	return "", false
 }

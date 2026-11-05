@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -18,7 +19,7 @@ func newExtMsgAgentBindingFixture(t *testing.T) (*fakeState, *Server, *extmsg.Se
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	t.Cleanup(srv.waitForBackground)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 	registry := extmsg.NewAdapterRegistry()
 	registry.Register(extmsg.AdapterKey{Provider: "discord", AccountID: "acct-1"}, &testExtMsgAdapter{})
@@ -127,7 +128,7 @@ func TestHandleExtMsgInboundAgentBoundColdWakesNamedSession(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Bind(agent): %v", err)
 	}
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named agent should not have a session before the inbound message")
 	}
 
@@ -154,7 +155,7 @@ func TestHandleExtMsgInboundAgentBoundColdWakesNamedSession(t *testing.T) {
 	// The notify fan-out materializes the bound agent's named session —
 	// the cold-wake.
 	srv.waitForBackground()
-	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id == "" {
+	if id, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err != nil || id == "" {
 		t.Fatalf("agent-bound inbound did not cold-wake myrig/worker: id=%q err=%v", id, err)
 	}
 }

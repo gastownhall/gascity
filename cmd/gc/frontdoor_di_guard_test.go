@@ -265,7 +265,10 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // a regression canary rather than a completeness proof.
 //
 // controller.go is intentionally ABSENT even though it routes: its
-// session-circuit-reset socket handler routes, but the file also holds the
+// session-circuit-reset socket handler runs inside the controller, so it routes
+// through the registered runtime's session store (registeredSessionFrontDoor,
+// pinned by session_circuit_reset_socket_test.go) rather than cliSessionStore,
+// whose one-shot memo can be stale there; and the file also holds the
 // already-safe param-threaded runtime `sessionFrontDoor(store.Store)` at the
 // gracefulStop path, which the substring needle cannot distinguish. It is
 // protected by in-code comments and the end-to-end relocation acceptance test
@@ -305,7 +308,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 //
 // cmd_handoff.go routes its full SESSION arm — restartability
 // (sessionRestartableByController), restart-request clear (clearRestartRequest ->
-// sessionFrontDoor(sessStore).ApplyPatch), restart persist (sessionRestartPersister),
+// sessionFrontDoor(sessStore).ApplyPatch), restart record (sessionRestartRecorder),
 // the remote kill/observe/identity trio, resolveSessionID, sender-identity resolution
 // (resolveDefaultMailSenderForCommand), and beadmail's session addressing via
 // beadmail.NewWithStores(msgStore, sessStore) — through cliSessionStore. Its messaging
@@ -361,11 +364,12 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // cmd_mail.go routes at its store-opening ROOTS rather than per-read, because every
 // store access in its identity/target resolver family is session-class: session-ID
 // resolution, the gc:session enumeration behind named-target matching, and mailbox
-// identity. The five roots — resolveMailTargetsForCommand,
-// resolveDefaultMailTargetsForCommand, resolveRawMailTargetForStorelessProvider,
-// cmdMailSendJSON, cmdMailReplyJSON — derive cliSessionStore(store, cfg, cityPath) and
-// hand it down; the whole resolver family therefore names its parameter sessStore and
-// does NO routing of its own, so a relocation is applied exactly once per command.
+// identity. The four roots — openMailTargetResolver (behind
+// resolveMailTargetsForCommand and resolveDefaultMailTargetsForCommand),
+// resolveRawMailTargetForStorelessProvider, cmdMailSendJSON, cmdMailReplyJSON —
+// derive cliSessionStore(store, cfg, cityPath) and hand it down; the whole resolver
+// family therefore names its parameter sessStore and does NO routing of its own, so
+// a relocation is applied exactly once per command.
 // Mail MESSAGES are a different coordination class and never travel through these
 // resolvers — they go through mail.Provider. The two out-of-file callers
 // (cmd_handoff.go, prime_auto_handoff_inject.go) already hold a routed sessStore.
@@ -409,6 +413,16 @@ var sessionRelocationRoutedFiles = []string{
 	// relocated sessions class — a green result that reads as "no stuck
 	// sessions" when the check simply looked in the wrong store.
 	"doctor_startup_health.go",
+	// `gc agent is-foreign` vouches for a claimant through this city's session
+	// records. Unrouted, it finds none under a relocated sessions class, so every
+	// dead local claim the orphan-sweep order asks about reads as foreign and is
+	// kept forever.
+	"cmd_agent_is_foreign.go",
+	// The in-band lane pass of `gc nudge drain --inject` reads the session row
+	// and writes the conversation's op rows and the delivery stamp. Unrouted,
+	// it would find no open lane op under a relocated sessions class, and the
+	// hook would deliver no notice while the controller is down.
+	"conversation_lane_hook.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a

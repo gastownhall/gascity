@@ -41,6 +41,9 @@ var (
 	ErrStatusMismatch = errors.New("opjournal: op status mismatch")
 	// ErrContention reports that a revision-fenced write lost every retry.
 	ErrContention = errors.New("opjournal: revision contention")
+	// ErrAttemptMoved reports an adoption that lost to another adopter: the
+	// op's attempt is no longer the one the adopter read.
+	ErrAttemptMoved = errors.New("opjournal: op attempt moved")
 	// ErrAlreadyTerminal reports a second, different outcome for a closed op.
 	ErrAlreadyTerminal = errors.New("opjournal: op already closed with another outcome")
 	// ErrBeadTypeUnregistered reports a store that refuses the "op" bead type.
@@ -52,6 +55,15 @@ var (
 	// ErrNoNamespace reports a store whose mint prefix could not be resolved.
 	ErrNoNamespace = errors.New("opjournal: store has no id prefix")
 )
+
+// Undecodable reports an error that a retry will not clear: a stored row this
+// build cannot decode, because it is corrupt (ErrCorruptOp) or a newer build
+// wrote it under a kind, schema revision or vocabulary value this one does
+// not know.
+func Undecodable(err error) bool {
+	return errors.Is(err, ErrCorruptOp) || errors.Is(err, ErrUnsupportedSchema) ||
+		errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrUnsupportedKind)
+}
 
 // KeyReuseError reports that a client key already names an op with another
 // request digest. Existing is the op already stored under the id.
