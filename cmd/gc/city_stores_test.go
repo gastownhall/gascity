@@ -429,7 +429,10 @@ func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
 			if got := cliMailStore(work, nil, cityPath).Store; resolvedKey(got) != resolvedKey(want) {
 				t.Errorf("cliMailStore wraps %v, resolveMailMessagesStore %v", resolvedKey(got), resolvedKey(want))
 			}
-			wantStore := work
+			// Unsplit, the messaging class falls to the scope store: the
+			// store itself in production, its class view under the
+			// split-strict gate (identity when the gate is off).
+			wantStore := splitStrictClassView(work)
 			if name == "split" {
 				wantStore = binding
 			}

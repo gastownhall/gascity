@@ -864,7 +864,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	if state != infraConvergenceMarked {
-		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q (%s is absent or its database is gone), so nothing here is a stranded write — the whole copy is still owed. Run:  %s\n", //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q (%s is absent, its database is gone, or a re-copy into it has not finished), so nothing here is a stranded write — the whole copy is still owed. Run:  %s\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.Binding, target.MarkerPath(), storageMigrationCommand)
 		return 1
 	}

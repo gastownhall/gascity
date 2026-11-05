@@ -265,7 +265,10 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // a regression canary rather than a completeness proof.
 //
 // controller.go is intentionally ABSENT even though it routes: its
-// session-circuit-reset socket handler routes, but the file also holds the
+// session-circuit-reset socket handler runs inside the controller, so it routes
+// through the registered runtime's session store (registeredSessionFrontDoor,
+// pinned by session_circuit_reset_socket_test.go) rather than cliSessionStore,
+// whose one-shot memo can be stale there; and the file also holds the
 // already-safe param-threaded runtime `sessionFrontDoor(store.Store)` at the
 // gracefulStop path, which the substring needle cannot distinguish. It is
 // protected by in-code comments and the end-to-end relocation acceptance test

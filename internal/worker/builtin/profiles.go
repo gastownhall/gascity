@@ -80,12 +80,16 @@ type BuiltinProviderSpec struct {
 	// Program-status declaration (OSC 7501), mirrored flat because this
 	// package cannot import config: ProgramStatusProtocol is "osc7501" to
 	// declare, ProgramStatusApp names the reporting program,
-	// ProgramStatusRelay wraps the agent in the probe-answering relay, and
-	// ProgramStatusEnv is forced into the session env when capture is armed.
-	ProgramStatusProtocol string
-	ProgramStatusApp      string
-	ProgramStatusRelay    bool
-	ProgramStatusEnv      map[string]string
+	// ProgramStatusRelay wraps the agent in the probe-answering relay,
+	// ProgramStatusHoldMidTurn declares that input typed mid-turn aborts the
+	// program's turn (config.ProgramStatusBinding.HoldMidTurn says which
+	// deliveries that holds back), and ProgramStatusEnv is forced into the
+	// session env when capture is armed.
+	ProgramStatusProtocol    string
+	ProgramStatusApp         string
+	ProgramStatusRelay       bool
+	ProgramStatusHoldMidTurn bool
+	ProgramStatusEnv         map[string]string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -349,9 +353,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
 		// Codex (verified on 0.165.0) reports OSC 7501 unprompted, so the
-		// pane-output tap alone captures it.
-		ProgramStatusProtocol: programStatusOSC7501,
-		ProgramStatusApp:      "codex",
+		// pane-output tap alone captures it. Input typed into a running
+		// Codex turn aborts it (the 2026-11-03 shadow: 18 of 20 mid-turn
+		// deliveries aborted their turn), so it declares the hold.
+		ProgramStatusProtocol:    programStatusOSC7501,
+		ProgramStatusApp:         "codex",
+		ProgramStatusHoldMidTurn: true,
 		PermissionModes: map[string]string{
 			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",

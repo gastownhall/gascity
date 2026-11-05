@@ -8,6 +8,7 @@ go_library(
         "flock_linux.go",
         "git.go",
         "loopback_port.go",
+        "loopback_probe.go",
         "path.go",
         "timeout.go",
     ],
@@ -24,6 +25,7 @@ go_test(
     srcs = [
         "dolt_test.go",
         "failure_artifacts_test.go",
+        "loopback_probe_test.go",
         "path_test.go",
         "testenv_import_test.go",
     ],

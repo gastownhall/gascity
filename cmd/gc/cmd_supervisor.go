@@ -2319,7 +2319,7 @@ func startOneCity(
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
 	var reconcilerBoot strings.Builder
-	wiring, wiringErr := newControllerWiringLoggingTo(cfg, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
+	wiring, wiringErr := newControllerWiringLoggingTo(cfg, path, reconcilerModeLookupEnv, stderr, &reconcilerBoot)
 	logSupervisorReconcilerBoot(stderr, path, cityName, reconcilerBoot.String())
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
@@ -2361,6 +2361,11 @@ func startOneCity(
 			lock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 		}
 	}()
+	// This process may have resolved the city through the one-shot funnel on
+	// an earlier boot, or while it was stopped and before a `gc storage
+	// migrate`. The pre-registration reads below (the provider snapshot, the
+	// v2 boot census) must not answer from that memo.
+	retireCityFunnelForBoot(path)
 
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(

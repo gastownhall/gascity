@@ -62,7 +62,7 @@ func (e *shadowExecutor) execute(args []string) (string, error) {
 		}
 		e.reads++
 		e.order = append(e.order, "program-read")
-		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, runtimeInventoryEnd}, "\t"), nil
+		return strings.Join([]string{dead, "agent", "%5", "1", tap, rec, "", runtimeInventoryEnd}, "\t"), nil
 	case tmuxSubcommand(args) == "show-environment" && strings.HasPrefix(args[len(args)-1], "="):
 		return "GC_PROVIDER=claude\nGC_SESSION_ID=gc-7\nSECRET=x", nil
 	}
@@ -337,7 +337,7 @@ func TestShadowPendingDecisionIdenticalToOff(t *testing.T) {
 	// pending, while the record reports a question.
 	pendingProvider := func(mode runtime.ProgramStatusMode) *Provider {
 		p, _ := readProvider(mode, out, &table)
-		p.tm.exec = &pendingPaneExecutor{fetch: out}
+		p.tm.exec = &pendingPaneExecutor{fetch: out, record: func() string { return blocked }}
 		return p
 	}
 
@@ -492,19 +492,45 @@ func TestShadowGoDropsWhenFull(t *testing.T) {
 	}
 }
 
-// pendingPaneExecutor resolves the agent pane like fakeAgentPaneRow, shows a
-// ready prompt to every capture, answers the state cache's listing with
-// fetch, and every other command with "".
-type pendingPaneExecutor struct{ fetch string }
+// pendingPaneExecutor resolves the agent pane like fakeAgentPaneRow, shows
+// screen() to every capture ("❯ ", a ready prompt, when nil), answers the
+// state cache's listing with fetch and a fresh program read with record()'s
+// agent pane armed under tap() (readNonce when nil), and every other command
+// with "". It counts both kinds of read.
+type pendingPaneExecutor struct {
+	mu      sync.Mutex
+	fetch   string
+	record  func() string
+	tap     func() string
+	screen  func() string
+	fetches int
+	fresh   int
+}
 
 func (e *pendingPaneExecutor) execute(args []string) (string, error) {
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
-	switch tmuxSubcommand(args) {
-	case "capture-pane":
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch {
+	case tmuxSubcommand(args) == "capture-pane":
+		if e.screen != nil {
+			return e.screen(), nil
+		}
 		return "❯ ", nil
-	case "list-panes":
+	case isProgramRead(args):
+		e.fresh++
+		if e.record == nil {
+			return "", errors.New("unscripted fresh read")
+		}
+		pane := armedPane(e.record())
+		if e.tap != nil {
+			pane.tap = e.tap()
+		}
+		return freshRows(pane), nil
+	case tmuxSubcommand(args) == "list-panes":
+		e.fetches++
 		return e.fetch, nil
 	}
 	return "", nil
@@ -512,6 +538,23 @@ func (e *pendingPaneExecutor) execute(args []string) (string, error) {
 
 func (e *pendingPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
 	return e.execute(args)
+}
+
+// reads is how many state cache listings and fresh program reads e answered.
+func (e *pendingPaneExecutor) reads() (fetches, fresh int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fetches, e.fresh
+}
+
+// freshRows renders programFreshFormat rows for a session's panes.
+func freshRows(panes ...capturePane) string {
+	var lines []string
+	for _, p := range panes {
+		row := append([]string{p.deadField()}, p.fields()...)
+		lines = append(lines, strings.Join(append(row, runtimeInventoryEnd), "\t"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Kills a readiness comparison that ignores the settle after the program's
@@ -1108,23 +1151,27 @@ func TestShadowDecisionReadingPrecedesTheCallersAct(t *testing.T) {
 	}
 }
 
-// heldListingExecutor is pendingPaneExecutor whose state cache listing is
-// listing(), answered after hold.
+// heldListingExecutor is pendingPaneExecutor whose state cache listing and
+// fresh program reads carry the record record() returns, answered after
+// hold.
 type heldListingExecutor struct {
-	hold    func()
-	listing func() string
+	hold   func()
+	record func() string
 }
 
 func (e *heldListingExecutor) execute(args []string) (string, error) {
 	if row, ok := fakeAgentPaneRow(args); ok {
 		return row, nil
 	}
-	switch tmuxSubcommand(args) {
-	case "capture-pane":
+	switch {
+	case tmuxSubcommand(args) == "capture-pane":
 		return "❯ ", nil
-	case "list-panes":
+	case isProgramRead(args):
 		e.hold()
-		return e.listing(), nil
+		return freshRows(armedPane(e.record())), nil
+	case tmuxSubcommand(args) == "list-panes":
+		e.hold()
+		return fetchRows(armedPane(e.record())), nil
 	}
 	return "", nil
 }
@@ -1133,7 +1180,7 @@ func (e *heldListingExecutor) executeCtx(_ context.Context, args []string) (stri
 	return e.execute(args)
 }
 
-// Kills a pending comparison whose state cache reading is taken after
+// Kills a pending comparison whose record reading is taken after
 // Pending returned (review finding: asynchronous decision reading): a
 // delivery made once Pending reads nothing pending starts a turn, and a
 // reading of the listing after it judged that turn. The listing from before
@@ -1144,11 +1191,11 @@ func TestShadowPendingReadingPrecedesTheCallersAct(t *testing.T) {
 		gate := newActGate()
 		blocked := psRecord(t, readNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Kind = runtime.ProgramBlockQuestion })
 		delivered := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts = 2, 2 })
-		ex := &heldListingExecutor{hold: gate.hold, listing: func() string {
+		ex := &heldListingExecutor{hold: gate.hold, record: func() string {
 			if gate.done() {
-				return fetchRows(armedPane(delivered))
+				return delivered
 			}
-			return fetchRows(armedPane(blocked))
+			return blocked
 		}}
 		col := newShadowCollector()
 		tm := &Tmux{cfg: Config{ProgramStatus: runtime.ProgramStatusShadow, ComparisonSink: col.sink}, exec: ex}
@@ -1244,5 +1291,165 @@ func TestShadowIdleProofTakesTwoObservations(t *testing.T) {
 				t.Fatalf("%d fresh reads, want one on each side of the proof", reads)
 			}
 		})
+	}
+}
+
+// shadowedStartOps are fake start ops whose startup ladder tm shadows, as a
+// tmuxStartOps's Tmux does.
+type shadowedStartOps struct {
+	*fakeStartOps
+	tm *Tmux
+}
+
+func (o shadowedStartOps) shadowStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.shadowStartupLadder(name, send, busy)
+}
+
+// providerPaneExecutor serves a session's agent pane (fakeAgentPaneRow),
+// whose GC_PROVIDER is provider, and answers every other command with "".
+// paneErr, when set, fails the agent-pane lookup.
+type providerPaneExecutor struct {
+	provider string
+	paneErr  error
+}
+
+func (e providerPaneExecutor) execute(args []string) (string, error) {
+	if row, ok := fakeAgentPaneRow(args); ok {
+		if e.paneErr != nil {
+			return "", e.paneErr
+		}
+		return row, nil
+	}
+	if tmuxSubcommand(args) == "show-environment" && args[len(args)-1] == "GC_PROVIDER" {
+		return "GC_PROVIDER=" + e.provider, nil
+	}
+	return "", nil
+}
+
+func (e providerPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// Kills a submit verification read off a pane other than the one the nudge
+// sent to, or a pane that cannot be resolved read as one the scan does not
+// verify: only claude and codex are verified.
+func TestSubmitVerifiedReadsTheAgentPane(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		ex           providerPaneExecutor
+		verified, ok bool
+	}{
+		{"claude", providerPaneExecutor{provider: "claude"}, true, true},
+		{"codex", providerPaneExecutor{provider: "codex"}, true, true},
+		{"pi", providerPaneExecutor{provider: "pi"}, false, true},
+		{"no pane", providerPaneExecutor{provider: "claude", paneErr: errors.New("no server running")}, false, false},
+	} {
+		tm := &Tmux{cfg: DefaultConfig(), exec: c.ex}
+		if verified, ok := tm.submitVerified("s"); verified != c.verified || ok != c.ok {
+			t.Errorf("%s: submitVerified = %v, %v; want %v, %v", c.name, verified, ok, c.verified, c.ok)
+		}
+	}
+}
+
+// Kills a startup ladder whose decisions go unrecorded on the path a start
+// takes (ga-f4ovjm.69): a startup nudge the scan confirms on its first send
+// ends the ladder with no busy look, and that send is the ladder's decision;
+// a ladder that retries records each send and each look. A family the scan
+// does not verify is sent best-effort, so its send that succeeded saw no
+// turn start: none. The ladder sends exactly as it does with the switch
+// off, and off records nothing.
+func TestShadowStartupLadderRecordsEachDecision(t *testing.T) {
+	stubShadowFollow(t)
+	origBackoffs := startupNudgeRetryBackoffs
+	startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { startupNudgeRetryBackoffs = origBackoffs })
+	idle := psRecord(t, readNonce, runtime.ProgramIdle, liveSince)
+	started := psRecord(t, readNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 2 })
+	// The first read is the baseline, before the ladder's first send.
+	record := func(n int) string {
+		if n == 0 {
+			return idle
+		}
+		return started
+	}
+	for _, c := range []struct {
+		name     string
+		provider string
+		sends    []error
+		scrape   []runtime.ProgramVerdict
+	}{
+		{"confirmed on the first send", "claude", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictConfirmed}},
+		{"confirmed on a retry", "claude", []error{ErrNudgeSubmitUnconfirmed, nil}, []runtime.ProgramVerdict{
+			runtime.ProgramVerdictUnconfirmed, runtime.ProgramVerdictUnconfirmed, runtime.ProgramVerdictConfirmed,
+		}},
+		{"sent best-effort to a family the scan does not verify", "pi", []error{nil}, []runtime.ProgramVerdict{runtime.ProgramVerdictNone}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := runtime.Config{Command: c.provider, Nudge: "start working"}
+			pane := providerPaneExecutor{provider: c.provider}
+			offOps := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(c.sends)}
+			off, offEx := shadowTmux(runtime.ProgramStatusOff, pane, record, nil)
+			offErr := doStartSession(context.Background(), shadowedStartOps{offOps, off}, "s", cfg, DefaultConfig().SetupTimeout)
+
+			col := newShadowCollector()
+			shOps := &fakeStartOps{hasSessionResult: true, sendKeysErrs: slices.Clone(c.sends)}
+			sh, _ := shadowTmux(runtime.ProgramStatusShadow, pane, record, col.sink)
+			shErr := doStartSession(context.Background(), shadowedStartOps{shOps, sh}, "s", cfg, DefaultConfig().SetupTimeout)
+
+			if offErr != nil || shErr != nil {
+				t.Fatalf("start: shadow %v, off %v; want both nil", shErr, offErr)
+			}
+			if !slices.Equal(offOps.callMethods(), shOps.callMethods()) {
+				t.Fatalf("shadow start called %v, off %v", shOps.callMethods(), offOps.callMethods())
+			}
+			if offEx.programReads() != 0 {
+				t.Fatalf("the switch off took %d program reads, want none", offEx.programReads())
+			}
+			// Comparisons reach the sink from shadow goroutines, in any order.
+			var scrapes []runtime.ProgramVerdict
+			for _, g := range col.wait(t, len(c.scrape)) {
+				if g.Point != runtime.ProgramPointStartupLadder || g.Program != runtime.ProgramVerdictConfirmed {
+					t.Fatalf("comparison %+v, want startup_ladder beside a confirmed record", g)
+				}
+				scrapes = append(scrapes, g.Scrape)
+			}
+			slices.Sort(scrapes)
+			want := slices.Clone(c.scrape)
+			slices.Sort(want)
+			if !slices.Equal(scrapes, want) {
+				t.Fatalf("scrape verdicts %v, want %v", scrapes, want)
+			}
+		})
+	}
+}
+
+// Kills an idle wait decided outside the leaf (the op lane's boundary) that
+// the leaf does not record as its own wait_for_idle: on a decision reading
+// taken before the call returns, followed to time the record's boundary.
+// Off shadow it reads nothing.
+func TestShadowIdleWaitDecidedOutsideTheLeaf(t *testing.T) {
+	stubShadowFollow(t)
+	working := psRecord(t, readNonce, runtime.ProgramWorking, liveSince)
+	ended := psRecord(t, readNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) {
+		s.Seq, s.TurnStarts, s.TurnEnds, s.QuietSince = 3, 1, 1, time.Now()
+	})
+	records := []string{working, working, ended}
+	record := func(n int) string { return records[min(n, len(records)-1)] }
+
+	off, offEx := shadowTmux(runtime.ProgramStatusOff, &fakeExecutor{}, record, nil)
+	(&Provider{tm: off}).ProgramStatusShadowIdleWait("s", time.Now(), time.Now(), runtime.ProgramVerdictIdle)
+	if offEx.programReads() != 0 {
+		t.Fatalf("the switch off took %d program reads, want none", offEx.programReads())
+	}
+
+	col := newShadowCollector()
+	sh, ex := shadowTmux(runtime.ProgramStatusShadow, &fakeExecutor{}, record, col.sink)
+	(&Provider{tm: sh}).ProgramStatusShadowIdleWait("s", time.Now(), time.Now(), runtime.ProgramVerdictIdle)
+	if ex.programReads() < 1 {
+		t.Fatal("the decision reading was not taken before the call returned")
+	}
+	got := col.wait(t, 1)[0]
+	if got.Point != runtime.ProgramPointWaitForIdle || got.Scrape != runtime.ProgramVerdictIdle || got.Program != runtime.ProgramVerdictBusy || !got.Timed {
+		t.Fatalf("comparison %+v, want a timed wait_for_idle idle/busy", got)
 	}
 }

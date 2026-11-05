@@ -91,9 +91,9 @@ jobs:
     if: ${{ !cancelled() }}
     # A called workflow's jobs get at most the caller job's token
     # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
-    # write), its lanes read worker-env drift issues (issues: read) and its
-    # rrc-verify job opens an alert issue on a remote repo contents cache
-    # mismatch (issues: write; no other bazel.yml job asks for it).
+    # write), its lanes read worker-env drift issues (issues: read), and its
+    # rrc-verify and split-strict-alert jobs open alert issues (issues: write;
+    # split-strict-alert also reads this run's jobs, actions: read).
     permissions:
       contents: read
       actions: write

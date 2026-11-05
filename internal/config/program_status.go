@@ -35,6 +35,17 @@ type ProgramStatusBinding struct {
 	// Relay wraps the agent in the probe-answering relay, for programs that
 	// only report after their support probe is answered. Unset inherits.
 	Relay *bool `toml:"relay,omitempty"`
+	// HoldMidTurn declares that the program aborts its running turn when
+	// input is typed into it mid-turn. It governs only the bypass of the
+	// quiescence gate that a delivery starved on a never-quiet session takes.
+	// The conversation lane takes that bypass only under the [session]
+	// program_status switch on, on a fresh read of the program's own record
+	// that decides and shows no live working record. Legacy delivery defers
+	// it under on while such a read shows a live working record, and
+	// otherwise takes it as without the declaration. Every other delivery is
+	// unchanged. It reaches a pane when its capture is armed (create,
+	// respawn, heal), and heal keeps it current. Unset inherits.
+	HoldMidTurn *bool `toml:"hold_mid_turn,omitempty"`
 	// Env is forced into the session environment when capture is armed (for
 	// example PI_PROGRAM_STATUS = "1"). It is not part of the launch
 	// fingerprint, so changing it does not relaunch running agents: keys gc
@@ -60,9 +71,10 @@ func (b ProgramStatusBinding) Arm(mode runtime.ProgramStatusMode, acp bool) (run
 		return runtime.ProgramStatusArm{}, nil
 	}
 	arm := runtime.ProgramStatusArm{
-		Capture: true,
-		App:     b.App,
-		Relay:   b.Relay != nil && *b.Relay,
+		Capture:     true,
+		App:         b.App,
+		Relay:       b.Relay != nil && *b.Relay,
+		HoldMidTurn: b.HoldMidTurn != nil && *b.HoldMidTurn,
 	}
 	return arm, maps.Clone(b.Env)
 }
@@ -71,12 +83,13 @@ func (b ProgramStatusBinding) Arm(mode runtime.ProgramStatusMode, acp bool) (run
 func (b ProgramStatusBinding) clone() ProgramStatusBinding {
 	out := b
 	out.Relay = cloneBoolPtr(b.Relay)
+	out.HoldMidTurn = cloneBoolPtr(b.HoldMidTurn)
 	out.Env = maps.Clone(b.Env)
 	return out
 }
 
 // mergeProgramStatusBinding layers over on base: a non-empty protocol or app
-// overrides, a non-nil relay overrides, and env merges per key with over
+// overrides, a non-nil relay or hold_mid_turn overrides, and env merges per key with over
 // winning (an empty value is copied verbatim, which withholds the variable).
 func mergeProgramStatusBinding(base, over ProgramStatusBinding) ProgramStatusBinding {
 	out := base.clone()
@@ -88,6 +101,9 @@ func mergeProgramStatusBinding(base, over ProgramStatusBinding) ProgramStatusBin
 	}
 	if over.Relay != nil {
 		out.Relay = cloneBoolPtr(over.Relay)
+	}
+	if over.HoldMidTurn != nil {
+		out.HoldMidTurn = cloneBoolPtr(over.HoldMidTurn)
 	}
 	if over.Env != nil {
 		merged := make(map[string]string, len(out.Env)+len(over.Env))

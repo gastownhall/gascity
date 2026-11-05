@@ -497,6 +497,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
+			registerCityStoreCheck(newExecRuntimeIdentityCheck(cfg, cityPath, sessionSP, sessionSPErr))
 			if !cityStoreStopped {
 				reconcilerCheck.capabilities = func() ([]v2StoreCapability, error) {
 					store, err := storeFactory(cityPath)
