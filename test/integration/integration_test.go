@@ -1550,6 +1550,11 @@ func pinRealHomeEnv(env []string) []string {
 	return replaceEnv(env, "HOME", lu.HomeDir)
 }
 
+// realHomeDir returns the operator's home directory.
+func realHomeDir() (string, error) {
+	return os.UserHomeDir()
+}
+
 func prependPath(paths ...string) string {
 	parts := make([]string, 0, len(paths))
 	for _, path := range paths {
