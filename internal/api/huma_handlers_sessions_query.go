@@ -20,7 +20,7 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
-func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -81,10 +81,16 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		pageSessions[j] = sessions[i]
 	}
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
+	workCtx, cancelWork := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancelWork()
+	activeWork := &activeWorkLookup{ctx: workCtx, server: s}
 	page := make([]sessionResponse, len(pageSessions))
 	for j, sess := range pageSessions {
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths, activeWork)
+	}
+	if activeWork.err != nil {
+		partialErrors = append(partialErrors, activeWork.err.Error())
 	}
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)

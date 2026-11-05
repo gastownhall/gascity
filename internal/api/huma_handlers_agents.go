@@ -153,6 +153,9 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	pools := newRequestSessionListing(sp)
 	var agents []agentResponse
 	var partialErrors []string
+	workCtx, cancelWork := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancelWork()
+	activeWork := &activeWorkLookup{ctx: workCtx, server: s}
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
@@ -285,7 +288,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			resp.ActiveBead = activeWork.find(ea.rig, sessionID, sessionName, ea.qualifiedName)
 			// A relocated-graph wisp names its assignee after the session, not
 			// the work store, so the work-store lookup above misses it. Fall
 			// back to the graph bead and use its timestamp as the activity
@@ -322,6 +325,9 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	partialErrors = append(partialErrors, runtimeSessions.partialErrors()...)
+	if activeWork.err != nil {
+		partialErrors = append(partialErrors, activeWork.err.Error())
+	}
 
 	if agents == nil {
 		agents = []agentResponse{}

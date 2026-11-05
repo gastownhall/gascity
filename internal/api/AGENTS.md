@@ -98,7 +98,11 @@ set `statusWorkCounts` skips, `cacheColdRigNames`); a store such a rig shares
 with a rig that is not suspended, as in legacy shared-file mode, is read
 through that rig. A lookup scoped to a suspended rig reads only that shared
 store, or nothing, and never falls back to the other rigs' stores
-(`activeBeadSearchScope`).
+(`activeBeadSearchScope`). Session and agent list enrichment share one
+request-wide budget for uncached active-work reads. Use a context-bound scoped
+store for bd-backed reads, stop on an unreadable higher-priority lookup, and
+mark the response partial instead of claiming that the missing work is absent.
+A clean cache remains usable after the budget expires until a lookup fails.
 
 ## Deferred creation baseline
 

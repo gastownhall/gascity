@@ -388,7 +388,8 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 // searched. A store only rigs suspended by effective state reach is never
 // searched (activeBeadSearchScope). Returns "" if no match.
 func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
+	id, _ := s.findActiveBeadForAssigneesWithFreshness(context.Background(), false, rig, false, assignees...)
+	return id
 }
 
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
@@ -396,7 +397,27 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // lower-frequency detail views where external reassignment freshness matters.
 // A store only rigs suspended by effective state reach is never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
+	id, _ := s.findActiveBeadForAssigneesWithFreshness(context.Background(), false, rig, true, assignees...)
+	return id
+}
+
+// activeWorkLookup bounds optional active-bead enrichment for an entire list
+// request. A failed higher-priority lookup cannot be treated as a miss.
+type activeWorkLookup struct {
+	ctx    context.Context
+	server *Server
+	err    error
+}
+
+func (l *activeWorkLookup) find(rig string, assignees ...string) string {
+	if l.err != nil {
+		return ""
+	}
+	id, err := l.server.findActiveBeadForAssigneesWithFreshness(l.ctx, true, rig, false, assignees...)
+	if err != nil {
+		l.err = fmt.Errorf("active work lookup: %w", err)
+	}
+	return id
 }
 
 // findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
@@ -405,7 +426,7 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // Limit=1 per identity and store, stopping at the first match; live reads go
 // through findLiveActiveBeadInStores. Both read only the stores
 // activeBeadSearchScope picks.
-func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
+func (s *Server) findActiveBeadForAssigneesWithFreshness(ctx context.Context, bounded bool, rig string, live bool, assignees ...string) (string, error) {
 	stores, rigNames := activeBeadSearchScope(s.state.BeadStores(), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
@@ -418,7 +439,7 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		unique = append(unique, assignee)
 	}
 	if live {
-		return findLiveActiveBeadInStores(stores, rigNames, unique)
+		return findLiveActiveBeadInStores(stores, rigNames, unique), nil
 	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
@@ -432,21 +453,33 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 				matches, cacheOK := cached.CachedList(query)
 				if cacheOK {
 					if len(matches) > 0 {
-						return matches[0].ID
+						return matches[0].ID, nil
 					}
 					continue
 				}
 			}
-			matches, err := stores[rn].List(query)
+			if bounded && ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			var matches []beads.Bead
+			var err error
+			if !bounded {
+				matches, err = stores[rn].List(query)
+			} else {
+				matches, err = statusListStoreWithTimeout(ctx, s.state, stores[rn], query)
+			}
 			if err != nil {
+				if bounded {
+					return "", fmt.Errorf("store %s: %w", rn, err)
+				}
 				continue
 			}
 			if len(matches) > 0 {
-				return matches[0].ID
+				return matches[0].ID, nil
 			}
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // activeBeadSearchScope returns the stores an active-bead lookup may read and
