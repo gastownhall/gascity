@@ -498,16 +498,25 @@ A work row that blocks on a malformed `<type>:<id>` literal (such as
 ready on a single-store city, because bd reads the literal as no blocker. On a
 split city `gc ready` holds the row, because no store resolves the literal,
 whether or not the split moved `<id>`. `gc storage preflight` lists every such
-row under `malformed edges` before the window, with where its `<id>` ends up.
+row of the city's work store under `malformed edges` before the window, with
+where its `<id>` ends up. It does not read the rigs' stores:
+`gc doctor --check dangling-blocking-edges` names their rows after the split.
 After the split, `gc doctor --check dangling-blocking-edges --fix` repairs each
 literal:
 
 - one whose `<id>` is still in the row's store is rewritten as that typed edge;
-- one whose `<id>` moved to the binding is removed, and the edge it meant is
-  recorded on the row (`gc.migrated_cross_edges`, `action: "dropped"`). It
-  writes no edge, because no edge crosses stores;
+- one whose `<id>` only the binding holds (the split moved it there, or the
+  binding minted it) is removed, and the edge it meant is recorded on the row
+  with the literal's payload (`gc.migrated_cross_edges`, `action: "dropped"`).
+  It writes no edge, because no edge crosses stores. `--fix` keeps the literal
+  and says why when the row's store cannot report the payload, or when the row
+  already records that edge without it. For the first, bring the scope's proxy
+  up (any `bd` read in the scope does) and run `--fix` again. Either way you
+  can remove the literal yourself with `gc bd dep remove <row> <literal>`,
+  which drops its payload;
 - one whose `<id>` no store holds is removed;
-- one whose `<id>` a rig holds is left for you.
+- one whose `<id>` another work store holds (a rig's, or the city's for a
+  rig's row) is left for you.
 
 ## gc bd on split cities
 

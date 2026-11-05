@@ -14,7 +14,9 @@ package main
 // reimplements none. Every step below calls the same function the migration
 // calls, so a refusal that changes there changes here — and a check added there
 // without a line here shows up as a preflight that clears a city the migration
-// refuses, which is the one failure mode this verb cannot tolerate.
+// refuses, which is the one failure mode this verb cannot tolerate. The one
+// thing it adds is a note, never a block: the "malformed edges" note in step 6
+// names the work rows the split will hold until `gc doctor --fix` repairs them.
 //
 // That last sentence is a claim about a list, and a comment cannot keep a list
 // honest: the first cut of this file asserted it while omitting three of the
@@ -239,6 +241,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	var gates []infraCopyGate
 	var plan infraCopyPlan
 	var literals []string
+	var literalRows int
 	if listErr == nil {
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
@@ -269,7 +272,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 			if err != nil {
 				literalErr = fmt.Errorf("listing the open rows' dependencies: %w", err)
 			}
-			literals = malformedLiteralRows(deps, moved, allIDs)
+			literals, literalRows = malformedLiteralRows(deps, moved, allIDs)
 		}
 	}
 	if closeErr := closeBeadStoreHandle(source); closeErr != nil {
@@ -301,7 +304,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	case literalErr != nil:
 		preflightNote(stdout, "malformed edges", fmt.Sprintf("could not read the open rows' edges (%v), so rows blocked on a malformed <type>:<id> literal are not listed", literalErr))
 	case len(literals) > 0:
-		preflightNote(stdout, "malformed edges", fmt.Sprintf("%d work row(s) block on a malformed <type>:<id> literal. bd reads it as no blocker, but no store resolves it, so after the split gc ready holds each row until `gc doctor --check dangling-blocking-edges --fix` repairs it: a literal whose <id> stays in the work store is rewritten as that typed edge, one whose <id> moves to the binding is removed and the edge recorded on the row (%s), and one whose <id> no store holds is removed (a rig's is left for you). Or repair each now (bd dep remove <row> <literal>, then, where <id> stays, bd dep add <row> <id> -t <type>), and the row stays ready across the split:", len(literals), beadmeta.MigratedCrossEdgesMetadataKey))
+		preflightNote(stdout, "malformed edges", fmt.Sprintf("%d row(s) of the city's work store block on a malformed <type>:<id> literal (%d edge(s), below). bd reads it as no blocker, but no store resolves it, so after the split gc ready holds each row until `gc doctor --check dangling-blocking-edges --fix` repairs it: a literal whose <id> stays in the work store is rewritten as that typed edge, one whose <id> moves to the binding is removed and the edge recorded on the row with its payload (%s), and one whose <id> no store holds is removed (a rig's is left for you). Rigs' rows are not read here; doctor names theirs after the split. Or repair each now (bd dep remove <row> <literal>, then, where <id> stays, bd dep add <row> <id> -t <type>), and the row stays ready across the split:", literalRows, len(literals), beadmeta.MigratedCrossEdgesMetadataKey))
 		for _, edge := range literals {
 			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, edge) //nolint:errcheck // best-effort stdout
 		}
