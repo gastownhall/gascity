@@ -382,8 +382,8 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 
 	// The in-flight guard must clear after completion; a leaked guard would
 	// wedge every future refresh for this key.
-	if srv.responseRefreshing["status"] {
-		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
+	if srv.statusBuilds["status"] != nil {
+		t.Fatal("statusBuilds[\"status\"] still set after background refresh completed (leaked guard)")
 	}
 }
 
@@ -484,8 +484,8 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 	// line never runs; reaching it at all is half the assertion.
 	srv.waitForBackground()
 
-	if srv.responseRefreshing["status"] {
-		t.Fatal("responseRefreshing[\"status\"] still true after a panicking background refresh (leaked guard wedges every future refresh)")
+	if srv.statusBuilds["status"] != nil {
+		t.Fatal("statusBuilds[\"status\"] still set after a panicking background refresh (leaked guard wedges every future refresh)")
 	}
 }
 

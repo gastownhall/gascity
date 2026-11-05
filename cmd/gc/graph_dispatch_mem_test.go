@@ -288,7 +288,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 				continue
 			}
-			result, err := dispatch.ProcessControl(store, bead, dispatch.ProcessOptions{CityPath: cityPath})
+			result, err := dispatch.ProcessControl(beadstest.Graph(store), bead, dispatch.ProcessOptions{CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("ProcessControl(%s): %v", bead.ID, err)
 			}
@@ -918,7 +918,7 @@ func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
 		if getErr != nil {
 			return getErr
 		}
-		_, processErr := dispatch.ProcessControl(rigStore, bead, dispatch.ProcessOptions{CityPath: cityPath})
+		_, processErr := dispatch.ProcessControl(beadstest.Graph(rigStore), bead, dispatch.ProcessOptions{CityPath: cityPath})
 		return processErr
 	}
 

@@ -69,9 +69,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "9b65b9e198acbcc98e7fd3a87a5d55baa065a572"
-		bdSourceSHA256 = "f176a649d688893026de5a7f4b74af51cf7737ad69fd4fcde3295b123407928f"
-		bdBuild        = "9b65b9e198a"
+		bdSourceRef    = "7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde"
+		bdSourceSHA256 = "fcf0e7a23c889b24a6c4cc0edb5053a602d3a410dc1fb0c6efaa5574c3118682"
+		bdBuild        = "7ef2fd05eb0"
 		bdBranch       = "HEAD"
 	)
 
@@ -230,16 +230,26 @@ const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-re
 // the "name==version \" line uv writes. Names compare case-insensitively.
 func lockPinnedVersion(t *testing.T, lock, dist string) string {
 	t.Helper()
+	version, ok := lockPin(lock, dist)
+	if !ok {
+		t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
+	}
+	return version
+}
+
+// lockPin returns the version a hashed requirements lock pins for dist and
+// whether it pins dist at all, matching the "name==version \" line uv writes.
+// Names compare case-insensitively.
+func lockPin(lock, dist string) (string, bool) {
 	for _, line := range strings.Split(lock, "\n") {
 		name, rest, ok := strings.Cut(line, "==")
 		if !ok || !strings.EqualFold(name, dist) {
 			continue
 		}
 		version, _, _ := strings.Cut(rest, " ")
-		return version
+		return version, true
 	}
-	t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
-	return ""
+	return "", false
 }
 
 // releaseLine returns the first n numeric components of a dotted release.

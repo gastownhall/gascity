@@ -44,6 +44,32 @@ type Projection interface {
 	ClassView(beads.Store) beads.Store
 }
 
+// Unviewer is the optional half of a Projection that can see through one of
+// its own views: front is the store the view polices, and rebind puts a store
+// rebuilt from front behind the same side of the same projection.
+type Unviewer interface {
+	ViewFront(beads.Store) (front beads.Store, rebind func(beads.Store) beads.Store, ok bool)
+}
+
+// Unview returns the store under p's outermost view of s, and a function that
+// puts a rebuilt copy of that store behind the same side of p. Without a
+// projection, or when s is not one of its views, it returns s and the
+// identity. It is for a caller that rebuilds its store rather than reading it
+// (gc status's ctx-bound bd clone): unwrapping lets the rebuild find the real
+// backing, and the rewrap keeps the rebuilt store's reads policed.
+func Unview(p Projection, s beads.Store) (beads.Store, func(beads.Store) beads.Store) {
+	identity := func(store beads.Store) beads.Store { return store }
+	unviewer, ok := p.(Unviewer)
+	if !ok || s == nil {
+		return s, identity
+	}
+	front, rebind, isView := unviewer.ViewFront(s)
+	if !isView || rebind == nil {
+		return s, identity
+	}
+	return front, rebind
+}
+
 // RefusingClassStore is a store that answers every operation with a standing
 // refusal.
 type RefusingClassStore interface {

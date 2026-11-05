@@ -358,7 +358,7 @@ gc bd backup init <backup_url>
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
 
-- `--reinit-local` is how the pinned bd release (v1.3.2) re-creates the database of a scope
+- `--reinit-local` is how the pinned bd release (v1.3.4) re-creates the database of a scope
   that is already initialized; a plain `gc bd init` refuses. It acts on this scope's
   database only (`dolt_database` in `.beads/metadata.json`) and keeps the project id that
   file records, which `gc start` checks against `.beads/identity.toml`. Run it only after

@@ -125,6 +125,12 @@ type Server struct {
 	// beginResponseRefresh / endResponseRefresh in response_cache.go.
 	responseRefreshing map[string]bool
 
+	// statusBuilds holds each /status view's running and queued build by
+	// response-cache key, guarded by responseCacheMu: the builds a
+	// stale-while-revalidate serve starts and ?fresh=true reads wait on. See
+	// statusBuildSlot in handler_status.go.
+	statusBuilds map[string]*statusBuildSlot
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests
