@@ -335,6 +335,9 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	if graphWorkflow {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
 		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
+		if f.InputLifecycle != "" {
+			rootStep.Metadata[beadmeta.InputLifecycleMetadataKey] = f.InputLifecycle
+		}
 	} else if rootOnly {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
 	}

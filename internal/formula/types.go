@@ -90,6 +90,10 @@ type Formula struct {
 	// "graph.v2" enables graph-first workflow compilation when formula_v2 is enabled.
 	Contract string `json:"contract,omitempty" toml:"contract,omitempty"`
 
+	// InputLifecycle declares whether source completion invalidates this workflow.
+	// Missing or external retains input-terminal retirement; graph leaves it to the graph.
+	InputLifecycle string `json:"input_lifecycle,omitempty" toml:"input_lifecycle,omitempty"`
+
 	// Requires declares minimum host capabilities needed to compile this formula.
 	Requires *Requirements `json:"requires,omitempty" toml:"requires,omitempty"`
 
@@ -1251,6 +1255,12 @@ func validateNoSessionAdvice(rules []*AdviceRule, errs *[]string) {
 func (f *Formula) Validate() error {
 	var errs []string
 	graphV2 := UsesGraphCompiler(f)
+	if _, err := beadmeta.InputLifecycle(f.InputLifecycle); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if f.InputLifecycle != "" && !graphV2 {
+		errs = append(errs, "input_lifecycle requires formulas v2")
+	}
 
 	if f.Formula == "" {
 		errs = append(errs, "formula: name is required")
