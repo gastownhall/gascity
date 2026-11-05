@@ -117,7 +117,8 @@ py_test(
 )
 
 # .github/workflows/scripts/security_scan_gate.py: security-scan.yml's verdict
-# over the osv-scanner and govulncheck reports, against osv-scanner.toml.
+# over the osv-scanner and govulncheck reports, against
+# .github/security-scan-allowlist.toml.
 py_test(
     name = "security_scan_gate_test",
     size = "small",
@@ -302,7 +303,6 @@ filegroup(
         ":deps.env",
         ":go.mod",
         ":go.sum",
-        ":osv-scanner.toml",
         ":root_extras",
     ] + glob([
         ".github/**",

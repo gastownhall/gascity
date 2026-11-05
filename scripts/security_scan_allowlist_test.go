@@ -13,25 +13,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// osvAllowlistEntry is one decoded waiver: its id, its expiry as YYYY-MM-DD
-// ("" when missing) and its reason.
-type osvAllowlistEntry struct {
-	id, until, reason string
+// securityScanAllowlistPath holds the waivers security-scan.yml's gate
+// (.github/workflows/scripts/security_scan_gate.py) applies.
+const securityScanAllowlistPath = ".github/security-scan-allowlist.toml"
+
+// scanAllowlistEntry is one decoded waiver: its id, its expiry as YYYY-MM-DD
+// ("" when missing), its reason, and the source lock, package and version it
+// accepts the advisory in.
+type scanAllowlistEntry struct {
+	id, until, reason, source, pkg, version string
 }
 
-func decodeOSVScannerAllowlist(t *testing.T, body string) []osvAllowlistEntry {
+func decodeSecurityScanAllowlist(t *testing.T, body string) []scanAllowlistEntry {
 	t.Helper()
 	var raw struct {
 		IgnoredVulns []map[string]any `toml:"IgnoredVulns"`
 	}
 	if _, err := toml.Decode(body, &raw); err != nil {
-		t.Fatalf("parsing osv-scanner.toml: %v", err)
+		t.Fatalf("parsing %s: %v", securityScanAllowlistPath, err)
 	}
-	entries := make([]osvAllowlistEntry, 0, len(raw.IgnoredVulns))
+	entries := make([]scanAllowlistEntry, 0, len(raw.IgnoredVulns))
 	for _, vuln := range raw.IgnoredVulns {
-		entry := osvAllowlistEntry{}
+		entry := scanAllowlistEntry{}
 		entry.id, _ = vuln["id"].(string)
 		entry.reason, _ = vuln["reason"].(string)
+		entry.source, _ = vuln["source"].(string)
+		entry.pkg, _ = vuln["package"].(string)
+		entry.version, _ = vuln["version"].(string)
 		if until, ok := vuln["ignoreUntil"]; ok {
 			if stamp, ok := until.(interface{ Format(string) string }); ok {
 				entry.until = stamp.Format("2006-01-02")
@@ -42,100 +50,179 @@ func decodeOSVScannerAllowlist(t *testing.T, body string) []osvAllowlistEntry {
 	return entries
 }
 
-// allowlistMirrorErrors reports every osv-scanner.toml entry that is not a
-// time-boxed, explained mirror of a .trivyignore.yaml waiver with the same id
-// and the same expiry date, and every id waived twice.
-func allowlistMirrorErrors(entries []osvAllowlistEntry, trivy trivyIgnoreDoc) []string {
-	trivyExpiry := map[string]string{}
+// trivyPathsNameRelease reports whether one of a .trivyignore.yaml waiver's
+// paths is in the dist-info directory of dist at version, the way each
+// gc-mcp-mail waiver names the release it accepts.
+func trivyPathsNameRelease(paths []string, dist, version string) bool {
+	want := strings.ToLower("/" + dist + "-" + version + ".dist-info/")
+	for _, p := range paths {
+		if strings.Contains(strings.ToLower("/"+p), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowlistMirrorErrors reports every allowlist entry that is not a
+// time-boxed, explained mirror of a .trivyignore.yaml waiver for the same
+// release, and every id waived twice. An entry mirrors its waiver when the
+// ids and expiry dates match, the entry's source lock (from locks, keyed by
+// repo-relative path) pins its package at its version, and one of the
+// waiver's paths names that same release.
+func allowlistMirrorErrors(entries []scanAllowlistEntry, trivy trivyIgnoreDoc, locks map[string]string) []string {
+	type trivyWaiver struct {
+		expiry string
+		paths  []string
+	}
+	trivyWaivers := map[string]trivyWaiver{}
 	for _, waiver := range trivy.Vulnerabilities {
-		trivyExpiry[waiver.ID] = waiver.ExpiredAt
+		trivyWaivers[waiver.ID] = trivyWaiver{expiry: waiver.ExpiredAt, paths: waiver.Paths}
 	}
 	var errs []string
 	seen := map[string]bool{}
 	for _, entry := range entries {
-		switch {
-		case strings.TrimSpace(entry.id) == "":
-			errs = append(errs, "osv-scanner.toml: an [[IgnoredVulns]] entry has no id")
+		if strings.TrimSpace(entry.id) == "" {
+			errs = append(errs, securityScanAllowlistPath+": an [[IgnoredVulns]] entry has no id")
 			continue
-		case seen[entry.id]:
-			errs = append(errs, "osv-scanner.toml: "+entry.id+" is listed twice")
+		}
+		where := securityScanAllowlistPath + ": " + entry.id
+		if seen[entry.id] {
+			errs = append(errs, where+" is listed twice")
 		}
 		seen[entry.id] = true
 		if entry.until == "" {
-			errs = append(errs, "osv-scanner.toml: "+entry.id+" has no ignoreUntil date; every waiver expires")
+			errs = append(errs, where+" has no ignoreUntil date; every waiver expires")
 		}
 		if strings.TrimSpace(entry.reason) == "" {
-			errs = append(errs, "osv-scanner.toml: "+entry.id+" has no reason")
+			errs = append(errs, where+" has no reason")
 		}
-		expiry, ok := trivyExpiry[entry.id]
+		release := entry.pkg + " " + entry.version
+		named := entry.source != "" && entry.pkg != "" && entry.version != ""
+		if !named {
+			errs = append(errs, where+" names no source, package and version; a waiver accepts one release in one lock")
+		} else if lock, ok := locks[entry.source]; !ok {
+			errs = append(errs, where+" names source "+entry.source+", which is not a lock file in the repo")
+		} else if pinned, ok := lockPin(lock, entry.pkg); !ok {
+			errs = append(errs, where+" accepts "+release+", but "+entry.source+" does not pin "+entry.pkg)
+		} else if pinned != entry.version {
+			errs = append(errs, where+" accepts "+release+", but "+entry.source+" pins "+pinned)
+		}
+		waiver, ok := trivyWaivers[entry.id]
 		switch {
 		case !ok:
-			errs = append(errs, "osv-scanner.toml: "+entry.id+" mirrors no .trivyignore.yaml waiver; document the risk there first")
-		case entry.until != "" && expiry != entry.until:
-			errs = append(errs, "osv-scanner.toml: "+entry.id+" expires "+entry.until+" but its .trivyignore.yaml waiver expires "+expiry)
+			errs = append(errs, where+" mirrors no .trivyignore.yaml waiver; document the risk there first")
+			continue
+		case entry.until != "" && waiver.expiry != entry.until:
+			errs = append(errs, where+" expires "+entry.until+" but its .trivyignore.yaml waiver expires "+waiver.expiry)
+		}
+		if named && !trivyPathsNameRelease(waiver.paths, entry.pkg, entry.version) {
+			errs = append(errs, where+" accepts "+release+", but its .trivyignore.yaml waiver names no "+entry.pkg+"-"+entry.version+".dist-info path; both must accept the same release")
 		}
 	}
 	return errs
 }
 
-// TestOSVScannerAllowlistMirrorsTrivyWaivers keeps the security scan's
+// TestSecurityScanAllowlistMirrorsTrivyWaivers keeps the security scan's
 // allowlist a strict subset of the repo's documented waivers: a risk is
 // accepted once, in .trivyignore.yaml, with its rationale, and the weekly
-// dependency scan stops accepting it on the same day the image scan does.
-func TestOSVScannerAllowlistMirrorsTrivyWaivers(t *testing.T) {
+// dependency scan accepts it only for the release the lock pins and the image
+// scan waives, and stops accepting it on the same day the image scan does.
+func TestSecurityScanAllowlistMirrorsTrivyWaivers(t *testing.T) {
 	root := repoRoot(t)
 	var trivy trivyIgnoreDoc
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &trivy); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
 	}
-	entries := decodeOSVScannerAllowlist(t, readFile(t, root, "osv-scanner.toml"))
+	entries := decodeSecurityScanAllowlist(t, readFile(t, root, securityScanAllowlistPath))
 	if len(entries) == 0 {
-		t.Fatal("osv-scanner.toml has no [[IgnoredVulns]] entries; the gc-mcp-mail lock waivers belong there")
+		t.Fatalf("%s has no [[IgnoredVulns]] entries; the gc-mcp-mail lock waivers belong there", securityScanAllowlistPath)
 	}
-	for _, err := range allowlistMirrorErrors(entries, trivy) {
+	locks := map[string]string{}
+	for _, entry := range entries {
+		if entry.source == "" || !filepath.IsLocal(filepath.FromSlash(entry.source)) {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(entry.source))); err == nil && info.Mode().IsRegular() {
+			locks[entry.source] = readFile(t, root, entry.source)
+		}
+	}
+	for _, err := range allowlistMirrorErrors(entries, trivy, locks) {
 		t.Error(err)
 	}
 }
 
-func TestOSVScannerAllowlistMirrorRejectsDrift(t *testing.T) {
+func TestSecurityScanAllowlistMirrorRejectsDrift(t *testing.T) {
 	var trivy trivyIgnoreDoc
-	trivy.Vulnerabilities = append(trivy.Vulnerabilities,
-		struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			Purls     []string `yaml:"purls"`
-			ExpiredAt string   `yaml:"expired_at"`
-			Statement string   `yaml:"statement"`
-		}{ID: "CVE-2026-1", ExpiredAt: "2027-01-26"},
-	)
-	entries := decodeOSVScannerAllowlist(t, `
+	for id, dist := range map[string]string{"CVE-2026-1": "gitpython-3.1.62", "CVE-2026-2": "gitpython-3.1.62", "CVE-2026-3": "requests-2.0.0"} {
+		trivy.Vulnerabilities = append(trivy.Vulnerabilities,
+			struct {
+				ID        string   `yaml:"id"`
+				Paths     []string `yaml:"paths"`
+				Purls     []string `yaml:"purls"`
+				ExpiredAt string   `yaml:"expired_at"`
+				Statement string   `yaml:"statement"`
+			}{ID: id, Paths: []string{mcpMailSitePackages + dist + ".dist-info/METADATA"}, ExpiredAt: "2027-01-26"},
+		)
+	}
+	locks := map[string]string{"lock.txt": "filelock==3.29.0 \\\n    --hash=sha256:00\ngitpython==3.1.62 \\\n    --hash=sha256:00\n"}
+	entries := decodeSecurityScanAllowlist(t, `
 [[IgnoredVulns]]
 id = "CVE-2026-1"
 ignoreUntil = 2027-01-26
+source = "lock.txt"
+package = "gitpython"
+version = "3.1.62"
 reason = "mirrors the trivy waiver"
 
 [[IgnoredVulns]]
 id = "CVE-2026-1"
 ignoreUntil = 2027-02-26
+source = "lock.txt"
+package = "gitpython"
+version = "3.1.62"
 reason = "drifted expiry, listed twice"
+
+[[IgnoredVulns]]
+id = "CVE-2026-2"
+ignoreUntil = 2027-01-26
+source = "lock.txt"
+package = "gitpython"
+version = "3.1.63"
+reason = "a release neither the lock nor the trivy waiver names"
+
+[[IgnoredVulns]]
+id = "CVE-2026-3"
+ignoreUntil = 2027-01-26
+source = "lock.txt"
+package = "requests"
+version = "2.0.0"
+reason = "a package the lock does not pin"
 
 [[IgnoredVulns]]
 id = "GHSA-undocumented"
 ignoreUntil = 2027-01-26
-reason = "no trivy waiver"
+source = "other.txt"
+package = "filelock"
+version = "3.29.0"
+reason = "no trivy waiver, and a source that is not a lock"
 
 [[IgnoredVulns]]
 id = "CVE-2026-1-forever"
 reason = ""
 `)
-	got := allowlistMirrorErrors(entries, trivy)
+	got := allowlistMirrorErrors(entries, trivy, locks)
 	want := []string{
-		"osv-scanner.toml: CVE-2026-1 is listed twice",
-		"osv-scanner.toml: CVE-2026-1 expires 2027-02-26 but its .trivyignore.yaml waiver expires 2027-01-26",
-		"osv-scanner.toml: GHSA-undocumented mirrors no .trivyignore.yaml waiver; document the risk there first",
-		"osv-scanner.toml: CVE-2026-1-forever has no ignoreUntil date; every waiver expires",
-		"osv-scanner.toml: CVE-2026-1-forever has no reason",
-		"osv-scanner.toml: CVE-2026-1-forever mirrors no .trivyignore.yaml waiver; document the risk there first",
+		securityScanAllowlistPath + ": CVE-2026-1 is listed twice",
+		securityScanAllowlistPath + ": CVE-2026-1 expires 2027-02-26 but its .trivyignore.yaml waiver expires 2027-01-26",
+		securityScanAllowlistPath + ": CVE-2026-2 accepts gitpython 3.1.63, but lock.txt pins 3.1.62",
+		securityScanAllowlistPath + ": CVE-2026-2 accepts gitpython 3.1.63, but its .trivyignore.yaml waiver names no gitpython-3.1.63.dist-info path; both must accept the same release",
+		securityScanAllowlistPath + ": CVE-2026-3 accepts requests 2.0.0, but lock.txt does not pin requests",
+		securityScanAllowlistPath + ": GHSA-undocumented names source other.txt, which is not a lock file in the repo",
+		securityScanAllowlistPath + ": GHSA-undocumented mirrors no .trivyignore.yaml waiver; document the risk there first",
+		securityScanAllowlistPath + ": CVE-2026-1-forever has no ignoreUntil date; every waiver expires",
+		securityScanAllowlistPath + ": CVE-2026-1-forever has no reason",
+		securityScanAllowlistPath + ": CVE-2026-1-forever names no source, package and version; a waiver accepts one release in one lock",
+		securityScanAllowlistPath + ": CVE-2026-1-forever mirrors no .trivyignore.yaml waiver; document the risk there first",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("allowlistMirrorErrors =\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
