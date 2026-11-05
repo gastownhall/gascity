@@ -115,6 +115,7 @@ go_test(
         "structured_tool_test.go",
         "structured_wire_test.go",
         "subagent_guard_adapter_test.go",
+        "subagent_guard_discovery_test.go",
         "subagent_guard_test.go",
         "testenv_import_test.go",
         "transcriptmeta_reconcile_test.go",
