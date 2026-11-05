@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -296,8 +297,9 @@ func TestDanglingBlockingEdgesFixSparesBlockersInUnreadRigs(t *testing.T) {
 // maintainer-city shape (ga-26jnu, ga-0wmnm, ga-dsazz): a blocks edge to the
 // literal "discovered-from:<id>" whose <id> the row's own store holds. --fix
 // rewrites it as the real discovered-from edge in that store; nothing blocks
-// afterwards. A literal whose <id> only another store holds is left for the
-// operator, because rewriting it would write a cross-store edge.
+// afterwards. A literal whose <id> only the class binding holds (ga-vt61ld: a
+// split moved it there) cannot be rewritten without a cross-store edge, so the
+// literal is removed and the typed edge recorded on the row instead.
 func TestDanglingBlockingEdgesFixRewritesAMalformedDiscoveredFromLiteral(t *testing.T) {
 	cityPath := t.TempDir()
 	binding := sessionSplitRoutes(t, cityPath)
@@ -343,8 +345,438 @@ func TestDanglingBlockingEdgesFixRewritesAMalformedDiscoveredFromLiteral(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(crossDeps) != 1 || crossDeps[0].DependsOnID != "discovered-from:"+elsewhere.ID {
-		t.Fatalf("deps of %s after --fix = %+v; want the literal left for the operator (its id lives in another store)", cross.ID, crossDeps)
+	if len(crossDeps) != 0 {
+		t.Fatalf("deps of %s after --fix = %+v; want the literal removed and no edge written (its id lives in the binding)", cross.ID, crossDeps)
+	}
+	got, err := work.Get(cross.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(`[{"dir":"out","type":"discovered-from","other":%q,"other_status_at_import":"open","action":"dropped"}]`, elsewhere.ID)
+	if raw := got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]; raw != want {
+		t.Fatalf("%s %s = %q, want %q", cross.ID, beadmeta.MigratedCrossEdgesMetadataKey, raw, want)
+	}
+	if edges, _ := check.collect(); len(edges) != 0 {
+		t.Fatalf("dangling edges after --fix = %+v; want none, so gc ready serves the rows again", edges)
+	}
+}
+
+// TestDanglingBlockingEdgesLeavesALiteralARigHolds: a "<type>:<id>" literal
+// whose <id> a rig's store holds, not the class binding, is still the
+// operator's: the rig is not where a split moved it, so neither the edge nor
+// a record of dropping it is gc's to write.
+func TestDanglingBlockingEdgesLeavesALiteralARigHolds(t *testing.T) {
+	cityPath := t.TempDir()
+	sessionSplitRoutes(t, cityPath)
+	work := beads.NewMemStore()
+	rig := beads.NewMemStore()
+	rig.HonorExplicitIDs = true
+	origin, err := rig.Create(beads.Bead{ID: "rg-7", Title: "rig-side origin", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	literal := "discovered-from:" + origin.ID
+	if err := work.DepAdd(row.ID, literal, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rg", Path: "rigs/rg", Prefix: "rg"}}}
+	check := newDanglingBlockingEdgesCheck(cfg, cityPath, func(p string) (beads.Store, error) {
+		if p == "rigs/rg" {
+			return rig, nil
+		}
+		return work, nil
+	})
+	edges, _ := check.collect()
+	if len(edges) != 1 || edges[0].action != danglingOperator {
+		t.Fatalf("edges = %+v; want the literal left for the operator", edges)
+	}
+	if err := check.Fix(nil); err != nil {
+		t.Fatal(err)
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != literal {
+		t.Fatalf("deps after --fix = %+v; want the literal left for the operator", deps)
+	}
+	if got, _ := work.Get(row.ID); got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != "" {
+		t.Fatalf("%s gained a record of an edge gc did not drop: %q", row.ID, got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
+	}
+}
+
+// crossEdgeRecordsOf decodes row's gc.migrated_cross_edges record in store.
+func crossEdgeRecordsOf(t *testing.T, store beads.Store, row string) []rigCrossEdgeRecord {
+	t.Helper()
+	got, err := store.Get(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []rigCrossEdgeRecord
+	if err := json.Unmarshal([]byte(got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]), &records); err != nil {
+		t.Fatalf("%s %s = %q: %v", row, beadmeta.MigratedCrossEdgesMetadataKey, got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], err)
+	}
+	return records
+}
+
+// TestDanglingBlockingEdgesFixRecordsTheDroppedLiteralsPayload: a literal
+// whose bead only the class binding holds is removed and no edge is written in
+// its place, so the record on the row is all that is left of it. On a store
+// whose edges carry a payload (SQLite), the record carries the literal edge's
+// payload.
+func TestDanglingBlockingEdgesFixRecordsTheDroppedLiteralsPayload(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := sessionSplitRoutes(t, cityPath)
+	work, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = work.(interface{ CloseStore() error }).CloseStore() })
+	origin, err := binding.Create(beads.Bead{Title: "graph-side origin", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	const payload = `{"note":"found while reviewing"}`
+	if err := work.(beads.DepMetadataWriter).DepAddWithMetadata(row.ID, "discovered-from:"+origin.ID, "blocks", payload); err != nil {
+		t.Fatal(err)
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	if edges, skipped := check.collect(); len(skipped) != 0 || len(edges) != 1 || edges[0].action != danglingCrossStore {
+		t.Fatalf("edges = %+v, skipped = %v; want the literal onto the binding's bead", edges, skipped)
+	}
+	if err := check.Fix(nil); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 0 {
+		t.Fatalf("deps of %s after --fix = %+v; want the literal removed and no edge written", row.ID, deps)
+	}
+	want := []rigCrossEdgeRecord{{Dir: "out", Type: "discovered-from", Other: origin.ID, OtherStatus: "open", Payload: payload, Action: rigEdgeDropped}}
+	if got := crossEdgeRecordsOf(t, work, row.ID); !slices.Equal(got, want) {
+		t.Fatalf("%s records = %+v, want %+v", row.ID, got, want)
+	}
+}
+
+// payloadReadFails is a store whose edge-payload read fails.
+type payloadReadFails struct{ beads.Store }
+
+func (payloadReadFails) DepMetadata(string, string) (string, bool, error) {
+	return "", false, errors.New("injected: payload read failed")
+}
+
+// noPayloadRead is a store with no edge-payload read, as bd's CLI store has
+// none: embedding the Store interface hides the inner store's.
+type noPayloadRead struct{ beads.Store }
+
+// TestDanglingBlockingEdgesFixKeepsALiteralWhosePayloadCannotBeRead: a payload
+// the row's store cannot report may be there, and the record would be its only
+// trace once the literal goes. So when the read fails, or the store has no
+// payload read at all, the literal is kept, nothing is recorded, and the
+// failure is reported.
+func TestDanglingBlockingEdgesFixKeepsALiteralWhosePayloadCannotBeRead(t *testing.T) {
+	for name, wrap := range map[string]func(beads.Store) beads.Store{
+		"the payload read fails":        func(s beads.Store) beads.Store { return payloadReadFails{s} },
+		"the store has no payload read": func(s beads.Store) beads.Store { return noPayloadRead{s} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			binding := sessionSplitRoutes(t, cityPath)
+			inner := beads.NewMemStore()
+			origin, err := binding.Create(beads.Bead{Title: "graph-side origin", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, _ := inner.Create(beads.Bead{Title: "row", Type: "task"})
+			literal := "discovered-from:" + origin.ID
+			if err := inner.DepAdd(row.ID, literal, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return wrap(inner), nil })
+			if edges, _ := check.collect(); len(edges) != 1 || edges[0].action != danglingCrossStore {
+				t.Fatalf("edges = %+v; want the literal onto the binding's bead", edges)
+			}
+			err = check.Fix(nil)
+			if err == nil || !strings.Contains(err.Error(), "is kept") {
+				t.Fatalf("Fix = %v; want the unreadable payload reported and the literal kept", err)
+			}
+			if remedy := "gc bd dep remove " + row.ID + " " + literal; !strings.Contains(err.Error(), remedy) {
+				t.Fatalf("Fix = %v; want the way out named (%s)", err, remedy)
+			}
+			if deps, _ := inner.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != literal {
+				t.Fatalf("deps after --fix = %+v; want the literal kept", deps)
+			}
+			if got, _ := inner.Get(row.ID); got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != "" {
+				t.Fatalf("%s gained a record although its literal was kept: %q", row.ID, got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
+			}
+		})
+	}
+}
+
+// TestDanglingBlockingEdgesFixKeepsALiteralWhoseRowRecordDoesNotParse: the
+// record is written before the literal goes. A row whose existing record does
+// not parse is refused rather than overwritten, so the write fails, and the
+// literal stays with the record it could not be added to.
+func TestDanglingBlockingEdgesFixKeepsALiteralWhoseRowRecordDoesNotParse(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := sessionSplitRoutes(t, cityPath)
+	work := beads.NewMemStore()
+	origin, err := binding.Create(beads.Bead{Title: "graph-side origin", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	const unparseable = "{not json"
+	if err := work.SetMetadata(row.ID, beadmeta.MigratedCrossEdgesMetadataKey, unparseable); err != nil {
+		t.Fatal(err)
+	}
+	literal := "discovered-from:" + origin.ID
+	if err := work.DepAdd(row.ID, literal, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	if err := check.Fix(nil); err == nil {
+		t.Fatal("Fix reported no error although the row's record does not parse")
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != literal {
+		t.Fatalf("deps after a failed record write = %+v; want the literal kept", deps)
+	}
+	if got, _ := work.Get(row.ID); got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != unparseable {
+		t.Fatalf("%s record = %q; want the unparseable record left as it was", row.ID, got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
+	}
+}
+
+// TestDanglingBlockingEdgesFixKeepsAPayloadTheRowRecordLacks: when the row
+// already records the typed edge a literal meant, the merge keeps that entry,
+// so the literal's payload would go with the literal. On a store whose edges
+// carry a payload (SQLite), --fix keeps such a literal and names the way out,
+// unless the entry carries the same payload (a fix run again after its record
+// was written but its removal failed) or the literal carries none. The record
+// is left as it was either way.
+func TestDanglingBlockingEdgesFixKeepsAPayloadTheRowRecordLacks(t *testing.T) {
+	const payload = `{"note":"found while reviewing"}`
+	for _, tc := range []struct {
+		name     string
+		literal  string // the literal edge's payload; "" adds it with none
+		recorded string // the payload of the row's entry for the typed edge
+		kept     bool
+	}{
+		{name: "the entry has no payload", literal: payload, kept: true},
+		{name: "the entry has another payload", literal: payload, recorded: `{"note":"an earlier one"}`, kept: true},
+		{name: "the entry has the same payload", literal: payload, recorded: payload},
+		{name: "the literal has no payload", recorded: payload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			binding := sessionSplitRoutes(t, cityPath)
+			work, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = work.(interface{ CloseStore() error }).CloseStore() })
+			origin, err := binding.Create(beads.Bead{Title: "graph-side origin", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+			prior, err := json.Marshal([]rigCrossEdgeRecord{{Dir: "out", Type: "discovered-from", Other: origin.ID, OtherStatus: "open", Payload: tc.recorded, Action: rigEdgeDropped}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := work.SetMetadata(row.ID, beadmeta.MigratedCrossEdgesMetadataKey, string(prior)); err != nil {
+				t.Fatal(err)
+			}
+			literal := "discovered-from:" + origin.ID
+			if tc.literal == "" {
+				err = work.DepAdd(row.ID, literal, "blocks")
+			} else {
+				err = work.(beads.DepMetadataWriter).DepAddWithMetadata(row.ID, literal, "blocks", tc.literal)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+			err = check.Fix(nil)
+			deps, _ := work.DepList(row.ID, "down")
+			if tc.kept {
+				if remedy := "gc bd dep remove " + row.ID + " " + literal; err == nil || !strings.Contains(err.Error(), "is kept") || !strings.Contains(err.Error(), remedy) {
+					t.Fatalf("Fix = %v; want the payload the record lacks reported, the literal kept and the way out named (%s)", err, remedy)
+				}
+				if len(deps) != 1 || deps[0].DependsOnID != literal {
+					t.Fatalf("deps after --fix = %+v; want the literal kept with the payload the record lacks", deps)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Fix: %v", err)
+				}
+				if len(deps) != 0 {
+					t.Fatalf("deps after --fix = %+v; want the literal removed, the record already keeping what it carried", deps)
+				}
+			}
+			if got, _ := work.Get(row.ID); got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != string(prior) {
+				t.Fatalf("%s record = %q; want it left as it was, %s", row.ID, got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey], prior)
+			}
+		})
+	}
+}
+
+// TestDanglingBlockingEdgesFixRecordsTwoDroppedLiteralsOnRealBd runs the
+// binding-only case on a real bd/Dolt work store, with two literals on one
+// row: both are removed, and the row's record keeps both, the second write
+// merged onto the first.
+func TestDanglingBlockingEdgesFixRecordsTwoDroppedLiteralsOnRealBd(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := sessionSplitRoutes(t, cityPath)
+	work := splittest.NewNativeWorkStore(t, "ga")
+	origin, err := binding.Create(beads.Bead{Title: "graph-side origin", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := binding.Create(beads.Bead{Title: "graph-side relative", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := work.Create(beads.Bead{Title: "row", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, literal := range []string{"discovered-from:" + origin.ID, "related:" + relative.ID} {
+		if err := work.DepAdd(row.ID, literal, "blocks"); err != nil {
+			t.Fatalf("seed %s: %v", literal, err)
+		}
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	if err := check.Fix(nil); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 0 {
+		t.Fatalf("deps of %s after --fix = %+v; want both literals removed and no edge written", row.ID, deps)
+	}
+	got := crossEdgeRecordsOf(t, work, row.ID)
+	slices.SortFunc(got, func(a, b rigCrossEdgeRecord) int { return strings.Compare(a.Type, b.Type) })
+	want := []rigCrossEdgeRecord{
+		{Dir: "out", Type: "discovered-from", Other: origin.ID, OtherStatus: "open", Action: rigEdgeDropped},
+		{Dir: "out", Type: "related", Other: relative.ID, OtherStatus: "open", Action: rigEdgeDropped},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s records = %+v, want %+v", row.ID, got, want)
+	}
+	if res := check.Run(nil); res.Status != doctor.StatusOK {
+		t.Fatalf("Run after --fix = %+v, want OK", res)
+	}
+}
+
+// relocatedReads is a work store as a proxied store's native lane serves it on
+// a split city: a Get of an id under the class binding's reserved prefix is
+// refused with beads.ErrBdSQLClassRelocated (ProxiedStore.Get's
+// relocated-class guard), not answered with ErrNotFound. beads.GetMany reads
+// that refusal as absent.
+type relocatedReads struct {
+	*beads.MemStore
+	prefix string
+}
+
+func (s relocatedReads) Get(id string) (beads.Bead, error) {
+	if strings.HasPrefix(id, s.prefix+"-") {
+		return beads.Bead{}, fmt.Errorf("%w: get %s", beads.ErrBdSQLClassRelocated, id)
+	}
+	return s.MemStore.Get(id)
+}
+
+// TestDanglingBlockingEdgesFixReadsARelocatedRefusalAsAbsent: on a work store
+// that refuses a Get of an id under the binding's reserved prefix, every
+// re-read before a fix takes the refusal as absent, as the scan's
+// beads.GetMany does, so each edge the scan reports is fixed rather than
+// failing on every run: a literal onto a bead the binding minted is removed
+// and recorded, and an edge, or a literal, onto such an id no store holds is
+// removed.
+func TestDanglingBlockingEdgesFixReadsARelocatedRefusalAsAbsent(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := sessionSplitRoutes(t, cityPath)
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("config.ReservedClassPrefix(graph) = ok:false")
+	}
+	work := relocatedReads{MemStore: beads.NewMemStore(), prefix: prefix}
+	origin, err := binding.Create(beads.Bead{Title: "minted by the binding", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(origin.ID, prefix+"-") {
+		t.Fatalf("the binding minted %s, not an id under %s-", origin.ID, prefix)
+	}
+	want := map[string]danglingAction{
+		"discovered-from:" + origin.ID:       danglingCrossStore,
+		prefix + "-404":                      danglingRemove,
+		"discovered-from:" + prefix + "-405": danglingRemove,
+	}
+	rowOf := map[string]string{}
+	for target := range want {
+		row, err := work.Create(beads.Bead{Title: "row", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := work.DepAdd(row.ID, target, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		rowOf[target] = row.ID
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	edges, skipped := check.collect()
+	if len(skipped) != 0 || len(edges) != len(want) {
+		t.Fatalf("edges = %+v, skipped = %v; want the %d edges onto the binding's namespace", edges, skipped, len(want))
+	}
+	for _, e := range edges {
+		if e.action != want[e.target] {
+			t.Fatalf("edge %s -> %s: action %d, want %d", e.rowID, e.target, e.action, want[e.target])
+		}
+	}
+	if err := check.Fix(nil); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for target, row := range rowOf {
+		if deps, _ := work.DepList(row, "down"); len(deps) != 0 {
+			t.Errorf("deps of %s after --fix = %+v; want the edge to %s removed", row, deps, target)
+		}
+	}
+	recorded := []rigCrossEdgeRecord{{Dir: "out", Type: "discovered-from", Other: origin.ID, OtherStatus: "open", Action: rigEdgeDropped}}
+	if got := crossEdgeRecordsOf(t, work, rowOf["discovered-from:"+origin.ID]); !slices.Equal(got, recorded) {
+		t.Fatalf("records = %+v, want %+v", got, recorded)
+	}
+	if edges, skipped := check.collect(); len(edges) != 0 || len(skipped) != 0 {
+		t.Fatalf("after --fix: edges = %+v, skipped = %v; want none", edges, skipped)
+	}
+}
+
+// TestDanglingBlockingEdgesFixRewritesABindingLiteralWhoseBeadReachedTheRowsStore:
+// a literal whose bead only the class binding held at the scan is rewritten
+// as the typed edge, not removed and recorded, when the row's own store holds
+// the bead by the time of the fix.
+func TestDanglingBlockingEdgesFixRewritesABindingLiteralWhoseBeadReachedTheRowsStore(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := sessionSplitRoutes(t, cityPath)
+	work := beads.NewMemStore()
+	work.HonorExplicitIDs = true
+	origin, err := binding.Create(beads.Bead{Title: "graph-side origin", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _ := work.Create(beads.Bead{Title: "row", Type: "task"})
+	if err := work.DepAdd(row.ID, "discovered-from:"+origin.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	check := newDanglingBlockingEdgesCheck(nil, cityPath, func(string) (beads.Store, error) { return work, nil })
+	edges, _ := check.collect()
+	if len(edges) != 1 || edges[0].action != danglingCrossStore {
+		t.Fatalf("edges = %+v; want the literal onto the binding's bead", edges)
+	}
+	if _, err := work.Create(beads.Bead{ID: origin.ID, Title: "now in the row's store", Type: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixDanglingEdge(edges[0], check.stillAbsent); err != nil {
+		t.Fatal(err)
+	}
+	if deps, _ := work.DepList(row.ID, "down"); len(deps) != 1 || deps[0].DependsOnID != origin.ID || deps[0].Type != "discovered-from" {
+		t.Fatalf("deps = %+v; want the literal rewritten as a discovered-from edge to %s", deps, origin.ID)
+	}
+	if got, _ := work.Get(row.ID); got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != "" {
+		t.Fatalf("%s recorded an edge it kept: %q", row.ID, got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
 	}
 }
 
@@ -1411,5 +1843,93 @@ func TestDanglingBlockingEdgesFixReportsARemovalBdRefuses(t *testing.T) {
 	}
 	if got := bd.stored(row.ID); !slices.Equal(got, []string{"gc-404:blocks"}) {
 		t.Fatalf("edges bd stores for %s = %v, want the edge kept", row.ID, got)
+	}
+}
+
+// TestPreflightNamesWorkRowsBlockedOnAMalformedLiteral is ga-vt61ld's
+// preflight leg. bd reads a malformed "<type>:<id>" blocks literal as no
+// blocker, so the row is ready on a single-store city; no store resolves the
+// literal, so a split city's gc ready holds the row until doctor --fix repairs
+// it, whether or not the copy moves <id>. The operator sees every such open row
+// of the work store before the window, each of its literals with where the
+// <id> ends up, which decides the repair; the preflight does not block on them.
+// A row the copy moves is not listed: the copy drops its literal.
+func TestPreflightNamesWorkRowsBlockedOnAMalformedLiteral(t *testing.T) {
+	request, _, _ := preflightReadyCity(t, 0)
+	source, err := openInfraMigrationSource(request.CityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := mustCreateInfraBead(t, source, beads.Bead{Title: "graph step", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	work := mustCreateInfraBead(t, source, beads.Bead{Title: "work origin", Type: "task"})
+	handoff := mustCreateInfraBead(t, source, beads.Bead{Title: "handoff", Type: "task"})
+	local := mustCreateInfraBead(t, source, beads.Bead{Title: "literal onto work", Type: "task"})
+	orphan := mustCreateInfraBead(t, source, beads.Bead{Title: "literal onto nothing", Type: "task"})
+	done := mustCreateInfraBead(t, source, beads.Bead{Title: "closed row", Type: "task"})
+	for _, edge := range []beads.Dep{
+		{IssueID: handoff.ID, DependsOnID: "discovered-from:" + step.ID, Type: "blocks"},
+		{IssueID: local.ID, DependsOnID: "discovered-from:" + work.ID, Type: "blocks"},
+		{IssueID: local.ID, DependsOnID: "related:gc-405", Type: "blocks"},
+		{IssueID: orphan.ID, DependsOnID: "related:gc-404", Type: "blocks"},
+		{IssueID: done.ID, DependsOnID: "discovered-from:" + step.ID, Type: "blocks"},
+		{IssueID: step.ID, DependsOnID: "discovered-from:" + work.ID, Type: "blocks"},
+	} {
+		if err := source.DepAdd(edge.IssueID, edge.DependsOnID, edge.Type); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := source.Close(done.ID); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
+		t.Fatalf("preflight blocked on a malformed literal doctor can fix: exit %d stdout=%q", code, stdout.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "3 row(s) of the city's work store block on a malformed <type>:<id> literal (4 edge(s), below)") {
+		t.Fatalf("preflight does not count every open row a split city holds behind a malformed literal, once each: %s", out)
+	}
+	for _, want := range []string{
+		handoff.ID + " -[blocks]-> discovered-from:" + step.ID + " (" + step.ID + " moves to the binding)",
+		local.ID + " -[blocks]-> discovered-from:" + work.ID + " (" + work.ID + " stays in the work store)",
+		local.ID + " -[blocks]-> related:gc-405 (gc-405 is not in the work store)",
+		orphan.ID + " -[blocks]-> related:gc-404 (gc-404 is not in the work store)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preflight does not name %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, done.ID+" -[blocks]->") {
+		t.Errorf("preflight names %s, a closed row nothing holds: %s", done.ID, out)
+	}
+	if strings.Contains(out, step.ID+" -[blocks]->") {
+		t.Errorf("preflight names %s, a row the copy moves without its literal: %s", step.ID, out)
+	}
+}
+
+// TestMalformedLiteralRowsCountsRowsAndSkipsMovedRows: every blocking literal
+// of a row that stays is listed, the count is of rows (two literals on one row
+// are one row the split holds), and neither a moved row's literal nor a
+// literal that is not a blocking edge is listed.
+func TestMalformedLiteralRowsCountsRowsAndSkipsMovedRows(t *testing.T) {
+	deps := map[string][]beads.Dep{
+		"gc-1": {
+			{IssueID: "gc-1", DependsOnID: "discovered-from:gc-9", Type: "blocks"},
+			{IssueID: "gc-1", DependsOnID: "related:gc-404", Type: "blocks"},
+		},
+		"gc-2": {{IssueID: "gc-2", DependsOnID: "discovered-from:gc-8", Type: "blocks"}},
+		"gc-3": {{IssueID: "gc-3", DependsOnID: "discovered-from:gc-9", Type: "related"}},
+		"gc-8": {{IssueID: "gc-8", DependsOnID: "discovered-from:gc-9", Type: "blocks"}},
+	}
+	moved := map[string]bool{"gc-8": true}
+	held := map[string]bool{"gc-1": true, "gc-2": true, "gc-3": true, "gc-8": true, "gc-9": true}
+	edges, rows := malformedLiteralRows(deps, moved, held)
+	want := []string{
+		"gc-1 -[blocks]-> discovered-from:gc-9 (gc-9 stays in the work store)",
+		"gc-1 -[blocks]-> related:gc-404 (gc-404 is not in the work store)",
+		"gc-2 -[blocks]-> discovered-from:gc-8 (gc-8 moves to the binding)",
+	}
+	if !slices.Equal(edges, want) || rows != 2 {
+		t.Fatalf("malformedLiteralRows = %q, %d rows; want %q, 2 rows", edges, rows, want)
 	}
 }

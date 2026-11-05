@@ -81,7 +81,7 @@ func d9Rig(t *testing.T, rows []beads.Bead, unreadable bool) {
 		}
 		return store, nil
 	}
-	infraCityBoundaryProbe = func(cityPath string, ids []string, fromBackup bool) (map[string][]beads.Bead, []string) {
+	infraCityBoundaryProbe = func(cityPath string, _ *config.City, ids []string, fromBackup bool) (map[string][]beads.Bead, []string) {
 		cfg := &config.City{Rigs: []config.Rig{{Name: "ga", Path: "rigs/ga"}}}
 		return probeElsewhere(rigImportEnv{CityPath: cityPath, Cfg: cfg}, "", resolveStoreScopeRoot(cityPath, cityPath), fromBackup, ids)
 	}

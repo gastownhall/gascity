@@ -1405,7 +1405,7 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	}
 	// The edges that cross the boundary (D9), decided before the destination
 	// is touched: a refused shape writes nothing.
-	if err := planInfraCityBoundary(cityPath, &plan, all, from == infraMigrationFromBackup); err != nil {
+	if err := planInfraCityBoundary(cityPath, nil, &plan, all, from == infraMigrationFromBackup); err != nil {
 		return fail(err)
 	}
 	var annotations []string
@@ -2306,11 +2306,14 @@ func (e *infraBoundaryRefusal) Error() string {
 // infraCityBoundaryProbe reads, from the stores other than the work store
 // and the binding, the blockers an open moved row waits on that the source
 // does not hold (probeElsewhere): every bound rig whose store is not the
-// city's, and the city work store too when the copy reads the backup.
+// city's, and the city work store too when the copy reads the backup. cfg
+// names the rigs; nil reads the open window's, else the city's on disk.
 // Overridden by tests.
-var infraCityBoundaryProbe = func(cityPath string, ids []string, fromBackup bool) (map[string][]beads.Bead, []string) {
+var infraCityBoundaryProbe = func(cityPath string, cfg *config.City, ids []string, fromBackup bool) (map[string][]beads.Bead, []string) {
 	var unread []string
-	cfg, _ := migrationWindowOpen(cityPath)
+	if cfg == nil {
+		cfg, _ = migrationWindowOpen(cityPath)
+	}
 	if cfg == nil {
 		loaded, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 		if err != nil {
@@ -2328,7 +2331,7 @@ var infraCityBoundaryProbe = func(cityPath string, ids []string, fromBackup bool
 // infrastructure row moves, and all is every row the source holds by id (the
 // work store's rows; only the infrastructure rows when the source is the
 // backup). A refused shape is returned as *infraBoundaryRefusal.
-func planInfraCityBoundary(cityPath string, plan *infraCopyPlan, all map[string]beads.Bead, fromBackup bool) error {
+func planInfraCityBoundary(cityPath string, cfg *config.City, plan *infraCopyPlan, all map[string]beads.Bead, fromBackup bool) error {
 	snap := rigSnapshot{byID: all, down: make(map[string][]beads.Dep, len(plan.down)+len(plan.up))}
 	for id, deps := range plan.down {
 		snap.down[id] = deps
@@ -2351,7 +2354,7 @@ func planInfraCityBoundary(cityPath string, plan *infraCopyPlan, all map[string]
 		SourceNoun: "the work store",
 	}
 	if ids := infraCityElsewhereCandidates(*plan, all); len(ids) > 0 {
-		in.Elsewhere, in.ElsewhereUnread = infraCityBoundaryProbe(cityPath, ids, fromBackup)
+		in.Elsewhere, in.ElsewhereUnread = infraCityBoundaryProbe(cityPath, cfg, ids, fromBackup)
 	}
 	plan.boundary = crossBoundaryPlan(in)
 	if len(plan.boundary.Refusals) > 0 {

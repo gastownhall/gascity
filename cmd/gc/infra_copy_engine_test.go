@@ -286,7 +286,7 @@ func plannedInfraCopy(t *testing.T, source beads.Store) infraCopyPlan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := planInfraCityBoundary(t.TempDir(), &plan, all, false); err != nil {
+	if err := planInfraCityBoundary(t.TempDir(), nil, &plan, all, false); err != nil {
 		t.Fatal(err)
 	}
 	return plan

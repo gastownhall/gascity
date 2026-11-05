@@ -383,11 +383,15 @@ const (
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
 	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
-	// MigratedCrossEdgesMetadataKey records, on a bead the rig importer moved
-	// into the city binding, the cross-boundary edges it did not copy: a JSON
-	// list of {dir, type, other, other_status_at_import, payload, action}. No
-	// cross-store edge is ever written, so this keeps the history readable;
-	// the rig's retained-source backup is authoritative for a reverse.
+	// MigratedCrossEdgesMetadataKey records, on a bead, the cross-boundary
+	// edges a writer dropped rather than write across stores: a JSON list of
+	// {dir, type, other, other_status_at_import, payload, action}. No
+	// cross-store edge is ever written, so this keeps the history readable.
+	// The rig importer records it on a bead it moved into the city binding,
+	// where the rig's retained-source backup is authoritative for a reverse.
+	// `gc doctor --fix` records it on a work row whose malformed "<type>:<id>"
+	// blocks literal it removed because only the binding holds <id>; there
+	// the entry, payload included, is the only trace of that edge.
 	MigratedCrossEdgesMetadataKey = "gc.migrated_cross_edges"
 	// TriggerBeadStoreRefMetadataKey records the store ref of the bead named by
 	// TriggerBeadIDMetadataKey. Like that key it is controller demand

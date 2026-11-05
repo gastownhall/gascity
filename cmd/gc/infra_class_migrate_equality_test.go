@@ -1125,7 +1125,7 @@ func importInfraRows(t *testing.T, destination, source beads.Store, rows []beads
 	if err != nil {
 		return err
 	}
-	if err := planInfraCityBoundary(t.TempDir(), &plan, all, false); err != nil {
+	if err := planInfraCityBoundary(t.TempDir(), nil, &plan, all, false); err != nil {
 		return err
 	}
 	_, err = importInfraSnapshot(destination, plan, infraPrepared{}, infraEngineClock{})
