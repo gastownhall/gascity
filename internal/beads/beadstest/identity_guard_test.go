@@ -14,18 +14,21 @@ import (
 const identityFixture = `package fixture
 
 import (
+	"slices"
+
 	b "github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type holder struct {
 	store  b.Store
 	graph  b.GraphStore
 	legs   map[string]b.Store
-	opener func() b.Store
 	name   string
 }
 
 type state interface {
+	Mail() string // a same-named method of this package that is no store
 	CityBeadStore() b.Store
 	GraphBeadStore() b.GraphStore
 	BeadStores() map[string]b.Store
@@ -42,11 +45,33 @@ func flagged(st state, h holder, w b.WorkStore, m b.MoleculeTarget, n b.Molecule
 	for _, leg := range st.BeadStores() {
 		_ = leg == h.graph // 4: range value vs handle field
 	}
-	_ = h.legs["x"] == h.opener() // 5: map index vs func field
-	_ = m != n                    // 6: molecule targets
+	_ = h.legs["x"] == h.store // 5: map index vs field
+	_ = m != n                 // 6: molecule targets
 	other, ok := h.legs["y"]
 	_ = ok && other == w.Store // 7: comma-ok index vs handle's store
 	_ = map[b.Store]bool{}     // map-key
+}
+
+// crossPackage holds 2 identity comparisons of handles another package hands
+// out (storeref.Stores is not declared here): a class accessor's .Store, and
+// two class accessors' handles.
+func crossPackage(rs storeref.Stores) {
+	_ = rs.Graph().Store == rs.Work().Store
+	_ = rs.Graph() != rs.Sessions()
+}
+
+// switched holds 1 switch on a store.
+func switched(h holder, w b.WorkStore) {
+	switch h.store {
+	case w.Store:
+	}
+}
+
+// slicesHelpers holds 3 slices calls that compare stores with ==.
+func slicesHelpers(h holder, list, other []b.Store) {
+	_ = slices.Contains(list, h.store)
+	_ = slices.Index(list, h.store)
+	_ = slices.Equal(list, other)
 }
 
 // clean compares nothing by store identity.
@@ -56,15 +81,23 @@ func clean(st state, h holder, w b.WorkStore) {
 	_ = h.name == "x"
 	_ = b.SameStore(h.store, st.CityBeadStore())
 	_ = map[string]b.Store{}
+	_ = slices.Contains([]string{h.name}, "x")
+	_ = slices.ContainsFunc([]b.Store{h.store}, func(s b.Store) bool { return b.SameStore(s, w) })
+	_ = st.Mail() == "x"
+	switch h.name {
+	case "x":
+	}
 }
 `
 
 // TestScanStoreIdentity pins what the store-identity guard counts, over a
 // fixture holding each shape: == and != whose operand is a store, a class
 // handle or a molecule target, typed from parameters, fields, range values,
-// map indexes, accessors, package functions and function-valued fields; and
-// a map keyed by a store. Nil and zero-handle checks, SameStore and maps
-// whose values are stores are not identity.
+// map indexes, the package's functions and methods, and another package's
+// class accessors and .Store; a switch on a store; slices.Contains, Index and
+// Equal over stores; and a map keyed by a store. Nil and zero-handle checks,
+// SameStore, ContainsFunc, non-store slices and switches, and maps whose values
+// are stores are not identity.
 func TestScanStoreIdentity(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(identityFixture), 0o600); err != nil {
@@ -79,8 +112,11 @@ func TestScanStoreIdentity(t *testing.T) {
 		counts[k] = len(lines)
 	}
 	want := map[string]int{
-		"fixture.go flagged eq":      7,
-		"fixture.go flagged map-key": 1,
+		"fixture.go flagged eq":           7,
+		"fixture.go flagged map-key":      1,
+		"fixture.go crossPackage eq":      2,
+		"fixture.go switched switch":      1,
+		"fixture.go slicesHelpers slices": 3,
 	}
 	if !reflect.DeepEqual(counts, want) {
 		t.Errorf("ScanStoreIdentity = %v (lines %v), want %v", counts, got, want)

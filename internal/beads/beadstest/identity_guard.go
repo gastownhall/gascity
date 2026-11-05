@@ -1,7 +1,6 @@
 package beadstest
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -15,25 +14,26 @@ import (
 // The store-identity guard (typed-stores T6 plan, OD-9): a class handle boxed
 // into a beads.Store is never == the raw store it wraps, and the compiler
 // cannot see the comparison go wrong. beads.SameStore and
-// beads.PhysicalStoreKey see through the class layers; == and a map keyed by
-// the store value do not. CheckStoreIdentity fails a package that compares a
+// beads.PhysicalStoreKey see through the class layers; ==, a switch, the
+// slices helpers and a map keyed by the store value do not. CheckStoreIdentity
+// fails a package that, at a site its reviewed table does not list, compares a
 // store, a class handle or a beads.MoleculeTarget with == or != (other than
-// against nil), or declares a map keyed by one, at a site its reviewed table
-// does not list.
+// against nil or a zero handle), switches on one, finds one with
+// slices.Contains or slices.Index, compares store slices with slices.Equal, or
+// declares a map keyed by one.
 //
 // It reads the package's non-test sources with go/parser alone, as the
-// repository's other source guards do, so it runs wherever the tests run. The
-// operand types are inferred from the declarations it can see: parameters,
-// results, variables, struct fields, range variables and the results of the
-// package's own functions and interface methods, each typed as a store, a map
-// or slice of stores, or a function returning one. That is an approximation:
-// it can miss a store reached through another package's function, and it can
-// flag a same-named non-store. A miss is a gap the review covers; a false hit
-// is listed with its reason.
+// repository's other source guards do, so it runs wherever the tests run. An
+// operand is a store when the package's own declarations say so: a
+// parameter, result, variable or struct field of a beads store type, an
+// element of a map or slice of them, the result of the package's own function
+// or interface method returning one, or a handle reached from any package: a
+// class accessor (Work(), Graph(), ...) or a .Store field. It can miss a store
+// another package's function returns under another name; the review covers
+// that gap, and a same-named non-store is listed with its reason.
 
-// IdentitySite is one reviewed use the guard tolerates: how many identity
-// comparisons (rule "eq") or store-keyed map types (rule "map-key") one
-// function holds, and why.
+// IdentitySite is one reviewed use the guard tolerates: how many sites of a
+// rule ("eq", "switch", "slices", "map-key") one function holds, and why.
 type IdentitySite struct {
 	Count  int
 	Reason string
@@ -44,6 +44,13 @@ type IdentitySite struct {
 var storeTypeNames = map[string]bool{
 	"Store": true, "WorkStore": true, "GraphStore": true, "SessionStore": true,
 	"MailStore": true, "OrdersStore": true, "NudgesStore": true, "MoleculeTarget": true,
+}
+
+// classAccessors are the methods that hand out a class handle in any package
+// (storeref.Stores, beads.ClassStores' readers): Stores().Graph() is a handle
+// whatever package it is read in.
+var classAccessors = map[string]bool{
+	"Work": true, "Graph": true, "Sessions": true, "Mail": true, "Orders": true, "Nudges": true,
 }
 
 // CheckStoreIdentity scans the Go package in dir and fails t for every
@@ -57,24 +64,18 @@ func CheckStoreIdentity(t *testing.T, dir string, reviewed map[string]IdentitySi
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := make(map[string]int, len(sites))
-	for k, lines := range sites {
-		got[k] = len(lines)
-	}
-	keys := make(map[string]bool, len(got)+len(reviewed))
-	for k := range got {
-		keys[k] = true
+	keys := make([]string, 0, len(sites)+len(reviewed))
+	for k := range sites {
+		keys = append(keys, k)
 	}
 	for k := range reviewed {
-		keys[k] = true
+		if _, ok := sites[k]; !ok {
+			keys = append(keys, k)
+		}
 	}
-	sorted := make([]string, 0, len(keys))
-	for k := range keys {
-		sorted = append(sorted, k)
-	}
-	sort.Strings(sorted)
-	for _, k := range sorted {
-		n, want := got[k], reviewed[k].Count
+	sort.Strings(keys)
+	for _, k := range keys {
+		n, want := len(sites[k]), reviewed[k].Count
 		switch {
 		case n > want:
 			t.Errorf("%s: %d store-identity site(s) (lines %v), %d reviewed: compare stores with beads.SameStore and key maps by beads.PhysicalStoreKey; a class handle is never == the store it wraps", k, n, sites[k], want)
@@ -88,13 +89,13 @@ func CheckStoreIdentity(t *testing.T, dir string, reviewed map[string]IdentitySi
 // package in dir, keyed "file func rule" (the file's base name; func is
 // Recv.Name for a method, or "" at package level).
 func ScanStoreIdentity(dir string) (map[string][]int, error) {
-	fset := token.NewFileSet()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	var files []*ast.File
-	var names []string
+	fset := token.NewFileSet()
+	s := &identityScanner{funcs: map[string]storeKind{}, fields: map[string]storeKind{}}
+	files := map[string]*ast.File{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -104,17 +105,14 @@ func ScanStoreIdentity(dir string) (map[string][]int, error) {
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, f)
-		names = append(names, name)
-	}
-	s := newIdentityScanner()
-	for _, f := range files {
-		s.indexPackage(f)
+		files[name] = f
+		s.index(f)
 	}
 	out := map[string][]int{}
-	for i, f := range files {
+	for name, f := range files {
+		s.imports = importNames(f)
 		for _, d := range f.Decls {
-			s.scanDecl(fset, names[i], f, d, out)
+			s.scanDecl(fset, name, d, out)
 		}
 	}
 	return out, nil
@@ -124,64 +122,58 @@ func ScanStoreIdentity(dir string) (map[string][]int, error) {
 type storeKind int
 
 const (
-	notStore   storeKind = iota
-	isStore              // a store, a handle or a molecule target
-	storeColl            // a map or slice whose elements are stores
-	storeFunc            // a function value returning a store
-	storeCollF           // a function value returning a collection of stores
+	notStore  storeKind = iota
+	isStore             // a store, a handle or a molecule target
+	storeColl           // a map or slice whose elements are stores
 )
 
-// identityScanner holds the package-wide declarations the per-function scan
-// types names against.
+// identityScanner holds the package-wide declarations names are typed
+// against, and the current file's import names.
 type identityScanner struct {
-	beadsNames map[*ast.File]map[string]bool // the names each file imports internal/beads under
-	funcs      map[string][]storeKind        // package funcs, methods and interface methods by name: their results
-	fields     map[string]storeKind          // struct field names by kind
-	pkgVars    map[string]storeKind
-	file       *ast.File
+	funcs   map[string]storeKind // package functions, methods and interface methods, by their first result
+	fields  map[string]storeKind // struct fields
+	imports map[string]string    // the current file's import name -> path
 }
 
-func newIdentityScanner() *identityScanner {
-	return &identityScanner{
-		beadsNames: map[*ast.File]map[string]bool{},
-		funcs:      map[string][]storeKind{},
-		fields:     map[string]storeKind{},
-		pkgVars:    map[string]storeKind{},
-	}
-}
-
-func (s *identityScanner) indexPackage(f *ast.File) {
-	names := map[string]bool{}
+// importNames maps each of f's import names to its path.
+func importNames(f *ast.File) map[string]string {
+	names := map[string]string{}
 	for _, imp := range f.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
-		if path != "github.com/gastownhall/gascity/internal/beads" {
-			continue
-		}
+		name := path[strings.LastIndex(path, "/")+1:]
 		if imp.Name != nil {
-			names[imp.Name.Name] = true
-		} else {
-			names["beads"] = true
+			name = imp.Name.Name
 		}
+		names[name] = path
 	}
-	if f.Name.Name == "beads" {
-		names[""] = true // the package's own unqualified names
-	}
-	s.beadsNames[f] = names
-	s.file = f
+	return names
+}
+
+func (s *identityScanner) index(f *ast.File) {
+	s.imports = importNames(f)
 	for _, d := range f.Decls {
 		switch d := d.(type) {
 		case *ast.FuncDecl:
-			s.funcs[d.Name.Name] = s.resultKinds(d.Type)
+			s.funcs[d.Name.Name] = s.firstResult(d.Type)
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
-				switch spec := spec.(type) {
-				case *ast.TypeSpec:
-					s.indexType(spec.Type)
-				case *ast.ValueSpec:
-					k := s.kindOfType(spec.Type)
-					for _, n := range spec.Names {
-						if k != notStore {
-							s.pkgVars[n.Name] = k
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				switch t := ts.Type.(type) {
+				case *ast.StructType:
+					for _, field := range t.Fields.List {
+						for _, n := range field.Names {
+							s.fields[n.Name] = s.kindOfType(field.Type)
+						}
+					}
+				case *ast.InterfaceType:
+					for _, m := range t.Methods.List {
+						if ft, ok := m.Type.(*ast.FuncType); ok {
+							for _, n := range m.Names {
+								s.funcs[n.Name] = s.firstResult(ft)
+							}
 						}
 					}
 				}
@@ -190,63 +182,26 @@ func (s *identityScanner) indexPackage(f *ast.File) {
 	}
 }
 
-func (s *identityScanner) indexType(t ast.Expr) {
-	switch t := t.(type) {
-	case *ast.StructType:
-		for _, field := range t.Fields.List {
-			if k := s.kindOfType(field.Type); k != notStore {
-				for _, n := range field.Names {
-					s.fields[n.Name] = k
-				}
-			}
-		}
-	case *ast.InterfaceType:
-		for _, m := range t.Methods.List {
-			if ft, ok := m.Type.(*ast.FuncType); ok {
-				for _, n := range m.Names {
-					s.funcs[n.Name] = s.resultKinds(ft)
-				}
-			}
-		}
+func (s *identityScanner) firstResult(ft *ast.FuncType) storeKind {
+	if ft.Results == nil || len(ft.Results.List) == 0 {
+		return notStore
 	}
-}
-
-// resultKinds is the kind of each result of a function type.
-func (s *identityScanner) resultKinds(ft *ast.FuncType) []storeKind {
-	if ft.Results == nil {
-		return nil
-	}
-	var out []storeKind
-	for _, r := range ft.Results.List {
-		k := s.kindOfType(r.Type)
-		n := max(len(r.Names), 1)
-		for range n {
-			out = append(out, k)
-		}
-	}
-	return out
+	return s.kindOfType(ft.Results.List[0].Type)
 }
 
 // isStoreType reports whether t names a beads store type.
 func (s *identityScanner) isStoreType(t ast.Expr) bool {
-	names := s.beadsNames[s.file]
-	switch t := t.(type) {
-	case *ast.SelectorExpr:
-		x, ok := t.X.(*ast.Ident)
-		return ok && names[x.Name] && storeTypeNames[t.Sel.Name]
-	case *ast.Ident:
-		return names[""] && storeTypeNames[t.Name]
-	case *ast.ParenExpr:
-		return s.isStoreType(t.X)
+	sel, ok := t.(*ast.SelectorExpr)
+	if !ok {
+		return false
 	}
-	return false
+	x, ok := sel.X.(*ast.Ident)
+	return ok && s.imports[x.Name] == "github.com/gastownhall/gascity/internal/beads" && storeTypeNames[sel.Sel.Name]
 }
 
 // kindOfType is what a value of type t holds.
 func (s *identityScanner) kindOfType(t ast.Expr) storeKind {
 	switch t := t.(type) {
-	case nil:
-		return notStore
 	case *ast.MapType:
 		if s.isStoreType(t.Value) {
 			return storeColl
@@ -254,13 +209,6 @@ func (s *identityScanner) kindOfType(t ast.Expr) storeKind {
 	case *ast.ArrayType:
 		if s.isStoreType(t.Elt) {
 			return storeColl
-		}
-	case *ast.FuncType:
-		switch r := s.resultKinds(t); {
-		case len(r) > 0 && r[0] == isStore:
-			return storeFunc
-		case len(r) > 0 && r[0] == storeColl:
-			return storeCollF
 		}
 	default:
 		if s.isStoreType(t) {
@@ -273,51 +221,69 @@ func (s *identityScanner) kindOfType(t ast.Expr) storeKind {
 // scope is one function's typed names.
 type scope map[string]storeKind
 
-func (s *identityScanner) scanDecl(fset *token.FileSet, file string, f *ast.File, d ast.Decl, out map[string][]int) {
-	s.file = f
+func (s *identityScanner) scanDecl(fset *token.FileSet, file string, d ast.Decl, out map[string][]int) {
 	fn := ""
 	sc := scope{}
-	switch d := d.(type) {
-	case *ast.FuncDecl:
-		fn = d.Name.Name
-		if d.Recv != nil && len(d.Recv.List) > 0 {
-			fn = recvTypeName(d.Recv.List[0].Type) + "." + fn
-			s.declareFields(sc, d.Recv)
+	if fd, ok := d.(*ast.FuncDecl); ok {
+		fn = fd.Name.Name
+		if fd.Recv != nil && len(fd.Recv.List) > 0 {
+			fn = recvTypeName(fd.Recv.List[0].Type) + "." + fn
 		}
-		s.declareFields(sc, d.Type.Params)
-		s.declareFields(sc, d.Type.Results)
-		if d.Body != nil {
-			s.inferLocals(d.Body, sc)
+		s.declare(sc, fd.Recv)
+		s.declare(sc, fd.Type.Params)
+		s.declare(sc, fd.Type.Results)
+		if fd.Body != nil {
+			s.inferLocals(fd.Body, sc)
 		}
-	case *ast.GenDecl:
-		// Package-level declarations: only map-key types can hit here.
+	}
+	hit := func(rule string, n ast.Node) {
+		k := file + " " + fn + " " + rule
+		out[k] = append(out[k], fset.Position(n.Pos()).Line)
 	}
 	ast.Inspect(d, func(n ast.Node) bool {
 		switch n := n.(type) {
-		case *ast.FuncLit:
-			s.declareFields(sc, n.Type.Params)
 		case *ast.MapType:
 			if s.isStoreType(n.Key) {
-				k := file + " " + fn + " map-key"
-				out[k] = append(out[k], fset.Position(n.Pos()).Line)
+				hit("map-key", n)
 			}
 		case *ast.BinaryExpr:
-			if n.Op != token.EQL && n.Op != token.NEQ {
-				return true
+			if (n.Op == token.EQL || n.Op == token.NEQ) && !s.isNoStore(n.X) && !s.isNoStore(n.Y) &&
+				(s.kindOf(n.X, sc) == isStore || s.kindOf(n.Y, sc) == isStore) {
+				hit("eq", n)
 			}
-			if s.isNoStore(n.X) || s.isNoStore(n.Y) {
-				return true // a nil or zero-handle check, not identity
+		case *ast.SwitchStmt:
+			if n.Tag != nil && s.kindOf(n.Tag, sc) == isStore {
+				hit("switch", n)
 			}
-			if s.kindOf(n.X, sc) == isStore || s.kindOf(n.Y, sc) == isStore {
-				k := file + " " + fn + " eq"
-				out[k] = append(out[k], fset.Position(n.Pos()).Line)
+		case *ast.CallExpr:
+			if s.slicesIdentity(n, sc) {
+				hit("slices", n)
 			}
 		}
 		return true
 	})
 }
 
-func (s *identityScanner) declareFields(sc scope, fl *ast.FieldList) {
+// slicesIdentity reports whether call is slices.Contains or slices.Index
+// looking for a store, or slices.Equal over stores: each compares with ==.
+func (s *identityScanner) slicesIdentity(call *ast.CallExpr, sc scope) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || len(call.Args) != 2 {
+		return false
+	}
+	if x, ok := sel.X.(*ast.Ident); !ok || s.imports[x.Name] != "slices" {
+		return false
+	}
+	switch sel.Sel.Name {
+	case "Contains", "Index":
+		return s.kindOf(call.Args[0], sc) == storeColl || s.kindOf(call.Args[1], sc) == isStore
+	case "Equal":
+		return s.kindOf(call.Args[0], sc) == storeColl || s.kindOf(call.Args[1], sc) == storeColl
+	}
+	return false
+}
+
+func (s *identityScanner) declare(sc scope, fl *ast.FieldList) {
 	if fl == nil {
 		return
 	}
@@ -331,47 +297,43 @@ func (s *identityScanner) declareFields(sc scope, fl *ast.FieldList) {
 }
 
 // inferLocals types the function's local names from their declarations and
-// assignments, to a fixpoint (an assignment can depend on a later-typed name
-// only through a loop, so a few passes suffice).
+// assignments, to a fixpoint. A multi-value assignment from one expression
+// types its first name only: a store-returning call's store, a map index's
+// value.
 func (s *identityScanner) inferLocals(body *ast.BlockStmt, sc scope) {
+	assign := func(name ast.Expr, k storeKind) {
+		if id, ok := name.(*ast.Ident); ok && id.Name != "_" && k != notStore {
+			sc[id.Name] = k
+		}
+	}
 	for range 4 {
 		before := len(sc)
 		ast.Inspect(body, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.FuncLit:
-				s.declareFields(sc, n.Type.Params)
+				s.declare(sc, n.Type.Params)
 			case *ast.ValueSpec:
-				k := s.kindOfType(n.Type)
 				for i, name := range n.Names {
 					switch {
-					case k != notStore:
-						sc[name.Name] = k
+					case n.Type != nil:
+						assign(name, s.kindOfType(n.Type))
 					case i < len(n.Values):
-						s.assign(sc, name, n.Values[i])
-					case len(n.Values) == 1:
-						s.assignResult(sc, name, n.Values[0], i)
+						assign(name, s.kindOf(n.Values[i], sc))
 					}
 				}
 			case *ast.AssignStmt:
 				for i, lhs := range n.Lhs {
-					name, ok := lhs.(*ast.Ident)
-					if !ok || name.Name == "_" {
-						continue
-					}
-					if len(n.Rhs) == len(n.Lhs) {
-						s.assign(sc, name, n.Rhs[i])
-					} else if len(n.Rhs) == 1 {
-						s.assignResult(sc, name, n.Rhs[0], i)
+					switch {
+					case len(n.Rhs) == len(n.Lhs):
+						assign(lhs, s.kindOf(n.Rhs[i], sc))
+					case i == 0:
+						assign(lhs, s.kindOf(n.Rhs[0], sc))
 					}
 				}
 			case *ast.RangeStmt:
-				if s.kindOf(n.X, sc) == storeColl {
-					if v, ok := n.Value.(*ast.Ident); ok && v.Name != "_" {
-						sc[v.Name] = isStore
-					}
+				if s.kindOf(n.X, sc) == storeColl && n.Value != nil {
+					assign(n.Value, isStore)
 				}
-			case *ast.TypeSwitchStmt:
-				// x := y.(type) keeps y's kind only in a store case; leave it.
 			}
 			return true
 		})
@@ -381,102 +343,37 @@ func (s *identityScanner) inferLocals(body *ast.BlockStmt, sc scope) {
 	}
 }
 
-func (s *identityScanner) assign(sc scope, name *ast.Ident, rhs ast.Expr) {
-	if k := s.kindOf(rhs, sc); k != notStore {
-		sc[name.Name] = k
-	}
-}
-
-// assignResult types name from result i of a multi-value rhs: a call, or the
-// value of a comma-ok map index.
-func (s *identityScanner) assignResult(sc scope, name *ast.Ident, rhs ast.Expr, i int) {
-	switch rhs := rhs.(type) {
-	case *ast.CallExpr:
-		if r := s.callResults(rhs, sc); i < len(r) && r[i] != notStore {
-			sc[name.Name] = r[i]
-		}
-	case *ast.IndexExpr:
-		if i == 0 && s.kindOf(rhs.X, sc) == storeColl {
-			sc[name.Name] = isStore
-		}
-	case *ast.TypeAssertExpr:
-		if i == 0 && s.isStoreType(rhs.Type) {
-			sc[name.Name] = isStore
-		}
-	}
-}
-
-// callResults is the result kinds of a call to a package function, method or
-// interface method, or of a store-returning function value.
-func (s *identityScanner) callResults(call *ast.CallExpr, sc scope) []storeKind {
-	switch fun := call.Fun.(type) {
-	case *ast.Ident:
-		if r, ok := s.funcs[fun.Name]; ok {
-			return r
-		}
-		switch sc[fun.Name] {
-		case storeFunc:
-			return []storeKind{isStore}
-		case storeCollF:
-			return []storeKind{storeColl}
-		}
-	case *ast.SelectorExpr:
-		if x, ok := fun.X.(*ast.Ident); ok && s.beadsNames[s.file][x.Name] {
-			return nil // a beads function: SameStore and friends return no store
-		}
-		if r, ok := s.funcs[fun.Sel.Name]; ok {
-			return r
-		}
-		switch s.fields[fun.Sel.Name] {
-		case storeFunc:
-			return []storeKind{isStore}
-		case storeCollF:
-			return []storeKind{storeColl}
-		}
-	}
-	return nil
-}
-
 // kindOf is what expression e holds, as far as the declarations say.
 func (s *identityScanner) kindOf(e ast.Expr, sc scope) storeKind {
 	switch e := e.(type) {
 	case *ast.ParenExpr:
 		return s.kindOf(e.X, sc)
 	case *ast.Ident:
-		if k, ok := sc[e.Name]; ok {
-			return k
-		}
-		return s.pkgVars[e.Name]
+		return sc[e.Name]
 	case *ast.SelectorExpr:
-		if e.Sel.Name == "Store" && s.kindOf(e.X, sc) == isStore {
-			return isStore // a handle's embedded store
-		}
-		if x, ok := e.X.(*ast.Ident); ok && s.beadsNames[s.file][x.Name] {
-			return notStore
+		if e.Sel.Name == "Store" {
+			return isStore // a handle's embedded store, or a store field
 		}
 		return s.fields[e.Sel.Name]
 	case *ast.CallExpr:
-		if r := s.callResults(e, sc); len(r) > 0 {
-			return r[0]
-		}
-		if len(e.Args) == 1 && s.isStoreType(e.Fun) {
-			return isStore // a conversion to a store type
+		switch fun := e.Fun.(type) {
+		case *ast.Ident:
+			return s.funcs[fun.Name]
+		case *ast.SelectorExpr:
+			if x, ok := fun.X.(*ast.Ident); ok && s.imports[x.Name] != "" {
+				return notStore // another package's function: SameStore and friends return no store
+			}
+			if k, declared := s.funcs[fun.Sel.Name]; declared {
+				return k // the package's own method of that name wins (State.Orders lists orders)
+			}
+			if classAccessors[fun.Sel.Name] && len(e.Args) == 0 {
+				return isStore
+			}
 		}
 	case *ast.IndexExpr:
 		if s.kindOf(e.X, sc) == storeColl {
 			return isStore
 		}
-	case *ast.CompositeLit:
-		if s.isStoreType(e.Type) {
-			return isStore
-		}
-		return s.kindOfType(e.Type)
-	case *ast.TypeAssertExpr:
-		if s.isStoreType(e.Type) {
-			return isStore
-		}
-	case *ast.StarExpr:
-		return s.kindOf(e.X, sc)
 	}
 	return notStore
 }
@@ -500,12 +397,10 @@ func recvTypeName(t ast.Expr) string {
 	switch t := t.(type) {
 	case *ast.StarExpr:
 		return recvTypeName(t.X)
-	case *ast.Ident:
-		return t.Name
 	case *ast.IndexExpr:
 		return recvTypeName(t.X)
-	case *ast.IndexListExpr:
-		return recvTypeName(t.X)
+	case *ast.Ident:
+		return t.Name
 	}
-	return fmt.Sprintf("%T", t)
+	return "?"
 }

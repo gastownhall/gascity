@@ -93,3 +93,25 @@ func TestWorkRecordLegacyRepoDirMatchesARigThroughAHandle(t *testing.T) {
 		}
 	}
 }
+
+// TestRetiredSessionWorkStoresDedupesAHandleOverAListedStore pins
+// retiredSessionWorkStores's dedupe to SameStore (typed-stores T6 plan, R3): a
+// sessions store handed in as a class handle over a store the sweep already
+// lists is that store, so the sweep lists it once. slices.Contains compared
+// the handle with ==, never equal to the raw store, and swept it twice.
+func TestRetiredSessionWorkStoresDedupesAHandleOverAListedStore(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.graphBeadStore = beads.NewMemStore()
+	s := New(state)
+	raw := s.retiredSessionWorkStores(state.CityBeadStore())
+	handle := s.retiredSessionWorkStores(beadstest.Sessions(state.CityBeadStore()))
+	if len(handle) != len(raw) {
+		t.Fatalf("the sweep over a sessions handle lists %d stores, over the raw store %d: the handle was listed beside the store it wraps", len(handle), len(raw))
+	}
+	for i := range raw {
+		if !beads.SameStore(handle[i], raw[i]) {
+			t.Errorf("store %d: %v, want %v", i, handle[i], raw[i])
+		}
+	}
+}
