@@ -94,6 +94,141 @@ func TestHookInputLifecyclePolicy(t *testing.T) {
 	}
 }
 
+// inputLifecycleSeatReads records the actor on the store used for step seats.
+type inputLifecycleSeatReads struct {
+	beads.Store
+	actor string
+	reads *[]string
+}
+
+func (s inputLifecycleSeatReads) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata["gc.root_bead_id"] != "" {
+		*s.reads = append(*s.reads, s.actor)
+	}
+	return s.Store.List(q)
+}
+
+func TestHookInputLifecycleStopStoreContract(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		for _, closed := range []bool{false, true} {
+			name := "single/open"
+			if split {
+				name = "split/open"
+			}
+			if closed {
+				name = strings.TrimSuffix(name, "open") + "closed"
+			}
+			t.Run(name, func(t *testing.T) {
+				f, root, _ := inputPolicyFixture(t, "graph")
+				if err := f.store.SetMetadata(root.ID, "gc.cancel_requested", "true"); err != nil {
+					t.Fatal(err)
+				}
+				if closed {
+					f.closeAs(root.ID, "canceled", nil)
+				}
+				root = f.get(root.ID)
+				var opened []string
+				probes := 0
+				env := []string{"BD_BIN=/usr/bin/false"} // An unexpected default-store read cannot reach a live ledger.
+				dir := t.TempDir()
+				ctx := t.Context()
+				ops := f.ops()
+				ops.WorkflowStore = func(gotCtx context.Context, gotDir string, gotEnv []string, id, actor string) beads.Store {
+					if gotCtx != ctx || gotDir != dir || !reflect.DeepEqual(gotEnv, env) {
+						t.Error("workflow opener context changed")
+					}
+					opened = append(opened, id+"/"+actor)
+					return f.store
+				}
+				ops.ReadWorkMeta = func(context.Context, string, []string, string, string) (beads.Bead, error) {
+					probes++
+					return beads.Bead{}, errors.New("unexpected residence probe")
+				}
+				ops.applyDefaults()
+				if split {
+					// Work-resident root in a split city, deliberately NOT memoized.
+					ops = classRoutedHookClaimOps(ops, newClaimRouteFor(t, newSplitEnvClassLeaf(t)))
+				}
+				var stderr bytes.Buffer
+				if !hookClaimWorkflowStop(ctx, root, "worker-1", false, hookClaimOptions{Env: env}, ops, dir, &stderr) {
+					t.Fatalf("stopped root delivered: %s", &stderr)
+				}
+				if probes != 0 {
+					t.Errorf("extra residence probes=%d", probes)
+				}
+				want := []string{root.ID + "/worker-1", root.Metadata["gc.input_convoy_id"] + "/"}
+				if !reflect.DeepEqual(opened, want) {
+					t.Errorf("openers=%v want=%v", opened, want)
+				}
+				f.wantClosed(root.ID, "canceled")
+			})
+		}
+	}
+	t.Run("split/memoized-convoy-key", func(t *testing.T) {
+		f := newDoneWorkflowSplitFixture(t, true)
+		if err := f.binding.Update(f.root.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.input_lifecycle": "graph", "gc.cancel_requested": "true"}}); err != nil {
+			t.Fatal(err)
+		}
+		root, err := f.binding.Get(f.root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.route.resident[root.ID] = true
+		var keys []string
+		base := f.baseOps(t)
+		base.WorkflowStore = func(_ context.Context, _ string, _ []string, key, actor string) beads.Store {
+			keys = append(keys, key+"/"+actor)
+			return f.work
+		}
+		base.applyDefaults()
+		ops := classRoutedHookClaimOps(base, f.route)
+		var stderr bytes.Buffer
+		if !hookClaimWorkflowStop(t.Context(), root, "worker-1", false, hookClaimOptions{}, ops, "/work", &stderr) {
+			t.Fatalf("stopped root delivered: %s", &stderr)
+		}
+		if !reflect.DeepEqual(keys, []string{f.convoyID + "/"}) {
+			t.Errorf("work opener keys=%v want convoy %s and empty actor", keys, f.convoyID)
+		}
+		got, err := f.binding.Get(root.ID)
+		if err != nil || got.Status != "closed" || got.Metadata["gc.outcome"] != "canceled" {
+			t.Fatalf("root=%+v err=%v stderr=%s", got, err, &stderr)
+		}
+	})
+	t.Run("single/actor-bearing-step-seats", func(t *testing.T) {
+		f, root, source := inputPolicyFixture(t, "graph")
+		status, seat := "open", "old-worker"
+		if err := f.store.Update(source.ID, beads.UpdateOpts{Status: &status, Assignee: &seat}); err != nil {
+			t.Fatal(err)
+		}
+		step := f.step("previous worker", root.ID, nil)
+		if err := f.store.Update(step.ID, beads.UpdateOpts{Assignee: &seat}); err != nil {
+			t.Fatal(err)
+		}
+		f.closeAs(step.ID, "pass", nil)
+		if err := f.store.SetMetadata(root.ID, "gc.cancel_requested", "true"); err != nil {
+			t.Fatal(err)
+		}
+		root = f.get(root.ID)
+		var reads []string
+		ops := f.ops()
+		ops.WorkflowStore = func(_ context.Context, _ string, _ []string, _ string, actor string) beads.Store {
+			return inputLifecycleSeatReads{Store: f.store, actor: actor, reads: &reads}
+		}
+		ops.applyDefaults()
+		var stderr bytes.Buffer
+		opts := hookClaimOptions{Env: []string{"BD_BIN=/usr/bin/false"}, IdentityCandidates: []string{"worker-1"}}
+		if !hookClaimWorkflowStop(t.Context(), root, "worker-1", false, opts, ops, t.TempDir(), &stderr) {
+			t.Fatal("stopped root delivered")
+		}
+		if !reflect.DeepEqual(reads, []string{"worker-1"}) {
+			t.Errorf("step-seat read actors=%v want [worker-1]; stderr=%s", reads, &stderr)
+		}
+		if !reflect.DeepEqual(root, f.get(root.ID)) || !strings.Contains(stderr.String(), "waiting for terminal input") {
+			t.Fatalf("own prior seat was treated as a foreign handoff: %s", &stderr)
+		}
+	})
+}
+
 func TestHookInputLifecycleAuthoritativeRoot(t *testing.T) {
 	f := newDoneWorkflowSplitFixture(t, true)
 	if err := f.binding.SetMetadata(f.root.ID, "gc.input_lifecycle", "graph"); err != nil {
@@ -160,7 +295,7 @@ func TestHookInputLifecycleStopAtCAS(t *testing.T) {
 				}
 			})
 			var stderr bytes.Buffer
-			if closed, err := hookResumeGraphCancellation(f.store, beadstest.Work(f.store), f.get(root.ID), []string{"worker-1"}, &stderr); closed || err != nil || !strings.Contains(stderr.String(), "waiting for terminal input or an API retry") {
+			if closed, err := hookResumeGraphCancellation(beadstest.Graph(f.store), beadstest.Work(f.store), f.get(root.ID), []string{"worker-1"}, &stderr); closed || err != nil || !strings.Contains(stderr.String(), "waiting for terminal input or an API retry") {
 				t.Fatalf("withhold diagnostic: closed=%v err=%v stderr=%s", closed, err, &stderr)
 			}
 			current := f.get(root.ID)
@@ -358,7 +493,7 @@ func TestHookInputLifecycleCancellationLateWinddown(t *testing.T) {
 	store := &inputLifecycleCancelBarrier{Store: f.store, seen: make(chan struct{}), resume: make(chan struct{})}
 	done := make(chan error, 1)
 	go func() {
-		_, err := hookResumeGraphCancellation(store, beadstest.Work(store), root, []string{"worker-1"}, io.Discard)
+		_, err := hookResumeGraphCancellation(beadstest.Graph(store), beadstest.Work(store), root, []string{"worker-1"}, io.Discard)
 		done <- err
 	}()
 	awaitClose(t, store.seen, "hook observed recorded cancel")
@@ -379,7 +514,7 @@ func TestHookInputLifecycleCancellationLateWinddown(t *testing.T) {
 	case <-t.Context().Done():
 		t.Fatal("hook recovery did not return")
 	}
-	if _, err := hookResumeGraphCancellation(store, beadstest.Work(store), root, []string{"worker-1"}, io.Discard); err != nil {
+	if _, err := hookResumeGraphCancellation(beadstest.Graph(store), beadstest.Work(store), root, []string{"worker-1"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("post-list overlap CloseAll calls=%d; stale member close remains B1", store.closes)
@@ -455,7 +590,7 @@ func TestHookInputLifecycleOutcomeOnlyAndDiagnostic(t *testing.T) {
 			t.Fatalf("missing successful recovery diagnostic: %s", &stderr)
 		}
 		stderr.Reset()
-		if _, err := hookResumeGraphCancellation(f.store, beadstest.Work(f.store), root, []string{"worker-1"}, &stderr); err != nil || stderr.Len() != 0 {
+		if _, err := hookResumeGraphCancellation(beadstest.Graph(f.store), beadstest.Work(f.store), root, []string{"worker-1"}, &stderr); err != nil || stderr.Len() != 0 {
 			t.Fatalf("stale snapshot logged a close: err=%v stderr=%s", err, &stderr)
 		}
 	}

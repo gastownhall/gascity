@@ -433,7 +433,8 @@ type (
 	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
-	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
+	hookWorkflowStoreFunc  func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
+	hookInputWorkStoreFunc func(ctx context.Context, dir string, env []string, beadID string) beads.WorkStore
 )
 
 type hookClaimJSONResult struct {
@@ -673,7 +674,7 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.DrainPending = hookSessionDrainPending
 	}
 	if ops.InputDone == nil {
-		ops.InputDone = hookInputDoneWithBdStore
+		ops.InputDone, _ = hookInputDoneWithBdStore(hookWorkflowStoreWithBdStore)
 	}
 	if ops.SkipDoneWorkflow == nil {
 		ops.SkipDoneWorkflow = hookSkipDoneWorkflowWithBdStore
@@ -1333,7 +1334,7 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 	if (!linked && workflowRootIDForInputCheck(candidate) != candidate.ID) || ops.WorkflowStore == nil {
 		return false
 	}
-	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	store := beads.GraphStore{Store: ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)}
 	if !linked {
 		root, err := store.Get(candidate.ID)
 		if err != nil {
@@ -1346,8 +1347,9 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 			strings.TrimSpace(root.Metadata[beadmeta.CancelRequestedMetadataKey]) != "" ||
 			root.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeCanceled
 		if root.Metadata[beadmeta.InputLifecycleMetadataKey] == beadmeta.InputLifecycleGraph && stopped {
-			work := ops.WorkflowStore(ctx, dir, opts.Env, root.Metadata[beadmeta.InputConvoyIDMetadataKey], "")
-			closed, err := hookResumeGraphCancellation(store, beads.WorkStore{Store: work}, root, opts.IdentityCandidates, stderr)
+			_, openWork := hookInputDoneWithBdStore(ops.WorkflowStore)
+			work := openWork(ctx, dir, opts.Env, root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+			closed, err := hookResumeGraphCancellation(store, work, root, opts.IdentityCandidates, stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc hook --claim: resuming cancellation of %s failed: %v\n", root.ID, err) //nolint:errcheck
 			}
@@ -1359,7 +1361,7 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return false
 	}
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
+	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(store), candidate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
 		return false
@@ -1383,18 +1385,18 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 }
 
 // hookResumeGraphCancellation retries run-cancel with teardown preserved, returning whether the root is closed.
-func hookResumeGraphCancellation(store beads.Store, work beads.WorkStore, root beads.Bead, identities []string, stderr io.Writer) (bool, error) {
+func hookResumeGraphCancellation(store beads.GraphStore, work beads.WorkStore, root beads.Bead, identities []string, stderr io.Writer) (bool, error) {
 	if root.Status == "closed" {
 		return true, nil
 	}
-	_, done, err := workflowExternalInputDone(store, work, root, identities)
+	_, done, err := workflowExternalInputDone(func() ([]string, error) { return workflowStepAssignees(store, root.ID) }, work, root, identities)
 	if err != nil || !done {
 		if err == nil {
 			fmt.Fprintf(stderr, "gc hook --claim: withholding standalone workflow %s: waiting for terminal input or an API retry\n", root.ID) //nolint:errcheck
 		}
 		return false, err
 	}
-	target := beads.GraphMolecule(beads.GraphStore{Store: store})
+	target := beads.GraphMolecule(store)
 	tree, err := sourceworkflow.WorkflowTree(target, root.ID)
 	if err != nil {
 		return false, err
@@ -2409,11 +2411,11 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 	if policy == beadmeta.InputLifecycleGraph {
 		return root.ID, false, nil
 	}
-	return workflowExternalInputDone(graph, work, root, identityCandidates)
+	return workflowExternalInputDone(func() ([]string, error) { return workflowStepAssignees(graph, root.ID) }, work, root, identityCandidates)
 }
 
 // workflowExternalInputDone classifies terminal/handoff input independently of lifecycle policy.
-func workflowExternalInputDone(graph beads.Store, work beads.WorkStore, root beads.Bead, identityCandidates []string) (string, bool, error) {
+func workflowExternalInputDone(stepAssignees func() ([]string, error), work beads.WorkStore, root beads.Bead, identityCandidates []string) (string, bool, error) {
 	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	if convoyID == "" {
 		return root.ID, false, nil
@@ -2435,7 +2437,7 @@ func workflowExternalInputDone(graph beads.Store, work beads.WorkStore, root bea
 			// (typically dead, its steps reopened), not another lane: the
 			// member was never handed off (sys-pxryan.44).
 			if workflowSeats == nil {
-				workflowSeats, err = workflowStepAssignees(graph, root.ID)
+				workflowSeats, err = stepAssignees()
 				if err != nil {
 					return root.ID, false, err
 				}
@@ -2507,8 +2509,16 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
-func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDone(beads.WorkStore{Store: hookClaimBdStoreContext(ctx, dir, env, "")}, candidate, identityCandidates)
+// hookInputDoneWithBdStore shares the work-handle adapter between input retirement
+// and cancellation, retaining the caller's store opener and lookup key.
+func hookInputDoneWithBdStore(open hookWorkflowStoreFunc) (hookInputDoneFunc, hookInputWorkStoreFunc) {
+	work := func(ctx context.Context, dir string, env []string, beadID string) beads.WorkStore {
+		return beads.WorkStore{Store: open(ctx, dir, env, beadID, "")}
+	}
+	inputDone := func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+		return workflowInputDone(work(ctx, dir, env, ""), candidate, identityCandidates)
+	}
+	return inputDone, work
 }
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
