@@ -47,7 +47,7 @@ func TestStatusHandsScopedStoreLikeRawStores(t *testing.T) {
 	}
 	for _, s := range handed {
 		switch s.(type) {
-		case beads.WorkStore, beads.GraphStore, beads.SessionStore, beads.MailStore, beads.OrdersStore, beads.NudgesStore:
+		case beads.WorkStore, beads.GraphStore, beads.SessionStore, beads.MailStore, beads.OrdersStore, beads.NudgesStore, beads.MoleculeTarget:
 			t.Errorf("/status handed ScopedStoreLike a class handle %T; it must be the raw store", s)
 			continue
 		}

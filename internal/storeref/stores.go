@@ -226,7 +226,10 @@ func (s Stores) Rig(name string) (beads.WorkStore, bool) {
 }
 
 // Rigs is every rig this epoch opened, in the topology's order (the holder's:
-// cmd/gc's router lists them by name), each with its work store.
+// cmd/gc's router lists them by name), each with its work store. A holder
+// opens suspended rigs too, so they are listed: a suspended rig's store runs
+// no cache, and a bd read of it can wake its retired proxy and Dolt. A caller
+// that must leave a suspended scope untouched skips it by name.
 func (s Stores) Rigs() []RigWork {
 	out := make([]RigWork, len(s.rigs))
 	for i, r := range s.rigs {

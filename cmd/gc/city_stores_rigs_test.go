@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -69,45 +75,14 @@ func TestControllerStoresRigScopesAreTheRawAccessorsStores(t *testing.T) {
 // the city store and the rig set under two locks (or none) lets a reader mint
 // across a swap; under -race an unlocked read is also a reported race.
 func TestControllerStoresNeverTearAcrossReloads(t *testing.T) {
-	cs := &controllerState{cityName: "c", cityBeadStore: beads.NewMemStore()}
-	cs.beadStores = map[string]beads.Store{"r": beads.NewMemStore()}
-	cs.rigStoresGen++
-	var pairs sync.Map // city work handle's store -> its reload's rig handle's store
-	pair := func(city, rig beads.Store) { pairs.Store(splitStrictWorkView(city), splitStrictWorkView(rig)) }
-	pair(cs.cityBeadStore, cs.beadStores["r"])
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	var torn sync.Once
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				st := cs.Stores()
-				rig, _ := st.Rig("r")
-				want, _ := pairs.Load(st.Work().Store)
-				if rig.Store != want {
-					torn.Do(func() { t.Errorf("a Stores minted a rig store from another reload than its city store") })
-				}
-			}
-		}()
-	}
-	for range 2000 {
-		city, rig := beads.NewMemStore(), beads.NewMemStore()
-		pair(city, rig)
+	cs := &controllerState{cityName: "c"}
+	tearCheck(t, cs.Stores, func(city, rig beads.Store) {
 		cs.mu.Lock()
 		cs.cityBeadStore = city
 		cs.beadStores = map[string]beads.Store{"r": rig}
 		cs.rigStoresGen++
 		cs.mu.Unlock()
-	}
-	close(stop)
-	wg.Wait()
+	})
 }
 
 // TestCityRuntimeStandaloneStoresFollowARigSwap pins the standalone epoch's
@@ -124,5 +99,107 @@ func TestCityRuntimeStandaloneStoresFollowARigSwap(t *testing.T) {
 	cr.setStandaloneStores(city, map[string]beads.Store{"r": second})
 	if got, ok := cr.cityStores().Rig("r"); !ok || got.Store != splitStrictWorkView(second) {
 		t.Errorf("rig r after the rig swap = %v, %v; want the second rig store %p", got.Store, ok, second)
+	}
+}
+
+// tearCheck runs readers of storesOf against writes of reload, each reload
+// swapping a city store and a rig store "r" that pair records together, and
+// fails when a reader got a rig handle from another reload than its city
+// handle. Under -race an unlocked read of either is also a reported race.
+func tearCheck(t *testing.T, storesOf func() storeref.Stores, reload func(city, rig beads.Store)) {
+	t.Helper()
+	var pairs sync.Map
+	pair := func(city, rig beads.Store) { pairs.Store(splitStrictWorkView(city), splitStrictWorkView(rig)) }
+	first, firstRig := beads.NewMemStore(), beads.NewMemStore()
+	pair(first, firstRig)
+	reload(first, firstRig)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var torn sync.Once
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				st := storesOf()
+				rig, _ := st.Rig("r")
+				if want, _ := pairs.Load(st.Work().Store); rig.Store != want {
+					torn.Do(func() { t.Errorf("a Stores minted a rig store from another reload than its city store") })
+				}
+			}
+		}()
+	}
+	for range 2000 {
+		city, rig := beads.NewMemStore(), beads.NewMemStore()
+		pair(city, rig)
+		reload(city, rig)
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestCityRuntimeStoresNeverTearAcrossControllerReloads is the torn-epoch pin
+// (R6) through the runtime's door: a CityRuntime with a controllerState reads
+// the state's epoch through storesOver, which must read the city store and
+// the rig set under one lock as Stores does.
+func TestCityRuntimeStoresNeverTearAcrossControllerReloads(t *testing.T) {
+	cs := &controllerState{cityName: "c"}
+	cr := &CityRuntime{cityName: "c", cs: cs}
+	tearCheck(t, cr.cityStores, func(city, rig beads.Store) {
+		cs.mu.Lock()
+		cs.cityBeadStore = city
+		cs.beadStores = map[string]beads.Store{"r": rig}
+		cs.rigStoresGen++
+		cs.mu.Unlock()
+	})
+}
+
+// TestCityRuntimeStandaloneStoresNeverTearAcrossReloads is the same pin for
+// a runtime with no controllerState: setStandaloneStores races cityStores,
+// which reads the standalone city store, rig map and generation under the
+// lock setStandaloneStores swaps them under.
+func TestCityRuntimeStandaloneStoresNeverTearAcrossReloads(t *testing.T) {
+	cr := &CityRuntime{cityName: "c"}
+	tearCheck(t, cr.cityStores, func(city, rig beads.Store) {
+		cr.setStandaloneStores(city, map[string]beads.Store{"r": rig})
+	})
+}
+
+// TestControllerStoresFollowARigReloadWhoseCityReopenFails pins update's rig
+// generation bump: a reload whose city-store reopen fails keeps the old city
+// store and swaps the rig stores, so only the generation tells the epoch the
+// rigs changed. Without it Stores kept serving the replaced rig stores, which
+// close controllerStateStoreCloseDelay later.
+func TestControllerStoresFollowARigReloadWhoseCityReopenFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cfg := &config.City{Workspace: config.Workspace{Name: "city1"}, Rigs: []config.Rig{{Name: "rig1", Path: t.TempDir()}}}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", t.TempDir())
+	before, ok := cs.Stores().Rig("rig1")
+	if !ok || before.Store != cs.BeadStore("rig1") {
+		t.Fatalf("rig1 before the reload = %v, %v; want BeadStore's", before.Store, ok)
+	}
+	city := cs.CityBeadStore()
+
+	prev := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{}, errors.New("city store reopen failed")
+	}
+	t.Cleanup(func() { newControllerStateOpenCityStore = prev })
+	cs.update(&config.City{Workspace: config.Workspace{Name: "city1"}, Rigs: []config.Rig{{Name: "rig1", Path: t.TempDir()}}}, runtime.NewFake())
+
+	if cs.CityBeadStore() != city {
+		t.Fatal("the failed reopen replaced the city store; the case under test does not arise")
+	}
+	after, ok := cs.Stores().Rig("rig1")
+	if !ok || after.Store != cs.BeadStore("rig1") {
+		t.Errorf("rig1 after the reload = %v, %v; want the reloaded BeadStore %v", after.Store, ok, cs.BeadStore("rig1"))
+	}
+	if after.Store == before.Store {
+		t.Error("Stores serves the rig store the reload replaced")
 	}
 }

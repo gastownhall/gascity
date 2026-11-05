@@ -229,7 +229,7 @@ func (f *fakeState) classStore(relocated beads.Store) beads.Store {
 // are the projection, so each handle wraps exactly the store its raw accessor
 // returns (TestFakeStateStoresWrapTheAccessorsStores).
 func (f *fakeState) Stores() storeref.Stores {
-	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses())
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), gateProjection{})
 }
 
 // relocatedClasses is every class a test relocated off the city store.
@@ -251,8 +251,9 @@ func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
 // mintFakeStores mints a fake city's handles: city is the work store, rigs
 // the rig scopes, and each class in relocated a one-class binding over its
 // store; a nil store there is a binding that failed to open, whose handle is
-// zero.
-func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store) storeref.Stores {
+// zero. proj is the split-strict gate's projection, or nil for stores that
+// already carry it.
+func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, proj storeref.Projection) storeref.Stores {
 	var bindings []storeref.ClassBinding
 	for class, store := range relocated {
 		classes := []coordclass.Class{class}
@@ -262,7 +263,7 @@ func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map
 		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: city},
 		Rigs:     storeref.RigLegs(rigs),
 		Bindings: bindings,
-	}, storeref.StoresOptions{Projection: gateProjection{}})
+	}, storeref.StoresOptions{Projection: proj})
 }
 
 // accessorState is the raw and per-class store accessors a State stands
@@ -284,8 +285,8 @@ type accessorState interface {
 // CityBeadStore, each class whose accessor answers another store is a binding
 // over that store (a zero handle's, nil, is a binding that failed to open),
 // and the rigs are BeadStore's. It applies no projection: the accessors
-// already did. A rig's graph placement is then the city's graph store, which
-// no test of such a fake reads.
+// already did. A rig's graph placement follows the same rule as Stores': the
+// graph binding when graph is relocated, else the rig's own store.
 func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
 	work := st.CityBeadStore()
 	relocated := map[coordclass.Class]beads.Store{}
@@ -299,20 +300,11 @@ func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
 			relocated[class] = store
 		}
 	}
-	var bindings []storeref.ClassBinding
-	for class, store := range relocated {
-		classes := []coordclass.Class{class}
-		bindings = append(bindings, storeref.ClassBinding{Classes: classes, Leg: storeref.Leg{Ref: storeref.ClassRef(classes), Store: store}})
-	}
 	rigStores := make(map[string]beads.Store, len(rigs))
 	for _, rig := range rigs {
 		rigStores[rig] = st.BeadStore(rig)
 	}
-	return storeref.NewStores(storeref.Topology{
-		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: work},
-		Rigs:     storeref.RigLegs(rigStores),
-		Bindings: bindings,
-	}, storeref.StoresOptions{})
+	return mintFakeStores(work, rigStores, relocated, nil)
 }
 
 // gateProjection is the split-strict gate's views as the router's projection:

@@ -109,17 +109,18 @@ func classRefusal(cityPath string, routes *storageRoutes, class coordclass.Class
 	return refusedClassStore{err: standingStorageRefusal{err: refusal}}
 }
 
-// cityTopology is the topology the router reads over routes: the work store,
-// the rig legs and the bindings. It feeds the mint only, never a plan, so its
-// rigs are every rig the holder opened, suspended ones included, as the API
-// serves them; the residency topologies that plans read exclude suspended rigs
-// themselves (residency_topology.go).
-func cityTopology(routes *storageRoutes, work beads.Store, rigs []storeref.Leg) storeref.Topology {
+// cityTopology is the topology the router reads over routes: the work store
+// and the bindings.
+func cityTopology(routes *storageRoutes, work beads.Store) storeref.Topology {
 	b := routes.mintBindings()
-	return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: work}, Rigs: rigs, Bindings: b.bindings, Refused: b.refused}
+	return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: work}, Bindings: b.bindings, Refused: b.refused}
 }
 
 // mintCityStores mints the class handles over work, the rig legs and routes.
+// The topology feeds the mint only, never a plan, so its rigs are every rig
+// the holder opened, suspended ones included, as the API serves them; the
+// residency topologies plans read exclude suspended rigs themselves
+// (residency_topology.go).
 func mintCityStores(cityPath string, routes *storageRoutes, work beads.Store, rigs []storeref.Leg) storeref.Stores {
 	opts := storeref.StoresOptions{Projection: splitStrictSeam}
 	for _, class := range mintClasses {
@@ -130,7 +131,9 @@ func mintCityStores(cityPath string, routes *storageRoutes, work beads.Store, ri
 			opts.ClassRefusals[class] = refusal
 		}
 	}
-	return storeref.NewStores(cityTopology(routes, work, rigs), opts)
+	t := cityTopology(routes, work)
+	t.Rigs = rigs
+	return storeref.NewStores(t, opts)
 }
 
 // placeClass is the store class lives in over work and routes, for the
@@ -143,7 +146,7 @@ func placeClass(cityPath string, routes *storageRoutes, work beads.Store, class 
 			opts.ClassRefusals = map[coordclass.Class]storeref.RefusingClassStore{class: refusal}
 		}
 	}
-	return storeref.Place(cityTopology(routes, work, nil), opts, class)
+	return storeref.Place(cityTopology(routes, work), opts, class)
 }
 
 // scopeStores mints the handles for a caller holding one opened scope store and
