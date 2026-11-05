@@ -42,8 +42,22 @@ func (g *Git) BranchExists(branch string) (bool, error) {
 	return false, fmt.Errorf("probing branch %q: %w", branch, err)
 }
 
-// BaseRefMissing is a stub.
-func (g *Git) BaseRefMissing(string) bool { return false }
+// BaseRefMissing reports true only when g is a git repository in which ref
+// resolves to no commit, either as the remote-tracking ref origin/<ref> or as
+// the literal ref. Anything it cannot decide (not a repository, git
+// unavailable) reports false, so a caller that refuses on true never blocks
+// work it could not actually check. It reads local refs and never fetches.
+func (g *Git) BaseRefMissing(ref string) bool {
+	if !g.IsRepo() {
+		return false
+	}
+	for _, candidate := range []string{"origin/" + ref, ref} {
+		if _, err := g.RevParseVerifyCommit(candidate); err == nil {
+			return false
+		}
+	}
+	return true
+}
 
 // RevParseVerifyCommit resolves ref to a full commit SHA, failing when the
 // ref does not exist or does not point at a commit. The ref is resolved

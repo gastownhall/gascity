@@ -485,6 +485,9 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	a := opts.Target
 	method := "formula"
 	searchPaths := SlingFormulaSearchPaths(deps, a)
+	if err := checkSlingBaseBranch(opts.BeadOrFormula, "", opts, deps, a); err != nil {
+		return SlingResult{Target: a.QualifiedName()}, err
+	}
 	inv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), opts.BeadOrFormula, "", opts, deps, a)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
@@ -654,6 +657,9 @@ func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID str
 func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName, method, errLabel string, fallbackToPlainOnMoleculeConflict bool, result SlingResult) (SlingResult, error) {
 	depsWork := beads.WorkStore{Store: deps.Store}
 	a := opts.Target
+	if err := checkSlingBaseBranch(formulaName, beadID, opts, deps, a); err != nil {
+		return result, err
+	}
 	formulaVars := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)
 	searchPaths := SlingFormulaSearchPaths(deps, a)
 	graphInv, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), formulaName, beadID, opts, deps, a)
@@ -2210,6 +2216,11 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		isGraph, err = isGraphSlingFormula(context.Background(), useFormula, searchPaths, formulaVars)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
+		}
+		for _, child := range open {
+			if err := checkSlingBaseBranch(useFormula, child.ID, opts, deps, a); err != nil {
+				return SlingResult{}, fmt.Errorf("child %s: %w", child.ID, err)
+			}
 		}
 		if err := validateBatchSlingFormulaRuntimeVars(context.Background(), useFormula, searchPaths, opts, open, a, deps); err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)

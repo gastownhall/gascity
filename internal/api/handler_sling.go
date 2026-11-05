@@ -595,7 +595,12 @@ func (r apiBranchResolver) DefaultBranch(dir string) string {
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"))
 }
 
-func (r apiBranchResolver) BaseRefMissing(string, string) bool { return false }
+func (r apiBranchResolver) BaseRefMissing(dir, ref string) bool {
+	if dir == "" {
+		dir = r.cityPath
+	}
+	return gitpkg.New(dir).BaseRefMissing(ref)
+}
 
 // apiNotifier implements sling.Notifier for the API context.
 type apiNotifier struct {

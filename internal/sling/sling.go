@@ -1119,6 +1119,25 @@ func SlingFormulaUsesTargetBranch(formulaName string) bool {
 	return formulaName == "mol-refinery-patrol"
 }
 
+// checkSlingBaseBranch refuses a formula sling whose base_branch names no ref
+// in the repository the work will be built in. The molecule's workspace step
+// would otherwise fail on it after the bead was already routed and its
+// molecule created. The check reads local refs only (no fetch) and passes
+// whenever the resolver cannot decide, so it refuses only on proof.
+func checkSlingBaseBranch(formulaName, beadID string, opts SlingOpts, deps SlingDeps, a config.Agent) error {
+	if deps.Branches == nil {
+		return nil
+	}
+	ref := BuildSlingFormulaVars(formulaName, beadID, opts.Vars, a, deps)["base_branch"]
+	if ref == "" {
+		return nil
+	}
+	if deps.Branches.BaseRefMissing(SlingFormulaRepoDir(beadID, deps, a), ref) {
+		return fmt.Errorf("base_branch %q resolves to no ref (neither origin/%s nor %s) in the build repository; fetch it or correct base_branch, do not retry unchanged", ref, ref, ref)
+	}
+	return nil
+}
+
 // SlingFormulaRepoDir returns the best repo directory for formula variable
 // resolution.
 func SlingFormulaRepoDir(beadID string, deps SlingDeps, a config.Agent) string {
