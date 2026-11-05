@@ -139,6 +139,11 @@
           "type": "string",
           "description": "Human-readable native-store fallback reason, when any."
         },
+        "gc_bd_inflight": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of bd subprocesses currently admitted by the city's subprocess admission semaphore (the gc_bd_inflight gauge), computed at read time. Omitted when zero."
+        },
         "proxied": {
           "type": "object",
           "description": "The proxied-native read lane's account of the bead store open this output was read through: the CLI's own open on locally built output, the serving controller's on output read from the city's API. Present only when GC_BEADS_PROXIED_NATIVE is on for a proxied-server scope.",
