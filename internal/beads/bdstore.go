@@ -3060,13 +3060,72 @@ func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery, assignees []
 	return filtered, nil
 }
 
+// bdListIDsPerCall is how many ids one `bd list --id` argv element carries.
+// A query with more ids is read in chunks of this size, so no single argv
+// element grows without bound.
+const bdListIDsPerCall = 500
+
 // fetchViaBDList runs `bd list` for query and returns the raw rows (before
 // applyListQuery's client-side filter/sort/limit) plus a partial-parse error
 // if parseIssuesTolerant dropped any. Split out of listViaBDList so the
 // assignee fan-out above can combine several independently-predicated reads'
 // raw rows before a single applyListQuery pass runs over all of them,
 // instead of each read sorting and limiting on its own.
+//
+// A query carrying IDs is pushed down to bd as `--id <comma-joined>`, so bd
+// answers for those rows alone instead of scanning the whole population the
+// other filters match. More than bdListIDsPerCall ids are read as one call per
+// chunk; the chunks' rows are unioned by id, keeping the first copy, and
+// returned here for the caller's single applyListQuery pass, so Limit, Sort
+// and SeekAfter apply once to the merged set. The Go-side IDs residual filter
+// still runs there. --id is exact-match, ANDs with the other flags and
+// tolerates ids bd does not hold.
 func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, error) {
+	if len(query.IDs) == 0 {
+		return s.fetchViaBDListCall(query, nil)
+	}
+	ids := make([]string, 0, len(query.IDs))
+	askedFor := make(map[string]bool, len(query.IDs))
+	for _, id := range query.IDs {
+		if id == "" || askedFor[id] {
+			continue
+		}
+		askedFor[id] = true
+		ids = append(ids, id)
+	}
+	// Only blank ids were asked for: no row can match, and an id-less bd list
+	// here would be the full scan this push-down exists to avoid.
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	var (
+		merged  []Bead
+		partial *PartialResultError
+	)
+	seen := make(map[string]bool)
+	for start := 0; start < len(ids); start += bdListIDsPerCall {
+		end := min(start+bdListIDsPerCall, len(ids))
+		rows, perCallPartial, err := s.fetchViaBDListCall(query, ids[start:end])
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, row := range rows {
+			if seen[row.ID] {
+				continue
+			}
+			seen[row.ID] = true
+			merged = append(merged, row)
+		}
+		if perCallPartial != nil && partial == nil {
+			partial = perCallPartial
+		}
+	}
+	return merged, partial, nil
+}
+
+// fetchViaBDListCall is one `bd list` invocation for fetchViaBDList. ids, when
+// non-empty, is sent as a single `--id` argv element.
+func (s *BdStore) fetchViaBDListCall(query ListQuery, ids []string) ([]Bead, *PartialResultError, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -3112,6 +3171,9 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if query.SkipLabels && serverQuery.Label == "" && s.listSkipLabelsEnabled {
 		args = append(args, "--skip-labels")
 	}
+	if len(ids) > 0 {
+		args = append(args, "--id", strings.Join(ids, ","))
+	}
 
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
@@ -3155,9 +3217,11 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs is pushed down as bd list --id (chunked, see fetchViaBDList), but
+	// the id set is read in chunks whose rows are merged before applyListQuery
+	// applies Limit, Sort and SeekAfter once, and the Go-side IDs filter still
+	// runs after bd's: a bd-side limit would cut each chunk on its own, so the
+	// read stays unbounded.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
