@@ -186,6 +186,11 @@ func TestBeadFromGenRoundTripsEveryBeadJSONField(t *testing.T) {
 		NoHistory:    true,
 		DeferUntil:   &deferUntil,
 		IsBlocked:    &blocked,
+		CreatedBy:    "creator",
+		Owner:        "owner@example.com",
+		Notes:        "some notes",
+		AwaitType:    "gh:pr",
+		AwaitID:      "42",
 		CloseReason:  "done",
 	}
 	rv := reflect.ValueOf(want)
