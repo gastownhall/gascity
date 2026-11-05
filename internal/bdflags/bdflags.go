@@ -262,6 +262,38 @@ func Known(sub string) bool {
 	return ok
 }
 
+// positionalCountBySub is the number of leading positional arguments each
+// subcommand accepts before only flags may follow, taken from each
+// subcommand's `bd <sub> --help` Usage line. Every manifest subcommand is
+// listed, even those that match the default, and
+// TestScanUnknownFlagsPositionalBudgetPerSubcommand pins each one's budget, so
+// adding a subcommand forces the decision there.
+//
+// Variadic [id...] subcommands (update, close, reopen, delete, show,
+// mol burn, dep list) are bounded at one id rather than left open-ended: the
+// scan reads prompt prose as well as commands, and an open budget lets the
+// words after "bd update" absorb everything up to an unrelated command's
+// flags. The known cost is that a real multi-id call ("bd close a b --reason
+// x") stops being flag-checked after its first id.
+var positionalCountBySub = map[string]int{
+	"create": 1, // [title]
+	"update": 1, "close": 1, "reopen": 1, "delete": 1, "show": 1,
+	"ready": 0, "list": 0,
+	"mol current": 1, "mol pour": 1, "mol wisp": 1, "mol burn": 1,
+	"gate check": 0, "gate list": 1,
+	"dep add": 2, "dep list": 1, "dep remove": 2,
+}
+
+// PositionalCount returns how many leading bare (non-flag) arguments sub
+// accepts before only flags may follow. A subcommand outside the manifest
+// defaults to one, an issue id.
+func PositionalCount(sub string) int {
+	if n, ok := positionalCountBySub[sub]; ok {
+		return n
+	}
+	return 1
+}
+
 // ValueFlags returns the set of value-consuming flag names (long and short
 // form) for sub, merged with the global flags shared by every bd
 // subcommand. Returns nil if sub is not a known subcommand key.

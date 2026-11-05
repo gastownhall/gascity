@@ -36,6 +36,11 @@ var gcScopeValueFlags = map[string]bool{
 // flag belonging to a downstream command ("bd show <id> --json | jq -r .x")
 // or to a neighboring markdown table cell is never attributed to bd.
 //
+// An invocation ends once it has more bare words than its subcommand takes
+// positional arguments (PositionalCount), so prose that merely mentions
+// "bd update" or "bd create" does not carry on to flags that belong to
+// another command or are only being discussed.
+//
 // Scanning is line-oriented and does not join backslash-continued shell
 // lines; every bd invocation seen in prompt templates today is a single
 // physical line, so this is an accepted scope boundary rather than a gap.
@@ -91,16 +96,46 @@ func splitShellSegments(line string) []string {
 }
 
 // tokenize splits a line on whitespace and trims flagTokenCutset from each
-// resulting token, dropping any token that becomes empty.
+// resulting token, dropping any token that becomes empty. A quoted run that
+// follows a flag ("--title \"a | b\"") is kept as one token, so a multi-word
+// flag value counts as the single argument it is; a quote with no closing
+// partner on the line is left alone rather than swallowing the rest of it.
 func tokenize(line string) []string {
 	fields := strings.Fields(line)
 	tokens := make([]string, 0, len(fields))
-	for _, f := range fields {
+	prev := ""
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if strings.HasPrefix(prev, "-") && !strings.Contains(prev, "=") {
+			f, i = joinQuotedRun(fields, i)
+		}
+		prev = f
 		if t := strings.Trim(f, flagTokenCutset); t != "" {
 			tokens = append(tokens, t)
 		}
 	}
 	return tokens
+}
+
+// joinQuotedRun returns fields[i] and i unchanged unless it opens a quote
+// that a later field closes, in which case it returns the fields from i
+// through the closing one joined with single spaces and the index of the
+// closing field.
+func joinQuotedRun(fields []string, i int) (string, int) {
+	f := fields[i]
+	if f == "" || (f[0] != '"' && f[0] != '\'') {
+		return f, i
+	}
+	quote := f[:1]
+	if len(f) > 1 && strings.HasSuffix(f, quote) {
+		return f, i // opens and closes within one field
+	}
+	for k := i + 1; k < len(fields); k++ {
+		if strings.HasSuffix(fields[k], quote) {
+			return strings.Join(fields[i:k+1], " "), k
+		}
+	}
+	return f, i
 }
 
 // scanLineForUnknownFlags walks tokens looking for bd/"gc bd" invocations of
@@ -174,6 +209,8 @@ func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool,
 			valueFlags[flag] = true
 		}
 	}
+	positionalBudget := PositionalCount(key)
+	positionalsSeen := 0
 	j := flagStart
 	for j < len(tokens) {
 		tok := tokens[j]
@@ -184,6 +221,10 @@ func scanInvocationFlags(tokens []string, flagStart int, key string, viaGC bool,
 			return findings, j // a new bd invocation begins; the outer loop takes it
 		}
 		if !strings.HasPrefix(tok, "-") || tok == "-" {
+			positionalsSeen++
+			if positionalsSeen > positionalBudget {
+				return findings, j // prose or an unrelated command follows; this invocation is over
+			}
 			j++
 			continue
 		}
