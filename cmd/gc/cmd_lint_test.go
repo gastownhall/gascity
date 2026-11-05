@@ -514,6 +514,22 @@ func TestLintCleanBdInvocationsProduceNoFindings(t *testing.T) {
 	}
 }
 
+func TestLintAcceptsThreeTokenBdSubcommandFlags(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-three-token", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`bd mol wisp gc --age foo --exclude-type bar`\n`bd mol wisp list --all --type patrol --json`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestLintReportsUnknownBdFlag(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "bd-flag-typo", "worker", "prompts/worker.template.md")

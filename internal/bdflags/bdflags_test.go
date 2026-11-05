@@ -497,3 +497,139 @@ func TestScanUnknownFlagsAcceptsBdHiddenAliases(t *testing.T) {
 		}
 	}
 }
+
+// bd's "mol wisp" has children ("gc", "list") that carry flags the parent does
+// not: the fleet's patrol templates run `bd mol wisp gc --age 3h --exclude-type
+// agent,rig` and `bd mol wisp list --all --type patrol`. Each is its own
+// manifest key, sourced from `bd mol wisp <child> --help`.
+func TestThreeTokenSubcommandFlagSets(t *testing.T) {
+	for _, flag := range []string{"--age", "--exclude-type"} {
+		if !ValueFlags("mol wisp gc")[flag] {
+			t.Errorf(`ValueFlags("mol wisp gc")[%q] = false, want true`, flag)
+		}
+	}
+	for _, flag := range []string{"--all", "--closed", "--dry-run", "-f", "--force"} {
+		if !BoolFlags("mol wisp gc")[flag] {
+			t.Errorf(`BoolFlags("mol wisp gc")[%q] = false, want true`, flag)
+		}
+	}
+	if !ValueFlags("mol wisp list")["--type"] {
+		t.Error(`ValueFlags("mol wisp list")["--type"] = false, want true`)
+	}
+	if !BoolFlags("mol wisp list")["--all"] {
+		t.Error(`BoolFlags("mol wisp list")["--all"] = false, want true`)
+	}
+	// The parent's own flags are not inherited by the children: bd rejects
+	// `bd mol wisp gc --var x=y`.
+	if ValueFlags("mol wisp gc")["--var"] {
+		t.Error(`ValueFlags("mol wisp gc")["--var"] = true, want false`)
+	}
+	if ValueFlags("mol wisp")["--age"] {
+		t.Error(`ValueFlags("mol wisp")["--age"] = true, want false`)
+	}
+}
+
+func TestMatchSubcommandPrefersThreeTokenKey(t *testing.T) {
+	cases := []struct {
+		name         string
+		tokens       []string
+		wantKey      string
+		wantConsumed int
+		wantOK       bool
+	}{
+		{"three-token gc", []string{"mol", "wisp", "gc", "--age", "3h"}, "mol wisp gc", 3, true},
+		{"three-token list", []string{"mol", "wisp", "list", "--json"}, "mol wisp list", 3, true},
+		{"parent with a formula positional stays two-token", []string{"mol", "wisp", "mol-deacon-patrol"}, "mol wisp", 2, true},
+		{"parent alone", []string{"mol", "wisp"}, "mol wisp", 2, true},
+		{"two-token", []string{"mol", "pour", "mol-x"}, "mol pour", 2, true},
+		{"one-token", []string{"update", "<id>"}, "update", 1, true},
+		{"unknown", []string{"formula", "show", "x"}, "", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, consumed, ok := matchSubcommand(tc.tokens, 0)
+			if key != tc.wantKey || consumed != tc.wantConsumed || ok != tc.wantOK {
+				t.Errorf("matchSubcommand(%v, 0) = (%q, %d, %v), want (%q, %d, %v)",
+					tc.tokens, key, consumed, ok, tc.wantKey, tc.wantConsumed, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestScanUnknownFlagsAcceptsThreeTokenSubcommandFlags(t *testing.T) {
+	cases := []string{
+		`bd mol wisp gc --age 3h --exclude-type agent,rig`,
+		`bd mol wisp gc --age foo --exclude-type bar`,
+		"`bd mol wisp gc --age 1m --dry-run`",
+		`gc bd mol wisp gc --closed --force --exclude-type mol`,
+		`gc bd --rig {{.Rig}} mol wisp gc --age 24h`,
+		`bd mol wisp list --json`,
+		`bd mol wisp list --all --type patrol --json`,
+		`gc bd mol wisp list --all`,
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
+}
+
+func TestScanUnknownFlagsDetectsTypoInThreeTokenSubcommand(t *testing.T) {
+	cases := []struct {
+		line    string
+		wantSub string
+		wantFlg string
+	}{
+		{`bd mol wisp gc --agee 3h`, "mol wisp gc", "--agee"},
+		{`bd mol wisp list --tpye patrol`, "mol wisp list", "--tpye"},
+		// Flags that belong to a sibling compound key are not valid here.
+		{`bd mol wisp gc --var x=y`, "mol wisp gc", "--var"},
+		{`bd mol wisp mol-deacon-patrol --age 3h`, "mol wisp", "--age"},
+	}
+	for _, tc := range cases {
+		findings := ScanUnknownFlags([]byte(tc.line))
+		if len(findings) != 1 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want exactly 1 finding", tc.line, findings)
+			continue
+		}
+		if findings[0].Subcommand != tc.wantSub || findings[0].Flag != tc.wantFlg {
+			t.Errorf("ScanUnknownFlags(%q) = %+v, want subcommand %q flag %q",
+				tc.line, findings[0], tc.wantSub, tc.wantFlg)
+		}
+	}
+}
+
+// The parent form still takes its own flags once three-token resolution is in
+// place: `bd mol wisp <formula> --var k=v` is how patrols are started.
+func TestScanUnknownFlagsParentWispFormStillValidated(t *testing.T) {
+	line := `bd mol wisp mol-deacon-patrol --var rig=x`
+	if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+		t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+	}
+}
+
+// bd does not abbreviate flags: live `bd list --stat open` and
+// `bd create --lab x` both fail with "unknown flag" (bd 1.3.2). The valid
+// short spelling `--label` on create is a hidden alias carried in the pinned
+// table, not a prefix of `--labels`. Treating a prefix as valid would make the
+// lint accept invocations bd rejects, so a prefix must stay a finding.
+func TestScanUnknownFlagsDoesNotAcceptFlagPrefixes(t *testing.T) {
+	cases := []struct {
+		line    string
+		wantSub string
+		wantFlg string
+	}{
+		{`bd list --stat open`, "list", "--stat"},
+		{`bd create "t" --lab x`, "create", "--lab"},
+		{`bd mol wisp gc --exclude-t agent`, "mol wisp gc", "--exclude-t"},
+	}
+	for _, tc := range cases {
+		findings := ScanUnknownFlags([]byte(tc.line))
+		if len(findings) != 1 || findings[0].Subcommand != tc.wantSub || findings[0].Flag != tc.wantFlg {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want one finding for %s on %q", tc.line, findings, tc.wantFlg, tc.wantSub)
+		}
+	}
+	if findings := ScanUnknownFlags([]byte(`bd create "t" --label area/docs`)); len(findings) != 0 {
+		t.Errorf("hidden alias --label on create = %v, want no findings", findings)
+	}
+}
