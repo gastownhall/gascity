@@ -84,6 +84,7 @@ func (t *programCaptureHealTally) add(action runtime.ProgramCaptureAction) {
 // sweep unfinished, which the pass trace records.
 func (t programCaptureHealTally) acted() bool {
 	return t.actions[runtime.ProgramCaptureArmed] > 0 || t.actions[runtime.ProgramCaptureDisarmed] > 0 ||
+		t.actions[runtime.ProgramCaptureDeclared] > 0 ||
 		t.swept > 0 || t.sweepDeferred > 0 || len(t.errs) > 0
 }
 
@@ -118,9 +119,10 @@ func (t programCaptureHealTally) String() string {
 
 // programCaptureHealNeeded reports whether a session's reading, under the
 // capture its config declares (want), calls for a heal: a declared session
-// whose pane is not armed or whose reader is lost, or an undeclared session
+// whose pane is not armed or whose reader is lost, or whose capture carries
+// another mid-turn hold declaration than want's, or an undeclared session
 // whose pane still carries our capture. Unread and exited readings, and a
-// declared capture that is working, call for nothing.
+// declared capture that is working as declared, call for nothing.
 func programCaptureHealNeeded(r runtime.ProgramStatus, want runtime.ProgramStatusArm) bool {
 	switch r.Validity {
 	case runtime.ProgramStatusNotArmed:
@@ -128,7 +130,7 @@ func programCaptureHealNeeded(r runtime.ProgramStatus, want runtime.ProgramStatu
 	case runtime.ProgramStatusReaderLost:
 		return true
 	case runtime.ProgramStatusValid, runtime.ProgramStatusSilent, runtime.ProgramStatusCleared:
-		return !want.Capture
+		return !want.Capture || r.HoldDeclared != want.HoldMidTurn
 	}
 	return false
 }

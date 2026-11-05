@@ -383,11 +383,15 @@ const (
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
 	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
-	// MigratedCrossEdgesMetadataKey records, on a bead the rig importer moved
-	// into the city binding, the cross-boundary edges it did not copy: a JSON
-	// list of {dir, type, other, other_status_at_import, payload, action}. No
-	// cross-store edge is ever written, so this keeps the history readable;
-	// the rig's retained-source backup is authoritative for a reverse.
+	// MigratedCrossEdgesMetadataKey records, on a bead, the cross-boundary
+	// edges a writer dropped rather than write across stores: a JSON list of
+	// {dir, type, other, other_status_at_import, payload, action}. No
+	// cross-store edge is ever written, so this keeps the history readable.
+	// The rig importer records it on a bead it moved into the city binding,
+	// where the rig's retained-source backup is authoritative for a reverse.
+	// `gc doctor --fix` records it on a work row whose malformed "<type>:<id>"
+	// blocks literal it removed because only the binding holds <id>; there
+	// the entry, payload included, is the only trace of that edge.
 	MigratedCrossEdgesMetadataKey = "gc.migrated_cross_edges"
 	// TriggerBeadStoreRefMetadataKey records the store ref of the bead named by
 	// TriggerBeadIDMetadataKey. Like that key it is controller demand
@@ -424,10 +428,24 @@ const (
 // routed bead or a generic bead. The kid names the key that signed the grant,
 // so it identifies a person only when each principal signs with a key of
 // their own, and the same launcher's work carries a new value after a key
-// rotation. It is server-owned. The generic bead API refuses a client-supplied
-// value, and nothing is stamped when the request carried no verified
-// principal.
+// rotation. On the API it is server-owned: the generic bead API refuses a
+// client-supplied value, and a request with no verified principal stamps
+// nothing. Two writers copy a value instead of verifying a grant. The drain
+// dispatcher copies its run root's value onto each item workflow root it
+// instantiates, so that copy is as trustworthy as the run root's. A local
+// `gc sling` run from inside a session stamps the initiator of the work that
+// session has claimed (cmd/gc sling_inherit.go). Such a value is only as
+// trustworthy as the stamp it was copied from and the session identity in the
+// caller's environment, and nothing on the bead tells it apart from a
+// grant-verified one.
 const InitiatorMetadataKey = "gc.initiator"
+
+// OwnerNamespaceMetadataKey is the creation stamp a rig with federation =
+// "rig" writes on every row created through its guarded store: the rig's
+// identity namespace ("<rig>/" under the actor fold). It marks a gc-created row
+// that carries no owner identity as the creating city's. Only that store
+// writes it.
+const OwnerNamespaceMetadataKey = "gc.owner_namespace"
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
@@ -530,8 +548,8 @@ const (
 	MoleculeIDMetadataKey = "molecule_id"
 
 	// MoleculeFailedMetadataKey marks the beads of a partially-instantiated
-	// molecule as failed (value "true"). Written best-effort by
-	// internal/molecule markFailed on instantiation error paths; read by
+	// molecule as failed (value "true"). Written by internal/molecule
+	// markFailed on instantiation error paths; read by
 	// dispatch/sling/cmd/gc to skip or close failed roots.
 	MoleculeFailedMetadataKey = "molecule_failed"
 
@@ -696,6 +714,7 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
+	OwnerNamespaceMetadataKey,
 	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,

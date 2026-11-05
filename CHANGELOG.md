@@ -411,6 +411,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc doctor` reports as a warning per gate. `require`, which refuses a
     request it cannot record, stays opt-in.
 
+- **Beads (`bd`) v1.3.4 is the pinned and tested bd.** `deps.env`
+  (`BD_VERSION`, `BD_CURRENT_VERSION`, `BD_CURRENT_REF`), the go.mod library,
+  the CI workflows' `BD_VERSION` pins, the Bazel test bd (`bd_bin_v1_3_4`)
+  and the agent image move from bd v1.3.2 to
+  [v1.3.4](https://github.com/gastownhall/beads/releases/tag/v1.3.4), which
+  keeps the 1.3.0 schema (no new migration), so upgrading is a binary swap:
+  `brew upgrade beads`. The 1.3.0 floor is unchanged. bd v1.3.3 and later
+  change what some commands accept: `.beads/.env` keys outside the allowlist
+  (`BEADS_*`, `BD_*`, `GT_ROOT`, `DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`)
+  are ignored with a warning on stderr; `mail.delegate` is read only from the
+  environment and user config; option-shaped remote URLs are refused;
+  `bd rules compact` previews unless given `--force`; and `bd delete` needs
+  full ids. v1.3.4 admits the `GT_ROOT` line `gc rig add` writes to a rig's
+  `.beads/.env`, so bd no longer prints `beads: ignoring GT_ROOT from
+  .beads/.env` there, as v1.3.3 did. gc embeds a bd 1.3.4 command inventory
+  beside the 1.3.2 one; bd 1.3.3 has the same command tree as 1.3.4, so a
+  split city admits 1.3.2, 1.3.3 and 1.3.4.
+
 - **Dolt 2.6.0 or newer is now required.** `gc init` and `gc start` readiness,
   `gc doctor`'s `dolt-version` check and the dolt pack's `check-dolt` doctor
   now refuse a final Dolt below 2.6.0 (the floor was 2.1.0) and still refuse
@@ -1204,6 +1222,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Adopting or restarting with a bd store bound to a loopback Dolt server
+  gc does not run works.** A store `bd init --server --external` bound to a
+  dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
+  managed server by its host spelling alone: `gc rig add --adopt` ran gc's
+  init op over it and failed (`managed Dolt server unreachable while
+  inspecting existing store`), and in a city on that server the
+  `gc.endpoint_origin` stamp made every later `gc start` fail. A loopback
+  binding is now gc's only when its port is one gc's managed-Dolt runtime
+  record for the city names (`.gc/runtime/packs/dolt/dolt-state.json` or
+  `dolt-provider-state.json`); a record gc cannot parse is an error naming
+  the file. One rule still answers first: in a city gc has run Dolt for, a
+  store whose database already has a directory in the city's data dir
+  (`.beads/dolt/<database>`, which `gc rig remove` leaves in place) is gc's
+  whatever its port, so give a store you adopt from your own server a
+  database name gc does not keep there. The boot port sync (and the
+  publication and `gc rig add` paths that share it) no longer stamps
+  endpoint keys into, writes, or removes the port file of a bd-owned store,
+  hosted or loopback; and `gc doctor`'s `dolt-drift` check no longer reports
+  such a store's own port file as drift. Like every store gc does not serve,
+  such a store does not get gc's bead types on start: after adopting one,
+  run `gc doctor --fix --check custom-types:<rig>` once. A store an earlier
+  gc already stamped needs a one-time repair: restore its pre-adopt
+  `.beads/config.yaml` (or drop the `gc.*` keys adopt appended), then adopt
+  again.
+
+- **`gc bd release-if-current` exits 1 for a bead its store does not hold.**
+  It printed `skipped` with exit 0 whenever nothing was released, including
+  when the store it ran against held no such bead, and the core orphan-sweep
+  order reads `skipped` as "someone else holds it". The bead is now read back
+  from that store before the verdict: a bead the store does not hold exits 1,
+  as does a failed read-back, and a bead it holds under another assignee or
+  status still prints `skipped` with exit 0.
+
+- **`gc lint` no longer flags bd's hidden flag aliases as unknown.** The bd
+  flag tables now list `bd create`'s `--label`, `--body`, `-m`/`--message`
+  and `--description-file`, `bd update`'s `--body`, `-m`/`--message`,
+  `--description-file` and `--acceptance-criteria`, and `bd close`'s
+  `--resolution`, `-m`/`--message` and `--comment`, which bd accepts without
+  listing them in its help. A prompt or script using one of them no longer
+  gets an unknown-flag finding.
+- **`gc bd` passes bd's hidden flag aliases through.** `gc bd close` with
+  `-m`/`--message`, `--resolution` or `--comment`, and `gc bd update` with
+  `--body`, `-m`/`--message`, `--description-file` or
+  `--acceptance-criteria`, used to stop with "cannot safely verify bead IDs
+  (unrecognized flag ...)"; they now run. `gc bd create` reads the token
+  after a valueless `--description-file` as that flag's value, as bd does,
+  so a `--metadata` there is no longer checked as a flag of its own.
+- **`gc agent-script`'s `bd_claim` and `bd_update` fail when the city config
+  cannot be loaded.** They used to run the write in the agent's default
+  store, so a city-scoped agent's claim of a rig bead could land in the
+  wrong store. The action now fails with the load error and runs no `bd`.
+
+- **The orphan sweep protects malformed claim rows and keeps sweeping.** A
+  claim whose bead id or assignee contains a tab, newline or carriage return
+  is protected and named, never asked about or released, since it could
+  forge a row of its own. A scope whose in-progress listing cannot be read is
+  dropped for the pass (its claims kept) while the other scopes are still
+  swept; one unreadable listing used to empty the whole pass.
+- **The orphan sweep releases a dead pool session's claim in a rig.** Its
+  release named no store, and `gc bd release-if-current` picked one from its
+  arguments, trying the assignee too: a pool session's bead id carries the
+  city's prefix and exists in the city store, so the release of a rig bead
+  went there and was skipped. `gc bd release-if-current` now routes by the
+  bead alone, and the sweep names the rig (`--rig`) for a rig claim.
+
 - **The supervisor built `/status`, `/agents` and `/rigs` slowly on cities
   with many unlimited pools (#8453).** Each unlimited pool listed the
   runtime's sessions on its own, so on tmux every pool forked
@@ -1292,6 +1375,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says so and records the run as partial (`order.skipped`) instead of reading
   the failure as no gates. Gates created before this change carry no stamp and
   stay unannounced; close or re-pour them.
+
+- **Split cities seat a released graph step on the next controller pass.**
+  On a city whose `[storage.classes]` serves the graph class from a
+  binding, the v2 reconciler read the binding's ready work only from the
+  external-reads lane's recording, which refreshes about every 20 seconds at
+  the 15-second patrol, so a step released by a blocker in the binding waited
+  for that recording before it got a seat. A step whose every blocker lives in
+  the binding's own namespace needs no other store, and the controller now
+  judges it from the binding's cache in the pass; a step with a blocker
+  anywhere else is still served from the gated recording.
 
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph

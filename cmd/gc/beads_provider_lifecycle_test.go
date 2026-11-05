@@ -3300,83 +3300,164 @@ dolt.auto-start: true
 	}
 }
 
+// TestSyncConfiguredDoltPortFilesClearsInheritedDoltUserWhenCityClearsIt pins
+// the re-mirror of an inherited rig whose dolt.user the city has since cleared,
+// a drift strict validation rejects. gc initializes a direct rig with `bd init
+// --server` against the city's server, so the rig's metadata.json carries bd's
+// binding, hosted or on loopback: the ownership check that reads it must leave
+// the drift to this re-mirror rather than fail the sync on it.
 func TestSyncConfiguredDoltPortFilesClearsInheritedDoltUserWhenCityClearsIt(t *testing.T) {
-	cityDir := t.TempDir()
-	inheritedRigDir := filepath.Join(t.TempDir(), "fe")
+	for name, tc := range map[string]struct {
+		host       string
+		rigBinding bool
+	}{
+		"hosted city, rig without bd's binding": {host: "db.example.com"},
+		"hosted city, rig with bd's binding":    {host: "db.example.com", rigBinding: true},
+		"loopback city, rig with bd's binding":  {host: "127.0.0.1", rigBinding: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			inheritedRigDir := filepath.Join(t.TempDir(), "fe")
 
-	files := map[string]string{
-		cityDir: `issue_prefix: stale
+			files := map[string]string{
+				cityDir: `issue_prefix: stale
 gc.endpoint_origin: city_canonical
 gc.endpoint_status: verified
-dolt.host: db.example.com
+dolt.host: ` + tc.host + `
 dolt.port: 3307
 dolt.auto-start: true
 `,
-		inheritedRigDir: `issue_prefix: stale
+				inheritedRigDir: `issue_prefix: stale
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
-dolt.host: db.example.com
+dolt.host: ` + tc.host + `
 dolt.port: 3307
 dolt.user: stale-user
 dolt.auto-start: true
 `,
-	}
-	for dir, cfg := range files {
-		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+			}
+			for dir, cfg := range files {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.rigBinding {
+				binding := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+					`"dolt_server_host":%q,"dolt_server_port":3307,"dolt_database":"fe"}`+"\n", tc.host)
+				if err := os.WriteFile(scopeMetadataJSONPath(inheritedRigDir), []byte(binding), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "db.example.com", Port: 3307})
-	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+			cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: tc.host, Port: 3307})
+			t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
 
-	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: "db.example.com", Port: 3307}, "gc", []config.Rig{{Name: "fe", Path: inheritedRigDir}})
+			requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{Host: tc.host, Port: 3307}, "gc", []config.Rig{{Name: "fe", Path: inheritedRigDir}})
 
-	cfgData, err := os.ReadFile(filepath.Join(inheritedRigDir, ".beads", "config.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := string(cfgData)
-	if strings.Contains(cfg, "dolt.user:") {
-		t.Fatalf("inherited rig config should clear stale dolt.user when city user is empty:%c%s", 10, cfg)
+			cfg := string(mustReadFile(t, filepath.Join(inheritedRigDir, ".beads", "config.yaml")))
+			if strings.Contains(cfg, "dolt.user:") {
+				t.Fatalf("inherited rig config should clear stale dolt.user when city user is empty:%c%s", 10, cfg)
+			}
+			if !strings.Contains(cfg, "gc.endpoint_origin: inherited_city") || !strings.Contains(cfg, "dolt.host: "+tc.host) {
+				t.Fatalf("inherited rig config should still mirror the city endpoint %s:3307:%c%s", tc.host, 10, cfg)
+			}
+		})
 	}
 }
 
+// TestNormalizeCanonicalBdScopeFilesReMirrorsADriftedInheritedRig is the same
+// drift on gc start's path: boot normalization classifies each rig before it
+// canonicalises it, and that classification must not fail on the gc-stamped
+// mirror the closing port sync repairs.
+func TestNormalizeCanonicalBdScopeFilesReMirrorsADriftedInheritedRig(t *testing.T) {
+	for name, host := range map[string]string{"hosted": "db.example.com", "loopback": "127.0.0.1"} {
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(t.TempDir(), "fe")
+			for dir, scope := range map[string]struct{ config, database string }{
+				cityDir: {database: "hq", config: "issue_prefix: gc\ngc.endpoint_origin: city_canonical\n" +
+					"gc.endpoint_status: verified\ndolt.host: " + host + "\ndolt.port: 3307\n"},
+				rigDir: {database: "fe", config: "issue_prefix: fe\ngc.endpoint_origin: inherited_city\n" +
+					"gc.endpoint_status: verified\ndolt.host: " + host + "\ndolt.port: 3307\ndolt.user: stale-user\n"},
+			} {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte(scope.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				binding := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+					`"dolt_server_host":%q,"dolt_server_port":3307,"dolt_database":%q}`+"\n", host, scope.database)
+				if err := os.WriteFile(scopeMetadataJSONPath(dir), []byte(binding), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "fixture"},
+				Dolt:      config.DoltConfig{Host: host, Port: 3307},
+				Rigs:      []config.Rig{{Name: "fe", Path: rigDir, Prefix: "fe"}},
+			}
+
+			if err := normalizeCanonicalBdScopeFiles(cityDir, cfg, io.Discard); err != nil {
+				t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+			}
+			rigConfig := string(mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")))
+			if strings.Contains(rigConfig, "dolt.user:") || !strings.Contains(rigConfig, "gc.endpoint_origin: inherited_city") {
+				t.Fatalf("rig config should re-mirror the city endpoint without the stale dolt.user:%c%s", 10, rigConfig)
+			}
+		})
+	}
+}
+
+// TestSyncConfiguredDoltPortFilesSkipsInheritedRigForCompleteCityStorageBinding
+// covers a city on an opaque storage binding, including one that still carries
+// bd's legacy host and port, hosted or on loopback with no gc record: the sync
+// leaves the city's inheriting rigs alone either way.
 func TestSyncConfiguredDoltPortFilesSkipsInheritedRigForCompleteCityStorageBinding(t *testing.T) {
-	cityDir := t.TempDir()
-	rigDir := filepath.Join(t.TempDir(), "frontend")
-	for _, dir := range []string{cityDir, rigDir} {
-		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cityMetadata := []byte(`{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`)
-	if err := os.WriteFile(scopeMetadataJSONPath(cityDir), cityMetadata, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rigConfig := []byte(`issue_prefix: frontend
+	const completeBinding = `"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"`
+	for name, cityMetadata := range map[string]string{
+		"no legacy host and port": `{` + completeBinding + `}`,
+		"legacy hosted host and port": `{` + completeBinding +
+			`,"dolt_mode":"server","dolt_server_host":"db.example","dolt_server_port":4406}`,
+		"legacy loopback host and port with no gc record": `{` + completeBinding +
+			`,"dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":17333}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(t.TempDir(), "frontend")
+			for _, dir := range []string{cityDir, rigDir} {
+				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(cityMetadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rigConfig := []byte(`issue_prefix: frontend
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
 dolt.auto-start: false
 `)
-	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), rigConfig, 0o644); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), rigConfig, 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir}}, io.Discard); err != nil {
-		t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
-	}
-	if got := mustReadFile(t, scopeMetadataJSONPath(cityDir)); string(got) != string(cityMetadata) {
-		t.Fatalf("city metadata changed:\n got %s\nwant %s", got, cityMetadata)
-	}
-	if got := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")); string(got) != string(rigConfig) {
-		t.Fatalf("inherited rig config changed:\n got %s\nwant %s", got, rigConfig)
-	}
-	if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
-		t.Fatalf("inherited rig port file should remain absent, stat err = %v", err)
+			if err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", []config.Rig{{Name: "frontend", Path: rigDir}}, io.Discard); err != nil {
+				t.Fatalf("syncConfiguredDoltPortFiles: %v", err)
+			}
+			if got := mustReadFile(t, scopeMetadataJSONPath(cityDir)); string(got) != cityMetadata {
+				t.Fatalf("city metadata changed:\n got %s\nwant %s", got, cityMetadata)
+			}
+			if got := mustReadFile(t, filepath.Join(rigDir, ".beads", "config.yaml")); string(got) != string(rigConfig) {
+				t.Fatalf("inherited rig config changed:\n got %s\nwant %s", got, rigConfig)
+			}
+			if _, err := os.Stat(filepath.Join(rigDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+				t.Fatalf("inherited rig port file should remain absent, stat err = %v", err)
+			}
+		})
 	}
 }
 

@@ -71,10 +71,15 @@ type SlingOpts struct {
 	ScopeKind  string
 	ScopeRef   string
 	// Initiator names who launched this sling: the verified principal of the
-	// API request (a write-grant key id). When set, sling records it as
+	// API request (a write-grant key id), or, for a local `gc sling` run from
+	// inside a session, the initiator of the work that session has claimed:
+	// that of the open run a claimed bead is the input of, else the claimed
+	// bead's own stamp, else its open run root's (cmd/gc sling_inherit.go).
+	// An inherited value is only as trustworthy as that stamp and the session
+	// identity in the caller's environment. When set, sling records it as
 	// gc.initiator on every root it instantiates and on the bead it routes,
-	// before routing, so the stamp is present before any worker can claim
-	// the work. Empty stamps nothing.
+	// before routing, so the stamp is present before any worker can claim the
+	// work. Empty stamps nothing.
 	Initiator string
 }
 

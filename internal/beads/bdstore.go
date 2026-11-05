@@ -283,17 +283,65 @@ func classifyBDExecResult(parent, ctx context.Context, name string, timeout time
 // every other shape — a single line, stderr that already leads with the error,
 // stderr with no bd error line, empty stderr, a non-bd command — composes
 // byte-for-byte what it composed before.
+//
+// bd's .beads/.env notices (isBdEnvFileNotice) go last, after whatever says
+// what failed, and do not count as stderr when choosing between the streams.
+// bd v1.3.3 and later print one on every command for each key outside their
+// .beads/.env allowlist. v1.3.3 also refused the GT_ROOT line every rig `gc rig
+// add` creates carries there (v1.3.4 admits GT_ROOT again), and any other key a
+// user puts in that file still draws the notice. If those lines counted, a --json failure bd reports only on stdout (bd close, dep
+// list, label add) would lose its envelope: the error text would hold just the
+// notices, and the text classifiers (isBdNotFound, isBdTransientWriteError)
+// would stop recognizing it.
 func bdFailureDetail(name string, out []byte, stderr string) string {
 	detail := strings.TrimSpace(stderr)
 	if name != "bd" {
 		return detail
 	}
+	detail, notices := splitBdEnvFileNotices(detail)
 	if detail == "" {
 		// bd writes structured errors to stdout under --json while stderr is
 		// often empty.
-		return bdStdoutErrorDetail(out)
+		detail = bdStdoutErrorDetail(out)
+	} else {
+		detail = hoistBdErrorLines(detail)
 	}
-	return hoistBdErrorLines(detail)
+	switch {
+	case notices == "":
+		return detail
+	case detail == "":
+		return notices
+	default:
+		return detail + "\n" + notices
+	}
+}
+
+// isBdEnvFileNotice reports whether line is the notice bd (v1.3.3 and later,
+// gastownhall/beads#7879) prints to stderr for a .beads/.env key outside its
+// allowlist: "beads: ignoring <KEY> from .beads/.env (<reason>)". bd prints it
+// before the command runs and ignores the key, so the line says nothing about
+// why a command failed.
+func isBdEnvFileNotice(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "beads: ignoring ") && strings.Contains(trimmed, " from .beads/.env (")
+}
+
+// splitBdEnvFileNotices separates bd's .beads/.env notices from the rest of
+// detail, each part keeping its lines in their original order. Detail without
+// a notice comes back unchanged.
+func splitBdEnvFileNotices(detail string) (rest, notices string) {
+	if !strings.Contains(detail, " from .beads/.env (") {
+		return detail, ""
+	}
+	var kept, moved []string
+	for _, line := range strings.Split(detail, "\n") {
+		if isBdEnvFileNotice(line) {
+			moved = append(moved, line)
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n")), strings.Join(moved, "\n")
 }
 
 // bdErrorLinePrefixes are the prefixes bd stamps on the lines that say what

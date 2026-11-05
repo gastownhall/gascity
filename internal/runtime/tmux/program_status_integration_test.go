@@ -20,7 +20,7 @@ import (
 )
 
 // RUNTIME-CONTRACT-017 on the real tmux: the runtimetest program-status
-// suite (PS-001…PS-014) against sessions whose agent pane runs the scripted
+// suite (PS-001…PS-015) against sessions whose agent pane runs the scripted
 // emitter, armed with the built companion, each on its own scratch server
 // (osc7501x-heal-<rand> for the heal cases PS-013 and PS-014). The Relayed
 // fixture runs the emitter under the built companion's relay.
@@ -39,6 +39,9 @@ func TestTmuxProgramStatusContract(t *testing.T) {
 		},
 		Relayed: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
 			return start(t, mode, runtime.ProgramStatusArm{Capture: true, Relay: true}, script).session()
+		},
+		Held: func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) runtimetest.ProgramStatusSession {
+			return start(t, mode, runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}, script).session()
 		},
 		Inherited: func(t *testing.T, mode runtime.ProgramStatusMode) runtimetest.ProgramStatusSession {
 			s := start(t, mode, runtime.ProgramStatusArm{}, nil)
@@ -92,10 +95,16 @@ func startProgramSession(t *testing.T, companion, emitter string, mode runtime.P
 }
 
 // programScratchKind names the scratch server of a contract case: heal for
-// the heal cases (PS-013, PS-014), arm for the rest.
+// the heal cases (PS-013, PS-014), hold for the mid-turn hold's case
+// (PS-015) and tests, pend for the pending read's tests, arm for the rest.
 func programScratchKind(t *testing.T) string {
-	if strings.Contains(t.Name(), "/PS-013_") || strings.Contains(t.Name(), "/PS-014_") {
+	switch {
+	case strings.Contains(t.Name(), "/PS-013_") || strings.Contains(t.Name(), "/PS-014_"):
 		return "heal"
+	case strings.Contains(t.Name(), "/PS-015_") || strings.HasPrefix(t.Name(), "TestHeld"):
+		return "hold"
+	case strings.HasPrefix(t.Name(), "TestPending"):
+		return "pend"
 	}
 	return "arm"
 }
@@ -399,4 +408,54 @@ func TestDisarmWhileProcessTableUnreadKeepsTheTapRecoverable(t *testing.T) {
 	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Valid() || r.State != runtime.ProgramIdle {
 		t.Fatalf("re-armed reading = %+v, %v; want a valid idle reading", r, err)
 	}
+}
+
+// The starved-queue veto's fresh read on the real tmux with the built
+// companion and emitter, on a scratch server (osc7501x-hold-<rand>): a pane
+// whose provider declares the mid-turn hold holds typing while its program
+// reports working, even with the state cache primed with that reading, and
+// releases at the first read after the program reports its turn done, the
+// cache not yet refreshed. A nudge is typed either way: the leaf itself
+// holds nothing.
+func TestHeldReadFollowsTheTurnPastTheStateCache(t *testing.T) {
+	s := startProgramSession(t, captureCompanionBin(t), captureEmitterBin(t), runtime.ProgramStatusOn,
+		runtime.ProgramStatusArm{Capture: true, HoldMidTurn: true}, []string{"report state=working"})
+	if got, pane := paneOption(t, s.p, s.name, programHoldOption), s.paneFormat(t, "#{pane_id}"); got != pane {
+		t.Fatalf("hold option %q, want it bound to the agent pane %s", got, pane)
+	}
+	if r, err := s.p.ProgramStatus(s.name); err != nil || !r.Running() || !r.HoldDeclared {
+		t.Fatalf("reading before the turn ends = %+v, %v; want a valid working record declaring the hold", r, err)
+	}
+	if r, held := runtime.ProgramRecordTypingHold(s.p, s.name, time.Now()); !held {
+		t.Fatalf("hold read while working = %+v, want held", r.Status)
+	}
+
+	// The turn ends; the state cache is not refreshed here, so only the
+	// fresh read can see it.
+	target := s.target(t)
+	s.tmux(t, "send-keys", "-t", target, "-l", "report state=done")
+	s.tmux(t, "send-keys", "-t", target, "Enter")
+	eventually(t, "the program to report done", func() bool {
+		rec, err := programstatus.Decode(paneOption(t, s.p, s.name, programStatusOption))
+		return err == nil && rec.Nonce == s.nonce && rec.State == runtime.ProgramDone
+	})
+	if r, held := runtime.ProgramRecordTypingHold(s.p, s.name, time.Now()); held || r.Status.State != runtime.ProgramDone {
+		t.Fatalf("hold read after done = %+v held=%v, want the done record and no hold", r.Status, held)
+	}
+
+	// The emitter reads each typed line as a step; a comment is skipped, so
+	// the marker reaches the pane's screen and nothing else.
+	const marker = "# gc-held-nudge-7501"
+	s.tmux(t, "send-keys", "-t", target, "-l", "report state=working")
+	s.tmux(t, "send-keys", "-t", target, "Enter")
+	eventually(t, "the program to report working again", func() bool {
+		rec, err := programstatus.Decode(paneOption(t, s.p, s.name, programStatusOption))
+		return err == nil && rec.Nonce == s.nonce && rec.State == runtime.ProgramWorking
+	})
+	if err := s.p.NudgeNow(s.name, []runtime.ContentBlock{{Type: "text", Text: marker}}); err != nil {
+		t.Fatalf("NudgeNow to a working pane = %v, want it typed: the leaf holds nothing", err)
+	}
+	eventually(t, "the nudge to reach the pane", func() bool {
+		return strings.Count(s.tmux(t, "capture-pane", "-p", "-J", "-S", "-", "-t", target), marker) == 1
+	})
 }

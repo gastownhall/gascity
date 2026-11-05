@@ -860,7 +860,7 @@ func rigImportCopy(loc rigImportLocation, binding, rigStore beads.Store, plan ri
 // createRigImportGate mints one S3b gate for g in the binding, stamped as
 // this import's and scoped as its owner.
 func createRigImportGate(binding beads.Store, rig string, g rigImportGate) (beads.Bead, error) {
-	gate := dispatch.NewCrossStoreGate(binding, g.Owner, g.Blocker)
+	gate := dispatch.NewCrossStoreGate(beads.GraphStore{Store: binding}, g.Owner, g.Blocker)
 	gate.Metadata[infraMigrationStampKey] = rigImportStamp(rig)
 	scope := strings.TrimSpace(g.Owner.Metadata[beadmeta.RootStoreRefMetadataKey])
 	if scope == "" {

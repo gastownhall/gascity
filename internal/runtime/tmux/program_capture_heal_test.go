@@ -20,6 +20,7 @@ type healModelPane struct {
 	mark                string // agent, orphan or pane
 	dead, pipe          bool
 	tap, record, text   string
+	hold                string // the hold option's value as set
 }
 
 // healServer is a scripted tmux server for heal: it answers heal's pane
@@ -128,7 +129,7 @@ func (s *healServer) run(cmd []string) (string, error) {
 		var rows []string
 		for _, p := range s.panes {
 			if p.session == session {
-				rows = append(rows, row(boolField(p.dead), p.window, p.mark, p.id, boolField(p.pipe), p.tap, p.record, runtimeInventoryEnd))
+				rows = append(rows, row(boolField(p.dead), p.window, p.mark, p.id, boolField(p.pipe), p.tap, p.record, p.hold, runtimeInventoryEnd))
 			}
 		}
 		if len(rows) == 0 {
@@ -139,6 +140,19 @@ func (s *healServer) run(cmd []string) (string, error) {
 		p := s.pane(target)
 		if err := s.fail(target); err != nil {
 			return "", err
+		}
+		if guard, ok := strings.CutPrefix(cmd[len(cmd)-2], "#{==:#{"+programTapOption+"},"); ok {
+			// A nonce-guarded hold declaration (declareHold).
+			if p.tap != strings.TrimSuffix(guard, "}") {
+				return "", nil
+			}
+			switch inner := cmd[len(cmd)-1]; {
+			case strings.Contains(inner, "'-pu'"):
+				p.hold = ""
+			default:
+				p.hold = p.id
+			}
+			return "", nil
 		}
 		if s.pipeOpensBeforeAct {
 			p.pipe = true
@@ -151,6 +165,10 @@ func (s *healServer) run(cmd []string) (string, error) {
 			return "", fmt.Errorf("if-shell arm list carries no nonce: %q", cmd[len(cmd)-1])
 		}
 		p.tap, p.record, p.text, p.pipe = m[1]+"."+p.id, "", "", true
+		p.hold = ""
+		if strings.Contains(cmd[len(cmd)-1], "'"+programHoldOption+"' '#{pane_id}'") {
+			p.hold = p.id
+		}
 		s.taps[p.tap] = true
 		return "", nil
 	case "display-message":
@@ -169,12 +187,17 @@ func (s *healServer) run(cmd []string) (string, error) {
 				p.record = ""
 			case programTextOption:
 				p.text = ""
+			case programHoldOption:
+				p.hold = ""
 			}
 			return "", nil
 		}
 		opt, value := cmd[len(cmd)-2], cmd[len(cmd)-1]
-		if opt == programTapOption {
+		switch opt {
+		case programTapOption:
 			p.tap = strings.ReplaceAll(value, "#{pane_id}", p.id)
+		case programHoldOption:
+			p.hold = strings.ReplaceAll(value, "#{pane_id}", p.id)
 		}
 		return "", nil
 	case "pipe-pane":
