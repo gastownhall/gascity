@@ -1526,3 +1526,140 @@ func TestNativeCodexApprovalManagedIdentityCannotDowngradeToContent(t *testing.T
 		})
 	}
 }
+
+// These fixtures retain the captured F6 Codex0.162.1 approval and native exec
+// wrapper. Only equal-width owned marker/path tokens are anonymized; the test
+// rollout's ownership and task-start bookends are constructed independently.
+const (
+	nativeCodexInlineCommand = "printf %s RFC8191_GRANTED_11111111111111111111111111111111 > /Users/admin/rfc8191/cities/rfc-questions-22222222222222222222222222222222/native-approval-33333333333333333333333333333333/granted.txt"
+	nativeCodexInlineReason  = "Do you allow only this exact marker write to /Users/admin/rfc8191/cities/rfc-questions-22222222222222222222222222222222/native-approval-33333333333333333333333333333333/granted.txt?"
+)
+
+func nativeCodexInlineCaptured(t *testing.T) (string, string) {
+	t.Helper()
+	var rows []struct {
+		Type   string `json:"type"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		CallID string `json:"call_id"`
+		Input  string `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(readCodexApprovalFixture(t, "f6-inline-exec-native.json")), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Type != "custom_tool_call" || rows[0].Name != "exec" || rows[0].Status != "completed" || rows[0].CallID == "" {
+		t.Fatalf("captured native exec record changed: %+v", rows)
+	}
+	return rows[0].CallID, rows[0].Input
+}
+
+func nativeCodexInlineScreen(t *testing.T, name string) string {
+	t.Helper()
+	var screen string
+	if err := json.Unmarshal([]byte(readCodexApprovalFixture(t, name)), &screen); err != nil {
+		t.Fatal(err)
+	}
+	return screen
+}
+
+func TestNativeCodexInlineCapturedLiteralExecCommand(t *testing.T) {
+	_, code := nativeCodexInlineCaptured(t)
+	command, reason, ok := codexLiteralExecCommand(code)
+	if !ok || command != nativeCodexInlineCommand || reason != nativeCodexInlineReason {
+		t.Fatalf("actual captured inline exec wrapper rejected or changed: command=%q reason=%q supported=%v", command, reason, ok)
+	}
+	if styled := nativeCodexInlineScreen(t, "f6-inline-exec-styled.json"); !strings.Contains(styled, "\x1b[") || !strings.Contains(styled, "RFC8191_GRANTED_11111111111111111111111111111111") {
+		t.Fatal("actual styled fixture lost its styling or captured command")
+	}
+}
+
+func TestNativeCodexInlineCapturedApprovalBindsAndGuardsOrdinaryInput(t *testing.T) {
+	callID, code := nativeCodexInlineCaptured(t)
+	tm, ex, _ := nativeCodexApprovalTmux(t, nativeCodexApprovalRecords(t, callID, code, false))
+	ex.panes = []string{nativeCodexInlineScreen(t, "f6-inline-exec-plain.json")}
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" || pending.Metadata["command"] != nativeCodexInlineCommand {
+		t.Fatalf("actual captured inline approval did not bind: %+v,%v", pending, err)
+	}
+	again, err := tm.Pending("q")
+	if err != nil || again == nil || again.RequestID != pending.RequestID {
+		t.Fatalf("same captured native invocation changed identity: %+v,%v", again, err)
+	}
+	if err := tm.checkNoApprovalPrompt("q"); !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("ordinary input did not stay held: %v", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
+func TestNativeCodexInlineUnsafeOrUnboundRefusesEveryAction(t *testing.T) {
+	callID, code := nativeCodexInlineCaptured(t)
+	base := nativeCodexApprovalRecords(t, callID, code, false)
+	second := nativeCodexApprovalRecords(t, "call_other", code, false)
+	last := strings.Split(strings.TrimSpace(second), "\n")[2] + "\n"
+	for name, records := range map[string]string{
+		"trailing statement": nativeCodexApprovalRecords(t, callID, code+"evil();", false),
+		"second call":        nativeCodexApprovalRecords(t, callID, code+code, false),
+		"other callee":       nativeCodexApprovalRecords(t, callID, strings.Replace(code, "text(await", "print(await", 1), false),
+		"variable":           nativeCodexApprovalRecords(t, callID, strings.Replace(code, fmt.Sprintf("cmd:%q", nativeCodexInlineCommand), "cmd:command", 1), false),
+		"expression":         nativeCodexApprovalRecords(t, callID, strings.Replace(code, fmt.Sprintf("cmd:%q", nativeCodexInlineCommand), fmt.Sprintf("cmd:%q+suffix", nativeCodexInlineCommand), 1), false),
+		"computed key":       nativeCodexApprovalRecords(t, callID, strings.Replace(code, "{cmd:", "{[\"cmd\"]:", 1), false),
+		"spread":             nativeCodexApprovalRecords(t, callID, strings.Replace(code, "{cmd:", "{...other,cmd:", 1), false),
+		"duplicate key":      nativeCodexApprovalRecords(t, callID, strings.Replace(code, "{cmd:", "{cmd:\"other\",cmd:", 1), false),
+		"unknown key":        nativeCodexApprovalRecords(t, callID, strings.Replace(code, "{cmd:", "{unknown:0,cmd:", 1), false),
+		"comment":            nativeCodexApprovalRecords(t, callID, "/* comment */"+code, false),
+		"wrong command":      nativeCodexApprovalRecords(t, callID, strings.Replace(code, nativeCodexInlineCommand, "printf other", 1), false),
+		"completed output":   nativeCodexApprovalRecords(t, callID, code, true),
+		"ambiguous call":     base + last,
+		"foreign uuid":       strings.ReplaceAll(base, nativeCodexApprovalUUID, "01a1a105-9ee9-7cd3-a25b-45840b88eb52"),
+		"aborted turn":       base + `{"type":"event_msg","payload":{"type":"turn_aborted"}}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm, ex, _ := nativeCodexApprovalTmux(t, records)
+			ex.panes = []string{nativeCodexInlineScreen(t, "f6-inline-exec-plain.json")}
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["command"] != "" || pending.Metadata["request_identity"] != "unavailable" || pending.Metadata["response_unavailable"] == "" {
+				t.Fatalf("unproven inline request exposed as answerable: %+v,%v", pending, err)
+			}
+			for _, action := range []string{"approve", "deny"} {
+				if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+					t.Fatalf("%s reached unproven inline request: %v", action, err)
+				}
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}
+
+func TestNativeCodexInlineBoundActionsAndLaterOccurrence(t *testing.T) {
+	callID, code := nativeCodexInlineCaptured(t)
+	for action, key := range map[string]string{"approve": "1", "deny": "3"} {
+		t.Run(action, func(t *testing.T) {
+			tm, ex, path := nativeCodexApprovalTmux(t, nativeCodexApprovalRecords(t, callID, code, false))
+			screen := nativeCodexInlineScreen(t, "f6-inline-exec-plain.json")
+			ex.panes = []string{screen, "assistant ready"}
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Metadata["request_identity"] != "native_invocation" {
+				t.Fatalf("captured native pending=%+v,%v", pending, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); err != nil {
+				t.Fatal(err)
+			}
+			if keys := sentKeys(ex.calls); !slices.Equal(keys, []string{key}) {
+				t.Fatalf("bound inline action sent %q, want exactly one %s key", keys, key)
+			}
+			ex.calls = nil
+			ex.panes = []string{screen}
+			if err := os.WriteFile(path, []byte(nativeCodexApprovalRecords(t, "call_later", code, false)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			later, err := tm.Pending("q")
+			if err != nil || later == nil || later.RequestID == pending.RequestID {
+				t.Fatalf("later inline invocation reused identity: %+v,%v", later, err)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); !errors.Is(err, runtime.ErrInteractionGone) {
+				t.Fatalf("stale inline action reached later occurrence: %v", err)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+}

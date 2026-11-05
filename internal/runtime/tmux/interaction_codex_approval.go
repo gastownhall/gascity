@@ -13,10 +13,11 @@ import (
 
 var (
 	codexApprovalUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	// This is the native literal wrapper observed on Codex0.162.1. It is not
+	// These are the native literal wrappers observed on Codex0.162.1. This is not
 	// a JavaScript evaluator: comments, other statements, computed values and
 	// multiple calls are unsupported and make the approval unavailable.
-	codexLiteralExecWrapper = regexp.MustCompile(`(?s)^\s*const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*await\s+tools\.exec_command\(\s*(\{.*\})\s*\)\s*;\s*text\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*;\s*$`)
+	codexLiteralExecWrapper       = regexp.MustCompile(`(?s)^\s*const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*await\s+tools\.exec_command\(\s*(\{.*\})\s*\)\s*;\s*text\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)\s*;\s*$`)
+	codexLiteralInlineExecWrapper = regexp.MustCompile(`(?s)^\s*text\(\s*await\s+tools\.exec_command\(\s*(\{.*\})\s*\)\s*\)\s*;\s*$`)
 )
 
 // codexLiteralExecCommand recognizes only one literal native tool call. JSON
@@ -25,11 +26,14 @@ func codexLiteralExecCommand(code string) (string, string, bool) {
 	if len(code) > 64*1024 {
 		return "", "", false
 	}
-	match := codexLiteralExecWrapper.FindStringSubmatch(code)
-	if match == nil || match[1] != match[3] {
+	var object string
+	if match := codexLiteralExecWrapper.FindStringSubmatch(code); match != nil && match[1] == match[3] {
+		object = match[2]
+	} else if match := codexLiteralInlineExecWrapper.FindStringSubmatch(code); match != nil {
+		object = match[1]
+	} else {
 		return "", "", false
 	}
-	object := match[2]
 	pos := 1
 	skip := func() {
 		for pos < len(object) && strings.ContainsRune(" \t\r\n", rune(object[pos])) {

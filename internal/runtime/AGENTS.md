@@ -28,3 +28,12 @@ Known startup menus derive movement from complete rendered choices and confirm t
 ## Structural terminal presentation
 
 Identify startup branding from structural text, preserving displayed text while removing only supported styling or exact known hyperlink wrappers. Dim styling must not erase a required version suffix. Keep dim-aware draft, running, pending, ownership and issued-authority checks separate; unknown or incomplete controls must refuse. Add actual current-screen styled captures, with private paths anonymized, to regressions before changing these rules.
+
+## Native Codex approval wrappers
+
+Bind approvals only from the qualified single literal `exec_command` wrappers:
+`const value = await tools.exec_command({...}); text(value);` or
+`text(await tools.exec_command({...}));`. Reuse the data-only object scanner;
+never evaluate JavaScript or accept multiple calls, effects or unknown
+expressions. Preserve exact command, current native invocation, conversation
+ownership and input-fence checks before any approval action.
