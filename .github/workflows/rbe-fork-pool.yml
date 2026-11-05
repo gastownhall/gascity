@@ -11,11 +11,14 @@
 # (CN=rbe-fork-worker, fork CA) reaches only the fork scheduler and the CAS.
 # Blacksmith donates this compute for workflows of our OSS repos only.
 name: rbe-fork-pool
-# The pool scalers count floor workers by this name (oss-pool-scaler.py
-# ROLE_TITLE): "(floor, idle 15m)". A dispatch without the input (CI
-# pre-warm, by hand) is named burst and keeps the default idle_minutes.
-# A canary (rbe_worker_sha) is named so, never floor or burst: the scalers
-# count it as neither.
+# The run name says the role (floor or burst) and the idle window, for
+# people: no scaler reads it. A dispatch without the input (CI pre-warm, by
+# hand) is named burst and keeps the default idle_minutes. A canary
+# (rbe_worker_sha) is named canary with its commit. The scalers' breaker
+# counts bazel-allocator[bot]'s runs alone, so a hand canary never trips it;
+# their pool size counts every unfinished run of this workflow (max workers,
+# the floor, booting, the drift cap, the daily budget), a canary too:
+# one worker more, harmless.
 run-name: ${{ format('rbe-fork-pool ({0}, idle {1}m){2}', inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}
 
 on:
@@ -62,7 +65,8 @@ jobs:
       # The worker code: gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
       # fetched anonymously from its main and verified there. No secret in
       # this step.
-      # Canary (input rbe_worker_sha): never from the pool scaler's App, a
+      # Canary (input rbe_worker_sha): never from an App or bot (the pool
+      # scalers' bazel-allocator[bot] included), a
       # 40-hex sha alone, max_minutes capped. Every value reaches the shell
       # through env, never an expression inside run.
       - name: Canary input
@@ -74,8 +78,8 @@ jobs:
           MAX: ${{ inputs.max_minutes }}
         run: |
           set -euo pipefail
-          if [ "$ACTOR" = "bazel-allocator[bot]" ]; then
-            echo "::error title=rbe-worker canary::the pool scaler never dispatches a canary; refused"
+          if [[ $ACTOR == *"[bot]" ]]; then
+            echo "::error title=rbe-worker canary::a canary is dispatched by a person, never an App or bot ($ACTOR); refused"
             exit 1
           fi
           [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=rbe-worker canary::rbe_worker_sha must be 40-hex"; exit 1; }
@@ -91,7 +95,7 @@ jobs:
       # (H5, as a pin bump), and the canary descends from the pin; before
       # any fetched code runs. h5.sh is this checkout's, not the fetched tree's.
       - name: Canary commits since the pin are signed, merged and verified (H5)
-        if: steps.rbe-worker.outputs.canary == 'true'
+        if: inputs.rbe_worker_sha != ''
         env:
           GH_TOKEN: ${{ github.token }}
           WORKER_REPO_DIR: ${{ steps.rbe-worker.outputs.dir }}
@@ -175,7 +179,9 @@ jobs:
   # As in rbe-worker-pool.yml: drift is reported while the worker serves.
   await-drift:
     name: worker-env drift watch
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # Never on a canary (rbe_worker_sha): its commit may measure what the
+    # pin does not, and a drift issue would cap both pools for the pin.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.rbe_worker_sha == ''
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

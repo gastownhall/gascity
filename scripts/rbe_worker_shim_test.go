@@ -1067,7 +1067,7 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 						t.Errorf("canary step env %v, want %v", st.Env, want)
 					}
 					for _, s := range []string{
-						`[ "$ACTOR" = "bazel-allocator[bot]" ]`, `[[ $SHA =~ ^[0-9a-f]{40}$ ]]`,
+						`if [[ $ACTOR == *"[bot]" ]]; then`, `[[ $SHA =~ ^[0-9a-f]{40}$ ]]`,
 						`echo "max_minutes=$(( MAX < 60 ? MAX : 60 ))" >>"$GITHUB_OUTPUT"`,
 					} {
 						if !strings.Contains(st.Run, s) {
@@ -1078,7 +1078,7 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 					at["fetch"] = i
 				case strings.Contains(st.Run, "h5.sh"):
 					at["h5"] = i
-					if st.If != "steps.rbe-worker.outputs.canary == 'true'" || st.Env["GH_TOKEN"] != "${{ github.token }}" ||
+					if st.If != "inputs.rbe_worker_sha != ''" || st.Env["GH_TOKEN"] != "${{ github.token }}" ||
 						st.Env["PIN_SHA"] != "${{ steps.rbe-worker.outputs.pin }}" || st.Env["NEW_SHA"] != "${{ steps.rbe-worker.outputs.sha }}" {
 						t.Errorf("h5 step if %q env %v", st.If, st.Env)
 					}
@@ -1095,8 +1095,27 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 			}
 			// rbe_worker_sha reaches nothing but these: the run name, the
 			// canary step's env and the fetch's canary-sha.
-			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != 6 {
-				t.Errorf("inputs.rbe_worker_sha referenced %d times, want 6 (run-name 2, canary if and env, the fetch's with)", n)
+			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != 8 {
+				t.Errorf("inputs.rbe_worker_sha referenced %d times, want 8 (run-name 2, canary if and env, the fetch's with, the H5 if, await-drift's if)", n)
+			}
+			// No drift job on a canary: a canary commit that measures
+			// something else would open a drift issue for the pin, which caps
+			// both pools and fails remote-mode PRs until closed by hand.
+			// report-drift needs await-drift, so it skips too.
+			var jobs struct {
+				Jobs map[string]struct {
+					If    string `yaml:"if"`
+					Needs any    `yaml:"needs"`
+				} `yaml:"jobs"`
+			}
+			if err := yaml.Unmarshal([]byte(text), &jobs); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(jobs.Jobs["await-drift"].If, " && inputs.rbe_worker_sha == ''") {
+				t.Errorf("await-drift if %q: must skip a canary", jobs.Jobs["await-drift"].If)
+			}
+			if jobs.Jobs["report-drift"].Needs != "await-drift" || !strings.Contains(jobs.Jobs["report-drift"].If, "needs.await-drift.outputs.drift == 'true'") {
+				t.Errorf("report-drift needs %v if %q: must follow await-drift", jobs.Jobs["report-drift"].Needs, jobs.Jobs["report-drift"].If)
 			}
 		})
 	}

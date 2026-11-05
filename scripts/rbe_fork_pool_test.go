@@ -185,9 +185,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 }
 
-// rbe-west's pool scalers count floor workers by run name (infra
-// nativelink-cas/west oss-pool-scaler.py ROLE_TITLE, README "Pool scalers:
-// floor and burst roles"): each pool workflow takes input role, a choice of
+// The run name says a worker's role, for people (no scaler reads it):
+// each pool workflow takes input role, a choice of
 // burst (the default: CI pre-warm and hand dispatches) or floor, and puts it
 // and idle_minutes in run-name. The worker never reads role; idle_minutes is
 // what changes its behavior.
