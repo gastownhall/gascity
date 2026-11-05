@@ -244,7 +244,7 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "internal/api/handler_sling.go",
-		line:   656,
+		line:   658,
 		reason: "write to a pre-existing bead; Root #4 (internal/api/handler_sling.go:534, API sling composition root per design sec 15) -- wrap that root's store construction in GREEN phase",
 	},
 	{
