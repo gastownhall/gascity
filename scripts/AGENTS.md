@@ -98,3 +98,10 @@ provide a cross-store atomic snapshot.
 Dashboard generation stages both raw dist assets and the compressed embedded
 bundle. A passing working-tree build must not leave the production embedding
 outside the commit; the real-hook index regression covers both outputs.
+
+## Build metadata synchronization
+
+- **BUILD files.** After changing imports or adding packages or files, run
+  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
+  fails otherwise. Never commit machine-specific endpoints; they belong in
+  `.bazelrc.local`.

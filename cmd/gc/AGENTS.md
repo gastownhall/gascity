@@ -15,3 +15,9 @@ publishing new endpoint config, while inherited mirrors still match the original
 city topology. Preserve the original rig metadata/config snapshots through the
 plan and refuse observed drift before the first topology write; this observation
 is not a cross-file concurrency lock. Do not bypass provider-owned classification.
+
+A resolved resume command must not append the one-shot `initial_message`, even
+when the controller start hash is absent. Keep the retained native conversation
+and the stored message; first-start classification alone does not authorize
+resending it. Fresh conversation launch and explicit fresh-wake input remain
+unchanged.

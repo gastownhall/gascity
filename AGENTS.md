@@ -36,7 +36,7 @@ next to that code; read the matching file before changing it.
 | Provider process environment | `internal/processenv/AGENTS.md` |
 | Provider hooks | `internal/hooks/AGENTS.md` |
 | Gate processes | `internal/convergence/AGENTS.md` |
-| `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
+| Go imports, new files, `scripts/`, test runners or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
 | `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
 | New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
@@ -319,10 +319,6 @@ targets, and a green `go test` is not evidence a change passes CI.
   `--config=remote-exec` (ask your human before adding either to
   `.bazelrc.local`). Details: TESTING.md "Bazel cache tiers" and
   `engdocs/bazel-quickstart.md`.
-- **BUILD files.** After changing imports or adding packages or files, run
-  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
-  fails otherwise. Never commit machine-specific endpoints; they belong in
-  `.bazelrc.local`.
 - **Go-native twins** (the `-go` make targets and the sharded runners of
   TESTING.md "Cross-category runners, timing, and resource isolation") are
   for humans working offline and for hosts Bazel does not serve: the macOS

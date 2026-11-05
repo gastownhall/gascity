@@ -1435,12 +1435,13 @@ func buildPreparedStartWithTranscript(
 	if !firstStart && !forceFresh && hasResumeKey {
 		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
 	}
-	// Initial message: append to prompt on first start only, reusing the
-	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
+	// Initial message: append only for a new conversation. A resolved resume
+	// never replays it, even when a missing controller hash classifies firstStart.
+	// Reuse the overrides parsed by parseSessionTemplateOverridesForLaunch above.
 	// Schema overrides were already applied in the block above (before coreHash).
 	// resolveSessionCommand only adds --resume/--session-id which are not schema
 	// flags, so the overrides don't need to be re-applied.
-	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
+	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) && !resumed {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 		} else {
