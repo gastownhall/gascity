@@ -2925,6 +2925,11 @@ resource = "subprocess"
 calls = 5
 
 [[count]]
+path = "scripts/check_routed_test_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "scripts/check_split_topology_rows_test.go"
 resource = "subprocess"
 calls = 1
@@ -3027,6 +3032,12 @@ calls = 1
 path = "scripts/test_slice_enroll_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "test/acceptance/beads_adopt_loopback_server_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "test/acceptance/beads_cli_contract_port_file_test.go"

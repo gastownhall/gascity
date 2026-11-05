@@ -18,8 +18,10 @@ import (
 // Legacy judges inside its demand pass under crossStoreGateDeadline
 // (readyDemandCache.gateSnapshot). The v2 pass does no remote I/O (CONTRACT v5
 // R4): the external-reads lane judges each leg's snapshot off the pass and
-// records it gated (allocator_backstop_lane.go), and the pass serves only a
-// gated recording for a gate leg (v2DemandReads.ReadyAll).
+// records it gated (allocator_backstop_lane.go), and the pass serves a gate
+// leg's Ready from that recording, except for the rows of an exact leg whose
+// readiness the rule leaves to the leg's own verdict, which it judges from the
+// leg's cache (v2DemandReads.ReadyAll).
 
 // crossStoreGateDeadline bounds how long one judgment of a store's ready
 // snapshot may take. The gate's reads take no context, so a read still in
