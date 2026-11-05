@@ -1662,9 +1662,20 @@ func isolateGCHomeEnv(env []string, gcHome string) []string {
 	return replaceEnv(env, supervisorIsolatedHomeEnv, "1")
 }
 
-// realHomeDir returns the operator's home directory.
+// realHomeDir returns the home directory the passwd database records for the
+// current uid, never $HOME: os.UserHomeDir() returns $HOME, which a test
+// process may already have pointed at an isolated directory (integrationEnvFor
+// does so for gc's own HOME, see isolateGCHomeEnv). It fails closed -- an
+// isolation assertion must not compare against a guessed path.
 func realHomeDir() (string, error) {
-	return os.UserHomeDir()
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		return "", fmt.Errorf("looking up passwd entry for uid %d: %w", os.Getuid(), err)
+	}
+	if strings.TrimSpace(lu.HomeDir) == "" {
+		return "", fmt.Errorf("passwd entry for uid %d has no home directory", os.Getuid())
+	}
+	return lu.HomeDir, nil
 }
 
 func prependPath(paths ...string) string {

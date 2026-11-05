@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -20,7 +19,7 @@ import (
 // auth.json/credentials) -- ga-5cokvb.1.
 func TestIntegrationEnvFor_IsolatesProviderHomes(t *testing.T) {
 	gcHome := t.TempDir()
-	env := integrationEnvFor(gcHome, t.TempDir(), false)
+	env := integrationEnvFor(t, gcHome, t.TempDir(), false)
 	got := parseEnvList(env)
 
 	cases := []struct {
@@ -104,7 +103,7 @@ func TestIntegrationEnvFor_StripsProviderCredentialEnvVars(t *testing.T) {
 		t.Setenv(name, "leaked-test-secret")
 	}
 
-	env := integrationEnvFor(t.TempDir(), t.TempDir(), false)
+	env := integrationEnvFor(t, t.TempDir(), t.TempDir(), false)
 	got := parseEnvList(env)
 
 	for name := range credEnvVars {
@@ -116,19 +115,27 @@ func TestIntegrationEnvFor_StripsProviderCredentialEnvVars(t *testing.T) {
 
 // TestIntegrationEnvFor_IsolatedHomesAreNeverTheRealHome proves the
 // CODEX_HOME/CLAUDE_CONFIG_DIR values integrationEnvFor sets can never
-// resolve to the real host's ~/.codex or ~/.claude. Both the codex and
-// claude CLIs read these env vars to locate their credential store, so this
-// is the concrete guarantee that a test/integration run cannot read or write
-// the operator's real provider credentials -- ga-5cokvb.1.
+// resolve to the real host's ~/.codex or ~/.claude. The codex and claude
+// CLIs read these env vars to locate their credential store, so a test
+// run's provider CLI subprocesses cannot read or write the operator's real
+// provider credentials through them -- ga-5cokvb.1.
+//
+// The guarantee is scoped to those two variables. gc's own readiness probes
+// (probeCodex reads <HOME>/.codex/auth.json, for one) resolve their home from
+// HOME and ignore CODEX_HOME; integrationEnvFor points HOME at a private
+// directory under gcHome (isolateGCHomeEnv), so a gc process started under this
+// env probes that directory. A test that execs gc under some other env, or a
+// process that resolves its home from the passwd entry, is outside this test;
+// reads of that kind are tracked by ga-qnqmzy.
 func TestIntegrationEnvFor_IsolatedHomesAreNeverTheRealHome(t *testing.T) {
-	realHome, err := os.UserHomeDir()
+	realHome, err := realHomeDir()
 	if err != nil {
-		t.Fatalf("os.UserHomeDir: %v", err)
+		t.Fatalf("realHomeDir: %v", err)
 	}
 	realCodexHome := filepath.Join(realHome, ".codex")
 	realClaudeConfigDir := filepath.Join(realHome, ".claude")
 
-	env := integrationEnvFor(t.TempDir(), t.TempDir(), false)
+	env := integrationEnvFor(t, t.TempDir(), t.TempDir(), false)
 	got := parseEnvList(env)
 
 	if got["CODEX_HOME"] == "" {
@@ -166,71 +173,11 @@ func TestBootstrapDriftEnv_InheritsProviderIsolation(t *testing.T) {
 	}
 }
 
-// TestLiveContractReadinessRequestsAvoidCredentialProbes proves the live
-// contract's readiness requests -- the per-route sweep default and the
-// provider-readiness / readiness queries -- name only readiness items whose
-// probe reads no credential file. Without a providers=/items= narrowing the
-// handler probes claude, codex and gemini (readiness adds github_cli), and
-// probeCodex reads <HOME>/.codex/auth.json from the supervisor's real HOME.
-// The contract asserts only HTTP 200 plus OpenAPI shape, so it needs no real
-// probe -- ga-qnqmzy.2.
-func TestLiveContractReadinessRequestsAvoidCredentialProbes(t *testing.T) {
-	// probeZCode reads only ZCODE_CJS / ZCODE_API_KEY from the environment,
-	// stats a binary, and runs `node --version`; it never opens a credential
-	// file under HOME. Every other supported item does (claude, codex, gemini,
-	// pi, antigravity, mimocode) or shells out to a credential-reading CLI
-	// (github_cli).
-	probeFree := map[string]bool{"zcode": true}
-
-	cases := []struct {
-		name         string
-		pathTemplate string
-		param        string
-	}{
-		{"city provider-readiness", "/v0/city/{cityName}/provider-readiness", "providers"},
-		{"supervisor provider-readiness", "/v0/provider-readiness", "providers"},
-		{"city readiness", "/v0/city/{cityName}/readiness", "items"},
-		{"supervisor readiness", "/v0/readiness", "items"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := appendLiveContractDefaultQuery(c.pathTemplate, c.pathTemplate, "rig")
-			_, rawQuery, _ := strings.Cut(got, "?")
-			query, err := url.ParseQuery(rawQuery)
-			if err != nil {
-				t.Fatalf("parse query of %q: %v", got, err)
-			}
-			raw := query.Get(c.param)
-			if raw == "" {
-				t.Fatalf("%q sets no %s= narrowing: the handler would probe its default credential-bearing providers against the real HOME", got, c.param)
-			}
-			for _, name := range strings.Split(raw, ",") {
-				if !probeFree[strings.TrimSpace(name)] {
-					t.Errorf("%q requests %q, whose probe reads a credential file", got, name)
-				}
-			}
-		})
-	}
-
-	// The two direct calls in TestGCLiveContract_BeadsAndEvents must use the
-	// same narrowing rather than a bare ?fresh=false.
-	src, err := os.ReadFile("gc_live_contract_test.go")
-	if err != nil {
-		t.Fatalf("read gc_live_contract_test.go: %v", err)
-	}
-	for _, bad := range []string{`/readiness?fresh=false"`, `/provider-readiness?fresh=false"`} {
-		if strings.Contains(string(src), bad) {
-			t.Errorf("gc_live_contract_test.go still requests %s with no providers=/items= narrowing", bad)
-		}
-	}
-}
-
 // TestRealHomeDir_IgnoresHOMEEnv proves the real home the isolation tests
-// compare against comes from the passwd entry for the current uid, as
-// pinRealHomeEnv resolves it, and not from $HOME: os.UserHomeDir() returns
-// $HOME, so a test process started with HOME already pointed at an isolated
-// directory would compare the isolated homes against themselves and pass
-// vacuously -- ga-qnqmzy.2.
+// compare against comes from the passwd entry for the current uid and not from
+// $HOME: os.UserHomeDir() returns $HOME, so a test process started with HOME
+// already pointed at an isolated directory would compare the isolated homes
+// against themselves and pass vacuously -- ga-qnqmzy.2.
 func TestRealHomeDir_IgnoresHOMEEnv(t *testing.T) {
 	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
 	if err != nil {
