@@ -41,8 +41,9 @@ func routeClearCapabilityRows() []routeClearCapabilityRow {
 		{capability: "AssignmentGuardedUpdater", inSwitch: true, gated: true, pinnedBy: seamTest},
 
 		{
-			capability: "GuardedBatcher", inSwitch: true,
-			reason: "applies pinned creates and revision-guarded updates to conversation-lane rows; no gc.routed_to producer calls it today (open question to the architect: gcg-1862657)",
+			capability: "GuardedBatcher", inSwitch: true, gated: true,
+			pinnedBy: "TestRouteClearGuardedBatch_GenuineRerouteClearsStampsAndRootMirrors",
+			reason:   "gated through the decorator's GuardedBatcherHandle: a per-item clear for an Update whose Opts.Metadata carries gc.routed_to; creates and other updates pass through",
 		},
 		{
 			capability: "GraphApplyStore", inSwitch: true,
@@ -57,6 +58,18 @@ func routeClearCapabilityRows() []routeClearCapabilityRow {
 		{capability: "GraphOnlyReadyStore", inSwitch: true, reason: "read-only"},
 		{capability: "AbsentBlockedReader", inSwitch: true, reason: "read-only"},
 
+		{
+			capability: "ForeignIDBatchCreator",
+			reason:     "creates copies of beads under foreign ids; a new bead has no earlier gc.routed_to to supersede",
+		},
+		{
+			capability: "DepBatchWriter",
+			reason:     "writes dependency edges only; it takes no metadata",
+		},
+		{
+			capability: "DepBatchRemover",
+			reason:     "removes dependency edges only; it takes no metadata",
+		},
 		{
 			capability: "ConditionalAssignmentReleaser",
 			reason:     "writes the assignee only; it takes no metadata",
@@ -146,16 +159,20 @@ func TestRouteClearCapabilityTableCoversResolveCapability(t *testing.T) {
 // A gated row's pinning test exists in this package.
 func TestRouteClearCapabilityTablePinningTestsExist(t *testing.T) {
 	dir := filepath.Join(findRepoRoot(t), "internal", "beads")
-	src, err := os.ReadFile(filepath.Join(dir, "route_clear_seam_test.go"))
-	if err != nil {
-		t.Fatalf("reading the seam tests: %v", err)
+	var src []byte
+	for _, name := range []string{"route_clear_seam_test.go", "route_clear_guarded_batch_test.go"} {
+		part, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		src = append(src, part...)
 	}
 	for _, row := range routeClearCapabilityRows() {
 		if !row.gated {
 			continue
 		}
 		if !strings.Contains(string(src), "func "+row.pinnedBy+"(") {
-			t.Errorf("gated row %s is pinned by %s, which route_clear_seam_test.go does not define", row.capability, row.pinnedBy)
+			t.Errorf("gated row %s is pinned by %s, which the route-clear gate tests do not define", row.capability, row.pinnedBy)
 		}
 	}
 }

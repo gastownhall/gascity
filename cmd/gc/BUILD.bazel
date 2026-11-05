@@ -2045,6 +2045,7 @@ go_test(
         "root_argv_test.go",
         "route_clear_capability_forwarding_test.go",
         "route_clear_carriers_test.go",
+        "route_clear_guarded_batch_test.go",
         "route_equivalence_beads_test.go",
         "route_equivalence_cache_age_footer_test.go",
         "route_equivalence_convoy_test.go",

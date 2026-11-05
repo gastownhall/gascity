@@ -419,6 +419,15 @@ var routeClearOmittedEngineCapabilities = map[string]func(beads.Store) bool{
 		_, ok := beads.MetadataCASWriterFor(store)
 		return ok
 	},
+	// ApplyGuarded is discovered through GuardedBatcherHandle, which answers the
+	// route-clearing gate over the backing's batcher: a batch Update that writes
+	// gc.routed_to runs the clear after the batch lands
+	// (TestRouteClearGuardedBatch_*). A structural ApplyGuarded would answer for a
+	// backing with no batcher.
+	"ApplyGuarded": func(store beads.Store) bool {
+		_, ok := beads.GuardedBatcherFor(store)
+		return ok
+	},
 	// Discovered through NamespaceCensusHandle only. Carrying HasResidentOutside
 	// structurally would advertise a census over a backing that has none, and the
 	// boot verdict would retire a by-id probe on an answer nobody computed.
