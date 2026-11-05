@@ -64,8 +64,12 @@ type idleTracker interface {
 	// a long-running controller.
 	clearIdleAnchor(sessionName string)
 
-	// progressIdleSince reports when the session's current continuous
-	// content-idle run began, for the progress-stall recycle.
+	// progressIdleSince observes the session's pane content and reports when
+	// its current continuous content-idle run began; ok is false when the
+	// session is busy or the observation could not read it as idle. The anchor
+	// is kept for every observed session, whether or not it has an
+	// idle_timeout, and is separate from the idle_timeout anchor so neither
+	// resets the other.
 	progressIdleSince(sessionName string, snap runtime.IdleSnapshotProvider, now time.Time) (time.Time, bool)
 
 	// exemptTemplateFallbackForSession prevents one stable session from
@@ -81,6 +85,7 @@ type memoryIdleTracker struct {
 	templateTimeouts           map[string]time.Duration // agent template → idle timeout
 	templateFallbackExemptions map[string]bool          // session name → skip template fallback
 	idleSince                  map[string]time.Time     // session name → start of the current continuous content-idle run
+	progressIdleAnchors        map[string]time.Time     // session name → same run, kept for the progress-stall recycle regardless of idle_timeout
 }
 
 // newIdleTracker creates an idle tracker. Returns nil if disabled.
@@ -91,6 +96,7 @@ func newIdleTracker() *memoryIdleTracker {
 		templateTimeouts:           make(map[string]time.Duration),
 		templateFallbackExemptions: make(map[string]bool),
 		idleSince:                  make(map[string]time.Time),
+		progressIdleAnchors:        make(map[string]time.Time),
 	}
 }
 
@@ -121,6 +127,7 @@ func (m *memoryIdleTracker) clearIdleAnchor(sessionName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.idleSince, sessionName)
+	delete(m.progressIdleAnchors, sessionName)
 }
 
 func (m *memoryIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
@@ -189,26 +196,37 @@ func (m *memoryIdleTracker) checkIdleUnder(sessionName, settingName, template, p
 // Any other observation error leaves the anchor untouched — a transient read
 // failure must neither reset a long accumulation nor be mistaken for idleness.
 func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.IdleSnapshotProvider, timeout time.Duration, now time.Time) bool {
-	idle, err := snap.SnapshotIdle(sessionName)
-	if err != nil && !errors.Is(err, runtime.ErrIdleIndeterminate) {
+	anchor, idle := m.observeIdleRun(m.idleSince, sessionName, snap, now)
+	if !idle || now.Sub(anchor) <= timeout {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.idleSince, sessionName)
+	return true
+}
+
+// observeIdleRun scans the session's pane and advances the content-idle run
+// recorded in anchors, returning the run's start and whether the session is
+// idle. A busy or indeterminate observation (runtime.ErrIdleIndeterminate)
+// ends the run; any other error leaves it untouched and reports not-idle.
+func (m *memoryIdleTracker) observeIdleRun(anchors map[string]time.Time, sessionName string, snap runtime.IdleSnapshotProvider, now time.Time) (time.Time, bool) {
+	idle, err := snap.SnapshotIdle(sessionName)
+	if err != nil && !errors.Is(err, runtime.ErrIdleIndeterminate) {
+		return time.Time{}, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err != nil || !idle {
-		delete(m.idleSince, sessionName)
-		return false
+		delete(anchors, sessionName)
+		return time.Time{}, false
 	}
-	anchor, ok := m.idleSince[sessionName]
+	anchor, ok := anchors[sessionName]
 	if !ok {
-		m.idleSince[sessionName] = now
-		return false
+		anchors[sessionName] = now
+		anchor = now
 	}
-	if now.Sub(anchor) > timeout {
-		delete(m.idleSince, sessionName)
-		return true
-	}
-	return false
+	return anchor, true
 }
 
 // idleTrackerContentClockApplies reports whether a session needs the
@@ -223,10 +241,32 @@ func idleTrackerContentClockApplies(provider, transport string) bool {
 	return transport != "acp" && provider == "claude"
 }
 
-func (m *memoryIdleTracker) progressIdleSince(string, runtime.IdleSnapshotProvider, time.Time) (time.Time, bool) {
-	return time.Time{}, false
+func (m *memoryIdleTracker) progressIdleSince(sessionName string, snap runtime.IdleSnapshotProvider, now time.Time) (time.Time, bool) {
+	return m.observeIdleRun(m.progressIdleAnchors, sessionName, snap, now)
 }
 
-func contentAwareLastActivity(_ idleTracker, _, _, _ string, _ runtime.Provider, raw, _ time.Time) time.Time {
-	return raw
+// contentAwareLastActivity returns the time a session last made progress for
+// the progress-stall recycle. For a Claude non-ACP session it is the earlier of
+// the raw pane-activity time and the start of the session's continuous
+// content-idle run: the Claude Code TUI repaints its update-check footer about
+// every 30 minutes, which keeps the raw clock fresh for a session idle at its
+// prompt, so the raw clock alone never reads as stalled (ga-g9n7ov). The
+// activity-clock half of checkIdle is defeated the same way for these
+// sessions; its content clock (checkIdleByContent) covers it. Every other
+// session, and any observation that is busy, erroring or unavailable, keeps
+// the raw activity time, so an unknown snapshot never makes a session look
+// stalled. A zero raw time stays zero (unknown).
+func contentAwareLastActivity(it idleTracker, sessionName, provider, transport string, sp runtime.Provider, raw, now time.Time) time.Time {
+	if it == nil || !idleTrackerContentClockApplies(provider, transport) {
+		return raw
+	}
+	snap, ok := sp.(runtime.IdleSnapshotProvider)
+	if !ok {
+		return raw
+	}
+	since, idle := it.progressIdleSince(sessionName, snap, now)
+	if !idle || raw.IsZero() || !since.Before(raw) {
+		return raw
+	}
+	return since
 }

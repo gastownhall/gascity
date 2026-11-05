@@ -76,6 +76,12 @@ func (f *fakeIdleTracker) setTimeoutForTemplate(template string, _ time.Duration
 // and its idle map is driven directly by tests.
 func (f *fakeIdleTracker) clearIdleAnchor(string) {}
 
+// progressIdleSince reports no content-idle run: the scripted fake tracks no
+// pane content.
+func (f *fakeIdleTracker) progressIdleSince(string, runtime.IdleSnapshotProvider, time.Time) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (f *fakeIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
 	if sessionName != "" {
 		f.exemptions[sessionName] = true

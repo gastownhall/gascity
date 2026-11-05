@@ -586,9 +586,3 @@ func TestContentAwareLastActivity(t *testing.T) {
 		}
 	})
 }
-
-// progressIdleSince is part of the idleTracker interface; the scripted fake
-// the reconciler tests use reports no content-idle run.
-func (f *fakeIdleTracker) progressIdleSince(string, runtime.IdleSnapshotProvider, time.Time) (time.Time, bool) {
-	return time.Time{}, false
-}

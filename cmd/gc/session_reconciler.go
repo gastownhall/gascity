@@ -3556,6 +3556,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if lastActivityErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
+			lastActivity = contentAwareLastActivity(it, name, infoByID[id].Provider, infoByID[id].Transport, sp, lastActivity, clk.Now())
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
