@@ -307,6 +307,69 @@ func TestScopedStoreLikePreservesBeadPolicyWrapper(t *testing.T) {
 	}
 }
 
+// TestControllerScopedStoreLikeReadsWorkHandlesAsTheirStores: the api's list
+// active-work lookup reads the work stores as the class handles Stores()
+// hands out, and a handle hides the bd backing scopedStoreLike rebuilds from.
+// The controller reads a handle over its city or rig store as that store, so
+// the read still gets the ctx-bound clone the raw store gets (ga-cdmx6x), and
+// a handle over a store that is not bd-backed still gets none.
+func TestControllerScopedStoreLikeReadsWorkHandlesAsTheirStores(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigStore := beads.NewCachingStoreForTest(beads.NewBdStore(rigDir, noopBdRunner()), nil)
+	cs := &controllerState{
+		cityName:      "demo",
+		cityPath:      cityDir,
+		cfg:           &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo"}, {Name: "mem", Path: "rigs/mem"}}},
+		cityBeadStore: beads.NewCachingStoreForTest(beads.NewBdStore(cityDir, noopBdRunner()), nil),
+		beadStores:    map[string]beads.Store{"repo": rigStore, "mem": beads.NewMemStore()},
+	}
+	rig, ok := cs.Stores().Rig("repo")
+	if !ok {
+		t.Fatal("Stores() has no handle for rig repo")
+	}
+	for _, tc := range []struct {
+		name     string
+		existing beads.Store
+		wantDir  string
+	}{
+		{"city work handle", cs.Stores().Work(), cityDir},
+		{"rig work handle", rig, rigDir},
+		{"raw rig store", rigStore, rigDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scoped, err := cs.ScopedStoreLike(context.Background(), tc.existing)
+			if err != nil {
+				t.Fatalf("ScopedStoreLike: %v", err)
+			}
+			bs, ok := scoped.(*beads.BdStore)
+			if !ok {
+				t.Fatalf("ScopedStoreLike() = %T, want the *beads.BdStore clone", scoped)
+			}
+			if got := bs.Dir(); got != tc.wantDir {
+				t.Errorf("clone Dir() = %q, want %q", got, tc.wantDir)
+			}
+		})
+	}
+	t.Run("handle over a store that is not bd-backed", func(t *testing.T) {
+		mem, ok := cs.Stores().Rig("mem")
+		if !ok {
+			t.Fatal("Stores() has no handle for rig mem")
+		}
+		scoped, err := cs.ScopedStoreLike(context.Background(), mem)
+		if err != nil {
+			t.Fatalf("ScopedStoreLike: %v", err)
+		}
+		if scoped != nil {
+			t.Fatalf("ScopedStoreLike() = %T, want nil for a MemStore", scoped)
+		}
+	})
+}
+
 func TestScopedStoreLikeHonorsCanceledResolutionContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

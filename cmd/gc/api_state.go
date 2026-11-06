@@ -2346,11 +2346,23 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 // ScopedStoreLike implements api.State. See the interface doc comment for
 // the contract; scopedStoreLike (cmd/gc/scoped_store.go) does the actual
 // unwrap-and-rebuild work, reusing the same credential/env resolution as
-// every other bd-CLI store this package constructs.
+// every other bd-CLI store this package constructs. A class handle hides the
+// bd backing scopedStoreLike looks for, so a handle over the city or a rig
+// store, as the api's work reads pass from Stores(), is read as that store.
 func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
 	cs.mu.RLock()
 	cityPath := cs.cityPath
 	cfg := cs.cfg
+	if beads.SameStore(existing, cs.cityBeadStore) {
+		existing = cs.cityBeadStore
+	} else {
+		for _, store := range cs.beadStores {
+			if beads.SameStore(existing, store) {
+				existing = store
+				break
+			}
+		}
+	}
 	cs.mu.RUnlock()
 	return scopedStoreLike(ctx, cityPath, cfg, existing)
 }
