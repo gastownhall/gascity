@@ -388,9 +388,10 @@ full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
 
 A question dialog (`kind` `question`) lists the options it can be answered
 with in `options`. Answer it with `POST .../respond` and `action` `select`,
-`text` naming one of those options by label or by number, and the
-question's `request_id`. Its free-text and chat rows, a multi-select page,
-and any other `action` are answered in the session's terminal instead; a
+`text` naming one of those options by label (or by number, when no option
+carries that label), and the question's `request_id`. A page that lists no
+options — a multi-select page, or one whose options show previews — is
+answered in the session's terminal, as are free-text and chat rows. A
 `respond` the page does not offer returns 409 `invalid_interaction`.
 
 The city event stream (and the supervisor stream, tagged with the city)

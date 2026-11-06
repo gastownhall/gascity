@@ -721,8 +721,9 @@ func (d *approvalDedup) clear(session string) {
 // Pending checks the tmux pane for an active Claude Code approval prompt,
 // Codex approval overlay or AskUserQuestion dialog (Kind "question"). A
 // question's Prompt is its question text, bounded, and its Options are the
-// labels Respond picks with action QuestionSelectAction (free text and chat
-// are answered in the terminal).
+// labels Respond picks with action QuestionSelectAction: none on a page an
+// option's key does not answer (multi-select, option previews), which is
+// answered in the terminal, as free text and chat are.
 // Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	dialog, err := t.dialogInPane(name)
@@ -837,8 +838,8 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		return err
 	}
 	if q := dialog.question; q != nil {
-		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); answer it with respond (action %q naming an option) or in the terminal (gc session attach %s), not by a message",
-			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), QuestionSelectAction, name)
+		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); %s",
+			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), q.answerHint(name))
 	}
 	approval := dialog.approval
 	if approval == nil {
@@ -1075,13 +1076,15 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 // respondQuestion answers the question page q that target shows: action
 // QuestionSelectAction picks the option response.Text names
 // (questionOptionKey) with that option's number key, typed once, and the
-// answer is verified by the page leaving the pane: the dialog's next page,
-// its review page, or none. A response naming another request is refused
-// with runtime.ErrInteractionGone and one the page does not offer with
-// runtime.ErrInteractionActionUnavailable, both before any key. A page that
-// still shows at the deadline (a multi-select question toggles its options
-// in place and is submitted in the terminal) is an error: the key may have
-// changed it.
+// answer is verified by the page leaving the pane (leftFor): the dialog's
+// next page, its review page, or none. A response naming another request is
+// refused with runtime.ErrInteractionGone, and one the page does not offer,
+// or any response to a page the key does not answer (TerminalOnly), with
+// runtime.ErrInteractionActionUnavailable, all before any key. Once the key
+// is typed, only a read proving the session or its pane gone
+// (paneProvenGone) counts as the page leaving; a read that fails otherwise,
+// or a page still showing at the deadline, is an error, since the key may
+// have changed the page.
 func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
 	answered := q.requestID()
 	// An action no question takes is refused as such, whatever request it
@@ -1108,19 +1111,27 @@ func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *pars
 	for time.Now().Before(deadline) {
 		time.Sleep(respondVerifyInterval)
 		dialog, err := t.dialogInPane(target)
-		switch {
-		case errors.Is(err, errPaneGeometry):
-			return fmt.Errorf("verifying the answer: %w", err)
-		case err != nil:
-			// Pane gone: the session ended, as respondCleared reads it.
-			return nil
+		if err != nil {
+			if paneProvenGone(err) {
+				// The session ended, and the page with it.
+				return nil
+			}
+			return fmt.Errorf("verifying the answer to question page %s: option %s was typed once, and reading the pane failed: %w",
+				answered, key, err)
 		}
-		if dialog.question == nil || dialog.question.requestID() != answered {
+		if q.leftFor(dialog.question) {
 			return nil
 		}
 	}
-	return fmt.Errorf("question page %s still showed %s after option %s was selected (a multi-select question is submitted in the terminal: gc session attach %s)",
+	return fmt.Errorf("question page %s still showed %s after option %s was typed once (see it in the terminal: gc session attach %s)",
 		answered, respondVerifyTimeout, key, name)
+}
+
+// paneProvenGone reports whether err, from reading a pane, proves its session
+// or its agent pane gone: tmux answered without it. A tmux server that could
+// not be reached (ErrNoServer) proves nothing, as in Pending.
+func paneProvenGone(err error) bool {
+	return errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) || errors.Is(err, errAgentPaneGone)
 }
 
 // respondCleared reports whether the approval Respond answered has left
