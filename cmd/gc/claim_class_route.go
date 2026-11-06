@@ -857,6 +857,20 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
 
+	// A workflow whose input is proved purged retires in the store that
+	// holds its root, by the same residence read: only the input's absence
+	// is judged across the city, by InputPurged.
+	ops.RetirePurgedWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return err
+		}
+		if resident {
+			return retirePurgedWorkflow(route.class, rootID)
+		}
+		return base.RetirePurgedWorkflow(ctx, dir, env, rootID)
+	}
+
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
 	// Beads, not gc, is the authority on staleness (ga-7rj87d NFR3), so a
 	// binding whose engine exposes no stale-lease reclaim reclaims nothing:

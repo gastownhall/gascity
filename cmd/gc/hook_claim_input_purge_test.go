@@ -23,11 +23,11 @@ func purgeFixtureCityConfig() *config.City {
 	return &config.City{Workspace: config.Workspace{Prefix: "gc"}}
 }
 
-// purgeFrameOverStores is the purge frame the claim path builds, over a work
-// store and rig stores already open.
-func purgeFrameOverStores(t *testing.T, cfg *config.City, work beads.Store, rigs map[string]beads.Store) workflowInputPurgeFrame {
+// purgeFrameOverWork is the purge frame the claim path builds for the rigless
+// fixture city, over its work store already open.
+func purgeFrameOverWork(t *testing.T, work beads.Store) workflowInputPurgeFrame {
 	t.Helper()
-	frame, err := workflowInputPurgeFrameOver(newWaitDependencyPlanReader(assembleResidencyTopology(cfg, work, rigs, nil, nil), false))
+	frame, err := workflowInputPurgeFrameOver(newWaitDependencyPlanReader(assembleResidencyTopology(purgeFixtureCityConfig(), work, nil, nil, nil), false))
 	if err != nil {
 		t.Fatalf("workflowInputPurgeFrameOver: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestDoHookClaimRetiresWorkflowWhoseInputConvoyWasPurged(t *testing.T) {
 	if err := store.Delete(convoyID); err != nil {
 		t.Fatalf("purge convoy: %v", err)
 	}
-	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
+	frame := purgeFrameOverWork(t, store)
 
 	claimed := ""
 	ops := purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open, other}, &claimed)
@@ -230,7 +230,7 @@ func TestDoHookClaimRetiresWorkflowWhoseSyntheticInputTargetWasPurged(t *testing
 	if err := store.Delete(target.ID); err != nil {
 		t.Fatalf("purge target: %v", err)
 	}
-	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
+	frame := purgeFrameOverWork(t, store)
 
 	claimed := ""
 	stderr := runPurgeClaim(t, purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open}, &claimed), 1)
@@ -256,7 +256,7 @@ func TestDoHookClaimRetiresWorkflowWhoseRecordedInputTargetWasPurgedWithItsEdge(
 	if err := store.Delete(target.ID); err != nil {
 		t.Fatalf("purge target: %v", err)
 	}
-	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
+	frame := purgeFrameOverWork(t, store)
 
 	claimed := ""
 	stderr := runPurgeClaim(t, purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open}, &claimed), 1)
@@ -517,5 +517,40 @@ func TestDoHookClaimNeverProbesPurgeForAResolvedInput(t *testing.T) {
 				assertNotRetired(t, store, map[string]string{root.ID: "open", open.ID: "open"})
 			}
 		})
+	}
+}
+
+// TestClassRoutedHookRetiresABindingResidentWorkflowWhoseInputWasPurged: the
+// retirement of a purged input lands in the store that holds the workflow. A
+// binding-resident root and its open step close as fail/hard/input_purged in
+// the binding, and a step that had already finished keeps its disposition.
+func TestClassRoutedHookRetiresABindingResidentWorkflowWhoseInputWasPurged(t *testing.T) {
+	f := newDoneWorkflowSplitFixture(t, false)
+	// A purge takes the convoy's tracks edge with it; the store's Delete
+	// does not cascade, so the edge goes first.
+	if err := f.work.DepRemove(f.convoyID, f.source.ID); err != nil {
+		t.Fatalf("purging the input convoy's tracks edge: %v", err)
+	}
+	if err := f.work.Delete(f.convoyID); err != nil {
+		t.Fatalf("purging the input convoy: %v", err)
+	}
+	base := f.baseOps(t)
+	base.InputPurged = proveOver(purgeFrameOverWork(t, f.work))
+	base.RetirePurgedWorkflow = func(_ context.Context, _ string, _ []string, rootID string) error {
+		return retirePurgedWorkflow(f.work, rootID)
+	}
+	ops := classRoutedHookClaimOps(base, f.route)
+
+	kept, stderr := f.retire(t, ops, f.step)
+	if len(kept) != 0 {
+		t.Fatalf("candidate %s kept (stderr=%q); its workflow %s has a purged input convoy and must be retired", f.step.ID, stderr, f.root.ID)
+	}
+	assertRetiredAsInputPurged(t, f.binding, f.root.ID, f.step.ID)
+	done, err := f.binding.Get(f.done.ID)
+	if err != nil {
+		t.Fatalf("reading %s from the binding: %v", f.done.ID, err)
+	}
+	if done.Status != "closed" || done.Metadata[beadmeta.FailureReasonMetadataKey] != "" || done.Metadata[beadmeta.OutcomeMetadataKey] != "" {
+		t.Fatalf("finished step %s = %s %v; it closed before the purge and keeps its disposition", f.done.ID, done.Status, done.Metadata)
 	}
 }
