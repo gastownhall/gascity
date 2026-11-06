@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -1425,7 +1426,7 @@ func TestCreateSessionNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *t
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "first", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err == nil {
 		t.Fatal("expected start failure")
 	}
-	if err := ensureSessionNameAvailable(store, "sky"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "sky"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after failed start = %v, want nil", err)
 	}
 
@@ -1785,7 +1786,7 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 	}
 
 	// The freed runtime name must be available for a fresh session.
-	if err := ensureSessionNameAvailable(store, "test-city--refinery"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "test-city--refinery"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after close = %v, want nil", err)
 	}
 }

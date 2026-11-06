@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // legacyResolveClassStore is resolveClassStore as it stood before the router
@@ -140,8 +142,8 @@ func TestCityStoresAgreeWithTheLegacyResolver(t *testing.T) {
 }
 
 // TestControllerStoresFollowTheSwappedStores pins the epoch: a reload that
-// swaps the city store is visible to the next accessor read, and an unchanged
-// state hands back the same minted Stores. The expected stores go through the
+// swaps the city store, or only the rig stores, is visible to the next
+// accessor read, and an unchanged state hands back the same minted Stores. The expected stores go through the
 // split-strict views, which are identity outside the gate.
 func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	first := beads.NewMemStore()
@@ -161,6 +163,29 @@ func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	cs.mu.Unlock()
 	if got := cs.GraphBeadStore().Store; got != splitStrictClassView(second) {
 		t.Errorf("graph after the swap = %p, want the new city store %p", got, second)
+	}
+
+	// A reload that swaps only the rig stores is visible too: the epoch keys
+	// on the rig set's generation, not just the city store.
+	rig := beads.NewMemStore()
+	cs.mu.Lock()
+	cs.beadStores = map[string]beads.Store{"r": rig}
+	cs.rigStoresGen++
+	cs.mu.Unlock()
+	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(rig) {
+		t.Errorf("rig r after the rig swap = %v, %v; want the new rig store %p", got.Store, ok, rig)
+	}
+	epoch = cs.stores.current.Load()
+	_ = cs.Stores()
+	if cs.stores.current.Load() != epoch {
+		t.Error("an unchanged rig set re-minted its Stores")
+	}
+	cs.mu.Lock()
+	cs.beadStores = map[string]beads.Store{}
+	cs.rigStoresGen++
+	cs.mu.Unlock()
+	if _, ok := cs.Stores().Rig("r"); ok {
+		t.Error("a rig the reload dropped is still served")
 	}
 }
 
@@ -236,8 +261,8 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 }
 
 // TestStoresReadersSeeTheFinalEpoch (review probe P1): readers race reload
-// swaps under -race; once the swaps stop, every accessor answers the final
-// stores.
+// swaps of the city and rig stores under -race; once the swaps stop, every
+// accessor answers the final stores.
 func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	binding := beads.NewMemStore()
 	graphOnly := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: binding}, binding: "infra"}
@@ -260,19 +285,28 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 				_ = cs.SessionsBeadStore()
 				_ = cs.GraphBeadStore()
 				_ = cs.cityWorkStore()
+				_, _ = cs.Stores().Rig("r")
 			}
 		}()
 	}
-	var last beads.Store
-	for range 3000 {
+	var last, lastRig beads.Store
+	for i := range 3000 {
 		city := beads.NewMemStore()
 		cs.mu.Lock()
 		cs.cityBeadStore = city
+		if i%3 == 0 {
+			lastRig = beads.NewMemStore()
+			cs.beadStores = map[string]beads.Store{"r": lastRig}
+			cs.rigStoresGen++
+		}
 		cs.mu.Unlock()
 		last = city
 	}
 	close(stop)
 	wg.Wait()
+	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(lastRig) {
+		t.Errorf("rig after the swaps = %v, %v; want the final rig store %p", got.Store, ok, lastRig)
+	}
 	if got := cs.SessionsBeadStore().Store; got != splitStrictClassView(last) {
 		t.Errorf("sessions after the swaps = %p, want the final city store %p", got, last)
 	}
@@ -407,4 +441,74 @@ func BenchmarkResolveClassStore(b *testing.B) {
 			_ = cs.SessionsBeadStore()
 		}
 	})
+}
+
+// TestCLIMailStoreIsTheResolvedMessagingStore pins the session-start mail
+// injection's reroute (typed-store T3): cliMailStore hands out the store
+// resolveMailMessagesStore did, the binding on a split one-shot city and the
+// scope store on an unsplit one.
+func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
+	for name, routes := range map[string]func(binding beads.Store) *storageRoutes{
+		"split":   messagingSplitRoutes,
+		"unsplit": func(beads.Store) *storageRoutes { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			binding := splittest.NewBindingStore(t)
+			work := splittest.NewWorkStore(t, "mc")
+			seedCLIStorageRoutes(t, cityPath, routes(binding))
+			want := resolveMailMessagesStore(cliStorageRoutes(cityPath), work, nil, cityPath, nil)
+			if got := cliMailStore(work, nil, cityPath).Store; resolvedKey(got) != resolvedKey(want) {
+				t.Errorf("cliMailStore wraps %v, resolveMailMessagesStore %v", resolvedKey(got), resolvedKey(want))
+			}
+			// Unsplit, the messaging class falls to the scope store: the
+			// store itself in production, its class view under the
+			// split-strict gate (identity when the gate is off).
+			wantStore := splitStrictClassView(work)
+			if name == "split" {
+				wantStore = binding
+			}
+			if !beads.SameStore(want, wantStore) {
+				t.Errorf("the messaging store is %v, want %v", resolvedKey(want), resolvedKey(wantStore))
+			}
+		})
+	}
+}
+
+// TestSessionStartMailReadsTheMessagingBindingOnASplitCity pins
+// sessionStartMailInjection's messaging route end to end: on a split one-shot
+// city the auto-handoff mail lives in the binding, the hook is handed the
+// work store, and the injection still finds the handoff.
+func TestSessionStartMailReadsTheMessagingBindingOnASplitCity(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := splittest.NewBindingStore(t)
+	work := splittest.NewWorkStore(t, "mc")
+	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+	sessionBead, err := binding.Create(beads.Bead{
+		Title:    "session worker",
+		Type:     sessionpkg.BeadType,
+		Labels:   []string{sessionpkg.LabelSession},
+		Metadata: map[string]string{"session_name": "worker", "alias": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_MAIL", "")
+	var stderr bytes.Buffer
+	if code := doHandoffAuto(binding, binding, events.Discard, "worker", []string{"context cycle"}, "", io.Discard, &stderr); code != 0 {
+		t.Fatalf("doHandoffAuto = %d; stderr=%s", code, stderr.String())
+	}
+	live := sessionpkg.Info{ID: sessionBead.ID, Alias: "worker", SessionName: "worker"}
+
+	startMail := sessionStartMailInjection(work, &live, cityPath, &stderr)
+
+	if len(startMail.autoHandoffIDs) != 1 {
+		t.Fatalf("the injection found %d auto-handoffs, want the one in the messaging binding (stderr %q)", len(startMail.autoHandoffIDs), stderr.String())
+	}
+	for id := range startMail.autoHandoffIDs {
+		if _, err := binding.Get(id); err != nil {
+			t.Errorf("auto-handoff %s is not the binding's: %v", id, err)
+		}
+	}
 }

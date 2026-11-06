@@ -635,7 +635,7 @@ type ProviderResume struct {
 // Manager orchestrates chat session lifecycle using beads for persistence
 // and runtime.Provider for runtime.
 type Manager struct {
-	store                   beads.Store
+	store                   beads.SessionStore
 	sp                      runtime.Provider
 	cityPath                string
 	transportResolver       func(template, provider string) transportResolution
@@ -914,7 +914,7 @@ func WithClock(clk clock.Clock) ManagerOption {
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
-func NewManagerWithOptions(store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
+func NewManagerWithOptions(store beads.SessionStore, sp runtime.Provider, opts ...ManagerOption) *Manager {
 	m := &Manager{store: store, sp: sp, staleKeyDetectionWaiter: waitForStaleKeyDetection}
 	for _, opt := range opts {
 		opt(m)
@@ -1815,7 +1815,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
 		}
@@ -1832,7 +1832,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
 		// Past a kill fence: the operator's close ends the session a kill was
 		// tearing down, as it did before CommitClose.
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
+		res, err := NewStore(m.store).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence(), CommitAsOperator())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
@@ -2226,7 +2226,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(b.ID, time.Now().UTC())
+		nudgeIDs, capped, err := NewStore(m.store).CancelWaits(b.ID, time.Now().UTC())
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
 		}
@@ -2392,7 +2392,7 @@ func (m *Manager) EnrichInfos(infos []Info) []Info {
 // persisted read half of the read model — pair it with EnrichInfo for the live
 // overlay (the worker catalog's Get composes exactly that).
 func (m *Manager) PersistedStore() *Store {
-	return NewStore(beads.SessionStore{Store: m.store})
+	return NewStore(m.store)
 }
 
 // ListFromInfos filters a pre-loaded persisted Info feed by state and template

@@ -357,8 +357,8 @@ func TestReadySeamIsFreshReadable(t *testing.T) {
 func TestReadyScriptExitTwoIsAFailure(t *testing.T) {
 	script, _ := observePack(t, readyHandshake, legacyOps)
 	sp := NewSeamBacked(script)
-	if names, err := sp.ListRunning("s"); !errors.Is(err, runtime.ErrListUnsupported) {
-		t.Errorf("ListRunning = %v, %v; want ErrListUnsupported", names, err)
+	if names, err := sp.ListRunning("s"); err == nil || runtime.IsPartialListError(err) || names != nil {
+		t.Errorf("ListRunning = %v, %v; want the inventory's exit 2 as a failure", names, err)
 	}
 	if err := sp.Stop("s"); !errors.Is(err, runtime.ErrStopUnsupported) {
 		t.Errorf("Stop = %v, want ErrStopUnsupported", err)
@@ -833,5 +833,77 @@ func TestFreshCollision(t *testing.T) {
 		if got := freshCollision(tc.err); got != tc.want {
 			t.Errorf("%s: freshCollision = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// Kills (F-1, PR-3b) a v2-ready Peek that reads only a running box, reads a
+// failure as an empty screen, or leaks "no screen" as an error: through the
+// production seam-backed provider, a dead box's screen is the `peek` op's
+// even though `is-running` is false; exit 66 (no screen) is an empty screen
+// with no error, as every Peek caller (the recycle, gc session peek, the
+// API, the startup death message, the legacy crash datapoint) reads it; any
+// other failure (exit 1, exit 2, a failed observe) is an error; a running
+// box's screen is read as before, and no box reads nothing. A script that
+// is not v2-ready keeps the seams' Peek: nothing for a box that is not
+// running, and no peek op.
+func TestPeekReadsAnyBoxWhenReady(t *testing.T) {
+	for _, c := range []struct {
+		name, state, peek string
+		want              string
+		wantErr           bool
+	}{
+		{"dead box's screen", `{"state":"dead",` + testObject + `}`, `echo "Usage limit reached"`, "Usage limit reached", false},
+		{"dead box, no screen", `{"state":"dead",` + testObject + `}`, `exit 66`, "", false},
+		{"no box", `{"state":"absent"}`, `exit 66`, "", false},
+		{"peek fails", `{"state":"dead",` + testObject + `}`, `echo boom >&2; exit 1`, "", true},
+		{"peek not implemented", `{"state":"dead",` + testObject + `}`, `exit 2`, "", true},
+		{"observe fails", `x`, `echo screen`, "", true},
+		{"running box", `{"state":"running",` + testObject + `}`, `echo live`, "live", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			script, dir := observePack(t, readyHandshake, map[string]string{
+				"observe":    `cat >/dev/null; echo '` + c.state + `'`,
+				"is-running": `echo false`,
+				"peek":       c.peek,
+			})
+			out, err := NewSeamBacked(script).Peek("s", 10)
+			switch {
+			case c.wantErr != (err != nil), out != c.want:
+				t.Fatalf("Peek = %q, %v; want %q (error %v)", out, err, c.want, c.wantErr)
+			case slices.Contains(opsRan(t, dir), "peek") != (c.name != "observe fails" && c.name != "no box"):
+				t.Fatalf("ops %v: want the peek op exactly for a box", opsRan(t, dir))
+			}
+		})
+	}
+	legacy, dir := observePack(t, "", map[string]string{"is-running": `echo false`, "peek": `exit 66`})
+	if out, err := NewSeamBacked(legacy).Peek("s", 10); out != "" || err != nil || slices.Contains(opsRan(t, dir), "peek") {
+		t.Fatalf("not v2-ready: Peek = %q, %v, ops %v; want the seams' empty answer with no peek op", out, err, opsRan(t, dir))
+	}
+}
+
+// Kills (PR-3b adoption review) "no screen" read as a failure off the
+// seam-backed Peek: on a v2-ready script, exit 66 is an empty screen with no
+// error on the raw provider's Peek too. So a welded start whose agent exits
+// while its startup dialogs are read (every peek then answers 66) returns
+// once the dialog budget ends, instead of failing and tearing the box down.
+// A script that is not v2-ready keeps 66 an ordinary failure.
+func TestPeekNoScreenIsABlankScreenWhenReady(t *testing.T) {
+	script, dir := observePack(t, readyHandshake, map[string]string{
+		"observe": `cat >/dev/null; echo '{"state":"absent"}'`,
+		"start":   `cat >/dev/null`,
+		"peek":    `exit 66`,
+	})
+	if out, err := NewProvider(script).Peek("s", 10); out != "" || err != nil {
+		t.Fatalf("Peek of no screen = %q, %v; want an empty screen with no error", out, err)
+	}
+	if err := NewSeamBacked(script).Start(t.Context(), "s", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("welded Start over a box with no screen = %v (ops %v), want nil", err, opsRan(t, dir))
+	}
+	if ops := opsRan(t, dir); !slices.Contains(ops, "peek") || slices.Contains(ops, "stop") {
+		t.Fatalf("ops %v: want the startup dialogs read through peek, and no stop", ops)
+	}
+	legacy, _ := observePack(t, "", map[string]string{"peek": `exit 66`})
+	if out, err := NewProvider(legacy).Peek("s", 10); err == nil {
+		t.Fatalf("not v2-ready: Peek exit 66 = %q with no error, want an ordinary failure", out)
 	}
 }

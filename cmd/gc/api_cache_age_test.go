@@ -129,35 +129,38 @@ func apiLanes(t *testing.T, h *charHarness) []charLane {
 }
 
 // cityStatusVia runs gc status through lane's API client and returns its
-// stdout, failing the test if it falls back to the local route.
-func cityStatusVia(t *testing.T, h *charHarness, lane charLane, jsonOut bool) []byte {
+// stdout and stderr, failing the test if it falls back to the local route.
+func cityStatusVia(t *testing.T, h *charHarness, lane charLane, jsonOut bool) (stdout, stderr []byte) {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
+	var out, errOut bytes.Buffer
 	fallback := func() int {
-		t.Errorf("%s: gc status fell back to the local route: %s", lane.name, stderr.String())
+		t.Errorf("%s: gc status fell back to the local route: %s", lane.name, errOut.String())
 		return 1
 	}
-	if code := routeCityStatus(h.cityPath, h.cs.Config(), newFakeDrainOps(), lane.client, "", jsonOut, &stdout, &stderr, fallback); code != 0 {
-		t.Fatalf("%s: gc status (json=%v) exit %d: %s", lane.name, jsonOut, code, stderr.String())
+	if code := routeCityStatus(h.cityPath, h.cs.Config(), newFakeDrainOps(), lane.client, "", jsonOut, &out, &errOut, fallback); code != 0 {
+		t.Fatalf("%s: gc status (json=%v) exit %d: %s", lane.name, jsonOut, code, errOut.String())
 	}
-	return stdout.Bytes()
+	return out.Bytes(), errOut.Bytes()
 }
 
-const cacheAgeFooter = "reconciler may be lagging"
+// cacheAgeFooterMark is how every cache-age footer line starts.
+const cacheAgeFooterMark = "(cache age: "
 
 // cacheAgeCity is the harness city with a fake session provider, so the
 // session list read below has a provider to observe.
 const cacheAgeCity = charCityBasic + "\n[session]\nprovider = \"fake\"\n"
 
-// The API reports the real age of the city's bead cache through the store
-// stack the controller and supervisor serve (bead-policy layer over a
-// CachingStore), and the CLI prints it as _cache_age_s and, past 30 s, as the
-// cache-age footer. gc beads list --format=json prints _cache_age_s only for a
-// remote target: a local city prints the bare array on every route, so there
-// the age shows only in the footer. The rig list is built from config, the
-// suspension state and runtime probes, not from the cache, so it reports no
-// age and prints no footer however old the cache is. Neither does a suspended
-// city's status, which is built without reading any bead store.
+// The API reports the real age of the city's bead cache, its re-scan interval
+// and its refresh state through the store stack the controller and supervisor
+// serve (bead-policy layer over a CachingStore). The CLI prints the age as
+// _cache_age_s and, only once it passes twice the reported interval, as the
+// cache-age footer on stderr: a healthy idle cache, which ages up to its
+// interval, prints none. gc beads list --format=json prints _cache_age_s only
+// for a remote target: a local city prints the bare array on every route. The
+// rig list is built from config, the suspension state and runtime probes, not
+// from the cache, so it reports no age and prints no footer however old the
+// cache is. Neither does a suspended city's status, which is built without
+// reading any bead store.
 func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -165,7 +168,8 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 		min, max float64
 		footer   bool
 	}{
-		{name: "aged", ageBy: 45 * time.Second, min: 30, max: 45, footer: true},
+		{name: "behind", ageBy: 75 * time.Second, min: 60, max: 75, footer: true},
+		{name: "idle", ageBy: 45 * time.Second, min: 30, max: 45, footer: false},
 		{name: "fresh", ageBy: 5 * time.Second, min: 0, max: 5, footer: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,10 +182,29 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 					t.Errorf("%s: cache age = %v, want in (%v, %v]", what, age, tc.min, tc.max)
 				}
 			}
+			footerOnStderrOnly := func(what string, stdout, stderr []byte) {
+				t.Helper()
+				if bytes.Contains(stdout, []byte(cacheAgeFooterMark)) {
+					t.Errorf("%s: stdout carries a cache-age footer:\n%s", what, stdout)
+				}
+				if got := bytes.Contains(stderr, []byte(cacheAgeFooterMark)); got != tc.footer {
+					t.Errorf("%s: footer on stderr = %v, want %v:\n%s", what, got, tc.footer, stderr)
+				}
+				if tc.footer && !bytes.Contains(stderr, []byte("30s re-scan interval")) {
+					t.Errorf("%s: footer does not name the cache's 30s re-scan interval:\n%s", what, stderr)
+				}
+			}
 
 			srv := cityAPI(h.cs)
 			for _, path := range []string{"/beads", "/sessions", "/status"} {
-				inRange("GET "+path+" X-GC-Cache-Age-S", cacheAgeHeaderOf(t, getCityPath(t, srv, path), path))
+				rec := getCityPath(t, srv, path)
+				inRange("GET "+path+" X-GC-Cache-Age-S", cacheAgeHeaderOf(t, rec, path))
+				if got := rec.Header().Get("X-GC-Cache-Refresh-Interval-S"); got != "30" {
+					t.Errorf("GET %s X-GC-Cache-Refresh-Interval-S = %q, want 30", path, got)
+				}
+				if got := rec.Header().Get("X-GC-Cache-Refresh"); got != "scheduled" {
+					t.Errorf("GET %s X-GC-Cache-Refresh = %q, want scheduled", path, got)
+				}
 			}
 			if age := cacheAgeHeaderOf(t, getCityPath(t, srv, "/rigs"), "/rigs"); age != 0 {
 				t.Errorf("GET /rigs X-GC-Cache-Age-S = %v, want 0: the rig list is not read from the bead cache", age)
@@ -201,9 +224,7 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 				if code := routeBeadsList(h.cityPath, lane.client, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
 					t.Fatalf("%s: beads list exit %d: %s", lane.name, code, stderr.String())
 				}
-				if got := strings.Contains(stdout.String(), cacheAgeFooter); got != tc.footer {
-					t.Errorf("%s: beads list footer shown = %v, want %v:\n%s", lane.name, got, tc.footer, stdout.String())
-				}
+				footerOnStderrOnly(lane.name+": beads list", stdout.Bytes(), stderr.Bytes())
 
 				stdout.Reset()
 				stderr.Reset()
@@ -219,15 +240,12 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 				if code := routeRigList(h.cityPath, lane.client, "", false, &stdout, &stderr); code != 0 {
 					t.Fatalf("%s: rig list exit %d: %s", lane.name, code, stderr.String())
 				}
-				if strings.Contains(stdout.String(), cacheAgeFooter) {
-					t.Errorf("%s: rig list shows the cache-age footer over output not read from the bead cache:\n%s", lane.name, stdout.String())
-				}
+				assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
 
-				inRange(lane.name+": status --json", jsonCacheAgeOf(t, lane.name+": status --json", cityStatusVia(t, h, lane, true)))
-				out := cityStatusVia(t, h, lane, false)
-				if got := bytes.Contains(out, []byte(cacheAgeFooter)); got != tc.footer {
-					t.Errorf("%s: status footer shown = %v, want %v:\n%s", lane.name, got, tc.footer, out)
-				}
+				statusJSON, _ := cityStatusVia(t, h, lane, true)
+				inRange(lane.name+": status --json", jsonCacheAgeOf(t, lane.name+": status --json", statusJSON))
+				out, errOut := cityStatusVia(t, h, lane, false)
+				footerOnStderrOnly(lane.name+": status", out, errOut)
 			}
 
 			if remoteLanes == 0 || localLanes == 0 {
@@ -251,11 +269,15 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 		h.cs.mu.Lock()
 		h.cs.cityBeadStore = wrapStoreWithBeadPolicies(beads.NewMemStore(), h.cs.cfg)
 		h.cs.mu.Unlock()
-		t.Cleanup(api.SetLivenessClockForTest(&clock.Fake{Time: cache.Stats().LastFreshAt.Add(45 * time.Second)}))
+		t.Cleanup(api.SetLivenessClockForTest(&clock.Fake{Time: cache.Stats().LastFreshAt.Add(300 * time.Second)}))
 
 		srv := cityAPI(h.cs)
-		if age := cacheAgeHeaderOf(t, getCityPath(t, srv, "/beads"), "/beads"); age != 0 {
+		rec := getCityPath(t, srv, "/beads")
+		if age := cacheAgeHeaderOf(t, rec, "/beads"); age != 0 {
 			t.Errorf("GET /beads X-GC-Cache-Age-S = %v, want 0 over an uncached store", age)
+		}
+		if got := rec.Header().Values("X-GC-Cache-Refresh"); len(got) != 0 {
+			t.Errorf("GET /beads X-GC-Cache-Refresh = %q over an uncached store, want it omitted", got)
 		}
 		for _, lane := range apiLanes(t, h) {
 			if age, ok := beadsListCacheAgeVia(t, h, lane); ok && age != 0 {
@@ -265,39 +287,54 @@ func TestCityAPIReportsTheCityCacheAge(t *testing.T) {
 			if code := routeBeadsList(h.cityPath, lane.client, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
 				t.Fatalf("%s: beads list exit %d: %s", lane.name, code, stderr.String())
 			}
-			if strings.Contains(stdout.String(), cacheAgeFooter) {
-				t.Errorf("%s: beads list shows the cache-age footer over an uncached store:\n%s", lane.name, stdout.String())
-			}
+			assertNoCacheAgeFooter(t, stdout.String(), stderr.String())
 		}
 	})
 
-	// A suspended city's status reads no bead store, so it reports no age and
-	// gc status prints no footer however old the paused cache is. GET /beads,
-	// read from the cache, still reports its age.
+	// A suspended city with no session running pauses the city cache's
+	// re-scans: GET /beads reports its age as paused, and gc beads list names
+	// the pause. Its status reads no bead store, so it reports no age and gc
+	// status prints no footer however old the paused cache is.
 	t.Run("suspended", func(t *testing.T) {
 		h := newCharCity(t, cacheAgeCity, nil)
 		cache := cityCacheOf(t, h.cs)
-		t.Cleanup(api.SetLivenessClockForTest(&clock.Fake{Time: cache.Stats().LastFreshAt.Add(45 * time.Second)}))
+		t.Cleanup(api.SetLivenessClockForTest(&clock.Fake{Time: cache.Stats().LastFreshAt.Add(75 * time.Second)}))
 		suspendCityAt(t, h.cityPath)
+		h.cs.setBeadsQuiescent(true)
+		t.Cleanup(func() { h.cs.setBeadsQuiescent(false) })
 
 		srv := cityAPI(h.cs)
-		if age := cacheAgeHeaderOf(t, getCityPath(t, srv, "/beads"), "/beads"); age <= 30 || age > 45 {
-			t.Fatalf("precondition: GET /beads X-GC-Cache-Age-S = %v, want in (30, 45]", age)
+		rec := getCityPath(t, srv, "/beads")
+		if age := cacheAgeHeaderOf(t, rec, "/beads"); age <= 60 || age > 75 {
+			t.Fatalf("precondition: GET /beads X-GC-Cache-Age-S = %v, want in (60, 75]", age)
+		}
+		if got := rec.Header().Get("X-GC-Cache-Refresh"); got != "paused" {
+			t.Errorf("GET /beads X-GC-Cache-Refresh = %q on a quiescent city, want paused", got)
 		}
 		if age := cacheAgeHeaderOf(t, getCityPath(t, srv, "/status"), "/status"); age != 0 {
 			t.Errorf("GET /status X-GC-Cache-Age-S = %v on a suspended city, want 0: its body is built without reading any bead store", age)
 		}
 		for _, lane := range apiLanes(t, h) {
-			if age := jsonCacheAgeOf(t, lane.name+": status --json", cityStatusVia(t, h, lane, true)); age != 0 {
+			var stdout, stderr bytes.Buffer
+			if code := routeBeadsList(h.cityPath, lane.client, "", "text", beadFilters{}, &stdout, &stderr); code != 0 {
+				t.Fatalf("%s: beads list exit %d: %s", lane.name, code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "the server has paused its bead cache's re-scans while the city is suspended") {
+				t.Errorf("%s: beads list stderr does not name the paused re-scans:\n%s", lane.name, stderr.String())
+			}
+			if strings.Contains(stdout.String(), cacheAgeFooterMark) {
+				t.Errorf("%s: beads list stdout carries a cache-age footer:\n%s", lane.name, stdout.String())
+			}
+
+			statusJSON, _ := cityStatusVia(t, h, lane, true)
+			if age := jsonCacheAgeOf(t, lane.name+": status --json", statusJSON); age != 0 {
 				t.Errorf("%s: status --json _cache_age_s = %v on a suspended city, want 0", lane.name, age)
 			}
-			out := cityStatusVia(t, h, lane, false)
+			out, errOut := cityStatusVia(t, h, lane, false)
 			if !bytes.Contains(out, []byte("Suspended:  yes")) {
 				t.Fatalf("precondition: %s: status does not show the city suspended:\n%s", lane.name, out)
 			}
-			if bytes.Contains(out, []byte(cacheAgeFooter)) {
-				t.Errorf("%s: status shows the cache-age footer on a suspended city:\n%s", lane.name, out)
-			}
+			assertNoCacheAgeFooter(t, string(out), string(errOut))
 		}
 	})
 }

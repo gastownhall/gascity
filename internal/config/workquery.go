@@ -531,7 +531,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		// A full window that filtered to nothing may still have allowed work
 		// past it, so re-read the queue unbounded. Only this case pays for it.
 		`if [ "$r" = "[]" ] && [ "$gc_routed_window" != "[]" ] && ` +
-		`[ "$(printf "%s" "$gc_routed_window" | jq length 2>/dev/null)" = "` + strconv.Itoa(routedReadyWindow) + `" ]; then ` +
+		`[ "$(printf "%s" "$gc_routed_window" | jq length 2>/dev/null)" = "` + strconv.Itoa(RoutedReadyClaimWindow) + `" ]; then ` +
 		`r=$(` + bdReadyPoolDemandShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		excludeClaimantsFilterScript("r") +
 		`fi; ` +
@@ -570,6 +570,13 @@ func preferExecutablePoolDemandScript() string {
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
+// RoutedReadyClaimWindow is how many routed ready rows a pool worker's claim
+// tier reads (routedReadyTierCommand). A worker claims only from these rows,
+// so the controller names pool demand bound to a managed worktree only for
+// rows inside this window: a seat placed for a row behind it would be served
+// none of its own work.
+const RoutedReadyClaimWindow = 20
+
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path rides the reader's canonical
@@ -582,16 +589,13 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
 	// rows — the bounded window contained zero P0s until the older rows
 	// drained). FIFO fairness survives within a priority band via the
-	// created_at term. The tier stays widened past a single row (limit=20, not
-	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// created_at term. The tier stays widened past a single row
+	// (RoutedReadyClaimWindow, not limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(routedReadyWindow), topo)
+	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo)
 }
-
-// routedReadyWindow is the bounded row count the routed tier reads first.
-const routedReadyWindow = 20
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
 // ready, unassigned, routed demand and prints the array length. It shares the

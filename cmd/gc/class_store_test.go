@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -208,5 +209,36 @@ func TestCookOnClassRoutedChoosesItsStoreThroughTheLibraryEntry(t *testing.T) {
 		t.Fatal("cooking a formula that does not exist succeeded")
 	} else if strings.Contains(err.Error(), "store chooser") {
 		t.Errorf("a formula that never compiled reached the store choice: %v", err)
+	}
+}
+
+// TestMoleculeClassTarget pins moleculeClassTarget: a graph-class recipe's
+// target is the graph store labeled graph, any other recipe's the work store
+// labeled work, by molecule.RecipeClass.
+func TestMoleculeClassTarget(t *testing.T) {
+	work, graph := beads.NewMemStore(), beads.NewMemStore()
+	for name, tc := range map[string]struct {
+		recipe    *formula.Recipe
+		wantGraph bool
+	}{
+		"a graph.v2 workflow": {&formula.Recipe{Steps: []formula.RecipeStep{{ID: "root", Metadata: map[string]string{"gc.kind": "workflow"}}}}, true},
+		"a root-only wisp":    {&formula.Recipe{RootOnly: true, Steps: []formula.RecipeStep{{ID: "root", Metadata: map[string]string{"gc.kind": "wisp"}}}}, true},
+		"a v1 poured recipe":  {&formula.Recipe{Steps: []formula.RecipeStep{{ID: "root", Type: "molecule"}, {ID: "step"}}}, false},
+		"no recipe":           {nil, false},
+	} {
+		got := moleculeClassTarget(tc.recipe, work, graph)
+		want := beads.Store(work)
+		if tc.wantGraph {
+			want = graph
+		}
+		if got.IsGraph() != tc.wantGraph {
+			t.Errorf("%s: IsGraph = %v, want %v", name, got.IsGraph(), tc.wantGraph)
+		}
+		if !beads.SameStore(got, want) {
+			t.Errorf("%s: the target is not the %s store", name, map[bool]string{true: "graph", false: "work"}[tc.wantGraph])
+		}
+	}
+	if !moleculeClassTarget(&formula.Recipe{}, nil, nil).Absent() {
+		t.Error("a nil choice is not an absent target")
 	}
 }

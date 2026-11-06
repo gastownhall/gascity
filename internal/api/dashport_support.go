@@ -204,10 +204,12 @@ func newSeededState(deps SeededCityDeps) *seededState {
 		s.rigStores = map[string]beads.Store{}
 	}
 	if s.cityStore != nil {
-		// Unrouted on purpose: SeededCityDeps carries one store for every
-		// class, so there is no messaging binding to route to. See the
-		// CityBeadStore doc for what that means for a split-city case.
-		svc := extmsg.NewServices(s.cityStore)
+		// SeededCityDeps carries one store for every class, so there is no
+		// messaging binding to route to: the single-store Stores hand both
+		// classes the city store. See the CityBeadStore doc for what that
+		// means for a split-city case.
+		stores := s.classStores()
+		svc := extmsg.NewServices(stores.Mail(), stores.Sessions())
 		s.extmsgSvc = &svc
 	}
 	return s
@@ -260,10 +262,15 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 // classStores mints the seeded city's handles: a single-store topology, so
 // NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
 // wrap the city store, exactly as they do on a default (non-relocated)
-// controller city.
+// controller city, and each seeded rig is a rig scope over its own store, by
+// name as the controller lists them.
 func (s *seededState) classStores() storeref.Stores {
-	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}}, storeref.StoresOptions{})
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}, storeref.StoresOptions{})
 }
+
+// Stores is the seeded city's class handles (classStores). The seeded stores
+// never change, so every call mints the same handles.
+func (s *seededState) Stores() storeref.Stores { return s.classStores() }
 
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 	return s.classStores().Nudges()
@@ -271,7 +278,7 @@ func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 
 // NudgeQueue is the city's state.json queue over the seeded city store.
 func (s *seededState) NudgeQueue() NudgeQueue {
-	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.cityStore}
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.NudgesBeadStore()}
 }
 
 func (s *seededState) SessionsBeadStore() beads.SessionStore {

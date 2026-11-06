@@ -13,7 +13,7 @@ import (
 )
 
 type groupService struct {
-	store      beads.Store
+	store      beads.MailStore
 	sessions   session.AddressDirectory
 	locks      *bindingLockPool
 	transcript groupTranscriptSync
@@ -24,17 +24,18 @@ type groupTranscriptSync interface {
 	RemoveMembership(ctx context.Context, input RemoveMembershipInput) error
 }
 
-// NewGroupService creates a GroupService backed by the given bead store.
-func NewGroupService(store beads.Store) GroupService {
+// NewGroupService creates a GroupService persisting in the messaging store,
+// with identity reads from the sessions directory over sessions.
+func NewGroupService(store beads.MailStore, sessions beads.SessionStore) GroupService {
 	locks := sharedBindingLockPool(store)
-	return newGroupServiceWithSessionDirectory(store, session.NewStore(beads.SessionStore{Store: store}), locks, newTranscriptService(store, locks))
+	return newGroupServiceWithSessionDirectory(store, session.NewStore(sessions), locks, newTranscriptService(store, locks))
 }
 
-func newGroupService(store beads.Store, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
-	return newGroupServiceWithSessionDirectory(store, session.NewStore(beads.SessionStore{Store: store}), locks, transcript)
+func newGroupService(store beads.MailStore, sessions beads.SessionStore, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
+	return newGroupServiceWithSessionDirectory(store, session.NewStore(sessions), locks, transcript)
 }
 
-func newGroupServiceWithSessionDirectory(store beads.Store, sessions session.AddressDirectory, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
+func newGroupServiceWithSessionDirectory(store beads.MailStore, sessions session.AddressDirectory, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
 	return &groupService{store: store, sessions: sessions, locks: locks, transcript: transcript}
 }
 

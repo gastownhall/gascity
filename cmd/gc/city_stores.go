@@ -14,13 +14,17 @@ package main
 // # One epoch, re-minted when its inputs change
 //
 // A holder keeps one Stores beside the inputs it was minted from and re-mints
-// on the first read after any of them changed: the city work store, and the
-// routes — which routes value, and the store it hands each class. The last is what makes an
-// IN-PLACE rewrite of the routes visible, and the controller makes one:
-// withControllerCache replaces each binding engine with its CachingStore under
-// the same pointer. Keying on the pointer alone would keep handles over the
-// uncached engine, whose reads bypass the cache and whose writes skip its
-// event emission.
+// on the first read after any of them changed: the city work store, the rig
+// set (by its generation), and the routes — which routes value, and the store
+// it hands each class. The last is what makes an IN-PLACE rewrite of the
+// routes visible, and the controller makes one: withControllerCache replaces
+// each binding engine with its CachingStore under the same pointer. Keying on
+// the pointer alone would keep handles over the uncached engine, whose reads
+// bypass the cache and whose writes skip its event emission.
+//
+// A holder reads the city work store and the rig set under one lock, the lock
+// it swaps them under, so one Stores never holds a city store from one reload
+// and rig stores from another.
 
 import (
 	"sync/atomic"
@@ -112,8 +116,12 @@ func cityTopology(routes *storageRoutes, work beads.Store) storeref.Topology {
 	return storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: work}, Bindings: b.bindings, Refused: b.refused}
 }
 
-// mintCityStores mints the class handles over work and routes.
-func mintCityStores(cityPath string, routes *storageRoutes, work beads.Store) storeref.Stores {
+// mintCityStores mints the class handles over work, the rig legs and routes.
+// The topology feeds the mint only, never a plan, so its rigs are every rig
+// the holder opened, suspended ones included, as the API serves them; the
+// residency topologies plans read exclude suspended rigs themselves
+// (residency_topology.go).
+func mintCityStores(cityPath string, routes *storageRoutes, work beads.Store, rigs []storeref.Leg) storeref.Stores {
 	opts := storeref.StoresOptions{Projection: splitStrictSeam}
 	for _, class := range mintClasses {
 		if refusal := classRefusal(cityPath, routes, class); refusal != nil {
@@ -123,7 +131,9 @@ func mintCityStores(cityPath string, routes *storageRoutes, work beads.Store) st
 			opts.ClassRefusals[class] = refusal
 		}
 	}
-	return storeref.NewStores(cityTopology(routes, work), opts)
+	t := cityTopology(routes, work)
+	t.Rigs = rigs
+	return storeref.NewStores(t, opts)
 }
 
 // placeClass is the store class lives in over work and routes, for the
@@ -142,10 +152,18 @@ func placeClass(cityPath string, routes *storageRoutes, work beads.Store, class 
 // scopeStores mints the handles for a caller holding one opened scope store and
 // the routes: the scope store is the work store, so a relocated class answers
 // from the binding and an unrelocated one from that scope store. It is the
-// frame every per-call class resolver has always taken. It mints per call; a
-// holder with an epoch uses its Stores.
+// frame every per-call class resolver has always taken, with no rig scopes.
+// It mints per call; a holder with an epoch uses its Stores.
+//
+// With nil routes it hands out handles of every class over scope, whatever
+// scope holds, and the storeclass lint counts none of them: this file is the
+// router's allowlisted mint. That is right for a scope store with no routes
+// (an unsplit city) and for refusedExtMsgServices, whose store refuses every
+// operation. It is not a relabel: a caller holding a store of one class that
+// needs a handle of another takes it from the city's Stores, or relabels it
+// with a counted literal at its own site.
 func scopeStores(cityPath string, routes *storageRoutes, scope beads.Store) storeref.Stores {
-	return mintCityStores(cityPath, routes, scope)
+	return mintCityStores(cityPath, routes, scope, nil)
 }
 
 // cliStores is scopeStores for a one-shot command, over the one-shot funnel's
@@ -157,29 +175,39 @@ func cliStores(cityPath string, scope beads.Store) storeref.Stores {
 	return scopeStores(cityPath, cliStorageRoutes(cityPath), scope)
 }
 
+// rigSet is the rig work stores a holder opened, keyed by rig name, with the
+// generation that names this map. The holder bumps the generation wherever it
+// replaces the map and never writes into a published map in place, so equal
+// generations are one rig set and the epoch can key on the number.
+type rigSet struct {
+	gen    uint64
+	stores map[string]beads.Store
+}
+
 // storesEpoch is one minted Stores and the inputs it was minted from.
 type storesEpoch struct {
 	cityPath string
 	bindings *routesBindings
 	work     beads.Store
+	rigGen   uint64
 	stores   storeref.Stores
 }
 
 // storesEpochCache holds a holder's current epoch.
 type storesEpochCache struct{ current atomic.Pointer[storesEpoch] }
 
-// get returns the Stores over work and routes, minting it when the cached
-// epoch was minted from a different city path, work store, or routes state.
-// The bindings memo stands for the routes: it lives on one routes value and is
-// replaced whenever that value hands a class a different store, so comparing
-// it covers both the pointer and an in-place rewrite. A cache hit reads the
-// routes and allocates nothing.
-func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, work beads.Store) storeref.Stores {
+// get returns the Stores over work, rigs and routes, minting it when the
+// cached epoch was minted from a different city path, work store, rig set
+// generation, or routes state. The bindings memo stands for the routes: it
+// lives on one routes value and is replaced whenever that value hands a class
+// a different store, so comparing it covers both the pointer and an in-place
+// rewrite. A cache hit reads the routes and allocates nothing.
+func (c *storesEpochCache) get(cityPath string, routes *storageRoutes, work beads.Store, rigs rigSet) storeref.Stores {
 	bindings := routes.mintBindings()
-	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.bindings == bindings && sameBeadStore(e.work, work) {
+	if e := c.current.Load(); e != nil && e.cityPath == cityPath && e.bindings == bindings && sameBeadStore(e.work, work) && e.rigGen == rigs.gen {
 		return e.stores
 	}
-	e := &storesEpoch{cityPath: cityPath, bindings: bindings, work: work, stores: mintCityStores(cityPath, routes, work)}
+	e := &storesEpoch{cityPath: cityPath, bindings: bindings, work: work, rigGen: rigs.gen, stores: mintCityStores(cityPath, routes, work, storeref.RigLegs(rigs.stores))}
 	c.current.Store(e)
 	return e.stores
 }

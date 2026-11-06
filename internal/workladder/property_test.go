@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -212,8 +213,10 @@ func (s *sim) reading() TurnReading {
 		return TurnReading{}
 	case s.chance(5):
 		return TurnReading{Read: true, Conv: 2, LastFailed: true}
+	case s.chance(6): // the newest turn canceled, or ended with no status
+		return TurnReading{Read: true, Conv: 1, ServedAt: s.served}
 	}
-	return TurnReading{Read: true, Conv: 1, LastFailed: s.lastFailed, ServedAt: s.served}
+	return TurnReading{Read: true, Conv: 1, LastFailed: s.lastFailed, LastCompleted: !s.lastFailed && !s.served.IsZero(), ServedAt: s.served}
 }
 
 func countNudges(d Decision) int {
@@ -363,8 +366,12 @@ func (s *sim) run() error {
 			case Nudge:
 				nudges++
 				if waits(a.Key) {
-					if from := waitFrom[a.Key]; o.Now.Sub(from) < DefaultCap {
-						return fail("a wait on a person nudged %v after its start or last nudge, want >= %v", o.Now.Sub(from), DefaultCap)
+					gap, least := o.Now.Sub(waitFrom[a.Key]), DefaultCap
+					if quietWait(o) {
+						least = DefaultWaitCap
+					}
+					if gap < least {
+						return fail("a wait on a person nudged %v after its start or last nudge, want >= %v (reading %+v)", gap, least, o.Turns)
 					}
 					waitFrom[a.Key] = o.Now
 				}
@@ -452,13 +459,16 @@ func (s *sim) run() error {
 		// nudge or an alert) within Cap, give or take the passes it waits
 		// for the seat's nudge slot; a release, kept, never silences it,
 		// and neither does a wait on a person, whose start or end begins a
-		// new episode.
+		// new episode, except while the seat's newest turn completed: a wait
+		// on a person is paced a WaitCap apart then (its pace is checked
+		// above, and by TestPropertyAWaitIsOnlyNudged).
 		eligible := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent
 		for _, e := range d.Next.Entries {
 			since, ok := lastHeard[e.Key]
 			pe, _ := entryOf(prev, e.Key)
 			switch {
-			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || pe.AwaitsHuman != e.AwaitsHuman:
+			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key) || pe.AwaitsHuman != e.AwaitsHuman ||
+				(e.AwaitsHuman && quietWait(o)):
 				lastHeard[e.Key] = o.Now
 			case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
 				return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
@@ -598,9 +608,25 @@ func TestNoDrainWave(t *testing.T) {
 // A wait on a person is only ever nudged, a Cap after it began and a Cap
 // apart after that, whatever the cell carried when it began (any rung, count
 // or recycle, an alert raised, a release that did not finish, a release in
-// flight) and whatever the seat or the provider does while it waits. Its
-// pace is tracked here from the actions alone, not from the cell.
+// flight) and whatever the seat or the provider does while it waits. On a
+// pass whose reading of the seat's turns, in its own conversation, shows the
+// newest ended turn completed, it is nudged only a WaitCap after it began or
+// after its last nudge; any other reading (a turn open, the newest turn
+// failed, canceled or ended with no status, no turn, another
+// conversation's, none) keeps it paced a Cap apart. Its pace is tracked
+// here from the actions alone, not from the cell, and the reading's verdict
+// from its fields.
 func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
+	var onCompleted, onFailed, onUnknown, onNeither atomic.Int64
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+		if onCompleted.Load() == 0 || onFailed.Load() == 0 || onUnknown.Load() == 0 || onNeither.Load() == 0 {
+			t.Errorf("waits nudged on a completed turn %d times, on a failed turn %d times, on no reading %d times, on a turn neither failed nor completed %d times: want all reached",
+				onCompleted.Load(), onFailed.Load(), onUnknown.Load(), onNeither.Load())
+		}
+	})
 	forEachSequence(t, func(seq uint64) error {
 		rng := rand.New(rand.NewPCG(seq, 0x6177616974))
 		prev := Record{V: 1, Gen: 1}
@@ -615,7 +641,7 @@ func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
 			}
 			e := Entry{
 				Key: k, Kind: KindClaim, Rung: rung, Since: t0.Add(-10 * time.Hour), Attempts: rng.IntN(12), Paused: rng.IntN(3),
-				Last: t0.Add(-time.Duration(rng.IntN(180)) * time.Minute), Recycles: rng.IntN(2), Escalated: rng.IntN(2) == 0,
+				Last: t0.Add(-time.Duration(rng.IntN(30*60)) * time.Minute), Recycles: rng.IntN(2), Escalated: rng.IntN(2) == 0,
 				Unreleased: rng.IntN(3) == 0, AwaitsHuman: rng.IntN(2) == 0,
 			}
 			if e.AwaitsHuman {
@@ -634,6 +660,22 @@ func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
 			if rng.IntN(10) == 0 { // the seat did something while it waits
 				o.LastActivity = now.Add(-time.Duration(rng.IntN(120)) * time.Second)
 			}
+			o.Conv = 1
+			served := now.Add(-time.Duration(rng.IntN(600)) * time.Minute)
+			switch rng.IntN(6) {
+			case 0: // no reading: a family that records no turns, a read that failed
+			case 1:
+				o.Turns = TurnReading{Read: true, Conv: 1, LastCompleted: true, ServedAt: served}
+			case 2:
+				o.Turns = TurnReading{Read: true, Conv: 1, LastFailed: true, ServedAt: served}
+			case 3:
+				o.Turns = TurnReading{Read: true, Conv: 2, LastCompleted: true, ServedAt: served} // of another conversation
+			case 4: // a turn open, or the newest turn canceled or ended with no status (an inferred end)
+				o.Turns = TurnReading{Read: true, Conv: 1, ServedAt: served}
+			case 5: // no turn at all
+				o.Turns = TurnReading{Read: true, Conv: 1}
+			}
+			failedTurn := o.Turns.Read && o.Turns.Conv == o.Conv && o.Turns.LastFailed
 			d := Decide(r, o, p)
 			for _, e := range d.Next.Entries {
 				if pe, ok := entryOf(r, e.Key); !ok || !pe.AwaitsHuman {
@@ -643,8 +685,22 @@ func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
 			for _, a := range d.Actions {
 				switch a := a.(type) {
 				case Nudge:
-					if gap := now.Sub(from[a.Key]); gap < DefaultCap {
-						return fmt.Errorf("at %v: %v nudged %v after its wait began or its last nudge (prev %s)", now.Sub(t0), a.Key, gap, EncodeLadder(prev))
+					gap, least := now.Sub(from[a.Key]), DefaultCap
+					if quietWait(o) {
+						least = DefaultWaitCap
+					}
+					if gap < least {
+						return fmt.Errorf("at %v: %v nudged %v after its wait began or its last nudge, want >= %v (reading %+v, conv %d; prev %s)", now.Sub(t0), a.Key, gap, least, o.Turns, o.Conv, EncodeLadder(prev))
+					}
+					switch {
+					case quietWait(o):
+						onCompleted.Add(1)
+					case failedTurn:
+						onFailed.Add(1)
+					case o.Turns.Read && o.Turns.Conv == o.Conv:
+						onNeither.Add(1)
+					default:
+						onUnknown.Add(1)
 					}
 					from[a.Key] = now
 				case Alert:
@@ -661,6 +717,14 @@ func TestPropertyAWaitIsOnlyNudged(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// quietWait reports whether o's reading of the seat's turns, of o's own
+// conversation, shows its newest ended turn completed: a wait on a person is
+// nudged on such a pass only a WaitCap after it began or after its last
+// nudge.
+func quietWait(o Observation) bool {
+	return o.Turns.Read && o.Turns.Conv == o.Conv && o.Turns.LastCompleted
 }
 
 // actionKey is the work a is about.

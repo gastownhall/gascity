@@ -105,6 +105,7 @@ type controllerState struct {
 	sp            runtime.Provider
 	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
+	rigStoresGen  uint64      // names beadStores for the store epoch; bumped wherever beadStores is replaced
 	cityBeadStore beads.Store // city-level store for session beads
 	// stores is the class handles over cityBeadStore and storageRoutes,
 	// re-minted when they change (city_stores.go).
@@ -367,6 +368,7 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: beads.native_transport=\"off\": city %q will never open a native bead store; always BdStore\n", cityName)
 	}
 	cs.beadStores = cs.buildStores(cfg)
+	cs.rigStoresGen++
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
@@ -379,7 +381,7 @@ func newControllerStateWithRoutes(
 		cs.cityBeadStore = wrapWithCachingStoreFeed(ctx, store, ep, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
-		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
+		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cityPath)
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
@@ -1278,7 +1280,7 @@ func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.S
 // through the delta pass's idempotency record, so a replayed or re-inferred
 // close is not a second fact.
 func (cs *controllerState) emitCompletedFact(step beads.Bead, actor string) {
-	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore().Store, step, actor)
+	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore(), step, actor)
 }
 
 func (cs *controllerState) closeRecorder() events.Recorder {
@@ -1616,7 +1618,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cityStore = wrapWithCachingStoreFeed(cs.cacheCtx, cityStore, cs.eventProv, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
-		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
+		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cs.cityPath)
 	}
 
 	// Swap under short critical section.
@@ -1631,6 +1633,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
+	cs.rigStoresGen++ // the store epoch keys on it (city_stores.go)
 	if cityStore != nil {
 		oldCityStore = cs.cityBeadStore
 		cs.cityBeadStore = cityStore

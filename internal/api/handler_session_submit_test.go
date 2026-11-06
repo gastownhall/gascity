@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -37,7 +38,7 @@ func TestHandleSessionSubmitResumesOnlyWithResumeTrue(t *testing.T) {
 			h := newTestCityHandler(t, fs)
 
 			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Me")
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 				t.Fatalf("Suspend: %v", err)
 			}
@@ -78,7 +79,7 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex Submit", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -204,7 +205,7 @@ func TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime(t *testing.T) {
 			fs.sp.TurnInterruptModeValue = tc.mode
 			h := newTestCityHandler(t, fs)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -260,7 +261,7 @@ func TestSessionSubmitInterruptNowUnsupportedReportsTypedFailureCode(t *testing.
 	fs.sp.TurnInterruptModeValue = runtime.TurnInterruptUnsupported
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -287,7 +288,7 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -340,7 +341,7 @@ func TestHandleSessionStopFollowsRuntimeTurnInterruptMode(t *testing.T) {
 			fs.sp.TurnInterruptModeValue = tc.mode
 			h := newTestCityHandler(t, fs)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -477,7 +478,7 @@ func TestHandleSessionMessageReportsQueued(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	rec := httptest.NewRecorder()
@@ -554,7 +555,7 @@ func TestHandleSessionSubmitWithoutResumeLeavesStartToController(t *testing.T) {
 			state := &willStartState{fakeState: fs, refusal: tc.refusal, uncertain: tc.uncertain}
 			h := newTestCityHandlerWith(t, state, New(state))
 			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Dormant")
-			if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+			if err := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 				t.Fatalf("Suspend: %v", err)
 			}
 			if !tc.held {
@@ -617,7 +618,7 @@ func TestHandleSessionSubmitToASkippedStateNamesOnlyTheClose(t *testing.T) {
 	refusal := "its state \" asleep\" is not one this gc version's controller manages, so the controller skips it; `gc session close " + info.ID + "` releases it"
 	state := &skippedStateWillStartState{fakeState: fs, refusal: refusal}
 	h := newTestCityHandlerWith(t, state, New(state))
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": " asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {
@@ -703,7 +704,7 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Asleep")
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {
@@ -746,7 +747,7 @@ func TestSessionReadsReportSteer(t *testing.T) {
 			fs.sp.SteerModeValue = tc.mode
 			h := newTestCityHandler(t, fs)
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("Create: %v", err)

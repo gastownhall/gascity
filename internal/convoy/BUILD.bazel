@@ -16,7 +16,6 @@ go_library(
         "//internal/config",
         "//internal/coordclass",
         "//internal/events",
-        "//internal/storeref",
     ],
 )
 
@@ -24,6 +23,7 @@ go_test(
     name = "convoy_test",
     srcs = [
         "classes_test.go",
+        "close_reason_test.go",
         "convoy_fields_test.go",
         "convoy_test.go",
         "testenv_import_test.go",
@@ -32,6 +32,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/events",
         "//internal/testenv",

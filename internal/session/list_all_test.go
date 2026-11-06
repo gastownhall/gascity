@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestListAllSessionBeads exercises the type+label union helper across the
@@ -64,7 +65,7 @@ func TestListAllSessionBeads(t *testing.T) {
 		t.Fatalf("create unrelated bead: %v", err)
 	}
 
-	got, err := ListAllSessionBeads(store, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestListAllSessionBeads_IncludeClosed(t *testing.T) {
 	}
 
 	// Default (IncludeClosed=false): only the open bead.
-	got, err := ListAllSessionBeads(store, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads open-only: %v", err)
 	}
@@ -124,7 +125,7 @@ func TestListAllSessionBeads_IncludeClosed(t *testing.T) {
 	}
 
 	// IncludeClosed=true: both.
-	got, err = ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+	got, err = ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{IncludeClosed: true})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads include-closed: %v", err)
 	}
@@ -149,7 +150,7 @@ func TestListAllSessionBeads_DedupedAcrossLegs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create healthy: %v", err)
 	}
-	got, err := ListAllSessionBeads(store, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestListAllSessionBeads_SortRespected(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	asc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedAsc})
+	asc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("asc: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestListAllSessionBeads_SortRespected(t *testing.T) {
 		}
 	}
 
-	desc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedDesc})
+	desc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedDesc})
 	if err != nil {
 		t.Fatalf("desc: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestListAllSessionBeads_GlobalSortAcrossLegs(t *testing.T) {
 		t.Fatalf("create b2: %v", err)
 	}
 
-	asc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedAsc})
+	asc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("asc: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestListAllSessionBeads_GlobalSortAcrossLegs(t *testing.T) {
 		}
 	}
 
-	desc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedDesc})
+	desc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedDesc})
 	if err != nil {
 		t.Fatalf("desc: %v", err)
 	}
@@ -302,7 +303,7 @@ func TestListAllSessionBeads_LimitAppliedOnce(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	got, err := ListAllSessionBeads(store, beads.ListQuery{Limit: 2, Sort: beads.SortCreatedAsc})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Limit: 2, Sort: beads.SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
@@ -316,7 +317,7 @@ func TestListAllSessionBeads_LimitAppliedOnce(t *testing.T) {
 
 // TestListAllSessionBeads_NilStore returns empty without error.
 func TestListAllSessionBeads_NilStore(t *testing.T) {
-	got, err := ListAllSessionBeads(nil, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beads.SessionStore{}, beads.ListQuery{})
 	if err != nil {
 		t.Errorf("nil store should not error, got %v", err)
 	}

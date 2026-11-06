@@ -884,11 +884,7 @@ func TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID(t *testing.T)
 		}
 	}
 
-	freshStore, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
-	updated, err := freshStore.Get(sessionID)
+	updated, err := openCitySessionStoreForTest(t, cityDir).Get(sessionID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", sessionID, err)
 	}

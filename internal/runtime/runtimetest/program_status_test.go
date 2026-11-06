@@ -64,9 +64,9 @@ func caseNamed(t *testing.T, code string) programStatusCase {
 }
 
 // Kills a case list that drops, reorders or renumbers a PS row.
-func TestProgramStatusCasesArePS001ThroughPS014(t *testing.T) {
-	if len(programStatusCases) != 14 {
-		t.Fatalf("%d cases, want 14", len(programStatusCases))
+func TestProgramStatusCasesArePS001ThroughPS015(t *testing.T) {
+	if len(programStatusCases) != 15 {
+		t.Fatalf("%d cases, want 15", len(programStatusCases))
 	}
 	for i, c := range programStatusCases {
 		want := fmt.Sprintf("PS-%03d_", i+1)
@@ -222,6 +222,91 @@ func (n neverArms) ProgramStatus(name string) (runtime.ProgramStatus, error) {
 
 func (neverArms) HealProgramCapture(string, runtime.ProgramStatusArm) (runtime.ProgramCaptureAction, error) {
 	return runtime.ProgramCaptureUnchanged, nil
+}
+
+// badHoldReader takes hold readings by read instead of its inner fake's
+// fresh hold read: a provider that breaks PS-015.
+type badHoldReader struct {
+	runtime.Provider
+	read func(inner runtime.Provider, name string) (runtime.ProgramHoldReading, bool)
+}
+
+func (b badHoldReader) ProgramStatus(name string) (runtime.ProgramStatus, error) {
+	ps, _ := runtime.ProgramStatusFor(b.Provider, name)
+	return ps.ProgramStatus(name)
+}
+
+func (b badHoldReader) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReading, bool) {
+	return b.read(b.Provider, name)
+}
+
+// badHolds wraps every held and armed session the fake fixtures start in a
+// badHoldReader taking readings by read.
+func badHolds(read func(inner runtime.Provider, name string) (runtime.ProgramHoldReading, bool)) ProgramStatusFixtures {
+	f := FakeProgramStatusFixtures()
+	held, armed := f.Held, f.Armed
+	f.Held = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+		s := held(t, m, script...)
+		s.Provider = badHoldReader{Provider: s.Provider, read: read}
+		return s
+	}
+	f.Armed = func(t *testing.T, m runtime.ProgramStatusMode, script ...string) ProgramStatusSession {
+		s := armed(t, m, script...)
+		s.Provider = badHoldReader{Provider: s.Provider, read: read}
+		return s
+	}
+	return f
+}
+
+// Kills a PS-015 that passes a hold read taken whatever the pane declares or
+// the switch reads, one that answers a reading the program has moved past,
+// or one that drops the record's state.
+func TestProgramStatusContractCatchesBadHoldReads(t *testing.T) {
+	ps015 := caseNamed(t, "PS-015")
+	if err := ps015.run(t, FakeProgramStatusFixtures()); err != nil {
+		t.Fatalf("the fake breaks PS-015: %v", err)
+	}
+	fresh := func(inner runtime.Provider, name string) (runtime.ProgramHoldReading, bool) {
+		h, _ := runtime.ProgramStatusHoldFor(inner, name)
+		return h.ProgramStatusHoldRead(name)
+	}
+	var frozen *runtime.ProgramHoldReading
+	for name, read := range map[string]func(runtime.Provider, string) (runtime.ProgramHoldReading, bool){
+		"ignores the declaration and the switch": func(inner runtime.Provider, name string) (runtime.ProgramHoldReading, bool) {
+			r, err := runtime.ReadProgramStatus(inner, name)
+			return runtime.ProgramHoldReading{Status: r}, err == nil && r.Valid()
+		},
+		"answers its first reading": func(inner runtime.Provider, name string) (runtime.ProgramHoldReading, bool) {
+			r, ok := fresh(inner, name)
+			if frozen == nil && ok {
+				frozen = &r
+			}
+			if frozen != nil {
+				return *frozen, ok
+			}
+			return r, ok
+		},
+		"drops the state": func(inner runtime.Provider, name string) (runtime.ProgramHoldReading, bool) {
+			r, ok := fresh(inner, name)
+			r.Status.State = runtime.ProgramIdle
+			return r, ok
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			frozen = nil
+			err := ps015.run(t, badHolds(read))
+			var s skipError
+			if err == nil || errors.As(err, &s) {
+				t.Fatalf("PS-015 passed a hold reader that %s (err %v)", name, err)
+			}
+		})
+	}
+	noHold := FakeProgramStatusFixtures()
+	noHold.Held = nil
+	var s skipError
+	if err := ps015.run(t, noHold); !errors.As(err, &s) {
+		t.Fatalf("PS-015 without a held fixture = %v, want a skip", err)
+	}
 }
 
 // Kills a runner that fails, rather than skips, a case its fixtures cannot

@@ -133,7 +133,7 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	bead, ok, err := session.FindCanonicalConfiguredNamedSessionBead(store, spec)
+	bead, ok, err := session.FindCanonicalConfiguredNamedSessionBead(beads.SessionStore{Store: store}, spec)
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("looking up canonical named session: %w", err)
 	}
@@ -149,7 +149,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	// lane reads only session.Info fields — no raw bead is cracked here and no
 	// b.Metadata key is inlined (the census-honest replacement for the old raw
 	// codec projection of SessionNameMetadata per candidate).
-	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
+	all, err := session.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false, map[string]string{
 		session.NamedSessionIdentityMetadata: spec.Identity,
 	})
 	if err != nil {
@@ -210,6 +210,9 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 	}
 	now := time.Now().UTC()
 	workStores := s.retiredSessionWorkStores(store)
+	// The bindings and participants have always been reassigned through the
+	// sessions store; see extmsgStoreOverSessions in cmd/gc.
+	messaging := beads.MailStore{Store: store}
 	var errs []error
 	for _, info := range retired {
 		for _, workStore := range workStores {
@@ -220,10 +223,10 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
 			errs = append(errs, fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
-		if err := extmsg.ReassignSessionBindings(ctx, store, info.ID, replacementID, now); err != nil {
+		if err := extmsg.ReassignSessionBindings(ctx, messaging, info.ID, replacementID, now); err != nil {
 			errs = append(errs, fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
-		if err := extmsg.ReassignSessionParticipants(ctx, store, info.ID, replacementID); err != nil {
+		if err := extmsg.ReassignSessionParticipants(ctx, messaging, info.ID, replacementID); err != nil {
 			errs = append(errs, fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
 	}
@@ -262,7 +265,7 @@ func (s *Server) handOffReleasedNamedSessionPredecessors(ctx context.Context, st
 // than canonicalID: open rows that lost continuity and released their
 // identifiers.
 func releasedNamedSessionPredecessors(store beads.Store, identity, canonicalID string) ([]session.Info, error) {
-	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
+	all, err := session.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false, map[string]string{
 		session.NamedSessionIdentityMetadata: identity,
 	})
 	if err != nil {
@@ -306,8 +309,15 @@ func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
 	}
 	var out []beads.Store
 	add := func(store beads.Store) {
-		if store == nil || slices.Contains(out, store) {
+		if store == nil {
 			return
+		}
+		// SameStore, not ==: a class handle over a store already listed is
+		// that store, and sweeping it twice moves nothing more.
+		for _, listed := range out {
+			if beads.SameStore(listed, store) {
+				return
+			}
 		}
 		out = append(out, store)
 	}
@@ -391,7 +401,7 @@ func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context,
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	lookup, err := session.LookupConfiguredNamedSession(store, spec)
+	lookup, err := session.LookupConfiguredNamedSession(beads.SessionStore{Store: store}, spec)
 	if err != nil {
 		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
@@ -533,11 +543,12 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		},
 	}
 	var info session.Info
+	sessions := beads.SessionStore{Store: store}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
 			return err
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
 			return err
 		}
 		handle, herr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
@@ -660,6 +671,7 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 // terminal decision cites. Lookups run exactly when the old inline ladder
 // ran them — an exact-ID hit never reaches the live scan.
 func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
+	sessions := beads.SessionStore{Store: store}
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
@@ -691,7 +703,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		}
 		switch dec.Gather {
 		case session.TargetStepExactID:
-			id, err := session.ResolveSessionIDByExactID(store, identifier)
+			id, err := session.ResolveSessionIDByExactID(sessions, identifier)
 			facts.ExactID = lookupFact(err)
 			selected[dec.Gather], failed[dec.Gather] = id, err
 		case session.TargetStepConfiguredName:
@@ -707,7 +719,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 				facts.ConfiguredName = session.NamedLookupNoMatch
 			}
 		case session.TargetStepLive:
-			id, err := session.ResolveSessionID(store, identifier)
+			id, err := session.ResolveSessionID(sessions, identifier)
 			facts.Live = lookupFact(err)
 			selected[dec.Gather], failed[dec.Gather] = id, err
 			if err == nil {
@@ -737,7 +749,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 				facts.ClosedNamedSpec = session.LookupNoMatch
 			}
 		case session.TargetStepClosed:
-			id, err := session.ResolveSessionIDAllowClosed(store, identifier)
+			id, err := session.ResolveSessionIDAllowClosed(sessions, identifier)
 			facts.Closed = lookupFact(err)
 			selected[dec.Gather], failed[dec.Gather] = id, err
 		default:
@@ -967,8 +979,9 @@ func (s *Server) submitMessageToSessionFor(ctx context.Context, store beads.Stor
 // lost wake CAS, a row that is not dormant, a pool seat that starts only for
 // demand) and, if not, why, with the remedy.
 func (s *Server) deferToController(store beads.Store, id string) (*bool, string) {
+	sessions := beads.SessionStore{Store: store}
 	no := false
-	outcome, err := session.NewStore(beads.SessionStore{Store: store}).RequestWakeUnlessHeld(id, false, time.Now().UTC())
+	outcome, err := session.NewStore(sessions).RequestWakeUnlessHeld(id, false, time.Now().UTC())
 	d := deferralFor(outcome, err)
 	switch d {
 	case deferFailed:
@@ -982,7 +995,7 @@ func (s *Server) deferToController(store beads.Store, id string) (*bool, string)
 		return nil, ""
 	}
 	certain := true
-	if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+	if info, err := session.NewStore(sessions).Get(id); err == nil {
 		// Resume does not change a state the controller skips: that refusal
 		// names only its own remedy, the close.
 		if refuser, ok := s.state.(UnknownStateRefuser); ok {

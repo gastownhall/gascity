@@ -69,6 +69,7 @@ type ProfileBackend interface {
 	LivenessObserverWithError
 	ProcessTableScanner
 	ProgramCaptureHealer
+	ProgramStatusHoldProvider
 	ProgramStatusProvider
 	ProgramStatusShadowProvider
 	RelaunchProvider
@@ -118,6 +119,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			LivenessObserverWithError:     b,
 			ProcessTableScanner:           b,
 			ProgramCaptureHealer:          b,
+			ProgramStatusHoldProvider:     b,
 			ProgramStatusProvider:         b,
 			ProgramStatusShadowProvider:   b,
 			RelaunchProvider:              b,
@@ -138,7 +140,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
-		return k8sProfile{core, b, b, timed}
+		return k8sProfile{core, b, b, timed, sharedListingTrait{}}
 	case ProfileExec, ProfileExecV2:
 		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}, execObserveTrait{core, b, p == ProfileExecV2}}
 	case ProfileSSH:
@@ -155,6 +157,7 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
+	sharedListingTrait struct{}                  // k8s lists every gc-agent pod in its namespace
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
 	steerTrait         struct{ m SteerMode }
@@ -178,6 +181,8 @@ func (localTranscriptTrait) LocalTranscripts() bool { return true }
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
+
+func (sharedListingTrait) ListRunningShared() bool { return true }
 
 // profileCapabilities are each backend's static capabilities; subprocess
 // has none. exec's come from its script's handshake: the profile is a pack
@@ -228,6 +233,7 @@ type (
 		LivenessObserverWithError
 		ProcessTableScanner
 		ProgramCaptureHealer
+		ProgramStatusHoldProvider
 		ProgramStatusProvider
 		ProgramStatusShadowProvider
 		RelaunchProvider
@@ -285,6 +291,7 @@ type (
 		ListingAttestation
 		RelaunchProvider
 		sleepTrait
+		sharedListingTrait
 	}
 	execProfile struct {
 		Provider
@@ -347,13 +354,14 @@ func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
 }
 
 // execObserveTrait is exec's observe.v1 surface, gated as the exec provider
-// gates it on its handshake. Ready (ProfileExecV2), the reads and kills are
-// the backend's, and the identity is its GetMeta of the identity keys for a
-// name its liveness read shows present, a corpse included, as exec's
-// `observe` reports a dead box's identity.
+// gates it on its handshake. Ready (ProfileExecV2), the reads, kills,
+// listing and inventory are the backend's, and the identity is its GetMeta
+// of the identity keys for a name its liveness read shows present, a
+// corpse included, as exec's `observe` reports a dead box's identity.
 // Otherwise (ProfileExec) liveness is the IsRunning and ProcessAlive read
 // with a nil error, nothing reads fresh or observes identity, nothing is
-// killed, and readiness names both missing capabilities.
+// killed, no inventory is served or listing attested, and readiness names
+// both missing capabilities.
 type execObserveTrait struct {
 	core  Provider
 	b     ProfileBackend
@@ -368,6 +376,32 @@ func (t execObserveTrait) ObserveLivenessWithError(name string, processNames []s
 }
 
 func (t execObserveTrait) LivenessReadsFresh() bool { return t.ready }
+
+func (t execObserveTrait) InventoryAvailable() bool { return t.ready }
+
+func (t execObserveTrait) ListRunningComplete() bool { return t.ready }
+
+func (t execObserveTrait) ListInventory(prefix string) ([]string, map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, nil, ErrRuntimeUnavailable
+	}
+	names, err := t.core.ListRunning(prefix)
+	if err != nil && !IsPartialListError(err) {
+		return nil, nil, err
+	}
+	inv, invErr := t.b.RuntimeInventory(context.Background())
+	if invErr != nil {
+		return nil, nil, invErr
+	}
+	return names, inv, err
+}
+
+func (t execObserveTrait) RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error) {
+	if !t.ready {
+		return nil, ErrRuntimeUnavailable
+	}
+	return t.b.RuntimeInventory(ctx)
+}
 
 func (t execObserveTrait) IdentityObservable() bool { return t.ready }
 

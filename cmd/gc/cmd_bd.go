@@ -123,7 +123,10 @@ too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
-that assignee.
+that assignee. It is routed by the issue id, as "show" and "update" are; the
+assignee never selects the store. It prints "released" when it cleared the
+assignment and "skipped" when that store holds the bead under another
+assignee or status, and exits 1 when that store does not hold the bead.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. To write a JSONL
@@ -343,6 +346,9 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 //
 // An `@file` body is read — relative to scopeRoot, the directory bd runs in —
 // and validated like an inline one; a file that cannot be read is refused.
+// bd reads a file only for a value that starts with "@", and reads the path
+// after it as written, spaces included, so that is the path read here; a
+// space-padded "@", which bd rejects as JSON, is read with the spaces trimmed.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
 	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
@@ -416,6 +422,9 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, scopeRoot string, bdArgs []
 
 		metadataJSON := strings.TrimSpace(value)
 		if path, isFile := strings.CutPrefix(metadataJSON, "@"); isFile {
+			if exact, ok := strings.CutPrefix(value, "@"); ok {
+				path = exact
+			}
 			if !filepath.IsAbs(path) {
 				path = filepath.Join(scopeRoot, path)
 			}
@@ -908,7 +917,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// The flag sets are the complete value-consuming and boolean (no-value)
 	// flags for this subcommand, in both long and short form, sourced from
-	// `bd <sub> --help` (bd 1.3.2, 2026-10-24). Unknown flags not in either set
+	// `bd <sub> --help` (bd 1.3.4, 2026-11-04). Unknown flags not in either set
 	// make the scan ambiguous.
 	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
 	if ambiguous {
@@ -1031,6 +1040,22 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	if released {
 		fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
 		return 0
+	}
+	// "skipped" is the compare-and-swap verdict: this store holds the bead,
+	// and it is no longer in progress under expectedAssignee. The store answers
+	// a bead it does not hold the same way, since there is nothing there to
+	// release, so the bead is read back before the verdict is printed. A
+	// release sent to a store that does not hold the bead (an explicit --city
+	// or --rig naming another store, or an id no store holds) is an error, as
+	// `gc bd show` and `gc bd update` of that id are; callers read "skipped"
+	// as "someone else holds it" and stop.
+	if _, err := store.Get(id); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			fmt.Fprintf(stderr, "gc bd release-if-current: bead %q is not in the %s store; nothing was released\n", id, scopeLabel(target)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintf(stderr, "gc bd release-if-current: %s was not released, and reading it back from the %s store failed: %v\n", id, scopeLabel(target), err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	fmt.Fprintln(stdout, "skipped") //nolint:errcheck // best-effort stdout
 	return 0
@@ -1156,7 +1181,7 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// store AND the store the rest of the chain would pick are the same store,
 	// the answer is that store whatever the probes say — and the passthrough
 	// below is the one bd invocation the command pays.
-	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, args)
+	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, bdScopeProbeArgs(args))
 	fallback, gcRigDiscarded, fallbackErr := bdScopeFallbackTarget(cfg, cityPath, cityTarget, args)
 	if len(candidates) > 0 && fallbackErr == nil && gcRigDiscarded == "" && bdScopeCandidatesAgree(candidates, fallback) {
 		return fallback, nil
@@ -1211,6 +1236,18 @@ func bdScopeProbeCandidates(cfg *config.City, cityTarget execStoreTarget, cityPa
 		}
 	}
 	return candidates
+}
+
+// bdScopeProbeArgs narrows argv to the tokens that may name the bead whose
+// store the command runs in. A release-if-current names its bead first and the
+// expected assignee second; the assignee is an identity, often a pool
+// session's bead id that exists in the city store, so probing it would run
+// the release of a rig bead in the city store, where it is skipped.
+func bdScopeProbeArgs(args []string) []string {
+	if id, _, ok, err := parseBdReleaseIfCurrentArgs(args); ok && err == nil {
+		return []string{args[0], id}
+	}
+	return args
 }
 
 // bdScopeCandidatesAgree reports whether every candidate routes to fallback,
