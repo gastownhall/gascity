@@ -197,6 +197,12 @@ type Config struct {
 	// (ProgramStatus, or the one SetProgramStatusMode published) is shadow;
 	// nil records nothing. It must not block.
 	ComparisonSink runtime.ProgramStatusComparisonSink
+	// ComparisonEnabled, when set, reports whether the process records
+	// comparisons at all right now. While it reports false the leaf shadows
+	// nothing (no comparison and no read taken for one), as under off: a
+	// short-lived process that only observes sessions decides nothing a
+	// comparison could measure. Nil records whenever the switch is shadow.
+	ComparisonEnabled func() bool
 	// ComparisonFollowUps reports whether the process lives long enough to
 	// follow a timed point's comparison past its decision. Nil, or false,
 	// records each decision-time verdict untimed with no follow-up: a
