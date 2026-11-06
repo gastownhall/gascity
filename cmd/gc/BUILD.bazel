@@ -2063,6 +2063,7 @@ go_test(
         "route_equivalence_session_peek_test.go",
         "route_equivalence_status_test.go",
         "route_log_test.go",
+        "route_notification_integration_test.go",
         "route_recovery_cas_test.go",
         "route_recovery_fenced_test.go",
         "route_recovery_lane_test.go",

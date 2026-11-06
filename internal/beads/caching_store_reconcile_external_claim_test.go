@@ -18,9 +18,9 @@ import (
 // absorbs the row and emits bead.updated with Actor "cache-reconcile"
 // (cmd/gc/api_state.go wires onChange straight to events.Recorder.Record).
 //
-// That matters because bead.updated is the trigger of the one core order keyed on it,
-// internal/bootstrap/packs/core/orders/nudge-on-route.toml. If this test fails, an
-// externally claimed bead stops waking a warm-idle worker.
+// That matters to consumers of the event log such as the core nudge-on-route order
+// (internal/bootstrap/packs/core/orders/nudge-on-route.toml), which reads bead.updated
+// to learn that routed work was claimed.
 func TestReconcileEmitsBeadUpdatedForAnExternallyClaimedBead(t *testing.T) {
 	t.Parallel()
 
@@ -78,7 +78,7 @@ func TestReconcileEmitsBeadUpdatedForAnExternallyClaimedBead(t *testing.T) {
 			t.Fatalf("decode payload: %v: %s", err, e.payload)
 		}
 		// The payload has to carry the claim, not just the id: a consumer that re-reads
-		// is a consumer that races, and nudge-on-route routes on what the event says.
+		// is a consumer that races, and nudge-on-route folds what the event says.
 		if b.Assignee != claimed || b.Status != inProgress {
 			t.Fatalf("bead.updated payload does not carry the claim: assignee=%q status=%q", b.Assignee, b.Status)
 		}
