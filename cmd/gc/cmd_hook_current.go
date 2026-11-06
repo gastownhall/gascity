@@ -98,6 +98,15 @@ func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout
 			return 1
 		}
 		if v.held {
+			newer, err := hookCurrentNewerQualifying(read, cell, stamp)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if newer != "" {
+				fmt.Fprintf(stderr, "gc hook current: session %s's stamped claim %s is contradicted by a newer live recorded claim %s; refusing to pick one\n", sessionID, stamp, newer) //nolint:errcheck
+				return 1
+			}
 			return hookCurrentPrint(stdout, sessionID, stamp, idOnly)
 		}
 		live, err := hookCurrentQualifyingIDs(read, cell)
@@ -112,7 +121,7 @@ func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout
 		case 0:
 			fmt.Fprintf(stderr, "gc hook current: session %s's stamped claim %s is no longer held (%s), and no live claim is recorded for the session\n", sessionID, stamp, v.reason) //nolint:errcheck
 		default:
-			fmt.Fprintf(stderr, "gc hook current: session %s holds more than one live claim; refusing to pick one\n", sessionID) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc hook current: session %s holds several live claims (%s); refusing to pick one\n", sessionID, strings.Join(live, ", ")) //nolint:errcheck
 		}
 		return 1
 	}
@@ -128,7 +137,7 @@ func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout
 	case 0:
 		fmt.Fprintf(stderr, "gc hook current: session %s has no current claim (nothing claimed through gc hook --claim)\n", sessionID) //nolint:errcheck
 	default:
-		fmt.Fprintf(stderr, "gc hook current: session %s holds more than one live claim; refusing to pick one\n", sessionID) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc hook current: session %s holds several live claims (%s); refusing to pick one\n", sessionID, strings.Join(live, ", ")) //nolint:errcheck
 	}
 	return 1
 }

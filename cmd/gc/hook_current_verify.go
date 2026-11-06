@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -116,6 +117,32 @@ func hookCurrentQualifyingIDs(read hookCurrentReader, cell session.WorkStarted) 
 		}
 	}
 	return live, nil
+}
+
+// hookCurrentNewerQualifying returns the first qualifying recorded delivery
+// newer than the stamp, or "" when none is. The cell lists deliveries newest
+// first, so the entries before the stamp's own position were recorded after
+// the stamp was written; a stamp the cell does not list at all is treated as
+// older than every entry, because its age relative to them is unknown. A
+// newer delivery whose work is still live contradicts the stamp: the session
+// took that work on later, so the stamp is not its current claim, whatever
+// its own row says. A read error aborts the scan, not skips the entry.
+func hookCurrentNewerQualifying(read hookCurrentReader, cell session.WorkStarted, stamp string) (string, error) {
+	ids := hookCurrentEntryIDs(cell)
+	k := slices.Index(ids, stamp)
+	if k < 0 {
+		k = len(ids)
+	}
+	for _, id := range ids[:k] {
+		v := read.verify(id)
+		if v.err != nil {
+			return "", v.err
+		}
+		if v.held {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 // hookCurrentRow is one work id's verdict: why the read failed (err), or why

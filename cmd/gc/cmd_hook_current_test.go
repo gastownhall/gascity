@@ -192,6 +192,92 @@ func TestDoHookCurrentPrintsTheOnlyRecordedClaimWhenNothingIsStamped(t *testing.
 	}
 }
 
+// TestDoHookCurrentRefusesAStampContradictedByANewerLiveDelivery is the
+// conflict arm: the stamp's own row still qualifies, but the cell recorded a
+// NEWER delivery (listed before the stamp, newest first) whose work is also
+// still live. The stamp is then not the session's most recent live claim —
+// printing it could close superseded work while its successor goes unclaimed
+// — so the command refuses, naming both.
+func TestDoHookCurrentRefusesAStampContradictedByANewerLiveDelivery(t *testing.T) {
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-stamp",
+			hookCurrentEntry("gcg-newer"),
+			hookCurrentEntry("gcg-stamp"),
+		),
+		hookCurrentWorkBead("gcg-stamp"),
+		hookCurrentWorkBead("gcg-newer"),
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (stamp contradicted by newer live delivery) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed for a contradicted stamp", stdout.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "gcg-stamp") || !strings.Contains(errText, "gcg-newer") {
+		t.Errorf("stderr = %q, want both the stamp and the newer claim named", errText)
+	}
+}
+
+// TestDoHookCurrentPrintsAStampNoNewerDeliveryContradicts is the no-false-
+// positive arm of the conflict scan: a newer recorded delivery exists, but its
+// work is no longer live (closed here), so nothing contradicts the stamp and
+// it prints with no disclosure — a verified stamp stays silent on stderr.
+func TestDoHookCurrentPrintsAStampNoNewerDeliveryContradicts(t *testing.T) {
+	finished := hookCurrentWorkBead("gcg-newer")
+	finished.Status = "closed"
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-stamp",
+			hookCurrentEntry("gcg-newer"),
+			hookCurrentEntry("gcg-stamp"),
+		),
+		hookCurrentWorkBead("gcg-stamp"),
+		finished,
+	)
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookCurrent (newer delivery not live) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); got != "gcg-stamp\n" {
+		t.Fatalf("--id-only stdout = %q, want the stamp", got)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty: nothing contradicts a verified stamp", stderr.String())
+	}
+}
+
+// TestDoHookCurrentNamesTheClaimsWhenSeveralRemain pins the ambiguity
+// diagnostic: several live recorded claims is a state no automation may
+// silently resolve, so the refusal names every conflicting id for the
+// operator the cell left holding all of them.
+func TestDoHookCurrentNamesTheClaimsWhenSeveralRemain(t *testing.T) {
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("",
+			hookCurrentEntry("gcg-y"),
+			hookCurrentEntry("gcg-z"),
+		),
+		hookCurrentWorkBead("gcg-y"),
+		hookCurrentWorkBead("gcg-z"),
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (several live claims) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed while ambiguous", stdout.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "gcg-y") || !strings.Contains(errText, "gcg-z") {
+		t.Errorf("stderr = %q, want every live claim named", errText)
+	}
+}
+
 // TestDoHookCurrentExitsOneWhenNothingIsStamped is the fail-loud half of the
 // contract: a session with nothing stamped AND nothing recorded live must NOT
 // print an empty line and exit 0, or a caller substituting the output would
