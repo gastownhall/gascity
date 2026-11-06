@@ -260,10 +260,11 @@ func (f *laneFixture) pass(ctx context.Context, t *testing.T, l *opjournal.Conve
 	return l.Pass(ctx, v, exec)
 }
 
-// nudges are the texts the fake runtime received.
+// nudges are the texts the fake runtime received. It reads a locked
+// snapshot: a started host's workers may still be calling the fake.
 func (f *laneFixture) nudges() []runtime.Call {
 	var out []runtime.Call
-	for _, c := range f.sp.Calls {
+	for _, c := range f.sp.SnapshotCalls() {
 		if c.Method == "Nudge" || c.Method == "NudgeNow" {
 			out = append(out, c)
 		}

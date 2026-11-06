@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -568,39 +569,74 @@ func admitAsAPI(t *testing.T, h *cliOpHarness, conv, key, text string, intent se
 }
 
 // closingOnReadStore is an op store that runs beforeRead once, just before it
-// serves the nth read of op id: a writer that lands between two reads.
+// serves the nth read of op id: a writer that lands between two reads. The
+// API's handler arms it and the CLI reads through it, so its fields are
+// guarded by mu; arming under mu also publishes the handler's admission to
+// the CLI goroutine that later finishes it.
 type closingOnReadStore struct {
 	*beads.MemStore
+	mu         sync.Mutex
 	id         string
 	nth        int
 	reads      int
 	beforeRead func()
 }
 
-// Get serves a read, first running beforeRead at the nth read of id.
+// arm sets the op id, the read to act before, and the action.
+func (s *closingOnReadStore) arm(id string, nth int, before func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.id, s.nth, s.beforeRead = id, nth, before
+}
+
+// readCount reports how many reads of the armed id were served.
+func (s *closingOnReadStore) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// Get serves a read, first running beforeRead at the nth read of id. It runs
+// beforeRead outside mu, since the writer may read through this store.
 func (s *closingOnReadStore) Get(id string) (beads.Bead, error) {
+	var before func()
+	s.mu.Lock()
 	if id == s.id {
 		s.reads++
 		if s.reads == s.nth && s.beforeRead != nil {
-			before := s.beforeRead
+			before = s.beforeRead
 			s.beforeRead = nil
-			before()
 		}
+	}
+	s.mu.Unlock()
+	if before != nil {
+		before()
 	}
 	return s.MemStore.Get(id)
 }
 
 // lostAnswerServer accepts a submit, records it as the API would through
 // accept, and then drops the connection before answering, as a transport
-// failure after the commit does.
+// failure after the commit does. A test that reads what accept wrote uses
+// lostAnswerServerGuarded instead.
 func lostAnswerServer(t *testing.T, accept func(key string)) *httptest.Server {
+	t.Helper()
+	return lostAnswerServerGuarded(t, new(sync.Mutex), accept)
+}
+
+// lostAnswerServerGuarded is lostAnswerServer with accept run under mu. A
+// dropped connection carries no happens-before edge back to the client, so a
+// test that reads what accept wrote reads it under mu too.
+func lostAnswerServerGuarded(t *testing.T, mu *sync.Mutex, accept func(key string)) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/submit") {
 			http.NotFound(w, r)
 			return
 		}
+		mu.Lock()
 		accept(r.Header.Get("Idempotency-Key"))
+		mu.Unlock()
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			t.Errorf("response writer cannot hijack")
@@ -644,17 +680,21 @@ func TestSessionSubmitFallbackDedupe(t *testing.T) {
 	t.Run("api accepted, answer lost, op open: reports the API's op", func(t *testing.T) {
 		var h *cliOpHarness
 		var c *cliOpCity
-		var sent string
-		var apiOp opjournal.Op
-		srv := lostAnswerServer(t, func(key string) {
-			sent = key
-			apiOp = proposeAsAPI(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
+		var mu sync.Mutex
+		var sentByAPI string
+		var opByAPI opjournal.Op
+		srv := lostAnswerServerGuarded(t, &mu, func(key string) {
+			sentByAPI = key
+			opByAPI = proposeAsAPI(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
 		})
 		h, c = submitOpCity(t, "auto", srv)
 		var stdout, stderr bytes.Buffer
 		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
 			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
 		}
+		mu.Lock()
+		sent, apiOp := sentByAPI, opByAPI
+		mu.Unlock()
 		if !strings.HasPrefix(sent, "k-") {
 			t.Fatalf("Idempotency-Key = %q, want the minted key", sent)
 		}
@@ -684,17 +724,17 @@ func TestSessionSubmitFallbackDedupe(t *testing.T) {
 	t.Run("api closed its op between the fallback's two reads: replays the outcome", func(t *testing.T) {
 		var h *cliOpHarness
 		var c *cliOpCity
+		var mu sync.Mutex
 		var store *closingOnReadStore
 		closed := false
-		srv := lostAnswerServer(t, func(key string) {
+		srv := lostAnswerServerGuarded(t, &mu, func(key string) {
 			adm := admitAsAPI(t, h, c.bead.ID, key, text, session.SubmitIntentDefault)
 			// Admit reads the op open; the API closes it before the
 			// fallback reads it again to report it accepted.
-			store.id, store.nth = adm.Op.ID, 2
-			store.beforeRead = func() {
+			store.arm(adm.Op.ID, 2, func() {
 				adm.Finish(legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyDelivered}}})
 				closed = true
-			}
+			})
 		})
 		h, c = submitOpCity(t, "auto", srv)
 		store = &closingOnReadStore{MemStore: h.opStore.(*beads.MemStore)}
@@ -704,7 +744,7 @@ func TestSessionSubmitFallbackDedupe(t *testing.T) {
 			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
 		}
 		if !closed {
-			t.Fatalf("the API's op was read %d times after its admission, so it never closed between the fallback's reads", store.reads)
+			t.Fatalf("the API's op was read %d times after its admission, so it never closed between the fallback's reads", store.readCount())
 		}
 		if n := submitDeliveries(c.sp); n != 0 {
 			t.Fatalf("deliveries = %d, want none: the API delivered it", n)
