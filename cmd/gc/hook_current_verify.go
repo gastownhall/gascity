@@ -89,21 +89,22 @@ func resolveHookCurrent(c hookCurrentContext, sessionID string) (beadID, note st
 			return "", "", err
 		}
 		if stale == "" {
+			// A newer delivery the session still holds contradicts the
+			// stamp: the claim that followed it failed to stamp. Deliveries
+			// older than the stamp are not read.
+			newer, err := c.heldDeliveries(deliveriesAhead(deliveries, stamp), "", sessionID, scope)
+			if err != nil {
+				return "", "", err
+			}
+			if len(newer) > 0 {
+				return "", "", fmt.Errorf("session %s's claim stamp %s is contradicted by the newer recorded hook delivery %s it still holds; refusing to pick one as the current claim", sessionID, stamp, strings.Join(newer, ", "))
+			}
 			return stamp, "", nil
 		}
 	}
-	var live []string
-	for _, id := range deliveries {
-		if id == stamp {
-			continue
-		}
-		reason, err := c.claimCheck(id, sessionID, scope)
-		if err != nil {
-			return "", "", err
-		}
-		if reason == "" {
-			live = append(live, id)
-		}
+	live, err := c.heldDeliveries(deliveries, stamp, sessionID, scope)
+	if err != nil {
+		return "", "", err
 	}
 	switch {
 	case len(live) == 1 && stamp == "":
@@ -116,6 +117,35 @@ func resolveHookCurrent(c hookCurrentContext, sessionID string) (beadID, note st
 		return "", "", fmt.Errorf("session %s has no current claim (nothing claimed through gc hook --claim)", sessionID)
 	}
 	return "", "", fmt.Errorf("session %s has no current claim: its claim stamp %s is stale (%s) and no recorded hook delivery is still held", sessionID, stamp, stale)
+}
+
+// heldDeliveries is the ids among deliveries, skip aside, that sessionID
+// still holds under scope (claimCheck), in order. Any read failure is the
+// error, whatever the ids already read showed.
+func (c hookCurrentContext) heldDeliveries(deliveries []string, skip, sessionID string, scope ReleaseScope) ([]string, error) {
+	var held []string
+	for _, id := range deliveries {
+		if id == skip {
+			continue
+		}
+		reason, err := c.claimCheck(id, sessionID, scope)
+		if err != nil {
+			return nil, err
+		}
+		if reason == "" {
+			held = append(held, id)
+		}
+	}
+	return held, nil
+}
+
+// deliveriesAhead is the deliveries recorded newer than stamp: those before
+// it, or every one when the cell does not record it.
+func deliveriesAhead(deliveries []string, stamp string) []string {
+	if k := slices.Index(deliveries, stamp); k >= 0 {
+		return deliveries[:k]
+	}
+	return deliveries
 }
 
 // hookDeliveredBeads is the distinct bead ids cell records, newest first.

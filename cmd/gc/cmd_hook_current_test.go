@@ -349,3 +349,85 @@ func TestDoHookCurrentRecoversTheOneLiveDelivery(t *testing.T) {
 		})
 	}
 }
+
+// TestDoHookCurrentRefusesWithoutOneVerifiedClaim is AC-3: no live recovery
+// candidate, several of them, or a held stamp contradicted by a newer live
+// hook delivery all exit 1 with nothing on stdout and a diagnostic naming the
+// ids in conflict. Recency never breaks a tie, and work the session holds
+// that no hook delivery records is not a candidate.
+func TestDoHookCurrentRefusesWithoutOneVerifiedClaim(t *testing.T) {
+	closed := func(id string) beads.Bead { return hookCurrentWork(id, "closed", hookCurrentSessionID) }
+	for _, tc := range []struct {
+		name  string
+		stamp string
+		cell  string
+		work  []beads.Bead
+		want  []string
+	}{
+		{
+			name:  "stale stamp, no live delivery",
+			stamp: "gcg-old", cell: hookCurrentStartedCell("gcg-a", "gcg-old"),
+			work: []beads.Bead{closed("gcg-old"), closed("gcg-a")},
+			want: []string{"gcg-old", string(claimStaleClosed), "no recorded hook delivery"},
+		},
+		{
+			name:  "stale stamp, held work no delivery records",
+			stamp: "gcg-old",
+			work:  []beads.Bead{closed("gcg-old"), hookCurrentHeld("gcg-unrecorded")},
+			want:  []string{"gcg-old", "no recorded hook delivery"},
+		},
+		{
+			name: "no stamp, nothing delivered",
+			want: []string{"no current claim"},
+		},
+		{
+			name:  "several live deliveries",
+			stamp: "gcg-old", cell: hookCurrentStartedCell("gcg-a", "gcg-b", "gcg-old"),
+			work: []beads.Bead{closed("gcg-old"), hookCurrentHeld("gcg-a"), hookCurrentHeld("gcg-b")},
+			want: []string{"gcg-a", "gcg-b", "several"},
+		},
+		{
+			name: "no stamp, several live deliveries",
+			cell: hookCurrentStartedCell("gcg-a", "gcg-b"),
+			work: []beads.Bead{hookCurrentHeld("gcg-a"), hookCurrentHeld("gcg-b")},
+			want: []string{"gcg-a", "gcg-b", "several"},
+		},
+		{
+			name:  "held stamp behind a newer live delivery",
+			stamp: "gcg-x", cell: hookCurrentStartedCell("gcg-y", "gcg-x"),
+			work: []beads.Bead{hookCurrentHeld("gcg-x"), hookCurrentHeld("gcg-y")},
+			want: []string{"gcg-x", "gcg-y"},
+		},
+		{
+			name:  "held stamp missing from a cell with a live delivery",
+			stamp: "gcg-x", cell: hookCurrentStartedCell("gcg-y"),
+			work: []beads.Bead{hookCurrentHeld("gcg-x"), hookCurrentHeld("gcg-y")},
+			want: []string{"gcg-x", "gcg-y"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookCurrentFixture(t, tc.stamp, tc.cell, tc.work...)
+			for _, idOnly := range []bool{true, false} {
+				code, stdout, stderr := f.run(idOnly)
+				if code != 1 || stdout != "" {
+					t.Fatalf("idOnly=%v: = (%d, %q), want exit 1 with empty stdout; stderr=%s", idOnly, code, stdout, stderr)
+				}
+				for _, want := range tc.want {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("idOnly=%v: stderr = %q, want it to name %q", idOnly, stderr, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestDoHookCurrentCountsADuplicatedDeliveryOnce: a bead the cell records
+// twice is one candidate, not an ambiguity.
+func TestDoHookCurrentCountsADuplicatedDeliveryOnce(t *testing.T) {
+	f := newHookCurrentFixture(t, "gcg-old", hookCurrentStartedCell("gcg-a", "gcg-a", "gcg-old"),
+		hookCurrentWork("gcg-old", "closed", hookCurrentSessionID), hookCurrentHeld("gcg-a"))
+	if code, stdout, stderr := f.run(true); code != 0 || stdout != "gcg-a\n" {
+		t.Fatalf("--id-only = (%d, %q), want (0, \"gcg-a\\n\"); stderr=%s", code, stdout, stderr)
+	}
+}
