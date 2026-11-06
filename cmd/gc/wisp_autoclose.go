@@ -113,7 +113,8 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	for _, a := range located {
 		seen[a.Bead.ID] = true
 	}
-	inputRoots, _ := collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)
+	inputRoots, discoverErr := collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)
+	run.note(discoverErr)
 	inputOf := make(map[string]inputConvoyRoot, len(inputRoots))
 	for _, input := range inputRoots {
 		inputOf[input.root.ID] = input
@@ -170,6 +171,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 				}
 			}
 			closed, err := closeAttachedWispSubtree(attachedStore, attached)
+			run.note(err)
 			if err != nil || closed == 0 {
 				continue
 			}
@@ -234,7 +236,8 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // attachedMoleculeIsParked guard, and a parked root retires only when
 // inputConvoyWorkflowIdle holds, so an orchestrated workflow whose step beads
 // are still in flight stays open and closes later via its workflow-finalize
-// control instead. A failed read is returned with whatever was found.
+// control instead. A failed read is returned with whatever was found: the
+// caller reports it so the run is retried.
 func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) ([]inputConvoyRoot, error) {
 	// The tracks edge is co-resident with the tracking convoy, and the two
 	// owning candidates differ on a split city: every convoy is WORK class

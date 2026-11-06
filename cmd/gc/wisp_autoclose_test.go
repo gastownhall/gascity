@@ -1115,6 +1115,131 @@ func TestWispAutocloseRechecksIdleInputWorkflowLiveBeforeRetiring(t *testing.T) 
 	f.assertPreserved(t)
 }
 
+// TestWispAutoclosePreservesInputWorkflowThatIsHeldGatedOrUnresolved: the close
+// of the last input retires an input-convoy workflow only when nothing in it
+// is held or gated and its whole input resolves terminal. Anything else keeps
+// it, and that clean preservation finishes the run. A step whose Type is gate
+// but declares no gc.gate_type is deferred routing, not a gate, and an open
+// spec sidecar is not executable: neither keeps the workflow.
+func TestWispAutoclosePreservesInputWorkflowThatIsHeldGatedOrUnresolved(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		members     int
+		mutate      func(t *testing.T, f inputWorkflowFixture)
+		wantRetired bool
+	}{
+		{name: "step assigned", mutate: func(t *testing.T, f inputWorkflowFixture) {
+			updateInputWorkflowBead(t, f.graph, f.step.ID, beads.UpdateOpts{Assignee: strPtr("worker-1")})
+		}},
+		{name: "step in progress", mutate: func(t *testing.T, f inputWorkflowFixture) {
+			updateInputWorkflowBead(t, f.graph, f.step.ID, beads.UpdateOpts{Status: strPtr("in_progress")})
+		}},
+		{name: "step declares a gate", mutate: func(t *testing.T, f inputWorkflowFixture) {
+			updateInputWorkflowBead(t, f.graph, f.step.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.GateTypeMetadataKey: "human"}})
+		}},
+		{name: "root assigned", mutate: func(t *testing.T, f inputWorkflowFixture) {
+			updateInputWorkflowBead(t, f.graph, f.root.ID, beads.UpdateOpts{Assignee: strPtr("worker-1")})
+		}},
+		{name: "input tracks an unresolved member", mutate: func(t *testing.T, f inputWorkflowFixture) {
+			if err := f.convoyStore.DepAdd(f.convoyID, "gc-404", "tracks"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "another input still open", members: 2},
+		{name: "routing-only gate step", wantRetired: true, mutate: func(t *testing.T, f inputWorkflowFixture) {
+			updateInputWorkflowBead(t, f.graph, f.step.ID, beads.UpdateOpts{Type: strPtr("gate")})
+		}},
+		{name: "open spec sidecar", wantRetired: true, mutate: func(t *testing.T, f inputWorkflowFixture) {
+			if _, err := f.graph.Create(beads.Bead{Title: "spec", Type: "task", Assignee: "worker-1", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: f.root.ID,
+				beadmeta.KindMetadataKey:       beadmeta.KindSpec,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			members := tc.members
+			if members == 0 {
+				members = 1
+			}
+			f := newInputWorkflowFixture(t, store, store, store, members)
+			if tc.mutate != nil {
+				tc.mutate(t, f)
+			}
+
+			run, _ := f.closeInput(t, 0, store)
+
+			if !run.finished() {
+				t.Fatalf("run = %+v, want finished", run)
+			}
+			if tc.wantRetired {
+				f.assertRetiredAsSkipped(t)
+			} else {
+				f.assertPreserved(t)
+			}
+		})
+	}
+}
+
+func updateInputWorkflowBead(t *testing.T, store beads.Store, id string, opts beads.UpdateOpts) {
+	t.Helper()
+	if err := store.Update(id, opts); err != nil {
+		t.Fatalf("Update(%s): %v", id, err)
+	}
+}
+
+// inputDiscoveryFailingStore fails the lookup of workflow roots by input
+// convoy, the discovery read of the input-convoy branch.
+type inputDiscoveryFailingStore struct{ beads.Store }
+
+func (s inputDiscoveryFailingStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if filters[beadmeta.InputConvoyIDMetadataKey] != "" {
+		return nil, errors.New("input-convoy root lookup unavailable")
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+// closeAllFailingStore fails every batch close, as the subtree close writes.
+type closeAllFailingStore struct{ beads.Store }
+
+func (closeAllFailingStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	return 0, errors.New("batch close unavailable")
+}
+
+// TestWispAutocloseLeavesInputWorkflowUnfinishedOnAReadOrCloseError: a failed
+// discovery, decision, or close read leaves an otherwise idle input-convoy
+// workflow open and the run unfinished, so the controller retries it.
+func TestWispAutocloseLeavesInputWorkflowUnfinishedOnAReadOrCloseError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(mem beads.Store) beads.Store
+	}{
+		{name: "discovery read fails", wrap: func(mem beads.Store) beads.Store { return inputDiscoveryFailingStore{mem} }},
+		{name: "membership read fails", wrap: func(mem beads.Store) beads.Store {
+			return &inputMembershipHookStore{Store: mem, onMembers: func(int) error { return errors.New("membership unavailable") }}
+		}},
+		{name: "subtree close fails", wrap: func(mem beads.Store) beads.Store { return closeAllFailingStore{mem} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			store := tc.wrap(mem)
+			f := newInputWorkflowFixture(t, store, store, store, 1)
+			if hooked, ok := store.(*inputMembershipHookStore); ok {
+				hooked.convoyID = f.convoyID
+			}
+
+			run, _ := f.closeInput(t, 0, store)
+
+			if run.finished() {
+				t.Fatalf("run = %+v, want unfinished so the close is retried", run)
+			}
+			f.assertPreserved(t)
+		})
+	}
+}
+
 func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {
 	// The input-convoy reap is graph.v2-only by contract: a legacy
 	// gc.kind=workflow root keeps its gc.source_bead_id attachment and is reaped
