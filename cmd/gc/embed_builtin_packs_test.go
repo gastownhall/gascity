@@ -404,6 +404,55 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 	}
 }
 
+// TestBundledOmpHookDrainsParkedPrimeContextOnce pins the delivery half of the
+// session_start parking that TestBundledOmpHookPublishesProviderSessionID
+// asserts. OMP's session_start cannot inject into the model's context, so the
+// output of `gc prime --hook` is parked in pendingPrimeContext and has to reach
+// the system prompt through before_agent_start: read before it is cleared, and
+// cleared so later turns do not repeat the startup prompt. Parking without that
+// drain is the bug this hook version fixes: gc archives auto-handoff mail once
+// its stdout write succeeds, so output that is parked and never injected
+// consumes the mail unseen.
+func TestBundledOmpHookDrainsParkedPrimeContextOnce(t *testing.T) {
+	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
+
+	start := strings.Index(data, `pi.on("before_agent_start"`)
+	if start < 0 {
+		t.Fatalf("bundled OMP hook has no before_agent_start handler:\n%s", data)
+	}
+	handler := data[start:]
+	if next := strings.Index(handler[1:], "pi.on("); next >= 0 { // a later handler is not this one's body
+		handler = handler[:next+1]
+	}
+
+	const (
+		readParked  = "const prime = pendingPrimeContext;"
+		clearParked = `pendingPrimeContext = "";`
+		injectCall  = "appendSystemPrompt(event.systemPrompt, ["
+	)
+	readAt, clearAt := strings.Index(handler, readParked), strings.Index(handler, clearParked)
+	switch {
+	case readAt < 0:
+		t.Errorf("bundled OMP before_agent_start does not read the parked output with %q:\n%s", readParked, handler)
+	case clearAt < 0:
+		t.Errorf("bundled OMP before_agent_start does not clear it with %q, so every later turn repeats the startup prompt:\n%s", clearParked, handler)
+	case clearAt < readAt:
+		t.Errorf("bundled OMP before_agent_start clears pendingPrimeContext before reading it, which drops the parked output:\n%s", handler)
+	}
+
+	injectAt := strings.Index(handler, injectCall)
+	if injectAt < 0 {
+		t.Fatalf("bundled OMP before_agent_start does not build the system prompt with %q:\n%s", injectCall, handler)
+	}
+	additions := handler[injectAt+len(injectCall):]
+	if end := strings.Index(additions, "]"); end >= 0 {
+		additions = additions[:end]
+	}
+	if !strings.Contains(additions, "prime") {
+		t.Errorf("bundled OMP before_agent_start does not inject the parked output (additions: %q), so the startup prompt is parked and never delivered:\n%s", additions, handler)
+	}
+}
+
 func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 	dir := t.TempDir()
 
