@@ -1,11 +1,14 @@
 package k8s
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -211,6 +214,45 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 	return projected, nil
 }
 
+// validateProjectedHostedStoreIdentity fails before pod creation when a
+// projected hosted endpoint lacks the exact identity for its store scope.
+// prefix is empty for the selected store and "GC_K8S_CITY_" for gc init.
+func validateProjectedHostedStoreIdentity(cfgEnv map[string]string, prefix, managedHost, managedPort string) (map[string]string, error) {
+	hostKey, portKey := "GC_DOLT_HOST", "GC_DOLT_PORT"
+	managedLocalKey := "GC_DOLT_MANAGED_LOCAL"
+	projectKey, issuePrefixKey, databaseKey, rootKey := "GC_BEADS_PROJECT_ID", "GC_BEADS_PREFIX", "GC_DOLT_DATABASE", "GC_STORE_ROOT"
+	if prefix != "" {
+		hostKey, portKey = prefix+"DOLT_HOST", prefix+"DOLT_PORT"
+		managedLocalKey = prefix + "DOLT_MANAGED_LOCAL"
+		projectKey, issuePrefixKey, databaseKey, rootKey = prefix+"BEADS_PROJECT_ID", prefix+"BEADS_PREFIX", prefix+"DOLT_DATABASE", prefix+"STORE_ROOT"
+	}
+	projected, err := projectedPodDoltEnv(map[string]string{
+		"GC_DOLT_HOST":          cfgEnv[hostKey],
+		"GC_DOLT_PORT":          cfgEnv[portKey],
+		"GC_DOLT_MANAGED_LOCAL": cfgEnv[managedLocalKey],
+	}, managedHost, managedPort)
+	if err != nil {
+		return nil, err
+	}
+	if len(projected) == 0 {
+		return projected, nil
+	}
+	for _, key := range []string{projectKey, issuePrefixKey, databaseKey, rootKey} {
+		if strings.TrimSpace(cfgEnv[key]) == "" {
+			return nil, fmt.Errorf("hosted Dolt session is missing scoped store identity %s", key)
+		}
+	}
+	port, err := strconv.Atoi(projected["GC_DOLT_PORT"])
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid projected GC_DOLT_PORT %q", projected["GC_DOLT_PORT"])
+	}
+	return projected, nil
+}
+
+// storeReadyMarkerAnnotation names the path that releases a prebaked pod's
+// entrypoint once the controller has verified its store.
+const storeReadyMarkerAnnotation = "gc-store-ready-marker"
+
 // buildPod creates a pod manifest compatible with gc-session-k8s.
 // Same labels, annotations, container names, volumes, and tmux-inside-pod
 // pattern so mixed-mode migration works.
@@ -230,6 +272,14 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	// Controller resolves dirs relative to its city path; pods use /workspace.
 	podWorkDir := projectedPodWorkDir(cfg)
 	ctrlCity := controllerCityPath(cfg.Env)
+	if _, err := resolvePodHostedDoltIdentity(cfg.Env, "", p.managedServiceHost, p.managedServicePort); err != nil {
+		return nil, fmt.Errorf("scoped store identity: %w", err)
+	}
+	if !p.prebaked {
+		if _, err := resolvePodHostedDoltIdentity(cfg.Env, "GC_K8S_CITY_", p.managedServiceHost, p.managedServicePort); err != nil {
+			return nil, fmt.Errorf("city store identity: %w", err)
+		}
+	}
 
 	// Build the agent command (base64-encoded to avoid quoting issues) — shared
 	// with the relaunch path so the entrypoint and a respawn launch identically.
@@ -267,8 +317,18 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 	credCopy := `mkdir -p $HOME/.claude && cp -rL /tmp/claude-secret/. $HOME/.claude/ 2>/dev/null; git config --global --add safe.directory '*' 2>/dev/null; `
 	wsWait := ""
+	storeReadyMarker := ""
 	if !p.prebaked {
 		wsWait = `while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; `
+	} else {
+		// A prebaked image brings its own workspace, so hold the entrypoint on a
+		// launch-specific path the image cannot already contain.
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, fmt.Errorf("creating store readiness marker: %w", err)
+		}
+		storeReadyMarker = "/tmp/gc-store-ready-" + hex.EncodeToString(nonce[:])
+		wsWait = fmt.Sprintf("while [ ! -f %s ]; do sleep 0.5; done; ", shellquote.Quote(storeReadyMarker))
 	}
 
 	// The pod spec's WorkingDir names the workspace root, because the kubelet
@@ -361,6 +421,10 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		return nil, err
 	}
 
+	annotations := map[string]string{"gc-session-name": name}
+	if storeReadyMarker != "" {
+		annotations[storeReadyMarkerAnnotation] = storeReadyMarker
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -370,9 +434,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 				"gc-session": label,
 				"gc-agent":   agentLabel,
 			},
-			Annotations: map[string]string{
-				"gc-session-name": name,
-			},
+			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: p.serviceAccount,
@@ -480,6 +542,11 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
 	}
+	for key := range cfgEnv {
+		if strings.HasPrefix(key, "GC_K8S_CITY_") {
+			skip[key] = true
+		}
+	}
 
 	ctrlCity := controllerCityPath(cfgEnv)
 	ctrlRuntimeDir := strings.TrimSpace(cfgEnv["GC_CITY_RUNTIME_DIR"])
@@ -501,7 +568,7 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 			val = podRuntimeDir
 		case "GC_CONTROL_DISPATCHER_TRACE_DEFAULT", "GC_PACK_STATE_DIR":
 			val = projectControllerRuntimePathToPod(val, ctrlCity, ctrlRuntimeDir, podRuntimeDir)
-		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
+		case "GC_STORE_ROOT", "GC_BEADS_SCOPE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
 			val = remapControllerPathToPod(val, ctrlCity)
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})

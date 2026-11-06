@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -556,6 +557,108 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 		return contract.DoltConnectionTarget{}, true, err
 	}
 	return target, true, nil
+}
+
+// k8sSessionStoreIdentityEnv projects the canonical identity for one session's
+// selected store scope. It is called with the scope-specific backend env, never
+// from controller process env, so a rig worker cannot inherit the HQ identity.
+func k8sSessionStoreIdentityEnv(cityPath, scopeRoot string, cfg *config.City, backendEnv map[string]string) (map[string]string, error) {
+	scopeRoot = filepath.Clean(scopeRoot)
+	identity := map[string]string{
+		"GC_BEADS_PROJECT_ID": "",
+		"GC_BEADS_PREFIX":     "",
+		"GC_DOLT_DATABASE":    "",
+		"GC_STORE_ROOT":       scopeRoot,
+		"GC_STORE_SCOPE":      "rig",
+		"GC_BEADS_SCOPE_ROOT": scopeRoot,
+	}
+	if samePath(cityPath, scopeRoot) {
+		identity["GC_STORE_SCOPE"] = "city"
+	}
+
+	host := strings.TrimSpace(backendEnv["GC_DOLT_HOST"])
+	port := strings.TrimSpace(backendEnv["GC_DOLT_PORT"])
+	if host == "" {
+		host = strings.TrimSpace(backendEnv["BEADS_DOLT_SERVER_HOST"])
+	}
+	if port == "" {
+		port = strings.TrimSpace(backendEnv["BEADS_DOLT_SERVER_PORT"])
+	}
+	// A withheld managed-local target has no endpoint here but still projects a
+	// hosted endpoint into the pod, so it needs the same store identity.
+	managedLocal := strings.TrimSpace(backendEnv["GC_DOLT_MANAGED_LOCAL"]) == "1"
+	if host == "" && port == "" && !managedLocal {
+		return identity, nil
+	}
+	if host != "" && port == "" {
+		return nil, fmt.Errorf("hosted Dolt scope %q has a host without a port", scopeRoot)
+	}
+
+	metadataPath := scopeMetadataJSONPath(scopeRoot)
+	metadata, metadataOK, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		return nil, fmt.Errorf("hosted Dolt scope %q metadata: %w", scopeRoot, err)
+	}
+	if !metadataOK || (metadata.Backend != "" && metadata.Backend != "dolt") {
+		return nil, fmt.Errorf("hosted Dolt endpoint for scope %q has no Dolt store metadata", scopeRoot)
+	}
+	projectID, projectOK, err := contract.ReadProjectIdentity(fsys.OSFS{}, scopeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("hosted Dolt scope %q project identity: %w", scopeRoot, err)
+	}
+	if !projectOK {
+		return nil, fmt.Errorf("hosted Dolt scope %q is missing project identity at %q", scopeRoot, contract.ProjectIdentityPath(scopeRoot))
+	}
+	if metadataID, ok, err := readMetadataProjectID(metadataPath); err != nil {
+		return nil, fmt.Errorf("hosted Dolt scope %q metadata project identity: %w", scopeRoot, err)
+	} else if !ok {
+		// Pod startup requires this mirror; fail here with the repair, not by
+		// provisioning a pod that can never pass.
+		return nil, fmt.Errorf("hosted Dolt scope %q metadata %q is missing project_id; set it to %q", scopeRoot, metadataPath, projectID)
+	} else if metadataID != projectID {
+		return nil, fmt.Errorf("hosted Dolt scope %q has inconsistent project identity at %q: identity=%q metadata.json=%q", scopeRoot, contract.ProjectIdentityPath(scopeRoot), projectID, metadataID)
+	}
+	prefix := strings.TrimSpace(issuePrefixForScope(scopeRoot, cityPath, cfg))
+	if prefix == "" {
+		return nil, fmt.Errorf("hosted Dolt scope %q is missing its beads issue prefix", scopeRoot)
+	}
+	database, databaseOK, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		return nil, fmt.Errorf("hosted Dolt scope %q database identity: %w", scopeRoot, err)
+	}
+	if !databaseOK || strings.TrimSpace(database) == "" {
+		return nil, fmt.Errorf("hosted Dolt scope %q is missing .beads/metadata.json dolt_database", scopeRoot)
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("hosted Dolt scope %q connection target: %w", scopeRoot, err)
+	}
+	if target.Database != database {
+		return nil, fmt.Errorf("hosted Dolt scope %q has inconsistent database identity: metadata=%q target=%q", scopeRoot, database, target.Database)
+	}
+	if strings.TrimSpace(target.Socket) != "" {
+		return nil, fmt.Errorf("hosted Dolt scope %q uses a socket binding that Kubernetes sessions cannot project", scopeRoot)
+	}
+
+	identity["GC_BEADS_PROJECT_ID"] = projectID
+	identity["GC_BEADS_PREFIX"] = prefix
+	identity["GC_DOLT_DATABASE"] = database
+	return identity, nil
+}
+
+func readMetadataProjectID(metadataPath string) (string, bool, error) {
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return "", false, err
+	}
+	var metadata struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", false, err
+	}
+	projectID := strings.TrimSpace(metadata.ProjectID)
+	return projectID, projectID != "", nil
 }
 
 // canonicalScopeDoltProjectionAuthoritative reports whether canonical
