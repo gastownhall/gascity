@@ -461,7 +461,7 @@ func TestAConvergedRerunAppliesTheFloor(t *testing.T) {
 			t.Fatal(err)
 		}
 		code, stderr := migrateFor(t, request)
-		if code != 0 || !strings.Contains(stderr, "WARNING: this city has converged, but its work store's id floor could not be set") || !strings.Contains(stderr, "min_hash_length=7") || !strings.Contains(stderr, "Nothing was removed and this run carries on") {
+		if code != 0 || !strings.Contains(stderr, "WARNING: this city has converged, but the id floor of its work store could not be set") || !strings.Contains(stderr, "min_hash_length=7") || !strings.Contains(stderr, "Nothing was removed and this run carries on") {
 			t.Fatalf("%s: a converged rerun = %d, want 0 with a warning naming min_hash_length=7: %s", name, code, stderr)
 		}
 		if _, err := os.Stat(note); err != nil {
