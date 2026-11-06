@@ -221,9 +221,10 @@ func hookRetireIfInputPurged(candidate beads.Bead, verdict workflowInputVerdict,
 
 // retirePurgedWorkflow closes rootID and its open steps with the input_purged
 // hard failure: the disposition a seat would write after burning its claim
-// cycle on the missing spec, written once instead of once per seat.
-func retirePurgedWorkflow(store workflowCloseStore, rootID string) error {
-	return closeWorkflowOpenMembers(store, rootID, map[string]string{
+// cycle on the missing spec, written once instead of once per seat. Nothing
+// is written once ctx — the fresh post-proof mutation deadline — is done.
+func retirePurgedWorkflow(ctx context.Context, store workflowCloseStore, rootID string) error {
+	return closeWorkflowOpenMembers(ctx, store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
 		beadmeta.FailureReasonMetadataKey: beadmeta.FailureReasonInputPurged,
@@ -232,5 +233,5 @@ func retirePurgedWorkflow(store workflowCloseStore, rootID string) error {
 }
 
 func hookRetirePurgedWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return retirePurgedWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+	return retirePurgedWorkflow(ctx, hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -62,10 +63,10 @@ func TestCmdGCRootClosesReadAsControllerClosesOnACrossStoreGate(t *testing.T) {
 	}
 	for name, closeRoot := range map[string]func(store beads.Store, rootID, gateID string) error{
 		"gc hook --claim skipDoneWorkflow": func(store beads.Store, rootID, _ string) error {
-			return skipDoneWorkflow(store, rootID)
+			return skipDoneWorkflow(context.Background(), store, rootID)
 		},
 		"gc hook --claim retirePurgedWorkflow": func(store beads.Store, rootID, _ string) error {
-			return retirePurgedWorkflow(store, rootID)
+			return retirePurgedWorkflow(context.Background(), store, rootID)
 		},
 		"stale order wisp sweep": func(store beads.Store, rootID, gateID string) error {
 			_, err := closeStaleOrderWispIDs(store, []string{gateID, rootID}, "")

@@ -1672,6 +1672,7 @@ go_test(
         "hook_claim_input_purge_test.go",
         "hook_claim_legacy_restamp_test.go",
         "hook_claim_occupant_identity_test.go",
+        "hook_claim_purge_split_test.go",
         "hook_claim_retry_window_test.go",
         "hook_claim_self_resume_residency_test.go",
         "hook_claim_sigpipe_unwind_test.go",

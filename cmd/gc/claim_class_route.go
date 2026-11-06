@@ -852,7 +852,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return err
 		}
 		if resident {
-			return skipDoneWorkflow(route.class, rootID)
+			return skipDoneWorkflow(ctx, route.class, rootID)
 		}
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
@@ -866,7 +866,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return err
 		}
 		if resident {
-			return retirePurgedWorkflow(route.class, rootID)
+			return retirePurgedWorkflow(ctx, route.class, rootID)
 		}
 		return base.RetirePurgedWorkflow(ctx, dir, env, rootID)
 	}

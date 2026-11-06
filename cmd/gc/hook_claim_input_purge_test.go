@@ -117,8 +117,8 @@ func purgeClaimOps(t *testing.T, store beads.Store, inputPurged hookInputPurgedF
 			return workflowInputDoneAcross(store, store, candidate, identityCandidates)
 		},
 		InputPurged: inputPurged,
-		RetirePurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return retirePurgedWorkflow(store, rootID)
+		RetirePurgedWorkflow: func(ctx context.Context, _ string, _ []string, rootID string) error {
+			return retirePurgedWorkflow(ctx, store, rootID)
 		},
 		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			t.Fatalf("unexpected done-skip of %s", rootID)
@@ -499,9 +499,9 @@ func TestDoHookClaimNeverProbesPurgeForAResolvedInput(t *testing.T) {
 			}
 			ops := purgeClaimOps(t, store, probe, []beads.Bead{open}, &claimed)
 			skipped := ""
-			ops.SkipDoneWorkflow = func(_ context.Context, _ string, _ []string, rootID string) error {
+			ops.SkipDoneWorkflow = func(ctx context.Context, _ string, _ []string, rootID string) error {
 				skipped = rootID
-				return skipDoneWorkflow(store, rootID)
+				return skipDoneWorkflow(ctx, store, rootID)
 			}
 			wantCode, wantClaimed, wantSkipped := 0, open.ID, ""
 			if tc.wantSkipped {
@@ -538,8 +538,8 @@ func TestClassRoutedHookRetiresABindingResidentWorkflowWhoseInputWasPurged(t *te
 	}
 	base := f.baseOps(t)
 	base.InputPurged = proveOver(purgeFrameOverWork(t, f.work))
-	base.RetirePurgedWorkflow = func(_ context.Context, _ string, _ []string, rootID string) error {
-		return retirePurgedWorkflow(f.work, rootID)
+	base.RetirePurgedWorkflow = func(ctx context.Context, _ string, _ []string, rootID string) error {
+		return retirePurgedWorkflow(ctx, f.work, rootID)
 	}
 	ops := classRoutedHookClaimOps(base, f.route)
 

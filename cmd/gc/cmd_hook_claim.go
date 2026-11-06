@@ -2490,8 +2490,8 @@ func workflowStepAssignees(store beads.Store, rootID string) ([]string, error) {
 
 // skipDoneWorkflow closes rootID and every open/in_progress step under it
 // with gc.outcome=skipped so pool demand and continuation claims drop.
-func skipDoneWorkflow(store beads.Store, rootID string) error {
-	return closeWorkflowOpenMembers(store, rootID, map[string]string{
+func skipDoneWorkflow(ctx context.Context, store beads.Store, rootID string) error {
+	return closeWorkflowOpenMembers(ctx, store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              hookSkipDoneWorkflowCloseReason,
 	})
@@ -2500,6 +2500,7 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 // workflowCloseStore is the slice of a store that closing a workflow's open
 // members needs.
 type workflowCloseStore interface {
+	Get(id string) (beads.Bead, error)
 	List(query beads.ListQuery) ([]beads.Bead, error)
 	CloseAll(ids []string, metadata map[string]string) (int, error)
 }
@@ -2507,9 +2508,10 @@ type workflowCloseStore interface {
 // closeWorkflowOpenMembers closes rootID and every non-terminal step under it
 // (by gc.root_bead_id, both tiers) with one CloseAll stamping disposition.
 // Terminal steps are left out, so they keep the disposition they closed with,
-// and the root goes last: a CloseAll that stops part-way leaves the root open
-// for the next claim to retire the rest.
-func closeWorkflowOpenMembers(store workflowCloseStore, rootID string, disposition map[string]string) error {
+// and so is the root when a re-read finds it already terminal. The root goes
+// last: a CloseAll that stops part-way leaves the root open for the next claim
+// to retire the rest. Nothing is written once ctx is done.
+func closeWorkflowOpenMembers(ctx context.Context, store workflowCloseStore, rootID string, disposition map[string]string) error {
 	steps, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		TierMode: beads.TierBoth,
@@ -2526,7 +2528,19 @@ func closeWorkflowOpenMembers(store workflowCloseStore, rootID string, dispositi
 		seen[step.ID] = true
 		ids = append(ids, step.ID)
 	}
-	ids = append(ids, rootID)
+	root, err := store.Get(rootID)
+	if err != nil {
+		return fmt.Errorf("rechecking workflow root %s: %w", rootID, err)
+	}
+	if !convoy.IsTerminalStatus(root.Status) {
+		ids = append(ids, rootID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("closing workflow %s: %w", rootID, err)
+	}
 	_, err = store.CloseAll(ids, disposition)
 	return err
 }
@@ -2541,7 +2555,7 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 }
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+	return skipDoneWorkflow(ctx, hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
