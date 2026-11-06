@@ -31,9 +31,10 @@ func nameFree(t *testing.T, city, name string) {
 // Kills the heal orphaning a live runtime: the inventory reads the name
 // gone, but a start still holds the name, or settled deferred with its
 // runtime up. The heal refuses while the name is locked, on an incomplete or
-// unsupported read, and over anything present (a live agent, a live pane
-// whose agent reads dead, which a booting agent can, or a corpse A12 has not
-// classified), writing nothing. Over a gone runtime it writes under the
+// unsupported read (a live pane whose agent reads dead under an unreadable
+// identity among them), and over anything present (a live agent, a live
+// pane whose agent reads dead, which a booting agent can, or a corpse A12
+// has not classified), writing nothing. Over a gone runtime it writes under the
 // lock. Every path leaves the lock free.
 func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 	unavailable := errors.Join(runtime.ErrRuntimeUnavailable, errors.New("probe"))
@@ -45,7 +46,8 @@ func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 	}{
 		{"name held by a start", gone().tmux(), true, causeNameBusy},
 		{"alive", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}}).tmux(), false, causeRuntimePresent},
-		{"live pane, agent dead", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}}).tmux(), false, causeRuntimePresent},
+		{"live pane, agent dead", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}, env: map[string]string{"GT_PROCESS_NAMES": "agent"}}).tmux(), false, causeRuntimePresent},
+		{"live pane, agent dead, identity unreadable", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}}).tmux(), false, causeLivenessUnknown},
 		{"corpse", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}}).tmux(), false, causeRuntimePresent},
 		{"incomplete", (&freshObserver{Fake: runtime.NewFake(), err: unavailable}).tmux(), false, causeLivenessUnknown},
 		{"no error-bearing read", runtime.NewFake(), false, causeLivenessUnsupported},

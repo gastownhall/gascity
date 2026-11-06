@@ -585,3 +585,12 @@ func TestStartRecycleRemembersItsClassification(t *testing.T) {
 		}
 	}
 }
+
+// resolvesProcessNames resolves the kit's template to names, as a reload
+// that moved the row to another provider does.
+func (k *txKit) resolvesProcessNames(names ...string) {
+	for key, res := range k.p.World.Templates.entries {
+		res.TP.Hints.ProcessNames = names
+		k.p.World.Templates.entries[key] = res
+	}
+}

@@ -424,8 +424,11 @@ func TestReadRuntimeJudgesTheAgentByItsLaunchNames(t *testing.T) {
 		{"the launch agent runs, the template's does not", template, launchedAs([]string{"agent"}, "agent"), false, nil, rtAlive, true, []string{"agent"}},
 		{"the launch agent exited, the template's runs", template, launchedAs([]string{"agent"}, "new-agent"), false, nil, rtZombie, false, []string{"agent"}},
 		{"no launch names: the pane alone answers", template, launchedAs(nil, "other"), false, nil, rtAlive, true, []string{}},
+		{"unreadable identity, agent not alive", template, unreadable(launchedAs([]string{"agent"}, "agent")), false, nil, rtUnknown, false, template},
 		{"launch and template names agree", []string{"agent"}, launchedAs([]string{"agent"}, "agent"), false, nil, rtAlive, true, []string{"agent"}},
+		{"unreadable identity, agent alive", template, unreadable(launchedAs([]string{"agent"}, "new-agent")), false, nil, rtAlive, true, template},
 		{"no launch names, the provider reads the agent dead", template, func(r *simRuntime) { launchedAs(nil, "other")(r); r.zombie = true }, false, nil, rtZombie, false, []string{}},
+		{"corpse, unreadable identity", template, unreadable(func(r *simRuntime) { launchedAs([]string{"agent"}, "agent")(r); r.corpse = true }), false, nil, rtCorpse, false, template},
 		{"dies between the reads, alive on a fall-through hop", template, launchedAs([]string{"agent"}, "agent"), true, func(sp *simProvider, n int) {
 			if n == 2 {
 				sp.rts["s-1"].corpse = true
@@ -478,4 +481,9 @@ func TestReadRuntimeJudgesTheAgentByItsLaunchNames(t *testing.T) {
 // whose pane now runs procs.
 func launchedAs(launch []string, procs ...string) func(*simRuntime) {
 	return func(r *simRuntime) { r.launch, r.procs = launch, procs }
+}
+
+// unreadable is mark with the runtime's identity unreadable.
+func unreadable(mark func(*simRuntime)) func(*simRuntime) {
+	return func(r *simRuntime) { mark(r); r.envErr = true }
 }

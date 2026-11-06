@@ -93,6 +93,7 @@ type simRuntime struct {
 	// for none, as tmux does. Unset, reads are name-blind and launch is
 	// "agent".
 	procs, launch []string
+	envErr        bool // its environment read errs: the identity unreadable
 }
 
 // simStart and simKill are the spy's records of a Start and of a
@@ -238,6 +239,9 @@ func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) 
 	rt := p.rts[name]
 	if rt == nil {
 		return nil, fmt.Errorf("sim: no session %s", name)
+	}
+	if rt.envErr {
+		return nil, fmt.Errorf("sim: environment of %s: %w", name, runtime.ErrRuntimeUnavailable)
 	}
 	launch := "agent"
 	if rt.procs != nil {

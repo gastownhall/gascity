@@ -50,7 +50,8 @@ func (r *txRuntime) Alive() bool { return r.Class == rtAlive && r.Same }
 // The bracketing read judges the agent by the process names its identity
 // records, the ones the runtime was launched with (none when it records
 // none), since a reload can move the template to another provider's under a
-// runtime still running its launch agent.
+// runtime still running its launch agent. An unreadable identity proves no
+// launch agent dead, so its not-alive answer stays unknown.
 func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time, now func() time.Time) (*txRuntime, string) {
 	name = strings.TrimSpace(name)
 	leaf, _, known := runtime.ResolveBackend(sp, name)
@@ -90,7 +91,9 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 			rt.Class = rtCorpse
 		}
 	case !again.Alive:
-		rt.Class = rtZombie
+		if rt.Identity.Known {
+			rt.Class = rtZombie
+		}
 	default:
 		rt.Class = rtAlive
 	}
