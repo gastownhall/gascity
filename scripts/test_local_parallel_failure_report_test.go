@@ -91,6 +91,30 @@ func TestLocalParallelFailureReportNamesFailedJobs(t *testing.T) {
 	}
 }
 
+// TestLocalParallelFailureReportWithoutMarkers covers a fan-out that fails
+// before any job writes a marker: the summary must still say so and point at
+// the log directory rather than print an empty list.
+func TestLocalParallelFailureReportWithoutMarkers(t *testing.T) {
+	content := localParallelScript(t)
+	logDir := t.TempDir()
+	script := shellFunctionSource(t, content, "report_failed_jobs") + "\n" +
+		"report_failed_jobs " + shellQuote(logDir) + "\n"
+
+	out, err := testCommand("bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("report_failed_jobs: %v; output:\n%s", err, out)
+	}
+	for _, want := range []string{
+		"=== FAILED JOBS ===",
+		"(no job left a failure marker; the fan-out itself failed)",
+		"Logs: " + logDir,
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("summary is missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // shellFunctionSource returns the full `name() { ... }` definition from a
 // shell script whose functions close with a `}` at column zero.
 func shellFunctionSource(t *testing.T, content, name string) string {
