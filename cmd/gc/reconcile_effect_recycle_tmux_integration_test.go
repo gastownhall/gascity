@@ -132,7 +132,9 @@ func waitTmux(t *testing.T, what string, ready func() bool) {
 func TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux(t *testing.T) {
 	sp, tm := realTmux(t, "zag")
 	env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
-	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env}); err != nil {
+	// The launch records its process names (GT_PROCESS_NAMES), as gc's does:
+	// the fresh read judges the agent by them.
+	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env, ProcessNames: []string{"agent"}}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	agent := tm("list-panes", "-s", "-t", "=s-gc-1:", "-F", "#{pane_id}")
@@ -188,5 +190,34 @@ func TestStartRecyclePinsThePeeksObjectOnRealTmux(t *testing.T) {
 	s := k.runKind()
 	if s.Cause != causePeekError || k.meta("sleep_reason") != "" || k.meta("provider_terminal_error") != "" {
 		t.Fatalf("object %q replaced by %q during the peek: settlement %+v, sleep_reason %q, provider_terminal_error %q; want refused peek-error, nothing parked", before, object(), s, k.meta("sleep_reason"), k.meta("provider_terminal_error"))
+	}
+}
+
+// TestReadRuntimeJudgesByLaunchNamesOnRealTmux (ga-2xkdf5). Kills a fresh
+// read judging the agent by the current template's process names on the
+// seam-backed tmux provider gc runs: a session launched running sleep reads
+// alive under the names it was launched with (or, launched with none, by
+// its pane alone), whatever names the template now gives; one launched with
+// names no process carries reads a zombie though the template's runs.
+func TestReadRuntimeJudgesByLaunchNamesOnRealTmux(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		launch   []string
+		template []string
+		class    runtimeClass
+	}{
+		{"alive under its launch names", []string{"sleep"}, []string{"new-agent"}, rtAlive},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sp, _ := realTmux(t, "lnm")
+			env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
+			if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env, ProcessNames: c.launch}); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			rt, cause := readRuntime(context.Background(), sp, c.template, "s-gc-1", time.Now(), time.Now)
+			if cause != "" || rt.Class != c.class || rt.Identity.Token != "tok" || !rt.Same {
+				t.Fatalf("read %+v cause %q, want class %d on one object with its identity", rt, cause, c.class)
+			}
+		})
 	}
 }

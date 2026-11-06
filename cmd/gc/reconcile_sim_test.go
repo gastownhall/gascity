@@ -87,6 +87,12 @@ type simRuntime struct {
 	attached         bool
 	probeErr         bool // a process probe errors, answering the agent not alive (v5 O3)
 	restart          bool // GC_RESTART_REQUESTED, as tmux's user-option mirror carries it (C7a-2b)
+	// procs, when set, are the pane's processes, and launch its
+	// GT_PROCESS_NAMES: a fresh read finds the agent alive only under a
+	// process name it asks for among procs, or by the pane alone when it asks
+	// for none, as tmux does. Unset, reads are name-blind and launch is
+	// "agent".
+	procs, launch []string
 }
 
 // simStart and simKill are the spy's records of a Start and of a
@@ -233,7 +239,11 @@ func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) 
 	if rt == nil {
 		return nil, fmt.Errorf("sim: no session %s", name)
 	}
-	return map[string]string{"GC_SESSION_ID": rt.id, "GC_RUNTIME_EPOCH": rt.epoch, "GC_INSTANCE_TOKEN": rt.token, "GT_PROCESS_NAMES": "agent"}, nil
+	launch := "agent"
+	if rt.procs != nil {
+		launch = strings.Join(rt.launch, ",")
+	}
+	return map[string]string{"GC_SESSION_ID": rt.id, "GC_RUNTIME_EPOCH": rt.epoch, "GC_INSTANCE_TOKEN": rt.token, "GT_PROCESS_NAMES": launch}, nil
 }
 
 // ObserveLivenessWithError answers from the last listing, once one ran.
@@ -250,11 +260,17 @@ func (p *simProvider) ObserveLivenessWithError(name string, _ []string) (runtime
 	return livenessOf(name, rt)
 }
 
-// ObserveLivenessSince reads the runtime as it is now.
-func (p *simProvider) ObserveLivenessSince(name string, _ []string, _ time.Time) (runtime.Liveness, error) {
+// ObserveLivenessSince reads the runtime as it is now, its agent by
+// processNames when the runtime lists its processes.
+func (p *simProvider) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return livenessOf(name, p.rts[name])
+	rt := p.rts[name]
+	l, err := livenessOf(name, rt)
+	if rt != nil && rt.procs != nil && l.Alive && len(processNames) > 0 {
+		l.Alive = slices.ContainsFunc(processNames, func(pn string) bool { return slices.Contains(rt.procs, pn) })
+	}
+	return l, err
 }
 
 func livenessOf(name string, rt *simRuntime) (runtime.Liveness, error) {
