@@ -670,6 +670,205 @@ func TestDoHookCurrentRefusesARowAssignedOutsideTheScope(t *testing.T) {
 	}
 }
 
+// hookCurrentWriteCountingStore counts every mutating verb that reaches the
+// store: gc hook current is a read, and the proof is that no arm of its
+// decision — not the recovery, not the refusal — ever mutates a row.
+type hookCurrentWriteCountingStore struct {
+	beads.Store
+	writes int
+}
+
+func (s *hookCurrentWriteCountingStore) note() { s.writes++ }
+
+// Create counts and forwards.
+func (s *hookCurrentWriteCountingStore) Create(b beads.Bead) (beads.Bead, error) {
+	s.note()
+	return s.Store.Create(b)
+}
+
+// Update counts and forwards.
+func (s *hookCurrentWriteCountingStore) Update(id string, opts beads.UpdateOpts) error {
+	s.note()
+	return s.Store.Update(id, opts)
+}
+
+// Close counts and forwards.
+func (s *hookCurrentWriteCountingStore) Close(id string) error {
+	s.note()
+	return s.Store.Close(id)
+}
+
+// Reopen counts and forwards.
+func (s *hookCurrentWriteCountingStore) Reopen(id string) error {
+	s.note()
+	return s.Store.Reopen(id)
+}
+
+// CloseAll counts and forwards.
+func (s *hookCurrentWriteCountingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.note()
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// SetMetadata counts and forwards.
+func (s *hookCurrentWriteCountingStore) SetMetadata(id, key, value string) error {
+	s.note()
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// SetMetadataBatch counts and forwards.
+func (s *hookCurrentWriteCountingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.note()
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Delete counts and forwards.
+func (s *hookCurrentWriteCountingStore) Delete(id string) error {
+	s.note()
+	return s.Store.Delete(id)
+}
+
+// DepAdd counts and forwards.
+func (s *hookCurrentWriteCountingStore) DepAdd(issueID, dependsOnID, depType string) error {
+	s.note()
+	return s.Store.DepAdd(issueID, dependsOnID, depType)
+}
+
+// DepRemove counts and forwards.
+func (s *hookCurrentWriteCountingStore) DepRemove(issueID, dependsOnID string) error {
+	s.note()
+	return s.Store.DepRemove(issueID, dependsOnID)
+}
+
+// TestDoHookCurrentNeverMutates is AC-7's read-only half: every arm of the
+// decision — the print, the recovery print, and every refusal — runs over the
+// same rows with zero writes. The command holds no emitter either (its read
+// context is stores and config only), so a write would be the only way it
+// could leave a trace; it never does. Repairing the stamp is the claim path's
+// job, and a read that healed its own evidence would be un-auditable.
+func TestDoHookCurrentNeverMutates(t *testing.T) {
+	closed := hookCurrentWorkBead("gcg-old")
+	closed.Status = "closed"
+	scenarios := []struct {
+		name      string
+		rows      []beads.Bead
+		sessionID string
+		wantCode  int
+	}{
+		{
+			name: "a verified stamp prints",
+			rows: []beads.Bead{
+				hookCurrentSessionBead("gcg-42", hookCurrentEntry("gcg-42")),
+				hookCurrentWorkBead("gcg-42"),
+			},
+			sessionID: hookCurrentSessionID,
+			wantCode:  0,
+		},
+		{
+			name: "a stale stamp recovers the one live recorded claim",
+			rows: []beads.Bead{
+				hookCurrentSessionBead("gcg-old",
+					hookCurrentEntry("gcg-live"),
+					hookCurrentEntry("gcg-old"),
+				),
+				closed,
+				hookCurrentWorkBead("gcg-live"),
+			},
+			sessionID: hookCurrentSessionID,
+			wantCode:  0,
+		},
+		{
+			name: "a contradicted stamp refuses",
+			rows: []beads.Bead{
+				hookCurrentSessionBead("gcg-old", hookCurrentEntry("gcg-old")),
+				closed,
+			},
+			sessionID: hookCurrentSessionID,
+			wantCode:  1,
+		},
+		{
+			name: "a stamp a newer delivery contradicts refuses",
+			rows: []beads.Bead{
+				hookCurrentSessionBead("gcg-stamp",
+					hookCurrentEntry("gcg-newer"),
+					hookCurrentEntry("gcg-stamp"),
+				),
+				hookCurrentWorkBead("gcg-stamp"),
+				hookCurrentWorkBead("gcg-newer"),
+			},
+			sessionID: hookCurrentSessionID,
+			wantCode:  1,
+		},
+		{
+			name: "several live claims refuse",
+			rows: []beads.Bead{
+				hookCurrentSessionBead("",
+					hookCurrentEntry("gcg-y"),
+					hookCurrentEntry("gcg-z"),
+				),
+				hookCurrentWorkBead("gcg-y"),
+				hookCurrentWorkBead("gcg-z"),
+			},
+			sessionID: hookCurrentSessionID,
+			wantCode:  1,
+		},
+		{
+			name:      "nothing stamped refuses",
+			rows:      []beads.Bead{hookCurrentSessionBead("")},
+			sessionID: hookCurrentSessionID,
+			wantCode:  1,
+		},
+		{
+			name: "an unreadable session refuses",
+			rows: []beads.Bead{
+				hookCurrentSessionBead("gcg-42", hookCurrentEntry("gcg-42")),
+				hookCurrentWorkBead("gcg-42"),
+			},
+			sessionID: "mc-missing",
+			wantCode:  1,
+		},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			store := &hookCurrentWriteCountingStore{Store: beads.NewMemStoreFrom(1, sc.rows, nil)}
+			ctx := hookCurrentContextOver(t, store)
+			var stdout bytes.Buffer
+			if code := doHookCurrent(ctx, sc.sessionID, true, &stdout, io.Discard); code != sc.wantCode {
+				t.Fatalf("doHookCurrent = %d, want %d; stdout=%q", code, sc.wantCode, stdout.String())
+			}
+			if store.writes != 0 {
+				t.Fatalf("the arm made %d store writes; gc hook current is a read", store.writes)
+			}
+		})
+	}
+}
+
+// TestHookCurrentRetainsItsOutputFormats is AC-7's format half: the command's
+// two shapes are load-bearing for callers — the bare id for $( ) substitution
+// and the annotated line for humans — so both are pinned exactly.
+func TestHookCurrentRetainsItsOutputFormats(t *testing.T) {
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-42", hookCurrentEntry("gcg-42")),
+		hookCurrentWorkBead("gcg-42"),
+	)
+
+	var stdout bytes.Buffer
+	if code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, io.Discard); code != 0 {
+		t.Fatalf("doHookCurrent(--id-only) = %d, want 0", code)
+	}
+	if got := stdout.String(); got != "gcg-42\n" {
+		t.Fatalf("--id-only stdout = %q, want exactly the id and a newline", got)
+	}
+
+	stdout.Reset()
+	if code := doHookCurrent(ctx, hookCurrentSessionID, false, &stdout, io.Discard); code != 0 {
+		t.Fatalf("doHookCurrent = %d, want 0", code)
+	}
+	if got := stdout.String(); got != "gcg-42 (claimed by session "+hookCurrentSessionID+")\n" {
+		t.Fatalf("stdout = %q, want the retained annotated shape", got)
+	}
+}
+
 // TestDoHookCurrentExitsOneOnAnUnreadableSession covers the store arm: an id the
 // session store cannot resolve is an error, not "nothing claimed", and must not
 // print a bead id.
