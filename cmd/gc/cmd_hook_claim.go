@@ -390,6 +390,10 @@ type hookClaimOps struct {
 	// from, and a candidate stranded under a stopped workflow is closed in,
 	// writing as actor (see hookClaimWorkflowStop).
 	WorkflowStore hookWorkflowStoreFunc
+	// ListWorkflowMembers lists every bead whose gc.root_bead_id names rootID
+	// from the store that holds the workflow: the foreign workflow hold's only
+	// input (hookClaimForeignWorkflowHold). Nil lists through WorkflowStore.
+	ListWorkflowMembers hookListWorkflowMembersFunc
 	// AnnounceBeadEvents records the work-store writes this invocation has
 	// made so far in the city event log, so the supervisor's run views see
 	// them (hook_claim_bead_events.go). Called once a claim is kept, before
@@ -433,6 +437,9 @@ type (
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
+	// hookListWorkflowMembersFunc (ctx, dir, env, rootID) lists the member
+	// beads of the workflow rooted at rootID.
+	hookListWorkflowMembersFunc func(ctx context.Context, dir string, env []string, rootID string) ([]beads.Bead, error)
 )
 
 type hookClaimJSONResult struct {
@@ -1154,6 +1161,11 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
+		// Nor does either know a root is already being worked: the stop gate
+		// walks UP from a candidate, and a root has nothing above it.
+		if hookClaimForeignWorkflowHold(ctx, candidate, opts, ops, dir, stderr) {
+			continue
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
@@ -1354,6 +1366,60 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 	}
 	fmt.Fprintf(stderr, "gc hook --claim: closed %s as %s: %s\n", candidate.ID, stop.Outcome(), reason) //nolint:errcheck
 	return true
+}
+
+// hookClaimForeignWorkflowHold is the eligible tier's foreign workflow hold.
+// It reports whether candidate is a workflow root handed out whole whose
+// member steps other sessions are already running, and so must not be claimed
+// by this one.
+//
+// The root row itself is legitimately open, unassigned and route-matched, so
+// nothing about it says it is taken; only its members do. A withheld root is
+// left exactly as it is — routed, for the next poll — and never closed: the
+// hold lifts when its members change hands or settle.
+func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindWorkflow {
+		return false
+	}
+	members, err := ops.listWorkflowMembers(ctx, dir, opts.Env, candidate.ID)
+	if err != nil {
+		return false
+	}
+	var held []string
+	for _, member := range members {
+		if member.ID == candidate.ID || !strings.EqualFold(strings.TrimSpace(member.Status), "in_progress") {
+			continue
+		}
+		held = append(held, member.ID)
+	}
+	if len(held) == 0 {
+		return false
+	}
+	slices.Sort(held)
+	fmt.Fprintf(stderr, "gc hook --claim: withholding workflow root %s: member steps %s are in_progress under other sessions\n", candidate.ID, strings.Join(held, ", ")) //nolint:errcheck
+	return true
+}
+
+// listWorkflowMembers is ops.ListWorkflowMembers, or a list through
+// ops.WorkflowStore when no listing seam is set.
+func (ops *hookClaimOps) listWorkflowMembers(ctx context.Context, dir string, env []string, rootID string) ([]beads.Bead, error) {
+	if ops.ListWorkflowMembers != nil {
+		return ops.ListWorkflowMembers(ctx, dir, env, rootID)
+	}
+	return listHookWorkflowMembers(ops.WorkflowStore(ctx, dir, env, rootID, "").List, rootID)
+}
+
+// listHookWorkflowMembers lists the beads whose gc.root_bead_id names rootID
+// through list, a work or graph store's List.
+func listHookWorkflowMembers(list func(beads.ListQuery) ([]beads.Bead, error), rootID string) ([]beads.Bead, error) {
+	members, err := list(beads.ListQuery{
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing members of workflow root %s: %w", rootID, err)
+	}
+	return members, nil
 }
 
 // hookClaimStoppedAdoption runs the stop gate over a bead offered for
