@@ -49,6 +49,8 @@ func TestEnrichSessionResponseAcceptsStateAndPeekCapability(t *testing.T) {
 		t.Fatalf("start runtime: %v", err)
 	}
 	srv := New(fs)
+	activeWork := newActiveWorkLookup(context.Background())
+	defer activeWork.cancel()
 	resp := &sessionResponse{}
 
 	srv.enrichSessionResponse(resp, session.Info{
@@ -59,7 +61,7 @@ func TestEnrichSessionResponseAcceptsStateAndPeekCapability(t *testing.T) {
 	}, nil, sessionResponseCapabilityHandle{
 		state:  worker.State{Phase: worker.PhaseReady},
 		output: "peek output",
-	}, true, false, false, 0)
+	}, true, activeWork, false, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")

@@ -199,7 +199,9 @@ func TestSessionModelContextSkipsControlDispatcher(t *testing.T) {
 				WorkDir:     workDir,
 			}
 			resp := sessionToResponse(info, state.cfg)
-			srv.enrichSessionResponse(&resp, info, state.cfg, sessionResponseCapabilityHandle{}, false, false, true, 0)
+			activeWork := newActiveWorkLookup(context.Background())
+			defer activeWork.cancel()
+			srv.enrichSessionResponse(&resp, info, state.cfg, sessionResponseCapabilityHandle{}, false, activeWork, true, 0)
 			if !resp.Running {
 				t.Fatalf("running = false, want true: runtime session %s is live", tt.sessionName)
 			}

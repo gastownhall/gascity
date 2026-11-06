@@ -150,6 +150,12 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
 
+	// One shared read budget covers every row's uncached active-work lookup,
+	// so a stalled work store bounds this response instead of stalling it
+	// once per agent.
+	activeWork := newActiveWorkLookup(ctx)
+	defer activeWork.cancel()
+
 	pools := newRequestSessionListing(sp)
 	var agents []agentResponse
 	var partialErrors []string
@@ -285,7 +291,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			resp.ActiveBead = s.findActiveBeadForAssigneesWithFreshness(ea.rig, activeWork, sessionID, sessionName, ea.qualifiedName)
 			// A relocated-graph wisp names its assignee after the session, not
 			// the work store, so the work-store lookup above misses it. Fall
 			// back to the graph bead and use its timestamp as the activity
@@ -322,6 +328,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	partialErrors = append(partialErrors, runtimeSessions.partialErrors()...)
+	partialErrors = append(partialErrors, activeWork.errors()...)
 
 	if agents == nil {
 		agents = []agentResponse{}

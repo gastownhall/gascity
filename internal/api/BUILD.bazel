@@ -5,6 +5,7 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 go_library(
     name = "api",
     srcs = [
+        "active_work_lookup.go",
         "agent_resolution.go",
         "beads_graph_federation.go",
         "blocking.go",

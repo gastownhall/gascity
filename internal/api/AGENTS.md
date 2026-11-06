@@ -100,6 +100,19 @@ through that rig. A lookup scoped to a suspended rig reads only that shared
 store, or nothing, and never falls back to the other rigs' stores
 (`activeBeadSearchScope`).
 
+List enrichment (`/sessions`, `/agents`) is bounded: one request-owned
+`activeWorkLookup` (`newActiveWorkLookup`) carries a context with the
+`statusStoreReadTimeout` deadline, shared by every uncached active-work read
+the response performs, so a stalled bd-backed read cannot hold the list for
+the backend's own timeout. Uncached reads are checked against that deadline
+before they start and run under it; the first failed read stops the lookup —
+it never falls through to a lower-priority store or identity, and never
+reports the session as work-free — and the response appends the failure to
+`partial_errors` (the existing envelopes already mark `partial`). Cache hits
+and authoritative cache misses stay usable after the deadline expires until a
+read has failed. Detail, get, create and rename views keep the unbounded live
+lookup (`findLiveActiveBeadForAssignees`); only the list rows take a lookup.
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves

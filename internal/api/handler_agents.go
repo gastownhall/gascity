@@ -382,30 +382,24 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 	return instance.QualifiedName(), rig, true
 }
 
-// findActiveBeadForAssignees returns the ID of the first in_progress bead
-// assigned to the given identities using the cached active snapshot. If rig is
-// non-empty, only that rig's store is searched; otherwise all stores are
-// searched. A store only rigs suspended by effective state reach is never
-// searched (activeBeadSearchScope). Returns "" if no match.
-func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
-}
-
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities, bypassing the cache. Use this on
 // lower-frequency detail views where external reassignment freshness matters.
 // A store only rigs suspended by effective state reach is never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
+	return s.findActiveBeadForAssigneesWithFreshness(rig, nil, assignees...)
 }
 
 // findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
 // highest-priority identity: identity order first, then store order, then
-// newest first within a store. Cached reads use a targeted ListQuery with
-// Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores. Both read only the stores
-// activeBeadSearchScope picks.
-func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
+// newest first within a store. A nil lookup selects the live path
+// (findLiveActiveBeadInStores) for detail views; a non-nil lookup — one per
+// list response — bounds every uncached read by the lookup's shared
+// deadline and stops at the first read failure instead of reading a
+// lower-priority store or reporting absence. Cached reads use a targeted
+// ListQuery with Limit=1 per identity and store, stopping at the first
+// match. Both read only the stores activeBeadSearchScope picks.
+func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *activeWorkLookup, assignees ...string) string {
 	stores, rigNames := activeBeadSearchScope(s.state.BeadStores(), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
@@ -417,7 +411,7 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
-	if live {
+	if lookup == nil {
 		return findLiveActiveBeadInStores(stores, rigNames, unique)
 	}
 	for _, assignee := range unique {
@@ -437,12 +431,32 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 					continue
 				}
 			}
-			matches, err := stores[rn].List(query)
-			if err != nil {
-				continue
+			// Check the shared deadline before initiating the read, so a
+			// later row cannot start a fresh uncached read once the budget
+			// is spent.
+			if err := lookup.ctx.Err(); err != nil {
+				lookup.fail(err)
+				return ""
 			}
-			if len(matches) > 0 {
-				return matches[0].ID
+			done := make(chan struct{})
+			var rows []beads.Bead
+			var listErr error
+			go func() {
+				rows, listErr = stores[rn].List(query)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-lookup.ctx.Done():
+				lookup.fail(lookup.ctx.Err())
+				return ""
+			}
+			if listErr != nil {
+				lookup.fail(listErr)
+				return ""
+			}
+			if len(rows) > 0 {
+				return rows[0].ID
 			}
 		}
 	}

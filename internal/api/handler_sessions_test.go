@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1076,10 +1077,12 @@ func TestHandleSessionListActiveBeadUsesCachedLookup(t *testing.T) {
 		t.Fatalf("reassign backing work: %v", err)
 	}
 
+	activeWork := newActiveWorkLookup(context.Background())
+	defer activeWork.cancel()
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false, false, 0)
+	}, false, activeWork, false, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
@@ -1368,10 +1371,12 @@ func TestHandleSessionListActiveBeadUsesCachedListWhenAvailable(t *testing.T) {
 		t.Fatalf("Update(work): %v", err)
 	}
 
+	activeWork := newActiveWorkLookup(context.Background())
+	defer activeWork.cancel()
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, false, false, 0)
+	}, false, activeWork, false, 0)
 
 	if got := resp.ActiveBead; got != work.ID {
 		t.Fatalf("active_bead = %q, want cached %q", got, work.ID)
@@ -1409,7 +1414,7 @@ func TestHandleSessionGetActiveBeadUsesLiveLookup(t *testing.T) {
 	resp := sessionResponse{}
 	srv.enrichSessionResponse(&resp, info, fs.Config(), sessionResponseCapabilityHandle{
 		state: worker.State{Phase: worker.PhaseReady},
-	}, false, true, true, 0)
+	}, false, nil, true, 0)
 
 	if !resp.Running {
 		t.Fatal("Running = false, want true")
@@ -9086,4 +9091,186 @@ func TestHandleSessionListActiveBeadSkipsSuspendedRig(t *testing.T) {
 	if !found {
 		t.Fatalf("session %s not listed in %+v", info.ID, resp.Items)
 	}
+}
+
+// stalledActiveWorkStore blocks every active-work List (in_progress, with an
+// assignee) until release closes, standing in for a bd-backed store whose
+// `bd list` child hangs; every other read passes through.
+type stalledActiveWorkStore struct {
+	beads.Store
+	release chan struct{}
+}
+
+func (s stalledActiveWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "in_progress" && (query.Assignee != "" || len(query.Assignees) > 0) {
+		<-s.release
+	}
+	return s.Store.List(query)
+}
+
+// TestHandleSessionListActiveWorkLookupHonorsDeadline: GET /sessions fills
+// each row's active bead from the work stores; when a work store's uncached
+// read stalls, the list still answers within the status read budget and is
+// marked partial instead of waiting out the store.
+func TestHandleSessionListActiveWorkLookupHonorsDeadline(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	fs := newSessionFakeState(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	fs.stores["myrig"] = stalledActiveWorkStore{Store: beads.NewMemStore(), release: release}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil))
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("GET /sessions did not answer within 3s with statusStoreReadTimeout=%s: the active-work lookup waits on the stalled store", statusStoreReadTimeout)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items   []sessionResponse `json:"items"`
+		Partial bool              `json:"partial"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ID != info.ID {
+		t.Fatalf("items = %#v, want one session %s", resp.Items, info.ID)
+	}
+	if !resp.Partial {
+		t.Fatal("partial = false, want true for a stalled work-store read")
+	}
+}
+
+// blockingActiveWorkStore stands in for a bd-backed store whose `bd list`
+// child hangs: every active-work List blocks until release closes, and
+// entries counts the uncached reads that reached the store.
+type blockingActiveWorkStore struct {
+	beads.Store
+	release chan struct{}
+	entries atomic.Int32
+}
+
+func (s *blockingActiveWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "in_progress" && (query.Assignee != "" || len(query.Assignees) > 0) {
+		s.entries.Add(1)
+		<-s.release
+	}
+	return s.Store.List(query)
+}
+
+// TestListActiveWorkLookupHonorsRequestDeadline: with a work store whose
+// uncached reads block, the agents list and the legacy sessions list answer
+// within the one shared statusStoreReadTimeout budget, mark the response
+// partial, and start no further uncached read after the first failure.
+func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	t.Run("agents list", func(t *testing.T) {
+		state := newFakeState(t)
+		state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+			Name: "second", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1),
+		})
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		store := &blockingActiveWorkStore{Store: beads.NewMemStore(), release: release}
+		state.stores["myrig"] = store
+		srv := New(state)
+		h := newTestCityHandlerWith(t, state, srv)
+
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("GET /agents did not answer within 3s with statusStoreReadTimeout=%s: the active-work lookup waits on the stalled store", statusStoreReadTimeout)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp struct {
+			Items         []agentResponse `json:"items"`
+			Partial       bool            `json:"partial"`
+			PartialErrors []string        `json:"partial_errors"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Items) != 2 {
+			t.Fatalf("items = %d, want the two configured agents", len(resp.Items))
+		}
+		for _, item := range resp.Items {
+			if item.ActiveBead != "" {
+				t.Fatalf("active_bead = %q, want empty while the work store is unreadable", item.ActiveBead)
+			}
+		}
+		if !resp.Partial || len(resp.PartialErrors) == 0 {
+			t.Fatalf("partial = %v, partial_errors = %v, want a partial response reporting the failed lookup", resp.Partial, resp.PartialErrors)
+		}
+		if got := store.entries.Load(); got != 1 {
+			t.Fatalf("uncached reads reaching the store = %d, want 1: after the first failure no further uncached read may start", got)
+		}
+	})
+
+	t.Run("legacy sessions list", func(t *testing.T) {
+		fs := newSessionFakeState(t)
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		store := &blockingActiveWorkStore{Store: beads.NewMemStore(), release: release}
+		fs.stores["myrig"] = store
+		createTestSession(t, fs.cityBeadStore, fs.sp, "First Session")
+		createTestSession(t, fs.cityBeadStore, fs.sp, "Second Session")
+		srv := New(fs)
+
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			srv.legacySessionHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/v0/sessions", nil))
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("GET /v0/sessions did not answer within 3s with statusStoreReadTimeout=%s: the active-work lookup waits on the stalled store", statusStoreReadTimeout)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp struct {
+			Items         []sessionResponse `json:"items"`
+			Total         int               `json:"total"`
+			Partial       bool              `json:"partial"`
+			PartialErrors []string          `json:"partial_errors"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Total != 2 {
+			t.Fatalf("total = %d, want the two sessions", resp.Total)
+		}
+		if !resp.Partial || len(resp.PartialErrors) == 0 {
+			t.Fatalf("partial = %v, partial_errors = %v, want a partial response reporting the failed lookup", resp.Partial, resp.PartialErrors)
+		}
+		if got := store.entries.Load(); got != 1 {
+			t.Fatalf("uncached reads reaching the store = %d, want 1: after the first failure no further uncached read may start", got)
+		}
+	})
 }
