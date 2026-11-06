@@ -66,6 +66,18 @@ func liveOwnershipOptions() hookClaimOptions {
 	}
 }
 
+// liveOwnershipStore is the workflow store, counting the member listings the
+// hold makes: one entry per List, naming the root it filtered on.
+type liveOwnershipStore struct {
+	*beads.MemStore
+	lists []string
+}
+
+func (s *liveOwnershipStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.lists = append(s.lists, query.Metadata[beadmeta.RootBeadIDMetadataKey])
+	return s.MemStore.List(query)
+}
+
 // liveOwnershipOutcome is what one `gc hook --claim` did: the decoded
 // result, the claim CASes attempted in order, stderr, and the workflow store
 // the members were listed from.
@@ -73,7 +85,7 @@ type liveOwnershipOutcome struct {
 	result   hookClaimJSONResult
 	claims   []string
 	stderr   string
-	workflow *beads.MemStore
+	workflow *liveOwnershipStore
 }
 
 // claimed reports whether a claim CAS ran for id.
@@ -94,7 +106,7 @@ func liveOwnershipRun(t *testing.T, rows []beads.Bead, members []beads.Bead, opt
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow := beads.NewMemStoreFrom(0, members, nil)
+	workflow := &liveOwnershipStore{MemStore: beads.NewMemStoreFrom(0, members, nil)}
 	var claims []string
 	var ops hookClaimOps
 	ops.Runner = func(string, string) (string, error) { return string(raw), nil }
@@ -219,6 +231,60 @@ func TestHookClaimLiveOwnershipIdentityAndRecovery(t *testing.T) {
 			if out := liveOwnershipRun(t, rows, members, liveOwnershipOptions()); out.result.BeadID != liveOwnershipRoot {
 				t.Fatalf("want the root served once its member is %s, got bead=%q claims=%v\nstderr: %s",
 					settle, out.result.BeadID, out.claims, out.stderr)
+			}
+		})
+	}
+}
+
+// TestHookClaimLiveOwnershipScopeAndReads pins the hold's scope: only an
+// unstamped workflow root with no root above it and no drain-control link is
+// listed, so every other candidate costs the hook no store read, and a root
+// costs exactly one member List. The ready tier is outside the hold: a root
+// already assigned to this session is its own.
+func TestHookClaimLiveOwnershipScopeAndReads(t *testing.T) {
+	const parent = "gk-parent"
+	withMeta := func(b beads.Bead, meta map[string]string) beads.Bead {
+		for k, v := range meta {
+			b.Metadata[k] = v
+		}
+		return b
+	}
+	cases := []struct {
+		label     string
+		candidate beads.Bead
+		lists     int
+		served    bool
+	}{
+		{"plain task", withMeta(liveOwnershipTaskBead(), map[string]string{}), 0, true},
+		{"workflow root under another root", withMeta(liveOwnershipRootBead(), map[string]string{beadmeta.RootBeadIDMetadataKey: parent}), 0, true},
+		{"drain-control item root", withMeta(liveOwnershipRootBead(), map[string]string{beadmeta.DrainControlIDMetadataKey: parent}), 0, true},
+		{"expanded workflow root", withMeta(liveOwnershipRootBead(), map[string]string{beadmeta.WorkflowExpandedMetadataKey: "true"}), 0, false},
+		{"root assigned to this session", func() beads.Bead {
+			b := liveOwnershipRootBead()
+			b.Assignee = liveOwnershipIdentity
+			return b
+		}(), 0, true},
+		{"self-rooted workflow root", withMeta(liveOwnershipRootBead(), map[string]string{beadmeta.RootBeadIDMetadataKey: liveOwnershipRoot}), 1, false},
+		{"standalone workflow root", liveOwnershipRootBead(), 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			// A foreign-held step under the candidate: had the hold read it,
+			// the candidate would have been withheld.
+			members := []beads.Bead{
+				{ID: parent, Status: "open", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+				{ID: "gk-step", Status: "in_progress", Type: "task", Assignee: "gk__polecat-2", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: tc.candidate.ID}},
+			}
+			out := liveOwnershipRun(t, []beads.Bead{tc.candidate}, members, liveOwnershipOptions())
+			if got := len(out.workflow.lists); got != tc.lists {
+				t.Fatalf("member Lists = %d %v, want %d", got, out.workflow.lists, tc.lists)
+			}
+			if tc.lists == 1 && out.workflow.lists[0] != tc.candidate.ID {
+				t.Fatalf("member List filtered on root %q, want %q", out.workflow.lists[0], tc.candidate.ID)
+			}
+			if served := out.result.Action == "work" && out.result.BeadID == tc.candidate.ID; served != tc.served {
+				t.Fatalf("candidate served=%v, want %v: action=%q reason=%q bead=%q\nstderr: %s",
+					served, tc.served, out.result.Action, out.result.Reason, out.result.BeadID, out.stderr)
 			}
 		})
 	}
