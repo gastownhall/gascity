@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -248,5 +249,28 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 	}
 	if !strings.Contains(string(probeOut), "GIT_CONFIG_GLOBAL_OK=") {
 		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probeOut, out)
+	}
+}
+
+// TestSeededGitConfigDisablesBackgroundMaintenance pins the seeded global
+// gitconfig's auto-maintenance switch. git 2.47 and later follow a fetch,
+// commit or merge with `git maintenance run --auto --detach`: a background
+// process that takes objects/maintenance.lock after the command exits, so a
+// test's t.TempDir cleanup can race it ("unlinkat .../.git: directory not
+// empty", TestRBEWorkerFetchCanary on the macOS runner's git 2.54).
+func TestSeededGitConfigDisablesBackgroundMaintenance(t *testing.T) {
+	repoRoot := repoRoot(t)
+	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "test-gitconfig-path"))
+	cmd.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("test-gitconfig-path: %v", err)
+	}
+	path := strings.TrimSpace(string(out))
+	for key, want := range map[string]string{"maintenance.auto": "false", "gc.auto": "0"} {
+		got, err := exec.Command("git", "config", "--file", path, "--get", key).Output()
+		if err != nil || strings.TrimSpace(string(got)) != want {
+			t.Errorf("seeded gitconfig %s = %q (%v), want %q", key, strings.TrimSpace(string(got)), err, want)
+		}
 	}
 }
