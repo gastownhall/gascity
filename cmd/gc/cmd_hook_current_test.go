@@ -592,6 +592,84 @@ func TestDoHookCurrentLetsAFrozenCopyEstablishNothing(t *testing.T) {
 	})
 }
 
+// TestDoHookCurrentRecoversASessionlessDeliveryUnderScopeIdentities is AC-6's
+// positive arm: a control delivery whose row carries no session metadata at
+// all — a pre-session-id claim shape, or a writer that never stamps it — is
+// still provably this session's when its assignee is one of the identities
+// the session releases work under (here its session_name, not its bead id),
+// so the recovery prints it. Actor env (BEADS_ACTOR, GC_AGENT) has no vote:
+// the verdict is ledger state, not who is asking.
+func TestDoHookCurrentRecoversASessionlessDeliveryUnderScopeIdentities(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "garbage-actor")
+	t.Setenv("GC_AGENT", "garbage-agent")
+	row := hookCurrentWorkBead("gcg-ctl")
+	row.Assignee = "mc-worker-1"       // the session's session_name identity, not its bead id
+	row.Metadata = map[string]string{} // no gc.session_id: the assignee alone carries the ownership
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("", hookCurrentEntry("gcg-ctl")),
+		row,
+	)
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookCurrent (sessionless delivery, scope assignee) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); got != "gcg-ctl\n" {
+		t.Fatalf("--id-only stdout = %q, want the recovered control delivery", got)
+	}
+}
+
+// TestDoHookCurrentRefusesARowAnotherSessionOwns is AC-6's foreign-metadata
+// arm: the row is in progress and assigned to this session's bead id, but its
+// gc.session_id names ANOTHER session — the shared fence's stale-stamp case.
+// Whatever the assignee says, the row is not this session's to close.
+func TestDoHookCurrentRefusesARowAnotherSessionOwns(t *testing.T) {
+	row := hookCurrentWorkBead("gcg-x")
+	row.Metadata[beadmeta.SessionIDMetadataKey] = "mc-other"
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-x", hookCurrentEntry("gcg-x")),
+		row,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (foreign gc.session_id) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed for another session's row", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "claimed by another session") {
+		t.Errorf("stderr = %q, want the foreign-session refusal named", stderr.String())
+	}
+}
+
+// TestDoHookCurrentRefusesARowAssignedOutsideTheScope is AC-6's outside-
+// assignee arm: the row carries this session's gc.session_id but is assigned
+// to an identity outside its release scope. The drain veto would hold this
+// row open; the id this command prints is a close target, so its bar is
+// higher — an assignee the session cannot release under is not its claim.
+func TestDoHookCurrentRefusesARowAssignedOutsideTheScope(t *testing.T) {
+	row := hookCurrentWorkBead("gcg-x")
+	row.Assignee = "someone-else"
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-x", hookCurrentEntry("gcg-x")),
+		row,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (assignee outside the scope) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed for an out-of-scope assignee", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "assigned to another identity") {
+		t.Errorf("stderr = %q, want the out-of-scope refusal named", stderr.String())
+	}
+}
+
 // TestDoHookCurrentExitsOneOnAnUnreadableSession covers the store arm: an id the
 // session store cannot resolve is an error, not "nothing claimed", and must not
 // print a bead id.
