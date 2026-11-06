@@ -24,9 +24,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -1043,4 +1045,86 @@ func TestHookClaimLiveOwnershipUnavailable(t *testing.T) {
 			t.Fatalf("stderr=%q: an out-of-scope candidate must short-circuit before the seam is ever read", stderr)
 		}
 	})
+}
+
+// TestHookClaimLiveOwnershipLoopReporting pins the withhold's observability
+// contract: distinct seats withheld by the same root report IDENTICAL failure
+// text (member ids are the incident's evidence, not the loop's signature), the
+// invocation drains no_work rather than claims_errored, the root is never
+// mutated, and the resulting events are exactly what the claim-loop guard
+// needs — a hold at the third seat, immune to member events, lifted by the
+// root's own change, and one probe admitted when the hold runs out.
+func TestHookClaimLiveOwnershipLoopReporting(t *testing.T) {
+	f := newHookLiveOwnershipFixture(t)
+	root := f.root("do-work run", nil)
+	f.served = []string{root.ID}
+
+	var texts []string
+	var members []string
+	for seat := 1; seat <= claimLoopTripFailures; seat++ {
+		members = append(members, f.step(root.ID, "in_progress", fmt.Sprintf("seat-holder-%d", seat), nil).ID)
+		run := f.runAs(fmt.Sprintf("worker-%d", seat),
+			"GC_TEMPLATE=worker-pool",
+			fmt.Sprintf("GC_SESSION_ID=gcg-loop-%d", seat))
+		if run.action != "drain" || run.reason != "no_work" {
+			t.Fatalf("seat %d: action=%q reason=%q, want drain no_work; a withheld root is not a claim error; stderr=%s", seat, run.action, run.reason, run.stderr)
+		}
+		f.wantUnchanged(root.ID)
+		if len(f.failures) != seat {
+			t.Fatalf("seat %d: claim failures = %d, want one per withheld poll", seat, len(f.failures))
+		}
+		note := f.failures[seat-1]
+		if note.beadID != root.ID {
+			t.Fatalf("seat %d: failure subject %q, want the root %s", seat, note.beadID, root.ID)
+		}
+		texts = append(texts, note.err.Error())
+	}
+	if len(f.claims) != 0 {
+		t.Fatalf("claims = %v; the root must never be claimed whole", f.claims)
+	}
+	for _, text := range texts[1:] {
+		if text != texts[0] {
+			t.Fatalf("withheld failure text varies by member set:\n  %q\n  %q\nthe claim-loop guard compares these texts; member ids must stay out of them", texts[0], text)
+		}
+	}
+
+	// The guard leg: the same three seats' events, through the real guard.
+	held := func(h *claimLoopHarness) bool {
+		t.Helper()
+		counts := map[string]int{"worker-pool": 1}
+		demand := map[string]scaleCheckDemand{"worker-pool": {Count: 1, WorkBeadIDs: []string{root.ID}}}
+		gotCounts, gotDemand := h.guard.withhold(counts, demand)
+		return gotCounts["worker-pool"] == 0 && len(gotDemand["worker-pool"].WorkBeadIDs) == 0
+	}
+	trip := func(h *claimLoopHarness) {
+		t.Helper()
+		for seat := 1; seat <= claimLoopTripFailures; seat++ {
+			h.failAs(fmt.Sprintf("gcg-loop-%d", seat), "worker-pool", root.ID, texts[0])
+			h.advance(time.Minute)
+		}
+	}
+
+	h := newClaimLoopHarness(t)
+	trip(h)
+	if !held(h) {
+		t.Fatal("repeated withholds did not hold the root out of its template's default routed demand")
+	}
+	h.guard.observe(events.Event{Type: events.BeadUpdated, Subject: members[0], Ts: h.now})
+	if !held(h) {
+		t.Fatal("a member's own bead event lifted the hold; only the root's changes may")
+	}
+	h.guard.observe(events.Event{Type: events.BeadUpdated, Subject: root.ID, Ts: h.now})
+	if held(h) {
+		t.Fatal("a change to the root did not lift the hold")
+	}
+
+	probe := newClaimLoopHarness(t)
+	trip(probe)
+	if !held(probe) {
+		t.Fatal("not held after the trip")
+	}
+	probe.advance(claimLoopHoldBase)
+	if held(probe) {
+		t.Fatal("a hold that ran out did not admit one probe")
+	}
 }
