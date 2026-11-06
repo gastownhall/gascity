@@ -45,14 +45,14 @@ func TestArmResolvedUnderOffFollowsLiveFlipOn(t *testing.T) {
 			if err := tm.newSessionWithCommandAndEnv("gc-cached", "/w", "claude", nil, arm); err != nil {
 				t.Fatal(err)
 			}
-			if len(rec.calls) == 0 || !slices.Contains(rec.calls[0], relayed) || !slices.Contains(rec.calls[0], programTapOption) {
+			if len(rec.calls) == 0 || !slices.Contains(rec.calls[0], "exec "+relayed) || !slices.Contains(rec.calls[0], programTapOption) {
 				t.Fatalf("create after the flip with an arm resolved under off is not relay-wrapped and tapped: %q", rec.calls)
 			}
 			rec.calls = nil
 			if err := tm.respawnPaneWithWorkDir("%1", "/w", "claude", arm); err != nil {
 				t.Fatal(err)
 			}
-			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], relayed) || !slices.Contains(rec.calls[0], programTapOption) {
+			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], "exec "+relayed) || !slices.Contains(rec.calls[0], programTapOption) {
 				t.Fatalf("respawn after the flip with an arm resolved under off is not relay-wrapped and tapped: %q", rec.calls)
 			}
 		})
