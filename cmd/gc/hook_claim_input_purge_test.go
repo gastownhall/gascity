@@ -449,3 +449,73 @@ func TestHookCityInputPurgeFrameRefusesACityWithARigOutOfFrame(t *testing.T) {
 		t.Fatalf("inputPurgeFrame() err = %v; want the frame refused naming parked and loose", err)
 	}
 }
+
+// TestDoHookClaimNeverProbesPurgeForAResolvedInput: the purge probe is asked
+// only about an input the done-check cannot judge. An input whose member
+// resolves keeps the decisions it had before — served while the member is
+// ours and open, skipped as done once it is terminal or handed off to another
+// lane — and no purge frame is opened for it.
+func TestDoHookClaimNeverProbesPurgeForAResolvedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// member moves the tracked target into the state under test.
+		member      func(t *testing.T, store beads.Store, target beads.Bead)
+		wantSkipped bool
+	}{
+		{
+			name:   "an open member is served",
+			member: func(*testing.T, beads.Store, beads.Bead) {},
+		},
+		{
+			name: "a closed member is done",
+			member: func(t *testing.T, store beads.Store, target beads.Bead) {
+				if err := store.Close(target.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSkipped: true,
+		},
+		{
+			name: "a member handed off to another lane is done",
+			member: func(t *testing.T, store beads.Store, target beads.Bead) {
+				if err := store.Update(target.ID, beads.UpdateOpts{Status: strPtr("in_progress"), Assignee: strPtr("reviewer-1")}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSkipped: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			target, _, root, open := seedSyntheticInputWorkflow(t, store)
+			tc.member(t, store, target)
+
+			claimed := ""
+			probe := func(verdict workflowInputVerdict) ([]string, error) {
+				t.Fatalf("purge probed for the resolved input of %s", verdict.RootID)
+				return nil, nil
+			}
+			ops := purgeClaimOps(t, store, probe, []beads.Bead{open}, &claimed)
+			skipped := ""
+			ops.SkipDoneWorkflow = func(_ context.Context, _ string, _ []string, rootID string) error {
+				skipped = rootID
+				return skipDoneWorkflow(store, rootID)
+			}
+			wantCode, wantClaimed, wantSkipped := 0, open.ID, ""
+			if tc.wantSkipped {
+				wantCode, wantClaimed, wantSkipped = 1, "", root.ID
+			}
+			stderr := runPurgeClaim(t, ops, wantCode)
+
+			if claimed != wantClaimed || skipped != wantSkipped {
+				t.Fatalf("claimed %q, skipped %q; want claimed %q, skipped %q (stderr=%q)", claimed, skipped, wantClaimed, wantSkipped, stderr)
+			}
+			if strings.Contains(stderr, "purge") {
+				t.Fatalf("stderr = %q; a resolved input must not reach the purge probe", stderr)
+			}
+			if !tc.wantSkipped {
+				assertNotRetired(t, store, map[string]string{root.ID: "open", open.ID: "open"})
+			}
+		})
+	}
+}
