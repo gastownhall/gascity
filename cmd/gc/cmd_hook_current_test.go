@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -622,5 +623,55 @@ func TestDoHookCurrentVerifiesAControlClaimByItsAssignee(t *testing.T) {
 				t.Errorf("stderr = %q, want it to name %q", stderr, tc.wantInEr)
 			}
 		})
+	}
+}
+
+// TestDoHookCurrentWritesNothing is AC-7's no-mutation half: printing,
+// recovering and refusing a claim all leave every row as they found it. The
+// stamp is repaired by the claim path, never by this read.
+func TestDoHookCurrentWritesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		claim    string
+		cell     string
+		work     []beads.Bead
+		wantCode int
+	}{
+		{name: "verified stamp", claim: "gcg-1", cell: hookCurrentStartedCell("gcg-1"), work: []beads.Bead{hookCurrentHeld("gcg-1")}, wantCode: 0},
+		{name: "recovered delivery", claim: "gcg-old", cell: hookCurrentStartedCell("gcg-new", "gcg-old"), work: []beads.Bead{hookCurrentWork("gcg-old", "closed", hookCurrentSessionID), hookCurrentHeld("gcg-new")}, wantCode: 0},
+		{name: "stale stamp refused", claim: "gcg-old", cell: hookCurrentStartedCell("gcg-old"), work: []beads.Bead{hookCurrentWork("gcg-old", "closed", hookCurrentSessionID)}, wantCode: 1},
+		{name: "several deliveries refused", cell: hookCurrentStartedCell("gcg-a", "gcg-b"), work: []beads.Bead{hookCurrentHeld("gcg-a"), hookCurrentHeld("gcg-b")}, wantCode: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookCurrentFixture(t, tc.claim, tc.cell, tc.work...)
+			all := beads.ListQuery{AllowScan: true, IncludeClosed: true}
+			before, err := f.store.List(all)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code, stdout, stderr := f.run(true); code != tc.wantCode {
+				t.Fatalf("--id-only = (%d, %q), want exit %d; stderr=%s", code, stdout, tc.wantCode, stderr)
+			}
+			after, err := f.store.List(all)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Errorf("gc hook current changed the store:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
+	}
+}
+
+// TestHookCurrentDocDescribesVerification is AC-7's help half: the Long text
+// says the stamp is printed only when the live ledger shows the session still
+// holds it, that a stale stamp falls back to the one held delivery, and that
+// an undecidable claim refuses with exit 1.
+func TestHookCurrentDocDescribesVerification(t *testing.T) {
+	long := newHookCurrentCmd(io.Discard, io.Discard).Long
+	for _, want := range []string{"live ledger", "still holds", "on stderr", "Exits 1, printing nothing"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("help text does not say %q; got:\n%s", want, long)
+		}
 	}
 }

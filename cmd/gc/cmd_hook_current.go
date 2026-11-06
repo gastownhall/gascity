@@ -17,8 +17,8 @@ func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
 	var idOnly bool
 	cmd := &cobra.Command{
 		Use:   "current",
-		Short: "Print the work bead this session most recently claimed",
-		Long: `Prints the work bead this session most recently claimed with gc hook --claim.
+		Short: "Print the work bead this session currently holds",
+		Long: `Prints the work bead this session currently holds, as claimed with gc hook --claim.
 
 The claim protocol stamps the claimed bead id onto the calling session's own
 bead, because the environment cannot name it: $GC_BEAD_ID exists only in the
@@ -30,9 +30,18 @@ it is running reads the stamp back here:
 
     BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"
 
-The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
-session identity and when the session has claimed nothing, so a caller that
-cannot name its bead fails loudly instead of skipping its own work.`,
+The stamp is written best-effort, so it is printed only when the live ledger
+says this session still holds that bead: in progress, not claimed since by
+another session, and assigned to one of this session's identities. When the
+stamp is stale or missing, the one recorded hook delivery the session still
+holds is printed instead, with a note on stderr. The stamp is never rewritten.
+
+The calling session is taken from $GC_SESSION_ID. Exits 1, printing nothing,
+when there is no session identity, when the session holds no verified claim,
+and when it cannot decide: several held deliveries, a stamp a newer held
+delivery contradicts, or a bead or rig store it could not read. A caller that
+cannot name its bead fails loudly instead of skipping its own work or closing
+someone else's.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return exitForCode(cmdHookCurrent(idOnly, stdout, stderr))
