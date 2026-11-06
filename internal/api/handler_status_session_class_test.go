@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // workLedgerStore stands in for a cross-region hosted work ledger: it counts
@@ -48,6 +51,10 @@ type sessionClassUnavailableState struct{ *fakeState }
 
 func (sessionClassUnavailableState) SessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{}
+}
+
+func (s sessionClassUnavailableState) Stores() storeref.Stores {
+	return mirrorAccessorStores(s, slices.Collect(maps.Keys(s.stores)))
 }
 
 // splitClassState builds a city with sessions relocated off the work ledger:

@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -41,6 +42,7 @@ var (
 	_ ConditionalWritesResolveTargeter = (*ProxiedStore)(nil)
 	_ Counter                          = (*ProxiedStore)(nil)
 	_ DepMetadataReader                = (*ProxiedStore)(nil)
+	_ ExactBatchGetter                 = (*ProxiedStore)(nil)
 	_ ForeignIDCreator                 = (*ProxiedStore)(nil)
 	_ GraphApplyHandleProvider         = (*ProxiedStore)(nil)
 	_ ParentProjectionWaiter           = (*ProxiedStore)(nil)
@@ -116,18 +118,70 @@ func (s *ProxiedStore) DepMetadata(issueID, dependsOnID string) (string, bool, e
 	return payload, carried, s.classifyReadError(err)
 }
 
+// GetExactBatch reads several beads by exact id (ExactBatchGetter).
+//
+// On the native lane it is the native leaf's keyed batch, and an id in a
+// relocated class's reserved namespace is not forwarded to it (H5): it is left
+// unresolved, so a caller that settles it with Get gets the typed refusal Get
+// gives, and a caller of the batch alone reads a bead this ledger does not
+// hold, which is what the refusal says. A miss is unresolved too, so Get's H1
+// fallback still settles it. A demoted store answers with the bd leaf's own
+// batch, or ErrExactBatchGetUnsupported when that leaf has none, and the
+// caller reads per id.
+func (s *ProxiedStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	native := s.nativeLeaf()
+	if native == nil {
+		getter, ok := s.writeLeaf().(ExactBatchGetter)
+		if !ok {
+			return nil, nil, ErrExactBatchGetUnsupported
+		}
+		return getter.GetExactBatch(ids)
+	}
+	readable := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s.guardRelocatedIDs("get "+id, id) == nil {
+			readable = append(readable, id)
+		}
+	}
+	found, _, err := native.GetExactBatch(readable)
+	if err != nil {
+		return nil, nil, s.classifyReadError(err)
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
+}
+
 // DepListBatch reads several beads' "down" edges.
 //
-// The native leaf has no batched read, so the fallback loops DepList THROUGH THIS
-// STORE rather than through a leaf: that keeps the relocated-class guard and the
-// demotion routing live on every id, and on the native lane it costs zero
-// subprocesses whatever the batch size.
+// On the native lane it is the native leaf's ONE batched read, and H5's guard
+// runs over every id before that read is spent. A relocated id refuses the whole
+// batch, with no map, as it refused the per-id loop this replaced at that id:
+// the batch answers an anchor it does not hold with NO ENTRY, which is
+// DependencyBatchLister's contract and which is exactly the silent negative the
+// guard exists to keep a relocated id from becoming.
+//
+// A demoted store answers with the bd leaf's own semantics, through its batch
+// when it has one. A bd leaf without one, or whose backend refuses the batch
+// (ErrDepListBatchUnsupported), is looped through DepList on THIS store, which
+// keeps the demotion routing live on every id.
 func (s *ProxiedStore) DepListBatch(ids []string) (map[string][]Dep, error) {
-	if batch, ok := s.readLeaf().(interface {
-		DepListBatch(ids []string) (map[string][]Dep, error)
-	}); ok {
-		deps, err := batch.DepListBatch(ids)
+	if native := s.nativeLeaf(); native != nil {
+		if err := s.guardRelocatedIDs("dep list batch", ids...); err != nil {
+			return nil, err
+		}
+		deps, err := native.DepListBatch(ids)
 		return deps, s.classifyReadError(err)
+	}
+	if batch, ok := DepListBatchFor(s.bd); ok {
+		deps, err := batch.DepListBatch(ids)
+		if !errors.Is(err, ErrDepListBatchUnsupported) {
+			return deps, err
+		}
 	}
 	result := make(map[string][]Dep, len(ids))
 	for _, id := range ids {
@@ -485,4 +539,14 @@ func (s *ProxiedStore) fireConditionalWritesDegradeOnce(d ConditionalWritesDegra
 	if carrier, ok := s.writeLeaf().(conditionalWritesModeCarrier); ok {
 		carrier.fireConditionalWritesDegradeOnce(d)
 	}
+}
+
+// ReadyOrdered forwards a bounded ordered ready read to the read leaf
+// (OrderedReadyReader). Explicit for the reason DepListBatch is: a wrapper
+// does not promote its leaf's optional capabilities, so a silent ProxiedStore
+// would make every bounded read take the whole-set path. The native leaf cuts
+// in order; a demoted store's bd leaf cannot and answers with its whole set.
+func (s *ProxiedStore) ReadyOrdered(query ReadyQuery, order ReadyOrder) ([]Bead, bool, error) {
+	rows, ordered, err := ReadyOrdered(s.readLeaf(), query, order)
+	return rows, ordered, s.classifyReadError(err)
 }

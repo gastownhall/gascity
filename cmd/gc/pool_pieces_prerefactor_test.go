@@ -91,7 +91,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 			}
 			if sn := resolveNamedSessionBeadNamePreRefactor(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
-				if bead != nil && bead.Drained && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
+				if bead != nil && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
 					reason = "routed-demand"
 				}
 				drainedExempt := reason == "routed-demand"
@@ -282,6 +282,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		if input.AttachedSessions[name] && !bead.WaitHold {
 			decision.ShouldWake = true
 			decision.Reason = "attached"
+			decision.Attached = true
 		}
 
 		if input.PendingSessions[name] && !bead.WaitHold {
@@ -363,20 +364,32 @@ func resolveNamedSessionBeadNamePreRefactor(beads []AwakeSessionBead, ns AwakeNa
 	if sn := findNamedSessionNamePreRefactor(beads, ns.Identity); sn != "" {
 		return sn
 	}
-	if ns.RuntimeName == "" {
-		return ""
+	if ns.RuntimeName != "" {
+		bead := findBeadBySessionName(beads, ns.RuntimeName)
+		if bead != nil && bead.ConfiguredNamedSession &&
+			(ns.Template == "" || bead.Template == ns.Template) &&
+			(bead.NamedIdentity == "" || bead.NamedIdentity == ns.Identity) {
+			return bead.SessionName
+		}
 	}
-	bead := findBeadBySessionName(beads, ns.RuntimeName)
-	if bead == nil || !bead.ConfiguredNamedSession {
-		return ""
+	// The #5957 requalification pass, mirroring resolveNamedSessionBead.
+	if bare := ns.BareIdentity; bare != "" && bare != ns.Identity {
+		sn, matches := "", 0
+		for i := range beads {
+			b := &beads[i]
+			if b.NamedIdentity != bare || !b.ConfiguredNamedSession || b.SessionName == "" {
+				continue
+			}
+			matches++
+			if matches == 1 {
+				sn = b.SessionName
+			}
+		}
+		if matches == 1 {
+			return sn
+		}
 	}
-	if ns.Template != "" && bead.Template != ns.Template {
-		return ""
-	}
-	if bead.NamedIdentity != "" && bead.NamedIdentity != ns.Identity {
-		return ""
-	}
-	return bead.SessionName
+	return ""
 }
 
 func countMinActiveCoveredPreRefactor(beads []AwakeSessionBead, desired map[string]string, template string, now time.Time) int {
@@ -420,6 +433,7 @@ func buildDemandTargetsPreRefactor(
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 	coldWakeTemplates := map[string]bool{}
 	namedOnDemandTemplates := map[string]bool{}
+	nameOnlyTemplates := map[string]bool{}
 	type activeStore struct {
 		store beads.Store
 		ref   string
@@ -520,11 +534,16 @@ func buildDemandTargetsPreRefactor(
 			}
 			continue
 		}
-		if store != nil && isCold && !storeScopedControlDispatcher {
+		claimsGeneratedQuery := cfg.Agents[i].WorkQuery == ""
+		if store != nil && !storeScopedControlDispatcher && (isCold || claimsGeneratedQuery) {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
 			}
-			coldWakeTemplates[template] = true
+			if isCold {
+				coldWakeTemplates[template] = true
+			} else {
+				nameOnlyTemplates[template] = true
+			}
 		}
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
@@ -539,6 +558,7 @@ func buildDemandTargetsPreRefactor(
 		defaultNamedScaleTargets: defaultNamedScaleTargets,
 		coldWakeTemplates:        coldWakeTemplates,
 		namedOnDemandTemplates:   namedOnDemandTemplates,
+		nameOnlyTemplates:        nameOnlyTemplates,
 	}
 }
 

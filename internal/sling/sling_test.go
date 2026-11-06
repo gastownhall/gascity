@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -718,6 +719,83 @@ func TestCheckBeadStatePoolLabelWithoutConvoyIsNotIdempotent(t *testing.T) {
 
 	if result.Idempotent {
 		t.Fatalf("expected Idempotent=false for pool label without convoy parent, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateReportsReadStatusAlongsideVerdict guards the #5927 batch
+// fix: the check reports the status it read without changing its routing
+// verdict, so a closed bead already routed to the target stays idempotent for
+// single-bead sling and dry-run while DoSlingBatch can still skip it as no
+// longer open.
+func TestCheckBeadStateReportsReadStatusAlongsideVerdict(t *testing.T) {
+	tests := []struct {
+		name           string
+		bead           beads.Bead
+		status         string // applied after create; empty keeps the bead open
+		wantIdempotent bool
+		wantStatus     string
+	}{
+		{
+			name:           "closed bead routed to the target stays idempotent",
+			bead:           beads.Bead{Title: "done", Type: "task", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+			status:         "closed",
+			wantIdempotent: true,
+			wantStatus:     "closed",
+		},
+		{
+			name:       "tombstoned unrouted bead",
+			bead:       beads.Bead{Title: "gone", Type: "task"},
+			status:     "tombstone",
+			wantStatus: "tombstone",
+		},
+		{
+			name:       "bead claimed by another actor",
+			bead:       beads.Bead{Title: "taken", Type: "task", Assignee: "alice"},
+			status:     "in_progress",
+			wantStatus: "in_progress",
+		},
+		{
+			name:           "open bead routed to the target",
+			bead:           beads.Bead{Title: "queued", Type: "task", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+			wantIdempotent: true,
+			wantStatus:     "open",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			bead, err := store.Create(tt.bead)
+			if err != nil {
+				t.Fatalf("store.Create(): %v", err)
+			}
+			if tt.status != "" {
+				if err := store.Update(bead.ID, beads.UpdateOpts{Status: &tt.status}); err != nil {
+					t.Fatalf("store.Update(): %v", err)
+				}
+			}
+
+			result := CheckBeadStateWithOptions(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store}, BeadCheckOptions{NoConvoy: true})
+
+			if result.Idempotent != tt.wantIdempotent {
+				t.Errorf("Idempotent = %v, want %v (status must not change the routing verdict): %+v", result.Idempotent, tt.wantIdempotent, result)
+			}
+			if result.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q", result.Status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestCheckBeadStateUnreadableBeadReportsNoStatus pins the empty Status that
+// DoSlingBatch reads as "unknown, keep dispatching" rather than "no longer
+// open".
+func TestCheckBeadStateUnreadableBeadReportsNoStatus(t *testing.T) {
+	store := &getErrStore{Store: beads.NewMemStore(), err: errors.New("boom: store unavailable")}
+
+	result := CheckBeadState(store, "BL-1", config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Status != "" || result.Idempotent {
+		t.Fatalf("CheckBeadState on an unreadable bead = %+v, want an empty result", result)
 	}
 }
 
@@ -1521,6 +1599,104 @@ func TestDoSlingSkippedForClaimWarningNamesDefaultFormula(t *testing.T) {
 	}
 	if !named {
 		t.Fatalf("BeadWarnings = %v, want a warning naming the skipped default formula %q", result.BeadWarnings, "code-review")
+	}
+}
+
+// TestDoSlingClosedBeadKeepsSingleBeadVerdict guards the scope of the #5927
+// fix: only DoSlingBatch skips on the status the check reads, so single-bead
+// sling of a closed bead keeps its routing verdict. A closed bead already
+// routed to or claimed by the target stays an idempotent no-op instead of
+// being dispatched again under a new auto-convoy or getting a molecule
+// attached to closed work.
+func TestDoSlingClosedBeadKeepsSingleBeadVerdict(t *testing.T) {
+	tests := []struct {
+		name           string
+		noConvoy       bool
+		parentConvoy   bool
+		assignee       string
+		defaultFormula string
+		wantWarning    string
+	}{
+		{name: "routed with no convoy", noConvoy: true},
+		{name: "routed under an open parent convoy", parentConvoy: true},
+		{
+			name:           "claimed with a default formula",
+			parentConvoy:   true,
+			assignee:       "mayor",
+			defaultFormula: "code-review",
+			wantWarning:    "was skipped to avoid re-attaching",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+			if tt.defaultFormula != "" {
+				a.DefaultSlingFormula = stringPtr(tt.defaultFormula)
+			}
+
+			store := beads.NewMemStore()
+			var parentID string
+			if tt.parentConvoy {
+				convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+				if err != nil {
+					t.Fatalf("store.Create(convoy): %v", err)
+				}
+				parentID = convoy.ID
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "done",
+				ParentID: parentID,
+				Assignee: tt.assignee,
+				Metadata: map[string]string{"gc.routed_to": "mayor"},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(bead): %v", err)
+			}
+			if err := store.Close(bead.ID); err != nil {
+				t.Fatalf("store.Close(): %v", err)
+			}
+			before, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil {
+				t.Fatalf("store.List(): %v", err)
+			}
+
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.Store = store
+			opts := testOpts(a, bead.ID)
+			opts.NoConvoy = tt.noConvoy
+			result, err := DoSling(opts, deps, store)
+			if err != nil {
+				t.Fatalf("DoSling error: %v", err)
+			}
+
+			if !result.Idempotent {
+				t.Errorf("expected Idempotent=true for a closed bead already routed to the target, got %+v", result)
+			}
+			if len(runner.calls) != 0 {
+				t.Errorf("runner should not have been called, got %v", runner.calls)
+			}
+			after, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil {
+				t.Fatalf("store.List(): %v", err)
+			}
+			if len(after) != len(before) {
+				t.Errorf("store holds %d beads after DoSling, want %d: no convoy or molecule may be created", len(after), len(before))
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("store.Get(): %v", err)
+			}
+			if mol := got.Metadata["molecule_id"]; mol != "" {
+				t.Errorf("closed bead got molecule_id %q, want none", mol)
+			}
+			if tt.wantWarning != "" && !slices.ContainsFunc(result.BeadWarnings, func(w string) bool {
+				return strings.Contains(w, tt.wantWarning)
+			}) {
+				t.Errorf("BeadWarnings = %v, want one containing %q", result.BeadWarnings, tt.wantWarning)
+			}
+		})
 	}
 }
 
@@ -2370,6 +2546,57 @@ func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
 	}
 }
 
+func TestDoSlingDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.NoFormula = true
+	opts.DryRun = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingBatchDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	deps, router, target := crossStoreSlingDeps(t)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	children := []beads.Bead{}
+	for _, title := range []string{"one", "two"} {
+		child, createErr := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if createErr != nil {
+			t.Fatalf("create child %s: %v", title, createErr)
+		}
+		children = append(children, child)
+	}
+	opts := SlingOpts{
+		Target:        target,
+		BeadOrFormula: convoy.ID,
+		Force:         true,
+		DryRun:        true,
+		NoFormula:     true,
+	}
+
+	result, err := DoSlingBatch(opts, deps, store)
+
+	requireCrossStoreRouteError(t, err)
+	if result.Routed != 0 {
+		t.Fatalf("Routed = %d, want 0", result.Routed)
+	}
+	for _, child := range children {
+		requireNoCrossStoreRouteMutation(t, store, child.ID, "")
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
 func TestDoSlingBatchRefusesCrossStoreBeforeFormulaMutation(t *testing.T) {
 	deps, router, target := crossStoreSlingDeps(t)
 	store := deps.Store
@@ -2618,7 +2845,7 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	if got := sourceAfter.Metadata["workflow_id"]; got != "" {
 		t.Fatalf("source workflow_id = %q, want empty", got)
 	}
-	members, err := convoycore.Members(deps.Store, inputConvoyID, true)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(deps.Store)}, inputConvoyID, true)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
@@ -2682,6 +2909,334 @@ func TestRestampWorkBeadRoutingCollapsesPoolInstanceResolvedViaResolveAgent(t *t
 	}
 	if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
 		t.Fatalf("gc.routed_to = %q, want empty", got)
+	}
+}
+
+// TestRestampWorkBeadRoutingClearsStaleRoutedTo guards against a source bead
+// that was routed by a plain sling (gc.routed_to=<pool>) keeping that claim key
+// after a graph.v2 workflow wraps it: the stale key makes the pool count the
+// source and the workflow's executable step as two units of demand. The clear
+// is unconditional and takes gc.run_target with it, the carried route that
+// route recovery would re-stamp gc.routed_to from.
+func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "myrig"}},
+		Agents: []config.Agent{{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(4)}},
+	}
+	a, ok := agentutil.ResolveAgent(cfg, "myrig/polecat", agentutil.ResolveOpts{AllowPoolMembers: true})
+	if !ok {
+		t.Fatal("ResolveAgent(myrig/polecat) failed to resolve")
+	}
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{name: "routed to the same target", metadata: map[string]string{beadmeta.RoutedToMetadataKey: "myrig/polecat"}},
+		{name: "routed to a different target", metadata: map[string]string{beadmeta.RoutedToMetadataKey: "otherrig/worker"}},
+		{name: "never routed"},
+		{
+			name: "run target is cleared too",
+			metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey:  "myrig/polecat",
+				beadmeta.RunTargetMetadataKey: "myrig/polecat",
+			},
+		},
+		{name: "run target without a route", metadata: map[string]string{beadmeta.RunTargetMetadataKey: "myrig/polecat"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			bead, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open", Metadata: tt.metadata})
+			if err != nil {
+				t.Fatalf("store.Create: %v", err)
+			}
+
+			result := &SlingResult{}
+			restampWorkBeadRouting(SlingDeps{Store: store, Cfg: cfg}, bead.ID, a, result)
+
+			if len(result.MetadataErrors) != 0 {
+				t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("store.Get: %v", err)
+			}
+			if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "myrig/polecat" {
+				t.Fatalf("gc.execution_routed_to = %q, want myrig/polecat", got)
+			}
+			if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
+				t.Fatalf("gc.routed_to = %q after graph.v2 wrap, want cleared (stale pre-wrap route doubles pool demand)", got)
+			}
+			if got := after.Metadata[beadmeta.RunTargetMetadataKey]; got != "" {
+				t.Fatalf("gc.run_target = %q after graph.v2 wrap, want cleared (route recovery re-stamps gc.routed_to from it)", got)
+			}
+		})
+	}
+}
+
+// failingRestampStore wraps a beads.Store and rejects any metadata write to
+// beadID that carries gc.execution_routed_to, through either SetMetadata or
+// SetMetadataBatch, so the source restamp fails while every other launch
+// write succeeds.
+type failingRestampStore struct {
+	beads.Store
+	beadID string
+	err    error
+}
+
+func (f *failingRestampStore) SetMetadata(id, key, value string) error {
+	if id == f.beadID && key == beadmeta.ExecutionRoutedToMetadataKey {
+		return f.err
+	}
+	return f.Store.SetMetadata(id, key, value)
+}
+
+func (f *failingRestampStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[beadmeta.ExecutionRoutedToMetadataKey]; ok && id == f.beadID {
+		return f.err
+	}
+	return f.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSlingAttachGraphFormulaReportsRestampWriteFailure pins the soft-failure
+// policy of the source restamp: once the graph.v2 workflow is launched, a
+// rejected routing write is surfaced in MetadataErrors and the attach still
+// succeeds.
+func TestSlingAttachGraphFormulaReportsRestampWriteFailure(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "mayor"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected restamp failure")
+	deps.Store = &failingRestampStore{Store: deps.Store, beadID: source.ID, err: injected}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v, want nil (restamp failure is advisory)", err)
+	}
+	if result.WorkflowID == "" {
+		t.Fatal("result.WorkflowID is empty, want the launched workflow root")
+	}
+	if _, err := deps.Store.Get(result.WorkflowID); err != nil {
+		t.Fatalf("Get(root %s): %v", result.WorkflowID, err)
+	}
+	if len(result.MetadataErrors) != 1 {
+		t.Fatalf("MetadataErrors = %v, want exactly the restamp failure", result.MetadataErrors)
+	}
+	entry := result.MetadataErrors[0]
+	if !strings.Contains(entry, source.ID) || !strings.Contains(entry, injected.Error()) {
+		t.Fatalf("MetadataErrors entry %q must name the source bead %s and the store error %q", entry, source.ID, injected.Error())
+	}
+}
+
+// TestPlainSlingClearsGraphTakeoverRoute: a bead a graph workflow took over
+// keeps the gc.execution_routed_to the restamp left after the workflow ends,
+// and the detached-orphan sweep reads that key on a bead outside any workflow
+// as the takeover, so it never re-routes the bead. A plain sling hands the bead
+// back to the pool, as a single bead or as a batch child, so it drops the key.
+// A workflow member keeps it: its execution route is its workflow's routing.
+func TestPlainSlingClearsGraphTakeoverRoute(t *testing.T) {
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		batch    bool
+		wantExec string
+	}{
+		{name: "taken over", metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "mayor"}},
+		{name: "taken over batch child", metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "mayor"}, batch: true},
+		{
+			name: "workflow member",
+			metadata: map[string]string{
+				beadmeta.ExecutionRoutedToMetadataKey: "mayor",
+				beadmeta.RootBeadIDMetadataKey:        "wf-1",
+			},
+			wantExec: "mayor",
+		},
+		{
+			name: "workflow member batch child",
+			metadata: map[string]string{
+				beadmeta.ExecutionRoutedToMetadataKey: "mayor",
+				beadmeta.RootBeadIDMetadataKey:        "wf-1",
+			},
+			batch:    true,
+			wantExec: "mayor",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+			bead := beads.Bead{Title: "work", Type: "task", Status: "open", Metadata: tt.metadata}
+			var result SlingResult
+			var err error
+			if tt.batch {
+				convoy, cerr := deps.Store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+				if cerr != nil {
+					t.Fatalf("create convoy: %v", cerr)
+				}
+				bead.ParentID = convoy.ID
+				if bead, err = deps.Store.Create(bead); err != nil {
+					t.Fatalf("create child: %v", err)
+				}
+				result, err = DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, deps.Store)
+			} else {
+				if bead, err = deps.Store.Create(bead); err != nil {
+					t.Fatalf("create bead: %v", err)
+				}
+				result, err = DoSling(testOpts(a, bead.ID), deps, deps.Store)
+			}
+			if err != nil {
+				t.Fatalf("sling: %v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("runner calls = %#v, want the one plain route", runner.calls)
+			}
+			if len(result.MetadataErrors) != 0 {
+				t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
+			}
+			after, err := deps.Store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", bead.ID, err)
+			}
+			if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != tt.wantExec {
+				t.Fatalf("gc.execution_routed_to = %q after the plain sling, want %q", got, tt.wantExec)
+			}
+		})
+	}
+}
+
+// TestPlainSlingReportsGraphTakeoverClearFailure pins the clear as advisory:
+// the bead is already routed, so a rejected write is reported in
+// MetadataErrors and the sling still succeeds.
+func TestPlainSlingReportsGraphTakeoverClearFailure(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	bead, err := deps.Store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.ExecutionRoutedToMetadataKey: "mayor"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected clear failure")
+	deps.Store = &failingRestampStore{Store: deps.Store, beadID: bead.ID, err: injected}
+
+	result, err := DoSling(testOpts(config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, bead.ID), deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v, want nil (the clear is advisory)", err)
+	}
+	if len(result.MetadataErrors) != 1 {
+		t.Fatalf("MetadataErrors = %v, want exactly the clear failure", result.MetadataErrors)
+	}
+	if entry := result.MetadataErrors[0]; !strings.Contains(entry, bead.ID) || !strings.Contains(entry, injected.Error()) {
+		t.Fatalf("MetadataErrors entry %q must name the bead %s and the store error %q", entry, bead.ID, injected.Error())
+	}
+}
+
+// rootHidingStore hides root from every read once the launch has restamped
+// source's routing (written gc.execution_routed_to on it): a launch whose new
+// root never becomes visible after finalize.
+type rootHidingStore struct {
+	beads.Store
+	source, root string
+	hidden       bool
+}
+
+func (s *rootHidingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[beadmeta.ExecutionRoutedToMetadataKey]; ok && id == s.source {
+		s.hidden = true
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *rootHidingStore) Get(id string) (beads.Bead, error) {
+	if s.hidden && id == s.root {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.Store.Get(id)
+}
+
+func (s *rootHidingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	got, err := s.Store.List(q)
+	if s.hidden {
+		got = slices.DeleteFunc(got, func(b beads.Bead) bool { return b.ID == s.root })
+	}
+	return got, err
+}
+
+// TestSourceWorkflowLaunchRollbackRestoresSourceRouting: a source workflow
+// launch restamps the source's routing in finalize. When the new root is still
+// not visible afterwards, the launch is rolled back, and the source must be the
+// pool demand it was before: left with the restamped routing it would sit
+// unrouted with no live workflow, and neither route recovery (no gc.run_target)
+// nor the detached-orphan sweep (it reads gc.execution_routed_to as a takeover)
+// would route it again.
+func TestSourceWorkflowLaunchRollbackRestoresSourceRouting(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{
+		Title:  "work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:  "polecat",
+			beadmeta.RunTargetMetadataKey: "polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	root, err := deps.Store.Create(beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	store := &rootHidingStore{Store: deps.Store, source: source.ID, root: root.ID}
+	deps.Store = store
+	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(5)}
+
+	_, err = withSourceWorkflowLaunchLock(context.Background(), deps, source.ID, false, func() (pendingSourceWorkflowLaunch, error) {
+		return pendingGraphWorkflowLaunch(root.ID, source.ID, source.ID, "", a, "batch", "graph-work", deps), nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "not visible") {
+		t.Fatalf("launch error = %v, want the not-visible invariant violation", err)
+	}
+	if !store.hidden {
+		t.Fatal("precondition: the launch never restamped the source's routing")
+	}
+	after, err := store.Store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	for key, want := range map[string]string{
+		beadmeta.RoutedToMetadataKey:          "polecat",
+		beadmeta.RunTargetMetadataKey:         "polecat",
+		beadmeta.ExecutionRoutedToMetadataKey: "",
+		"workflow_id":                         "",
+	} {
+		if got := after.Metadata[key]; got != want {
+			t.Errorf("source %s = %q after the rollback, want %q", key, got, want)
+		}
 	}
 }
 
@@ -2905,11 +3460,11 @@ func TestRollbackGraphV2ReplacementLaunchRestoresReplacedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(store, replaced.ID)
+	snapshots, err := sourceworkflow.SnapshotOpenWorkflowBeads(beadstest.GraphMolecule(store), replaced.ID)
 	if err != nil {
 		t.Fatalf("SnapshotOpenWorkflowBeads: %v", err)
 	}
-	if _, err := sourceworkflow.CloseWorkflowSubtree(store, replaced.ID); err != nil {
+	if _, err := sourceworkflow.CloseWorkflowSubtree(beadstest.GraphMolecule(store), replaced.ID); err != nil {
 		t.Fatalf("CloseWorkflowSubtree(replaced): %v", err)
 	}
 	replacement, err := store.Create(beads.Bead{
@@ -2997,7 +3552,7 @@ func TestDoSlingBatchGraphFormulaTreatsConvoyAsSingleInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := convoycore.TrackItem(deps.Store, convoy.ID, child.ID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(deps.Store)}, convoy.ID, child.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3211,7 +3766,7 @@ func TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := convoycore.TrackItem(deps.Store, unrelated.ID, source.ID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(deps.Store)}, unrelated.ID, source.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3376,7 +3931,7 @@ func TestSlingAttachGraphFormulaMultiItemConvoyRootDoesNotBlockMemberLaunch(t *t
 		t.Fatal(err)
 	}
 	for _, item := range []string{member.ID, sibling.ID} {
-		if err := convoycore.TrackItem(deps.Store, convoy.ID, item); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(deps.Store)}, convoy.ID, item); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3436,7 +3991,7 @@ func TestLiveConvoyTrackedWorkflowRootsSkipsTerminalRoots(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := convoycore.TrackItem(deps.Store, convoy.ID, source.ID); err != nil {
+			if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(deps.Store)}, convoy.ID, source.ID); err != nil {
 				t.Fatal(err)
 			}
 			trackedGraphV2Root(t, deps.Store, convoy.ID, "graph-work", tc.status)
@@ -4081,6 +4636,52 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 	}
 }
 
+// A child refused because its source bead already has a live workflow keeps
+// that typed conflict on its result, so a caller holding only the per-child
+// results (POST /sling's partial response) can still name the blocking
+// workflows and the cleanup. Any other failure carries no conflict.
+func TestDoSlingBatchPartialFailureKeepsChildConflict(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var children []beads.Bead
+	for _, title := range []string{"routed", "conflicted", "plain"} {
+		child, err := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		children = append(children, child)
+	}
+	routed, conflicted, plain := children[0], children[1], children[2]
+	conflict := &sourceworkflow.ConflictError{SourceBeadID: conflicted.ID, WorkflowIDs: []string{"wf-1"}}
+	runner.on(conflicted.ID, fmt.Errorf("routing %s: %w", conflicted.ID, conflict))
+	runner.on(plain.ID, errors.New("runner failed"))
+
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+	if err == nil {
+		t.Fatal("expected an error for a partial failure")
+	}
+	byID := map[string]SlingChildResult{}
+	for _, c := range result.Children {
+		byID[c.BeadID] = c
+	}
+	if got := byID[conflicted.ID]; !got.Failed || got.Conflict != conflict {
+		t.Fatalf("conflicted child: failed=%v conflict=%#v, want failed with the runner's ConflictError", got.Failed, got.Conflict)
+	}
+	if got := byID[plain.ID]; !got.Failed || got.Conflict != nil {
+		t.Fatalf("plainly failed child: failed=%v conflict=%#v, want failed with no conflict", got.Failed, got.Conflict)
+	}
+	if got := byID[routed.ID]; !got.Routed || got.Conflict != nil {
+		t.Fatalf("routed child: routed=%v conflict=%#v, want routed with no conflict", got.Routed, got.Conflict)
+	}
+}
+
 func TestFindBlockingMolecule(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "BL-1", Type: "task", Status: "open"},
@@ -4335,6 +4936,181 @@ func TestDoSlingBatchSkipsClosedChildren(t *testing.T) {
 	}
 	if result.Skipped != 1 {
 		t.Errorf("Skipped = %d, want 1 (closed child)", result.Skipped)
+	}
+}
+
+// raceOnGetStore simulates the TOCTOU race from #5927 without real
+// concurrency: it embeds a real store, and the first time raceID is read via
+// Get it applies race to that bead first, then returns the changed bead. This
+// stands in for a concurrent actor changing the bead between the batch
+// dispatch loop's initial listing snapshot and this child's turn in the
+// loop -- the same "flip status on a later read" style used by
+// internal/dispatch/retry_test.go's stateful fake stores (e.g. failGetStore)
+// to simulate races without goroutines.
+type raceOnGetStore struct {
+	beads.Store
+	raceID string
+	race   func(store beads.Store, id string) error
+	raced  bool
+}
+
+func (s *raceOnGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.raceID && !s.raced {
+		s.raced = true
+		if err := s.race(s.Store, id); err != nil {
+			return beads.Bead{}, err
+		}
+	}
+	return s.Store.Get(id)
+}
+
+// TestDoSlingBatchRacesStatusChangeAgainstDispatch is the regression test for
+// #5927: the batch dispatch loop lists open children once, then does real
+// work (formula compilation, molecule checks, etc.) for each prior sibling
+// before a given child's turn. If that child leaves the open status during
+// the window, the fresh read in CheckBeadStateWithOptions sees it, and the
+// child must be skipped with that status rather than dispatched or reported
+// as a failure. The status skip also wins over idempotency for a child
+// already routed to the target.
+func TestDoSlingBatchRacesStatusChangeAgainstDispatch(t *testing.T) {
+	closeBead := func(store beads.Store, id string) error { return store.Close(id) }
+	setStatus := func(status, assignee string) func(beads.Store, string) error {
+		return func(store beads.Store, id string) error {
+			opts := beads.UpdateOpts{Status: &status}
+			if assignee != "" {
+				opts.Assignee = &assignee
+			}
+			return store.Update(id, opts)
+		}
+	}
+	tests := []struct {
+		name           string
+		routed         bool
+		defaultFormula string
+		race           func(beads.Store, string) error
+		wantStatus     string
+	}{
+		{name: "closed", race: closeBead, wantStatus: "closed"},
+		{name: "tombstoned", race: setStatus("tombstone", ""), wantStatus: "tombstone"},
+		{
+			name:           "claimed by another actor under a default formula",
+			defaultFormula: "code-review",
+			race:           setStatus("in_progress", "alice"),
+			wantStatus:     "in_progress",
+		},
+		{name: "closed after routing to the target", routed: true, race: closeBead, wantStatus: "closed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+			a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+			if tt.defaultFormula != "" {
+				a.DefaultSlingFormula = stringPtr(tt.defaultFormula)
+			}
+			deps := testDeps(cfg, runtime.NewFake(), runner.run)
+			base := deps.Store
+
+			convoy, err := base.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := base.Create(beads.Bead{Title: "first", Type: "task", ParentID: convoy.ID, Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			racedBead := beads.Bead{Title: "raced", Type: "task", ParentID: convoy.ID, Status: "open"}
+			if tt.routed {
+				racedBead.Metadata = map[string]string{"gc.routed_to": "mayor"}
+			}
+			raced, err := base.Create(racedBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			querier := &raceOnGetStore{Store: base, raceID: raced.ID, race: tt.race}
+
+			result, err := DoSlingBatch(SlingOpts{
+				Target: a, BeadOrFormula: convoy.ID,
+			}, deps, querier)
+			if err != nil {
+				t.Fatalf("DoSlingBatch: %v", err)
+			}
+
+			if result.Routed != 1 {
+				t.Errorf("Routed = %d, want 1 (only %s, the non-raced child)", result.Routed, first.ID)
+			}
+			if result.Failed != 0 {
+				t.Errorf("Failed = %d, want 0 -- a raced status change is a skip, not a failure", result.Failed)
+			}
+			if result.NotOpenCt != 1 || result.IdempotentCt != 0 || result.Skipped != 1 {
+				t.Errorf("NotOpenCt = %d, IdempotentCt = %d, Skipped = %d, want 1, 0, 1 (raced child skipped as no longer open)",
+					result.NotOpenCt, result.IdempotentCt, result.Skipped)
+			}
+
+			for _, cmd := range runner.calls {
+				if strings.Contains(cmd, raced.ID) {
+					t.Fatalf("dispatched raced child %s after it left the open status mid-loop: calls=%v", raced.ID, runner.calls)
+				}
+			}
+			got, err := base.Get(raced.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", raced.ID, err)
+			}
+			if mol := got.Metadata["molecule_id"]; mol != "" {
+				t.Errorf("raced child %s got molecule_id %q after it left the open status mid-loop", raced.ID, mol)
+			}
+
+			var sawRacedChild bool
+			for _, c := range result.Children {
+				if c.BeadID != raced.ID {
+					continue
+				}
+				sawRacedChild = true
+				if !c.Skipped || c.Routed || c.Failed || c.Status != tt.wantStatus {
+					t.Errorf("raced child result = %+v, want Skipped=true, Routed=false, Failed=false, Status=%q", c, tt.wantStatus)
+				}
+			}
+			if !sawRacedChild {
+				t.Fatalf("raced child %s missing from batch result children: %+v", raced.ID, result.Children)
+			}
+		})
+	}
+}
+
+// TestBatchSkipsSkip pins DoSlingBatch's per-child skip rule: a child whose
+// fresh status is no longer open is skipped with that status, ahead of the
+// idempotency test, and a child the check could not read (empty Status) is
+// skipped only when idempotent.
+func TestBatchSkipsSkip(t *testing.T) {
+	tests := []struct {
+		name       string
+		check      BeadCheckResult
+		wantSkip   bool
+		wantStatus string
+		want       batchSkips
+	}{
+		{name: "open", check: BeadCheckResult{Status: "open"}},
+		{name: "open and idempotent", check: BeadCheckResult{Status: "open", Idempotent: true}, wantSkip: true, want: batchSkips{idempotent: 1}},
+		{name: "in progress", check: BeadCheckResult{Status: "in_progress"}, wantSkip: true, wantStatus: "in_progress", want: batchSkips{notOpen: 1}},
+		{name: "closed and idempotent", check: BeadCheckResult{Status: "closed", Idempotent: true}, wantSkip: true, wantStatus: "closed", want: batchSkips{notOpen: 1}},
+		{name: "unread", check: BeadCheckResult{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var skips batchSkips
+			child := SlingChildResult{BeadID: "BL-1"}
+
+			if got := skips.skip(tt.check, &child); got != tt.wantSkip {
+				t.Fatalf("skip(%+v) = %v, want %v", tt.check, got, tt.wantSkip)
+			}
+			if child.Skipped != tt.wantSkip || child.Status != tt.wantStatus {
+				t.Errorf("child = %+v, want Skipped=%v, Status=%q", child, tt.wantSkip, tt.wantStatus)
+			}
+			if skips != tt.want {
+				t.Errorf("counts = %+v, want %+v", skips, tt.want)
+			}
+		})
 	}
 }
 

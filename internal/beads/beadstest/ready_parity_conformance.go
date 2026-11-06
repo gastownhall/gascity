@@ -294,7 +294,9 @@ func primeReadyParityCache(t *testing.T, backing beads.Store) *beads.CachingStor
 }
 
 // assertReadyParity compares the cache's served ready projection with the
-// backing store's own Ready for every query shape: same ids, same order.
+// backing store's own Ready for every query shape: same ids, same order. Each
+// shape is read through ReadyContext, which fails rather than read live, and
+// through ReadyPreferCache, the read GET /beads/ready serves.
 func assertReadyParity(t *testing.T, when string, cache *beads.CachingStore, backing beads.Store) {
 	t.Helper()
 	want, err := backing.Ready()
@@ -316,6 +318,11 @@ func assertReadyParity(t *testing.T, when string, cache *beads.CachingStore, bac
 			t.Fatalf("%s: cache ReadyContext(%+v) did not serve from the cache: %v", when, q, err)
 		}
 		compareReadyIDs(t, when, fmt.Sprintf("Ready(%+v)", q), got, want)
+		preferred, err := cache.ReadyPreferCache(q)
+		if err != nil {
+			t.Fatalf("%s: cache ReadyPreferCache(%+v): %v", when, q, err)
+		}
+		compareReadyIDs(t, when, fmt.Sprintf("ReadyPreferCache(%+v)", q), preferred, want)
 	}
 }
 

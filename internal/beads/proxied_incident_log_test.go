@@ -156,7 +156,7 @@ func TestProxiedHeadMovedIsLoudAtEverySite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Admit: %v", err)
 		}
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly(),
 			WithNativeReopen(func(context.Context) (NativeStorage, error) { return nil, moved() }))
 		native.idPrefix = "prx"

@@ -110,16 +110,23 @@ type agentScriptExecutor struct {
 	runCommandInStore func(dir string, env []string, name string, args ...string) error
 	// resolveBeadStore returns the dir + env a bd write against beadID must use
 	// (ok=true) when the current runner must claim/update across stores; ok=false
-	// runs the write in the default (inherited) environment.
-	resolveBeadStore func(beadID string) (dir string, env []string, ok bool)
+	// runs the write in the default (inherited) environment. An error means the
+	// store could not be decided: the write is refused and no bd process runs.
+	resolveBeadStore func(beadID string) (dir string, env []string, ok bool, err error)
 }
 
 // runBDForBead runs a bd subprocess against beadID, redirecting it to the bead's
 // owning store when the runner is cross-store-eligible (vp-kvp stage iii write
-// half). Falls back to the default environment otherwise.
+// half). Falls back to the default environment otherwise. An error from
+// resolveBeadStore is returned without running bd and without a fallback: a
+// write whose store cannot be decided must not land in the default store.
 func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
-	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
-		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
+	if e.resolveBeadStore != nil {
+		dir, env, ok, err := e.resolveBeadStore(strings.TrimSpace(beadID))
+		if err != nil {
+			return err
+		}
+		if ok && e.runCommandInStore != nil {
 			return e.runCommandInStore(dir, env, "bd", args...)
 		}
 	}
@@ -803,6 +810,11 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 
 func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
+		return false
+	}
+	// The store could not be read, which is not the same as no work, even
+	// when bd's own message is warning-shaped.
+	if strings.Contains(stderr, hookStoreUnavailableToken) {
 		return false
 	}
 	for _, line := range strings.Split(stderr, "\n") {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -306,8 +308,8 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 	if code := doSessionWake(sessionBead.ID, &bytes.Buffer{}, &stderr, false, deps); code != 0 {
 		t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if got := stderr.String(); !strings.Contains(got, "warning: poke failed: dial failed") {
-		t.Fatalf("stderr = %q, want poke failure warning", got)
+	if got := stderr.String(); !strings.Contains(got, "warning: poke failed: dial failed") || strings.Contains(got, "rolled back") {
+		t.Fatalf("stderr = %q, want the poke failure warning with no rollback limit for a row with no pending create", got)
 	}
 	updated, err := store.Get(sessionBead.ID)
 	if err != nil {
@@ -477,9 +479,12 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 			}
 			deps := sessionWakeDeps{store: store, cfg: cfg, cityPath: "/city", now: time.Now}
 
+			// The wake is recorded (and a stale create healed), but no agent
+			// runs the template: the shared will-not-start predicate says so
+			// and the CLI exits 1, as the API answers 409.
 			var stdout, stderr bytes.Buffer
-			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 {
-				t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 || !strings.Contains(stderr.String(), "no configured agent runs its template") {
+				t.Fatalf("doSessionWake() = %d, want 1 naming the missing template; stderr=%s", code, stderr.String())
 			}
 
 			updated, err := store.Get(b.ID)
@@ -584,8 +589,8 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				cityPath = t.TempDir()
 				st := suspensionstate.State{}
 				suspensionstate.SetRig(&st, "frontend", tt.runtimeOverride)
-				if err := saveSuspensionState(fsys.OSFS{}, cityPath, st); err != nil {
-					t.Fatalf("saveSuspensionState: %v", err)
+				if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+					t.Fatalf("suspensionstate.Save: %v", err)
 				}
 			}
 			deps := sessionWakeDeps{
@@ -648,7 +653,11 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
 	}
-	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor")
+	// Session resolution and session-row writes go through the session-class
+	// store, as the CLI's own callers do (cliSessionStore): the fixture now
+	// matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
+	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}
@@ -700,7 +709,7 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{"mayor"}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionWake([]string{"mayor"}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -779,7 +788,11 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
 	}
-	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor")
+	// Session resolution and session-row writes go through the session-class
+	// store, as the CLI's own callers do (cliSessionStore): the fixture now
+	// matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
+	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}
@@ -793,7 +806,7 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code == 0 {
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code == 0 {
 		t.Fatalf("cmdSessionWake() = %d, want rejection; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	// Pin the CLI wake-conflict artifact: the fused WakeSession returns a
@@ -803,7 +816,14 @@ func TestCmdSessionWake_RejectsArchivedHistoricalSessionID(t *testing.T) {
 	}
 }
 
-func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *testing.T) {
+// TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID: a
+// continuity-eligible archived row passes the wake's conflict check, but
+// archived is a state the controller skips, so the wake is refused before it
+// writes anything, naming the close that releases the row: the archive stamp,
+// the continuity flag and the wake blockers stay as they were, and no wake is
+// recorded. Kills a "wake requested" success for a row no reconciler ever
+// starts, and a refusal that clears the row's archive stamp or blockers first.
+func TestCmdSessionWake_RefusesContinuityEligibleArchivedSessionID(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -827,7 +847,11 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
 	}
-	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor")
+	// Session resolution and session-row writes go through the session-class
+	// store, as the CLI's own callers do (cliSessionStore): the fixture now
+	// matches the production path.
+	store = cliSessionStore(store, cfg, cityDir)
+	sessionID, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "mayor", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
 	}
@@ -835,33 +859,333 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 		"state":               "archived",
 		"continuity_eligible": "true",
 		"archived_at":         time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		"wake_attempts":       "3",
+		"churn_count":         "2",
 	}); err != nil {
 		t.Fatalf("SetMetadataBatch(%s): %v", sessionID, err)
 	}
-
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdSessionWake() = %d, want success; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "wake requested") {
-		t.Fatalf("stdout = %q, want wake requested message", stdout.String())
-	}
-
-	freshStore, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
-	}
-	updated, err := freshStore.Get(sessionID)
+	archived, err := store.Get(sessionID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", sessionID, err)
 	}
-	if got := updated.Metadata["state"]; got != "archived" {
-		t.Fatalf("state = %q, want archived", got)
+	before := maps.Clone(archived.Metadata)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "" {
-		t.Fatalf("pending_create_claim = %q, want empty", got)
+	for _, want := range []string{
+		"gc session wake: session " + sessionID + " cannot be woken: ",
+		`"archived"`,
+		"gc session close " + sessionID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
 	}
-	if got := updated.Metadata["wake_request"]; got != "explicit" {
-		t.Fatalf("wake_request = %q, want explicit", got)
+
+	updated, err := openCitySessionStoreForTest(t, cityDir).Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", sessionID, err)
+	}
+	if !maps.Equal(updated.Metadata, before) {
+		t.Fatalf("metadata = %v, want it unchanged: %v", updated.Metadata, before)
+	}
+}
+
+// TestDoSessionWake_RefusesUnknownStateRow: a wake of a row in a state the
+// controller skips exits 1 naming the raw state and the close that releases
+// it, before anything is written: the row is left exactly as it was, no op
+// is recorded, no queued nudge is withdrawn and the controller is not poked.
+// A wake of a row it manages, under the same op gate, records its op. Kills a
+// wake that reports success for a row the reconciler never starts, and one
+// that records the wake (or clears its blockers) before refusing it.
+func TestDoSessionWake_RefusesUnknownStateRow(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	h.opStore = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "future-state", "wake_attempts": "3", "churn_count": "2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := maps.Clone(b.Metadata)
+	withdrawn, pokes := 0, 0
+	deps := sessionWakeDeps{
+		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { withdrawn++; return nil },
+		cityUsesManagedReconciler: func(string) bool { return true },
+		pokeController:            func(string, reconcilekey.Key) error { pokes++; return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
+		t.Fatalf("doSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"gc session wake: session " + b.ID + " cannot be woken: ",
+		`"future-state"`,
+		"gc session close " + b.ID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(got.Metadata, before) {
+		t.Fatalf("metadata = %v, want it unchanged: %v", got.Metadata, before)
+	}
+	if ops := cliOpRows(t, h.opStore); len(ops) != 0 || withdrawn != 0 || pokes != 0 {
+		t.Fatalf("op rows = %+v, withdrawals = %d, pokes = %d; want none", ops, withdrawn, pokes)
+	}
+
+	managed, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-2", "state": "asleep",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doSessionWake(managed.ID, &bytes.Buffer{}, &bytes.Buffer{}, false, deps)
+	if ops := cliOpRows(t, h.opStore); len(ops) != 1 {
+		t.Fatalf("op rows after a managed row's wake = %+v, want its op", ops)
+	}
+}
+
+// TestDoSessionWake_JudgesThePostWakeRow: an explicit wake of a drained pool
+// seat moves it to asleep, so the shared will-not-start predicate, reading
+// the row after the wake, does not report it as a drained seat. Kills a
+// predicate fed the pre-wake row.
+func TestDoSessionWake_JudgesThePostWakeRow(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "drained", "pool_managed": "true", "session_origin": "ephemeral",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := sessionWakeDeps{
+		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+		cityUsesManagedReconciler: func(string) bool { return false },
+		pokeController:            func(string, reconcilekey.Key) error { return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 || strings.Contains(stderr.String(), "drained pool seat") {
+		t.Fatalf("doSessionWake() = %d, stderr=%s; want the woken (asleep) seat not refused as drained", code, stderr.String())
+	}
+}
+
+// On a city whose sessions live on their own binding, the CLI wake's
+// will-not-start predicate reads assigned work from the work store: a claim
+// there overrides the idle latch, as in the API (B4).
+func TestDoSessionWakeReadsTheWorkStoreOnASplitCity(t *testing.T) {
+	work, binding := beads.NewMemStore(), beads.NewMemStore()
+	cityPath := t.TempDir()
+	seedCLIStorageRoutes(t, cityPath, splitRoutes(binding))
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", SleepAfterIdle: "1m"}}}
+	sp := runtime.NewFake()
+	info := session.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}
+	seat, err := binding.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker", "state": "asleep", "sleep_reason": "idle",
+		"sleep_policy_fingerprint": resolveSessionSleepPolicyInfo(info, cfg, sp).Fingerprint,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := work.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: seat.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := doSessionWake(seat.ID, &bytes.Buffer{}, &stderr, false, sessionWakeDeps{
+		store: work, cfg: cfg, cityPath: cityPath, sp: sp, now: time.Now,
+	}); code != 0 || strings.Contains(stderr.String(), "will not start") {
+		t.Fatalf("doSessionWake = %d, stderr %q; want the work store's claim to override the latch", code, stderr.String())
+	}
+}
+
+// TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy: the CLI wake refuses a
+// session whose respawn circuit is open only when the city's controller runs
+// legacy, the one reconciler that reads the circuit; under v2 the open circuit
+// is stale state. The mode is the running controller's latch. Kills the
+// circuit refusal applied under v2.
+func TestDoSessionWake_OpenCircuitRefusesOnlyUnderLegacy(t *testing.T) {
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	for _, mode := range []reconcilerMode{reconcilerLegacy, reconcilerV2} {
+		t.Run(mode.String(), func(t *testing.T) {
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) { return mode, true }
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+				"template": "worker", "session_name": "worker", "state": "asleep",
+				session.SessionCircuitStateMetadataKey: session.SessionCircuitStateOpen,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deps := sessionWakeDeps{
+				store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+				withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+				cityUsesManagedReconciler: func(string) bool { return false },
+				pokeController:            func(string, reconcilekey.Key) error { return nil },
+			}
+			var stderr bytes.Buffer
+			code := doSessionWake(b.ID, &bytes.Buffer{}, &stderr, false, deps)
+			refused := code != 0 && strings.Contains(stderr.String(), "circuit breaker is open")
+			if refused != (mode == reconcilerLegacy) {
+				t.Fatalf("doSessionWake = %d, stderr %q; want refused=%v under %s", code, stderr.String(), mode == reconcilerLegacy, mode)
+			}
+		})
+	}
+}
+
+// TestCmdSessionWakeRegisteredCitySupervisorDownDefersNamedStart wakes a
+// configured named session with no bead yet in a registered city whose
+// supervisor is down, through cmdSessionWake's production wiring: the
+// materialized row is left for the reconciler, and one warning says so.
+func TestCmdSessionWakeRegisteredCitySupervisorDownDefersNamedStart(t *testing.T) {
+	cityDir := newSupervisorDownSessionCity(t)
+	registerCityWithSupervisorForTest(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionWake([]string{"mayor"}, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("cmdSessionWake(registered, supervisor down) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "wake requested") {
+		t.Fatalf("stdout = %q, want it to report the wake requested", stdout.String())
+	}
+	b := onlySessionBead(t, cityDir)
+	assertDeferredSessionBead(t, b)
+	errText := stderr.String()
+	if n := strings.Count(errText, "gc session wake: warning: poke failed:"); n != 1 {
+		t.Fatalf("poke-failed warnings = %d, want 1; stderr=%s", n, errText)
+	}
+	if n := strings.Count(errText, "poke failed"); n != 1 {
+		t.Fatalf("poke-failed lines of any command = %d, want 1; stderr=%s", n, errText)
+	}
+	if want := "rolled back if none has started it by " + neverStartedDeadlineForTest(t, b); !strings.Contains(errText, want) {
+		t.Fatalf("stderr = %q, want it to state the limit for the row it created: %q", errText, want)
+	}
+}
+
+// TestDoSessionWake_RefusedWakeWithFailedPokePromisesNoStart: a wake refused
+// as one that cannot complete, in a city whose controller owns the start but
+// does not answer the poke, reports only the failed poke. It does not say the
+// session will start, nor state a rollback limit: nothing starts it.
+func TestDoSessionWake_RefusedWakeWithFailedPokePromisesNoStart(t *testing.T) {
+	staleStart := time.Now().Add(-15 * time.Minute).UTC().Format(time.RFC3339)
+	for _, tc := range []struct {
+		name       string
+		meta       map[string]string
+		cfg        *config.City
+		wantRefuse string
+	}{
+		{
+			name: "stale pending create",
+			meta: map[string]string{
+				"template":                  "worker",
+				"state":                     string(session.StateStartPending),
+				"pending_create_claim":      "true",
+				"pending_create_started_at": staleStart,
+			},
+			wantRefuse: "cannot complete now",
+		},
+		{
+			name: "suspended rig",
+			meta: map[string]string{
+				"session_name": "s-gc-frontend-worker",
+				"template":     "frontend/worker",
+				"state":        string(session.StateAsleep),
+			},
+			cfg: &config.City{
+				Agents: []config.Agent{{Name: "worker", Dir: "frontend"}},
+				Rigs:   []config.Rig{{Name: "frontend", SuspendedOnStart: true}},
+			},
+			wantRefuse: "it will not start",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{
+				Type:     session.BeadType,
+				Labels:   []string{session.LabelSession},
+				Metadata: tc.meta,
+			})
+			if err != nil {
+				t.Fatalf("store.Create(): %v", err)
+			}
+			deps := sessionWakeDeps{
+				store:                     store,
+				cfg:                       tc.cfg,
+				cityPath:                  "/city",
+				cityResolved:              true,
+				now:                       time.Now,
+				withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+				cityUsesManagedReconciler: func(string) bool { return true },
+				pokeController: func(string, reconcilekey.Key) error {
+					return errors.New("dial failed")
+				},
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 {
+				t.Fatalf("doSessionWake() = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			errText := stderr.String()
+			for _, want := range []string{tc.wantRefuse, "gc session wake: warning: poke failed: dial failed\n"} {
+				if !strings.Contains(errText, want) {
+					t.Fatalf("stderr = %q, want it to contain %q", errText, want)
+				}
+			}
+			for _, unwanted := range []string{"will start", "rolled back"} {
+				if strings.Contains(errText, unwanted) {
+					t.Fatalf("stderr = %q, want no %q for a refused wake", errText, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// TestDoSessionWake_AcceptedWakeStatesRollbackDeadline: an accepted wake of
+// a pending create whose poke failed states the reconciler's rollback
+// deadline, counted from the row's pending-create anchor rather than from the
+// wake.
+func TestDoSessionWake_AcceptedWakeStatesRollbackDeadline(t *testing.T) {
+	started := time.Now().Add(-5 * time.Second).UTC().Truncate(time.Second)
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":                  "worker",
+			"state":                     string(session.StateStartPending),
+			"pending_create_claim":      "true",
+			"pending_create_started_at": started.Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+	deps := sessionWakeDeps{
+		store:                     store,
+		cityPath:                  "/city",
+		cityResolved:              true,
+		now:                       time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+		cityUsesManagedReconciler: func(string) bool { return true },
+		pokeController: func(string, reconcilekey.Key) error {
+			return errors.New("dial failed")
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 {
+		t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	want := "session " + b.ID + " will start when the city's controller next reconciles, and is rolled back if none has started it by " + started.Add(pendingCreateNeverStartedTimeout).Format(time.RFC3339)
+	if got := stderr.String(); !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want it to contain %q", got, want)
 	}
 }

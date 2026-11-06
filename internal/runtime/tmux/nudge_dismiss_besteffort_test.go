@@ -22,7 +22,7 @@ func TestDismissMidSessionDialogBeforeNudge_PeekErrorIsSwallowed(t *testing.T) {
 	fe := &fakeExecutor{errs: []error{errors.New("capture-pane failed")}}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge("agent-pane"); dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); dismissed {
 		t.Error("dismissed = true on peek error, want false")
 	}
 	// The peek failed, so no dismissal keystroke may be sent: exactly the one
@@ -47,7 +47,7 @@ func TestDismissMidSessionDialogBeforeNudge_SendErrorIsSwallowed(t *testing.T) {
 	}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge("agent-pane"); dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); dismissed {
 		t.Error("dismissed = true on send error, want false")
 	}
 	// The chooser matched (capture-pane), then the first dismissal keystroke
@@ -81,16 +81,16 @@ func TestDismissMidSessionDialogBeforeNudge_UsesVisibleOnlyCapture(t *testing.T)
 	fe := &fakeExecutor{outs: []string{resumeDialogPane}}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge("agent-pane"); !dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); !dismissed {
 		t.Fatal("dismissed = false, want true for a live resume dialog")
 	}
 	if len(fe.calls) == 0 {
 		t.Fatal("no executor calls recorded")
 	}
-	// Exactly `capture-pane -p -t =agent-pane:`, with no scrollback selector.
+	// Exactly `capture-pane -p -t <agent pane>`, with no scrollback selector.
 	// run() prepends "-u".
 	gotCapture := fe.calls[0]
-	wantCapture := []string{"-u", "capture-pane", "-p", "-t", "=agent-pane:"}
+	wantCapture := []string{"-u", "capture-pane", "-p", "-t", fakeAgentPane("agent-pane")}
 	if !slices.Equal(gotCapture, wantCapture) {
 		t.Fatalf("capture call = %v, want %v (visible-only, no -S)", gotCapture, wantCapture)
 	}
@@ -103,7 +103,7 @@ func TestDismissMidSessionDialogBeforeNudge_NoDialogSendsNoKeys(t *testing.T) {
 	fe := &fakeExecutor{outs: []string{"❯ "}}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge("agent-pane"); dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); dismissed {
 		t.Error("dismissed = true on a plain idle prompt, want false")
 	}
 	if len(fe.calls) != 1 {
@@ -132,6 +132,9 @@ func (d *dialogThenSilentExecutor) execute(args []string) (string, error) {
 	cp := make([]string, len(args))
 	copy(cp, args)
 	d.calls = append(d.calls, cp)
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	if slices.Contains(args, "capture-pane") && !slices.Contains(args, "-S") {
 		return d.pane, nil
 	}

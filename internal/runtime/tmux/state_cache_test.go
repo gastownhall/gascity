@@ -6,12 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 
 	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
@@ -69,6 +75,7 @@ type controlledRefreshFetcher struct {
 	mu        sync.Mutex
 	calls     int
 	state     runtimeStateSnapshot
+	err       error
 	blockCall int
 	entered   chan struct{}
 	release   chan struct{}
@@ -79,6 +86,7 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 	f.calls++
 	call := f.calls
 	state := f.state
+	err := f.err
 	f.mu.Unlock()
 
 	if call == f.blockCall {
@@ -89,13 +97,20 @@ func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeState
 			return runtimeStateSnapshot{}, ctx.Err()
 		}
 	}
-	return state, nil
+	return state, err
 }
 
 func (f *controlledRefreshFetcher) getCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *controlledRefreshFetcher) setResult(state runtimeStateSnapshot, err error) {
+	f.mu.Lock()
+	f.state = state
+	f.err = err
+	f.mu.Unlock()
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -477,6 +492,50 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	}
 }
 
+func TestStateCache_CoalescesRefreshesWithinGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fetcher := &controlledRefreshFetcher{
+			state:     runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}},
+			blockCall: 2,
+			entered:   make(chan struct{}),
+			release:   make(chan struct{}),
+		}
+		cache := NewStateCache(fetcher, time.Hour)
+		if cache.IsRunning("agent-1") {
+			t.Fatal("primed liveness = true, want false")
+		}
+
+		fetcher.setResult(runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}},
+		}, nil)
+		cache.Invalidate()
+
+		results := make(chan bool, 2)
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		select {
+		case <-fetcher.entered:
+		default:
+			t.Fatal("first invalidated refresh did not enter")
+		}
+
+		go func() { results <- cache.IsRunning("agent-1") }()
+		synctest.Wait()
+		callsBeforeRelease := fetcher.getCalls()
+		close(fetcher.release)
+		synctest.Wait()
+
+		if callsBeforeRelease != 2 {
+			t.Fatalf("fetch calls before release = %d, want prime plus one coalesced generation refresh", callsBeforeRelease)
+		}
+		for range 2 {
+			if got := <-results; !got {
+				t.Fatal("coalesced IsRunning call = false, want live result")
+			}
+		}
+	})
+}
+
 // TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot pins the
 // copy-on-write contract: a snapshot handed out by currentState is read
 // without the cache lock, so EvictSession must publish a new Sessions map
@@ -829,7 +888,7 @@ func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.
 	if process.Args != "2.1.30 --print" {
 		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
 	}
-	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+	if !snapshot.processMatchesNames("102", proctable.ProcessNameSet([]string{"claude"})) {
 		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
 	}
 }
@@ -857,7 +916,7 @@ func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
 	if process.Args != "" {
 		t.Fatalf("Args = %q, want empty args", process.Args)
 	}
-	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+	if !snapshot.hasDescendantWithNames("101", proctable.ProcessNameSet([]string{"claude"}), 0) {
 		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
 	}
 }
@@ -873,6 +932,28 @@ func TestProcessSnapshotPSArgsRejectsLinuxSyntaxOnDarwin(t *testing.T) {
 	for _, a := range args {
 		if strings.Contains(a, ":") {
 			t.Fatalf("processSnapshotPSArgs returned %v on darwin; contains Linux-only `:N=` width specifier", args)
+		}
+	}
+}
+
+// ps cuts each line to COLUMNS when stdout is no terminal, and the
+// controller's environment can carry COLUMNS=80 (a nudge poller's shell). The
+// snapshot asks for unlimited width and drops COLUMNS, so a long argv (a
+// tap's nonce follows its companion path) is never cut.
+func TestProcessSnapshotCommandIsWideWithoutColumns(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	for _, args := range [][]string{processSnapshotPSArgs(), darwinCommandSnapshotPSArgs()} {
+		cmd := processSnapshotCommand(context.Background(), args)
+		if want := append([]string{"ps", "-ww"}, args...); !slices.Equal(cmd.Args, want) {
+			t.Fatalf("ps argv = %q, want %q", cmd.Args, want)
+		}
+		if cmd.Env == nil {
+			t.Fatal("ps inherits the environment whole, COLUMNS included")
+		}
+		for _, kv := range cmd.Env {
+			if strings.HasPrefix(kv, "COLUMNS=") {
+				t.Fatalf("ps runs with %s", kv)
+			}
 		}
 	}
 }
@@ -995,7 +1076,7 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 		{PID: "101", PPID: "100", Command: "claude", Args: "claude"},
 	})
 	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
-	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
+	if !pane.processAlive(proctable.ProcessNameSet([]string{"claude"}), snapshot) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
 }
@@ -1107,5 +1188,62 @@ func TestStateCacheSessionReadsMissForUnknownSession(t *testing.T) {
 	attached, ok := cache.SessionAttached("known")
 	if !ok || !attached {
 		t.Errorf("SessionAttached(known) = %t, %t, want true, true", attached, ok)
+	}
+}
+
+// gcDispatcherSnapshot is a running session whose pane runs one process,
+// command with args, as its pane command and sole process.
+func gcDispatcherSnapshot(session, command, args string) runtimeStateSnapshot {
+	return runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			session: {
+				Running: true,
+				Panes:   []paneRuntimeState{{Command: command, PID: "201"}},
+			},
+		},
+		Processes: newProcessSnapshot([]processRuntimeState{{
+			PID:     "201",
+			PPID:    "1",
+			Command: command,
+			Args:    args,
+		}}),
+		ProcessesAvailable: true,
+	}
+}
+
+// #7551: a control-dispatcher started via `exec "$GC_BIN" convoy control ...`
+// runs gc under its executable's on-disk name (a Nix wrapProgram target is
+// `.gc-wrapped`) and must still satisfy the core pack's process_names = ["gc"].
+// The running test binary plays the gc binary, as GC_BIN = os.Executable()
+// does in production; the literal Nix name is pinned in proctable.
+func TestStateCache_ProcessAliveMatchesWrappedGCExecutable(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	self := filepath.Base(exe)
+	if self == "gc" {
+		t.Fatalf("test executable is named %q; the wrapped-name case is vacuous", self)
+	}
+	const session = "core__control-dispatcher-gc-wisp-9ragnq7"
+	args := exe + " convoy control --serve --follow ntrecv/core.control-dispatcher"
+	cache := NewStateCache(&mockFetcher{state: gcDispatcherSnapshot(session, self, args)}, 2*time.Second)
+
+	if !cache.ProcessAlive(session, []string{"gc"}) {
+		t.Fatalf("ProcessAlive(dispatcher running %s, [gc]) = false, want true: a live gc dispatcher under a renamed/wrapped executable is reported runtime-missing", self)
+	}
+	if !processMatchesNamesForTest(self, args, []string{"gc"}) {
+		t.Fatalf("uncached matcher missed the gc executable %s", self)
+	}
+}
+
+// The gc executable alias must not make an unrelated pane process read as a
+// live gc session.
+func TestStateCache_ProcessAliveRejectsOtherProcessForGCNames(t *testing.T) {
+	const session = "core__control-dispatcher-gc-wisp-9ragnq7"
+	cache := NewStateCache(&mockFetcher{state: gcDispatcherSnapshot(session, "sleep", "sleep 60")}, 2*time.Second)
+
+	if cache.ProcessAlive(session, []string{"gc"}) {
+		t.Fatal("ProcessAlive(pane running sleep, [gc]) = true, want false")
 	}
 }

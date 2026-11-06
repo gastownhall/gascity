@@ -28,6 +28,9 @@ func TestIsReparentedOrphan(t *testing.T) {
 		// A subreaper pid of 0/1 means "none detected" and must not turn every
 		// live-parent process into an orphan.
 		{"undetected subreaper does not match a live parent", 4242, 1, false},
+		// ppid 0 is "could not read the parent", never proof of reparenting.
+		{"unreported parent", 0, 0, false},
+		{"unreported parent with a subreaper present", 0, subreaper, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := IsReparentedOrphan(tc.ppid, tc.subreaperPID); got != tc.want {

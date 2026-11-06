@@ -17,7 +17,9 @@ import (
 // answered, so tests observe readiness and need a bound only a genuinely hung
 // helper can outlive. Set here, before any test runs, so every test in the
 // package, and the helper processes the test binary re-executes itself as,
-// share it without a race.
+// share it without a race. The bound gates a kill, so it is a guard: this
+// package-global relaxation is allowlisted, with this reason, in
+// tools/nogo/analyzers/testrelax.
 func init() {
 	proxyProcessReadyTimeout = time.Minute
 }

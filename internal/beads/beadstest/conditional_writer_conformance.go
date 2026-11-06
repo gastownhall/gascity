@@ -27,6 +27,12 @@ type ConditionalWriterOptions struct {
 	// one row can apply them and leaves this false.
 	RestrictedUpdateFields bool
 
+	// LabelsGuarded narrows RestrictedUpdateFields to the parent for a store
+	// whose UpdateIfMatch applies labels under the revision check (MemStore,
+	// NativeDoltStore, and a CachingStore over either).
+	// RunConditionalLabelsConformance asserts the label behavior instead.
+	LabelsGuarded bool
+
 	// OpenDisabled returns a fresh store of the same kind whose conditional
 	// writes are turned off at the instance level (e.g. MemStore/FileStore with
 	// DisableConditionalWrites=true). When non-nil, the disable_toggle subtest
@@ -74,7 +80,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
 	conformanceWholeBeadWriteChangesRevision(t, name, open)
 	if opts.RestrictedUpdateFields {
-		conformanceRestrictedUpdateFieldsRejected(t, name, open)
+		conformanceRestrictedUpdateFieldsRejected(t, name, open, opts.LabelsGuarded)
 	}
 	conformanceReadsNeverBump(t, name, open)
 	conformanceRevisionTokensNeverReused(t, name, open)
@@ -83,6 +89,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 		conformanceRowBackedMutationFlavors(t, name, open)
 	}
 	conformanceStaleRevisionIsPreconditionFailed(t, name, open, opts)
+	conformanceZeroRevisionRefusedAfterMutation(t, name, open)
 	conformanceConditionalSuccessPaths(t, name, open)
 	conformanceCASEmptyExpectedClaimsAbsentOrEmpty(t, name, open)
 	conformanceCASValueMismatchIsFalseNil(t, name, open)
@@ -145,8 +152,9 @@ func conformanceWholeBeadWriteChangesRevision(t *testing.T, name string, open fu
 
 // conformanceRestrictedUpdateFieldsRejected asserts a store that cannot fold
 // parent/labels into a revision-guarded update rejects them with the typed
-// unsupported error and mutates nothing.
-func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+// unsupported error and mutates nothing. With labelsGuarded only the parent is
+// checked.
+func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store, labelsGuarded bool) {
 	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
 		s := open(t)
 		w := conformanceWriterFor(t, s)
@@ -162,6 +170,9 @@ func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open f
 			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
 			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
 			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
+		}
+		if labelsGuarded {
+			tests = tests[:1]
 		}
 
 		for _, tt := range tests {
@@ -491,6 +502,51 @@ func conformanceStaleRevisionIsPreconditionFailed(t *testing.T, name string, ope
 		// The bead must still exist (every stale write was rejected).
 		if _, err := s.Get(id); err != nil {
 			t.Fatalf("bead vanished after rejected conditional writes: %v", err)
+		}
+	})
+}
+
+// conformanceZeroRevisionRefusedAfterMutation asserts zero is a real token,
+// compared exactly: once a whole-row mutation has moved the bead on, each
+// *IfMatch verb fenced at zero is refused with a typed PreconditionFailedError
+// without mutating, like any stale token. A store that read zero as "no
+// token" and wrote unfenced fails here.
+func conformanceZeroRevisionRefusedAfterMutation(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/zero_revision_refused_after_mutation", func(t *testing.T) {
+		s := open(t)
+		w := conformanceWriterFor(t, s)
+		b, err := s.Create(beads.Bead{Title: "zero"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := b.ID
+		if err := s.SetMetadata(id, "k", "moved"); err != nil {
+			t.Fatal(err)
+		}
+		if rev := conformanceRevOf(t, s, id); rev == 0 {
+			t.Fatal("mutated bead reads revision 0, want a nonzero token")
+		}
+
+		assertRefused := func(verb string, err error) {
+			t.Helper()
+			var pfe *beads.PreconditionFailedError
+			if !errors.As(err, &pfe) {
+				t.Fatalf("%s at revision 0 on a mutated bead: got %v, want *PreconditionFailedError", verb, err)
+			}
+			if pfe.Expected != 0 {
+				t.Fatalf("%s: PreconditionFailedError.Expected = %d, want 0 (the caller's revision)", verb, pfe.Expected)
+			}
+		}
+
+		assertRefused("UpdateIfMatch", w.UpdateIfMatch(id, 0, beads.UpdateOpts{Title: conformanceStrPtr("x")}))
+		assertRefused("CloseIfMatch", w.CloseIfMatch(id, 0))
+		assertRefused("DeleteIfMatch", w.DeleteIfMatch(id, 0))
+		got, err := s.Get(id)
+		if err != nil {
+			t.Fatalf("bead vanished after refused zero-revision writes: %v", err)
+		}
+		if got.Title != "zero" || got.Status == "closed" {
+			t.Fatalf("bead after refused zero-revision writes: title %q status %q, want title %q and not closed", got.Title, got.Status, "zero")
 		}
 	})
 }

@@ -3,14 +3,17 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // allocNow is the decide tests' one clock.
@@ -32,7 +35,10 @@ type allocFixture struct {
 	// further fresh facts, as a session key's probe write-back would.
 	activity map[string]time.Time
 	facts    map[string]map[FactKind]ObsFact
-	in       allocInputs
+	// own are the listed names whose identity observation resolves to the
+	// one census row of that name (Current), or reads Unknown.
+	own map[string]bool
+	in  allocInputs
 }
 
 func newAllocFixture(t *testing.T, cfg *config.City) *allocFixture {
@@ -41,15 +47,13 @@ func newAllocFixture(t *testing.T, cfg *config.City) *allocFixture {
 		t:     t,
 		attrs: make(map[string]InventoryAttrs),
 		in: allocInputs{
-			Now:              allocNow,
-			Epoch:            "e1",
-			SelGen:           1,
-			Cfg:              cfg,
-			ConfigRev:        "rev-1",
-			CityPath:         "/city",
-			CityName:         "city",
-			ObsMaxAge:        observeMaxAge,
-			ScaleCheckMaxAge: time.Minute,
+			Now:       allocNow,
+			Epoch:     "e1",
+			Cfg:       cfg,
+			ConfigRev: "rev-1",
+			CityPath:  "/city",
+			CityName:  "city",
+			ObsMaxAge: observeMaxAge,
 		},
 	}
 }
@@ -66,19 +70,46 @@ func (f *allocFixture) rigLeg(rows ...beads.Bead) *allocFixture {
 	return f
 }
 
-// alive lists runtime name as a running pane with attrs.
+// alive lists runtime name as a running pane with attrs. Unless attrs set
+// an identity, the runtime's is read: attrs' owner's (readIdentity), or the
+// one census row named name's.
 func (f *allocFixture) alive(name string, attrs InventoryAttrs) *allocFixture {
 	attrs.DeadKnown = true
+	if !attrs.Identity.Known {
+		if attrs.OwnerState == OwnerSession {
+			attrs.Identity = readIdentity(attrs.OwnerID)
+		} else {
+			f.ownIdentity(name)
+		}
+	}
 	f.attrs[name] = attrs
 	f.listed = append(f.listed, name)
 	return f
 }
 
-// corpse lists runtime name as an exited pane.
+// corpse lists runtime name as an exited pane of the one census row so
+// named.
 func (f *allocFixture) corpse(name string) *allocFixture {
 	f.attrs[name] = InventoryAttrs{DeadKnown: true, AllPanesDead: true, AttachedKnown: true}
 	f.listed = append(f.listed, name)
+	f.ownIdentity(name)
 	return f
+}
+
+// unread leaves listed name's identity unread.
+func (f *allocFixture) unread(name string) *allocFixture {
+	delete(f.own, name)
+	a := f.attrs[name]
+	a.Identity = runtimeIdentity{}
+	f.attrs[name] = a
+	return f
+}
+
+func (f *allocFixture) ownIdentity(name string) {
+	if f.own == nil {
+		f.own = make(map[string]bool)
+	}
+	f.own[name] = true
 }
 
 // fact sets a fresh fact on a listed runtime name.
@@ -95,8 +126,7 @@ func (f *allocFixture) fact(name string, kind FactKind, v ObsFact) *allocFixture
 
 func (f *allocFixture) census() *sessionCensus {
 	f.t.Helper()
-	feed := &fakeCensusFeed{}
-	return readCensus(f.t, newCensusReader(feed.feed()), f.in.Now, f.in.Cfg, f.legs)
+	return readCensus(f.t, f.in.Now, f.legs)
 }
 
 func (f *allocFixture) observation() *ObservationSnapshot {
@@ -104,18 +134,32 @@ func (f *allocFixture) observation() *ObservationSnapshot {
 	if f.noInventory {
 		return cache.Snapshot()
 	}
-	snap := cache.publish(f.in.Now, f.attrs, completeBackend("tmux", f.listed...))
-	if len(f.activity) == 0 && len(f.facts) == 0 {
+	attrs := maps.Clone(f.attrs)
+	if len(f.own) > 0 {
+		c := f.census()
+		for name := range f.own {
+			a := attrs[name]
+			a.Identity = readIdentity("")
+			if rows := c.RowsNamed(name); len(rows) == 1 {
+				a.Identity = readIdentity(rows[0].ID)
+			}
+			attrs[name] = a
+		}
+	}
+	// The lane's activity read (readActivities) publishes through the
+	// pass's attrs.
+	for name, at := range f.activity {
+		a := attrs[name]
+		a.ActivityKnown, a.LastActivity = true, at
+		attrs[name] = a
+	}
+	snap := cache.publish(f.in.Now, attrs, completeBackend("tmux", f.listed...))
+	if len(f.facts) == 0 {
 		return snap
 	}
-	// No lane publishes activity yet (F1); a session key's write-back
-	// would land like this.
 	clone := *snap
 	clone.ByName = make(map[string]RuntimeObservation, len(snap.ByName))
 	for name, obs := range snap.ByName {
-		if at, ok := f.activity[name]; ok {
-			obs.LastActivity, obs.LastActivityKnown = at, true
-		}
 		for kind, v := range f.facts[name] {
 			*obs.fact(kind) = RuntimeFact{Value: v, ObservedAt: f.in.Now, Source: SourceProbe}
 		}
@@ -171,9 +215,10 @@ func mustDecide(t *testing.T, in allocInputs) allocDecision {
 	return d
 }
 
-// sessionRow is an open session row.
+// sessionRow is an open session row. Its instance_token is rowToken(id)
+// unless meta sets one.
 func sessionRow(id string, meta ...string) beads.Bead {
-	m := make(map[string]string)
+	m := map[string]string{"instance_token": rowToken(id)}
 	for i := 0; i+1 < len(meta); i += 2 {
 		m[meta[i]] = meta[i+1]
 	}
@@ -234,7 +279,7 @@ func ago(d time.Duration) string { return allocNow.Add(-d).Format(time.RFC3339) 
 
 // Kills: an empty snapshot read as drain-all (#41), and Wake from a
 // suspended city (POOL-001, C2.1). Every row has an entry; live rows drain
-// as suspended; the canonical named row stays InDesired asleep; a loser
+// as suspended; the canonical named row stays InDesired asleep; a duplicate
 // stays None.
 func TestAllocator_CitySuspended_PublishesSuspendedNotEmptySelection(t *testing.T) {
 	cfg := &config.City{
@@ -266,8 +311,8 @@ func TestAllocator_CitySuspended_PublishesSuspendedNotEmptySelection(t *testing.
 	if e := entryOf(t, d, "gc-2"); e.Desired != desireSleep || !e.InDesired || e.DrainReason != drainSuspended {
 		t.Errorf("canonical named row: %s indesired=%v, want an InDesired sleep (SESS-054/064)", e.Desired, e.InDesired)
 	}
-	if e := entryOf(t, d, "gc-4"); e.Desired != desireNone || e.Reason != reasonIdentityLoser {
-		t.Errorf("identity loser: %s/%s, want none", e.Desired, e.Reason)
+	if e := entryOf(t, d, "gc-4"); e.Desired != desireNone || e.Reason != reasonIdentityDuplicate {
+		t.Errorf("identity duplicate: %s/%s, want none", e.Desired, e.Reason)
 	}
 	if e := entryOf(t, d, "gc-3"); e.Desired != desireNone || e.Reason != reasonUnknownState {
 		t.Errorf("unknown-state row: %s/%s, want none", e.Desired, e.Reason)
@@ -333,9 +378,10 @@ func TestAllocator_CitySuspended_KeepsWhatLegacySuspendSpares(t *testing.T) {
 	}
 }
 
-// Kills: the suspended city's keeps leaking into a normal pass: there an
-// undesired row with assigned work, or a pending create within its lease,
-// drains; the session key's drain gates hold it (CONTRACT §2.2).
+// Kills: the suspended city's assigned-work keep leaking into a normal
+// pass: there an undesired row with assigned work drains; the session key's
+// drain gates hold it (CONTRACT §2.2). An undesired pending create within its
+// lease keeps in a normal pass too (v5.9r, SESS-065), pool rows included.
 func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).sessions(
@@ -345,10 +391,11 @@ func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1"}}
 	f.in.Demand.AssignedStoreRefs = []string{""}
 	d := f.decideSelecting()
-	for _, id := range []string{"gc-1", "gc-2"} {
-		if e := entryOf(t, d, id); e.Desired != desireDrain {
-			t.Errorf("%s = %s/%s, want drain", id, e.Desired, e.Reason)
-		}
+	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
+		t.Errorf("gc-1 = %s/%s, want drain", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-2"); e.Desired != desireKeep || e.Reason != reasonPendingCreate {
+		t.Errorf("gc-2 = %s/%s, want keep/%s", e.Desired, e.Reason, reasonPendingCreate)
 	}
 	if e := entryOf(t, d, "gc-1"); e.AssignedWork == nil || e.AssignedWork.BeadID != "w-1" {
 		t.Errorf("undesired row's assigned work = %+v, want w-1 carried for the session key's gate", e.AssignedWork)
@@ -407,12 +454,13 @@ func TestAllocator_UnknownStateRowNoneButOccupiesSlot(t *testing.T) {
 	}
 }
 
-// Kills: rolling back a row legacy would not (F8, SESS-501, MAINT-034): a
-// pending create past its lease is a rollback candidate only when its own
+// Kills: rolling back a row legacy would not (F8, SESS-501, MAINT-034), and
+// a lease predicate as an input (v5 P4, SC A5; C5b): a pending create past
+// A10's never-started deadline is a rollback candidate only when its own
 // runtime is not running (absent, or the name another row holds) and its
-// endpoint does not hold it; one within its lease, alive, dead or of
-// unknown liveness stays managed. A creating row with no claim past the
-// stale window is one too, unless its start is in flight.
+// endpoint does not hold it; one before the deadline, one that recorded a
+// start (whatever its attempt's age), alive, dead or of unknown liveness
+// stays managed.
 func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 9)}, Workspace: config.Workspace{Provider: "claude"}}
 	expired := func(id string, slot int) beads.Bead {
@@ -423,8 +471,7 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 		expired("gc-alive", 2),
 		expired("gc-dead", 3),
 		poolRow("gc-lease", "worker", 4, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(time.Minute)),
-		poolRow("gc-stale", "worker", 5, "creating"),
-		poolRow("gc-starting", "worker", 6, "creating", "last_woke_at", ago(10*time.Second)),
+		poolRow("gc-woke", "worker", 5, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(30*time.Minute), "last_woke_at", ago(2*time.Minute)),
 		expired("gc-shared", 7),
 		poolRow("gc-owner", "worker", 8, "active", "session_name", "s-gc-shared"),
 	).alive("s-gc-alive", InventoryAttrs{}).corpse("s-gc-dead").
@@ -432,8 +479,8 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	f.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
 	d := f.decide()
 	for id, want := range map[string]bool{
-		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false,
-		"gc-stale": true, "gc-starting": false, "gc-shared": true,
+		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false, "gc-woke": false,
+		"gc-shared": true,
 	} {
 		e := entryOf(t, d, id)
 		if got := e.Desired == desireNone && e.Reason == reasonRollbackCandidate; got != want {
@@ -449,6 +496,30 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	held.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed, HoldsPendingCreate: true}}
 	if e := entryOf(t, held.decide(), "gc-1"); e.Reason == reasonRollbackCandidate {
 		t.Errorf("a pending create the breaker holds rolled back: %s/%s", e.Desired, e.Reason)
+	}
+}
+
+// Kills: rolling back a creating row that holds no pending-create claim
+// (v5 C3, B5, scenario R53; D2a's claimless-creating finding). Rollback is
+// for pending creates only: a claimless creating row past the stale window
+// with its runtime gone stays managed and is reused for demand, as legacy
+// reuses it, so no fresh slot is planned beside it; A6 heals it to asleep.
+// Its name held by another row's runtime makes it None(name-occupied).
+func TestAllocator_ClaimlessCreatingRowIsNeverRolledBack(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	d := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "creating")).demand("worker", "w-1").decide()
+	if e := entryOf(t, d, "gc-1"); e.Desired == desireNone || !e.InDesired {
+		t.Errorf("claimless creating row = %s/%s indesired=%v, want reused", e.Desired, e.Reason, e.InDesired)
+	}
+	if slots := planSlots(d, "worker"); len(slots) != 0 {
+		t.Errorf("planned fresh slots %v beside a reusable claimless creating row", slots)
+	}
+	occupied := newAllocFixture(t, cfg).sessions(
+		poolRow("gc-1", "worker", 1, "creating", "session_name", "s-gc-owner"),
+		poolRow("gc-owner", "worker", 2, "active"),
+	).alive("s-gc-owner", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-owner"}).decide()
+	if e := entryOf(t, occupied, "gc-1"); e.Desired != desireNone || e.Reason != reasonNameOccupied {
+		t.Errorf("claimless creating row on another row's runtime = %s/%s, want None(%s)", e.Desired, e.Reason, reasonNameOccupied)
 	}
 }
 
@@ -543,33 +614,83 @@ func TestAllocator_FortyThreeRowsShareANameStaleOnesRollBack(t *testing.T) {
 	}
 }
 
-// Kills: starting both duplicates, and retiring under a partial read
-// (C2.13). The loser is None with a verdict.
-func TestAllocator_IdentityVerdictsLosersNoneNoneUnderPartial(t *testing.T) {
-	rows := []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}
-	d := newAllocFixture(t, chatCity("always")).sessions(rows...).decide()
-	v := d.Snapshot.Identities["chat"]
-	if v.Canonical == nil || v.Canonical.ID != "gc-2" || len(v.Losers) != 1 || v.Losers[0].ID != "gc-1" || v.VerdictID == "" {
-		t.Fatalf("verdict = %+v, want gc-2 over gc-1", v)
-	}
-	if e := entryOf(t, d, "gc-1"); e.Desired != desireNone || e.Reason != reasonIdentityLoser || !e.Identity.Loser {
-		t.Fatalf("loser = %s/%s %+v", e.Desired, e.Reason, e.Identity)
-	}
-	if e := entryOf(t, d, "gc-2"); e.Desired == desireNone || !e.Identity.Canonical {
-		t.Fatalf("winner = %s %+v, want the canonical row managed", e.Desired, e.Identity)
-	}
-	for label, setup := range map[string]func(*allocFixture){
-		"store-partial": func(f *allocFixture) { f.in.Demand.StorePartial = true },
+// Kills: a reintroduced retire, choosing the loser as canonical, a
+// duplicate standing for its identity, and a duplicate raising no alert
+// (C2.13, S2-1). Legacy's rule (here, the higher generation) picks the
+// canonical row in either census order, when the rows share a session name,
+// and under a partial demand or census read. The canonical row is selected
+// as the spec's named row and wakes; every other managed row is
+// None(identity-duplicate), traced, and never drained or started. One alert
+// names every duplicate, a census-only row on another leg included.
+func TestNamedDuplicateIsNoneWithAlert(t *testing.T) {
+	partialLeg := classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: &beads.PartialResultError{Op: "list", Err: errors.New("down")}}}
+	for label, tc := range map[string]struct {
+		rows      []beads.Bead
+		setup     func(*allocFixture)
+		canonical string
+		dups      []string // managed duplicates
+		alerted   []string // every duplicate the alert names, by leg/ID
+	}{
+		"loser-sorts-first": {rows: []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}, canonical: "gc-2", dups: []string{"gc-1"}},
+		"loser-sorts-last":  {rows: []beads.Bead{chatRow("gc-1", "3"), chatRow("gc-2", "1")}, canonical: "gc-1", dups: []string{"gc-2"}},
+		"shared-session-name": {
+			rows:      []beads.Bead{chatRow("gc-1", "1", "session_name", "chat"), chatRow("gc-2", "3", "session_name", "chat")},
+			canonical: "gc-2", dups: []string{"gc-1"},
+		},
+		"store-partial": {
+			rows: []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}, canonical: "gc-2", dups: []string{"gc-1"},
+			setup: func(f *allocFixture) { f.in.Demand.StorePartial = true },
+		},
+		"partial-census-leg": {
+			rows: []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}, canonical: "gc-2", dups: []string{"gc-1"},
+			setup: func(f *allocFixture) { f.legs = append(f.legs, partialLeg) },
+		},
+		"census-only-other-leg": {
+			rows: []beads.Bead{chatRow("gc-1", "1")}, canonical: "gc-1",
+			setup:   func(f *allocFixture) { f.rigLeg(chatRow("gc-r", "9")) },
+			alerted: []string{"rig:a/gc-r"},
+		},
 	} {
-		f := newAllocFixture(t, chatCity("always")).sessions(rows...)
-		setup(f)
-		partial := f.decide()
-		if v := partial.Snapshot.Identities["chat"]; len(v.Losers) != 0 || v.Canonical == nil || v.Canonical.ID != "gc-2" {
-			t.Errorf("%s: verdict %+v, want gc-2 canonical with no losers", label, v)
+		f := newAllocFixture(t, chatCity("always")).sessions(tc.rows...)
+		if tc.setup != nil {
+			tc.setup(f)
 		}
-		if e := entryOf(t, partial, "gc-1"); e.Desired == desireNone {
-			t.Errorf("%s: a duplicate retired: %s/%s", label, e.Desired, e.Reason)
+		d := f.decide()
+		alerted := tc.alerted
+		for _, id := range tc.dups {
+			alerted = append(alerted, allocSessionsLeg+"/"+id)
+			dup := entryOf(t, d, id)
+			if dup.Desired != desireNone || dup.Reason != reasonIdentityDuplicate || dup.InDesired ||
+				dup.Identity == nil || dup.Identity.Identity != "chat" || dup.Identity.Canonical {
+				t.Errorf("%s: duplicate %s = %s/%s indesired=%v identity=%+v, want None(identity-duplicate)",
+					label, id, dup.Desired, dup.Reason, dup.InDesired, dup.Identity)
+			}
+			if !slices.ContainsFunc(d.Trace, func(r allocTraceRecord) bool {
+				return r.Key.ID == id && r.Reason == reasonIdentityDuplicate && r.Instance == "chat"
+			}) {
+				t.Errorf("%s: no identity-duplicate trace for %s: %v", label, id, d.Trace)
+			}
 		}
+		c := entryOf(t, d, tc.canonical)
+		if c.Desired != desireWake || c.Reason != "named-always" || c.Config == nil || c.Config.ResolveKind != resolveNamed ||
+			c.Config.Alias != "chat" || c.Identity == nil || !c.Identity.Canonical {
+			t.Errorf("%s: canonical %s = %s/%s config=%+v identity=%+v, want the spec's named row woken (named-always)",
+				label, tc.canonical, c.Desired, c.Reason, c.Config, c.Identity)
+		}
+		if len(d.Alerts) != 1 || !strings.Contains(d.Alerts[0], "chat") || !strings.Contains(d.Alerts[0], allocSessionsLeg+"/"+tc.canonical) {
+			t.Errorf("%s: alerts %q, want one naming chat and its canonical row", label, d.Alerts)
+		}
+		for _, k := range alerted {
+			if len(d.Alerts) == 1 && !strings.Contains(d.Alerts[0], k) {
+				t.Errorf("%s: alert %q does not name duplicate %s", label, d.Alerts[0], k)
+			}
+		}
+		if len(d.Plans) != 0 {
+			t.Errorf("%s: plans %+v: the identity has a canonical row", label, d.Plans)
+		}
+	}
+	if d := newAllocFixture(t, chatCity("always")).sessions(chatRow("gc-1", "1")).decide(); len(d.Alerts) != 0 {
+		t.Errorf("a lone named row alerted: %q", d.Alerts)
 	}
 }
 
@@ -590,6 +711,10 @@ func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 		sessionRow("gc-00", "template", "worker", "state", "active", "session_name", "manual-0", "manual_session", "true"),
 		poolRow("gc-000", "worker", 6, "active", "session_name", "shared"),
 		poolRow("gc-9", "worker", 7, "active", "session_name", "shared"),
+		// Named rows sort below gc-2 and never take a rank (PAR-FLOORACK
+		// reads the floor: a ranked named row would drop a pool seat out).
+		poolRow("gc-11", "worker", 8, "active", "configured_named_session", "true"),
+		poolRow("gc-12", "worker", 9, "active", "configured_named_identity", "worker"),
 	).alive("shared", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-9"}).decide()
 	got := d.Snapshot.Floors["worker"]
 	if fmt.Sprint(got) != fmt.Sprint([]rowKey{{allocSessionsLeg, "gc-2"}, {allocSessionsLeg, "gc-3"}}) {
@@ -598,7 +723,7 @@ func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 	if e := entryOf(t, d, "gc-2"); e.Floor == nil || e.Floor.Rank != 0 || e.Floor.MinActive != 2 {
 		t.Fatalf("gc-2 floor view = %+v", e.Floor)
 	}
-	for _, id := range []string{"gc-4", "gc-1", "gc-0", "gc-00", "gc-000"} {
+	for _, id := range []string{"gc-4", "gc-1", "gc-0", "gc-00", "gc-000", "gc-11", "gc-12"} {
 		if entryOf(t, d, id).Floor != nil {
 			t.Errorf("%s holds a floor rank", id)
 		}
@@ -640,8 +765,8 @@ func TestAllocator_PendingInteractionWakes(t *testing.T) {
 	f.activity = map[string]time.Time{"s-gc-1": allocNow.Add(-time.Hour)}
 	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}}
 	e := entryOf(t, f.decideSelecting("gc-1"), "gc-1")
-	if e.Desired != desireWake || e.Reason != "pending" || e.DemandClass != "human" {
-		t.Fatalf("pending row = %s/%s class %s, want a human pending wake", e.Desired, e.Reason, e.DemandClass)
+	if e.Desired != desireWake || e.Reason != "pending" {
+		t.Fatalf("pending row = %s/%s, want a pending wake", e.Desired, e.Reason)
 	}
 }
 
@@ -656,19 +781,16 @@ func TestAllocator_UncertainAttachOnlyWakeKeeps(t *testing.T) {
 		poolRow("gc-1", "worker", 2, "active"),
 		poolRow("gc-2", "idle", 1, "active"),
 	)
-	// The first pass reports attach; the next lists every name but reports
-	// attach for gc-0 only, so gc-1's and gc-2's attach facts age past
-	// maxAge while their listings stay fresh: a stale attach on a reporter.
-	cache := newObserveCache()
-	attrs := map[string]InventoryAttrs{}
-	for _, n := range []string{"s-gc-0", "s-gc-1", "s-gc-2"} {
-		attrs[n] = InventoryAttrs{DeadKnown: true, AttachedKnown: true}
+	// gc-1's and gc-2's runtimes are listed, with their identity read, on a
+	// backend that reports attach but has not primed: their attach facts
+	// read unprimed. A stale attach can no longer reach an alive row: a pass
+	// that does not enrich a name leaves its identity unread (v5 O1).
+	attrs := map[string]InventoryAttrs{"s-gc-0": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("gc-0")}}
+	for _, id := range []string{"gc-1", "gc-2"} {
+		attrs["s-"+id] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity(id)}
 	}
-	cache.publish(allocNow.Add(-50*time.Second), attrs, completeBackend("tmux", "s-gc-0", "s-gc-1", "s-gc-2"))
 	in := f.inputs()
-	in.Now = allocNow.Add(observeMaxAge - 40*time.Second)
-	in.Obs = cache.publish(in.Now, map[string]InventoryAttrs{"s-gc-0": {DeadKnown: true, AttachedKnown: true, Attached: true}},
-		completeBackend("tmux", "s-gc-0", "s-gc-1", "s-gc-2"))
+	in.Obs = newObserveCache().publish(in.Now, attrs, completeBackend("tmux", "s-gc-0"), unattestedBackend("exec", "s-gc-1", "s-gc-2"))
 	p := newDecidePass(in)
 	p.prepare()
 	for _, id := range []string{"gc-0", "gc-1"} {
@@ -679,9 +801,9 @@ func TestAllocator_UncertainAttachOnlyWakeKeeps(t *testing.T) {
 		t.Fatalf("control row = %s/%s uncertain=%v, want a certain wake", e.Desired, e.Reason, e.ObservationUncertain)
 	}
 	if e := entryOf(t, d, "gc-1"); !e.InDesired || !e.ObservationUncertain || e.Desired != desireKeep || e.Reason != reasonObservationUncertain ||
-		!slices.Equal(e.WakeReasons, []WakeReason{WakeAttached}) || e.DemandClass != "human" {
-		t.Fatalf("desired row woken only by an uncertain attach = %s/%s indesired=%v wake=%v class=%s, want a keep read as attached",
-			e.Desired, e.Reason, e.InDesired, e.WakeReasons, e.DemandClass)
+		!slices.Equal(e.WakeReasons, []WakeReason{WakeAttached}) {
+		t.Fatalf("desired row woken only by an uncertain attach = %s/%s indesired=%v wake=%v, want a keep read as attached",
+			e.Desired, e.Reason, e.InDesired, e.WakeReasons)
 	}
 	if e := entryOf(t, d, "gc-2"); e.InDesired || e.Desired != desireKeep {
 		t.Fatalf("undesired row with an uncertain attach = %s/%s, want keep, not drain", e.Desired, e.Reason)
@@ -729,68 +851,154 @@ func TestAllocator_ConfigSleepSuppressionDeadUsesDetachedAtLiveNeedsActivity(t *
 	}
 }
 
-// Kills: a stale leg's rows shrunk (§4.2 rule 4): served past their bound,
-// they keep, and the census is incomplete.
-func TestAllocator_StaleLegRowsKeep(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
-	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{}, recordings: map[beads.Store]censusRecording{}}
-	rig := censusStore()
-	feed.nonExact[rig] = true
-	feed.recordings[rig] = censusRecording{Rows: censusInfos(t, poolRow("rg-1", "worker", 2, "active")), At: allocNow.Add(-10 * time.Minute), Expires: allocNow.Add(-9 * time.Minute)}
-	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "asleep"))
-	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: rig})
-	in := f.in
-	c, err := newCensusReader(feed.feed()).read(allocNow, cfg, f.legs)
-	if err != nil {
-		t.Fatal(err)
+// Kills: the allocator leg of wakeDemandOverridesSleepSuppression's attached
+// rule. A live row past its idle window (activity five minutes old under a 1m
+// policy) that a terminal is attached to wakes instead of config-sleeping; its
+// detached control config-sleeps; one whose attach the pass cannot read keeps
+// (it neither sleeps nor starts on that uncertain attach).
+func TestAllocator_ConfigSleepSuppressionYieldsToAttached(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "chat"}}}
+	manual := func(id string) beads.Bead {
+		return sessionRow(id, "template", "chat", "state", "active", "session_name", "s-"+id, "manual_session", "true")
 	}
-	in.Census, in.Obs = c, f.observation()
-	d := mustDecide(t, in)
-	if !slices.Contains(d.Snapshot.Partial.Legs["rig:a"], causeLegStale) || d.Snapshot.Mode != modePartial ||
-		!slices.Contains(d.Snapshot.Partial.Global, causeCensusIncomplete) {
-		t.Fatalf("stale leg: mode %s partial %+v", d.Snapshot.Mode, d.Snapshot.Partial)
+	f := newAllocFixture(t, cfg).sessions(manual("gc-attached"), manual("gc-detached"), manual("gc-unsure")).
+		alive("s-gc-attached", InventoryAttrs{AttachedKnown: true, Attached: true}).
+		alive("s-gc-detached", InventoryAttrs{AttachedKnown: true}).
+		alive("s-gc-unsure", InventoryAttrs{AttachedKnown: true}).
+		fact("s-gc-unsure", FactAttached, ObsUnknown)
+	stale := allocNow.Add(-5 * time.Minute)
+	f.activity = map[string]time.Time{"s-gc-attached": stale, "s-gc-detached": stale, "s-gc-unsure": stale}
+	policy := resolvedSessionSleepPolicy{Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}
+	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-attached": policy, "gc-detached": policy, "gc-unsure": policy}
+	d := f.decideSelecting("gc-attached", "gc-detached", "gc-unsure")
+	if e := entryOf(t, d, "gc-attached"); e.Desired != desireWake {
+		t.Errorf("attached live row past its idle window = %s/%s, want a wake", e.Desired, e.Reason)
 	}
-	if e := entryOf(t, d, "gc-1"); e.Desired != desireKeep || e.Reason != reasonPartialRetain {
-		t.Fatalf("row under an incomplete census = %s/%s, want partial-retain keep", e.Desired, e.Reason)
+	if e := entryOf(t, d, "gc-detached"); e.Desired != desireSleep || e.Reason != reasonConfigSleep {
+		t.Errorf("detached live row past its idle window = %s/%s, want %s/%s", e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+	}
+	if e := entryOf(t, d, "gc-unsure"); e.Desired != desireKeep || e.Reason != reasonObservationUncertain {
+		t.Errorf("live row with an uncertain attach past its idle window = %s/%s, want %s/%s", e.Desired, e.Reason, desireKeep, reasonObservationUncertain)
 	}
 }
 
-// Kills: retiring an identity loser under an incomplete census (C2.13,
-// M22). A stale leg may hold the winner, so the verdict retires nothing.
-func TestAllocator_StaleLegRetiresNoIdentityLoser(t *testing.T) {
-	cfg := chatCity("always")
-	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{}, recordings: map[beads.Store]censusRecording{}}
-	rig := censusStore()
-	feed.nonExact[rig] = true
-	feed.recordings[rig] = censusRecording{At: allocNow.Add(-10 * time.Minute), Expires: allocNow.Add(-9 * time.Minute)}
-	f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1"), chatRow("gc-2", "3"))
-	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: rig})
-	in := f.in
-	c, err := newCensusReader(feed.feed()).read(allocNow, cfg, f.legs)
-	if err != nil {
-		t.Fatal(err)
+// Kills: the attached rule reading the awake set's reason label, and an
+// uncertain attach outranking the policy. A durable wait registered without a
+// wait hold that turns ready relabels the attached wake "wait-ready"; past its
+// idle window the attached live row still wakes, and its detached control,
+// whose wait is ready too, config-sleeps. One whose attach the pass cannot
+// read keeps, as it does without the wait: the relabel must not turn the
+// unread attach into a wake. Inside its idle window that row's ready wait
+// wakes it, so classify's uncertain-attach keep must not widen past the
+// "attached" label to every decision the attach touched.
+func TestAllocator_ConfigSleepSuppressionYieldsToAttachedWithReadyWait(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "chat"}}}
+	manual := func(id string) beads.Bead {
+		return sessionRow(id, "template", "chat", "state", "active", "session_name", "s-"+id, "manual_session", "true")
 	}
-	if !c.Incomplete() {
-		t.Fatal("stale leg: census complete, want incomplete")
+	f := newAllocFixture(t, cfg).sessions(manual("gc-attached"), manual("gc-detached"), manual("gc-unsure"), manual("gc-unsure-busy")).
+		alive("s-gc-attached", InventoryAttrs{AttachedKnown: true, Attached: true}).
+		alive("s-gc-detached", InventoryAttrs{AttachedKnown: true}).
+		alive("s-gc-unsure", InventoryAttrs{AttachedKnown: true}).
+		fact("s-gc-unsure", FactAttached, ObsUnknown).
+		alive("s-gc-unsure-busy", InventoryAttrs{AttachedKnown: true}).
+		fact("s-gc-unsure-busy", FactAttached, ObsUnknown)
+	stale := allocNow.Add(-5 * time.Minute)
+	f.activity = map[string]time.Time{
+		"s-gc-attached": stale, "s-gc-detached": stale, "s-gc-unsure": stale,
+		"s-gc-unsure-busy": allocNow.Add(-30 * time.Second),
 	}
-	in.Census, in.Obs = c, f.observation()
-	d := mustDecide(t, in)
-	if v := d.Snapshot.Identities["chat"]; len(v.Losers) != 0 {
-		t.Fatalf("stale leg: losers %v retired under an incomplete census", v.Losers)
+	policy := resolvedSessionSleepPolicy{Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}
+	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{
+		"gc-attached": policy, "gc-detached": policy,
+		"gc-unsure": policy, "gc-unsure-busy": policy,
 	}
-	if e := entryOf(t, d, "gc-1"); e.Desired == desireNone {
-		t.Fatalf("stale leg: a duplicate retired: %s/%s", e.Desired, e.Reason)
+	f.in.ReadyWaits = map[string]bool{"gc-attached": true, "gc-detached": true, "gc-unsure": true, "gc-unsure-busy": true}
+	d := f.decideSelecting("gc-attached", "gc-detached", "gc-unsure", "gc-unsure-busy")
+	if e := entryOf(t, d, "gc-attached"); e.Desired != desireWake {
+		t.Errorf("attached live row with a ready wait past its idle window = %s/%s, want a wake", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-detached"); e.Desired != desireSleep || e.Reason != reasonConfigSleep {
+		t.Errorf("detached live row with a ready wait past its idle window = %s/%s, want %s/%s", e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+	}
+	if e := entryOf(t, d, "gc-unsure"); e.Desired != desireKeep || e.Reason != reasonObservationUncertain {
+		t.Errorf("live row with an uncertain attach and a ready wait past its idle window = %s/%s, want %s/%s", e.Desired, e.Reason, desireKeep, reasonObservationUncertain)
+	}
+	if e := entryOf(t, d, "gc-unsure-busy"); e.Desired != desireWake || e.Reason != "wait-ready" {
+		t.Errorf("live row with an uncertain attach and a ready wait inside its idle window = %s/%s, want %s/wait-ready", e.Desired, e.Reason, desireWake)
+	}
+}
+
+// Kills: stage 6b dropping legacy's explicit-wake override
+// (wakeDemandOverridesSleepSuppression). A durable explicit wake request that
+// is still pending outranks the idle latch, whatever reason the awake set
+// labels the wake with; one requested before the row's last sleep was served
+// and leaves the latch in force.
+func TestAllocator_ConfigSleepSuppressionHonorsPendingExplicitWake(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "chat"}}}
+	latched := func(id, requestedAt string) beads.Bead {
+		return sessionRow(id, "template", "chat", "state", "asleep", "session_name", "s-"+id,
+			"manual_session", "true", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+			"slept_at", ago(10*time.Minute), "wake_request", "explicit", "wake_requested_at", requestedAt)
+	}
+	f := newAllocFixture(t, cfg).sessions(latched("gc-pending", ago(time.Minute)), latched("gc-served", ago(20*time.Minute)))
+	policy := resolvedSessionSleepPolicy{Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}
+	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-pending": policy, "gc-served": policy}
+	d := f.decideSelecting("gc-pending", "gc-served")
+	if e := entryOf(t, d, "gc-pending"); e.Desired != desireWake {
+		t.Errorf("idle-latched row with a pending explicit wake = %s/%s, want a wake", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-served"); e.Desired != desireSleep || e.Reason != reasonConfigSleep {
+		t.Errorf("idle-latched row whose explicit wake predates its sleep = %s/%s, want %s/%s",
+			e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+	}
+}
+
+// Kills: routed demand masked by named-demand on an idle-latched named
+// holder (the allocator leg of wakeDemandOverridesSleepSuppression). Blocked
+// in_progress work assigned to the holder sets the named work-ready signal,
+// which wins the awake set's reason switch; with live routed demand as well
+// the row must still wake through the latch. Blocked work alone must not.
+func TestAllocator_ConfigSleepSuppressionYieldsToRoutedDemandDespiteBlockedAssignedWork(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		routed bool
+		wake   bool
+	}{
+		{name: "routed and blocked assigned", routed: true, wake: true},
+		{name: "blocked assigned only", routed: false, wake: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := chatCity("on_demand")
+			cfg.Agents[0].MaxActiveSessions = intPtr(1)
+			f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1",
+				"configured_named_mode", "on_demand", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+				"slept_at", ago(10*time.Minute)))
+			f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}}
+			blocked := true
+			f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "chat", IsBlocked: &blocked}}
+			f.in.Demand.AssignedStoreRefs = []string{""}
+			if tc.routed {
+				f.demand("chat", "w-r")
+			}
+			e := entryOf(t, f.decide(), "gc-1")
+			if tc.wake && e.Desired != desireWake {
+				t.Fatalf("idle-latched named row with routed demand and blocked assigned work = %s/%s, want a wake", e.Desired, e.Reason)
+			}
+			if !tc.wake && (e.Desired != desireSleep || e.Reason != reasonConfigSleep) {
+				t.Fatalf("idle-latched named row with only blocked assigned work = %s/%s, want %s/%s",
+					e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+			}
+		})
 	}
 }
 
 // Kills: a missing census read as an empty city (§4.2 census errors): with
-// no census the pass is partial and keeps.
-func TestAllocator_NoCensusIsPartialNotEmpty(t *testing.T) {
+// no census the pass is refused.
+func TestAllocator_NoCensusIsRefusedNotEmpty(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
-	in := newAllocFixture(t, cfg).in
-	d := mustDecide(t, in)
-	if d.Snapshot.Mode != modePartial || !slices.Contains(d.Snapshot.Partial.Global, causeCensusIncomplete) {
-		t.Fatalf("no census: mode %s partial %+v, want partial census-incomplete", d.Snapshot.Mode, d.Snapshot.Partial)
+	if _, err := decideAllocation(newAllocFixture(t, cfg).in); !errors.Is(err, errDecideNoCensus) {
+		t.Fatalf("no census: err = %v, want errDecideNoCensus", err)
 	}
 }
 
@@ -844,7 +1052,7 @@ func TestAllocator_EntryTemplateResolvesLegacyRows(t *testing.T) {
 	in := f.inputs()
 	p := newDecidePass(in)
 	p.prepare()
-	p.markTemplate("worker", true, true, "pool-scale-check-partial")
+	p.markTemplate("worker", true, causeScaleCheckPartial)
 	d := p.finish()
 	if e := entryOf(t, d, "gc-2"); e.Template != "worker" || e.Desired != desireKeep {
 		t.Fatalf("legacy-template row = template %q %s/%s, want worker, retained", e.Template, e.Desired, e.Reason)
@@ -861,7 +1069,7 @@ func TestAllocator_NamedScaleCheckPartialKeepsOnlyNamedRows(t *testing.T) {
 	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).alive("s-gc-2", InventoryAttrs{AttachedKnown: true})
 	p := newDecidePass(f.inputs())
 	p.prepare()
-	p.markTemplate("chat", false, false, "named-scale-check-partial")
+	p.markTemplate("chat", false, "named-scale-check-partial")
 	d := p.finish()
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireKeep || e.Reason != reasonPartialRetain {
 		t.Errorf("named row = %s/%s, want partial-retain keep", e.Desired, e.Reason)
@@ -912,5 +1120,197 @@ func TestAllocator_DecideRefusesAZeroClock(t *testing.T) {
 	in.Now = time.Time{}
 	if _, err := decideAllocation(in); !errors.Is(err, errDecideNoClock) {
 		t.Fatalf("err = %v, want errDecideNoClock", err)
+	}
+}
+
+// Kills: the idle latch's override counting a wait's own intent (D-J 3). An
+// idle-latched waiter holding work whose wait turned ready wakes through the
+// latch though it kept sleep_intent=wait-hold; any other intent still
+// refuses the override.
+func TestAllocator_ConfigSleepSuppressionWakesAReadyWaiter(t *testing.T) {
+	for intent, wake := range map[string]bool{"wait-hold": true, "idle-stop-pending": false} {
+		cfg := chatCity("on_demand")
+		cfg.Agents[0].MaxActiveSessions = intPtr(1)
+		f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1",
+			"configured_named_mode", "on_demand", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+			"slept_at", ago(10*time.Minute), "wait_hold", "true", "sleep_intent", intent))
+		f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}}
+		f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "chat"}}
+		f.in.Demand.AssignedStoreRefs = []string{""}
+		f.in.ReadyWaits = map[string]bool{"gc-1": true}
+		e := entryOf(t, f.decide(), "gc-1")
+		if wake && e.Desired != desireWake {
+			t.Errorf("intent %q: idle-latched waiter whose wait is ready = %s/%s, want a wake", intent, e.Desired, e.Reason)
+		}
+		if !wake && (e.Desired != desireSleep || e.Reason != reasonConfigSleep) {
+			t.Errorf("intent %q: idle-latched row = %s/%s, want %s/%s", intent, e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+		}
+	}
+}
+
+// Kills: an honored explicit wake drained or closed (CONTRACT D7 rule 4,
+// v5.10n, §12.2 row 26; J26 D/E): a pool row the desired set did not pick,
+// holding a pending explicit wake, wakes and carries WakeHonored; a wake
+// served by a sleep since, a suspended agent's row and a dependency-only
+// row still drain.
+func TestAllocator_HonoredExplicitWakeIsNeverDrained(t *testing.T) {
+	fresh := []string{"state", "asleep", "sleep_reason", "drained", "slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute)}
+	served := []string{"state", "asleep", "sleep_reason", "drained", "slept_at", ago(time.Minute), "wake_request", "explicit", "wake_requested_at", ago(time.Hour)}
+	for _, c := range []struct {
+		name      string
+		meta      []string
+		suspended bool
+		want      desire
+		honored   bool
+	}{
+		{"a pending wake", fresh, false, desireWake, true},
+		{"a wake served by a sleep since", served, false, desireDrain, false},
+		{"a suspended agent's pending wake", fresh, true, desireDrain, false},
+		{"a dependency-only row's pending wake", append(slices.Clone(fresh), "dependency_only", "true"), false, desireDrain, false},
+	} {
+		agent := allocPoolAgent("worker", 3)
+		agent.Suspended = c.suspended
+		cfg := &config.City{Agents: []config.Agent{agent}}
+		d := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, c.meta[1], c.meta[2:]...)).decideSelecting()
+		if e := entryOf(t, d, "gc-1"); e.Desired != c.want || e.WakeHonored != c.honored || (c.honored && e.DrainReason != "") {
+			t.Errorf("%s: %s/%s honored %t drain %q, want %s honored %t", c.name, e.Desired, e.Reason, e.WakeHonored, e.DrainReason, c.want, c.honored)
+		}
+	}
+}
+
+// Kills a resume: true that consumes an operator's suspend on a pool row
+// without recording its wake (session.Store.ResumeHeld, SESSION-START-022):
+// the suspend alone kept the row, so a pass that read it before the lane
+// host's own wake request landed drained it as orphaned and A21 closed it,
+// failing the message it was resumed for. The resumed row's explicit wake is
+// honored, and A21 proposes no close.
+func TestAllocator_ResumedPoolRowWakesAndIsNotClosed(t *testing.T) {
+	store := censusStore(poolRow("gc-1", "worker", 1, "asleep", "slept_at", ago(2*time.Hour)))
+	sessions := session.NewStore(beads.SessionStore{Store: store})
+	if _, err := sessions.OperatorSuspend("gc-1", allocNow.Add(-time.Hour)); err != nil {
+		t.Fatalf("OperatorSuspend: %v", err)
+	}
+	if err := sessions.ResumeHeld("gc-1", allocNow.Add(-time.Second), allocNow.Add(-time.Second)); err != nil {
+		t.Fatalf("ResumeHeld: %v", err)
+	}
+	resumed, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := newAllocFixture(t, &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}).sessions(resumed).inputs()
+	d := mustDecide(t, in)
+	e := entryOf(t, d, "gc-1")
+	if e.Desired != desireWake || !e.WakeHonored || e.DrainReason != "" {
+		t.Fatalf("resumed pool row = %s/%s honored %t drain %q, want its wake honored", e.Desired, e.Reason, e.WakeHonored, e.DrainReason)
+	}
+	w := &World{Now: allocNow, Census: in.Census, Mislabelled: map[rowKey]bool{}}
+	if it, _ := decideRow(w, &d, e.Key); it.Kind == intentClose {
+		t.Fatalf("A21 = %s on the resumed row, want no close", it.Reason)
+	}
+}
+
+// Kills: an honored wake that overruns max_active_sessions (v5.10n): with
+// the template at its max (rows woken or alive), the honored row is Keep,
+// never Wake and never Drain, and wakes once a slot frees.
+func TestAllocator_HonoredExplicitWakeRespectsMaxActive(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	woken := func(alive ...string) *allocFixture {
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", "sleep_reason", "drained", "slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute)))
+		for _, name := range alive {
+			f = f.alive(name, InventoryAttrs{AttachedKnown: true})
+		}
+		return f
+	}
+	if e := entryOf(t, woken("s-gc-1", "s-gc-2").decideSelecting("gc-1", "gc-2"), "gc-3"); e.Desired != desireKeep || !e.WakeHonored {
+		t.Errorf("at the max: gc-3 = %s/%s honored %t, want keep (the wake waits)", e.Desired, e.Reason, e.WakeHonored)
+	}
+	if e := entryOf(t, woken("s-gc-1").decideSelecting("gc-1"), "gc-3"); e.Desired != desireWake {
+		t.Errorf("a slot free: gc-3 = %s/%s, want wake", e.Desired, e.Reason)
+	}
+}
+
+// honoredWakeMeta is an asleep drained row's pending explicit wake.
+func honoredWakeMeta() []string {
+	return []string{"sleep_reason", "drained", "slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute)}
+}
+
+// Kills an honored wake that overruns max_active_sessions through what the
+// bound must count beside woken and alive rows (#7807 review, v5.10n): the
+// creates this pass plans, the creates in flight the census does not show
+// yet, and rows of unknown liveness (the awake set reads unknown as
+// running). In each case the honored row is Keep, its wake waiting.
+func TestAllocator_HonoredExplicitWakeCountsEverySessionTowardMax(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	t.Run("a create this pass plans", func(t *testing.T) {
+		d := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).demand("worker", "w-1", "w-2").decide()
+		plans := 0
+		for _, p := range d.Plans {
+			if p.Template == "worker" {
+				plans++
+			}
+		}
+		if e := entryOf(t, d, "gc-3"); plans > 0 && e.Desired == desireWake {
+			t.Errorf("gc-3 woken beside gc-1 and %d planned create(s): over max_active_sessions 2", plans)
+		}
+	})
+	t.Run("a create in flight", func(t *testing.T) {
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+		f.in.InFlight = inflightView{Entries: []inflightEntry{{Kind: inflightCreate, Token: "tok-new", Template: "worker", Identity: "worker:new"}}}
+		if e := entryOf(t, f.decide(), "gc-3"); e.Desired != desireKeep || !e.WakeHonored {
+			t.Errorf("gc-3 = %s/%s honored %t, want keep beside gc-1 and a create in flight", e.Desired, e.Reason, e.WakeHonored)
+		}
+	})
+	t.Run("a named create the census already shows counts once", func(t *testing.T) {
+		// A named reopen keeps its row's own token: the in-flight create and
+		// its open row are one session, not two (#7807 review, mc-mhloj).
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active", "configured_named_session", "true", "configured_named_identity", "chat", "instance_token", "tok-row"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+		f.in.InFlight = inflightView{Entries: []inflightEntry{{Kind: inflightCreate, Token: "tok-reopen", Template: "worker", Identity: createIdentity{QualifiedInstance: "chat", Named: true}.key()}}}
+		if e := entryOf(t, f.decide(), "gc-3"); e.Desired != desireWake {
+			t.Errorf("gc-3 = %s/%s, want wake: the named create is gc-1's own row, one of max_active_sessions 2", e.Desired, e.Reason)
+		}
+	})
+	t.Run("rows of unknown liveness", func(t *testing.T) {
+		d := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).alive("s-gc-2", InventoryAttrs{AttachedKnown: true}).
+			unread("s-gc-1").unread("s-gc-2").decideSelecting("gc-1", "gc-2")
+		if e := entryOf(t, d, "gc-3"); e.Desired == desireWake {
+			t.Errorf("gc-3 woken while gc-1 and gc-2 run under unread identities (liveness unknown)")
+		}
+	})
+}
+
+// Kills a last slot given to a second honored row, or by map order (#7807
+// review): honored rows compete for one slot; the lowest key wakes and every
+// other keeps. Twelve competitors make an unsorted map walk pick the lowest
+// with probability 1/12 a run, so 20 runs cannot pass by chance
+// ((1/12)^20), as two competitors could ((1/2)^20 was the k6 survivor).
+func TestAllocator_HonoredExplicitWakeLastSlotIsDeterministic(t *testing.T) {
+	const competitors = 12
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	for i := range 20 {
+		rows := []beads.Bead{poolRow("gc-01", "worker", 1, "active")}
+		for c := range competitors {
+			rows = append(rows, poolRow(fmt.Sprintf("gc-%02d", 10+c), "worker", 10+c, "asleep", honoredWakeMeta()...))
+		}
+		d := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-01", InventoryAttrs{AttachedKnown: true}).decideSelecting("gc-01")
+		for c := range competitors {
+			id := fmt.Sprintf("gc-%02d", 10+c)
+			if want := map[bool]desire{true: desireWake, false: desireKeep}[c == 0]; entryOf(t, d, id).Desired != want {
+				t.Fatalf("run %d: %s %s, want %s (the lowest key, gc-10, takes the last slot)", i, id, entryOf(t, d, id).Desired, want)
+			}
+		}
 	}
 }

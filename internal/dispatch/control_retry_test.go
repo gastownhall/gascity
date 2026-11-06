@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -119,6 +120,11 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt invalid connection timeout", err: errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"), want: TierAvailability},
 		{name: "mysql lock timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded; try restarting transaction"), want: TierAvailability},
 		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: TierAvailability},
+		// Every live Dolt 1213/40001 message carries both serialization needles
+		// (doltSerializationFailureErr); one row per needle keeps each
+		// load-bearing on its own if Dolt rewords the other half.
+		{name: "dolt serialization envelope only", err: errors.New("Error 1213 (40001): serialization failure: write conflict on branch main, try restarting transaction"), want: TierAvailability},
+		{name: "dolt conflict detail only", err: errors.New("committing: this transaction conflicts with a committed transaction from another client"), want: TierAvailability},
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: TierAvailability},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: TierAvailability},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: TierAvailability},
@@ -126,6 +132,12 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt server unreachable", err: errors.New("begin read tx: dolt server unreachable"), want: TierAvailability},
 		{name: "workflow root close blocked", err: closeBlockedErr("gsp-p68ch6", "gsp-yl7fpr"), want: TierSemantic},
 		{name: "scope body close blocked", err: closeBlockedErr("pl-pujtf", "pl-mmneh"), want: TierSemantic},
+		// A stop cuts a bd command short (bd cancels its root context only on
+		// signals): the store never answered, so it is Tier A like a timeout.
+		{name: "stop-canceled finalizer outcome read", err: errors.New("gc-1: resolving workflow outcome: bd list both tiers: bd query: bd query (wisps): exit status 1: search count wisps: context canceled"), want: TierAvailability},
+		{name: "wrapped context canceled", err: fmt.Errorf("gc-1: closing source bead chain: %w", context.Canceled), want: TierAvailability},
+		{name: "typed canceled without the text", err: canceledLockWaitErr{}, want: TierAvailability},
+		{name: "operator canceled is not a canceled read", err: errors.New("workflow gc-1 canceled by operator"), want: TierNone},
 		{name: "non work query sigterm", err: errors.New("starting provider: exit status 143: Terminated"), want: TierNone},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: TierNone},
 		// Availability dominates: a refusal read off a store that is also
@@ -147,6 +159,13 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		})
 	}
 }
+
+// canceledLockWaitErr wraps context.Canceled behind text that does not say
+// "context canceled", so only the typed check can classify it.
+type canceledLockWaitErr struct{}
+
+func (canceledLockWaitErr) Error() string { return "source workflow lock abandoned" }
+func (canceledLockWaitErr) Unwrap() error { return context.Canceled }
 
 func newSemanticControlBead(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()
@@ -175,7 +194,7 @@ func TestRecordSemanticControlRetryStampsTheDeadlineOnce(t *testing.T) {
 	budget := 15 * time.Minute
 	start := time.Date(2026, 8, 11, 8, 0, 47, 0, time.UTC)
 
-	first, err := RecordSemanticControlRetry(store, bead.ID, cause, start, budget)
+	first, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, cause, start, budget)
 	if err != nil {
 		t.Fatalf("first RecordSemanticControlRetry: %v", err)
 	}
@@ -197,7 +216,7 @@ func TestRecordSemanticControlRetryStampsTheDeadlineOnce(t *testing.T) {
 	var last SemanticRetryState
 	for restart := 1; restart <= 5; restart++ {
 		now := start.Add(time.Duration(restart) * 2 * time.Minute)
-		last, err = RecordSemanticControlRetry(store, bead.ID, cause, now, budget)
+		last, err = RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, cause, now, budget)
 		if err != nil {
 			t.Fatalf("restart %d RecordSemanticControlRetry: %v", restart, err)
 		}
@@ -218,7 +237,7 @@ func TestRecordSemanticControlRetryStampsTheDeadlineOnce(t *testing.T) {
 
 	// The sixth dispatcher starts at +15m01s. It has no memory of the previous
 	// five, and the persisted anchor is what expires the budget.
-	expired, err := RecordSemanticControlRetry(store, bead.ID, cause, start.Add(budget+time.Second), budget)
+	expired, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, cause, start.Add(budget+time.Second), budget)
 	if err != nil {
 		t.Fatalf("post-budget RecordSemanticControlRetry: %v", err)
 	}
@@ -268,7 +287,7 @@ func TestRecordPendingControlRetryKeepsItsOwnBudget(t *testing.T) {
 	start := time.Date(2026, 8, 11, 8, 0, 0, 0, time.UTC)
 	pendingCause := errors.New(`rig "ghostrig" not found in city config`)
 
-	first, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start, budget)
+	first, err := RecordPendingControlRetry(beadstest.Graph(store), bead.ID, pendingCause, start, budget)
 	if err != nil {
 		t.Fatalf("first RecordPendingControlRetry: %v", err)
 	}
@@ -276,7 +295,7 @@ func TestRecordPendingControlRetryKeepsItsOwnBudget(t *testing.T) {
 		t.Fatalf("first pending state = %#v, want Attempts=1 anchored at %s with no expiry or repeat", first, start)
 	}
 
-	repeat, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start.Add(time.Minute), budget)
+	repeat, err := RecordPendingControlRetry(beadstest.Graph(store), bead.ID, pendingCause, start.Add(time.Minute), budget)
 	if err != nil {
 		t.Fatalf("repeat RecordPendingControlRetry: %v", err)
 	}
@@ -287,7 +306,7 @@ func TestRecordPendingControlRetryKeepsItsOwnBudget(t *testing.T) {
 		t.Fatalf("repeat.FirstSeen = %s, want the original anchor %s", repeat.FirstSeen, start)
 	}
 
-	expired, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start.Add(budget+time.Second), budget)
+	expired, err := RecordPendingControlRetry(beadstest.Graph(store), bead.ID, pendingCause, start.Add(budget+time.Second), budget)
 	if err != nil {
 		t.Fatalf("post-budget RecordPendingControlRetry: %v", err)
 	}
@@ -323,7 +342,7 @@ func TestRecordPendingControlRetryKeepsItsOwnBudget(t *testing.T) {
 	}
 
 	// The semantic budget the bead has never used is still whole.
-	semantic, err := RecordSemanticControlRetry(store, bead.ID, closeBlockedErr("pl-pujtf", "pl-mmneh"), start.Add(budget+time.Second), budget)
+	semantic, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, closeBlockedErr("pl-pujtf", "pl-mmneh"), start.Add(budget+time.Second), budget)
 	if err != nil {
 		t.Fatalf("RecordSemanticControlRetry after a long pending wait: %v", err)
 	}
@@ -347,11 +366,11 @@ func TestRecordSemanticControlRetryDoesNotReanchorOnChangedRefusal(t *testing.T)
 	budget := 15 * time.Minute
 	start := time.Date(2026, 8, 11, 8, 0, 0, 0, time.UTC)
 
-	if _, err := RecordSemanticControlRetry(store, bead.ID, closeBlockedErr("pl-pujtf", "pl-mmneh"), start, budget); err != nil {
+	if _, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, closeBlockedErr("pl-pujtf", "pl-mmneh"), start, budget); err != nil {
 		t.Fatalf("first RecordSemanticControlRetry: %v", err)
 	}
 
-	changed, err := RecordSemanticControlRetry(store, bead.ID,
+	changed, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID,
 		closeBlockedErr("pl-pujtf", "pl-mmneh pl-6o6uk"), start.Add(budget+time.Second), budget)
 	if err != nil {
 		t.Fatalf("changed RecordSemanticControlRetry: %v", err)
@@ -391,10 +410,10 @@ func TestRecordSemanticControlRetryBudgetBoundaries(t *testing.T) {
 			store := beads.NewMemStore()
 			bead := newSemanticControlBead(t, store)
 			cause := closeBlockedErr("pl-pujtf", "pl-mmneh")
-			if _, err := RecordSemanticControlRetry(store, bead.ID, cause, start, tt.budget); err != nil {
+			if _, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, cause, start, tt.budget); err != nil {
 				t.Fatalf("anchor RecordSemanticControlRetry: %v", err)
 			}
-			state, err := RecordSemanticControlRetry(store, bead.ID, cause, start.Add(tt.at), tt.budget)
+			state, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, cause, start.Add(tt.at), tt.budget)
 			if err != nil {
 				t.Fatalf("RecordSemanticControlRetry: %v", err)
 			}
@@ -415,7 +434,7 @@ func TestRecordSemanticControlRetryReanchorsAnUnparseableAnchor(t *testing.T) {
 	}
 	now := time.Date(2026, 8, 11, 8, 0, 0, 0, time.UTC)
 
-	state, err := RecordSemanticControlRetry(store, bead.ID, closeBlockedErr("a", "b"), now, 15*time.Minute)
+	state, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, closeBlockedErr("a", "b"), now, 15*time.Minute)
 	if err != nil {
 		t.Fatalf("RecordSemanticControlRetry: %v", err)
 	}
@@ -441,7 +460,7 @@ func TestRecordSemanticControlRetryTruncatesTheRecordedRefusal(t *testing.T) {
 	bead := newSemanticControlBead(t, store)
 	long := errors.New(strings.Repeat("é", maxControllerRetryErrorMetadata))
 
-	state, err := RecordSemanticControlRetry(store, bead.ID, long, time.Now(), 15*time.Minute)
+	state, err := RecordSemanticControlRetry(beadstest.Graph(store), bead.ID, long, time.Now(), 15*time.Minute)
 	if err != nil {
 		t.Fatalf("RecordSemanticControlRetry: %v", err)
 	}
@@ -465,7 +484,7 @@ func TestRecordSemanticControlRetrySurfacesStoreFailures(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
-	if _, err := RecordSemanticControlRetry(store, "gc-nonexistent", closeBlockedErr("a", "b"), time.Now(), time.Minute); err == nil {
+	if _, err := RecordSemanticControlRetry(beadstest.Graph(store), "gc-nonexistent", closeBlockedErr("a", "b"), time.Now(), time.Minute); err == nil {
 		t.Fatal("RecordSemanticControlRetry on a missing bead = nil error, want the store failure surfaced")
 	}
 }

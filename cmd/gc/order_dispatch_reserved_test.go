@@ -159,6 +159,7 @@ func TestOrderDispatchReservedOrdersRemainSubjectToTriggerEligibility(t *testing
 	recent, err := store.Create(beads.Bead{
 		Title:  "recent completed run",
 		Status: "closed",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:" + orderName},
 	})
 	if err != nil {

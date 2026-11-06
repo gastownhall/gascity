@@ -171,7 +171,7 @@ func buildFormulaRuns(state State, formulaName, requestedScopeKind, requestedSco
 	}, nil
 }
 
-func buildFormulaDetail(ctx context.Context, store beads.Store, name string, paths []string, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
+func buildFormulaDetail(ctx context.Context, store beads.WorkStore, name string, paths []string, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (*formulaDetailResponse, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
@@ -262,7 +262,7 @@ func buildFormulaDetail(ctx context.Context, store beads.Store, name string, pat
 	return resp, nil
 }
 
-func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name string, paths []string, resolved *formula.Formula, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
+func formulaDetailPreviewVars(ctx context.Context, store beads.WorkStore, name string, paths []string, resolved *formula.Formula, target string, targetIsRoutingIdentity bool, vars map[string]string, validateRuntimeVars bool) (map[string]string, error) {
 	if resolved == nil || !formula.UsesGraphCompiler(resolved) {
 		return vars, nil
 	}

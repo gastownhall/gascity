@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // WakeReason describes why a session should be awake.
@@ -56,8 +57,12 @@ type drainState struct {
 	deadline   time.Time
 	reason     string // "idle", "pool-excess", "config-drift", "user"
 	generation int    // generation at drain start — fence for Stop
-	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
-	followUp   bool   // true when the controller should trigger one more immediate tick
+	// basis is the row the drain began on: its stop-pending mark and its
+	// timeout kill act only while the row still carries the basis's facts
+	// (sessionpkg.FactsLegacyStopPending).
+	basis    sessionpkg.Decided
+	ackSet   bool // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp bool // true when the controller should trigger one more immediate tick
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.

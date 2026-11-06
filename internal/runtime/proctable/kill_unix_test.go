@@ -3,6 +3,8 @@
 package proctable
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"slices"
@@ -224,4 +226,51 @@ func startDistinctLiveProcess(t *testing.T, pid int) int {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// Kills: a kill not bound to the scanned process, or one that never kills.
+// A changed start identity (a recycled PID: the scanned process is gone) and
+// a gone PID are success without a signal; an unreadable identity is an error
+// without a signal. Those signals are recorded, never sent. A matching
+// identity kills a real child.
+func TestKillByPIDIdentityRefusesRecycledPID(t *testing.T) {
+	self := os.Getpid()
+	for _, tc := range []struct {
+		name    string
+		read    func(int) (string, error)
+		wantErr string
+	}{
+		{name: "recycled", read: func(int) (string, error) { return "999", nil }},
+		{name: "unreadable", read: func(int) (string, error) { return "", errors.New("EIO") }, wantErr: "re-reading start identity"},
+		{name: "gone", read: func(pid int) (string, error) { return "", fmt.Errorf("%w: PID %d", ErrProcessGone, pid) }},
+	} {
+		var signaled []string
+		kill := func(pid int, sig syscall.Signal) error {
+			signaled = append(signaled, fmt.Sprintf("%d:%v", pid, sig))
+			return nil
+		}
+		err := killByPIDIdentity(self, "123", tc.read, kill)
+		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("%s: killByPIDIdentity = %v, want %q", tc.name, err, tc.wantErr)
+		}
+		if len(signaled) != 0 {
+			t.Errorf("%s: signaled %v, want none", tc.name, signaled)
+		}
+	}
+
+	t.Run("matching identity kills", func(t *testing.T) {
+		child := startDistinctLiveProcess(t, self)
+		identity, err := ProcessIdentity(child)
+		if err != nil {
+			t.Fatalf("ProcessIdentity(child): %v", err)
+		}
+		// KillByPIDIdentity returns nil only once the child is confirmed
+		// dead: gone, or a zombie that can no longer run.
+		if err := KillByPIDIdentity(child, identity); err != nil {
+			t.Fatalf("KillByPIDIdentity(child, its identity) = %v, want nil", err)
+		}
+		if pidutil.Alive(child) {
+			t.Fatalf("child %d still runnable after KillByPIDIdentity with its own identity", child)
+		}
+	})
 }

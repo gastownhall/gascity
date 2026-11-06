@@ -53,7 +53,7 @@ func patchFenceBackends() []patchFenceBackend {
 	stampSQLite := func(t *testing.T, mode gate.Mode) beads.Store {
 		t.Helper()
 		s := openSQLite(t)
-		if err := beads.StampOpenedStore(s, "SQLiteStore", mode, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(s, "SQLiteStore", mode, false, nil, nil); err != nil {
 			t.Fatalf("StampOpenedStore: %v", err)
 		}
 		return s

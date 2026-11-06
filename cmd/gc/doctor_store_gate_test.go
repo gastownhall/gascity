@@ -114,7 +114,7 @@ func TestBuildDoctorChecksNeverReadsAStoppedRigStore(t *testing.T) {
 		}
 	}
 
-	gate := newDoctorStoreGate(false)
+	gate := newDoctorStoreGate(false, nil)
 	opened := 0
 	factory := gate.StoreFactory(func(string) (beads.Store, error) { opened++; return nil, nil })
 	if _, err := factory(filepath.Join(cityDir, "rigstore")); !errors.Is(err, errDoctorStoreNotRunning) {
@@ -139,6 +139,91 @@ func TestBuildDoctorChecksWarnsOnAStoppedStoreUnderARunningCity(t *testing.T) {
 		r := runDoctorCheckNamed(t, checks, name)
 		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, doctor.StoreNotRunningMessage) {
 			t.Errorf("%s = %v %q, want a not-running warning", name, r.Status, r.Message)
+		}
+	}
+}
+
+// The store gate's decision matrix: city running or stopped, the scope's idle
+// policy never or finite, its proxy live or absent, and its rig suspended. A
+// finite scope whose proxy retired on its idle timeout under a running city is
+// read (waking it for one more idle period), not warned about; a stopped city
+// is never started; a suspended scope is never woken.
+func TestDoctorStoreGateMatrix(t *testing.T) {
+	oldLive, oldScope, oldIdle := doctorProxiedStoreNotRunning, doctorProxiedStoreScope, doctorProxiedStoreRetiresWhenIdle
+	t.Cleanup(func() {
+		doctorProxiedStoreNotRunning, doctorProxiedStoreScope, doctorProxiedStoreRetiresWhenIdle = oldLive, oldScope, oldIdle
+	})
+	type want struct {
+		state  doctorScopeState
+		status doctor.CheckStatus
+		msg    string
+	}
+	for _, tc := range []struct {
+		name                       string
+		running, finite, live, sus bool
+		want                       want
+	}{
+		{name: "running/finite/live", running: true, finite: true, live: true, want: want{state: doctorScopeReadable}},
+		{name: "running/finite/retired wakes", running: true, finite: true, want: want{state: doctorScopeReadable}},
+		{name: "running/never/dead warns", running: true, want: want{doctorScopeStopped, doctor.StatusWarning, doctor.StoreNotRunningMessage}},
+		{name: "running/never/live", running: true, live: true, want: want{state: doctorScopeReadable}},
+		{name: "stopped/finite/absent never starts", finite: true, want: want{doctorScopeStopped, doctor.StatusOK, doctor.StoreNotRunningMessage}},
+		{name: "stopped/never/absent", want: want{doctorScopeStopped, doctor.StatusOK, doctor.StoreNotRunningMessage}},
+		{name: "stopped/live", live: true, want: want{state: doctorScopeReadable}},
+		{name: "running/suspended/finite/absent", running: true, finite: true, sus: true, want: want{doctorScopeSuspended, doctor.StatusOK, doctor.StoreSuspendedMessage}},
+		{name: "running/suspended/live", running: true, live: true, sus: true, want: want{doctorScopeSuspended, doctor.StatusOK, doctor.StoreSuspendedMessage}},
+		{name: "stopped/suspended", sus: true, want: want{doctorScopeSuspended, doctor.StatusOK, doctor.StoreSuspendedMessage}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doctorProxiedStoreScope = func(string) bool { return true }
+			doctorProxiedStoreNotRunning = func(string) bool { return !tc.live }
+			doctorProxiedStoreRetiresWhenIdle = func(string) bool { return tc.finite }
+			gate := newDoctorStoreGate(tc.running, func(string) bool { return tc.sus })
+			scope := filepath.Join(t.TempDir(), "r1")
+			if got := gate.State(scope); got != tc.want.state {
+				t.Fatalf("State = %v, want %v", got, tc.want.state)
+			}
+			realCheck := doctor.ErrorCheck("rig:r1:beads", "the real check")
+			c := gate.Check(realCheck, []string{scope}, []string{"r1"})
+			if tc.want.state == doctorScopeReadable {
+				if c != realCheck {
+					t.Fatalf("readable scope got a stand-in: %T", c)
+				}
+				return
+			}
+			r := c.Run(&doctor.CheckContext{})
+			if r.Status != tc.want.status || !strings.Contains(r.Message, tc.want.msg) {
+				t.Fatalf("stand-in = %v %q, want %v %q", r.Status, r.Message, tc.want.status, tc.want.msg)
+			}
+			opened := false
+			if _, err := gate.StoreFactory(func(string) (beads.Store, error) { opened = true; return nil, nil })(scope); err == nil || opened {
+				t.Fatalf("store factory opened a skipped scope (err=%v)", err)
+			}
+		})
+	}
+}
+
+// A suspended city under a running controller: every check that reads the
+// city's proxied store reports "not checked: suspended" with OK status, and
+// the store is never opened. (Suspended rigs are already left out of doctor's
+// per-rig checks entirely.)
+func TestBuildDoctorChecksLeavesASuspendedCityCold(t *testing.T) {
+	cityDir, cfg := doctorStoreGateCity(t)
+	stubDoctorStoreLiveness(t)
+	oldScope := doctorProxiedStoreScope
+	t.Cleanup(func() { doctorProxiedStoreScope = oldScope })
+	doctorProxiedStoreScope = func(string) bool { return true }
+	t.Setenv("GC_SUSPENDED", "1")
+	doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error {
+		t.Error("bead-store preflight ran against a suspended city")
+		return nil
+	}
+
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{ControllerRunning: true, SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true})
+	for _, name := range []string{"agent-sessions", "beads-store", "custom-types:city", "hold-label-conventions:city"} {
+		r := runDoctorCheckNamed(t, checks, name)
+		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, doctor.StoreSuspendedMessage) {
+			t.Errorf("%s = %v %q, want %q", name, r.Status, r.Message, doctor.StoreSuspendedMessage)
 		}
 	}
 }

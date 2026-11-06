@@ -964,7 +964,7 @@ func TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot(t *testing.T) {
 
 		for _, longLived := range []bool{false, true} {
 			if _, err := openStoreResultAtForCityWithConfig(
-				cityDir, cityDir, &config.City{}, gate.ModeUnset, false, false, longLived); err != nil {
+				cityDir, cityDir, &config.City{}, gate.ModeUnset, false, false, longLived, nil); err != nil {
 				t.Fatalf("openStoreResultAtForCityWithConfig(longLived=%v): %v", longLived, err)
 			}
 			if captured.LongLived != longLived {

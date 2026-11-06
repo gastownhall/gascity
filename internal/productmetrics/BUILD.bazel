@@ -1,5 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# //cmd/gc:gc_productmetrics_testhook_test builds this package with -tags
+# productmetrics_testhook; gazelle lists the tagged files in srcs, and
+# rules_go drops them again in every configuration without the tag.
+# gazelle:build_tags integration,productmetrics_testhook
+
 go_library(
     name = "productmetrics",
     srcs = [
@@ -12,6 +17,7 @@ go_library(
         "notice_content.go",
         "pause.go",
         "platform_unsupported.go",
+        "productmetrics_testhook.go",
         "quota.go",
         "release.go",
         "service.go",
@@ -149,6 +155,11 @@ go_test(
     }),
 )
 
+exports_files(
+    ["command_ids_gen.go"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -157,6 +168,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )
