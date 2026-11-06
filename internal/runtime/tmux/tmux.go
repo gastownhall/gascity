@@ -998,6 +998,7 @@ func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err != nil {
 		return err
 	}
+	command = plan.execPaneRoot(command)
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	cmds := [][]string{args}
@@ -6329,7 +6330,7 @@ func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime
 		return err
 	}
 	if plan := t.planCapture(arm); plan != nil {
-		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.wrapRelay(command)), plan.armCommands(target, true))
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.execPaneRoot(plan.wrapRelay(command))), plan.armCommands(target, true))
 		t.programArms.noteArmed(plan)
 		if err != nil {
 			return err
