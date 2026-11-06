@@ -889,3 +889,20 @@ func TestHookClaimWindowCountsTimeBeforeTheWorkQuery(t *testing.T) {
 		t.Fatalf("invocation_age_ms = %d, want >= 2500: the age must count the slow fence open", expiries[0].InvocationAgeMS)
 	}
 }
+
+// TestHookClaimWindowStillClaimsAfterAQuickPreamble is the control for the test
+// above: the identical city and window, with a fence open that leaves the window
+// open. It must reach the claim mutation and report no expiry, which a fence
+// that refused unconditionally, or measured the start and the age on different
+// clocks, would not.
+func TestHookClaimWindowStillClaimsAfterAQuickPreamble(t *testing.T) {
+	code, stdout, stderr, argvLog, cityDir := runHookClaimWithSlowFence(t, 1500*time.Millisecond)
+
+	if !nonTurnProbeClaimed(t, argvLog) {
+		t.Fatalf("a claim inside its 2s window did not reach the claim mutation; code=%d stdout=%q stderr=%s\nbd argv log:\n%s",
+			code, stdout, stderr, readFileForTest(t, argvLog))
+	}
+	if expiries := hookClaimWindowExpiries(t, cityDir); len(expiries) != 0 {
+		t.Fatalf("claim-window-expired events = %+v, want none inside the window", expiries)
+	}
+}
