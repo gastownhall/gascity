@@ -33,7 +33,6 @@ var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
 	"residency_topology.go Server.residencyTopology map-key":          {Count: 1, Reason: "groups raw class stores into bindings by store value; T7 residency topology"},
 	"residency_topology.go apiResidencyBindings map-key":              {Count: 1, Reason: "the grouping map residencyTopology builds; T7 residency topology"},
 	"rig_graph_legs.go workflowGraphStoreInfo eq":                     {Count: 1, Reason: "graphStore == CityBeadStore(): both raw; T7 workflow legs"},
-	"session_ops.go sameStoreValue eq":                                {Count: 1, Reason: "the panic-safe raw == helper serverOps.store uses; T6b replaces it with beads.SameStore"},
 }
 
 // TestStoreIdentityGuard holds internal/api's store comparisons to the

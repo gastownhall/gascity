@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -297,8 +298,8 @@ func (s *Server) sessionMCPServers(template, providerName, identity, workDir, tr
 }
 
 func (s *Server) sessionMetadata(sessionID string) map[string]string {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
 	bead, err := store.Get(sessionID)

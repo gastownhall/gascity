@@ -54,6 +54,7 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	mailBeadStore     beads.Store // relocated messaging store (Stores().Mail only); nil falls back to cityBeadStore (default backend)
 	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
 	// the nudges store.
 	nudgeQueue NudgeQueue
@@ -236,10 +237,11 @@ func (f *fakeState) Stores() storeref.Stores {
 func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
 	out := map[coordclass.Class]beads.Store{}
 	for class, relocated := range map[coordclass.Class]beads.Store{
-		coordclass.ClassGraph:    f.graphBeadStore,
-		coordclass.ClassSessions: f.sessionsBeadStore,
-		coordclass.ClassOrders:   f.ordersBeadStore,
-		coordclass.ClassNudges:   f.nudgesBeadStore,
+		coordclass.ClassGraph:     f.graphBeadStore,
+		coordclass.ClassSessions:  f.sessionsBeadStore,
+		coordclass.ClassOrders:    f.ordersBeadStore,
+		coordclass.ClassNudges:    f.nudgesBeadStore,
+		coordclass.ClassMessaging: f.mailBeadStore,
 	} {
 		if relocated != nil && relocated != f.cityBeadStore {
 			out[class] = relocated
