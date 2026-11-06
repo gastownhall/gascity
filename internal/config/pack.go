@@ -108,8 +108,8 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions) error {
 	var expanded []Agent
-	// City-scoped agents and named sessions encountered through a rig-scope
-	// include/import are hoisted to city scope (deduped) rather than dropped,
+	// City-scoped agents and named sessions encountered through a legacy
+	// rig-scope include are hoisted to city scope (deduped) rather than dropped,
 	// so a city-scoped agent that lives in a rig-included pack (e.g. a routing
 	// coordinator in a pack only ever rig-included) still registers. Collected
 	// here across all rigs and merged into cfg once below.
@@ -417,10 +417,12 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 				rigImportPackDirs = prependUniqueBlock(rigImportPackDirs, mcpTopoDirs...)
 
-				// Hoist city-scoped agents/sessions to city scope instead of
-				// dropping them at the rig-import boundary.
-				hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
-				hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
+				// A rig-scoped import expands only the pack's rig-scoped and
+				// unscoped parts (pack-spec §2.4). Its city-scoped agents and
+				// named sessions are not hoisted: a city that wants them
+				// imports the pack at city scope. Hoisting them here started
+				// always-on city sessions from a pack bound to one rig.
+				// Legacy rig includes above keep the hoist.
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -540,7 +542,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		cfg.NamedSessions = append(cfg.NamedSessions, rigNamedSessions...)
 	}
 	cfg.Agents = append(cfg.Agents, expanded...)
-	// Merge hoisted city-scoped agents/sessions (from rig includes/imports)
+	// Merge hoisted city-scoped agents/sessions (from legacy rig includes)
 	// into the city set, deduped by qualified name. The same pack is commonly
 	// included by several rigs; without dedup the same city-scoped agent would
 	// be registered once per rig and collide (see duplicate_agent_error.go).

@@ -1595,15 +1595,134 @@ scope = "city"
 	if !found["proj/gs.polecat"] {
 		t.Errorf("missing proj/gs.polecat; got: %v", found)
 	}
-	// City-scoped agent reached through a rig-level import is hoisted to city
-	// scope (rig dir cleared) rather than dropped, so it registers as the
-	// binding-qualified "gs.mayor" — not under the rig prefix "proj/gs.mayor".
-	if !found["gs.mayor"] {
-		t.Errorf("city-scoped mayor should be hoisted from rig import as gs.mayor; got: %v", found)
+	// A rig-level import expands only rig-scoped parts (pack-spec §2.4): the
+	// city-scoped mayor registers neither at city scope nor under the rig.
+	if found["gs.mayor"] || found["proj/gs.mayor"] {
+		t.Errorf("city-scoped mayor leaked from a rig import; got: %v", found)
 	}
-	if found["proj/gs.mayor"] {
-		t.Errorf("hoisted mayor should not retain rig prefix proj/gs.mayor; got: %v", found)
+}
+
+// TestImport_RigLevelImportDoesNotLeakCityScope proves a rig-scoped import
+// leaves the pack's city-scoped agents and always-on named sessions out of
+// the city, while a city-level import of the same pack still brings them in.
+func TestImport_RigLevelImportDoesNotLeakCityScope(t *testing.T) {
+	const pack = `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+
+[[agent]]
+name = "witness"
+scope = "rig"
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+mode = "always"
+`
+	load := func(t *testing.T, cityImport bool) *City {
+		t.Helper()
+		dir := t.TempDir()
+		cityDir := filepath.Join(dir, "city")
+		gasDir := filepath.Join(dir, "gastown")
+		for _, d := range []string{cityDir, gasDir} {
+			mustMkdirAll(t, d, 0o755)
+		}
+		cityToml := `
+[workspace]
+name = "test"
+`
+		if cityImport {
+			cityToml += `
+[imports.gastown]
+source = "../gastown"
+`
+		}
+		cityToml += `
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gastown]
+source = "../gastown"
+`
+		writeTestFile(t, cityDir, "city.toml", cityToml)
+		writeTestFile(t, gasDir, "pack.toml", pack)
+		cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+		if err != nil {
+			t.Fatalf("LoadWithIncludes: %v", err)
+		}
+		return cfg
 	}
+	cityAgents := func(cfg *City) map[string]bool {
+		got := map[string]bool{}
+		for _, a := range explicitAgents(cfg.Agents) {
+			got[a.QualifiedName()] = true
+		}
+		return got
+	}
+	citySessions := func(cfg *City) map[string]string {
+		got := map[string]string{}
+		for _, s := range cfg.NamedSessions {
+			got[s.Dir+"|"+s.Template] = s.Mode
+		}
+		return got
+	}
+
+	t.Run("rig import only", func(t *testing.T) {
+		cfg := load(t, false)
+		agents := cityAgents(cfg)
+		for _, want := range []string{"proj/gastown.polecat", "proj/gastown.witness"} {
+			if !agents[want] {
+				t.Errorf("missing rig agent %s; got %v", want, agents)
+			}
+		}
+		for _, leak := range []string{"gastown.deacon", "proj/gastown.deacon"} {
+			if agents[leak] {
+				t.Errorf("city-scoped agent %s leaked from the rig import; got %v", leak, agents)
+			}
+		}
+		for key, mode := range citySessions(cfg) {
+			if strings.HasSuffix(key, "deacon") {
+				t.Errorf("city-scoped named session %s (mode %q) leaked from the rig import", key, mode)
+			}
+		}
+		if _, ok := citySessions(cfg)["proj|witness"]; !ok {
+			t.Errorf("rig named session witness missing; got %v", citySessions(cfg))
+		}
+	})
+	t.Run("city import still brings the city parts", func(t *testing.T) {
+		cfg := load(t, true)
+		agents := cityAgents(cfg)
+		if !agents["gastown.deacon"] || agents["proj/gastown.deacon"] {
+			t.Errorf("want city-scoped gastown.deacon from the city import only; got %v", agents)
+		}
+		if !agents["proj/gastown.polecat"] {
+			t.Errorf("missing rig agent proj/gastown.polecat; got %v", agents)
+		}
+		n := 0
+		for key := range citySessions(cfg) {
+			if strings.HasSuffix(key, "deacon") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("deacon named sessions = %d, want 1 from the city import; got %v", n, citySessions(cfg))
+		}
+	})
 }
 
 func TestImport_RigImportsCoexistWithIncludes(t *testing.T) {
