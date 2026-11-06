@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -212,5 +213,42 @@ func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
 	}
 	if got, err := ops.ReadSessionTrigger("gc-no-such-session"); err == nil {
 		t.Fatalf("ReadSessionTrigger of a missing row = %q, nil; want an error", got)
+	}
+}
+
+// TestHookCityClaimOpsCarryTheInvocationStart pins that the invocation start and
+// clock cmdHookWithOptions stamps onto the city reach the claim ops and survive
+// the production wrappers and repeated defaulting: the window the claim fences
+// check is the one that opened at command entry, not one a wrapper dropped or a
+// second applyDefaults refreshed.
+func TestHookCityClaimOpsCarryTheInvocationStart(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := writeFenceTestCity(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	start := time.Now()
+	city := newHookCity(cityDir, cfg)
+	city.invokedAt = start
+	clock := start.Add(3 * time.Second)
+	city.now = func() time.Time { return clock }
+
+	// The composition the claim door builds: bead events, then the class route
+	// (nil on a city that relocates nothing), then the claim loop's own
+	// defaulting.
+	ops := withHookClaimBeadEvents(city.claimOps(), cityDir)
+	routed, proceed := routedHookClaimOps(ops, nil, nil, city.recorder, io.Discard)
+	if !proceed {
+		t.Fatal("a city that relocates nothing must proceed unrouted")
+	}
+	routed.applyDefaults()
+
+	if !routed.InvokedAt.Equal(start) {
+		t.Fatalf("ops InvokedAt = %v, want the invocation start %v carried through the wrappers and re-defaulting",
+			routed.InvokedAt, start)
+	}
+	if got := routed.invocationAge(); got != 3*time.Second {
+		t.Fatalf("ops invocation age = %s, want 3s measured on the invocation's clock", got)
 	}
 }
