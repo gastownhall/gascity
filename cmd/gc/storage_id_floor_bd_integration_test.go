@@ -105,7 +105,7 @@ func TestTheCityFloorHoldsOnARealBdStore(t *testing.T) {
 	}
 
 	again, err := reserveCityIDs(dir, carried)
-	if err != nil || again.Before != floor || again.Floor != floor {
+	if err != nil || len(again.Changes) != 0 || again.Floor != floor {
 		t.Fatalf("a second reservation = %+v (%v), want the floor already in force", again, err)
 	}
 }
@@ -179,7 +179,7 @@ func TestTheDefaultFloorOpenerReachesARealBdCity(t *testing.T) {
 		t.Fatalf("bd reads %s = %q, want 6", bdMinHashLengthKey, v)
 	}
 	again, err := reserveCityIDs(city, carried)
-	if err != nil || again.Before != 6 {
+	if err != nil || len(again.Changes) != 0 || again.Floor != 6 {
 		t.Fatalf("a second reservation = %+v (%v), want the floor already in force", again, err)
 	}
 	if id := parseCreatedBeadID(t, must("bd", "create", "--json", "minted", "-t", "task")); len(rigIDHashSuffix(id)) < 6 {

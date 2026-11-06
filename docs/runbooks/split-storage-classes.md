@@ -449,16 +449,20 @@ Each row keeps its id and is stamped `gc.root_store_ref = rig:<rig>` (wisps and
 steps included). Edges inside the moved set are copied; an open `blocks` edge
 onto rig work becomes a cross-store gate in the binding; every other boundary
 edge is dropped and recorded on the row (`gc.migrated_cross_edges`) and in the
-rig's backup. Shapes that would need a cross-store edge are refused by bead,
-with the fix. Per rig it writes `infra.rig.<rig>.migrated.beads` (the manifest)
-and `infra.rig.<rig>.migrated` beside `infra.migrated`, backs the rows up to
+rig's backup. A gate minted before the import onto one of the rig's graph beads
+(by the city copy in Step 4, or by another rig's import) keeps working once the
+import moves that bead: the gate lane reads the binding too, and closes the gate
+once the bead closes there. Shapes that would need a cross-store edge are
+refused by bead, with the fix. Per rig it writes
+`infra.rig.<rig>.migrated.beads` (the manifest) and `infra.rig.<rig>.migrated`
+beside `infra.migrated`, backs the rows up to
 `infra.rig.<rig>.retained-source.jsonl`, raises the rig's `min_hash_length` so a
 later short id cannot re-mint an imported one, then clears the rig's copies and
 marks `.gc/storage-infra-cleared.rig.<rig>.json` complete. A rig with no graph
 row is recorded `infra.rig.<rig>.clean`. Suspended rigs are imported without
 being resumed; a rig that cannot be read blocks only itself. Every step resumes:
-run the command again after any failure. A pending clear makes boot refuse
-until the re-run finishes it.
+run the command again after any failure. A pending clear makes boot refuse until
+the re-run finishes it.
 
 `gc storage status` exits non-zero while any rig awaits import, holds a pending
 clear, or holds rows written after its import.
