@@ -1474,6 +1474,71 @@ func TestTerminateExitsCleanly(t *testing.T) {
 	}
 }
 
+// TERM must end the session even when it lands after bash's last trap check
+// for the idle wait's read and before read(2) blocks. bash runs a trap only
+// between commands, or when a signal interrupts the read(2) it is blocked in,
+// so a TERM in that window gets neither: its trap waits for the next byte of
+// input, which an idle pane never sends (ga-f4lela, #7088). What runs it is
+// the idle wait's timer: the read gives up every IDLE_WAKE_SECS, and the next
+// command runs the pending trap. TestTerminateExitsCleanly sends its TERM
+// after the ready marker, which aims at the window but almost never lands in
+// it, so a BASH_ENV shim puts the TERM there on every run.
+//
+// The shim sends the TERM from a command substitution in the arguments of the
+// idle wait's `builtin read`. bash checks for traps before it expands a
+// command's words and not again before read(2), so the trap is still pending
+// when the read starts: without the timer the adapter hangs on every run, on
+// bash 3.2, 5.2 and 5.3 alike. The signal comes from the substitution's own
+// child, after bash has parsed the substitution, so the trap cannot run inside
+// the expansion (the hazard TestNoSubstitutionsWhileSignalTrapsAreArmed keeps
+// out of the adapter). A TERM sent as a command of its own proves nothing: its
+// trap runs at the next command, before the read, with or without the timer.
+// The shim finds the idle wait by its variable, not by its -t, so it still
+// fires if the timer is gone.
+func TestTermBeforeTheIdleReadBlocksStillEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	const termBeforeIdleRead = `read() {
+    if [[ "${!#}" == line && -z "${term_shim_fired-}" ]]; then
+        term_shim_fired=1
+        builtin read "$@" $(kill -TERM $$; echo "shim: sent TERM ahead of the idle read" >&2)
+        return
+    fi
+    builtin read "$@"
+}
+`
+	for _, tc := range []struct {
+		name string
+		tty  bool
+	}{
+		{name: "piped"},
+		{name: "tty", tty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			shim := filepath.Join(t.TempDir(), "term-before-idle-read.bash")
+			if err := os.WriteFile(shim, []byte(termBeforeIdleRead), 0o644); err != nil {
+				t.Fatalf("write shim: %v", err)
+			}
+			h := newHarness(t, map[string]string{"BASH_ENV": shim})
+			start := h.start
+			if tc.tty {
+				start = h.startOnTTY
+			}
+			// stdin stays open and gets nothing, so only the TERM's trap can end
+			// the session; wait fails the test if it outlives adapterWaitBudget.
+			out, code := start().wait()
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 from the TERM trap:\n%s", code, out)
+			}
+			if !strings.Contains(out, "zcode-repl ready") {
+				t.Fatalf("adapter exited before it reached the idle wait:\n%s", out)
+			}
+		})
+	}
+}
+
 // Behavior 8: sid persistence across restarts, with the unvalidated gate.
 func TestSidRoundTripsAcrossRestarts(t *testing.T) {
 	t.Parallel()
