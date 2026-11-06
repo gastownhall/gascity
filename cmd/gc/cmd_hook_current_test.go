@@ -431,3 +431,80 @@ func TestDoHookCurrentCountsADuplicatedDeliveryOnce(t *testing.T) {
 		t.Fatalf("--id-only = (%d, %q), want (0, \"gcg-a\\n\"); stderr=%s", code, stdout, stderr)
 	}
 }
+
+// TestDoHookCurrentRefusesWhatItCannotRead is AC-4: a read or decode failure
+// on anything the decision needs exits 1 with nothing on stdout and names the
+// failed operation and id, even after another candidate already verified. A
+// claim missing from the legs while a leg could not be read is unknown, not
+// stale; a claim found in the legs it could read still verifies.
+func TestDoHookCurrentRefusesWhatItCannotRead(t *testing.T) {
+	closed := hookCurrentWork("gcg-old", "closed", hookCurrentSessionID)
+	failing := func(f *hookCurrentFixture, id string) {
+		store := &ownershipFailingGetStore{Store: f.store}
+		store.arm(id)
+		f.ctx.legs = testWorkLegs("", f.ctx.cfg, store, nil)
+	}
+	for _, tc := range []struct {
+		name  string
+		stamp string
+		cell  string
+		work  []beads.Bead
+		setup func(*hookCurrentFixture)
+		want  []string
+	}{
+		{name: "malformed delivery cell", stamp: "gcg-42", cell: "{not json", work: []beads.Bead{hookCurrentHeld("gcg-42")}, want: []string{session.WorkStartedKey}},
+		{name: "unknown delivery cell version", stamp: "gcg-42", cell: `{"v":9,"claims":[]}`, work: []beads.Bead{hookCurrentHeld("gcg-42")}, want: []string{session.WorkStartedKey, "version"}},
+		{
+			name: "stamp unreadable", stamp: "gcg-42", work: []beads.Bead{hookCurrentHeld("gcg-42")},
+			setup: func(f *hookCurrentFixture) { failing(f, "gcg-42") },
+			want:  []string{"reading claim gcg-42"},
+		},
+		{
+			name: "newer delivery unreadable", stamp: "gcg-42", cell: hookCurrentStartedCell("gcg-new", "gcg-42"),
+			work:  []beads.Bead{hookCurrentHeld("gcg-42"), hookCurrentHeld("gcg-new")},
+			setup: func(f *hookCurrentFixture) { failing(f, "gcg-new") },
+			want:  []string{"reading claim gcg-new"},
+		},
+		{
+			name: "candidate unreadable after another verified", stamp: "gcg-old", cell: hookCurrentStartedCell("gcg-a", "gcg-b", "gcg-old"),
+			work:  []beads.Bead{closed, hookCurrentHeld("gcg-a"), hookCurrentHeld("gcg-b")},
+			setup: func(f *hookCurrentFixture) { failing(f, "gcg-b") },
+			want:  []string{"reading claim gcg-b"},
+		},
+		{
+			name: "stamp missing with a leg unread", stamp: "gcg-gone", cell: hookCurrentStartedCell("gcg-a", "gcg-gone"),
+			work:  []beads.Bead{hookCurrentHeld("gcg-a")},
+			setup: func(f *hookCurrentFixture) { f.ctx.gaps = []string{`rig "far" did not open`} },
+			want:  []string{"reading claim gcg-gone", `rig "far" did not open`},
+		},
+		{
+			name: "no usable work legs", stamp: "gcg-42", work: []beads.Bead{hookCurrentHeld("gcg-42")},
+			setup: func(f *hookCurrentFixture) { f.ctx.legs = WorkLegs{} },
+			want:  []string{"reading claim gcg-42"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookCurrentFixture(t, tc.stamp, tc.cell, tc.work...)
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			code, stdout, stderr := f.run(true)
+			if code != 1 || stdout != "" {
+				t.Fatalf("--id-only = (%d, %q), want exit 1 with empty stdout; stderr=%s", code, stdout, stderr)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr = %q, want it to name %q", stderr, want)
+				}
+			}
+		})
+	}
+
+	t.Run("found claim verifies with a leg unread", func(t *testing.T) {
+		f := newHookCurrentFixture(t, "gcg-42", hookCurrentStartedCell("gcg-42"), hookCurrentHeld("gcg-42"))
+		f.ctx.gaps = []string{`rig "far" is suspended`}
+		if code, stdout, stderr := f.run(true); code != 0 || stdout != "gcg-42\n" || stderr != "" {
+			t.Fatalf("--id-only = (%d, %q, %q), want the found claim verified", code, stdout, stderr)
+		}
+	})
+}

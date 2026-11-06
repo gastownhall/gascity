@@ -20,6 +20,10 @@ type hookCurrentContext struct {
 	sessFront *session.Store
 	cfg       *config.City
 	legs      WorkLegs
+	// gaps names the work legs this invocation could not read: rigs whose
+	// store failed to open, and suspended rigs, which no leg set reads. A
+	// claim missing from the legs it could read is unknown while one is set.
+	gaps []string
 }
 
 // openHookCurrentContext opens the city the calling shell resolves for one
@@ -42,23 +46,36 @@ func openHookCurrentContext() (hookCurrentContext, error) {
 	if err != nil {
 		return hookCurrentContext{}, fmt.Errorf("opening city store: %w", err)
 	}
-	rigs, _ := openStandaloneRigStores(cityRigs(cfg), cityPath, oneShotRigStoreOpener(cfg), sequentialRigStoreOpens)
+	rigs, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, oneShotRigStoreOpener(cfg), sequentialRigStoreOpens)
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(cliStores(cityPath, store).Work()), rigs)
+	var gaps []string
+	for _, f := range failures {
+		gaps = append(gaps, fmt.Sprintf("rig %q did not open: %v", f.rig, f.err))
+	}
+	for _, rig := range legs.suspendedRigs() {
+		gaps = append(gaps, fmt.Sprintf("rig %q is suspended", rig))
+	}
 	return hookCurrentContext{
 		sessFront: cliSessionFrontDoor(store, cfg, cityPath),
 		cfg:       cfg,
-		legs:      workLegsFromCensus(cityPath, cfg, cityWorkLegOf(cliStores(cityPath, store).Work()), rigs),
+		legs:      legs,
+		gaps:      gaps,
 	}, nil
 }
 
 // claimCheck reads claim id live from the work leg that owns it by residency
 // (WorkLegs.readLive) and reports why sessionID does not currently hold it
-// under scope ("" when it does). A read failure is an error, never a verdict.
+// under scope ("" when it does). A read failure is an error, never a verdict,
+// and so is a miss while a leg went unread (gaps).
 func (c hookCurrentContext) claimCheck(id, sessionID string, scope ReleaseScope) (claimStaleReason, error) {
 	work, found, err := c.legs.readLive(id)
 	if err != nil {
 		return "", fmt.Errorf("reading claim %s: %w", id, err)
 	}
 	if !found {
+		if len(c.gaps) > 0 {
+			return "", fmt.Errorf("reading claim %s: not found in the work legs read, and %s", id, strings.Join(c.gaps, "; "))
+		}
 		return claimStaleGone, nil
 	}
 	return currentClaimStaleReason(work, sessionID, scope), nil
