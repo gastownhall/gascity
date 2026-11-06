@@ -12,10 +12,6 @@
 Users install from homebrew-core with `brew install gascity`. The tap stays
 available for emergency updates.
 
-Releases rely on the automated GitHub workflows alone: CI runs on every pull
-request and every push to `main`, and a tag push runs the publishing
-workflows below. There is no manual gate to run before tagging.
-
 ## How to Release
 
 ### Recommended: bump script
@@ -29,19 +25,26 @@ This rewrites the `[Unreleased]` section of `CHANGELOG.md` into `[X.Y.Z] - YYYY-
 ### Release candidates
 
 Use the **RC Release** workflow to produce downloadable release-candidate
-archives without updating Homebrew or publishing the stable release.
+archives for manual verification without updating Homebrew or publishing the
+stable release.
 
 Recommended path:
 
-1. Open **Actions → RC Release → Run workflow**.
-2. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
-3. Set `target_ref` to the exact commit SHA for the release candidate, a
-   `main` commit whose CI passed.
+1. Run the RC gate on the intended release branch or commit.
+2. Open **Actions → RC Release → Run workflow**.
+3. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
+4. Set `target_ref` to the exact RC-gate-passing commit SHA.
 
-The workflow creates the annotated RC tag if needed, builds GoReleaser
-archives for linux/darwin × amd64/arm64, and creates a GitHub **draft
-prerelease** with generated GoReleaser notes and downloadable assets. It does
-not update the Homebrew tap, create attestations, or mark the release latest.
+Nothing enforces step 1: the **RC Gate** workflow (`rc-gate.yml`) runs only
+when someone dispatches it, and neither `rc-release.yml` nor `release.yml`
+checks for a passing run. It is also the only workflow that checks the bundled
+pack pin (`BundledPackImportVersion`) against the content the release embeds.
+
+The RC Release workflow creates the annotated RC tag if needed, builds
+GoReleaser archives for linux/darwin × amd64/arm64, and creates a GitHub
+**draft prerelease** with generated GoReleaser notes and downloadable assets.
+It does not update the Homebrew tap, create attestations, or mark the release
+latest.
 
 Tag creation on the dispatch path uses the **gastownhall-release-tagger**
 GitHub App (an `Integration` bypass actor on the "Protect release tags"
@@ -131,7 +134,7 @@ The formula is in `Homebrew/homebrew-core`, and BrewTestBot bumps it automatical
 
 1. Tag push → GoReleaser creates the GitHub Release.
 2. BrewTestBot polls releases every ~3h, opens a PR to homebrew-core bumping the formula's `url` and `sha256`.
-3. Homebrew maintainers merge; bottles are built for macOS (arm64 + x86_64) and Linux.
+3. Homebrew maintainers merge; bottles are built for Apple Silicon macOS and Linux (arm64 + x86_64).
 4. `brew upgrade gascity` picks up the new version worldwide.
 
 Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stalls, check `https://github.com/Homebrew/homebrew-core/pulls?q=gascity` for stuck PRs.
