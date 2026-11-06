@@ -209,6 +209,9 @@ func (e *conversationLaneExec) note(stage string, err error) {
 // newConversationLaneExec returns the live executor for row's conversation.
 func newConversationLaneExec(deps laneExecDeps, row laneRow) *conversationLaneExec {
 	e := &conversationLaneExec{deps: deps, info: row.info, stop: row.stop, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, row.info), budget: laneProbeBudget}
+	// The executor decides for its conversation's session: a short-lived
+	// process records that session's shadow comparisons.
+	programShadowDecideFor(e.target.sessionName, e.target.sessionID, row.info.ID)
 	e.observe = func(t nudgeTarget) (worker.LiveObservation, error) {
 		switch {
 		case e.info.ID != "":

@@ -5548,6 +5548,23 @@ refuses to mint resumes at its next mint once the floor covers the store.
 The store defaults to this city's SQLite infrastructure binding; --dir names
 any other store directory (the directory holding beads.sqlite).
 
+With --id-floor it raises the city WORK store's bd id floor instead: it sets
+min_hash_length one past the longest hash suffix among the ids the city's
+copy manifest records as carried into the binding (those of the work store's
+own prefix whose suffix bd could have minted: base36, 3 to 8 characters), and
+max_hash_length with it when needed, so bd does not mint a carried id again
+after the clear removed it: every id it mints has a longer suffix than any
+carried one. Neither is set above 8, the longest suffix bd mints, so where a
+carried suffix already has 8 characters a new 8-character id only rarely
+could repeat one. It never lowers either setting, with one exception: one
+above 8 (an earlier import may have set both higher) is brought down to 8,
+since bd mints nothing longer and a hosted bd serve only pads ids to it. A
+second run changes nothing. It holds the controller lock and refuses while
+the city runs, like every writing storage verb. A file store needs no floor
+and a generic exec store cannot take one; both are reported and skipped. On a
+hosted bd store that refuses the write it names the value to set out of
+band. --id-floor takes no --floor, --dir or --prefix.
+
 ```
 gc storage repair-sequence [flags]
 ```
@@ -5556,6 +5573,7 @@ gc storage repair-sequence [flags]
 |------|------|---------|-------------|
 | `--dir` | string |  | store directory holding beads.sqlite (default: this city's SQLite infrastructure binding) |
 | `--floor` | string |  | new floor (int64, may be negative); omit to only report |
+| `--id-floor` | bool |  | raise the city work store's bd min_hash_length past every id the copy carried into the binding (not with --floor, --dir or --prefix) |
 | `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
 
 ## gc storage snapshot

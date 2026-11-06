@@ -528,6 +528,19 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
 			return request
 		}},
+		{"an open work bead is blocked by an open infrastructure bead (D9)", "a work store cannot hold a cross-store gate", func(t *testing.T) storageOperatorRequest {
+			request, _, _ := preflightReadyCity(t, 0)
+			source, err := openInfraMigrationSource(request.CityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			running := mustCreateInfraBead(t, source, beads.Bead{Title: "graft running", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+			waiting := mustCreateInfraBead(t, source, beads.Bead{Title: "work waiting on it", Type: "task"})
+			if err := source.DepAdd(waiting.ID, running.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}},
 		{"the destination already holds beads this migration did not write", "did not write", func(t *testing.T) storageOperatorRequest {
 			request, cfg, _ := preflightReadyCity(t, 1)
 			target := mustResolveInfraTarget(t, request.CityPath, cfg)

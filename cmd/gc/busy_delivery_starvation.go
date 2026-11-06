@@ -100,6 +100,7 @@ func starvedQueuedNudgeBypass(target nudgeTarget, sp runtime.Provider, now time.
 // switch on (programHoldDeclared), and decided is false wherever it took
 // none.
 func starvedBypassLook(target nudgeTarget, sp runtime.Provider, now time.Time) (how worker.NudgeDelivery, hold, decided bool, err error) {
+	programShadowDecideForTarget(target)
 	how, hold, err = starvedQueuedNudgeDelivery(sp, target.sessionName)
 	if err != nil || how != worker.NudgeDeliveryImmediate {
 		return how, hold, false, err
@@ -119,7 +120,7 @@ func starvedBypassLook(target nudgeTarget, sp runtime.Provider, now time.Time) (
 
 // programHoldDeclared reports whether target's resolved provider declares
 // hold_mid_turn under the city switch on and its transport (the arm every
-// start derives, config.ProgramStatusArmFor).
+// heal converges to, config.ProgramStatusArmFor).
 func (t nudgeTarget) programHoldDeclared() bool {
 	if t.cfg == nil || t.resolved == nil || t.cfg.Session.ProgramStatusMode() != runtime.ProgramStatusOn {
 		return false

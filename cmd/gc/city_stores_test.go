@@ -475,6 +475,31 @@ func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
 	}
 }
 
+// TestControllerMessagingStoreIsTheSessionsStore pins the premise the API's
+// named-session hand-off rests on (typed-stores T6b, R13): it reassigns a
+// retired session's external-message bindings and participants through the
+// city's messaging handle, where they always went through its sessions
+// store. On both topologies the controller serves, a single store and the
+// whole split, the two handles are one store.
+func TestControllerMessagingStoreIsTheSessionsStore(t *testing.T) {
+	for name, routes := range map[string]func(binding beads.Store) *storageRoutes{
+		"whole split":  messagingSplitRoutes,
+		"single store": func(beads.Store) *storageRoutes { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			binding := splittest.NewBindingStore(t)
+			cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: splittest.NewWorkStore(t, "mc"), storageRoutes: routes(binding)}
+			st := cs.Stores()
+			if !beads.SameStore(st.Mail(), st.Sessions()) {
+				t.Errorf("Mail() wraps %v, Sessions() %v: the hand-off would move bindings in a store other than the sessions store", resolvedKey(st.Mail().Store), resolvedKey(st.Sessions().Store))
+			}
+			if name == "whole split" && !beads.SameStore(st.Mail(), binding) {
+				t.Errorf("Mail() wraps %v, want the binding", resolvedKey(st.Mail().Store))
+			}
+		})
+	}
+}
+
 // TestSessionStartMailReadsTheMessagingBindingOnASplitCity pins
 // sessionStartMailInjection's messaging route end to end: on a split one-shot
 // city the auto-handoff mail lives in the binding, the hook is handed the

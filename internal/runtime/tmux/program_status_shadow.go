@@ -110,9 +110,13 @@ type shadowInterrupt struct {
 }
 
 // shadowSink returns the sink comparisons go to, nil unless the switch is
-// shadow and a sink is configured.
+// shadow, a sink is configured, and the process records comparisons
+// (Config.ComparisonEnabled).
 func (t *Tmux) shadowSink() runtime.ProgramStatusComparisonSink {
 	if t.programStatusMode() != runtime.ProgramStatusShadow {
+		return nil
+	}
+	if t.cfg.ComparisonEnabled != nil && !t.cfg.ComparisonEnabled() {
 		return nil
 	}
 	return t.cfg.ComparisonSink

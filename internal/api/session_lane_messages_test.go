@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -1037,7 +1038,7 @@ func TestExtmsgNotifyUnderLaneProposesANotice(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	info := e.session(t, "Member")
 	s := e.server(t)
-	if err := s.sendBackgroundMessageToSession(context.Background(), e.fs.SessionsBeadStore().Store, info.ID, "new message in #ops"); err != nil {
+	if err := s.sendBackgroundMessageToSession(context.Background(), beadstest.Sessions(e.fs.SessionsBeadStore().Store), info.ID, "new message in #ops"); err != nil {
 		t.Fatalf("notice: %v", err)
 	}
 	open, err := st.ops.ListOpen(info.ID)
@@ -1278,7 +1279,7 @@ func TestExtmsgNoticeUnderLaneFitsTheLanePayload(t *testing.T) {
 		!strings.HasPrefix(notice, "<system-reminder>\nNew message in shared conversation slack/C123") || !strings.HasSuffix(notice, "</system-reminder>") {
 		t.Fatalf("notice of %d bytes (valid UTF-8 %v) = %q...%q; want the reminder cut to fit with its note", len(notice), utf8.ValidString(notice), notice[:80], notice[len(notice)-200:])
 	}
-	if err := s.sendBackgroundMessageToSession(context.Background(), e.fs.SessionsBeadStore().Store, info.ID, notice); err != nil {
+	if err := s.sendBackgroundMessageToSession(context.Background(), beadstest.Sessions(e.fs.SessionsBeadStore().Store), info.ID, notice); err != nil {
 		t.Fatalf("notice: %v", err)
 	}
 	open, err := st.ops.ListOpen(info.ID)

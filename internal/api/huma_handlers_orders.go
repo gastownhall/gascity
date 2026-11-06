@@ -232,16 +232,21 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	}
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
+		var cursor uint64
 		if fresh {
-			cursorFn = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))
+			cursor = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))(a.ScopedName())
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
 				labelSets = append(labelSets, row.bead.Labels)
 			}
-			cursor := orders.MaxSeqFromLabels(labelSets)
-			cursorFn = func(string) uint64 { return cursor }
+			cursor = orders.MaxSeqFromLabels(labelSets)
 		}
+		start, err := orders.CheckEventStart(ep, cursor)
+		if err != nil {
+			return orders.TriggerResult{Due: false, ReadFailed: true, Reason: "event: " + err.Error()}
+		}
+		cursorFn = func(string) uint64 { return start }
 	}
 	return orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 }
