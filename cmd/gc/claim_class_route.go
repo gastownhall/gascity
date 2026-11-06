@@ -830,17 +830,17 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// decided by the same read the claim-time seams use — the work leg first,
 	// the binding only on a proven absence — so a work-resident workflow
 	// keeps the exact unrouted call.
-	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	ops.InputVerdict = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates)
 		}
 		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
 		if err != nil {
-			return rootID, false, err
+			return workflowInputVerdict{RootID: rootID}, err
 		}
 		if !resident {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
 		return workflowInputDoneAcross(route.class, beads.WorkStore{Store: work}, candidate, identityCandidates)
