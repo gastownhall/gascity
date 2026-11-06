@@ -990,7 +990,10 @@ func TestWispAutocloseRetiresIdleWorkflowViaInputConvoyWhenInputTerminal(t *test
 	_ = store.Close(issue.ID)
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+	run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+	if !run.finished() {
+		t.Fatalf("retirement run unfinished (refused=%v failed=%v); a clean retirement finishes", run.refused, run.failed)
+	}
 
 	for _, id := range []string{root.ID, step.ID} {
 		got, err := store.Get(id)
@@ -1115,7 +1118,10 @@ func TestWispAutoclosePreservesHeldWorkflowStepsViaInputConvoy(t *testing.T) {
 		_ = store.Close(issue.ID)
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		if !run.finished() {
+			t.Fatalf("run unfinished (refused=%v failed=%v); a clean preservation finishes with nothing left undecided", run.refused, run.failed)
+		}
 
 		for _, id := range []string{root.ID, step.ID} {
 			got, err := store.Get(id)
@@ -1136,7 +1142,10 @@ func TestWispAutoclosePreservesHeldWorkflowStepsViaInputConvoy(t *testing.T) {
 		_ = store.Close(issue.ID)
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		if !run.finished() {
+			t.Fatalf("run unfinished (refused=%v failed=%v); a clean preservation finishes with nothing left undecided", run.refused, run.failed)
+		}
 
 		got, err := store.Get(root.ID)
 		if err != nil {
@@ -1161,7 +1170,10 @@ func TestWispAutoclosePreservesGatedWorkflowStepsViaInputConvoy(t *testing.T) {
 		_ = store.Close(issue.ID)
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		if !run.finished() {
+			t.Fatalf("run unfinished (refused=%v failed=%v); a clean preservation finishes with nothing left undecided", run.refused, run.failed)
+		}
 
 		for _, id := range []string{root.ID, step.ID} {
 			got, err := store.Get(id)
@@ -1186,7 +1198,10 @@ func TestWispAutoclosePreservesGatedWorkflowStepsViaInputConvoy(t *testing.T) {
 		_ = store.Close(issue.ID)
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		if !run.finished() {
+			t.Fatalf("run unfinished (refused=%v failed=%v); a clean preservation finishes with nothing left undecided", run.refused, run.failed)
+		}
 
 		for _, id := range []string{root.ID, routing.ID} {
 			got, err := store.Get(id)
@@ -1217,7 +1232,10 @@ func TestWispAutoclosePreservesWorkflowViaInputConvoyWhileInputNotTerminal(t *te
 		_ = store.Close(issue.ID)
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		if !run.finished() {
+			t.Fatalf("run unfinished (refused=%v failed=%v); a clean preservation finishes with nothing left undecided", run.refused, run.failed)
+		}
 
 		got, err := store.Get(root.ID)
 		if err != nil {
@@ -1242,7 +1260,10 @@ func TestWispAutoclosePreservesWorkflowViaInputConvoyWhileInputNotTerminal(t *te
 		_ = store.Close(issue.ID)
 
 		var stdout bytes.Buffer
-		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		run := doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+		if !run.finished() {
+			t.Fatalf("run unfinished (refused=%v failed=%v); a clean preservation finishes with nothing left undecided", run.refused, run.failed)
+		}
 
 		got, err := store.Get(root.ID)
 		if err != nil {
@@ -1252,6 +1273,77 @@ func TestWispAutoclosePreservesWorkflowViaInputConvoyWhileInputNotTerminal(t *te
 			t.Fatalf("root: status=%q; unresolved membership is the claim-time purge probe's question, not a close-time retirement", got.Status)
 		}
 	})
+}
+
+// A decision read or close write that fails leaves the run UNFINISHED — the
+// workflow is preserved either way, but the sweep retries instead of marking
+// the close handled (#8729: errors retry, clean preservation finishes).
+func TestWispAutocloseReportsIdleRetirementDecisionAndWriteErrors(t *testing.T) {
+	t.Run("membership read error", func(t *testing.T) {
+		store, issue, convoy, root, _ := seedInputConvoyWorkflow(t)
+		_ = store.Close(issue.ID)
+		// The convoy's own DepList is the retirement arm's decision read;
+		// failing it (and only it) leaves discovery and the parked walk
+		// serving, so the failure reaches the run through the arm itself.
+		failing := partialGraphViewStore{Store: store, failID: convoy.ID}
+
+		var stdout bytes.Buffer
+		run := doWispAutocloseWith(failing, issue.ID, &stdout, beads.GraphStore{Store: failing})
+
+		if run.finished() {
+			t.Fatalf("run finished; a failed membership decision read must leave it unfinished for the sweep to retry")
+		}
+		got, err := failing.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("root: status=%q; an unreadable decision preserves the workflow", got.Status)
+		}
+	})
+	t.Run("close write error", func(t *testing.T) {
+		store, issue, _, root, _ := seedInputConvoyWorkflow(t)
+		_ = store.Close(issue.ID)
+		// Only the close itself fails; every read the decision rests on
+		// still serves, so the failure is exactly the swallowed write the
+		// run must report.
+		failing := closeFailsForStore{Store: store, failID: root.ID}
+
+		var stdout bytes.Buffer
+		run := doWispAutocloseWith(failing, issue.ID, &stdout, beads.GraphStore{Store: failing})
+
+		if run.finished() {
+			t.Fatalf("run finished; a failed retirement close must leave it unfinished for the sweep to retry")
+		}
+		got, err := failing.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("root: status=%q; a failed close leaves the workflow open", got.Status)
+		}
+	})
+}
+
+// closeFailsForStore serves every read from the embedded store and fails only
+// the CloseAll batch that contains failID. Comparable on purpose, unlike
+// closeAllFailStore: the autoclose flow compares store values (the two-store
+// discovery probe, membership-leg dedupe), and passing an uncomparable
+// wrapper as both stores panics those comparisons instead of failing the
+// close under test. Passed as both the work and graph store, it is the
+// single-store shape with one write failing.
+type closeFailsForStore struct {
+	beads.Store
+	failID string
+}
+
+func (s closeFailsForStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if id == s.failID {
+			return 0, fmt.Errorf("forced close failure for %s", id)
+		}
+	}
+	return s.Store.CloseAll(ids, metadata)
 }
 
 func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {

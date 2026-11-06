@@ -190,6 +190,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 				continue
 			}
 			closed, err := closeAttachedWispSubtree(attachedStore, attached)
+			run.note(err)
 			if err != nil || closed == 0 {
 				continue
 			}
