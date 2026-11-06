@@ -137,7 +137,8 @@ func programCaptureHealNeeded(r runtime.ProgramStatus, want runtime.ProgramStatu
 
 // programCaptureWant is the capture session info's config declares: its
 // resolved provider's program-status binding under the city switch and its
-// transport (config.ProgramStatusArmFor, the derivation every start uses).
+// transport (config.ProgramStatusArmFor): a start carries the switch-independent
+// declaration (config.ProgramStatusLaunchFor) and the leaf gates it live.
 func programCaptureWant(cfg *config.City, info session.Info) runtime.ProgramStatusArm {
 	resolved, _ := resolveWorkerRuntimeProviderWithConfig(cfg, info, "")
 	arm, _ := config.ProgramStatusArmFor(cfg, resolved, info.Transport)
