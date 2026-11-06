@@ -78,6 +78,51 @@ func TestWorkflowInputDoneDetectsTerminalConvoyMember(t *testing.T) {
 	if !done || rootID != root.ID {
 		t.Fatalf("step: done=%v rootID=%q, want done=true rootID=%q", done, rootID, root.ID)
 	}
+
+	// A step that carries the input convoy id beside its root id (a
+	// formula's step metadata may stamp it) resolves to the same root, so
+	// retiring the workflow closes the root and not that step alone.
+	stamped, err := store.Create(beads.Bead{Title: "Review", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    root.ID,
+		beadmeta.InputConvoyIDMetadataKey: root.Metadata[beadmeta.InputConvoyIDMetadataKey],
+		beadmeta.RoutedToMetadataKey:      "rig/worker",
+	}})
+	if err != nil {
+		t.Fatalf("create stamped step: %v", err)
+	}
+	rootID, done, err = workflowInputDone(store, stamped, nil)
+	if err != nil {
+		t.Fatalf("workflowInputDone(stamped step): %v", err)
+	}
+	if !done || rootID != root.ID {
+		t.Fatalf("stamped step: done=%v rootID=%q, want done=true rootID=%q", done, rootID, root.ID)
+	}
+}
+
+// TestWorkflowRootIDForInputCheck pins which bead a candidate's input check
+// reads as its workflow root: the root a step names wins over an input convoy
+// id the step also carries; a bead is its own root only when it names no
+// other root and carries the input convoy id.
+func TestWorkflowRootIDForInputCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{name: "root with input convoy", metadata: map[string]string{beadmeta.InputConvoyIDMetadataKey: "gc-in"}, want: "gc-self"},
+		{name: "root naming itself with input convoy", metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-self", beadmeta.InputConvoyIDMetadataKey: "gc-in"}, want: "gc-self"},
+		{name: "step", metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-root"}, want: "gc-root"},
+		{name: "step stamped with the input convoy id", metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-root", beadmeta.InputConvoyIDMetadataKey: "gc-in"}, want: "gc-root"},
+		{name: "root naming itself without input convoy", metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-self"}},
+		{name: "bead outside any workflow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := workflowRootIDForInputCheck(beads.Bead{ID: "gc-self", Metadata: tc.metadata})
+			if got != tc.want {
+				t.Fatalf("workflowRootIDForInputCheck = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestWorkflowInputDoneFalseWhileMemberOpen(t *testing.T) {

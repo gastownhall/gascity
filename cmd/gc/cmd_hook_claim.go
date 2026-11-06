@@ -2380,18 +2380,20 @@ func inputVerdictFromDone(done hookInputDoneFunc) hookInputVerdictFunc {
 }
 
 // workflowRootIDForInputCheck is the workflow root workflowInputDone resolves
-// candidate to: itself when it carries gc.input_convoy_id, else its
-// gc.root_bead_id. It returns "" for a candidate that is not part of a
-// workflow (no root, or its own root without an input convoy).
+// candidate to: its gc.root_bead_id when that names another bead, else itself
+// when it carries gc.input_convoy_id. A step's root decides even when the
+// formula's step metadata also stamps the input convoy id on the step: the
+// root holds the workflow's contract and is what retiring the workflow closes.
+// It returns "" for a candidate that is not part of a workflow (no root, or its
+// own root without an input convoy).
 func workflowRootIDForInputCheck(candidate beads.Bead) string {
+	if rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && rootID != candidate.ID {
+		return rootID
+	}
 	if strings.TrimSpace(candidate.Metadata[beadmeta.InputConvoyIDMetadataKey]) != "" {
 		return candidate.ID
 	}
-	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
-	if rootID == candidate.ID {
-		return ""
-	}
-	return rootID
+	return ""
 }
 
 // workflowInputDoneAcross is workflowInputDone with the workflow's two halves
@@ -2400,15 +2402,14 @@ func workflowRootIDForInputCheck(candidate beads.Bead) string {
 // store; on a split city the root lives in the binding and the synthetic input
 // convoy, which is work class, beside the work it tracks.
 func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
+	rootID := workflowRootIDForInputCheck(candidate)
+	if rootID == "" {
+		return workflowInputVerdict{}, nil
+	}
 	root := candidate
-	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
-		rootID := workflowRootIDForInputCheck(candidate)
-		if rootID == "" {
-			return workflowInputVerdict{}, nil
-		}
+	if rootID != candidate.ID {
 		var err error
-		root, err = graph.Get(rootID)
-		if err != nil {
+		if root, err = graph.Get(rootID); err != nil {
 			return workflowInputVerdict{}, fmt.Errorf("loading workflow root %s: %w", rootID, err)
 		}
 	}
