@@ -292,6 +292,11 @@ type hookCommandOptions struct {
 	DrainAck   bool
 	JSON       bool
 	DrainAckFn hookDrainAckFunc
+	// Now is the invocation's clock: cmdHookWithOptions stamps the claim
+	// window's start from it at entry and carries it, through the invocation's
+	// hookCity, to the claim ops. Nil reads the wall clock; tests inject a
+	// controllable one.
+	Now func() time.Time
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -309,6 +314,18 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	if opts.Inject {
 		return 0
 	}
+	// The invocation's clock, resolved once: the claim window's start below and
+	// every age the claim fences measure read this one clock, never a mix of an
+	// injected one and the wall clock.
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	// The claim window opens HERE, at invocation entry — before the city
+	// resolution, the config compose and the session fence's store open below —
+	// so a claim whose preamble outlasts the window is refused rather than
+	// claimed as fresh (hookClaimOps.InvokedAt).
+	invokedAt := now()
 	// One composed city config for the whole invocation. The front door loads
 	// it, and the claim's helpers and the drain-ack load it again on their own;
 	// each composition walks city.toml and every pack include, ~0.15-0.2 s on
@@ -363,6 +380,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	city := newHookCity(cityPath, cfg)
+	// The invocation's start and clock, stamped before anything slow ran and
+	// handed to the city before any session-fence operation, so the claim ops
+	// it builds carry a window that covers the whole invocation.
+	city.invokedAt, city.now = invokedAt, now
 
 	// Fence a stale/superseded/unregistered runtime session BEFORE the
 	// city-suspension, agent-resolution, and agent-suspension early returns

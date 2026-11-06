@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,6 +35,15 @@ import (
 type hookCity struct {
 	path string
 	cfg  *config.City
+
+	// invokedAt is when the `gc hook` invocation began and now is the clock it
+	// runs on, stamped by cmdHookWithOptions at entry and read by claimOps so
+	// the claim window spans the whole invocation: the city resolution, the
+	// config load and this front door's store open all precede the first claim
+	// tier. A city built without them (newHookCity's other callers) leaves both
+	// zero, and the claim ops fall back to applyDefaults' own stamping.
+	invokedAt time.Time
+	now       func() time.Time
 
 	mu    sync.Mutex
 	front *session.Store
@@ -76,10 +86,13 @@ func (h *hookCity) recorder() events.Recorder {
 // session work-dir lookup, the current-claim stamp and its clear, and the
 // work_started write, removal and read) answer through the invocation's one
 // session front door, whose claim store refs are read off its loaded config, and whose events and continuation
-// nudge reach the invocation's city without resolving it again. Every other
-// seam is left to its default (hookClaimOps.applyDefaults).
+// nudge reach the invocation's city without resolving it again. The ops carry
+// the invocation's start and clock, so the claim window opens at command entry.
+// Every other seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.InvokedAt = h.invokedAt
+	ops.Now = h.now
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}

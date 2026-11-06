@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // turnBoundRoutedWork is one open, routed, claimable candidate: the shape every
@@ -783,5 +786,114 @@ func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
 	}
 	if len(sessSpy.beadIDs) != 0 {
 		t.Fatalf("session-claim seam writes = %v, want none: the straddle path stamps nothing, so it must clear nothing", sessSpy.beadIDs)
+	}
+}
+
+// hookClaimWindowClockOpts returns the claim command options carrying a
+// controlled invocation clock whose first city-store open — the session fence's,
+// the first store the invocation opens — advances it by advance, following
+// countHookCityStoreOpens. The clock starts at a nonzero instant: a zero one
+// reads as "no window opened" at every InvokedAt zero-check and would prove
+// nothing. No sleep: the fence's open is made slow by moving the clock, not the
+// wall.
+func hookClaimWindowClockOpts(t *testing.T, advance time.Duration) hookCommandOptions {
+	t.Helper()
+	clock := time.Now()
+	prev := hookCityStoreOpener
+	var advanced bool
+	hookCityStoreOpener = func(cityPath string, cfg *config.City) (beads.Store, error) {
+		if !advanced {
+			advanced = true
+			clock = clock.Add(advance)
+		}
+		return prev(cityPath, cfg)
+	}
+	t.Cleanup(func() { hookCityStoreOpener = prev })
+	return hookCommandOptions{Claim: true, JSON: true, Now: func() time.Time { return clock }}
+}
+
+// readClaimWindowExpiries decodes the typed execution.claim_window_expired
+// payloads the city's event log carries. An absent log is no events; a line
+// that cannot be decoded is a test failure, never a skipped event.
+func readClaimWindowExpiries(t *testing.T, cityDir string) []events.ExecutionClaimWindowExpiredPayload {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("reading events.jsonl: %v", err)
+	}
+	var out []events.ExecutionClaimWindowExpiredPayload
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var envelope struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+			t.Fatalf("decoding event line %q: %v", line, err)
+		}
+		if envelope.Type != events.ExecutionClaimWindowExpired {
+			continue
+		}
+		var payload events.ExecutionClaimWindowExpiredPayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			t.Fatalf("decoding %s payload %s: %v", envelope.Type, envelope.Payload, err)
+		}
+		out = append(out, payload)
+	}
+	return out
+}
+
+// TestHookClaimWindowCountsTimeBeforeTheWorkQuery is the end-to-end F-B pin for
+// the window's anchor: the claim window opens when `gc hook --claim` STARTS, not
+// when its claim tiers first read the clock. The invocation's preamble — the
+// city resolution, the config load, the session fence's store open — is time the
+// invoking turn spent too, so a fresh claim that reaches its work query only
+// after the window has closed must be refused, not claimed as fresh. Before the
+// start was stamped at cmdHookWithOptions entry, the first stamping sat in
+// applyDefaults, past the fence, and a delayed preamble claimed with age ~0.
+func TestHookClaimWindowCountsTimeBeforeTheWorkQuery(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	argvLog := installNonTurnDemandProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "live-token")
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "2s")
+	// The session fence's store open alone outlasts the 2s window.
+	opts := hookClaimWindowClockOpts(t, 2500*time.Millisecond)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, opts, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1: a claim whose whole window was spent before its work query must be refused; stdout=%q stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty: a spent window is not a drain record", stdout.String())
+	}
+	if nonTurnProbeClaimed(t, argvLog) {
+		t.Fatalf("the claim mutation ran although the 2s claim window was spent on the preamble; bd argv log:\n%s",
+			readFileForTest(t, argvLog))
+	}
+	if !strings.Contains(stderr.String(), "claim window") {
+		t.Fatalf("stderr = %q, want a named claim-window diagnostic", stderr.String())
+	}
+	expiries := readClaimWindowExpiries(t, cityDir)
+	if len(expiries) != 1 {
+		t.Fatalf("claim_window_expired events = %+v, want exactly one for the routed candidate", expiries)
+	}
+	if got := expiries[0].BeadID; got != "demand-1" {
+		t.Fatalf("claim_window_expired bead = %q, want demand-1", got)
+	}
+	if got := expiries[0].InvocationAgeMS; got < 2500 {
+		t.Fatalf("claim_window_expired invocation_age_ms = %d, want >= 2500: the 2.5s preamble counts against the window", got)
 	}
 }
