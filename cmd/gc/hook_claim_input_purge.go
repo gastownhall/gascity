@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -109,8 +110,12 @@ func (h *hookCity) openInputPurgeFrame() (workflowInputPurgeFrame, error) {
 }
 
 // proveWorkflowInputPurged proves an unjudged input purged over frame and
-// returns the evidence ids it found absent: the input convoy itself, which
-// must read as gone. A convoy that is found or cannot be read is not proof.
+// returns the evidence ids it found absent. The evidence is the input convoy
+// itself when it is gone; when it still exists it must be a synthetic convoy,
+// and the evidence is every unresolved member plus every target its metadata
+// records (graphv2.RecordedInputTargetIDs), which name the target after a
+// purge cascaded its tracks edge away. Empty evidence, a non-synthetic convoy,
+// or any evidence id that is found or cannot be read is not proof.
 func proveWorkflowInputPurged(frame workflowInputPurgeFrame, verdict workflowInputVerdict) ([]string, error) {
 	if !verdict.Unjudged || verdict.ConvoyID == "" {
 		return nil, fmt.Errorf("%w: the input of workflow %s is not unjudged", errWorkflowInputPurgeUnproven, verdict.RootID)
@@ -122,7 +127,27 @@ func proveWorkflowInputPurged(frame workflowInputPurgeFrame, verdict workflowInp
 	if err != nil {
 		return nil, err
 	}
-	return nil, fmt.Errorf("%w: input convoy %s of workflow %s still exists", errWorkflowInputPurgeUnproven, inputConvoy.ID, verdict.RootID)
+	if strings.TrimSpace(inputConvoy.Metadata[beadmeta.SyntheticMetadataKey]) != "true" {
+		return nil, fmt.Errorf("%w: input convoy %s exists and is not synthetic", errWorkflowInputPurgeUnproven, verdict.ConvoyID)
+	}
+	evidence := slices.Clone(verdict.Unresolved)
+	for _, id := range graphv2.RecordedInputTargetIDs(inputConvoy) {
+		if !slices.Contains(evidence, id) {
+			evidence = append(evidence, id)
+		}
+	}
+	if len(evidence) == 0 {
+		return nil, fmt.Errorf("%w: input convoy %s exists and neither tracks nor records a target", errWorkflowInputPurgeUnproven, verdict.ConvoyID)
+	}
+	for _, id := range evidence {
+		if _, err := readPurgeEvidence(frame, id); !errors.Is(err, beads.ErrNotFound) {
+			if err == nil {
+				return nil, fmt.Errorf("%w: input %s of convoy %s still exists", errWorkflowInputPurgeUnproven, id, verdict.ConvoyID)
+			}
+			return nil, err
+		}
+	}
+	return evidence, nil
 }
 
 // readPurgeEvidence reads one evidence id over frame. Its result is a row,
