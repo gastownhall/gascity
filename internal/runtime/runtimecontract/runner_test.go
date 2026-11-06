@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
@@ -287,7 +288,11 @@ func TestObserveGroupSkipsWhatIsNotDeclared(t *testing.T) {
 // declared idle-boundary passed without reading the box.
 func TestIdleBoundaryGatesOnTheDeclaration(t *testing.T) {
 	noSession := func(bodies map[string]string) {
-		bodies["exec"] = strings.Replace(bodies["exec"], `has-session) [ -d "$box" ] ;;`, `has-session) return 1 ;;`, 1)
+		const from = `has-session) [ -d "$box" ] ;;`
+		if !strings.Contains(bodies["exec"], from) {
+			t.Fatalf("golden exec body has no %q to break", from)
+		}
+		bodies["exec"] = strings.Replace(bodies["exec"], from, `has-session) return 1 ;;`, 1)
 	}
 
 	bodies := reference.Bodies()
@@ -320,6 +325,40 @@ func TestIdleBoundaryGatesOnTheDeclaration(t *testing.T) {
 	}
 	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusFail {
 		t.Errorf("idle-boundary alone over a box with no tmux session: %s (%s), want FAIL", res.Status, res.Detail)
+	}
+}
+
+// The idle-boundary probe sends each command exactly as the exec provider
+// sends it on the exec op's stdin, so a pack that handles gc's own commands
+// is the one that passes.
+// Kills: a probe quoting that drifts from the exec provider's.
+func TestIdleBoundaryCommandsMatchTheExecProvider(t *testing.T) {
+	dir := t.TempDir()
+	got := filepath.Join(dir, "stdin")
+	script := filepath.Join(dir, "pack")
+	body := "#!/bin/sh\ncase \"$1\" in\n  protocol) echo '{\"version\":0,\"capabilities\":[\"proc.exec\"]}' ;;\n  exec) cat > '" + got + "' ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvs := [][]string{
+		{"tmux", "has-session", "-t", "main"},
+		{"tmux", "capture-pane", "-t", "main", "-p", "-S", "-120"},
+	}
+	if len(argvs) != len(idleBoundaryCommands) {
+		t.Fatalf("%d idle-boundary commands, want %d", len(idleBoundaryCommands), len(argvs))
+	}
+	p := sessionexec.NewProvider(script)
+	for i, argv := range argvs {
+		if _, _, err := p.Exec(context.Background(), "s", argv); err != nil {
+			t.Fatalf("Exec(%q): %v", argv, err)
+		}
+		sent, err := os.ReadFile(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(sent) != idleBoundaryCommands[i] {
+			t.Errorf("probe command %d = %q, exec provider sends %q", i, idleBoundaryCommands[i], sent)
+		}
 	}
 }
 

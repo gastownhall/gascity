@@ -228,9 +228,12 @@ func TestRun_UnknownDeclaredCapabilityIgnored(t *testing.T) {
 // Kills: a token gc acts on reported as ignored.
 func TestRun_IdleBoundaryCapabilityIsKnown(t *testing.T) {
 	state := t.TempDir()
-	body := strings.Replace(conformantScript(state),
-		`["report-attachment","report-activity"]`,
-		`["report-attachment","report-activity","idle-boundary"]`, 1)
+	const from = `["report-attachment","report-activity"]`
+	script := conformantScript(state)
+	if !strings.Contains(script, from) {
+		t.Fatalf("conformant script declares no %s to extend", from)
+	}
+	body := strings.Replace(script, from, `["report-attachment","report-activity","idle-boundary"]`, 1)
 	res := runScript(t, body, Options{})
 
 	if res.Failed() {

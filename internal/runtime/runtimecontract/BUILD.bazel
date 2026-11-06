@@ -39,6 +39,7 @@ go_test(
     embed = [":runtimecontract"],
     deps = [
         "//internal/bazeltest",
+        "//internal/runtime/exec",
         "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],
