@@ -5463,6 +5463,101 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	}
 }
 
+// nudgeShadowsIn lists every nudge shadow bead (open or closed) in store.
+func nudgeShadowsIn(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+	shadows, err := store.List(beads.ListQuery{Label: nudgeBeadLabel, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing nudge shadows: %v", err)
+	}
+	return shadows
+}
+
+// slingNudgeTwoStoreFixture queues a sling nudge for a bead that lives in a rig
+// store distinct from the city store. It returns the city store (reopened, as
+// the queue's readers and closers open it), the rig store, and the queued item.
+func slingNudgeTwoStoreFixture(t *testing.T) (cityPath string, city, rig beads.Store, item queuedNudge) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityPath = t.TempDir()
+	rig = beads.NewMemStore()
+	fake := runtime.NewFake()
+	target := nudgeTarget{
+		cityPath:          cityPath,
+		agent:             config.Agent{Name: "worker"},
+		resolved:          &config.ResolvedProvider{Name: "claude"},
+		sessionID:         "gc-worker",
+		continuationEpoch: "7",
+		sessionName:       "worker-session",
+	}
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, rig, openNudgeBeadStore(cityPath), cityPath, "", &stdout, &stderr)
+
+	pending, _, _, err := listQueuedNudges(cityPath, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1 (stderr: %s)", len(pending), stderr.String())
+	}
+	return cityPath, openNudgeBeadStore(cityPath), rig, pending[0]
+}
+
+// A sling nudge for a bead in a rig store writes its shadow to the city nudges
+// store: every reader and terminalizer of shadows holds the city store, so a
+// rig-store shadow is unreachable and stays queued forever.
+func TestDeliverSlingNudgeShadowLandsInCityStoreNotSlungBeadRigStore(t *testing.T) {
+	_, city, rig, item := slingNudgeTwoStoreFixture(t)
+
+	if got := nudgeShadowsIn(t, rig); len(got) != 0 {
+		t.Fatalf("rig store holds %d nudge shadow(s) %v, want 0: the shadow must not live next to the slung bead", len(got), got)
+	}
+	if got := nudgeShadowsIn(t, city); len(got) != 1 {
+		t.Fatalf("city store holds %d nudge shadow(s), want 1", len(got))
+	}
+	if item.BeadID == "" {
+		t.Fatal("queued item has no shadow BeadID")
+	}
+	if _, err := city.Get(item.BeadID); err != nil {
+		t.Fatalf("queued item BeadID %q is not a city-store id: %v", item.BeadID, err)
+	}
+	if _, err := rig.Get(item.BeadID); err == nil {
+		t.Fatalf("queued item BeadID %q resolves in the rig store", item.BeadID)
+	}
+}
+
+// The production terminalizer (claim, then ack) reaches the shadow of a sling
+// nudge for a rig-store bead and closes it with its real terminal state.
+func TestDeliverSlingNudgeRigBeadShadowTerminalizesOnAck(t *testing.T) {
+	cityPath, city, _, item := slingNudgeTwoStoreFixture(t)
+
+	claimed, err := claimDueQueuedNudgesMatching(cityPath, time.Now(), func(q queuedNudge) bool { return q.ID == item.ID })
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %d item(s), err %v, want 1 item", len(claimed), err)
+	}
+	if err := ackQueuedNudges(cityPath, []string{item.ID}); err != nil {
+		t.Fatalf("ackQueuedNudges: %v", err)
+	}
+
+	shadow, err := city.Get(item.BeadID)
+	if err != nil {
+		t.Fatalf("city shadow %q: %v", item.BeadID, err)
+	}
+	if shadow.Status != "closed" {
+		t.Fatalf("city shadow status = %q, want closed after ack", shadow.Status)
+	}
+	if got := shadow.Metadata["state"]; got != "injected" {
+		t.Fatalf("city shadow state = %q, want injected", got)
+	}
+}
+
 func assertSessionLastNudgeDeliveredAtStamped(t *testing.T, store beads.Store, sessionID string) {
 	t.Helper()
 	refetched, err := store.Get(sessionID)
