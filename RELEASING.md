@@ -7,9 +7,14 @@
 | **GitHub Release** | GoReleaser via `release.yml` on tag push | Yes |
 | **GitHub draft prerelease** | GoReleaser via `rc-release.yml` on RC tag push or manual dispatch | Yes |
 | **Homebrew tap** (`gastownhall/gascity`) | `release.yml` writes an asset-based formula after archives upload | Yes |
-| **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump, once listed | Yes (~3h delay) |
+| **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump | Yes (~3h delay) |
 
-The homebrew-core submission is [in progress](https://github.com/Homebrew/homebrew-core). Until it lands and is added to the autobump list, users install via `brew install gascity`.
+Users install from homebrew-core with `brew install gascity`. The tap stays
+available for emergency updates.
+
+Releases rely on the automated GitHub workflows alone: CI runs on every pull
+request and every push to `main`, and a tag push runs the publishing
+workflows below. There is no manual gate to run before tagging.
 
 ## How to Release
 
@@ -24,15 +29,14 @@ This rewrites the `[Unreleased]` section of `CHANGELOG.md` into `[X.Y.Z] - YYYY-
 ### Release candidates
 
 Use the **RC Release** workflow to produce downloadable release-candidate
-archives for manual verification without updating Homebrew or publishing the
-stable release.
+archives without updating Homebrew or publishing the stable release.
 
 Recommended path:
 
-1. Run the RC gate on the intended release branch or commit.
-2. Open **Actions → RC Release → Run workflow**.
-3. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
-4. Set `target_ref` to the exact RC-gate-passing commit SHA.
+1. Open **Actions → RC Release → Run workflow**.
+2. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
+3. Set `target_ref` to the exact commit SHA for the release candidate, a
+   `main` commit whose CI passed.
 
 The workflow creates the annotated RC tag if needed, builds GoReleaser
 archives for linux/darwin × amd64/arm64, and creates a GitHub **draft
@@ -113,25 +117,19 @@ goreleaser check          # also enforced by CI
 
 The release workflow automatically overwrites `Formula/gascity.rb` in the `gastownhall/homebrew-gascity` repo on every tag push. Publishing is GitHub App only: `HOMEBREW_TAP_APP_ID` and `HOMEBREW_TAP_APP_PRIVATE_KEY` must be configured in repository secrets for an app installed on `gastownhall/homebrew-gascity` with contents write.
 
-The tap formula installs prebuilt release assets, so users do not need Go or a source build:
+The tap formula installs prebuilt release assets, so it needs no Go or source build. Name the tap to install from it:
 
 ```bash
-brew install gascity
+brew install gastownhall/gascity/gascity
 ```
 
-The intended long-term user-facing Homebrew path is homebrew-core:
+The public install path is homebrew-core (`brew install gascity`). The tap stays available for emergency updates; normal releases flow through homebrew-core.
 
-```bash
-brew install gascity
-```
+## Homebrew core
 
-Until the core formula lands, the tap is the public install path. After core lands, keep the tap available for emergency updates while normal releases flow through homebrew-core.
+The formula is in `Homebrew/homebrew-core`, and BrewTestBot bumps it automatically:
 
-## Homebrew core (planned)
-
-Once the formula is merged to `Homebrew/homebrew-core` and added to the autobump list, the flow becomes:
-
-1. Tag push → GoReleaser creates GitHub Release (as today).
+1. Tag push → GoReleaser creates the GitHub Release.
 2. BrewTestBot polls releases every ~3h, opens a PR to homebrew-core bumping the formula's `url` and `sha256`.
 3. Homebrew maintainers merge; bottles are built for macOS (arm64 + x86_64) and Linux.
 4. `brew upgrade gascity` picks up the new version worldwide.
@@ -147,6 +145,7 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 | GitHub Release page | Created with binaries + grouped changelog | GoReleaser in `release.yml` |
 | Release SBOM + attestations | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml` |
 | `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated | `update-homebrew-formula` in `release.yml` |
+| `Homebrew/homebrew-core` `Formula/g/gascity.rb` | source `url` + `sha256` bumped | BrewTestBot's autobump PR |
 
 ## Troubleshooting
 
@@ -170,6 +169,6 @@ Check the Homebrew tap GitHub App credentials in repo secrets: `HOMEBREW_TAP_APP
 
 ### Homebrew shows old version after a release
 
-While on the tap: a tag push updates the tap directly; users pick it up on the next `brew update && brew upgrade gascity`. If the formula wasn't updated, see above.
+homebrew-core picks up a release through the autobump bot, which runs every ~3h; users get it with `brew update && brew upgrade gascity` once the bot's PR merges and its bottles build. After ~6h without a PR, check `https://github.com/Homebrew/homebrew-core/pulls?q=gascity`.
 
-After homebrew-core lands: the autobump bot runs every ~3h. After ~6h without a PR, check `https://github.com/Homebrew/homebrew-core/pulls?q=gascity`.
+The tap updates on the tag push itself; if it didn't, see [Tap formula not updated](#tap-formula-not-updated).
