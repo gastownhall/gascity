@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
@@ -918,47 +919,339 @@ func TestWispAutocloseFailsClosedOnPartialGraphView(t *testing.T) {
 	}
 }
 
-func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t *testing.T) {
-	// The input-convoy reap must not steamroll an orchestrated graph.v2 workflow
-	// whose step beads are still in flight: those roots close via their
-	// workflow-finalize control bead, not the on_close hook. The shared parked
-	// guard (subtreeTerminalExcludingRoot) keeps a root with a non-terminal
-	// descendant alive even when an input-convoy member closes early, so only the
-	// genuinely stepless root-only wisp reaps here.
-	store := beads.NewMemStore()
-	issue, _ := store.Create(beads.Bead{Title: "convoy member", Type: "task"})
-	convoy, _ := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+// seedInputConvoyWorkflow seeds one open graph.v2 workflow root over a
+// synthetic input convoy tracking one work issue, plus one open idle step
+// under the root, in a fresh single-store MemStore. Rows mutate the step or
+// the membership to the shape under test and close the issue themselves.
+func seedInputConvoyWorkflow(t *testing.T) (store *beads.MemStore, issue, convoy, root, step beads.Bead) {
+	t.Helper()
+	store = beads.NewMemStore()
+	var err error
+	issue, err = store.Create(beads.Bead{Title: "convoy member", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err = store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
 		t.Fatalf("DepAdd(tracks): %v", err)
 	}
-	root, _ := store.Create(beads.Bead{
-		Title: "orchestrated workflow root",
+	root, err = store.Create(beads.Bead{
+		Title: "workflow root",
 		Type:  "task",
 		Metadata: map[string]string{
-			beadmeta.KindMetadataKey:            "workflow",
-			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
 		},
 	})
-	// An open step bead keeps the subtree non-terminal -> root stays parked.
-	_, _ = store.Create(beads.Bead{
-		Title:    "in-flight step",
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err = store.Create(beads.Bead{
+		Title:    "idle step",
 		Type:     "task",
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, issue, convoy, root, step
+}
 
+// The idle-retirement arm of the input-convoy reap (#8729): an open graph.v2
+// workflow whose input convoy's membership is fully terminal and whose
+// non-terminal members are all idle (unassigned, open) and ungated has nothing
+// left to run — every step would dispose against input that no longer exists,
+// one burned seat poll each. The close hook retires it at close time instead:
+// root and open steps close skipped under the subtree close reason the
+// controller recognizes, and a terminal step keeps its own disposition. This
+// row replaces the pre-fix preservation of the same shape, which kept the
+// workflow for a workflow-finalize control bead that a purged-input launch
+// never runs.
+func TestWispAutocloseRetiresIdleWorkflowViaInputConvoyWhenInputTerminal(t *testing.T) {
+	store, issue, _, root, step := seedInputConvoyWorkflow(t)
+	done, err := store.Create(beads.Bead{
+		Title: "finished step",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(done.ID); err != nil {
+		t.Fatal(err)
+	}
 	_ = store.Close(issue.ID)
 
 	var stdout bytes.Buffer
 	doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
 
-	rootAfter, err := store.Get(root.ID)
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" ||
+			got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped ||
+			got.Metadata["close_reason"] != sourceworkflow.WorkflowSubtreeClosedReason {
+			t.Fatalf("%s: status=%q outcome=%q close_reason=%q; want closed/%s/%s (retired at close time, no seat poll)",
+				id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata["close_reason"],
+				beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSubtreeClosedReason)
+		}
+	}
+	gotDone, err := store.Get(done.ID)
 	if err != nil {
-		t.Fatalf("Get(root): %v", err)
+		t.Fatal(err)
 	}
-	if rootAfter.Status != "open" {
-		t.Fatalf("orchestrated workflow root status = %q, want open (left for workflow-finalize)", rootAfter.Status)
+	if gotDone.Status != "closed" || gotDone.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("finished step: status=%q outcome=%q; a terminal step keeps its own disposition",
+			gotDone.Status, gotDone.Metadata[beadmeta.OutcomeMetadataKey])
 	}
+}
+
+// The idle retirement over both convoy residences: a post-split launch keeps
+// the convoy and its tracks edges in the work store beside the issue, while a
+// store migrated from the single-store era holds them on the graph side. The
+// arm reads membership through whichever store owns the edges, and the
+// retirement lands in the graph store the workflow lives in.
+func TestWispAutocloseRetiresIdleWorkflowAcrossStores(t *testing.T) {
+	seed := func(t *testing.T, convoyInWork bool) (work, graph *beads.MemStore, issue, root, step beads.Bead) {
+		t.Helper()
+		work = beads.NewMemStore()
+		graph = beads.NewMemStore()
+		// Distinct mint prefixes so the two stores cannot alias ids.
+		graph.IDPrefix = "gx"
+		var err error
+		issue, err = work.Create(beads.Bead{Title: "convoy member", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		convoyHome := work
+		if !convoyInWork {
+			convoyHome = graph
+		}
+		convoy, err := convoyHome.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := convoyHome.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+			t.Fatalf("DepAdd(tracks): %v", err)
+		}
+		root, err = graph.Create(beads.Bead{
+			Title: "workflow root",
+			Type:  "task",
+			Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		step, err = graph.Create(beads.Bead{
+			Title:    "idle step",
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := work.Close(issue.ID); err != nil {
+			t.Fatal(err)
+		}
+		return work, graph, issue, root, step
+	}
+	assertRetired := func(t *testing.T, graph *beads.MemStore, ids ...string) {
+		t.Helper()
+		for _, id := range ids {
+			got, err := graph.Get(id)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", id, err)
+			}
+			if got.Status != "closed" ||
+				got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped ||
+				got.Metadata["close_reason"] != sourceworkflow.WorkflowSubtreeClosedReason {
+				t.Fatalf("%s: status=%q outcome=%q close_reason=%q; want closed/%s/%s",
+					id, got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata["close_reason"],
+					beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSubtreeClosedReason)
+			}
+		}
+	}
+	t.Run("convoy in the work store", func(t *testing.T) {
+		work, graph, issue, root, step := seed(t, true)
+		var stdout bytes.Buffer
+		doWispAutocloseWith(work, issue.ID, &stdout, beads.GraphStore{Store: graph})
+		assertRetired(t, graph, root.ID, step.ID)
+		if src, err := work.Get(issue.ID); err != nil || src.Status != "closed" {
+			t.Errorf("issue %s: status=%q err=%v; the retirement must not touch the work store", issue.ID, src.Status, err)
+		}
+	})
+	t.Run("convoy migrated to the graph store", func(t *testing.T) {
+		work, graph, issue, root, step := seed(t, false)
+		var stdout bytes.Buffer
+		doWispAutocloseWith(work, issue.ID, &stdout, beads.GraphStore{Store: graph})
+		assertRetired(t, graph, root.ID, step.ID)
+	})
+}
+
+// A step held by a seat — assigned, claimed to in_progress, or otherwise off
+// the open status — is work in flight: the input closing may be that seat's
+// own result, so the close hook preserves the workflow and the holder's
+// release, finalization, or a later claim progresses it.
+func TestWispAutoclosePreservesHeldWorkflowStepsViaInputConvoy(t *testing.T) {
+	t.Run("assigned", func(t *testing.T) {
+		store, issue, _, root, step := seedInputConvoyWorkflow(t)
+		assignee := "worker-1"
+		if err := store.Update(step.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close(issue.ID)
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+
+		for _, id := range []string{root.ID, step.ID} {
+			got, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "open" {
+				t.Fatalf("%s: status=%q; a held workflow is preserved for its seat", id, got.Status)
+			}
+		}
+	})
+	t.Run("in-progress", func(t *testing.T) {
+		store, issue, _, root, step := seedInputConvoyWorkflow(t)
+		progress := "in_progress"
+		if err := store.Update(step.ID, beads.UpdateOpts{Status: &progress}); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close(issue.ID)
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+
+		got, err := store.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("root: status=%q; a status other than open is work in flight, preserved", got.Status)
+		}
+	})
+}
+
+// gc.gate_type names a declared gate: a gated subtree is a checkpoint that
+// outlives its input and must not be steamrolled at close time. Type=gate
+// alone is deferred routing, not a gate (internal/molecule/molecule.go), so a
+// gate-typed step without gc.gate_type still retires with its workflow.
+func TestWispAutoclosePreservesGatedWorkflowStepsViaInputConvoy(t *testing.T) {
+	t.Run("declared gate", func(t *testing.T) {
+		store, issue, _, root, step := seedInputConvoyWorkflow(t)
+		if err := store.SetMetadata(step.ID, beadmeta.GateTypeMetadataKey, "human"); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close(issue.ID)
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+
+		for _, id := range []string{root.ID, step.ID} {
+			got, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "open" {
+				t.Fatalf("%s: status=%q; a declared gate is a checkpoint the close hook must preserve", id, got.Status)
+			}
+		}
+	})
+	t.Run("gate type without a declared gate", func(t *testing.T) {
+		store, issue, _, root, _ := seedInputConvoyWorkflow(t)
+		routing, err := store.Create(beads.Bead{
+			Title:    "routing bead",
+			Type:     "gate",
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close(issue.ID)
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+
+		for _, id := range []string{root.ID, routing.ID} {
+			got, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("%s: status=%q; Type=gate without gc.gate_type is deferred routing, not a checkpoint, and retires", id, got.Status)
+			}
+		}
+	})
+}
+
+// The retirement arm reads the convoy's live membership: input that is not
+// fully terminal — an open member, or a member that resolves to nothing (an
+// unresolved placeholder over a dangling tracks edge) — keeps the workflow.
+// Unresolved is a question for the claim-time purge probe, not the close hook.
+func TestWispAutoclosePreservesWorkflowViaInputConvoyWhileInputNotTerminal(t *testing.T) {
+	t.Run("open member", func(t *testing.T) {
+		store, issue, convoy, root, _ := seedInputConvoyWorkflow(t)
+		second, err := store.Create(beads.Bead{Title: "still-open member", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(convoy.ID, second.ID, "tracks"); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close(issue.ID)
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+
+		got, err := store.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("root: status=%q; an open input member keeps the workflow live", got.Status)
+		}
+	})
+	t.Run("unresolved member", func(t *testing.T) {
+		store, issue, convoy, root, _ := seedInputConvoyWorkflow(t)
+		other, err := store.Create(beads.Bead{Title: "purged member", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(convoy.ID, other.ID, "tracks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Delete(other.ID); err != nil {
+			t.Fatalf("purging the other tracked member: %v", err)
+		}
+		_ = store.Close(issue.ID)
+
+		var stdout bytes.Buffer
+		doWispAutocloseWith(store, issue.ID, &stdout, beads.GraphStore{Store: store})
+
+		got, err := store.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("root: status=%q; unresolved membership is the claim-time purge probe's question, not a close-time retirement", got.Status)
+		}
+	})
 }
 
 func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
@@ -111,8 +113,15 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	for _, a := range located {
 		seen[a.Bead.ID] = true
 	}
-	for _, root := range collectInputConvoyWorkflowRoots(store, graphStore, parent, seen) {
-		located = append(located, sling.AttachedBead{Bead: root, Store: graphStore})
+	convoyRoots, err := collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)
+	run.note(err)
+	// The idle-retirement arm below keys on the convoy each root was
+	// discovered over: which convoy, and which store owns its membership
+	// edges.
+	convoyLinks := make(map[string]inputConvoyWorkflowRoot, len(convoyRoots))
+	for _, root := range convoyRoots {
+		convoyLinks[root.Root.ID] = root
+		located = append(located, sling.AttachedBead{Bead: root.Root, Store: graphStore})
 	}
 	if err == nil || len(located) > 0 {
 		for _, a := range located {
@@ -123,7 +132,43 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			parked, err := attachedMoleculeIsParked(attachedStore, attached)
 			run.note(err)
 			if parked {
-				continue
+				// The idle-retirement arm of the input-convoy reap (#8729). A
+				// parked subtree is preserved for its workflow-finalize
+				// control — unless the workflow was dispatched over a
+				// synthetic input convoy whose membership is now fully
+				// terminal while every non-terminal member sits idle and
+				// ungated. Such a workflow has nothing left to run: each
+				// open step would dispose against input that no longer
+				// exists, one burned seat poll each (the claim-time done arm
+				// eventually retires it; this closes it at close time, no
+				// seat poll). Source attachments keep the parked behavior,
+				// and a subtree the park walk could not read is not one this
+				// arm may license a close over.
+				link, overConvoy := convoyLinks[attached.ID]
+				if !overConvoy || err != nil {
+					continue
+				}
+				convoyStore := graphStore
+				if link.ConvoyInWork {
+					convoyStore = store
+				}
+				members, err := convoycore.MembersIn(convoycore.MemberClasses{
+					Convoy: convoyStore,
+					Work:   []beads.Store{store},
+					Graph:  graphStore,
+				}, link.ConvoyID, true)
+				run.note(err)
+				if err != nil || !inputMembersAllTerminal(members) {
+					continue
+				}
+				subtree, err := molecule.ListSubtree(attachedStore, attached.ID)
+				run.note(err)
+				if err != nil || !workflowSubtreeIdleAndUngated(subtree, attached.ID, link.ConvoyID) {
+					continue
+				}
+				// Licensed: fall through to the shared rechecks and close,
+				// which stamps skipped and the subtree close reason the
+				// controller recognizes.
 			}
 			// A subtree close has no conditional form, so re-check both rows
 			// it rests on live: the parent still closed, and a root decided
@@ -192,6 +237,75 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 	return !terminal, err
 }
 
+// inputConvoyWorkflowRoot is one open graph.v2 workflow root the close hook
+// discovered over a synthetic input convoy, with the link that found it: the
+// convoy's id and which of the two probed stores owns the convoy row and its
+// tracks edges (the work store, or the graph store of a migrated residence).
+// The owning store is carried as a flag rather than a handle so the discovery
+// result stays data: the caller holds the two stores and picks by the flag.
+type inputConvoyWorkflowRoot struct {
+	Root beads.Bead
+	// ConvoyID is the input convoy the root was discovered over — the value
+	// of its gc.input_convoy_id, which the retirement arm rechecks live.
+	ConvoyID string
+	// ConvoyInWork reports the convoy row lives in the work store rather
+	// than the graph store, so the membership read names the right owner.
+	ConvoyInWork bool
+}
+
+// inputMembersAllTerminal reports whether a convoy's live membership set
+// licenses retirement: non-empty (an input that resolves to nothing is the
+// claim-time purge probe's question, not the close hook's), fully resolved
+// (an unresolved placeholder over a dangling edge means an owner the read did
+// not span may hold the member), and entirely terminal.
+func inputMembersAllTerminal(members []beads.Bead) bool {
+	if len(members) == 0 {
+		return false
+	}
+	for _, m := range members {
+		if convoycore.IsUnresolvedTrackedItem(m) {
+			return false
+		}
+		if !convoycore.IsTerminalStatus(m.Status) {
+			return false
+		}
+	}
+	return true
+}
+
+// workflowSubtreeIdleAndUngated reports whether a freshly listed workflow
+// subtree is idle and ungated: the root row still names the input convoy it
+// was discovered over, and every non-terminal member — generated spec
+// sidecars ignored, as the parked predicate ignores them — is unassigned,
+// open, and carries no declared gate. gc.gate_type is the gate signal: a
+// Type=gate bead without it is deferred routing (internal/molecule), not a
+// checkpoint. A held member (an assignee, or any status but open) is work in
+// flight whose input may be its own result, and a gated member is a
+// checkpoint that outlives its input; either keeps the workflow.
+func workflowSubtreeIdleAndUngated(subtree []beads.Bead, rootID, convoyID string) bool {
+	for _, b := range subtree {
+		if sourceworkflow.IsGeneratedSpecSidecar(b) {
+			continue
+		}
+		if b.ID == rootID && strings.TrimSpace(b.Metadata[beadmeta.InputConvoyIDMetadataKey]) != convoyID {
+			return false
+		}
+		if convoycore.IsTerminalStatus(b.Status) {
+			continue
+		}
+		if strings.TrimSpace(b.Assignee) != "" {
+			return false
+		}
+		if b.Status != "open" {
+			return false
+		}
+		if strings.TrimSpace(b.Metadata[beadmeta.GateTypeMetadataKey]) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // collectInputConvoyWorkflowRoots finds open graph.v2 workflow roots that were
 // dispatched over a synthetic input convoy tracking the just-closed bead. A
 // root-only in-session wisp -- mol-focus-review and peers routed to a pool --
@@ -204,11 +318,17 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // it outlives its closed issue, re-routes to the pool, and churns a fresh worker
 // (the gastownhall/gascity review-pool spawn-churn finalize-gap).
 //
+// Each root carries its convoy link so the caller's idle-retirement arm reads
+// membership through the store that owns the edges. Discovery errors are
+// returned — a probe that cannot see the convoys or the roots certifies
+// nothing, and the run reports the failure so the sweep retries.
+//
 // This is discovery only: the caller runs each root through the shared
-// attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
-// are still in flight stays open and closes later via its workflow-finalize
-// control instead.
-func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+// attachedMoleculeIsParked guard, so a workflow whose step beads are still in
+// flight stays open and closes later via its workflow-finalize control —
+// unless its input is fully terminal and its subtree idle and ungated, which
+// the caller's arm retires here instead.
+func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) ([]inputConvoyWorkflowRoot, error) {
 	// The tracks edge is co-resident with the tracking convoy, and the two
 	// owning candidates differ on a split city: every convoy is WORK class
 	// (coordclass), minted co-resident with the issue it tracks, so a
@@ -219,7 +339,13 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 	// the pre-split single read.
 	convoys, err := convoycore.TrackingConvoysForItem(workStore, parent.ID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing tracking convoys over %s in the work store: %w", parent.ID, err)
+	}
+	// inWork maps a convoy id to the store that owns it: true for the work
+	// leg above, false (zero value) for the graph leg below.
+	inWork := make(map[string]bool, len(convoys))
+	for _, c := range convoys {
+		inWork[c.ID] = true
 	}
 	if graphStore != workStore {
 		// The graph leg of the two-store probe above: a miss here is
@@ -241,12 +367,14 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 			// graph store (cli_storage_routes.go), so every probe errors here.
 			// The refusal itself was printed once when the verdict was taken;
 			// narrowing to the work leg would be exactly the
-			// looks-like-success answer that file exists to close.
-			return nil
+			// looks-like-success answer that file exists to close. The error
+			// is returned now too, so the run reports the failure and the
+			// sweep retries.
+			return nil, fmt.Errorf("listing tracking convoys over %s in the graph store: %w", parent.ID, gerr)
 		}
 		convoys = dedupeConvoysByID(convoys, graphConvoys)
 	}
-	var roots []beads.Bead
+	var roots []inputConvoyWorkflowRoot
 	for _, convoy := range convoys {
 		// Roots are graph-class, so the root lookup stays on the graph store
 		// regardless of which store owned the tracking convoy.
@@ -255,7 +383,7 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 			0, beads.WithBothTiers,
 		)
 		if err != nil {
-			continue
+			return roots, fmt.Errorf("listing workflow roots over input convoy %s: %w", convoy.ID, err)
 		}
 		for _, root := range matches {
 			if seen[root.ID] {
@@ -273,10 +401,10 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 				continue
 			}
 			seen[root.ID] = true
-			roots = append(roots, root)
+			roots = append(roots, inputConvoyWorkflowRoot{Root: root, ConvoyID: convoy.ID, ConvoyInWork: inWork[convoy.ID]})
 		}
 	}
-	return roots
+	return roots, nil
 }
 
 // dedupeConvoysByID merges tracking-convoy lists from the work and graph
