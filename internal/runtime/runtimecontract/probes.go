@@ -26,6 +26,7 @@ var probes = map[Code]probe{
 	ReqLifecycleStopIdempotent:    probeStopIdempotent,
 	ReqLifecycleUnknownNotRunning: probeUnknownNotRunning,
 	ReqConnectionExec:             probeExec,
+	ReqConnectionIdleBoundary:     probeIdleBoundary,
 	ReqProvisionBoxWithoutAgent:   probeProvision,
 
 	ReqObserveDeclaredOpsRespond:   probeObserveDeclaredOps,
@@ -162,6 +163,42 @@ func probeExec(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, 
 		return StatusFail, fmt.Sprintf("exec op exit = %d, want %d (op exit must mirror the command's exit code)", nz.exitCode, wantCode)
 	}
 	return StatusPass, "exec runs the command in the box; output and exit code propagate"
+}
+
+// idleBoundaryCommands are the in-box tmux commands the idle-boundary probe
+// runs over exec: the session the agent runs in, then the capture gc's idle
+// wait takes (exec/idle.go, tmux.PromptObservationLines).
+var idleBoundaryCommands = []string{
+	"tmux has-session -t main",
+	"tmux capture-pane -t main -p -S -120",
+}
+
+// probeIdleBoundary verifies that a declared idle-boundary holds: the script
+// says its agent runs in the in-box tmux session `main`, so in a started box
+// that session must exist and its pane must be readable over exec, which is
+// how gc reads the idle boundary. It gates on the declaration, not on
+// behavior: a script that does not declare idle-boundary gets no idle wait
+// from gc whatever its box runs, so it SKIPs.
+func probeIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if !hs.Has(runtime.ProtocolCapabilityIdleBoundary) {
+		return StatusSkip, "idle-boundary not declared — gc reads no idle boundary from the box"
+	}
+	name := r.nextName()
+	if status, detail := requireStart(ctx, r, name); status != StatusPass {
+		return status, detail
+	}
+	defer r.stop(ctx, name)
+
+	for _, command := range idleBoundaryCommands {
+		out := r.execOp(ctx, name, command)
+		switch {
+		case out.unsupported:
+			return StatusFail, "the handshake declares idle-boundary but exec is unimplemented (exit 2); gc reads the idle boundary over exec"
+		case out.err != nil:
+			return StatusFail, fmt.Sprintf("%q over exec failed: %v (idle-boundary declares that the agent runs in the box's tmux session main)", command, out.err)
+		}
+	}
+	return StatusPass, "the box's tmux session main answers has-session and the idle capture over exec"
 }
 
 // probeProvision verifies the runtime/transport un-weld's box-without-agent op:
