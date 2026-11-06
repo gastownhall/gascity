@@ -537,3 +537,39 @@ func TestSessionStartMailReadsTheMessagingBindingOnASplitCity(t *testing.T) {
 		}
 	}
 }
+
+// TestControllerClassHelpersServeEachClassFromStores pins the controller's
+// per-class helpers, and the API nudge queue's shadow store, to the class
+// each names (typed-stores T6c: they read Stores() since the exported
+// accessors went), on routes that relocate every class to its own store.
+func TestControllerClassHelpersServeEachClassFromStores(t *testing.T) {
+	work := beads.NewMemStore()
+	graph, sessions, orders, nudges, mail := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:     graph,
+		coordclass.ClassSessions:  sessions,
+		coordclass.ClassOrders:    orders,
+		coordclass.ClassNudges:    nudges,
+		coordclass.ClassMessaging: mail,
+	}, binding: "infra"}
+	cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: work, storageRoutes: routes}
+	for name, pair := range map[string][2]beads.Store{
+		"graph":    {cs.graphBeadStore().Store, graph},
+		"sessions": {cs.sessionsBeadStore().Store, sessions},
+		"orders":   {cs.ordersBeadStore("").Store, orders},
+		"nudges":   {cs.nudgesBeadStore().Store, nudges},
+		"mail":     {cs.mailBeadStore().Store, mail},
+		"work":     {cs.cityWorkStore().Store, splitStrictWorkView(work)},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s helper serves %p, want %p", name, pair[0], pair[1])
+		}
+	}
+	q, ok := cs.NudgeQueue().(*fileNudgeQueue)
+	if !ok {
+		t.Fatalf("NudgeQueue = %T, want the file queue", cs.NudgeQueue())
+	}
+	if q.store.Store != beads.Store(nudges) {
+		t.Errorf("the API nudge queue's shadows live in %p, want the nudges store %p", q.store.Store, nudges)
+	}
+}
