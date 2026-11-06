@@ -5275,6 +5275,7 @@ gc storage
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
 | [gc storage remote-stage](#gc-storage-remote-stage) | Mark or unmark this directory as a remote stage of a controller's city |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
+| [gc storage snapshot](#gc-storage-snapshot) | Snapshot this city's stores: the binding, the work store, the rigs |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 | [gc storage vouch-bd](#gc-storage-vouch-bd) | Walk a scope's bd and, if it matches a pinned gc bd inventory, vouch for it |
 
@@ -5580,6 +5581,98 @@ gc storage repair-sequence [flags]
 | `--floor` | string |  | new floor (int64, may be negative); omit to only report |
 | `--id-floor` | bool |  | raise the city work store's bd min_hash_length past every id the copy carried into the binding (not with --floor, --dir or --prefix) |
 | `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
+
+## gc storage snapshot
+
+Write a snapshot of this city's stores into a new directory &lt;to&gt;/&lt;id&gt;/.
+
+Each store gets an exact copy where its kind has one and, always, a JSONL of
+every row with its edges and their payloads:
+
+  binding (SQLite)   VACUUM INTO, then PRAGMA integrity_check on the copy
+  native Dolt        a Dolt tag of HEAD (wisps, in dolt_ignore'd tables, are
+                     not in it; the JSONL holds them)
+  bd CLI, hosted bd  bd export --all
+  file               a copy of the file
+  generic exec       the JSONL alone
+
+The JSONL is a record, not yet a restore source: no tool imports it.
+
+manifest.json records the stores, their row and edge counts, each file's
+sha256, the gc version, the work store's identity, and the binding root's
+records. It is written last, after every file is re-read and proven, so a
+directory without one is an interrupted snapshot, never a complete one.
+
+--binding alone runs against a live city: it only reads. --work and --rigs
+need the city stopped and --fleet-stopped, and run in the maintenance window.
+Every snapshot refuses while a migration, a re-copy, a rig import or a restore
+holds the city.
+
+--keep N keeps the newest N of this city's snapshots in &lt;to&gt; (this one always
+among them, and a pinned one never counted or removed) and removes the rest of
+this city's. Snapshots of another city or work store sharing &lt;to&gt; are left
+alone. --verify ID re-reads a snapshot and proves it against its manifest.
+
+```
+gc storage snapshot [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--binding` | bool |  | snapshot the infrastructure binding (live; read-only) |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--if-bound` | bool |  | with --binding alone: on a city with no binding, do nothing and exit 0 (the binding-snapshot order) |
+| `--keep` | int | `2` | keep the newest N of this city's snapshots in --to, this one included, and remove the rest of this city's (at least 1); other cities' snapshots there are left alone |
+| `--rigs` | bool |  | snapshot every rig's store (needs --fleet-stopped) |
+| `--to` | string |  | directory to write snapshots into (default &lt;city&gt;/.gc/snapshots) |
+| `--verify` | string |  | re-read snapshot ID in --to and prove it against its manifest, writing nothing |
+| `--work` | bool |  | snapshot the city's work store (needs --fleet-stopped) |
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc storage snapshot restore](#gc-storage-snapshot-restore) | Restore the binding from a snapshot (city stopped) |
+
+## gc storage snapshot restore
+
+Put snapshot &lt;id&gt;'s binding database back in place of the live one.
+
+It refuses a snapshot of another work store, and one taken before the
+binding's records changed (a migration, a recovery or a rig import since; a
+rig marked clean since, or a marker that only gained its identity line, is
+compatible): the database is only half of a binding, and the records beside
+it are not restored. It refuses, too, while the live binding holds rows a rig
+import carried in since the snapshot that neither the snapshot nor that rig's
+own store holds. It reads the rig's store for them, starting the city's
+bead-store provider for the read when it is stopped. A live binding too
+damaged to read is restored over, with a warning that its rig imports went
+unchecked.
+
+The snapshot is proven against its manifest first, then installed under the
+controller lock with the city stopped, in WAL mode, with the id floor raised
+past every id the replaced database held. The database it replaces, with its
+-wal, -shm and -journal, is kept beside it as *.pre-restore-&lt;ts&gt;. The
+installed database is a whole binding, so it also replaces a re-copy that
+never finished, and removes that re-copy's record (infra.recopying).
+
+From the moment it starts copying until it finishes, the binding counts as
+stale (infra.restoring beside it): every gc that boots refuses it and names
+this command. A refusal before the live database moves changes nothing. A
+restore interrupted after that holds the city stale until you run it again.
+
+Only --binding is restorable here. A work store is restored by the runbook:
+DOLT_RESET --hard to the snapshot's tag, or bd import of its export.
+
+```
+gc storage snapshot restore <id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--binding` | bool |  | restore the infrastructure binding |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
+| `--to` | string |  | directory the snapshot is in (default &lt;city&gt;/.gc/snapshots) |
 
 ## gc storage status
 

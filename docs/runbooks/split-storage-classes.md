@@ -1266,6 +1266,199 @@ Make sure the `gc` on every agent's `PATH` is the build that has `gc ready`:
 the generated work query shells out to it by name, and an older `gc` on `PATH`
 fails every hook with `running work query: exit status 1`.
 
+## Snapshots and restoring the binding
+
+`gc storage snapshot` writes a snapshot of the city's stores into a new
+directory, `.gc/snapshots/<id>/` by default (`--to DIR` to put it elsewhere):
+
+```
+# live, read-only: the binding alone
+gc storage snapshot --binding
+# with the city stopped: the binding, the work store and every rig
+gc storage snapshot --binding --work --rigs --fleet-stopped
+# re-read one and prove it against its manifest
+gc storage snapshot --verify <id>
+```
+
+Each store gets an exact copy where its kind has one, and a JSONL of every
+row with its edges and their payloads:
+
+| Store | Exact copy |
+|---|---|
+| SQLite binding | `VACUUM INTO`, proven with `PRAGMA integrity_check`. The copy is one self-contained file in rollback-journal mode |
+| Native Dolt | a Dolt tag, `gc-storage-snapshot-<id>-<dir hash>`, of HEAD |
+| bd CLI, hosted bd | `bd export --all` |
+| File | a copy of the file |
+| Generic exec | none |
+
+Know what each one can bring back:
+
+- **The JSONL is a record, not a restore source.** No tool imports it yet
+  (the manifest says `"jsonl_restorable": false`). For a generic exec store,
+  which has no exact copy, a snapshot is therefore not a way back to the
+  store.
+- **A Dolt tag holds the committed tables only.** bd keeps wisps in
+  `dolt_ignore`'d tables, so they are not in the tag; the JSONL holds them. A
+  working set with uncommitted changes is noted in the manifest.
+- **The binding is restorable** (below). A work store is restored by hand:
+  `CALL DOLT_RESET('--hard', '<tag>')` on its Dolt, or `bd import` of the
+  snapshot's `work/export.jsonl`. `gc storage migrate --to-work` is the
+  automated rollback.
+
+A snapshot directory holds `manifest.json` only once every file in it has
+been re-read and proven, so a directory without one is an interrupted
+snapshot: `--verify` refuses it, and the next snapshot into the same
+directory removes it. `--keep N` (default 2) keeps the newest N of this
+city's snapshots; snapshots of another city or work store in a shared `--to`
+are left alone. A snapshot with a `pinned` file in its directory is never
+counted or removed.
+
+On a split city the core `binding-snapshot` order snapshots the binding every
+6 hours into the core pack's state directory,
+`<city>/.gc/runtime/packs/core/binding-archive/`, and keeps the newest 4
+(`--keep 4`). On a city with no binding it does nothing. Its snapshots are
+not in the default directory, so pass that directory as `--to` to verify or
+restore one:
+
+```
+gc storage snapshot --verify <id> --to <city>/.gc/runtime/packs/core/binding-archive
+```
+
+### Restoring the binding
+
+With the city stopped, and `--to` naming the directory the snapshot is in
+(`.gc/snapshots` when it is left out):
+
+```
+gc storage snapshot restore <id> --binding --fleet-stopped --to <dir>
+```
+
+An id that is not in that directory is reported as missing, with the
+snapshots that are there.
+
+It installs the snapshot's database in WAL mode, raises the id floor past
+every id the replaced database held (a wrapped range included), and keeps the
+replaced database, with its `-wal`, `-shm` and `-journal`, beside it as
+`*.pre-restore-<ts>`. A live database too damaged to open is restored over
+too: the restore warns that it could not check that database for rig imports
+(below), and keeps it aside like any other.
+
+> **Do not copy a snapshot's `beads.sqlite` into place by hand.** It is in
+> rollback-journal mode, so a binding served from it makes every reader stall
+> the controller's writers, and a copy put down next to the live database's
+> `-wal` can have that WAL replayed into it. The restore command switches it
+> to WAL and moves the old files aside first.
+
+From the moment the restore starts copying until it finishes, the binding
+counts as stale (`infra.restoring` beside it): every `gc` that boots refuses
+it and names the restore. A refusal before the live database moves changes
+nothing. A restore interrupted after that holds the city stale until you run
+the same command again. If one was interrupted before it moved anything, the
+stale message says the database is still in place; remove `infra.restoring`
+to keep it. A re-run that fails before it moves anything puts back the
+record the earlier run left, so the stale message still names the files that
+run moved aside.
+
+A binding whose re-copy (`gc storage migrate --from-backup`) never finished
+can be restored instead. The installed snapshot is a whole binding, so the
+restore removes the re-copy's `infra.recopying` along with its own record.
+
+The restore refuses a snapshot of another work store (compared as boot
+compares a marker: the project id, else the database; never the path), and
+one taken before the binding's records changed: a migration, a recovery or a
+rig import since. A rig marked clean since, and a marker that only gained its
+`work-store` identity line, are compatible.
+
+**Rolling back past a rig import.** A snapshot from before `gc storage migrate
+--from-rigs` imported a rig refuses, naming the rig's records
+(`infra.rig.<rig>.migrated` and its cleared note). The binding's database is
+only half of the rollback: the rig's rows left the rig's store. To go back:
+
+> **Step 1 must come first.** Moving the rig's records aside without first
+> restoring the rig's store would make the binding restore drop the rows the
+> import carried (they are in the binding and no longer in the rig), so they
+> would end up in neither store. The restore refuses that case: it checks the
+> live binding for rows stamped as imported from a rig that the snapshot lacks
+> (not the cross-store gates the import minted in the binding, which the rig
+> never held), reads the rig's own store for them (starting the city's
+> bead-store provider for the read when it is stopped), and refuses the rows
+> the rig does not hold under the same id and created_at, naming the rig and
+> the rows, and which of them are ephemeral or no-history rows.
+
+1. With the city stopped, put every row the import carried back into the
+   rig's own store, under its id and `created_at`. The import moved rows of
+   both tiers: the rig's committed rows, and the ephemeral and no-history rows
+   bd keeps out of Dolt history, in its `dolt_ignore`'d tables. By default gc
+   stores sessions, waits, nudges, order tracking and mail that way, and,
+   under `[beads] bd_compatibility = "bd-1.0.5"`, its wisp and workflow rows
+   too. Two sources hold both tiers:
+
+   - **The import's own backup**, `infra.rig.<rig>.retained-source.jsonl`
+     beside the binding: every row it cleared from the rig, with its edges.
+     Import it with plain `bd`: `gc bd import` cannot do it on a split city,
+     because the binding holds these rows' class and their ids, so it refuses
+     them. Run every bd command of this step in the rig's directory, in a
+     shell with no `BEADS_*`, `BD_*` or `GC_*` variable set. bd takes its
+     store from `BEADS_DIR`, its Dolt server from the `BEADS_DOLT_*` variables
+     and its settings from `BD_*` before it looks at the directory it runs in,
+     and a gc agent session sets them for its own store: a bd run from one
+     writes the rig's rows into that store instead, and every re-run writes
+     them again. gc, in turn, takes its city from `GC_CITY`, `GC_CITY_PATH`
+     or `GC_RIG` before the directory it runs in, and a gc agent session sets
+     them for its own city: `gc rig list` run from one lists that city's rigs,
+     and a rig of the same name there passes the check below. bd reads no
+     `GC_*` variable. So open a shell of its own for this step, clear them
+     there, name the city, and check where bd points before anything is
+     imported:
+
+     ```bash
+     for v in $(env | cut -d= -f1 | grep -E '^(BEADS|BD|GC)_'); do unset "$v"; done
+     gc --city <city path> rig list   # it must say "Rigs in <city path>:"
+     cd <rig path>                    # the rig's Path in that list
+     bd where                         # its first line must be <rig path>/.beads; stop if it is not
+     ```
+
+     Then, in that shell, run step 4 of [Restoring the work store from the
+     backup](#restoring-the-work-store-from-the-backup) with `B` set to this
+     file's full path, `bd` in place of `gc bd`, and from the rig's
+     directory, not the city's. Run `bd where` again in the same block, just
+     before its `bd import`, and stop if its first line is not
+     `<rig path>/.beads`. bd's import keeps each row's `created_at`, which
+     the restore matches on, and the transform's `wisp_plane` marker puts
+     each ephemeral and no-history row back in bd's `dolt_ignore`'d tables;
+     without it, bd imports a no-history row among the committed rows. bd
+     1.3.2 to 1.3.4 leave out of the import each edge between a row they put
+     in those tables and one they do not, a parent link included, and print
+     `Skipped dependency: <row> -> <row>: cross-bucket dependency …` for it;
+     the 1.3.0 Enterprise build keeps them. Add them back, still in that
+     shell (an edge bd kept is left as it is):
+
+     ```bash
+     # Each edge between a restored ephemeral or no-history row and a
+     # restored committed one.
+     jq -rs '(map({key: .id, value: (.wisp_plane == true)}) | from_entries) as $plane
+       | .[] | (.wisp_plane == true) as $p | .dependencies[]
+       | select($plane[.depends_on_id] != null and $plane[.depends_on_id] != $p)
+       | "\(.issue_id) \(.depends_on_id) \(.type)"' /tmp/gc-restore.jsonl |
+       while read -r issue on kind; do bd dep add "$issue" "$on" --type "$kind"; done
+     ```
+
+   - **A Dolt backup of the rig synced before the import and not since**
+     (`dolt backup restore`).
+
+   A Dolt tag holds the committed tables only: `CALL DOLT_RESET('--hard',
+   '<tag>')` to the tag a `--rigs` snapshot took brings back the committed
+   rows and none of the others, and the restore in step 3 refuses while those
+   are missing, naming the import's backup. A Dolt backup synced since the
+   import holds neither. A reset or a backup restore also undoes every write
+   to the rig since then, its work included; the import's backup adds back
+   only the rows the import cleared.
+2. Move the rig's records aside, its backup included once step 1 has used
+   it: `infra.rig.<rig>.*` beside the binding, and
+   `.gc/storage-infra-cleared.rig.<rig>.json`.
+3. Restore the binding: `gc storage snapshot restore <id> --binding --fleet-stopped --to <dir>`.
+4. Check with `gc storage status`: the rig shows as awaiting import again.
+
 ## Rolling back
 
 **Before cutover, rollback is free** — nothing moved, so nothing is lost. How
@@ -1341,7 +1534,11 @@ dispatches it again. Check the binding (`gc bd show <id>` before the revert)
 for any step whose work must not run twice.
 Edge payloads (a `waits_for` gate's `{"gate":"any-children"}`) are not carried
 by `bd import`; a restored gate reads as the default, `all-children`. Verified
-with `bd` 1.3.2-rc.1.
+with `bd` 1.3.2-rc.1. The transform marks every ephemeral and no-history row
+`"wisp_plane": true`, which puts it back in bd's `dolt_ignore`'d tables: bd
+1.3.2, 1.3.4 and the 1.3.0 Enterprise build import a no-history row without the
+marker into the committed `issues` table. Verified with the Enterprise build
+`77612097cec0`.
 
 The order matters, because `gc` refuses to serve a reverted city while the
 notes stand — that refusal is what sent you here:
@@ -1357,7 +1554,8 @@ notes stand — that refusal is what sent you here:
 ```bash
 B=<binding root>/infra.retained-source.jsonl
 
-# The rows, with their outbound edges and parent links.
+# The rows, with their outbound edges and parent links, each ephemeral and
+# no-history row marked for bd's dolt_ignore'd tables.
 cat > /tmp/gc-restore.jq <<'JQ'
 select(.bead)
 | .bead as $b
@@ -1368,6 +1566,7 @@ select(.bead)
 | del(.parent, .from)
 | .dependencies = $deps
 | if $b.from then .metadata = (($b.metadata // {}) + {from: $b.from}) else . end
+| if $b.ephemeral or $b.no_history then .wisp_plane = true else . end
 JQ
 jq -c -f /tmp/gc-restore.jq "$B" > /tmp/gc-restore.jsonl
 gc bd import /tmp/gc-restore.jsonl

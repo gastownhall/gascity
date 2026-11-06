@@ -216,6 +216,11 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		return 0
 	}
 	if state == infraConvergenceStale {
+		// A restore under way is the one stale binding the migration does not
+		// re-copy: it refuses and names the restore.
+		if err := infraRestoreRecopyRefusal(target); err != nil {
+			return preflightBlock(stdout, "cutover", err)
+		}
 		preflightPass(stdout, "cutover", fmt.Sprintf("a convergence marker exists and %s, so the copy would run again and re-converge", infraStaleCause(target)))
 	} else {
 		preflightPass(stdout, "cutover", "not converged yet, which is what the migration is for")
