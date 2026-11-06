@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -337,15 +338,52 @@ func TestHookClaimLiveOwnershipScopeAndReads(t *testing.T) {
 	}
 }
 
+// liveOwnershipBinding is the relocated graph binding, counting the member
+// listings made against it and able to fault its probes or listings. It
+// forwards the compare-and-swap claim newHookClaimClassRoute requires, which
+// embedding the Store interface alone would hide.
+type liveOwnershipBinding struct {
+	beads.Store
+	lists   int
+	getErr  error
+	listErr error
+}
+
+func (s *liveOwnershipBinding) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.lists++
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.Store.List(query)
+}
+
+func (s *liveOwnershipBinding) Get(id string) (beads.Bead, error) {
+	if s.getErr != nil {
+		return beads.Bead{}, s.getErr
+	}
+	return s.Store.Get(id)
+}
+
+func (s *liveOwnershipBinding) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, fmt.Errorf("the split leaf %T has no compare-and-swap claim", s.Store)
+	}
+	return claimer.Claim(id, assignee)
+}
+
 // liveOwnershipSplit is a split city: a work store and the relocated graph
 // binding, with a workflow root and a foreign-held member step minted in the
-// binding.
+// binding. reads counts the work-leg reads the residence decision makes.
 type liveOwnershipSplit struct {
 	work    *liveOwnershipStore
-	binding beads.Store
+	binding *liveOwnershipBinding
 	route   *hookClaimClassRoute
 	root    beads.Bead
 	claims  []string
+	reads   int
 	readErr error
 }
 
@@ -353,7 +391,7 @@ func newLiveOwnershipSplit(t *testing.T) *liveOwnershipSplit {
 	t.Helper()
 	f := &liveOwnershipSplit{
 		work:    &liveOwnershipStore{MemStore: beads.NewMemStoreFrom(0, nil, nil)},
-		binding: newSplitEnvClassLeaf(t),
+		binding: &liveOwnershipBinding{Store: newSplitEnvClassLeaf(t)},
 	}
 	var err error
 	f.root, err = f.binding.Create(beads.Bead{Title: "workflow root", Type: "task", Metadata: map[string]string{
@@ -390,6 +428,7 @@ func (f *liveOwnershipSplit) baseOps() hookClaimOps {
 			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee}, true, nil
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+			f.reads++
 			if f.readErr != nil {
 				return beads.Bead{}, f.readErr
 			}
@@ -436,6 +475,132 @@ func TestClassRoutedWorkflowMembersFollowRootResidence(t *testing.T) {
 		members, err := ops.listWorkflowMembers(context.Background(), "/work", nil, f.root.ID)
 		if err != nil || len(members) != 1 || members[0].Assignee != "gk__polecat-2" {
 			t.Fatalf("listWorkflowMembers(%s) = %+v, %v; want the binding's held step", f.root.ID, members, err)
+		}
+		if f.binding.lists != 1 || len(f.work.lists) != 0 {
+			t.Fatalf("listings: binding=%d work=%v, want exactly one binding listing and none from the work store", f.binding.lists, f.work.lists)
+		}
+		if f.reads != 0 {
+			t.Fatalf("work reads = %d, want 0: a binding-minted id is reserved, so no work read can answer it", f.reads)
+		}
+	})
+
+	t.Run("a withheld graph root moves on to a later task without a root CAS", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		task, err := f.work.Create(liveOwnershipTaskBead())
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal([]beads.Bead{f.root, task})
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := f.baseOps()
+		base.Runner = func(string, string) (string, error) { return string(raw), nil }
+		ops := classRoutedHookClaimOps(base, f.route)
+		var stdout, stderr bytes.Buffer
+		doHookClaim("bd ready --json", "/work", liveOwnershipOptions(), ops, &stdout, &stderr)
+		var result hookClaimJSONResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("stdout is not JSON: %v\nraw: %s\nstderr: %s", err, stdout.String(), stderr.String())
+		}
+		if result.Action != "work" || result.BeadID != task.ID {
+			t.Fatalf("want the later task %s served, got action=%q reason=%q bead=%q\nstderr: %s", task.ID, result.Action, result.Reason, result.BeadID, stderr.String())
+		}
+		if len(f.claims) != 1 || f.claims[0] != task.ID {
+			t.Fatalf("work claim CASes = %v, want only the later task %s", f.claims, task.ID)
+		}
+		root, err := f.binding.Get(f.root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Status != "open" || root.Assignee != "" {
+			t.Fatalf("binding root status=%q assignee=%q, want it left open and unassigned", root.Status, root.Assignee)
+		}
+	})
+
+	t.Run("co-residence keeps the work answer", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		f.work.HonorExplicitIDs = true
+		// The same root row in both stores: the work copy and its members
+		// answer, and the binding's copy and its foreign-held member do not.
+		if _, err := f.work.Create(liveOwnershipRootBead()); err != nil {
+			t.Fatal(err)
+		}
+		own := liveOwnershipMember("gk-own-step", "in_progress", liveOwnershipIdentity, nil)
+		if _, err := f.work.Create(own); err != nil {
+			t.Fatal(err)
+		}
+		// The migration's door: the binding keeps the work-minted id.
+		creator, ok := f.binding.Store.(beads.ForeignIDCreator)
+		if !ok {
+			t.Fatalf("the binding %T is not a beads.ForeignIDCreator; the migrated root copy has no way in", f.binding.Store)
+		}
+		if _, err := creator.CreateWithForeignID(liveOwnershipRootBead()); err != nil {
+			t.Fatalf("copying the root into the binding: %v", err)
+		}
+		if _, err := f.binding.Get(liveOwnershipRoot); err != nil {
+			t.Fatalf("the binding's copy of %s is not readable under the same id: %v", liveOwnershipRoot, err)
+		}
+		foreign, err := f.binding.Create(beads.Bead{Title: "binding member", Type: "task", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: liveOwnershipRoot,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, holder := "in_progress", "gk__polecat-2"
+		if err := f.binding.Update(foreign.ID, beads.UpdateOpts{Status: &status, Assignee: &holder}); err != nil {
+			t.Fatal(err)
+		}
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		members, err := ops.listWorkflowMembers(context.Background(), "/work", nil, liveOwnershipRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, member := range members {
+			ids = append(ids, member.ID)
+		}
+		if !slices.Equal(ids, []string{own.ID}) {
+			t.Fatalf("members = %v, want the work store's %s alone, not the binding's %s", ids, own.ID, foreign.ID)
+		}
+		if f.binding.lists != 0 || len(f.work.lists) != 1 {
+			t.Fatalf("listings: binding=%d work=%v, want the work leg alone", f.binding.lists, f.work.lists)
+		}
+	})
+
+	t.Run("an unknown root keeps the work leg without an error", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		members, err := ops.listWorkflowMembers(context.Background(), "/work", nil, "gk-unknown")
+		if err != nil || len(members) != 0 {
+			t.Fatalf("listWorkflowMembers = %+v, %v; want the work leg's empty answer", members, err)
+		}
+		if f.binding.lists != 0 || len(f.work.lists) != 1 {
+			t.Fatalf("listings: binding=%d work=%v, want the work leg alone once the binding proves absence", f.binding.lists, f.work.lists)
+		}
+	})
+
+	t.Run("a binding probe failure surfaces", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		f.binding.getErr = errors.New("binding unreadable")
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		if _, err := ops.listWorkflowMembers(context.Background(), "/work", nil, f.root.ID); err == nil || !strings.Contains(err.Error(), "binding unreadable") {
+			t.Fatalf("listWorkflowMembers error = %v; the binding probe's failure must surface, not read as absence", err)
+		}
+		if f.binding.lists != 0 || len(f.work.lists) != 0 {
+			t.Fatalf("listings: binding=%d work=%v, want none after a failed probe", f.binding.lists, f.work.lists)
+		}
+	})
+
+	t.Run("a binding listing failure surfaces", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		f.binding.listErr = errors.New("binding list failed")
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		if _, err := ops.listWorkflowMembers(context.Background(), "/work", nil, f.root.ID); err == nil || !strings.Contains(err.Error(), "binding list failed") {
+			t.Fatalf("listWorkflowMembers error = %v; the binding listing's failure must surface", err)
+		}
+		if len(f.work.lists) != 0 {
+			t.Fatalf("work listings = %v; a failed binding listing must not fall back to the work store's empty answer", f.work.lists)
 		}
 	})
 
