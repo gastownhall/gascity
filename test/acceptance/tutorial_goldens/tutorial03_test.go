@@ -245,10 +245,23 @@ func TestTutorial03Sessions(t *testing.T) {
 		if deepErr != nil {
 			t.Fatalf("gc session peek %s --lines %d: %v\n%s", reviewerSessionID, reviewerIdentityPeekLines, deepErr, deepOut)
 		}
-		if !peekIdentifiesReviewer(deepOut) {
-			t.Fatalf("peek reviewer output mismatch; default window:\n%s\n\nhidden %d-line window:\n%s", out, reviewerIdentityPeekLines, deepOut)
+		if peekIdentifiesReviewer(deepOut) {
+			ws.noteWarning("tutorial 03 runtime workaround: the default peek window slid past the reviewer-identifying prompt text (provider footer chrome can shift the visible window, issue #3877), so the page driver confirmed the same session identity in a wider hidden %d-line peek window", reviewerIdentityPeekLines)
+			return
 		}
-		ws.noteWarning("tutorial 03 runtime workaround: the default peek window slid past the reviewer-identifying prompt text (provider footer chrome can shift the visible window, issue #3877), so the page driver confirmed the same session identity in a wider hidden %d-line peek window", reviewerIdentityPeekLines)
+		// The prompt's header can sit outside even the wider window: the
+		// provider renders only part of a long first input (the prompt plus
+		// the skills appendix gc prime adds). The session's transcript holds
+		// the whole prompt, so it settles the identity.
+		var logsOut string
+		var logsErr error
+		if !waitForCondition(t, 30*time.Second, 2*time.Second, func() bool {
+			logsOut, logsErr = ws.runShell("gc session logs "+reviewerSessionID+" --tail 0", "")
+			return logsErr == nil && peekIdentifiesReviewer(logsOut)
+		}) {
+			t.Fatalf("peek reviewer output mismatch; default window:\n%s\n\nhidden %d-line window:\n%s\n\ntranscript (%v):\n%s", out, reviewerIdentityPeekLines, deepOut, logsErr, logsOut)
+		}
+		ws.noteWarning("tutorial 03 runtime workaround: neither peek window showed the reviewer-identifying prompt text (the provider renders only part of a long first input), so the page driver confirmed the session's identity from its transcript (gc session logs %s --tail 0)", reviewerSessionID)
 	})
 
 	t.Run("gc session list", func(t *testing.T) {

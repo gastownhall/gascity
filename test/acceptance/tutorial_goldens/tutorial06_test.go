@@ -249,14 +249,30 @@ func TestTutorial06Beads(t *testing.T) {
 	})
 
 	t.Run("gc convoy status mc-d4g", func(t *testing.T) {
-		out, err := ws.runShell(fmt.Sprintf("gc convoy status %s", sprintConvoyID), "")
-		if err != nil {
-			t.Fatalf("gc convoy status %s: %v\n%s", sprintConvoyID, err, out)
-		}
-		for _, want := range []string{"Sprint 42", "Fix the login bug", "Refactor auth module", "Update API docs"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("convoy status missing %q:\n%s", want, out)
+		// convoy status reads through the supervisor's bead cache, which can
+		// trail the convoy create that just wrote the tracks by a moment, so
+		// wait for every member rather than read once.
+		wants := []string{"Sprint 42", "Fix the login bug", "Refactor auth module", "Update API docs"}
+		listsEveryMember := func(out string) bool {
+			for _, want := range wants {
+				if !strings.Contains(out, want) {
+					return false
+				}
 			}
+			return true
+		}
+		var out string
+		var err error
+		reads := 0
+		if !waitForCondition(t, 30*time.Second, time.Second, func() bool {
+			reads++
+			out, err = ws.runShell(fmt.Sprintf("gc convoy status %s", sprintConvoyID), "")
+			return err == nil && listsEveryMember(out)
+		}) {
+			t.Fatalf("gc convoy status %s never listed every member of %q within 30s (%v):\n%s", sprintConvoyID, wants, err, out)
+		}
+		if reads > 1 {
+			ws.noteWarning("tutorial 06 runtime workaround: gc convoy status, read through the supervisor's bead cache, trailed the convoy create for %d read(s), so the page driver waited for every member", reads-1)
 		}
 	})
 
