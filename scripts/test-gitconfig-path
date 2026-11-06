@@ -11,8 +11,13 @@
 # It also turns off auto maintenance: git 2.47 and later follow a fetch,
 # commit or merge with `git maintenance run --auto --detach`, a background
 # process that writes into .git after the command exits and races a test's
-# temp-dir cleanup. A seed is created once and never rewritten, so its name
-# carries a version: bump it whenever the seed's content changes.
+# temp-dir cleanup. internal/testenv's git template, the only guard in Bazel
+# runs, covers the repos tests create; in a go-native run this seed also
+# covers every git process that keeps the test env's GIT_CONFIG_GLOBAL. A
+# script that drops both, as .github/actions/rbe-worker/fetch.sh does, turns
+# it off on its own git calls (TESTING.md "Git auto-maintenance in test
+# repos"). A seed is created once and never rewritten, so its name carries a
+# version: bump it whenever the seed's content changes.
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
