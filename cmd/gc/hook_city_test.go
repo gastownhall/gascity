@@ -240,3 +240,39 @@ func TestHookCityClaimOpsCarryTheInvocationStart(t *testing.T) {
 		t.Fatalf("invocation age = %v, want 3s measured on the city's clock", got)
 	}
 }
+
+// TestHookCityClaimOpsWithoutAStartFallBackToApplyDefaults pins the fallback for
+// claim ops built without an invocation start, from a city that carries none or
+// directly: the first defaulting stamps the start from the supplied clock and a
+// later one keeps it, so every federated leg still shares one window.
+func TestHookCityClaimOpsWithoutAStartFallBackToApplyDefaults(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := writeFenceTestCity(t)
+	for name, build := range map[string]func() hookClaimOps{
+		"plain city": func() hookClaimOps { return newHookCity(cityDir, &config.City{}).claimOps() },
+		"direct":     func() hookClaimOps { return hookClaimOps{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			start := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			clock := start
+			ops := build()
+			if !ops.InvokedAt.IsZero() {
+				t.Fatalf("InvokedAt = %v before defaulting, want zero", ops.InvokedAt)
+			}
+			ops.Now = func() time.Time { return clock }
+
+			ops.applyDefaults()
+			if !ops.InvokedAt.Equal(start) {
+				t.Fatalf("first defaulting stamped InvokedAt = %v, want %v from the supplied clock", ops.InvokedAt, start)
+			}
+			clock = start.Add(5 * time.Second)
+			ops.applyDefaults()
+			if !ops.InvokedAt.Equal(start) {
+				t.Fatalf("second defaulting moved InvokedAt to %v, want the original start %v", ops.InvokedAt, start)
+			}
+			if got := ops.invocationAge(); got != 5*time.Second {
+				t.Fatalf("invocation age = %v, want 5s from the original start", got)
+			}
+		})
+	}
+}

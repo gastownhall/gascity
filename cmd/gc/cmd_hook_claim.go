@@ -333,9 +333,10 @@ type hookClaimOps struct {
 	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
 	// is how long after it a claim mutation may still run. Together they are the
 	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
-	// outlived the turn that asked for it. applyDefaults fills both, once per
-	// invocation, so every federated leg shares ONE window rather than getting a
-	// fresh one each time the loop copies the ops.
+	// outlived the turn that asked for it. cmdHookWithOptions supplies InvokedAt
+	// from its entry (hookCity.claimOps); applyDefaults fills whichever is still
+	// unset, once per invocation, so every federated leg shares ONE window rather
+	// than getting a fresh one each time the loop copies the ops.
 	InvokedAt   time.Time
 	ClaimWindow time.Duration
 	// ClassRoute is the relocated coordination-class binding these seams
@@ -758,9 +759,11 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.Sleep == nil {
 		ops.Sleep = time.Sleep
 	}
-	// Stamped once per invocation and never refreshed: every federated leg the
-	// claim loop tries shares the window the FIRST one opened, which is what
-	// makes the fence bound the whole command rather than each attempt.
+	// The fallback for ops built without an invocation start (a direct caller,
+	// or a hookCity that carries none): stamped once and never refreshed, so
+	// every federated leg the claim loop tries shares the window the FIRST one
+	// opened, which is what makes the fence bound the whole command rather than
+	// each attempt.
 	if ops.InvokedAt.IsZero() {
 		ops.InvokedAt = ops.Now()
 	}
@@ -808,10 +811,11 @@ func (ops *hookClaimOps) sleepOrWallClock(d time.Duration) {
 
 // invocationAge is how long this `gc hook --claim` invocation has been running.
 //
-// A zero InvokedAt means no invocation window was ever opened, which happens
-// only for a caller driving a claim tier directly rather than through
-// doHookClaim / claimHookWorkWithRunner (both of which stamp it in
-// applyDefaults). Such a caller has no turn for the claim to outlive, so it
+// It is measured on ops.Now from InvokedAt, which cmdHookWithOptions supplies
+// from its entry and applyDefaults otherwise stamps. A zero InvokedAt means no
+// invocation window was ever opened, which happens only for a caller driving a
+// claim tier directly rather than through doHookClaim /
+// claimHookWorkWithRunner (both of which run applyDefaults). Such a caller has no turn for the claim to outlive, so it
 // reports age zero and the fence never fires — fail-open by construction, not
 // by accident.
 func (ops *hookClaimOps) invocationAge() time.Duration {
