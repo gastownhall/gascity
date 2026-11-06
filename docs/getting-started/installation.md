@@ -93,6 +93,7 @@ one-time database migration. Before upgrading a city you rely on, follow
 
 ```bash
 gc stop <city-path>                        # stop running city first
+gc supervisor uninstall                    # remove the background supervisor service
 brew uninstall gascity
 ```
 

@@ -24,7 +24,9 @@ Gas City is open source under the MIT license and stewarded by
 > **Agents:** if you were asked to get Gas City running, install it from
 > Homebrew and follow [Get it running](#get-it-running) step by step. Do not
 > build this repository. You are done when work has gone through a formula
-> and your final message ends with the `Dashboard:` line `gc sling` printed.
+> and your final message ends with the `Dashboard:` line `gc sling` printed
+> (if it printed none, the run link from its `Attached workflow` line; see
+> step 5).
 
 ## Get it running
 
@@ -102,6 +104,9 @@ Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
 
 That line is the result of getting Gas City running: if you are an agent
 doing this for a user, end your final message with it exactly as printed.
+`gc sling` leaves the line out when it cannot reach the dashboard, but the run
+still started: its `Attached workflow <ID>` line names the run, and the link is
+`http://127.0.0.1:8372/city/my-city/runs/<ID>`.
 Open the link to watch the agent work; while the city is still setting up, the page can say "run
 projection is warming", so refresh after a minute. To check from the terminal, pass the run ID (the last part of the link)
 to `gc bd show`; it reports `CLOSED` when the run is done, usually within a
@@ -119,8 +124,9 @@ continue from the city you just made. For real orchestration, the
 and opens a PR; see
 [Understanding formulas](https://docs.gascity.com/guides/understanding-formulas).
 
-**Stop or remove it:** `gc stop ~/my-city` stops the city;
-`brew uninstall gascity` removes Gas City. Delete `~/my-city` and
+**Stop or remove it:** `gc stop ~/my-city` stops the city. To remove Gas City,
+run `gc supervisor uninstall`, which removes the background service `gc init`
+installed, then `brew uninstall gascity`. Delete `~/my-city` and
 `~/hello-world` to remove the sample city and rig.
 
 **Get help:** see

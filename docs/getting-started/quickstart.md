@@ -83,7 +83,10 @@ Dashboard: http://127.0.0.1:8372/city/my-city/runs/hw-4up
 ```
 
 That line is the result of getting Gas City running. An agent doing this setup
-for you should end its final message with it exactly as printed.
+for you should end its final message with it exactly as printed. `gc sling`
+leaves the line out when it cannot reach the dashboard, but the run still
+started: its `Attached workflow <ID>` line names the run, and the link is
+`http://127.0.0.1:8372/city/my-city/runs/<ID>`.
 
 ## 5. Watch It Finish
 
