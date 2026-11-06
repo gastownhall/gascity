@@ -346,3 +346,70 @@ func TestActiveWorkLookupPreservesPriorityAfterFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestActiveWorkLookupUsesCleanCacheAfterDeadline: a clean cache answers a
+// row, hit or authoritative miss, after the lookup's window has closed, with
+// no uncached read and no partial error. Once a read has failed, though,
+// later rows resolve nothing, cached or not. The session lists show the
+// expired window: the agents list's own session snapshot shares
+// statusStoreReadTimeout, so a zero window would fail it first.
+func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
+	for _, route := range activeWorkListRoutes[:2] {
+		t.Run("expired window/"+route.name, func(t *testing.T) {
+			pinStatusStoreReadTimeout(t, 0)
+			work := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore()}
+			city := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore()}
+			fs := newSessionFakeState(t)
+			fs.stores["myrig"] = work
+			fs.cityBeadStore = city
+			withWork := createTestSession(t, city, fs.sp, "With work")
+			idle := createTestSession(t, city, fs.sp, "Idle")
+			want := addActiveWork(t, work, withWork.ID)
+			work.blockList, city.blockList = true, true
+			srv := New(fs)
+
+			body, _ := getActiveWorkList(t, route.handler(t, fs, srv), httptest.NewRequest("GET", route.path(fs), nil))
+
+			if got := body.activeBeadOf(t, withWork.ID); got != want {
+				t.Errorf("active_bead = %q, want cached %q", got, want)
+			}
+			if got := body.activeBeadOf(t, idle.ID); got != "" {
+				t.Errorf("idle active_bead = %q, want none (authoritative cache miss)", got)
+			}
+			if body.Partial {
+				t.Errorf("partial_errors = %q, want none: cache answers need no window", body.PartialErrors)
+			}
+			if work.listCalls != 0 || city.listCalls != 0 {
+				t.Errorf("uncached reads = %d work, %d city; want 0", work.listCalls, city.listCalls)
+			}
+		})
+	}
+	for _, route := range activeWorkListRoutes[:2] {
+		t.Run("failure ends cached rows/"+route.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			a := &faultyActiveWorkStore{Store: beads.NewMemStore(), err: errors.New("bd list: connection refused")}
+			cached := &cachedOnlyListStoreForSessionTest{MemStore: beads.NewMemStore()}
+			fs.stores = map[string]beads.Store{"a": a, "myrig": cached}
+			first := createTestSession(t, fs.cityBeadStore, fs.sp, "First")
+			second := createTestSession(t, fs.cityBeadStore, fs.sp, "Second")
+			addActiveWork(t, cached, first.ID)
+			addActiveWork(t, cached, second.ID)
+			cached.blockList = true
+			srv := New(fs)
+
+			body, _ := getActiveWorkList(t, route.handler(t, fs, srv), httptest.NewRequest("GET", route.path(fs), nil))
+
+			for _, info := range []string{first.ID, second.ID} {
+				if got := body.activeBeadOf(t, info); got != "" {
+					t.Errorf("%s active_bead = %q, want none after store a failed", info, got)
+				}
+			}
+			if n := a.reads.Load(); n != 1 {
+				t.Errorf("store a active-work reads = %d, want 1", n)
+			}
+			if !body.Partial || !body.hasActiveWorkError("a") {
+				t.Errorf("partial = %v, partial_errors = %q; want partial naming the active-work read of a", body.Partial, body.PartialErrors)
+			}
+		})
+	}
+}
