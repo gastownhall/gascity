@@ -111,6 +111,23 @@ func (f FullFake) ProgramStatusShadowIdleWait(name string, _, _ time.Time, scrap
 	recordIdleWaitUntimed(f, name, scrape)
 }
 
+// ProgramStatusShadowGo implements [ProgramStatusShadowProvider]: the fake
+// takes no background work, so fn runs on the caller's path.
+func (f FullFake) ProgramStatusShadowGo(_ string, _ ProgramStatusPoint, fn func()) {
+	fn()
+}
+
+// ProgramStatusShadowIdleWaitAtNudge implements
+// [ProgramStatusShadowProvider]: the fake's nudges take no decision reading,
+// so it defers nothing and the wait is recorded when it is decided.
+func (f FullFake) ProgramStatusShadowIdleWaitAtNudge(string, time.Time, time.Time, ProgramVerdict) bool {
+	return false
+}
+
+// ProgramStatusShadowSettleNudge implements [ProgramStatusShadowProvider]:
+// the fake defers nothing, so there is nothing to settle.
+func (f FullFake) ProgramStatusShadowSettleNudge(string) {}
+
 // ProgramStatusHoldRead implements [ProgramStatusHoldProvider]: name's
 // agent-pane row judged fresh, as ProgramStatusShadowRead judges it, with
 // the session's configured activity ([Fake.Activity]), recorded as a call of

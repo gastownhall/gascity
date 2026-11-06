@@ -441,6 +441,34 @@ func TestObservationShadowRecordedOnSessionReads(t *testing.T) {
 	}
 }
 
+// Kills an observation (observation) judged on the state cache's snapshot
+// of the record (ga-f4ovjm.77: 41 scrape-right disagreements, and the turn
+// overlay's "working record with no open turn means starting" clause wrong
+// 36 of 54 times, all on readings up to the cache's TTL old): a turn that
+// ended inside the TTL still read working there beside the transcript's
+// idle. The record is read fresh, so its idle stands beside the
+// transcript's; the response still shows the reading it showed, the
+// snapshot's.
+func TestObservationShadowJudgesTheFreshRecord(t *testing.T) {
+	c := newObservationShadowCity(t, "worker")
+	id := c.start(t, "myrig--worker", "myrig/worker", c.rigDir, runtime.ProgramIdle, endedTurnTranscript...)
+	c.fs.sp.SetProgramCachedPane("myrig--worker", programRowAt(runtime.ProgramStatusShadow, runtime.ProgramWorking, "", time.Now().Add(-time.Second)))
+	var got []runtime.ProgramStatusComparison
+	c.fs.sp.ProgramShadowSink = func(cmp runtime.ProgramStatusComparison) {
+		if cmp.Point == runtime.ProgramPointObservation {
+			got = append(got, cmp)
+		}
+	}
+	var resp sessionResponse
+	getProgramStatusJSON(t, c.h, cityURL(c.fs, "/session/")+id, &resp)
+	if len(got) != 1 || got[0].Scrape != runtime.ProgramVerdictIdle || got[0].Program != runtime.ProgramVerdictIdle || got[0].Status.State != runtime.ProgramIdle {
+		t.Fatalf("recorded %+v, want observation idle/idle on the pane's own idle record", got)
+	}
+	if resp.ProgramStatus == nil || resp.ProgramStatus.State != string(runtime.ProgramWorking) {
+		t.Fatalf("response program_status %+v, want the snapshot's working reading it showed before", resp.ProgramStatus)
+	}
+}
+
 // Kills observation producers that disagree about one unchanged session:
 // agent reads that recorded indeterminate for an agent whose session file is
 // ambiguous (two claude agents share its rig), beside the session reads'

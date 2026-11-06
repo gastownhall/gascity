@@ -126,6 +126,8 @@ func observeProgram(ps runtime.ProgramStatus, transcriptActivity string) program
 // included, decided nothing and records nothing; an indeterminate would
 // count as a disagreement beside a valid record, and alternate with the
 // readings the session's other producers record, every change kept. The
+// record is read fresh, off the response's path
+// (runtime.ShadowObserveIdle), never the snapshot the response shows. The
 // leaf records only when the pair changes and only while it is shadowing
 // too; nothing in the response reads it. The agent reads record nothing:
 // an agent's activity is its session's transcript, read only for a claude
@@ -144,7 +146,7 @@ func shadowObservation(published runtime.ProgramStatusMode, sp runtime.Provider,
 	default:
 		return
 	}
-	runtime.ShadowCompareIdle(sp, strings.TrimSpace(sessionName), sessionID, family, runtime.ProgramPointObservation, scrape)
+	runtime.ShadowObserveIdle(sp, strings.TrimSpace(sessionName), sessionID, family, scrape)
 }
 
 // programStatusFrames tracks the program-status view a session stream last

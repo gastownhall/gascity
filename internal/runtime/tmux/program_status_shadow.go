@@ -20,9 +20,12 @@ import (
 // path, before the point hands control back to its caller: a baseline before
 // gc types, the reading just before a look whose verdict gc acts on at once,
 // or the reading right after a wait decided. Each is one tmux read, past the
-// state cache (pending's is taken right after the parsers' capture). Read
-// any later, it could judge what gc did with the decision instead (a
-// delivery typed as soon as a wait returns starts a turn). Everything after that read (any follow-up that times the
+// state cache (pending's is taken right after the parsers' capture), and the
+// points of one decision share it: a nudge's idle waits are judged on the
+// read its typing gate takes before it types (program_status_shadow_nudge.go).
+// Read any later, it could judge what gc did with the decision instead (a
+// delivery typed as soon as a wait returns starts a turn). Everything after
+// that read (any follow-up that times the
 // program's own signal, the hand-off to the sink) runs on a bounded
 // background goroutine, and a point whose work finds no free slot is dropped
 // and counted, never waited for. A comparison carries the reading its rule
@@ -88,6 +91,12 @@ type programShadow struct {
 	taps func() programTaps
 	// following holds the session points with a follow-up outstanding.
 	following map[shadowFollowKey]struct{}
+	// atNudge holds, per session, the idle waits judged on the session's
+	// next nudge decision reading (deferToNudge).
+	atNudge map[string][]func(shadowDecision)
+	// observing holds the session points with a background comparison
+	// running (claimShadowObserve).
+	observing map[shadowFollowKey]struct{}
 }
 
 // shadowFollowKey is one session's timed decision point.
@@ -165,18 +174,19 @@ func (p *Provider) ProgramStatusShadowRead(name string) (runtime.ProgramStatus, 
 var _ runtime.ProgramStatusShadowProvider = (*Provider)(nil)
 
 // shadowGo runs fn on a background goroutine when a slot is free, and
-// otherwise drops it, counting the drop against the next comparison. The
-// process is told of the work (Config.ComparisonWork) so its exit can wait
-// for it. A panic in fn is contained (a supervisor process hosts several
-// cities) and counted as a drop.
-func (t *Tmux) shadowGo(fn func()) {
+// otherwise drops it, counting the drop against the next comparison; it
+// reports whether fn runs. The process is told of the work
+// (Config.ComparisonWork) so its exit can wait for it. A panic in fn is
+// contained (a supervisor process hosts several cities) and counted as a
+// drop.
+func (t *Tmux) shadowGo(fn func()) bool {
 	sh := &t.shadow
 	sh.slotsOnce.Do(func() { sh.slots = make(chan struct{}, shadowSlots) })
 	select {
 	case sh.slots <- struct{}{}:
 	default:
 		sh.dropped.Add(1)
-		return
+		return false
 	}
 	done := func() {}
 	if t.cfg.ComparisonWork != nil {
@@ -192,6 +202,7 @@ func (t *Tmux) shadowGo(fn func()) {
 		}()
 		fn()
 	}()
+	return true
 }
 
 // shadowFollowsUp reports whether the process follows timed comparisons
@@ -465,9 +476,11 @@ func settleWaitVerdict(err error) (runtime.ProgramVerdict, bool) {
 // (WaitForIdle), before the wait returns to its caller: its wait_for_idle,
 // unless ctx's caller records the decision at its own point
 // ([runtime.WithShadowCallerRecords]), and the settle of an interrupt gc
-// noted before it (interrupt_settle). Both judge one reading, taken here. A
-// wait that decided nothing records nothing, and takes no reading when
-// neither point records.
+// noted before it (interrupt_settle). Both judge one reading, taken here,
+// or, for a nudge's own wait (ctx marked by withShadowNudge), the nudge's
+// decision reading, which it takes before it types (deferToNudge). A wait
+// that decided nothing records nothing, and takes no reading when neither
+// point records.
 func (t *Tmux) shadowIdleWait(ctx context.Context, session string, started, decidedAt time.Time, err error) {
 	waitScrape, waits := idleWaitVerdict(err)
 	waits = waits && !runtime.ShadowCallerRecords(ctx)
@@ -477,15 +490,20 @@ func (t *Tmux) shadowIdleWait(ctx context.Context, session string, started, deci
 	if !waits && !settles {
 		return
 	}
-	d, ok := t.shadowDecide(session)
-	if !ok {
+	judge := func(d shadowDecision) {
+		if waits {
+			t.shadowWaitForIdle(session, started, decidedAt, waitScrape, d)
+		}
+		if settles {
+			t.shadowSettleFrom(session, mark, decidedAt, settleScrape, d)
+		}
+	}
+	if inShadowNudge(ctx, session) && t.shadowing() {
+		t.deferToNudge(session, judge)
 		return
 	}
-	if waits {
-		t.shadowWaitForIdle(session, started, decidedAt, waitScrape, d)
-	}
-	if settles {
-		t.shadowSettleFrom(session, mark, decidedAt, settleScrape, d)
+	if d, ok := t.shadowDecide(session); ok {
+		judge(d)
 	}
 }
 
@@ -612,11 +630,12 @@ func (t *Tmux) shadowTypingGate(session string, lookErr error, lookAt time.Time,
 	})
 }
 
-// shadowTypingGateNow is shadowTypingGate with a reading taken now, for a
-// look taken at lookAt that refused before any baseline was needed.
+// shadowTypingGateNow is shadowTypingGate with the nudge's decision reading
+// taken now (nudgeDecide), for a look taken at lookAt that refused before
+// any baseline was needed.
 func (t *Tmux) shadowTypingGateNow(session string, lookErr error, lookAt time.Time) {
-	if s, ok := t.shadowRead(session); ok {
-		t.shadowTypingGate(session, lookErr, lookAt, s)
+	if d, ok := t.nudgeDecide(session); ok {
+		t.shadowTypingGate(session, lookErr, lookAt, d.status)
 	}
 }
 
