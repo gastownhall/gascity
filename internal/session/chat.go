@@ -1499,8 +1499,9 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 
 // PendingInteractionError returns an error wrapping ErrPendingInteraction that
 // names the pending request, so callers can tell the operator what must be
-// answered before text can be delivered: a permission prompt is answered with
-// Respond, a question in the terminal.
+// answered before text can be delivered: a permission prompt with Respond's
+// approve or deny, a question with Respond's select (naming one of its
+// options) or in the terminal.
 func PendingInteractionError(pending *runtime.PendingInteraction) error {
 	what := strings.TrimSpace(pending.Kind)
 	if what == "" {
@@ -1513,9 +1514,9 @@ func PendingInteractionError(pending *runtime.PendingInteraction) error {
 		what += " (request " + pending.RequestID + ")"
 	}
 	if strings.TrimSpace(pending.Kind) == "question" {
-		// A question dialog offers no response verbs: only a person answers
-		// it, in the terminal.
-		return fmt.Errorf("%w: %s is waiting for an answer in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
+		// A question is answered by picking one of its options; free text
+		// and chat are answered in the terminal.
+		return fmt.Errorf("%w: %s is waiting for an answer; respond to it (select one of its options) or answer it in the terminal (gc session attach <session>); text sent now would select one of its options", ErrPendingInteraction, what)
 	}
 	return fmt.Errorf("%w: %s is waiting for an answer; respond to it (approve or deny) before sending text", ErrPendingInteraction, what)
 }
