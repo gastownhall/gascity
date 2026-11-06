@@ -581,9 +581,34 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		// gzip CVE-2026-41992; libpcre2-8-0 CVE-2026-86145 and CVE-2026-89161;
 		// libsqlite3-0 CVE-2026-11822 and CVE-2026-11824.
 		"gzip", "libpcre2-8-0", "libsqlite3-0",
+		// apt set, CVE-2026-109518, fixed in 3.0.4.
+		"apt", "libapt-pkg7.0",
 	} {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
+		}
+	}
+}
+
+// TestAgentBaseImageUpgradesPatchedOSPackages guards the --only-upgrade list in
+// Dockerfile.base, which every Ubuntu image (gc-agent-base, gc-agent,
+// gc-controller) inherits. As in Dockerfile.mail, the base image is pinned by
+// digest, so a CVE in a package the base already ships is only cleared by naming
+// the package: the plain install leaves an installed package where it is.
+func TestAgentBaseImageUpgradesPatchedOSPackages(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.base")
+
+	_, upgrade, ok := strings.Cut(dockerfile, "&& apt-get install -y --no-install-recommends --only-upgrade \\")
+	if !ok {
+		t.Fatal("contrib/k8s/Dockerfile.base no longer upgrades any pinned-base OS package")
+	}
+	upgrade, _, _ = strings.Cut(upgrade, "&& rm -rf /var/lib/apt/lists/*")
+	for _, pkg := range []string{
+		// apt set, CVE-2026-109518, fixed in 2.8.4ubuntu0.1.
+		"apt", "libapt-pkg6.0t64",
+	} {
+		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
+			t.Errorf("contrib/k8s/Dockerfile.base --only-upgrade list missing %q", pkg)
 		}
 	}
 }

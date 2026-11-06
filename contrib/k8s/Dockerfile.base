@@ -150,7 +150,10 @@ FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194
 ENV DEBIAN_FRONTEND=noninteractive
 ARG CLAUDE_CODE_VERSION=2.1.308
 
-# System packages.
+# System packages. apt and libapt-pkg6.0t64 carry CVE-2026-109518, fixed in
+# 2.8.4ubuntu0.1. The pinned base image ships them, and an install leaves an
+# installed package where it is, so they are upgraded by name, together: Trivy
+# reports each binary package of the source separately.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -166,6 +169,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     # util-linux: provides flock(1) for the bd/Dolt beads lock — runtime hard dep, not optional diagnostics.
     util-linux \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
+    libapt-pkg6.0t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/scripts/install-claude-native.sh /tmp/install-claude-native.sh
