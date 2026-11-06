@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -64,25 +65,66 @@ func (c hookCurrentContext) claimCheck(id, sessionID string, scope ReleaseScope)
 }
 
 // resolveHookCurrent is the claim sessionID currently holds, as `gc hook
-// current` prints it. The session's claim stamp is printed only when the live
-// ledger says the session still holds it. It never writes: repairing the
-// stamp is the claim path's job.
-func resolveHookCurrent(c hookCurrentContext, sessionID string) (string, error) {
+// current` prints it, and a note for stderr when it is not the session's claim
+// stamp. The stamp is written best-effort, so it is printed only when the live
+// ledger says the session still holds it. A stale or absent stamp resolves to
+// the session's one recorded hook delivery (the work_started cell) it still
+// holds; none, or several, is an error. It never writes: repairing the stamp
+// is the claim path's job.
+func resolveHookCurrent(c hookCurrentContext, sessionID string) (beadID, note string, err error) {
 	info, err := c.sessFront.Get(sessionID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	stamp := strings.TrimSpace(info.CurrentClaimBeadID)
-	if stamp == "" {
-		return "", fmt.Errorf("session %s has no current claim (nothing claimed through gc hook --claim)", sessionID)
-	}
-	scope := releaseScope(info, c.cfg)
-	reason, err := c.claimCheck(stamp, sessionID, scope)
+	cell, err := session.DecodeWorkStarted(info.WorkStartedRaw)
 	if err != nil {
-		return "", err
+		return "", "", fmt.Errorf("session %s: %w", sessionID, err)
 	}
-	if reason != "" {
-		return "", fmt.Errorf("session %s has no current claim: its claim stamp %s is stale (%s)", sessionID, stamp, reason)
+	deliveries := hookDeliveredBeads(cell)
+	stamp := strings.TrimSpace(info.CurrentClaimBeadID)
+	scope := releaseScope(info, c.cfg)
+	var stale claimStaleReason
+	if stamp != "" {
+		if stale, err = c.claimCheck(stamp, sessionID, scope); err != nil {
+			return "", "", err
+		}
+		if stale == "" {
+			return stamp, "", nil
+		}
 	}
-	return stamp, nil
+	var live []string
+	for _, id := range deliveries {
+		if id == stamp {
+			continue
+		}
+		reason, err := c.claimCheck(id, sessionID, scope)
+		if err != nil {
+			return "", "", err
+		}
+		if reason == "" {
+			live = append(live, id)
+		}
+	}
+	switch {
+	case len(live) == 1 && stamp == "":
+		return live[0], fmt.Sprintf("session %s has no claim stamp; its current claim is %s, the one recorded hook delivery it still holds", sessionID, live[0]), nil
+	case len(live) == 1:
+		return live[0], fmt.Sprintf("claim stamp %s is stale (%s); the current claim is %s, the one recorded hook delivery session %s still holds", stamp, stale, live[0], sessionID), nil
+	case len(live) > 1:
+		return "", "", fmt.Errorf("session %s holds several recorded hook deliveries (%s); refusing to pick one as the current claim", sessionID, strings.Join(live, ", "))
+	case stamp == "":
+		return "", "", fmt.Errorf("session %s has no current claim (nothing claimed through gc hook --claim)", sessionID)
+	}
+	return "", "", fmt.Errorf("session %s has no current claim: its claim stamp %s is stale (%s) and no recorded hook delivery is still held", sessionID, stamp, stale)
+}
+
+// hookDeliveredBeads is the distinct bead ids cell records, newest first.
+func hookDeliveredBeads(cell session.WorkStarted) []string {
+	var ids []string
+	for _, e := range cell.Claims {
+		if id := strings.TrimSpace(e.Bead); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

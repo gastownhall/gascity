@@ -60,15 +60,19 @@ func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 }
 
 // doHookCurrent prints the claim sessionID currently holds
-// (resolveHookCurrent). It exits 1 — never 0 with empty output — when there is
+// (resolveHookCurrent), disclosing on stderr a claim that is not the session's
+// stamp. It exits 1 — never 0 with empty output — when there is
 // none it can verify: the whole point of the back-channel is that a step which
 // cannot name its own bead must fail loudly rather than let a caller
 // substitute an empty string, or someone else's bead, and close it.
 func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
-	beadID, err := resolveHookCurrent(ctx, sessionID)
+	beadID, note, err := resolveHookCurrent(ctx, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	if note != "" {
+		fmt.Fprintf(stderr, "gc hook current: %s\n", note) //nolint:errcheck
 	}
 	if idOnly {
 		fmt.Fprintln(stdout, beadID) //nolint:errcheck

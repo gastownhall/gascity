@@ -288,3 +288,64 @@ func TestDoHookCurrentPrintsAQualifyingStampWithCleanStderr(t *testing.T) {
 		})
 	}
 }
+
+// TestDoHookCurrentReplacesClosedStampWithLiveStartedClaim is the reported
+// incident (AC-2): the stamp still names a closed earlier claim X while the
+// session's delivery cell records its live claim Y ahead of it. The command
+// prints Y, not X, and says why only on stderr.
+func TestDoHookCurrentReplacesClosedStampWithLiveStartedClaim(t *testing.T) {
+	f := newHookCurrentFixture(t, "gcg-x", hookCurrentStartedCell("gcg-y", "gcg-x"),
+		hookCurrentWork("gcg-x", "closed", hookCurrentSessionID, beadmeta.SessionIDMetadataKey, hookCurrentSessionID),
+		hookCurrentHeld("gcg-y"))
+	code, stdout, stderr := f.run(true)
+	if code != 0 || stdout != "gcg-y\n" {
+		t.Fatalf("--id-only = (%d, %q), want (0, %q); stderr=%s", code, stdout, "gcg-y\n", stderr)
+	}
+	for _, want := range []string{"gcg-x", "closed", "gcg-y"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want the substitution disclosed naming %q", stderr, want)
+		}
+	}
+}
+
+// TestDoHookCurrentRecoversTheOneLiveDelivery is AC-2 across every way a stamp
+// is stale, and an absent one: the single recorded hook delivery the session
+// still holds is printed, with the old stamp (or its absence), the reason and
+// the replacement on stderr and never on stdout.
+func TestDoHookCurrentRecoversTheOneLiveDelivery(t *testing.T) {
+	sid := beadmeta.SessionIDMetadataKey
+	for _, tc := range []struct {
+		name       string
+		stamp      string
+		stale      []beads.Bead
+		wantReason string
+	}{
+		{name: "closed", stamp: "gcg-old", stale: []beads.Bead{hookCurrentWork("gcg-old", "closed", hookCurrentSessionID, sid, hookCurrentSessionID)}, wantReason: string(claimStaleClosed)},
+		{name: "released", stamp: "gcg-old", stale: []beads.Bead{hookCurrentWork("gcg-old", "open", "")}, wantReason: string(claimStaleReleased)},
+		{name: "not started", stamp: "gcg-old", stale: []beads.Bead{hookCurrentWork("gcg-old", "blocked", hookCurrentSessionID)}, wantReason: string(claimStaleNotInProgress)},
+		{name: "re-claimed by another session", stamp: "gcg-old", stale: []beads.Bead{hookCurrentWork("gcg-old", "in_progress", "mc-other", sid, "mc-other")}, wantReason: string(claimStaleOtherSession)},
+		{name: "reassigned", stamp: "gcg-old", stale: []beads.Bead{hookCurrentWork("gcg-old", "in_progress", "someone-else")}, wantReason: string(claimStaleOtherAssignee)},
+		{name: "gone", stamp: "gcg-old", wantReason: string(claimStaleGone)},
+		{name: "no stamp", wantReason: "no claim stamp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cell := hookCurrentStartedCell("gcg-live", "gcg-old")
+			f := newHookCurrentFixture(t, tc.stamp, cell, append(tc.stale, hookCurrentHeld("gcg-live"))...)
+			code, stdout, stderr := f.run(true)
+			if code != 0 || stdout != "gcg-live\n" {
+				t.Fatalf("--id-only = (%d, %q), want (0, %q); stderr=%s", code, stdout, "gcg-live\n", stderr)
+			}
+			if !strings.Contains(stderr, tc.wantReason) || !strings.Contains(stderr, "gcg-live") {
+				t.Errorf("stderr = %q, want the reason %q and the replacement disclosed", stderr, tc.wantReason)
+			}
+			if tc.stamp != "" && !strings.Contains(stderr, tc.stamp) {
+				t.Errorf("stderr = %q, want the stale stamp %s named", stderr, tc.stamp)
+			}
+
+			code, stdout, _ = f.run(false)
+			if code != 0 || stdout != "gcg-live (claimed by session mc-sess1)\n" {
+				t.Fatalf("human form = (%d, %q), want the existing format for the recovered claim", code, stdout)
+			}
+		})
+	}
+}
