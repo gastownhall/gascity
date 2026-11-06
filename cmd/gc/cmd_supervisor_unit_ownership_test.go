@@ -54,9 +54,24 @@ func installSupervisorUnitForTest(t *testing.T, writeUnit, unitActive bool, main
 	oldMainPID := supervisorSystemctlMainPID
 	supervisorSystemctlActive = func(_ string) bool { return unitActive }
 	supervisorSystemctlMainPID = func(_ string) (int, bool) { return mainPID, mainPIDOK }
+	// The system-scope seams must be stubbed here too, not just in the tests
+	// that care about them. Without this, every existing case would consult
+	// the real host's system scope and start depending on whether the machine
+	// running the tests happens to have a gascity system unit installed
+	// (city-8xj7). Default: no system unit, so these cases keep exercising
+	// exactly the user-scope logic they were written for.
+	oldSysExists := supervisorSystemctlSystemUnitExists
+	oldSysActive := supervisorSystemctlSystemActive
+	oldSysMainPID := supervisorSystemctlSystemMainPID
+	supervisorSystemctlSystemUnitExists = func(_ string) bool { return false }
+	supervisorSystemctlSystemActive = func(_ string) bool { return false }
+	supervisorSystemctlSystemMainPID = func(_ string) (int, bool) { return 0, false }
 	t.Cleanup(func() {
 		supervisorSystemctlActive = oldActive
 		supervisorSystemctlMainPID = oldMainPID
+		supervisorSystemctlSystemUnitExists = oldSysExists
+		supervisorSystemctlSystemActive = oldSysActive
+		supervisorSystemctlSystemMainPID = oldSysMainPID
 	})
 }
 
@@ -213,6 +228,129 @@ func TestSupervisorDetermineUnitOwnership(t *testing.T) {
 // supervisorDetermineUnitOwnership with the production parent reader against
 // this test process, whose parent is a real MainPID stand-in: the test process
 // descends from its parent, and the parent does not descend from it.
+// TestSupervisorUnitOwnershipSystemScope covers city-8xj7: a supervisor owned
+// by a SYSTEM-scope unit must report "owned", not a permanent false
+// "outside_unit".
+//
+// The field shape that produced the bug: gascity-supervisor.service is a system
+// unit (FragmentPath=/etc/systemd/system/..., MainPID=the live supervisor,
+// ActiveState=active) while a user-scope unit file also exists on disk but is
+// inactive. Before the system scope was consulted, the check looked only at
+// the user unit, found unit PID 0 and active=false, and reported outside_unit
+// forever — while systemd's Restart=always was in fact protecting the process.
+func TestSupervisorUnitOwnershipSystemScope(t *testing.T) {
+	const (
+		livePID = 4242
+		unitPID = 4242
+	)
+
+	cases := []struct {
+		name       string
+		writeUser  bool // a stale user unit file exists on disk
+		userActive bool
+		userPID    int
+		sysExists  bool
+		sysActive  bool
+		sysPID     int
+		parents    map[int]int
+		wantStatus string
+		wantScope  string
+	}{
+		{
+			name: "system unit owns the PID, stale user unit inactive",
+			// The exact city-8xj7 field shape.
+			writeUser:  true,
+			userActive: false,
+			sysExists:  true,
+			sysActive:  true,
+			sysPID:     unitPID,
+			wantStatus: "owned",
+			wantScope:  "system",
+		},
+		{
+			name:      "system unit owns the PID and no user unit exists",
+			writeUser: false,
+			sysExists: true,
+			sysActive: true,
+			sysPID:    unitPID,
+			parents:   map[int]int{livePID: unitPID},
+			// livePID is a child of the system unit's MainPID.
+			wantStatus: "owned",
+			wantScope:  "system",
+		},
+		{
+			name:       "user unit owns the PID, system unit inactive",
+			writeUser:  true,
+			userActive: true,
+			userPID:    unitPID,
+			sysExists:  true,
+			sysActive:  false,
+			wantStatus: "owned",
+			wantScope:  "user",
+		},
+		{
+			name:       "no unit in either scope",
+			writeUser:  false,
+			sysExists:  false,
+			wantStatus: "no_unit",
+			wantScope:  "",
+		},
+		{
+			name:       "system unit exists and is active but does not own the PID",
+			writeUser:  false,
+			sysExists:  true,
+			sysActive:  true,
+			sysPID:     9999,
+			parents:    map[int]int{livePID: 8888, 8888: 1},
+			wantStatus: "outside_unit",
+			wantScope:  "system",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installSupervisorUnitForTest(t, tc.writeUser, tc.userActive, tc.userPID, tc.userPID != 0)
+			oldExists := supervisorSystemctlSystemUnitExists
+			oldActive := supervisorSystemctlSystemActive
+			oldPID := supervisorSystemctlSystemMainPID
+			supervisorSystemctlSystemUnitExists = func(_ string) bool { return tc.sysExists }
+			supervisorSystemctlSystemActive = func(_ string) bool { return tc.sysActive }
+			supervisorSystemctlSystemMainPID = func(_ string) (int, bool) { return tc.sysPID, tc.sysPID != 0 }
+			t.Cleanup(func() {
+				supervisorSystemctlSystemUnitExists = oldExists
+				supervisorSystemctlSystemActive = oldActive
+				supervisorSystemctlSystemMainPID = oldPID
+			})
+			if tc.parents != nil {
+				fakeSupervisorProcessTree(t, tc.parents, nil)
+			} else {
+				// MainPID == livePID, so the walk stops immediately and never
+				// reads /proc.
+				fakeSupervisorProcessTree(t, map[int]int{tc.sysPID: tc.sysPID}, nil)
+			}
+
+			got := supervisorDetermineUnitOwnership(livePID)
+			if got.Status != tc.wantStatus {
+				t.Fatalf("supervisorDetermineUnitOwnership(%d).Status = %q, want %q (full: %+v)", livePID, got.Status, tc.wantStatus, got)
+			}
+			if got.Scope != tc.wantScope {
+				t.Errorf("supervisorDetermineUnitOwnership(%d).Scope = %q, want %q", livePID, got.Scope, tc.wantScope)
+			}
+			if tc.wantStatus == "owned" {
+				// Being owned is only meaningful if the PID systemd reports is
+				// the one that actually owns it.
+				wantPID := tc.sysPID
+				if tc.wantScope == "user" {
+					wantPID = tc.userPID
+				}
+				if got.UnitPID != wantPID {
+					t.Errorf("supervisorDetermineUnitOwnership(%d).UnitPID = %d, want %d", livePID, got.UnitPID, wantPID)
+				}
+			}
+		})
+	}
+}
+
 func TestSupervisorDetermineUnitOwnershipReadsRealProcessAncestry(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("process ancestry is read from /proc, which only linux provides")
@@ -286,6 +424,7 @@ func TestGatherSupervisorUnitOwnership(t *testing.T) {
 	want := doctor.SupervisorUnitOwnership{
 		Status:     "outside_unit",
 		Unit:       supervisorSystemdServiceName(),
+		Scope:      "user",
 		UnitActive: true,
 		UnitPID:    wrapperPID,
 	}
