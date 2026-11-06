@@ -1377,6 +1377,9 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 // nothing about it says it is taken; only its members do. A withheld root is
 // left exactly as it is — routed, for the next poll — and never closed: the
 // hold lifts when its members change hands or settle.
+//
+// A failed member listing fails open, the stop gate's trade: one store hiccup
+// must not idle every seat, and the claim CAS that follows runs regardless.
 func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	// Scoped to exactly the latch the pool hands out whole: an unstamped
 	// workflow root with no workflow above it. Every other candidate leaves
@@ -1386,6 +1389,7 @@ func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opt
 	}
 	members, err := ops.listWorkflowMembers(ctx, dir, opts.Env, candidate.ID)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: foreign workflow hold check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
 		return false
 	}
 	var held []string
@@ -1429,7 +1433,14 @@ func (ops *hookClaimOps) listWorkflowMembers(ctx context.Context, dir string, en
 	if ops.ListWorkflowMembers != nil {
 		return ops.ListWorkflowMembers(ctx, dir, env, rootID)
 	}
-	return listHookWorkflowMembers(ops.WorkflowStore(ctx, dir, env, rootID, "").List, rootID)
+	if ops.WorkflowStore == nil {
+		return nil, errors.New("no workflow store to list members from")
+	}
+	store := ops.WorkflowStore(ctx, dir, env, rootID, "")
+	if store == nil {
+		return nil, fmt.Errorf("no workflow store opened for %s", rootID)
+	}
+	return listHookWorkflowMembers(store.List, rootID)
 }
 
 // listHookWorkflowMembers lists the beads whose gc.root_bead_id names rootID
