@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -390,6 +391,11 @@ type hookClaimOps struct {
 	// from, and a candidate stranded under a stopped workflow is closed in,
 	// writing as actor (see hookClaimWorkflowStop).
 	WorkflowStore hookWorkflowStoreFunc
+	// ListWorkflowMembers lists the member steps of a standalone workflow
+	// root, so the eligible tier can withhold a root whose steps are still
+	// in_progress under other sessions (ga-35b8a4). Nil, or an error, fails
+	// the hold open — the stop gate's trade.
+	ListWorkflowMembers hookListWorkflowMembersFunc
 	// AnnounceBeadEvents records the work-store writes this invocation has
 	// made so far in the city event log, so the supervisor's run views see
 	// them (hook_claim_bead_events.go). Called once a claim is kept, before
@@ -433,6 +439,9 @@ type (
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
+	// hookListWorkflowMembersFunc (ctx, dir, env, rootID) lists the member
+	// steps of the workflow root rootID.
+	hookListWorkflowMembersFunc func(ctx context.Context, dir string, env []string, rootID string) ([]beads.Bead, error)
 )
 
 type hookClaimJSONResult struct {
@@ -730,6 +739,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.WorkflowStore == nil {
 		ops.WorkflowStore = hookWorkflowStoreWithBdStore
+	}
+	if ops.ListWorkflowMembers == nil {
+		ops.ListWorkflowMembers = hookListWorkflowMembersWithBdStore
 	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
@@ -1098,6 +1110,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	// on stderr only if the invocation then claims nothing.
 	var leftToAnotherSession []beads.Bead
 	for _, candidate := range candidates {
+		if hookCandidateHandedOff(candidate) {
+			// A bead another lane has taken over carries its handoff marker;
+			// taking it back here would run the same work beside (or against)
+			// the seat it was handed to. The marker is opaque metadata a pack
+			// stamps and clears — nothing here reads its value.
+			continue
+		}
 		if hookClaimSeatLeaves(candidate, opts.PoolSeat, seatManaged) {
 			// Work placed for another directory belongs to the seat the
 			// controller starts there; this seat would run it in the wrong
@@ -1152,6 +1171,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		// failed or canceled root stays ready. This gate is what keeps it from
 		// minting a new obligation.
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
+		// ga-35b8a4. The stop gate above looks UP for a dead workflow; this
+		// fence looks DOWN for a live one. A graph.v2 root whose steps are
+		// still in_progress under other sessions is their workflow, mid-run:
+		// claiming it whole mints a second executor for work already held.
+		if hookClaimForeignWorkflowHold(ctx, candidate, opts, ops, dir, stderr) {
 			continue
 		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
@@ -1354,6 +1380,105 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 	}
 	fmt.Fprintf(stderr, "gc hook --claim: closed %s as %s: %s\n", candidate.ID, stop.Outcome(), reason) //nolint:errcheck
 	return true
+}
+
+// hookClaimForeignHoldScoped reports whether candidate is a workflow root the
+// foreign-hold fence reads the members of: a standalone, not-yet-expanded
+// root (workflowRunTargetFallbackEligible) that no ancestry gate already
+// covers (hookClaimWorkflowLinked — a linked step or a drain item root has its
+// own gate). Pure metadata, so an out-of-scope candidate pays no store read.
+func hookClaimForeignHoldScoped(candidate beads.Bead) bool {
+	return !hookClaimWorkflowLinked(candidate) && workflowRunTargetFallbackEligible(candidate)
+}
+
+// hookClaimForeignWorkflowHold is the claim-time live-ownership fence
+// (ga-35b8a4). It reports whether candidate is a workflow root withheld
+// because one of its member steps is in_progress under a session other than
+// this one, and so must not be handed out whole.
+//
+// A withheld root is left exactly as served — not claimed, not closed, not
+// stamped: it is not stopped, only spoken for. The withhold is named on
+// stderr with the members that caused it and reported as a claim failure
+// (ops.emitClaimFailed), whose error text is member-id-free so distinct seats
+// withheld by the same root report identical text — the form the claim-loop
+// guard compares.
+//
+// A member read that cannot be made fails open, the same trade
+// hookClaimWorkflowStop makes: one store hiccup must not idle every seat, and
+// the claim CAS that follows runs against the same store.
+func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	if !hookClaimForeignHoldScoped(candidate) {
+		return false
+	}
+	rootID := strings.TrimSpace(candidate.ID)
+	if rootID == "" {
+		return false
+	}
+	if ops.ListWorkflowMembers == nil {
+		fmt.Fprintf(stderr, "gc hook --claim: foreign workflow hold check unavailable for %s: no member listing seam; proceeding\n", rootID) //nolint:errcheck
+		return false
+	}
+	members, err := ops.ListWorkflowMembers(ctx, dir, opts.Env, rootID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: foreign workflow hold check unavailable for %s: %v; proceeding\n", rootID, err) //nolint:errcheck
+		return false
+	}
+	var foreign []string
+	for _, member := range members {
+		if strings.TrimSpace(member.ID) == rootID {
+			continue // a root naming itself (a self-link) is not its own holder
+		}
+		if !strings.EqualFold(strings.TrimSpace(member.Status), "in_progress") {
+			continue // open members are the root's to hand out; closed ones are done
+		}
+		if hookClaimMemberHeldForeign(member, opts.IdentityCandidates) {
+			foreign = append(foreign, strings.TrimSpace(member.ID))
+		}
+	}
+	if len(foreign) == 0 {
+		return false
+	}
+	sort.Strings(foreign)
+	fmt.Fprintf(stderr, "gc hook --claim: withholding workflow root %s: member steps in_progress under other sessions: %s\n", rootID, strings.Join(foreign, ", ")) //nolint:errcheck
+	ops.emitClaimFailed(rootID, opts, fmt.Errorf("workflow root %s withheld: member steps in_progress under other sessions", rootID))
+	return true
+}
+
+// hookClaimMemberHeldForeign reports whether an in_progress member step is
+// held by a session other than this one. The holder is read the way a step's
+// own execution records it: an assignee is authoritative, and failing that
+// the session provenance stamps (name and durable id) count as one set — any
+// alias resolving to this session exempts the row, the way a renamed
+// session's stale name sits beside its durable id. Provenance matching nobody
+// withholds, a dead seat's stamps included: the row is that seat's work to
+// finish or release, not a fresh root for another seat to run whole. A row
+// with no holder fields at all evidences no foreign ownership.
+func hookClaimMemberHeldForeign(member beads.Bead, identityCandidates []string) bool {
+	if assignee := strings.TrimSpace(member.Assignee); assignee != "" {
+		return !hookClaimHasIdentity(assignee, identityCandidates)
+	}
+	stamped := false
+	for _, key := range []string{beadmeta.SessionNameMetadataKey, beadmeta.SessionIDMetadataKey} {
+		provenance := strings.TrimSpace(member.Metadata[key])
+		if provenance == "" {
+			continue
+		}
+		stamped = true
+		if hookClaimHasIdentity(provenance, identityCandidates) {
+			return false
+		}
+	}
+	return stamped
+}
+
+// hookCandidateHandedOff reports whether a candidate carries a handoff marker
+// another lane stamped when it took the bead over (a pack-level convention:
+// the key and its values belong to configuration, and nothing in Go reads
+// them beyond this presence check). A handed-off bead is skipped by every
+// tier that would hand it out fresh; the marker's absence restores ordinary
+// claimability.
+func hookCandidateHandedOff(candidate beads.Bead) bool {
+	return strings.TrimSpace(candidate.Metadata["handoff_stage"]) != ""
 }
 
 // hookClaimStoppedAdoption runs the stop gate over a bead offered for
@@ -2446,6 +2571,21 @@ func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, can
 
 func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
 	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
+}
+
+// hookListWorkflowMembersWithBdStore lists the member steps of a workflow
+// root through the hook's bd context — the same query skipDoneWorkflow runs,
+// read-only — for the foreign-workflow hold fence (ga-35b8a4).
+func hookListWorkflowMembersWithBdStore(ctx context.Context, dir string, env []string, rootID string) ([]beads.Bead, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	members, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing members of workflow root %s: %w", rootID, err)
+	}
+	return members, nil
 }
 
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
