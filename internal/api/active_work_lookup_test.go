@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // isActiveWorkLookupQuery reports whether query is an active-bead lookup's
@@ -269,4 +272,118 @@ func TestActiveWorkLookupCancelsScopedStore(t *testing.T) {
 			t.Errorf("shared store active-work reads = %d, want 0", n)
 		}
 	})
+}
+
+// activeBeadOf returns the active bead of the row whose id or name is key.
+func (b activeWorkListBody) activeBeadOf(t *testing.T, key string) string {
+	t.Helper()
+	for _, item := range b.Items {
+		if item.ID == key || item.Name == key {
+			return item.ActiveBead
+		}
+	}
+	t.Fatalf("no row %q in %+v", key, b.Items)
+	return ""
+}
+
+// TestActiveWorkLookupPreservesPriorityAfterFailure: identity order, then
+// store order, decides a row's active bead, so when store a, read first,
+// fails, the bead store z holds for the same identity or a later one may not
+// be the winner. The row reports no work-store bead, and partial_errors names
+// the failure beside the errors the list already had. Rows a partial result
+// decoded cannot prove the newest match either.
+func TestActiveWorkLookupPreservesPriorityAfterFailure(t *testing.T) {
+	sessionRoutes := activeWorkListRoutes[:2]
+	for _, fault := range []struct {
+		name     string
+		err      error
+		aHoldsID bool
+	}{
+		{name: "error", err: errors.New("bd list: connection refused")},
+		{name: "partial result with rows", err: &beads.PartialResultError{Op: "bd list", Err: errors.New("bad row")}, aHoldsID: true},
+		{name: "partial result without rows", err: &beads.PartialResultError{Op: "bd list", Err: errors.New("bad row")}},
+	} {
+		for _, route := range sessionRoutes {
+			t.Run(fault.name+"/"+route.name, func(t *testing.T) {
+				fs := newSessionFakeState(t)
+				a := &faultyActiveWorkStore{Store: beads.NewMemStore(), err: fault.err}
+				z := beads.NewMemStore()
+				fs.stores = map[string]beads.Store{"a": a, "z": z}
+				info := createTestSession(t, fs.cityBeadStore, fs.sp, "Session")
+				if fault.aHoldsID {
+					addActiveWork(t, a.Store, info.ID)
+				}
+				addActiveWork(t, z, info.ID)
+				addActiveWork(t, z, info.SessionName)
+				srv := New(fs)
+
+				body, _ := getActiveWorkList(t, route.handler(t, fs, srv), httptest.NewRequest("GET", route.path(fs), nil))
+
+				if got := body.activeBeadOf(t, info.ID); got != "" {
+					t.Errorf("active_bead = %q, want none while store a, which outranks z, is unread", got)
+				}
+				if !body.Partial || !body.hasActiveWorkError("a") {
+					t.Errorf("partial = %v, partial_errors = %q; want partial naming the active-work read of a", body.Partial, body.PartialErrors)
+				}
+			})
+		}
+	}
+	t.Run("agents keep earlier errors", func(t *testing.T) {
+		state := newFakeState(t)
+		state.sp = runtime.NewFailFake()
+		initCfg := config.DefaultCity(state.cityName)
+		state.cfg.Agents = initCfg.Agents
+		state.cfg.NamedSessions = initCfg.NamedSessions
+		state.stores = map[string]beads.Store{"myrig": &faultyActiveWorkStore{Store: beads.NewMemStore(), err: errors.New("bd list: connection refused")}}
+		srv := New(state)
+
+		body, _ := getActiveWorkList(t, newTestCityHandlerWith(t, state, srv), httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+
+		if !body.Partial || !body.hasActiveWorkError("myrig") {
+			t.Errorf("partial = %v, partial_errors = %q; want partial naming the active-work read of myrig", body.Partial, body.PartialErrors)
+		}
+		if !slices.ContainsFunc(body.PartialErrors, func(e string) bool { return strings.HasPrefix(e, "agent ") }) {
+			t.Errorf("partial_errors = %q, want the pool listing error kept beside the active-work one", body.PartialErrors)
+		}
+	})
+}
+
+// twoRigActiveWorkState is a city with rigs a and z, whose stores are a and z;
+// a sorts first, so an unscoped lookup reads it before z.
+func twoRigActiveWorkState(t *testing.T, a, z beads.Store) *fakeState {
+	t.Helper()
+	fs := newFakeState(t)
+	fs.cfg.Rigs = []config.Rig{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "z", Path: "/tmp/z"},
+	}
+	fs.stores = map[string]beads.Store{"a": a, "z": z}
+	return fs
+}
+
+// TestActiveWorkLookupFailureIsNamedAndLoggedOnce: the recorded active-work
+// failure names the lookup and the rig it failed on, and is logged once per
+// request however many rows follow.
+func TestActiveWorkLookupFailureIsNamedAndLoggedOnce(t *testing.T) {
+	fs := twoRigActiveWorkState(t,
+		activeBeadErrStore{Store: beads.NewMemStore(), err: errors.New("store a is down")},
+		&listCountingStore{Store: beads.NewMemStore()})
+	srv := New(fs)
+	lookup := newTestActiveWorkLookup(t)
+
+	var logs bytes.Buffer
+	t.Cleanup(captureLog(t, &logs))
+	for range 3 {
+		srv.findActiveBeadForAssignees(lookup, "", "session-id")
+	}
+	errs := lookup.partialErrors()
+	if len(errs) != 1 {
+		t.Fatalf("partial errors = %q, want exactly the first failure", errs)
+	}
+	if !strings.Contains(errs[0], `looking up active work in rig "a"`) || !strings.Contains(errs[0], "store a is down") {
+		t.Fatalf("error = %q, want it to name the active-work lookup and rig a with the cause", errs[0])
+	}
+	if n := strings.Count(logs.String(), "looking up active work in rig"); n != 1 {
+		t.Fatalf("failure logged %d times over 3 rows, want 1; log:\n%s", n, logs.String())
+	}
 }
