@@ -36,9 +36,10 @@ ARG XTEXT_VERSION=0.43.0
 ARG XMOD_VERSION=0.41.0
 ARG THRIFT_VERSION=0.24.0
 # Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6, Dolt
-# v1.18.0), where CVE-2026-63209 is fixed. 1.18.7 requires no other module, so
-# its `go get` cannot move any of the pins above.
-ARG COMPRESS_VERSION=1.18.7
+# v1.18.0), where CVE-2026-63209 is fixed; go.mod now pins 1.20.2, which also
+# fixes GO-2026-6865 (panic on two-block frames). 1.20.2 requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG COMPRESS_VERSION=1.20.2
 # Dolt's pinned source selects go-jose/v4 4.1.4, which CVE-2026-116587 (DoS
 # parsing JWKs with RSA keys) affects; 4.1.6 is fixed and requires no other
 # module, so its `go get` cannot move any of the pins above.
