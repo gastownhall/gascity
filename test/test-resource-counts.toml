@@ -2982,6 +2982,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "scripts/rbe_fork_pool_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "scripts/rbe_worker_env_drift_test.go"
 resource = "subprocess"
 calls = 2

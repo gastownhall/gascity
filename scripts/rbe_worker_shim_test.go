@@ -1106,8 +1106,14 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 			}
 			// rbe_worker_sha reaches nothing but these: the run name, the
 			// canary step's env and the fetch's canary-sha.
-			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != 8 {
-				t.Errorf("inputs.rbe_worker_sha referenced %d times, want 8 (run-name 2, canary if and env, the fetch's with, the H5 if, await-drift's if)", n)
+			// The fork pool's hot pre-check also refuses the two together
+			// (its CANARY env): one more.
+			want := 8
+			if path == rbeForkPoolWorkflow {
+				want = 9
+			}
+			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != want {
+				t.Errorf("inputs.rbe_worker_sha referenced %d times, want %d (run-name 2, canary if and env, the fetch's with, the H5 if, await-drift's if; fork: the pre-check's CANARY)", n, want)
 			}
 			// No drift job on a canary: a canary commit that measures
 			// something else would open a drift issue for the pin, which caps
@@ -1122,7 +1128,7 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(text), &jobs); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.HasSuffix(jobs.Jobs["await-drift"].If, " && inputs.rbe_worker_sha == ''") {
+			if !strings.Contains(jobs.Jobs["await-drift"].If, " && inputs.rbe_worker_sha == ''") {
 				t.Errorf("await-drift if %q: must skip a canary", jobs.Jobs["await-drift"].If)
 			}
 			if jobs.Jobs["report-drift"].Needs != "await-drift" || !strings.Contains(jobs.Jobs["report-drift"].If, "needs.await-drift.outputs.drift == 'true'") {
