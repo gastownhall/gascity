@@ -166,6 +166,46 @@ func TestHookClaimLiveOwnershipWithholdsAndMovesOn(t *testing.T) {
 	}
 }
 
+// TestHookClaimWithholdsRootWithForeignInProgressStep is the incident through
+// the stop gate's store-backed fixture: a molecule root served ahead of
+// unrelated pool work while another session holds one of its steps. The root
+// is never claimed, the held step is left exactly as its holder has it, and
+// the hook moves on to the live pool bead behind the root.
+func TestHookClaimWithholdsRootWithForeignInProgressStep(t *testing.T) {
+	f := newHookWorkflowStopFixture(t)
+	root := f.create(beads.Bead{Title: "mol root", Type: "molecule", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "worker",
+	}})
+	foreign := f.create(beads.Bead{Title: "implement step", Type: "task", Assignee: "nux", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.routed_to": "worker",
+	}})
+	// MemStore.Create lands rows open; in_progress is a transition.
+	inProgress := "in_progress"
+	if err := f.store.Update(foreign.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("holding %s: %v", foreign.ID, err)
+	}
+	other := f.create(beads.Bead{Title: "unrelated pool work", Type: "task", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	f.served = []string{root.ID, other.ID}
+
+	handed, stderr := f.run()
+	if handed == root.ID {
+		t.Fatalf("hook served the foreign-held root %s; a seat must not be handed a workflow whose steps run elsewhere", root.ID)
+	}
+	if handed != other.ID {
+		t.Fatalf("hook handed out %q, want the live pool bead %q behind the withheld root", handed, other.ID)
+	}
+	f.wantNeverClaimed(root.ID)
+	if got := f.get(root.ID); got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("withheld root %s became status=%q assignee=%q; withholding must leave it open and unassigned", root.ID, got.Status, got.Assignee)
+	}
+	if got := f.get(foreign.ID); got.Status != "in_progress" || got.Assignee != "nux" {
+		t.Fatalf("held step mutated: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+	if want := "withholding workflow root " + root.ID + ": member steps " + foreign.ID + " are in_progress under other sessions"; !strings.Contains(stderr, want) {
+		t.Fatalf("stderr missing the withhold disclosure %q:\n%s", want, stderr)
+	}
+}
+
 // TestHookClaimLiveOwnershipIdentityAndRecovery pins who counts as a foreign
 // holder. A member's assignee is authoritative; with none, its claim
 // provenance (gc.session_name, gc.session_id) decides, and a member with no
