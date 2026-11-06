@@ -148,7 +148,7 @@ func TestCityStoresAgreeWithTheLegacyResolver(t *testing.T) {
 func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	first := beads.NewMemStore()
 	cs := &controllerState{cityName: "c", cityBeadStore: first}
-	if got := cs.sessionsBeadStore().Store; got != splitStrictClassView(first) {
+	if got := cs.Stores().Sessions().Store; got != splitStrictClassView(first) {
 		t.Fatalf("sessions = %p, want the city store %p", got, first)
 	}
 	epoch := cs.stores.current.Load()
@@ -538,11 +538,11 @@ func TestSessionStartMailReadsTheMessagingBindingOnASplitCity(t *testing.T) {
 	}
 }
 
-// TestControllerClassHelpersServeEachClassFromStores pins the controller's
-// per-class helpers, and the API nudge queue's shadow store, to the class
-// each names (typed-stores T6c: they read Stores() since the exported
-// accessors went), on routes that relocate every class to its own store.
-func TestControllerClassHelpersServeEachClassFromStores(t *testing.T) {
+// TestControllerNudgeQueueShadowsLiveInTheNudgesStore pins the API nudge
+// queue's shadow store to the nudges class (typed-stores T6c: it reads
+// Stores() since the exported accessor went), on routes that relocate every
+// class to its own store.
+func TestControllerNudgeQueueShadowsLiveInTheNudgesStore(t *testing.T) {
 	work := beads.NewMemStore()
 	graph, sessions, orders, nudges, mail := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
 	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
@@ -553,18 +553,6 @@ func TestControllerClassHelpersServeEachClassFromStores(t *testing.T) {
 		coordclass.ClassMessaging: mail,
 	}, binding: "infra"}
 	cs := &controllerState{cityName: "c", cityPath: t.TempDir(), cityBeadStore: work, storageRoutes: routes}
-	for name, pair := range map[string][2]beads.Store{
-		"graph":    {cs.graphBeadStore().Store, graph},
-		"sessions": {cs.sessionsBeadStore().Store, sessions},
-		"orders":   {cs.ordersBeadStore("").Store, orders},
-		"nudges":   {cs.nudgesBeadStore().Store, nudges},
-		"mail":     {cs.mailBeadStore().Store, mail},
-		"work":     {cs.cityWorkStore().Store, splitStrictWorkView(work)},
-	} {
-		if pair[0] != pair[1] {
-			t.Errorf("%s helper serves %p, want %p", name, pair[0], pair[1])
-		}
-	}
 	q, ok := cs.NudgeQueue().(*fileNudgeQueue)
 	if !ok {
 		t.Fatalf("NudgeQueue = %T, want the file queue", cs.NudgeQueue())

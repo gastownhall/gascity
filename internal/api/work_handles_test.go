@@ -578,3 +578,28 @@ func TestRigIdempotencyTreatsAZeroWorkHandleAsNoStore(t *testing.T) {
 		t.Errorf("SweepOrphanRigProvisions over a zero handle = %v after %d teardowns, want nil and none", err, len(deps.teardowns))
 	}
 }
+
+// TestConvoyCreateHonorsItsRig pins convoy create's rig argument: on a city
+// with a city store and a rig store, a create naming the rig lands in the
+// rig's store, and the city store gains no convoy.
+func TestConvoyCreateHonorsItsRig(t *testing.T) {
+	fs := newFakeState(t)
+	city, rig := beads.NewMemStore(), beads.NewMemStore()
+	fs.cityBeadStore = city
+	fs.stores = map[string]beads.Store{"myrig": rig}
+	item, err := rig.Create(beads.Bead{Title: "rig task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, fs)
+	var created beads.Bead
+	if err := json.Unmarshal([]byte(workRequest(t, h, fs, http.MethodPost, "/convoys", `{"title":"probe","rig":"myrig","items":["`+item.ID+`"]}`, http.StatusCreated)), &created); err != nil {
+		t.Fatal(err)
+	}
+	if got := convoysIn(t, rig); len(got) != 1 || got[0].ID != created.ID {
+		t.Errorf("rig store convoys = %v, want the created %s", got, created.ID)
+	}
+	if got := convoysIn(t, city); len(got) != 0 {
+		t.Errorf("city store convoys = %v, want none: the create named the rig", got)
+	}
+}

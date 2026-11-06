@@ -145,51 +145,57 @@ func TestFakeStateStoresWrapTheResidueAccessors(t *testing.T) {
 // ScopedStoreLike), and the sling store lookup T6d retypes. The table only
 // shrinks: a new caller takes its class handle from Stores().
 var reviewedResidueCallers = map[string]int{
-	"beads_graph_federation.go relocatedGraphStore CityBeadStore":         1,
-	"handler_beads.go Server.findStore BeadStore":                         1,
-	"handler_beads.go Server.findStore BeadStores":                        1,
-	"handler_beads.go Server.findStore CityBeadStore":                     1,
-	"handler_beads.go Server.resolveStoreByPrefix BeadStores":             1,
-	"handler_beads.go Server.resolveStoreByPrefix CityBeadStore":          2,
-	"handler_convoy_dispatch.go workflowStoreByRef BeadStore":             1,
-	"handler_convoy_dispatch.go workflowStoreByRef CityBeadStore":         3,
-	"handler_convoy_dispatch.go workflowStoresWith BeadStore":             1,
-	"handler_convoy_dispatch.go workflowStoresWith BeadStores":            1,
-	"handler_convoy_dispatch.go workflowStoresWith CityBeadStore":         1,
-	"handler_convoys.go isGraphConvoyID BeadStores":                       1,
-	"handler_convoys.go isGraphConvoyID CityBeadStore":                    1,
-	"handler_sling.go Server.findSlingStore BeadStore":                    3,
-	"handler_sling.go Server.findSlingStore CityBeadStore":                2,
-	"handler_sling.go Server.sourceWorkflowStores BeadStores":             2,
-	"handler_sling.go Server.sourceWorkflowStores CityBeadStore":          1,
-	"handler_status.go Server.statusSessionSnapshot CityBeadStore":        1,
-	"handler_status.go Server.statusSessionSnapshot ScopedStoreLike":      1,
-	"handler_status.go Server.statusWorkCounts BeadStores":                1,
-	"handler_status.go Server.statusWorkCounts CityBeadStore":             1,
-	"handler_status.go statusListStoreWithTimeout ScopedStoreLike":        1,
-	"handler_status.go statusReadyStoreWithTimeout ScopedStoreLike":       1,
-	"huma_handlers_beads.go Server.humaHandleBeadList BeadStores":         1,
-	"huma_handlers_beads.go Server.humaHandleBeadReady BeadStores":        1,
-	"huma_handlers_beads.go Server.humaHandleBeadReady CityBeadStore":     1,
-	"huma_handlers_orders.go orderStoreInfosForState BeadStore":           1,
-	"huma_handlers_orders.go orderStoreInfosForState CityBeadStore":       1,
-	"residency_by_id.go Server.configuredPrefixLegs BeadStore":            1,
-	"residency_by_id.go Server.configuredPrefixLegs CityBeadStore":        1,
-	"residency_by_id.go Server.unroutedWorkLegs BeadStores":               1,
-	"residency_by_id.go Server.unroutedWorkLegs CityBeadStore":            1,
-	"residency_topology.go Server.residencyTopology BeadStore":            1,
-	"residency_topology.go Server.residencyTopology CityBeadStore":        1,
-	"rig_graph_legs.go workflowGraphStoreInfo CityBeadStore":              1,
-	"session_resolution.go Server.retiredSessionWorkStores BeadStores":    1,
-	"session_resolution.go Server.retiredSessionWorkStores CityBeadStore": 1,
-	"store_health.go Server.computeStoreHealth CityBeadStore":             1,
-	"work_record_close_gate.go Server.workRecordLegacyRepoDir BeadStore":  1,
+	"beads_graph_federation.go relocatedGraphStore CityBeadStore": 1,
+	// Not the accessor: SeededCityDeps' field of the same name, read by the
+	// integration-tag dashport seam (OD-6). The guard matches by name.
+	"dashport_support.go newSeededState CityBeadStore":                1,
+	"handler_beads.go Server.findStore BeadStore":                     1,
+	"handler_beads.go Server.findStore BeadStores":                    1,
+	"handler_beads.go Server.findStore CityBeadStore":                 1,
+	"handler_beads.go Server.resolveStoreByPrefix BeadStores":         1,
+	"handler_beads.go Server.resolveStoreByPrefix CityBeadStore":      2,
+	"handler_convoy_dispatch.go workflowStoreByRef BeadStore":         1,
+	"handler_convoy_dispatch.go workflowStoreByRef CityBeadStore":     3,
+	"handler_convoy_dispatch.go workflowStoresWith BeadStore":         1,
+	"handler_convoy_dispatch.go workflowStoresWith BeadStores":        1,
+	"handler_convoy_dispatch.go workflowStoresWith CityBeadStore":     1,
+	"handler_convoys.go isGraphConvoyID BeadStores":                   1,
+	"handler_convoys.go isGraphConvoyID CityBeadStore":                1,
+	"handler_sling.go Server.findSlingStore BeadStore":                3,
+	"handler_sling.go Server.findSlingStore CityBeadStore":            2,
+	"handler_sling.go Server.sourceWorkflowStores BeadStores":         2,
+	"handler_sling.go Server.sourceWorkflowStores CityBeadStore":      1,
+	"handler_status.go Server.statusSessionSnapshot CityBeadStore":    1,
+	"handler_status.go Server.statusSessionSnapshot ScopedStoreLike":  1,
+	"handler_status.go Server.statusWorkCounts BeadStores":            1,
+	"handler_status.go Server.statusWorkCounts CityBeadStore":         1,
+	"handler_status.go statusListStoreWithTimeout ScopedStoreLike":    1,
+	"handler_status.go statusReadyStoreWithTimeout ScopedStoreLike":   1,
+	"huma_handlers_beads.go Server.humaHandleBeadList BeadStores":     1,
+	"huma_handlers_beads.go Server.humaHandleBeadReady BeadStores":    1,
+	"huma_handlers_beads.go Server.humaHandleBeadReady CityBeadStore": 1,
+	"huma_handlers_orders.go orderStoreInfosForState BeadStore":       1,
+	"huma_handlers_orders.go orderStoreInfosForState CityBeadStore":   1,
+	"residency_by_id.go Server.configuredPrefixLegs BeadStore":        1,
+	"residency_by_id.go Server.configuredPrefixLegs CityBeadStore":    1,
+	"residency_by_id.go Server.unroutedWorkLegs BeadStores":           1,
+	"residency_by_id.go Server.unroutedWorkLegs CityBeadStore":        1,
+	"residency_topology.go Server.residencyTopology BeadStore":        1,
+	"residency_topology.go Server.residencyTopology CityBeadStore":    1,
+	// A method value: the census replay apiResidencyBindings consults.
+	"residency_topology.go Server.residencyTopology ClassBindingHasLegacyResidents": 1,
+	"rig_graph_legs.go workflowGraphStoreInfo CityBeadStore":                        1,
+	"session_resolution.go Server.retiredSessionWorkStores BeadStores":              1,
+	"session_resolution.go Server.retiredSessionWorkStores CityBeadStore":           1,
+	"store_health.go Server.computeStoreHealth CityBeadStore":                       1,
+	"work_record_close_gate.go Server.workRecordLegacyRepoDir BeadStore":            1,
 }
 
-// TestStateResidueAccessorCallers holds the production callers of State's
-// raw store accessors (BeadStore, BeadStores, CityBeadStore, ScopedStoreLike
-// and ClassBindingHasLegacyResidents) to reviewedResidueCallers. It matches
-// calls by method name over every non-test file, whatever its build tags.
+// TestStateResidueAccessorCallers holds the production uses of State's raw
+// store accessors (BeadStore, BeadStores, CityBeadStore, ScopedStoreLike and
+// ClassBindingHasLegacyResidents) to reviewedResidueCallers. It matches every
+// selector of those names, calls and method values alike, over every non-test
+// file, whatever its build tags.
 func TestStateResidueAccessorCallers(t *testing.T) {
 	residue := map[string]bool{"BeadStore": true, "BeadStores": true, "CityBeadStore": true, "ScopedStoreLike": true, "ClassBindingHasLegacyResidents": true}
 	paths, err := filepath.Glob("*.go")
@@ -222,10 +228,11 @@ func TestStateResidueAccessorCallers(t *testing.T) {
 				}
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && residue[sel.Sel.Name] {
-						got[path+" "+name+" "+sel.Sel.Name]++
-					}
+				// Every selector, not only calls: a method value handed
+				// on (s.state.ClassBindingHasLegacyResidents) reaches the
+				// accessor as surely as a call does.
+				if sel, ok := n.(*ast.SelectorExpr); ok && residue[sel.Sel.Name] {
+					got[path+" "+name+" "+sel.Sel.Name]++
 				}
 				return true
 			})

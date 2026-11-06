@@ -54,46 +54,10 @@ func (cs *controllerState) rigSetLocked() rigSet {
 	return rigSet{gen: cs.rigStoresGen, stores: cs.beadStores}
 }
 
-// graphBeadStore returns the store that owns graph (workflow/v2) beads: the
-// binding when the routes relocate graph, else the city work store. On this
-// side the controller's CachingStore over the binding is the emitter
-// (class_store_cache.go); the one-shot CLI's is class_store_emit.go.
-func (cs *controllerState) graphBeadStore() beads.GraphStore {
-	return cs.Stores().Graph()
-}
-
-// sessionsBeadStore returns the store that owns session and session-wait
-// beads: the binding when the routes relocate sessions, else the city work
-// store.
-func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
-	return cs.Stores().Sessions()
-}
-
-// mailBeadStore returns the store that owns mail (message) beads: the binding
-// when the routes relocate messaging, else the city work store.
-func (cs *controllerState) mailBeadStore() beads.MailStore {
-	return cs.Stores().Mail()
-}
-
-// nudgesBeadStore returns the store that owns nudge beads: the binding when
-// the routes relocate nudges, else the city work store.
-func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
-	return cs.Stores().Nudges()
-}
-
-// ordersBeadStore returns the store that owns order-tracking bookkeeping beads
-// for the city scope. The scope argument is not read: per-order scope
-// (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
-// (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
-// It is the store the order dispatcher creates every tracking bead in.
-func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
-	return cs.Stores().Orders()
-}
-
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
 // are not scoped to a named rig: the store CityBeadStore() returns, as a
 // handle. CityBeadStore() stays beads.Store as the federation/by-id/default
-// root until the API state is retyped (T6).
+// root until T7's federated readers retire it.
 func (cs *controllerState) cityWorkStore() beads.WorkStore {
 	return cs.Stores().Work()
 }

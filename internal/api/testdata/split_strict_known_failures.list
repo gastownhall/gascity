@@ -90,7 +90,7 @@ TestRunCancelUnderLaneProposesOneInterruptPerHolder	fails under the gate: cancel
 TestRunCancelUnderLaneSkipsAHolderWhoseAgentIsDead	fails under the gate: cancel: run not found: gcg-1
 TestRunReadAfterCancelReflectsTheCancel	fails under the gate: GET /bead/gc-2 = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gc-2 not found","code":"bead-not-found"}
 TestRunViewsAgreeWithBeadAfterOutOfProcessClaim	fails under the gate: GET /bead/gc-2 = 404: {"type":"urn:gascity:error:bead-not-found","title":"Bead Not Found","status":404,"detail":"bead gc-2 not found","code":"bead-not-found"}
-TestSessionClassRoutingIsIdentityOnSingleStoreCity	fails under the gate: default backend: SessionsBeadStore().Store must be the identical value CityBeadStore() returns
+TestSessionClassRoutingIsIdentityOnSingleStoreCity	fails under the gate: default backend: Stores().Sessions().Store must be the identical value CityBeadStore() returns
 TestSingleStoreCityByIDPerformsNoProbe	fails under the gate: the work store was read 2 times, want 1 — a city that relocates nothing must not pay for the seam
 TestSlingDefaultFormulaCooksWorkflowWhereTheTargetsWorkersLook	fails under the gate: city store holds 1 workflow root(s) [{gcg-1001 graph-work in_progress task 0x17fdfa6fb100 2026-10-28 02:22:40.595803436 +0000 UTC 2026-10-28 02:22:40.595907202 
 TestSlingDefaultFormulaReceivesTitleAndVars	fails under the gate: no step titled "Say hi" in the rig store: the greeting var never reached the default formula

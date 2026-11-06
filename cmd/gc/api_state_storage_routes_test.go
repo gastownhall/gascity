@@ -134,7 +134,7 @@ func TestControllerStateSingleStoreKeepsMessagingOnTheWorkStore(t *testing.T) {
 	if _, err := store.Get(rec.ID); err != nil {
 		t.Fatalf("transcript %q not in the single store: %v", rec.ID, err)
 	}
-	if got := cs.mailBeadStore().Store; got != cs.cityBeadStore {
+	if got := cs.Stores().Mail().Store; got != cs.cityBeadStore {
 		t.Fatalf("mailBeadStore = %p, want the identical city store %p", got, cs.cityBeadStore)
 	}
 	if got := cs.Stores().Sessions().Store; got != cs.cityBeadStore {
@@ -167,8 +167,8 @@ func TestSetControllerStateDoesNotRaceClassAccessors(t *testing.T) {
 			_ = cs.Stores().Graph()
 			_ = cs.Stores().Nudges()
 			_ = cs.Stores().Sessions()
-			_ = cs.mailBeadStore()
-			_ = cs.ordersBeadStore("")
+			_ = cs.Stores().Mail()
+			_ = cs.Stores().Orders()
 		}
 	}()
 	wg.Wait()

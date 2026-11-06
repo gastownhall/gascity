@@ -154,7 +154,7 @@ func TestStatusSessionSnapshotStoreIdentity(t *testing.T) {
 			t.Errorf("read store = %p, want CityBeadStore %p — a city that relocates nothing must stay byte-identical", observed, st.CityBeadStore())
 		}
 		if observed != st.Stores().Sessions().Store {
-			t.Errorf("read store = %p, want SessionsBeadStore %p", observed, st.Stores().Sessions().Store)
+			t.Errorf("read store = %p, want Stores().Sessions() %p", observed, st.Stores().Sessions().Store)
 		}
 	})
 

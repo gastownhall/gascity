@@ -2206,3 +2206,29 @@ func TestExplicitEmptyAuthoritativeRollsBackAndWarns(t *testing.T) {
 		t.Fatalf("logs = %q, want the nudge_dispatcher deprecation, without asking for removal", logs)
 	}
 }
+
+// laneStoreWithoutBatches is a store whose guarded batches are hidden: a lane
+// host refuses to run over it.
+type laneStoreWithoutBatches struct{ beads.Store }
+
+// TestLaneHostServesTheSessionsBindingOnASplitCity pins the lane host's
+// sessions reads to the sessions class on a split city (typed-stores T6c):
+// the host decides to run over the sessions binding, which holds guarded
+// batches, though the work store beside it does not, and its op store opens
+// over that binding.
+func TestLaneHostServesTheSessionsBindingOnASplitCity(t *testing.T) {
+	binding := newLaneTestStore()
+	f := newLaneFixtureOver(t, binding)
+	work := laneStoreWithoutBatches{beads.NewMemStore()}
+	cs := &controllerState{cityBeadStore: work, storageRoutes: splitRoutes(binding), cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
+	h := newConversationLaneHost(cs, []string{"message"}, session.StopRequestsLive)
+	if state := h.decide(); state != laneHostStateRunning {
+		t.Fatalf("decide = %q (%s), want running over the sessions binding", state, h.reason)
+	}
+	if _, _, err := h.store(); err != nil {
+		t.Fatalf("store = %v, want the op store opened over the sessions binding", err)
+	}
+	if !sameBeadStore(h.stOver, binding) {
+		t.Errorf("the op store opened over %T, want the sessions binding", h.stOver)
+	}
+}
