@@ -3,14 +3,22 @@ package scripts_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -453,14 +461,17 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 }
 
 // The hot tier's B3 pre-check (infra nativelink-cas/west README "Hot blobs on
-// R2"), vendored from gascity/infra (private: no job here can fetch it) byte
-// for byte at the commit below, with its sha256 beside it; the job checks the
-// sha256 before it runs it. A new infra version: copy the file, update
+// R2"), vendored from gascity/infra (private: no job here can fetch it) at the
+// commit below, with its sha256 beside it; the job checks the sha256 before it
+// runs it. The copy carries one fix infra does not have yet: its decode check
+// also fails when zstd rejects the stream, not only when the bytes zstd wrote
+// hash wrong (TestRBEHotPrecheckInput's decode cases). A new infra version:
+// copy the file, keep that fix until infra has it, and update
 // rbe-hot-precheck.sha256 and these two constants together.
 const (
 	rbeHotPrecheckDir         = ".github/rbe-hot"
-	rbeHotPrecheckSHA256      = "9fa6830a0323a820411e9b385186e760d6d90d57af8097a4b26b80731501d25e"
-	rbeHotPrecheckInfraCommit = "1dbe5d9dad6a6718ab52ac685bce532e0071df00" // gascity/infra rbe-wi/fork-path, nativelink-cas/west/rbe-hot-precheck.sh
+	rbeHotPrecheckSHA256      = "c0318d670c4f6357b254e59af875315be9b1662aefc106e3b7ed2d8752f1fc05"
+	rbeHotPrecheckInfraCommit = "1dbe5d9dad6a6718ab52ac685bce532e0071df00" // gascity/infra rbe-wi/fork-path, nativelink-cas/west/rbe-hot-precheck.sh, plus the decode fix
 )
 
 // TestRBEHotPrecheckInput: rbe-fork-pool.yml's hot_precheck_digest runs the
@@ -475,7 +486,7 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 	script := readFile(t, root, rbeHotPrecheckDir+"/rbe-hot-precheck.sh")
 	sum := sha256.Sum256([]byte(script))
 	if got := hex.EncodeToString(sum[:]); got != rbeHotPrecheckSHA256 {
-		t.Errorf("%s/rbe-hot-precheck.sh sha256 %s, want %s (infra %s): vendor it byte for byte", rbeHotPrecheckDir, got, rbeHotPrecheckSHA256, rbeHotPrecheckInfraCommit)
+		t.Errorf("%s/rbe-hot-precheck.sh sha256 %s, want %s (infra %s plus the decode fix): vendor it byte for byte", rbeHotPrecheckDir, got, rbeHotPrecheckSHA256, rbeHotPrecheckInfraCommit)
 	}
 	if got := readFile(t, root, rbeHotPrecheckDir+"/rbe-hot-precheck.sha256"); got != rbeHotPrecheckSHA256+"  rbe-hot-precheck.sh\n" {
 		t.Errorf("rbe-hot-precheck.sha256 = %q, want the sha256sum line of %s", got, rbeHotPrecheckSHA256)
@@ -529,6 +540,9 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 	}
 	order := []string{
 		"(cd .github/rbe-hot && sha256sum --strict -c rbe-hot-precheck.sha256)",
+		// Each install command its own: under set -e a failed apt-get update
+		// stops the step, where an && would carry on to the promotion.
+		"command -v zstd >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq zstd >/dev/null; }",
 		`trap 'shred -u "$pki"/*.pem 2>/dev/null; rm -rf "$pki"' EXIT`,
 		`(umask 077 && printf '%s' "$CERT_B64" | base64 -d >"$pki/cert.pem" && printf '%s' "$KEY_B64" | base64 -d >"$pki/key.pem")`,
 		`out=$(env -u CERT_B64 -u KEY_B64 DIGEST="$DIGEST" CERT="$pki/cert.pem" KEY="$pki/key.pem"`,
@@ -551,32 +565,94 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 		t.Errorf("fork worker certificate secrets referenced %d times, want 4 (the worker step 2, the pre-check 2)", n)
 	}
 
-	// The pre-check step, run against nothing (the edge unreachable): the
-	// script's FAIL fails the step, and no certificate file is left behind.
-	t.Run("a failed pre-check fails the step", func(t *testing.T) {
+	// The pre-check step, run as the job runs it: from the checkout, with path
+	// as PATH and the script's HOT_URL and PROMOTE_URL at edge. No case may
+	// leave a certificate file behind.
+	runCheck := func(t *testing.T, path, digest, edge string) (string, error) {
+		t.Helper()
 		dir := t.TempDir()
-		path := filepath.Join(dir, "check.sh")
-		if err := os.WriteFile(path, []byte(check.Run), 0o755); err != nil {
+		step := filepath.Join(dir, "check.sh")
+		if err := os.WriteFile(step, []byte(check.Run), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		tmp := filepath.Join(dir, "tmp")
 		if err := os.MkdirAll(tmp, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		env := append(os.Environ(), "DIGEST="+strings.Repeat("ab", 32)+"-103593364", "CERT_B64=Q0VSVAo=", "KEY_B64=S0VZCg==",
+		env := append(os.Environ(), "PATH="+path, "DIGEST="+digest, "CERT_B64=Q0VSVAo=", "KEY_B64=S0VZCg==",
 			"GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"), "TMPDIR="+tmp,
-			"HOT_URL=http://127.0.0.1:1/h/fork", "PROMOTE_URL=http://127.0.0.1:1/rbe.hot.v1.Hot/Promote")
-		out, stderr, err := runRBEScript(root, env, path)
+			"HOT_URL="+edge+"/h/fork", "PROMOTE_URL="+edge+"/rbe.hot.v1.Hot/Promote")
+		out, stderr, err := runRBEScript(root, env, step)
+		if left, _ := filepath.Glob(filepath.Join(tmp, "*", "*.pem")); len(left) != 0 {
+			t.Errorf("certificate files left behind: %v", left)
+		}
+		return out + stderr, err
+	}
+	// zstdFirst puts a zstd stub first on PATH, so the step never installs
+	// one. The stub decodes as the script calls it (zstd -q -dc FILE) by
+	// writing the object, its own plaintext here, then runs the rest of body.
+	zstdFirst := func(t *testing.T, body string) string {
+		t.Helper()
+		bin := t.TempDir()
+		writeExecutable(t, filepath.Join(bin, "zstd"), "#!/bin/sh\ncat \"$3\"\n"+body+"\n")
+		return bin + string(os.PathListSeparator) + os.Getenv("PATH")
+	}
+	const unreachable = "http://127.0.0.1:1"
+	h := strings.Repeat("ab", 32)
+
+	// Against nothing (the edge unreachable): the script's FAIL fails the
+	// step, and the sha256 was checked first.
+	t.Run("a failed pre-check fails the step", func(t *testing.T) {
+		out, err := runCheck(t, zstdFirst(t, "exit 0"), h+"-103593364", unreachable)
 		if err == nil || !strings.Contains(out, "::error title=rbe hot pre-check::the pre-check did not print 'precheck: ok'") {
-			t.Errorf("step passed or said nothing: %v\n%s%s", err, out, stderr)
+			t.Errorf("step passed or said nothing: %v\n%s", err, out)
 		}
 		if !strings.Contains(out, "rbe-hot-precheck.sh: OK") {
 			t.Errorf("the sha256 was not checked first:\n%s", out)
 		}
-		if left, _ := filepath.Glob(filepath.Join(tmp, "*", "*.pem")); len(left) != 0 {
-			t.Errorf("certificate files left behind: %v", left)
+	})
+
+	// No zstd on the runner, and its install fails: the step stops there,
+	// before the certificate files and the script. An && between the install
+	// commands would carry on to the promotion, which spends the digest, and
+	// fail only at the decode.
+	t.Run("a failed zstd install stops the step", func(t *testing.T) {
+		bin := rbeHostCommandsWithout(t, "zstd", "sudo")
+		writeExecutable(t, filepath.Join(bin, "sudo"), "#!/bin/sh\necho \"sudo $*: refused\" >&2\nexit 1\n")
+		out, err := runCheck(t, bin, h+"-103593364", unreachable)
+		if err == nil || !strings.Contains(out, "sudo apt-get update -qq: refused") ||
+			strings.Contains(out, "apt-get install") || strings.Contains(out, "precheck:") {
+			t.Errorf("step went on past a failed zstd install (error %v):\n%s", err, out)
 		}
 	})
+
+	// Check 3, the decode, against a stand-in edge that serves the promoted
+	// object: "precheck: ok" needs both the bytes zstd wrote to hash to DIGEST
+	// and zstd to accept the whole stream. zstd writes every byte of a valid
+	// frame followed by garbage before it rejects the garbage, so the bytes
+	// alone pass and only zstd's status fails that object.
+	obj := []byte(strings.Repeat("hot tier pre-check\n", 1000))
+	objSum := sha256.Sum256(obj)
+	digest := hex.EncodeToString(objSum[:]) + "-" + strconv.Itoa(len(obj))
+	decodes := "after promotion, ?r=: the object decodes to " + digest
+	for _, c := range []struct {
+		name, zstd, decode, verdict string
+		ok                          bool
+	}{
+		{"zstd accepts the stream", "exit 0", "ok    " + decodes + " (zstd exit 0)", "precheck: ok", true},
+		{
+			"zstd rejects the stream after writing it", `echo "zstd: $3: unsupported format" >&2; exit 1`,
+			"FAIL  " + decodes + " (zstd exit 1)", "precheck: FAIL (1)", false,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := runCheck(t, zstdFirst(t, c.zstd), digest, rbeHotEdge(t, digest, obj))
+			lines := strings.Split(out, "\n")
+			if !slices.Contains(lines, c.decode) || !slices.Contains(lines, c.verdict) || (err == nil) != c.ok {
+				t.Errorf("want the lines %q and %q and the step passing = %v; error %v:\n%s", c.decode, c.verdict, c.ok, err, out)
+			}
+		})
+	}
 
 	// The input step, run: who may dispatch, and what digest.
 	runInput := func(digest, actor, canary string) (string, error) {
@@ -590,7 +666,6 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 		out, stderr, err := runRBEScript(dir, env, path)
 		return out + stderr, err
 	}
-	h := strings.Repeat("ab", 32)
 	for _, c := range []struct {
 		name, digest, actor, canary string
 		ok                          bool
@@ -602,7 +677,8 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 		{"under 64 MiB", h + "-67108863", "someone", "", false},
 		{"uppercase hex", strings.ToUpper(h) + "-103593364", "someone", "", false},
 		{"short hash", h[:63] + "-103593364", "someone", "", false},
-		{"leading zero size", h + "-0103593364", "someone", "", false},
+		// Octal 67108864: the size check alone would take it.
+		{"leading zero size", h + "-0400000000", "someone", "", false},
 		{"no size", h, "someone", "", false},
 		{"an injection", h + "-103593364; id", "someone", "", false},
 		{"two lines", h + "-103593364\n" + h + "-103593364", "someone", "", false},
@@ -615,4 +691,66 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// rbeHotEdge stands in for the hot tier's edge and its promoter, over plain
+// HTTP on loopback, at the pre-check's HOT_URL (<url>/h/fork) and PROMOTE_URL
+// (<url>/rbe.hot.v1.Hot/Promote): every key is a 404 until a Promote of
+// digest's hash and size, then digest's key answers obj, whatever the query
+// string. Promote answers as infra's rbe-hot.py does (json.dumps).
+func rbeHotEdge(t *testing.T, digest string, obj []byte) string {
+	t.Helper()
+	hash, size, _ := strings.Cut(digest, "-")
+	var promoted atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/rbe.hot.v1.Hot/Promote":
+			var req struct {
+				Hash string      `json:"hash"`
+				Size json.Number `json:"size"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Hash != hash || req.Size.String() != size {
+				http.Error(w, "not a Promote of "+digest, http.StatusBadRequest)
+				return
+			}
+			promoted.Store(true)
+			_, _ = fmt.Fprintf(w, `{"key": "h/fork/%s.zst"}`, digest)
+		case r.Method == http.MethodGet && r.URL.Path == "/h/fork/"+digest+".zst" && promoted.Load():
+			_, _ = w.Write(obj)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// rbeHostCommandsWithout links every command on the test's PATH except names
+// into a new directory, the first on PATH winning as for the shell: as PATH,
+// this host without those commands.
+func rbeHostCommandsWithout(t *testing.T, names ...string) string {
+	t.Helper()
+	bin := t.TempDir()
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // the shell skips a missing PATH directory too
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			link := filepath.Join(bin, e.Name())
+			if slices.Contains(names, e.Name()) {
+				continue
+			}
+			if _, err := os.Lstat(link); err == nil {
+				continue
+			}
+			if err := os.Symlink(filepath.Join(dir, e.Name()), link); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return bin
 }

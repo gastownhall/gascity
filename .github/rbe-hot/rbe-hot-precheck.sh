@@ -9,7 +9,8 @@
 #   2. DIGEST's key, GET before it is promoted: 404 (an object already there
 #      aborts: pick another DIGEST), then promote it (the fork worker
 #      certificate), then GET it again at once: 200, not a 404;
-#   3. those bytes decode to DIGEST (R2 ignores the query string).
+#   3. those bytes decode to DIGEST, and zstd accepts the whole stream (R2
+#      ignores the query string).
 # Information only, never a FAIL (no reader in the design uses the plain
 # URL; there is no cache rule): the same keys without a query string, so a
 # missing key's second plain GET and a plain GET after the promotion show
@@ -82,8 +83,9 @@ info "after promotion, plain URL at once: $ap1 cf-cache-status=${aps1:--}: stale
 # 3. The bytes rbe-hotread would read decode to DIGEST.
 if [ "$a1" = 200 ]; then
 	got=$(zstd -q -dc "$tmp/q.zst" | tee >(wc -c >"$tmp/n") | sha256sum | cut -d' ' -f1)
+	dec=$? # pipefail: zstd's own failure, even after it wrote every byte (a valid frame, then garbage)
 	sleep 0.2
-	[ "$got" = "$hash" ] && [ "$(tr -d ' ' <"$tmp/n")" = "$size" ]; check $? "after promotion, ?r=: the object decodes to $hash-$size"
+	[ "$dec" = 0 ] && [ "$got" = "$hash" ] && [ "$(tr -d ' ' <"$tmp/n")" = "$size" ]; check $? "after promotion, ?r=: the object decodes to $hash-$size (zstd exit $dec)"
 fi
 info "plain URL (no reader uses it; no cache rule): edge-cached 404: $edge404; stale 404 after promotion: $stale"
 if [ "$fails" = 0 ]; then echo "precheck: ok"; else echo "precheck: FAIL ($fails)"; exit 1; fi
