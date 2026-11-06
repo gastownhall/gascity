@@ -62,7 +62,6 @@ func newSessionsShapeState(t *testing.T, shape sessionsShape) (*fakeState, beads
 	if shape.split {
 		fs.cityBeadStore = work
 		fs.sessionsBeadStore = sessions
-		fs.mailBeadStore = sessions
 	} else {
 		fs.cityBeadStore = sessions
 	}
@@ -254,8 +253,17 @@ func TestSessionReadsReportTheSessionsStoreCacheAge(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			fs, sessions := newSessionsShapeState(t, shape)
 			info := createTestSession(t, sessions, fs.sp, "probe")
+			wait, err := sessions.Create(beads.Bead{
+				Title:    "probe wait",
+				Type:     session.WaitBeadType,
+				Labels:   []string{session.WaitBeadLabel, "session:" + info.ID},
+				Metadata: map[string]string{"session_id": info.ID, "state": "ready", "kind": "deps"},
+			})
+			if err != nil {
+				t.Fatalf("Create(wait): %v", err)
+			}
 			h := newTestCityHandler(t, fs)
-			for _, path := range []string{"/sessions", "/session/" + info.ID, "/pending", "/waits"} {
+			for _, path := range []string{"/sessions", "/session/" + info.ID, "/pending", "/waits", "/wait/" + wait.ID} {
 				if got := cacheHeadersOf(t, h, fs, path).Get("X-GC-Cache-Refresh"); got != string(CacheRefreshScheduled) {
 					t.Errorf("GET %s X-GC-Cache-Refresh = %q, want %q from the sessions store's cache", path, got, CacheRefreshScheduled)
 				}
@@ -363,7 +371,6 @@ func TestWorkerFactoryOverAnAbsentSessionsStoreHasNoStore(t *testing.T) {
 func splitSessionsBinding(t *testing.T, fs *fakeState) {
 	t.Helper()
 	fs.sessionsBeadStore = fs.cityBeadStore
-	fs.mailBeadStore = fs.cityBeadStore
 	fs.cityBeadStore = splittest.NewWorkStore(t, "gc")
 }
 
@@ -375,7 +382,6 @@ func TestSessionCreateAndPermissionModeUseTheSessionsBinding(t *testing.T) {
 	work, binding := splittest.NewWorkStore(t, "gc"), splittest.NewBindingStore(t)
 	fs.cityBeadStore = work
 	fs.sessionsBeadStore = binding
-	fs.mailBeadStore = binding
 	h := newTestCityHandler(t, fs)
 
 	rec := httptest.NewRecorder()
@@ -517,5 +523,60 @@ func TestSessionAddressingReadsTheSessionsStore(t *testing.T) {
 	}
 	if err := srv.refuseUnconfiguredMailSender(t.Context(), info.ID); err != nil {
 		t.Errorf("a mail sender naming a configured agent's session %s was refused: %v", info.ID, err)
+	}
+}
+
+// TestDefaultOpStoreOpensOverTheLiveServersSessionsStore pins
+// openDefaultOpStore to the live Server's sessions store: a Server the
+// supervisor replaced (a city restart that reopened its sessions store) asks
+// whether, and opens, the op store over the store the city is served with
+// now, not the one its own State held. Here the old store is not SQLite, so
+// the old State's answer would be "not recorded by default".
+func TestDefaultOpStoreOpensOverTheLiveServersSessionsStore(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	old := e.server(t)
+	reopened, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.(interface{ CloseStore() error }).CloseStore() })
+	e.rebuildOver(t, reopened, nil)
+	live := e.server(t)
+	var openedOver beads.SessionStore
+	live.ops.openStore = func(st beads.SessionStore, clk clock.Clock) (*opjournal.Store, error) {
+		openedOver = st
+		return opjournal.NewStore(st, clk)
+	}
+
+	if _, err := old.openDefaultOpStore(); err != nil {
+		t.Fatalf("the replaced Server's default op store: %v, want it opened over the live sessions store", err)
+	}
+	if !beads.SameStore(openedOver, reopened) {
+		t.Fatalf("the op store was opened over %v, want the reopened sessions store", openedOver)
+	}
+}
+
+// TestAgentOutputPeeksTheSessionTheSessionsStoreNames pins agentWorkerHandle
+// (the legacy agent output's peek fallback) to the sessions store: the
+// agent's session name is the alias of a session
+// whose runtime runs under another name, which only the session row in the
+// sessions binding of a split city can tell. Resolved anywhere else, the
+// handle falls back to a runtime named for the agent, which is not running.
+func TestAgentOutputPeeksTheSessionTheSessionsStoreNames(t *testing.T) {
+	fs, sessions := newSessionsShapeState(t, sessionsShape{split: true})
+	// No configured named session reserves the agent's session name.
+	fs.cfg.NamedSessions = nil
+	info := createTestSession(t, sessions, fs.sp, "agent")
+	agentName := agentSessionName(fs.CityName(), "myrig/worker", fs.cfg.Workspace.SessionTemplate)
+	if err := sessions.SetMetadata(info.ID, "alias", agentName); err != nil {
+		t.Fatal(err)
+	}
+	const pane = "agent-pane-output"
+	fs.sp.SetPeekOutput(info.SessionName, pane)
+
+	rec := httptest.NewRecorder()
+	New(fs).legacyAgentHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v0/agent/myrig/worker/output", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), pane) {
+		t.Fatalf("GET agent output = %d %s, want 200 with the pane of session %s (runtime %s)", rec.Code, rec.Body.String(), info.ID, info.SessionName)
 	}
 }

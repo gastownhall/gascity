@@ -213,7 +213,10 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 	// The bindings and participants are messaging-class: they move in the
 	// city's messaging store, which is the sessions store on every topology
 	// the routes serve (one store unsplit, one binding split; typed-stores T6
-	// plan, R13).
+	// plan, R13). Reading Stores() again here, mid-request, is deliberate and
+	// benign: an epoch swapped since store was read serves the same database,
+	// so the bindings move in the store they live in either way. T7 threads
+	// the request's Stores through instead.
 	messaging := s.state.Stores().Mail()
 	var errs []error
 	for _, info := range retired {

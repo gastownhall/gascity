@@ -48,7 +48,6 @@ func newSplitReassignFixture(t *testing.T, rig beads.Store) splitReassignFixture
 	fs.cityBeadStore = work
 	fs.stores = map[string]beads.Store{"myrig": rig}
 	fs.sessionsBeadStore = binding
-	fs.mailBeadStore = binding
 	fs.graphBeadStore = binding
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
