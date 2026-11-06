@@ -83,8 +83,10 @@ func (h *hookCity) recorder() events.Recorder {
 // session work-dir lookup, the current-claim stamp and its clear, and the
 // work_started write, removal and read) answer through the invocation's one
 // session front door, whose claim store refs are read off its loaded config, and whose events and continuation
-// nudge reach the invocation's city without resolving it again. Every other
-// seam is left to its default (hookClaimOps.applyDefaults).
+// nudge reach the invocation's city without resolving it again. They carry the
+// invocation's start and clock, so the claim window counts from when the
+// invocation began. Every other seam, and a start or clock the city does not
+// carry, is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
 	ops.InvokedAt = h.invokedAt

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -212,5 +213,30 @@ func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
 	}
 	if got, err := ops.ReadSessionTrigger("gc-no-such-session"); err == nil {
 		t.Fatalf("ReadSessionTrigger of a missing row = %q, nil; want an error", got)
+	}
+}
+
+// TestHookCityClaimOpsCarryTheInvocationStart pins that the invocation start and
+// clock a city carries survive the production claim wrappers and repeated
+// defaulting: one invocation shares one claim window, measured on one clock.
+func TestHookCityClaimOpsCarryTheInvocationStart(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := writeFenceTestCity(t)
+	start := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	city := newHookCity(cityDir, &config.City{})
+	city.invokedAt = start
+	city.now = func() time.Time { return start.Add(3 * time.Second) }
+
+	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), nil, nil, city.recorder, io.Discard)
+	if !proceed {
+		t.Fatal("a nil class route refused the claim")
+	}
+	ops.applyDefaults()
+
+	if !ops.InvokedAt.Equal(start) {
+		t.Fatalf("InvokedAt = %v, want the city's invocation start %v", ops.InvokedAt, start)
+	}
+	if got := ops.invocationAge(); got != 3*time.Second {
+		t.Fatalf("invocation age = %v, want 3s measured on the city's clock", got)
 	}
 }
