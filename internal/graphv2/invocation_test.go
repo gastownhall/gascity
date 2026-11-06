@@ -66,7 +66,7 @@ title = "Inspect {{convoy_id}}"
 	if created.Type != "convoy" {
 		t.Fatalf("input convoy type = %q, want convoy", created.Type)
 	}
-	wantMetadata := map[string]string{"gc.synthetic": "true"}
+	wantMetadata := map[string]string{"gc.synthetic": "true", beadmeta.InputTargetIDMetadataKey: target.ID}
 	if !maps.Equal(created.Metadata, wantMetadata) {
 		t.Fatalf("input convoy metadata = %+v, want %+v", created.Metadata, wantMetadata)
 	}
