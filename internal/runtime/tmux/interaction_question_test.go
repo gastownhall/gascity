@@ -279,8 +279,9 @@ func TestProviderPendingReportsAskUserQuestionDialog(t *testing.T) {
 	if pending.Kind != "question" {
 		t.Errorf("Kind = %q, want %q", pending.Kind, "question")
 	}
-	if len(pending.Options) != 0 {
-		t.Errorf("Options = %q, want none: Respond offers no verbs for a question", pending.Options)
+	wantOptions := []string{"Run gates, then ship if clean (Recommended)", "Run gates, ask again before push", "Keep holding"}
+	if !slices.Equal(pending.Options, wantOptions) {
+		t.Errorf("Options = %q, want the options Respond selects (no free text or chat): %q", pending.Options, wantOptions)
 	}
 	if !strings.HasPrefix(pending.RequestID, "tmux-question-") {
 		t.Errorf("RequestID = %q, want the tmux-question- prefix", pending.RequestID)
@@ -471,8 +472,8 @@ func (e *captureFailExecutor) executeCtx(_ context.Context, args []string) (stri
 	return e.execute(args)
 }
 
-// The operator text for a question dialog says it is answered in the terminal.
-// It is not a permission prompt, and respond has nothing to offer.
+// The operator text for a question dialog says it is answered with respond's
+// select action or in the terminal. It is not a permission prompt.
 func TestAskUserQuestionRefusalTextIsKindAware(t *testing.T) {
 	tm, _ := questionTmux(askUserQuestionPane)
 	err := tm.checkNoApprovalPrompt("auq")
@@ -480,12 +481,12 @@ func TestAskUserQuestionRefusalTextIsKindAware(t *testing.T) {
 		t.Fatalf("checkNoApprovalPrompt = %v, want runtime.ErrPendingInteraction", err)
 	}
 	text := err.Error()
-	for _, banned := range []string{"permission prompt", "approve or deny", "respond"} {
+	for _, banned := range []string{"permission prompt", "approve or deny"} {
 		if strings.Contains(text, banned) {
 			t.Errorf("refusal %q mentions %q, which does not apply to a question dialog", text, banned)
 		}
 	}
-	for _, want := range []string{"question", "gc session attach"} {
+	for _, want := range []string{"question", "gc session attach", "respond", `"select"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("refusal %q does not mention %q", text, want)
 		}
@@ -493,10 +494,10 @@ func TestAskUserQuestionRefusalTextIsKindAware(t *testing.T) {
 }
 
 // The dialog's numbered options are per-dialog, not the fixed Yes/Yes-always/No
-// menu Respond's approval switch encodes: Respond refuses, with the typed
-// error the API maps to 409 invalid_interaction, before any key is sent. A
-// refusal that already pressed "1" has answered the dialog, and one that
-// returned nil would report a still-open dialog as answered.
+// menu Respond's approval switch encodes: an approval's action is refused,
+// with the typed error the API maps to 409 invalid_interaction, before any
+// key is sent. A refusal that already pressed "1" has answered the dialog,
+// and one that returned nil would report a still-open dialog as answered.
 func TestRespondRefusesAskUserQuestionDialog(t *testing.T) {
 	for name, pane := range map[string]string{
 		"bare dialog":                askUserQuestionPane,
@@ -897,8 +898,8 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 	if pending.Prompt != "Which features should the change cover?" {
 		t.Errorf("Prompt = %q, want the question text itself", pending.Prompt)
 	}
-	if len(pending.Options) != 0 {
-		t.Errorf("Options = %q, want none: a question is answered by a human, not by a verb", pending.Options)
+	if want := []string{"Tags", "Scope"}; !slices.Equal(pending.Options, want) {
+		t.Errorf("Options = %q, want the page's options %q", pending.Options, want)
 	}
 
 	again := pendingFor(multiSelectPage)
@@ -1147,4 +1148,113 @@ func TestNudgeSessionStillDismissesSessionLimitChooserAndDelivers(t *testing.T) 
 	if submitted, _ := pane.state(); !slices.Equal(submitted, []string{"run the tests"}) {
 		t.Fatalf("submitted %q, want the message", submitted)
 	}
+}
+
+// questionAnswerExecutor serves before to every capture until a typed key
+// (send-keys -l), and after from then on: the page the key moved the dialog
+// to, or the same page for a key that changed nothing. It records the keys.
+type questionAnswerExecutor struct {
+	paneExecutor
+	after string
+	keys  []string
+}
+
+func (e *questionAnswerExecutor) execute(args []string) (string, error) {
+	if sendsKeys(args) && slices.Contains(args, "-l") {
+		e.keys = append(e.keys, args[len(args)-1])
+		e.pane = e.after
+	}
+	return e.paneExecutor.execute(args)
+}
+
+func (e *questionAnswerExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// Respond answers a question page with action select, its text naming one
+// of the options Pending offers by label (case ignored) or by number: it
+// types that option's number once and returns when the page leaves the
+// pane, whether for the next page, the review page or none. The review
+// page's Submit answers is option 1.
+func TestRespondSelectsAQuestionOption(t *testing.T) {
+	withFastRespondVerify(t, time.Second)
+	nextPage := strings.Join(readQuestionFixture(t, "question-after-enter-ga-ngrme8.txt"), "\n") + "\n"
+	reviewPage := strings.Join(readQuestionFixture(t, "review-page-ga-ngrme8.txt"), "\n") + "\n"
+	firstPage := strings.Join(readQuestionFixture(t, "question-page-ga-ngrme8.txt"), "\n") + "\n"
+	for _, tc := range []struct {
+		name, before, after, text, wantKey string
+		withRequestID                      bool
+	}{
+		{"by label to the idle composer", askUserQuestionPane, answeredAskUserQuestionPane, "keep holding", "3", true},
+		{"by number to the next page", firstPage, nextPage, "2", "2", true},
+		{"without a request id", firstPage, nextPage, "Gamma variant", "3", false},
+		{"submit on the review page", reviewPage, answeredAskUserQuestionPane, "Submit answers", "1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm0, _ := questionTmux(tc.before)
+			pending, err := (&Provider{tm: tm0}).Pending("auq")
+			if err != nil || pending == nil {
+				t.Fatalf("Pending = %+v, %v; want the open question", pending, err)
+			}
+			ex := &questionAnswerExecutor{paneExecutor: paneExecutor{pane: tc.before, inMode: "0"}, after: tc.after}
+			tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+			response := runtime.InteractionResponse{Action: QuestionSelectAction, Text: tc.text}
+			if tc.withRequestID {
+				response.RequestID = pending.RequestID
+			}
+			if err := tm.Respond("auq", response); err != nil {
+				t.Fatalf("Respond(select %q) = %v, want nil", tc.text, err)
+			}
+			if want := []string{tc.wantKey}; !slices.Equal(ex.keys, want) {
+				t.Fatalf("keys = %q, want %q typed once", ex.keys, want)
+			}
+		})
+	}
+}
+
+// Respond refuses before any key a select naming no option the page offers
+// (free text and chat included: they are answered in the terminal) with
+// ErrInteractionActionUnavailable, and one naming another request with
+// ErrInteractionGone. A page the key leaves in place (a multi-select
+// question toggles in place) is an error once the deadline passes, the key
+// typed once.
+func TestRespondSelectRefusalsOnAQuestion(t *testing.T) {
+	withFastRespondVerify(t, 20*time.Millisecond)
+	tm0, _ := questionTmux(askUserQuestionPane)
+	pending, err := (&Provider{tm: tm0}).Pending("auq")
+	if err != nil || pending == nil {
+		t.Fatalf("Pending = %+v, %v", pending, err)
+	}
+	for _, tc := range []struct {
+		name, text, requestID string
+		want                  error
+	}{
+		{"free text row", "Type something.", pending.RequestID, runtime.ErrInteractionActionUnavailable},
+		{"chat row", "5", pending.RequestID, runtime.ErrInteractionActionUnavailable},
+		{"no such option", "Ship it", pending.RequestID, runtime.ErrInteractionActionUnavailable},
+		{"empty text", "", "", runtime.ErrInteractionActionUnavailable},
+		{"another request", "Keep holding", "tmux-question-0123456789abcdef", runtime.ErrInteractionGone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ex := &questionAnswerExecutor{paneExecutor: paneExecutor{pane: askUserQuestionPane, inMode: "0"}, after: answeredAskUserQuestionPane}
+			tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+			err := tm.Respond("auq", runtime.InteractionResponse{RequestID: tc.requestID, Action: QuestionSelectAction, Text: tc.text})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Respond(select %q) = %v, want %v", tc.text, err, tc.want)
+			}
+			requireNoKeys(t, ex.calls, false)
+		})
+	}
+
+	t.Run("page stays", func(t *testing.T) {
+		ex := &questionAnswerExecutor{paneExecutor: paneExecutor{pane: askUserQuestionPane, inMode: "0"}, after: askUserQuestionPane}
+		tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+		err := tm.Respond("auq", runtime.InteractionResponse{RequestID: pending.RequestID, Action: QuestionSelectAction, Text: "1"})
+		if err == nil || !strings.Contains(err.Error(), "still showed") {
+			t.Fatalf("Respond = %v, want the page-still-showed error", err)
+		}
+		if want := []string{"1"}; !slices.Equal(ex.keys, want) {
+			t.Fatalf("keys = %q, want %q typed once and never again", ex.keys, want)
+		}
+	})
 }

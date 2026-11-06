@@ -1727,7 +1727,7 @@ func immediateNudgeBehindPendingInteractionError(target nudgeTarget, what string
 		if attach == "" {
 			attach = target.agentKey()
 		}
-		return fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it in the terminal (gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)
+		return fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it first (POST .../session/{id}/respond with action select naming one of its options, or in the terminal: gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)
 	}
 	return fmt.Errorf("%s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what)
 }
@@ -2069,8 +2069,8 @@ func writeQueuedSessionNudgeNote(target nudgeTarget, mode nudgeDeliveryMode, jso
 }
 
 // queuedNudgeQuestionNote is the downgrade note for a nudge queued behind a
-// question dialog, which is answered in the terminal rather than with respond.
-const queuedNudgeQuestionNote = " (the session is waiting on a question; the queued dispatcher delivers it after the question is answered in the terminal)"
+// question dialog, which is answered with respond's select or in the terminal.
+const queuedNudgeQuestionNote = " (the session is waiting on a question; the queued dispatcher delivers it after the question is answered)"
 
 // queuedNudgeDowngradeNote renders the reason the live leg was skipped, or "" for
 // a nudge that was queued by request. It names the provider for the unsupported

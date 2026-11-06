@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ---------------------------------------------------------------------------
@@ -95,6 +98,9 @@ type parsedQuestion struct {
 	Question string
 	// Choices are the numbered options' labels in pane order.
 	Choices []string
+	// Numbers are the options' numbers, parallel to Choices: the key that
+	// selects each.
+	Numbers []int
 	// Focused is the label of the highlighted option, empty when the dialog
 	// draws no cursor.
 	Focused string
@@ -146,7 +152,9 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 		}
 		if m := askUserQuestionOptionRe.FindStringSubmatch(trimmed); m != nil {
 			label := strings.TrimSpace(m[3])
+			number, _ := strconv.Atoi(m[2])
 			q.Choices = append(q.Choices, label)
+			q.Numbers = append(q.Numbers, number)
 			if m[1] != "" {
 				q.Focused = label
 			}
@@ -230,6 +238,7 @@ func parseReviewPage(lines []string) *parsedQuestion {
 			return nil
 		}
 		q.Choices = append(q.Choices, labels[k])
+		q.Numbers = append(q.Numbers, k+1)
 		if m[1] != "" {
 			q.Focused = labels[k]
 		}
@@ -285,4 +294,58 @@ func boundPromptText(text string) string {
 func (q *parsedQuestion) requestID() string {
 	h := sha256.Sum256([]byte(q.Question + "\x00" + strings.Join(q.Choices, "\x00")))
 	return fmt.Sprintf("tmux-question-%x", h[:8])
+}
+
+// QuestionSelectAction is the InteractionResponse action that answers a
+// question page: its Text names the option to pick, by its label or its
+// number, as Pending's Options list them.
+const QuestionSelectAction = "select"
+
+// questionMetaChoices are the rows a question page offers that answer
+// nothing: they open a free-text field or a chat in the terminal, so
+// Respond does not pick them and Pending does not offer them.
+var questionMetaChoices = map[string]bool{
+	"Type something.": true,
+	"Chat about this": true,
+}
+
+// answerChoices are the labels of the options Respond may pick, in pane
+// order: every choice but questionMetaChoices.
+func (q *parsedQuestion) answerChoices() []string {
+	out := make([]string, 0, len(q.Choices))
+	for _, c := range q.Choices {
+		if !questionMetaChoices[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// questionOptionKey returns the key that picks the option response names on
+// q: action QuestionSelectAction, its Text one of answerChoices by label
+// (case and surrounding space ignored) or by number. A response that names
+// another action, no offered option, or one no single key selects is
+// refused with runtime.ErrInteractionActionUnavailable.
+func questionOptionKey(q *parsedQuestion, response runtime.InteractionResponse) (string, error) {
+	offered := strings.Join(q.answerChoices(), " | ")
+	if response.Action != QuestionSelectAction {
+		return "", fmt.Errorf("%w: a question dialog (%s) is answered with action %q naming one of its options [%s], not %q",
+			runtime.ErrInteractionActionUnavailable, q.promptText(), QuestionSelectAction, offered, response.Action)
+	}
+	want := strings.TrimSpace(response.Text)
+	for i, label := range q.Choices {
+		if questionMetaChoices[label] || i >= len(q.Numbers) {
+			continue
+		}
+		if !strings.EqualFold(label, want) && strconv.Itoa(q.Numbers[i]) != want {
+			continue
+		}
+		if q.Numbers[i] < 1 || q.Numbers[i] > 9 {
+			return "", fmt.Errorf("%w: option %d (%s) cannot be selected with one key; answer it in the terminal",
+				runtime.ErrInteractionActionUnavailable, q.Numbers[i], label)
+		}
+		return strconv.Itoa(q.Numbers[i]), nil
+	}
+	return "", fmt.Errorf("%w: the question dialog (%s) offers no option %q to select; its options are [%s] (free text and chat are answered in the terminal)",
+		runtime.ErrInteractionActionUnavailable, q.promptText(), want, offered)
 }

@@ -719,10 +719,10 @@ func (d *approvalDedup) clear(session string) {
 // ---------------------------------------------------------------------------
 
 // Pending checks the tmux pane for an active Claude Code approval prompt,
-// Codex approval overlay or AskUserQuestion dialog (Kind "question", which
-// offers no options: it is answered in the terminal). A question's Prompt is
-// its question text, bounded; its choices reach a client only in the text of
-// a refused nudge or Respond.
+// Codex approval overlay or AskUserQuestion dialog (Kind "question"). A
+// question's Prompt is its question text, bounded, and its Options are the
+// labels Respond picks with action QuestionSelectAction (free text and chat
+// are answered in the terminal).
 // Returns nil with no error if nothing is pending.
 func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	dialog, err := t.dialogInPane(name)
@@ -755,6 +755,7 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
 			Prompt:    boundPromptText(dialog.question.Question),
+			Options:   dialog.question.answerChoices(),
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}
@@ -836,8 +837,8 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		return err
 	}
 	if q := dialog.question; q != nil {
-		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); it is answered in the terminal (gc session attach %s), not by a message",
-			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), name)
+		return fmt.Errorf("%w: session %q is waiting on a question dialog (%s, request %s); answer it with respond (action %q naming an option) or in the terminal (gc session attach %s), not by a message",
+			runtime.ErrPendingInteraction, name, q.promptText(), q.requestID(), QuestionSelectAction, name)
 	}
 	approval := dialog.approval
 	if approval == nil {
@@ -1005,11 +1006,11 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 		return preVerify(err)
 	}
 	// A question's numbered options are its own, not the fixed approval menu
-	// the keys below encode: refuse before any key, and before the "prompt
-	// already gone" path that would report the open dialog as answered.
+	// the keys below encode: it is answered by respondQuestion, before the
+	// "prompt already gone" path that would report the open dialog as
+	// answered.
 	if dialog.question != nil {
-		return fmt.Errorf("%w: session %q is showing a question dialog (%s); it is answered in the terminal (gc session attach %s)",
-			runtime.ErrInteractionActionUnavailable, name, dialog.question.promptText(), name)
+		return t.respondQuestion(ctx, name, target, dialog.question, response)
 	}
 	current := dialog.approval
 	if current == nil {
@@ -1069,6 +1070,57 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	}
 
 	return fmt.Errorf("approval prompt did not clear within %s of the answer", respondVerifyTimeout)
+}
+
+// respondQuestion answers the question page q that target shows: action
+// QuestionSelectAction picks the option response.Text names
+// (questionOptionKey) with that option's number key, typed once, and the
+// answer is verified by the page leaving the pane: the dialog's next page,
+// its review page, or none. A response naming another request is refused
+// with runtime.ErrInteractionGone and one the page does not offer with
+// runtime.ErrInteractionActionUnavailable, both before any key. A page that
+// still shows at the deadline (a multi-select question toggles its options
+// in place and is submitted in the terminal) is an error: the key may have
+// changed it.
+func (t *Tmux) respondQuestion(ctx context.Context, name, target string, q *parsedQuestion, response runtime.InteractionResponse) error {
+	answered := q.requestID()
+	// An action no question takes is refused as such, whatever request it
+	// names.
+	if response.Action == QuestionSelectAction && response.RequestID != "" && response.RequestID != answered {
+		return fmt.Errorf("question changed: expected %s, got %s: %w", response.RequestID, answered, runtime.ErrInteractionGone)
+	}
+	key, err := questionOptionKey(q, response)
+	if err != nil {
+		return fmt.Errorf("session %q: %w", name, err)
+	}
+	t.cancelCopyModeIfParked(inputCtx(ctx), target)
+	// key is one digit from 1 to 9, typed as given (see respond).
+	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
+		case errors.Is(err, ErrNoServer):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
+		}
+		return fmt.Errorf("send-keys failed: %w", err)
+	}
+	deadline := time.Now().Add(respondVerifyTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(respondVerifyInterval)
+		dialog, err := t.dialogInPane(target)
+		switch {
+		case errors.Is(err, errPaneGeometry):
+			return fmt.Errorf("verifying the answer: %w", err)
+		case err != nil:
+			// Pane gone: the session ended, as respondCleared reads it.
+			return nil
+		}
+		if dialog.question == nil || dialog.question.requestID() != answered {
+			return nil
+		}
+	}
+	return fmt.Errorf("question page %s still showed %s after option %s was selected (a multi-select question is submitted in the terminal: gc session attach %s)",
+		answered, respondVerifyTimeout, key, name)
 }
 
 // respondCleared reports whether the approval Respond answered has left

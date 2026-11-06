@@ -520,7 +520,7 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 	if blocked {
 		if noteDrainReminderHold(store, info, drainReminderHoldPending) {
 			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-				"%s: holding the drain reminder for %s: it is waiting on a dialog that is answered in the terminal\n",
+				"%s: holding the drain reminder for %s: it is waiting on a dialog to be answered\n",
 				drainReminderLabel, name)
 		}
 		return drainReminderHeld, false
