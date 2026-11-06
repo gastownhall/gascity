@@ -485,6 +485,35 @@ pre-push, PR, and main runs. `scripts/bazel_bep_summary_workflow_test.go`
 fails if a `bazel test` runs outside the lanes or a lane stops writing a
 BEP file the report reads.
 
+### Flame graphs (Bazel profiles)
+
+Every `bazel.yml` lane and the nightly `bazel / coverage` job upload their
+Bazel JSON trace profile (`--profile`), gzipped, as the artifact
+`bazel-profile-<lane>-<attempt>` (one `bazel-profile-<lane>.json.gz`
+inside), kept 7 days. To see where a slow lane spent its time:
+
+```bash
+gh run download <run-id> -R gastownhall/gascity -p 'bazel-profile-*' -D /tmp/prof
+```
+
+Open the `.json.gz` in <https://ui.perfetto.dev> ("Open trace file"; it
+reads gzip directly and parses in the browser, nothing is uploaded) or in
+`chrome://tracing` ("Load"). For text, run
+`python3 tools/bazel/critpath.py <(zcat /tmp/prof/*/bazel-profile-unit.json.gz)`
+or `bazel analyze-profile`. Locally, Bazel already keeps the last five
+profiles of each output base as `$(bazel info output_base)/command-<id>.profile.gz`.
+
+These artifacts are public, like every artifact of this repo. A profile
+holds timings, mnemonics, target labels and the runner's output base path;
+it carries no command line, environment value or endpoint. The prepare step
+still refuses a profile with anything secret-shaped (credentials in a URL, a
+PEM block, `token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+(`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host) or over 20 MB
+gzipped, with a warning. The upload never fails or holds up a lane
+(`continue-on-error`, 2-minute bounds);
+`TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
+
 ### Bazel cache tiers
 
 A result is reused only by a run that hashes the action identically, so
