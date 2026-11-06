@@ -30,12 +30,13 @@ stable release.
 
 Recommended path:
 
-1. Run the RC gate on the intended release branch or commit.
-2. Open **Actions → RC Release → Run workflow**.
-3. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
-4. Set `target_ref` to the exact RC-gate-passing commit SHA.
+1. On the release branch, [re-pin the bundled packs](#re-pin-the-bundled-packs).
+2. Run the RC gate on the intended release branch or commit.
+3. Open **Actions → RC Release → Run workflow**.
+4. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
+5. Set `target_ref` to the exact RC-gate-passing commit SHA.
 
-Nothing enforces step 1: the **RC Gate** workflow (`rc-gate.yml`) runs only
+Nothing enforces step 2: the **RC Gate** workflow (`rc-gate.yml`) runs only
 when someone dispatches it, and neither `rc-release.yml` nor `release.yml`
 checks for a passing run. It is also the only workflow that checks the bundled
 pack pin (`BundledPackImportVersion`) against the content the release embeds.
@@ -75,6 +76,29 @@ git push origin vX.Y.Z-rcN
 Pushing an RC tag triggers `rc-release.yml`. The stable `release.yml` jobs
 skip tags containing a prerelease suffix, so RC tags do not run the Homebrew
 or stable publishing path.
+
+### Re-pin the bundled packs
+
+`BundledPackImportVersion` (`internal/config/public_packs.go`) names the
+gascity.git commit whose bundled packs (`internal/bootstrap/packs/core` and
+`examples/bd`) match what the release embeds. The RC Gate's `embedded pins`
+job fails if those packs changed after that commit. On `main` they move past
+the pin between releases, so re-pin on the release branch, after its last
+change to the bundled packs:
+
+```bash
+old=$(sed -n 's/.*BundledPackImportVersion = "sha:\([0-9a-f]\{40\}\)".*/\1/p' internal/config/public_packs.go)
+new=$(git rev-parse HEAD)
+test -n "$old" && git grep -l "$old" -- internal/config/public_packs.go examples docs | xargs perl -pi -e "s/$old/$new/g"
+```
+
+That moves the pin, and the examples that import the bundled packs, to the
+branch tip. Then append `"sha:<old>",` to `SupersededBundledPackImportVersions`
+with a comment naming the release, so the release keeps serving its embedded
+packs to cities an earlier release pinned at the old commit. Commit it as
+`[release-only] chore(pins): re-pin the bundled packs to <new>` and push.
+`scripts/check-embedded-pins --bd-advisory` runs the RC Gate's check locally.
+Re-pin again if a later backport changes the bundled packs.
 
 ### Manual
 
@@ -147,6 +171,7 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 | Git tag `vX.Y.Z` | Created and pushed | `scripts/bump-version.sh` |
 | GitHub Release page | Created with binaries + grouped changelog | GoReleaser in `release.yml` |
 | Release SBOM + attestations | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml` |
+| `internal/config/public_packs.go` and the example cities | `BundledPackImportVersion` re-pinned on the release branch | [Re-pin the bundled packs](#re-pin-the-bundled-packs) |
 | `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated | `update-homebrew-formula` in `release.yml` |
 | `Homebrew/homebrew-core` `Formula/g/gascity.rb` | source `url` + `sha256` bumped | BrewTestBot's autobump PR |
 
