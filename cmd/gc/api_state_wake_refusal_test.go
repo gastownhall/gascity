@@ -123,7 +123,7 @@ func TestWakeStartRefusalReadsTheWorkStoreOnASplitCity(t *testing.T) {
 	work, binding := beads.NewMemStore(), beads.NewMemStore()
 	agent := config.Agent{Name: "worker", SleepAfterIdle: "1m"}
 	cs := &controllerState{cityPath: t.TempDir(), cfg: &config.City{Agents: []config.Agent{agent}}, cityBeadStore: work, storageRoutes: splitRoutes(binding), sp: runtime.NewFake()}
-	if cs.SessionsBeadStore().Store != binding {
+	if cs.Stores().Sessions().Store != binding {
 		t.Fatal("fixture: the sessions store is not the binding")
 	}
 	if _, err := work.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: "gc-1"}); err != nil {

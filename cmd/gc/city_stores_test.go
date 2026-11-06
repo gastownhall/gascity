@@ -161,7 +161,7 @@ func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	cs.mu.Lock()
 	cs.cityBeadStore = second
 	cs.mu.Unlock()
-	if got := cs.GraphBeadStore().Store; got != splitStrictClassView(second) {
+	if got := cs.Stores().Graph().Store; got != splitStrictClassView(second) {
 		t.Errorf("graph after the swap = %p, want the new city store %p", got, second)
 	}
 
@@ -246,7 +246,7 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 	engine := beads.NewMemStore()
 	routes := messagingSplitRoutes(engine)
 	cs := &controllerState{cityName: "c", storageRoutes: routes, cityBeadStore: beads.NewMemStore()}
-	if got := cs.SessionsBeadStore().Store; got != beads.Store(engine) {
+	if got := cs.Stores().Sessions().Store; got != beads.Store(engine) {
 		t.Fatalf("pre-cache sessions = %T, want the engine", got)
 	}
 	routes.withControllerCache(t.Context(), nil)
@@ -255,7 +255,7 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 		t.Fatalf("withControllerCache left sessions on %T", cached)
 	}
 	t.Cleanup(func() { _ = routes.close() })
-	if got := cs.SessionsBeadStore().Store; got != cached {
+	if got := cs.Stores().Sessions().Store; got != cached {
 		t.Errorf("sessions after withControllerCache = %T, want the controller's cache", got)
 	}
 }
@@ -269,7 +269,7 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	cs := &controllerState{cityName: "c", cityBeadStore: beads.NewMemStore(), storageRoutes: graphOnly}
 	// Mint the first epoch before any swap, so a key that missed the work
 	// store would keep it deterministically rather than by scheduling.
-	_ = cs.SessionsBeadStore()
+	_ = cs.Stores().Sessions()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 8 {
@@ -282,8 +282,8 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 					return
 				default:
 				}
-				_ = cs.SessionsBeadStore()
-				_ = cs.GraphBeadStore()
+				_ = cs.Stores().Sessions()
+				_ = cs.Stores().Graph()
 				_ = cs.cityWorkStore()
 				_, _ = cs.Stores().Rig("r")
 			}
@@ -307,10 +307,10 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(lastRig) {
 		t.Errorf("rig after the swaps = %v, %v; want the final rig store %p", got.Store, ok, lastRig)
 	}
-	if got := cs.SessionsBeadStore().Store; got != splitStrictClassView(last) {
+	if got := cs.Stores().Sessions().Store; got != splitStrictClassView(last) {
 		t.Errorf("sessions after the swaps = %p, want the final city store %p", got, last)
 	}
-	if got := cs.GraphBeadStore().Store; got != beads.Store(binding) {
+	if got := cs.Stores().Graph().Store; got != beads.Store(binding) {
 		t.Errorf("graph after the swaps = %p, want the binding", got)
 	}
 	if got := cs.cityWorkStore().Store; got != splitStrictWorkView(last) {
@@ -438,7 +438,7 @@ func BenchmarkResolveClassStore(b *testing.B) {
 	b.Run("cs-accessor-cached-epoch", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			_ = cs.SessionsBeadStore()
+			_ = cs.Stores().Sessions()
 		}
 	})
 }

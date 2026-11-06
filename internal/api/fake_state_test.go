@@ -187,48 +187,21 @@ func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (
 	return f.scopedStoreFn(ctx, existing)
 }
 
-func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: f.classStore(f.nudgesBeadStore)}
-}
-
 func (f *fakeState) NudgeQueue() NudgeQueue {
 	if f.nudgeQueue != nil {
 		return f.nudgeQueue
 	}
-	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore()}
-}
-
-func (f *fakeState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: f.classStore(f.sessionsBeadStore)}
-}
-
-func (f *fakeState) GraphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: f.classStore(f.graphBeadStore)}
-}
-
-func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
-	return beads.OrdersStore{Store: f.classStore(f.ordersBeadStore)}
-}
-
-// classStore resolves a coordination-class accessor: the relocated store a
-// test set, or the city store when it set none (the default backend keeps every
-// class there). A class left on the city store — unset, or set to the city
-// store itself — is the gate's class view of it under GC_TEST_SPLIT_STRICT=1,
-// and the city store unchanged otherwise. A store relocated to a different
-// physical store is already split and is handed out as is.
-func (f *fakeState) classStore(relocated beads.Store) beads.Store {
-	if relocated != nil && relocated != f.cityBeadStore {
-		return relocated
-	}
-	return splittest.GateClassView(f.cityBeadStore)
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.Stores().Nudges()}
 }
 
 // Stores mints the fake's class handles per call from its raw fields, through
 // the same router production uses (storeref.NewStores): the city store is the
 // work store, every rig in stores is a rig scope, and a class a test relocated
-// to a different store is a one-class binding. The split-strict gate's views
-// are the projection, so each handle wraps exactly the store its raw accessor
-// returns (TestFakeStateStoresWrapTheAccessorsStores).
+// to a different store is a one-class binding. A class left on the city store
+// (unset, or set to the city store itself) wraps the city store, through the
+// gate's class view under GC_TEST_SPLIT_STRICT=1. The split-strict gate's views
+// are the projection, so the work and rig handles wrap exactly the stores
+// CityBeadStore and BeadStore return (TestFakeStateStoresWrapTheResidueAccessors).
 func (f *fakeState) Stores() storeref.Stores {
 	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), gateProjection{})
 }
@@ -273,52 +246,6 @@ func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map
 		Rigs:     storeref.RigLegs(rigs),
 		Bindings: bindings,
 	}, storeref.StoresOptions{Projection: proj})
-}
-
-// accessorState is the raw and per-class store accessors a State stands
-// beside Stores until T6c drops the per-class ones.
-type accessorState interface {
-	Stores() storeref.Stores
-	CityBeadStore() beads.Store
-	BeadStore(rig string) beads.Store
-	BeadStores() map[string]beads.Store
-	GraphBeadStore() beads.GraphStore
-	SessionsBeadStore() beads.SessionStore
-	OrdersBeadStore() beads.OrdersStore
-	NudgesBeadStore() beads.NudgesStore
-	CityName() string
-}
-
-// mirrorAccessorStores mints handles that wrap exactly what st's accessors
-// return, for a fake that overrides some of them: the work store is
-// CityBeadStore, each class whose accessor answers another store is a binding
-// over that store (a zero handle's, nil, is a binding that failed to open),
-// messaging follows a relocated sessions store, and the rigs are
-// BeadStore's. It applies no projection: the accessors
-// already did. A rig's graph placement follows the same rule as Stores': the
-// graph binding when graph is relocated, else the rig's own store.
-func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
-	work := st.CityBeadStore()
-	relocated := map[coordclass.Class]beads.Store{}
-	for class, store := range map[coordclass.Class]beads.Store{
-		coordclass.ClassGraph:    st.GraphBeadStore().Store,
-		coordclass.ClassSessions: st.SessionsBeadStore().Store,
-		coordclass.ClassOrders:   st.OrdersBeadStore().Store,
-		coordclass.ClassNudges:   st.NudgesBeadStore().Store,
-	} {
-		if store != work {
-			relocated[class] = store
-		}
-	}
-	// Messaging follows a relocated sessions store, as relocatedClasses has it.
-	if sessions, ok := relocated[coordclass.ClassSessions]; ok {
-		relocated[coordclass.ClassMessaging] = sessions
-	}
-	rigStores := make(map[string]beads.Store, len(rigs))
-	for _, rig := range rigs {
-		rigStores[rig] = st.BeadStore(rig)
-	}
-	return mintFakeStores(work, rigStores, relocated, nil)
 }
 
 // gateProjection is the split-strict gate's views as the router's projection:

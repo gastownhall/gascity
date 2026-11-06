@@ -981,7 +981,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 		t.Fatal("workflowStoreByRef(rig:missing) = true, want false")
 	}
 
-	// A city that relocates nothing has no orders binding to name: OrdersBeadStore()
+	// A city that relocates nothing has no orders binding to name: Stores().Orders()
 	// is the city store, and an orders: ref there would be a second name for a store
 	// the city: ref already resolves.
 	if _, ok := workflowStoreByRef(state, "orders:city"); ok {

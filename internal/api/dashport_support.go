@@ -260,10 +260,9 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 }
 
 // classStores mints the seeded city's handles: a single-store topology, so
-// NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
-// wrap the city store, exactly as they do on a default (non-relocated)
-// controller city, and each seeded rig is a rig scope over its own store, by
-// name as the controller lists them.
+// every class handle wraps the city store, exactly as on a default
+// (non-relocated) controller city, and each seeded rig is a rig scope over its
+// own store, by name as the controller lists them.
 func (s *seededState) classStores() storeref.Stores {
 	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}, storeref.StoresOptions{})
 }
@@ -272,25 +271,9 @@ func (s *seededState) classStores() storeref.Stores {
 // never change, so every call mints the same handles.
 func (s *seededState) Stores() storeref.Stores { return s.classStores() }
 
-func (s *seededState) NudgesBeadStore() beads.NudgesStore {
-	return s.classStores().Nudges()
-}
-
 // NudgeQueue is the city's state.json queue over the seeded city store.
 func (s *seededState) NudgeQueue() NudgeQueue {
-	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.NudgesBeadStore()}
-}
-
-func (s *seededState) SessionsBeadStore() beads.SessionStore {
-	return s.classStores().Sessions()
-}
-
-func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return s.classStores().Graph()
-}
-
-func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return s.classStores().Orders()
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.classStores().Nudges()}
 }
 
 // ClassBindingHasLegacyResidents answers true for everything: a seeded city

@@ -112,14 +112,14 @@ func TestGraphResidentWorkCountsAsRunning(t *testing.T) {
 }
 
 // TestGraphResidentSingleStoreByteIdentical pins the single-store invariant:
-// with the graph class NOT relocated (GraphBeadStore() == CityBeadStore()), the
+// with the graph class NOT relocated (Stores().Graph() == CityBeadStore()), the
 // graph leg is inert — the very same wisp bead placed in the shared store is
 // ignored, so the agent stays stopped and uncounted, byte-identical to the
 // pre-seam behavior. This is the regression guard for the relocation gate.
 func TestGraphResidentSingleStoreByteIdentical(t *testing.T) {
 	st := bdDogState(t)
-	// graphBeadStore left nil => GraphBeadStore() falls back to the city store.
-	if st.GraphBeadStore().Store != st.CityBeadStore() {
+	// graphBeadStore left nil => Stores().Graph() falls back to the city store.
+	if st.Stores().Graph().Store != st.CityBeadStore() {
 		t.Fatalf("precondition: expected single-store (graph == city)")
 	}
 	// Same wisp bead as the relocated test, but in the shared city store.

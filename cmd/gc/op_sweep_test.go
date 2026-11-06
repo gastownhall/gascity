@@ -1362,8 +1362,8 @@ func TestOpsBuiltinDefaultRecordsOnARealSplitCity(t *testing.T) {
 
 	// Sweeper over a controllerState that routes sessions to that cache.
 	cs := &controllerState{cityBeadStore: work, storageRoutes: ctlRoutes, cfg: cfg, cityPath: root, rolloutFlags: rollout.ForTest(), beadsQuiescent: new(atomic.Bool)}
-	if got := cs.SessionsBeadStore().Store; got != ctlSess.Store {
-		t.Fatalf("cs.SessionsBeadStore = %T, want the routed cache", got)
+	if got := cs.Stores().Sessions().Store; got != ctlSess.Store {
+		t.Fatalf("cs.Stores().Sessions() = %T, want the routed cache", got)
 	}
 	h := newOpSweepHarness(cs)
 	if h.s.safePass() {

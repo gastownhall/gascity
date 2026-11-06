@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -40,10 +41,12 @@ type laneHostEnvFake struct {
 	enqueued []reconcilekey.Key
 }
 
-func (e *laneHostEnvFake) SessionsBeadStore() beads.SessionStore {
+// Stores is a single-store city over the env's store, with no projection: its
+// sessions handle wraps exactly the store a test set.
+func (e *laneHostEnvFake) Stores() storeref.Stores {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return beads.SessionStore{Store: e.store}
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: e.store}}, storeref.StoresOptions{})
 }
 
 // setStore replaces the sessions store the env answers.

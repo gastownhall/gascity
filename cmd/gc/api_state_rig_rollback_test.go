@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/git"
@@ -459,5 +460,42 @@ func TestTeardownPartialRigRefusesOtherRigDatabaseDrop(t *testing.T) {
 	}
 	if len(dropped) != 1 || dropped[0] != "xdb" {
 		t.Fatalf("dropped = %v, want [xdb]", dropped)
+	}
+}
+
+// TestControllerRigSweepReadsTheCityWorkStore pins the boot sweep to the city
+// work store the controller's Stores hands out (typed-stores T6c): an orphan
+// in_flight rig-create record there is rolled back in place, and a controller
+// with no city store sweeps nothing.
+func TestControllerRigSweepReadsTheCityWorkStore(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := (&controllerState{cityPath: cityPath}).sweepOrphanRigProvisions(context.Background()); err != nil {
+		t.Fatalf("sweep with no city store = %v, want nil", err)
+	}
+
+	store := beads.NewMemStore()
+	orphan, err := store.Create(beads.Bead{
+		Title:  "rig-create orphan",
+		Labels: []string{"gc-idem"},
+		Metadata: map[string]string{
+			"gc.idem.kind":     "rig-create",
+			"gc.idem.city":     filepath.Clean(cityPath),
+			"gc.idem.state":    "in_flight",
+			"gc.idem.rig_name": "web",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cityPath: cityPath, cityBeadStore: store, cfg: &config.City{}}
+	if err := cs.sweepOrphanRigProvisions(context.Background()); err != nil {
+		t.Fatalf("sweep = %v", err)
+	}
+	got, err := store.Get(orphan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := got.Metadata["gc.idem.state"]; state != "rolled_back" {
+		t.Errorf("the orphan's state = %q, want rolled_back: the sweep did not read the city work store", state)
 	}
 }

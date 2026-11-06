@@ -646,11 +646,11 @@ func workflowStoresWith(state State, includeRetiredRigs bool) []workflowStoreInf
 	// store, workflow roots/steps/wisps live there, NOT on the work store, so the
 	// snapshot scan must consult it. Lead with it (graph-first) so a graph-resident
 	// root is found on the first probe. Skip it on a default (non-relocated) city —
-	// where GraphBeadStore() == CityBeadStore() — so the scan stays byte-identical
+	// where Stores().Graph() wraps CityBeadStore() — so the scan stays byte-identical
 	// there. It carries the city scope as its fallback (graph roots stamp their own
 	// scope metadata, which workflowSnapshotScope prefers) but a distinct ref so the
 	// store-scan dedup never conflates it with the city store.
-	if graphStore := state.GraphBeadStore().Store; graphStore != nil && graphStore != cityStore {
+	if graphStore := state.Stores().Graph().Store; graphStore != nil && graphStore != cityStore {
 		stores = append(stores, workflowStoreInfo{
 			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
 			scopeKind: beadmeta.ScopeKindCity,
@@ -727,7 +727,7 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 		// Round-trip the graph-store ref minted by workflowStores when graph is
 		// relocated. On a default city (graph == city) there is no graph entry, so
 		// this resolves nothing and callers fall back to the store scan.
-		graphStore := state.GraphBeadStore().Store
+		graphStore := state.Stores().Graph().Store
 		cityName := workflowCityScopeRef(state.CityName())
 		if graphStore == nil || graphStore == state.CityBeadStore() || scopeRef != cityName {
 			return workflowStoreInfo{}, false
@@ -744,7 +744,7 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 		// binding-resident tracking bead, and the detail endpoint takes it back. On
 		// a default city (orders == city) there is no orders entry to name, so this
 		// resolves nothing and callers fall back to the store scan.
-		ordersStore := state.OrdersBeadStore().Store
+		ordersStore := state.Stores().Orders().Store
 		cityName := workflowCityScopeRef(state.CityName())
 		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
 			return workflowStoreInfo{}, false

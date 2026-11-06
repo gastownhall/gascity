@@ -54,18 +54,19 @@ func (cs *controllerState) rigSetLocked() rigSet {
 	return rigSet{gen: cs.rigStoresGen, stores: cs.beadStores}
 }
 
-// graphBeadStore returns the store that owns graph (workflow/v2) beads. It
-// delegates to the exported GraphBeadStore() accessor so the api.State surface
-// and the controller's own callers share one resolver.
+// graphBeadStore returns the store that owns graph (workflow/v2) beads: the
+// binding when the routes relocate graph, else the city work store. On this
+// side the controller's CachingStore over the binding is the emitter
+// (class_store_cache.go); the one-shot CLI's is class_store_emit.go.
 func (cs *controllerState) graphBeadStore() beads.GraphStore {
-	return cs.GraphBeadStore()
+	return cs.Stores().Graph()
 }
 
-// sessionsBeadStore returns the store that owns session and session-wait beads.
-// It delegates to the exported SessionsBeadStore() accessor so the api.State
-// surface and the controller's own callers share one resolver.
+// sessionsBeadStore returns the store that owns session and session-wait
+// beads: the binding when the routes relocate sessions, else the city work
+// store.
 func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
-	return cs.SessionsBeadStore()
+	return cs.Stores().Sessions()
 }
 
 // mailBeadStore returns the store that owns mail (message) beads: the binding
@@ -74,19 +75,19 @@ func (cs *controllerState) mailBeadStore() beads.MailStore {
 	return cs.Stores().Mail()
 }
 
-// nudgesBeadStore returns the store that owns nudge beads. It delegates to the
-// exported NudgesBeadStore() accessor so the api.State surface and the
-// controller's own callers share one resolver.
+// nudgesBeadStore returns the store that owns nudge beads: the binding when
+// the routes relocate nudges, else the city work store.
 func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
-	return cs.NudgesBeadStore()
+	return cs.Stores().Nudges()
 }
 
 // ordersBeadStore returns the store that owns order-tracking bookkeeping beads
 // for the city scope. The scope argument is not read: per-order scope
 // (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
 // (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
+// It is the store the order dispatcher creates every tracking bead in.
 func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
-	return cs.OrdersBeadStore()
+	return cs.Stores().Orders()
 }
 
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
