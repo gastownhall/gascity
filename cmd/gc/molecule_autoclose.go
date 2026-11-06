@@ -81,7 +81,7 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// leg routes off the owning store rather than following it.
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath)) // byid:allow name reuse: this store is autocloseOwningStore's owning-store answer, not the raw fallback opened below
 		return
 	}
 

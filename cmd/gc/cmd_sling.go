@@ -470,7 +470,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		return 1
 	}
 	var inlineText bool
-	beadOrFormula, inlineText, errCode, errMsg = applySlingInlineBead(cfg, beadOrFormula, isFormula, dryRun, sourceBead, store, storeRef, stdinDescription, humanStdout, stderr)
+	beadOrFormula, inlineText, errCode, errMsg = applySlingInlineBead(cfg, beadOrFormula, isFormula, dryRun, sourceBead, store, storeRef, stdinDescription, humanStdout, stderr) // byid:allow store is the one openSlingStore resolved for this same beadOrFormula (the binding when the probe found it there); the inline probe reads only that id
 	if errCode != "" {
 		return fail(errCode, errMsg)
 	}
