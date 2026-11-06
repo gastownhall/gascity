@@ -1390,7 +1390,9 @@ func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opt
 		if member.ID == candidate.ID || !strings.EqualFold(strings.TrimSpace(member.Status), "in_progress") {
 			continue
 		}
-		held = append(held, member.ID)
+		if hookClaimMemberHeldElsewhere(member, opts.IdentityCandidates) {
+			held = append(held, member.ID)
+		}
 	}
 	if len(held) == 0 {
 		return false
@@ -1398,6 +1400,24 @@ func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opt
 	slices.Sort(held)
 	fmt.Fprintf(stderr, "gc hook --claim: withholding workflow root %s: member steps %s are in_progress under other sessions\n", candidate.ID, strings.Join(held, ", ")) //nolint:errcheck
 	return true
+}
+
+// hookClaimMemberHeldElsewhere reports whether a workflow member is held by a
+// session outside identities. A member's assignee is authoritative. With none,
+// its claim provenance decides: a session_name or session_id naming this
+// session is ours, and any other provenance — a seat that has since gone
+// included — is foreign. A member that names no holder at all is no evidence
+// that anyone else owns the workflow.
+func hookClaimMemberHeldElsewhere(member beads.Bead, identities []string) bool {
+	if assignee := strings.TrimSpace(member.Assignee); assignee != "" {
+		return !hookClaimHasIdentity(assignee, identities)
+	}
+	sessionName := member.Metadata[beadmeta.SessionNameMetadataKey]
+	sessionID := member.Metadata[beadmeta.SessionIDMetadataKey]
+	if hookClaimHasIdentity(sessionName, identities) || hookClaimHasIdentity(sessionID, identities) {
+		return false
+	}
+	return strings.TrimSpace(sessionName) != "" || strings.TrimSpace(sessionID) != ""
 }
 
 // listWorkflowMembers is ops.ListWorkflowMembers, or a list through
