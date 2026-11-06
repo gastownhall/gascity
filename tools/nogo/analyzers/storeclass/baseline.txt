@@ -808,7 +808,6 @@ cmd/gc/conversation_lane_turns.go	laneTurnRows	raw-field	1
 cmd/gc/cross_store_gate_lane.go	CityRuntime.releaseCrossStoreGates	mint	1
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerLeg	raw-field	1
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerResolver	raw-param	3
-cmd/gc/cross_store_gate_lane.go	crossStoreBlockerResolverOver	raw-param	1
 cmd/gc/demand_cross_store_gate.go	crossStoreGateLeg	raw-param	1
 cmd/gc/demand_cross_store_gate.go	crossStoreGateLegs	raw-param	2
 cmd/gc/demand_serve_predicate.go	beadHasUnmetPlainBlocksDep	raw-param	1
@@ -992,8 +991,6 @@ cmd/gc/idle_nudge.go	poolContinuationBackstop.observeHold	raw-param	1
 cmd/gc/idle_nudge.go	poolContinuationBackstop.reserve	raw-param	1
 cmd/gc/idle_nudge.go	writeContinuationClaimMarker	raw-param	1
 cmd/gc/idle_nudge.go	writeIdleClaimMarker	raw-param	1
-cmd/gc/infra_class_clear.go	infraRestoreKeptEdge	cap-assert	1
-cmd/gc/infra_class_holds.go	mintInfraCopyGates	mint	1
 cmd/gc/infra_class_migrate.go	infraCopyDepEdge	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraDestinationEdgePayloadRefusal	cap-assert	1
 cmd/gc/infra_class_migrate.go	infraReadEdgePayload	cap-assert	1

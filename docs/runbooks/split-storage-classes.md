@@ -247,19 +247,47 @@ What the command does, in order:
 7. Closes the destination, reopens it, and proves field-level equality against
    the bytes on disk — not against the connection that wrote them.
 8. Records a proven-copy manifest, and only then the convergence marker.
+   Before the clear it raises the work store's bd `min_hash_length` one past
+   the longest hash suffix among the carried ids of the store's own prefix
+   (only suffixes bd mints count: base36, 3 to 8 characters, so a cross-store
+   gate's `xsg-` id does not; neither setting goes above 8, the longest suffix
+   bd mints; it raises `max_hash_length` with it when needed, and never lowers
+   either, with one exception: an earlier `--from-rigs` may have set either
+   above 8, which bd's minting ignores and a hosted `bd serve` only pads ids
+   to, and each is brought back down to 8), so bd does not mint a carried id
+   again once the clear removes it: every id it mints has a longer suffix than
+   any carried one. Where a carried suffix already has 8 characters the floor
+   stops at 8, and a new 8-character id only rarely could repeat one. A file
+   store needs no floor and a generic exec store cannot take one; both are
+   reported. A hosted bd store that refuses the write stops the run before the
+   clear and names the value to set on the hosted project out of band; then
+   run the same command again. `gc storage repair-sequence --id-floor` sets
+   the same floor on its own, under the same lock, and is safe to repeat.
 9. Clears the work store's copies of the beads it moved. Each row, with every
    dependency edge touching it and that edge's payload, is first written to
    `<binding root>/infra.retained-source.jsonl`; the file is re-read from disk
    and proven equal to the rows it records; only then is a row removed.
 
-**Holds.** A bead parked in the work store stays parked in the binding. An
-open infrastructure bead with a `blocks` edge onto an unfinished work bead (a
-parked `mol-dog` wisp blocked on an open work bead, say) waits in the binding on
-a cross-store gate: a `gate` bead in the binding that names the work bead, which
-the controller's gate lane closes once the work bead closes. The migrate output
-names each one. A hold the binding cannot express makes the migration refuse,
-before anything is copied, naming each bead and its fix; `gc storage preflight`
-reports the same refusal under `holds`:
+**Holds.** A bead parked in the work store stays parked in the binding, and
+no cross-store edge is ever written. The copy plans every edge between a moved
+bead and one that stays the way `--from-rigs` does (the same planner). An open
+infrastructure bead with a `blocks` edge onto an unfinished work bead (a parked
+`mol-dog` wisp blocked on an open work bead, say), or onto an unfinished bead a
+rig store holds, waits in the binding on a cross-store gate: a `gate` bead in
+the binding that names the blocker, which the controller's gate lane closes
+once the blocker closes. The migrate output names each one, and the manifest
+lists it (`#gc:gate`). An `external:` reference a moved bead holds is carried
+as it is, and the split city enforces it: an `external:<id>` blocker holds its
+bead until some store holds `<id>` and it closes, and an
+`external:<rig>:<capability>` reference never blocks. `gc storage preflight`
+names, under `external refs`, every open bead the copy moves that waits on an
+`external:<id>` whose bead no store holds: it arrives blocked, so close or
+re-point the edge first if it should not wait. Every other edge between a
+moved bead and one that stays is dropped and recorded on the moved bead
+(`gc.migrated_cross_edges`). A hold
+the binding cannot express makes the migration refuse, before anything is
+copied, naming each bead and its fix; `gc storage preflight` reports the same
+refusal under `holds`:
 
 - **an undated deferral** (`bd` status `deferred` with no future
   `defer_until`): give the bead a dated deferral, `bd defer <id> --until
@@ -271,7 +299,16 @@ reports the same refusal under `holds`:
   --status open`), or close it;
 - **a `waits-for` or `conditional-blocks` edge onto unfinished work**: a
   cross-store gate encodes only `blocks`. Finish the work bead, close the
-  infrastructure bead, or replace the edge with a `blocks` edge.
+  infrastructure bead, or replace the edge with a `blocks` edge;
+- **an open work bead blocked by an unfinished infrastructure bead** (the
+  v1 `cook --attach` graft is the known producer): a work store cannot hold a
+  cross-store gate. Finish or cancel the infrastructure bead's workflow, or
+  remove the edge with `gc bd dep remove <work> <infra>`;
+- **a `tracks` or `parent-child` edge with both ends open**, in either
+  direction: a membership edge cannot cross stores. Close the workflow or
+  convoy, or the other bead;
+- **a blocker no readable store holds while a rig store cannot be read**:
+  restore access to the rig store and run this again.
 
 An infrastructure bead blocked on open work needs no manual deferral before the
 migration.
@@ -322,12 +359,9 @@ the run stops at the next boundary and exits 75 with `paused in <phase> at <n>/<
   holds an edge of the work store no longer has.
 - after the marker, the clear is pending and boot refuses it as retained
   copies. Running the same command again finishes the clear from the rows it
-  had not yet removed. The cross-store edges the clear keeps (from a work bead
-  into a moved row) are re-added only when the clear finishes, so between runs
-  the edges into rows an earlier run already removed are absent from the work
-  store: a blocking one does not hold its work bead back until the clear is
-  finished. They are recorded in the backup, and the finishing run restores
-  them.
+  had not yet removed. The clear re-adds no edge, so nothing waits on the
+  finishing run; every run checks the edges from work beads onto the rows it
+  is about to remove again before it removes one (see step 9 below).
 - in the re-copy of a binding whose database is gone (`--from-backup`, or
   `--from-work` on a city whose work store was never cleared), the old marker
   is still in place, so before the re-copy creates the database it writes
@@ -350,11 +384,16 @@ that reaches the work store first (`bd`, `gc hook`, the demand and claim
 surfaces), and a workflow step closed in the binding stays open there and is
 dispatched again and again.
 
-Step 9 changes only what it has to. A work bead whose blocking dependency
-points at a moved bead keeps that dependency, unless the binding has already
-closed the bead it waits on, in which case the dependency is released. Every
-other dependency from a work bead into a moved bead is kept by re-adding it
-after its target row is removed.
+Step 9 never writes a cross-store edge. Every dependency from a work bead into
+a moved bead is removed with it, recorded, and not re-added. Before the first
+row goes, the clear runs the copy's rules against the binding's copy of each
+moved bead, and refuses, removing nothing, while an edge still matters: an open
+work bead blocked by a moved bead the binding has not finished, or a `tracks`
+or `parent-child` edge with both ends open. Finish the moved bead in the binding
+or remove the edge (`gc bd dep remove <work> <infra>`), then run the same
+command again. A copy by this build has refused those shapes already; the check
+is what holds a city an earlier build converged with its copies retained, and
+it runs again on every resumed run.
 
 Step 8 never changes a work bead's text. `bd delete --force` (and the native
 Dolt delete) rewrites every mention of a deleted id in the text of each bead
@@ -364,30 +403,23 @@ not deleted, so every edge touching a moved row is removed from the work store
 neighbor to rewrite. No pre-removal of work-to-infrastructure edges is needed
 before the migration.
 
-**On a `bd` or native-Dolt work store those kept edges are lost.** Removing a
-row there drops every edge touching it, and the store refuses to re-add an edge
-to a bead it no longer holds. So a work bead blocked on a moved bead that is
-still open stops being held back, and a `tracks` or `related` edge from a work
-bead (a convoy tracking a workflow bead, say) stops linking the two. Cross-class
-blocking is not expressible on a split city yet (ga-2orlf); the migration does
-not refuse over it, because refusing would leave a city that boot also refuses
-with no way forward. Instead:
+**What the clear records of each edge it drops.** On every work store:
 
 - `gc storage preflight` lists every such edge under `cross-store edges`
   before the window, as a note that does not block;
-- the migrate output lists every such edge as **AT RISK** before the first row
-  is removed;
-- every edge the store then refuses is recorded on its work bead, as a
-  `dropped` entry in `gc.migrated_cross_edges` (the shape `--from-rigs` uses:
-  `dir`, `type`, `other`, `other_status_at_import`, `payload`, `action`), so
-  `gc bd show <id>` still names the bead a bug was discovered from;
-- every edge the store then refuses is also recorded in
-  `.gc/storage-infra-cleared.json`, listed under `lost cross-store edges` by
-  `gc storage status`, and carried as `lost_cross_edges` on every
-  `storage.binding.*` event that reads the note;
-- every one stays in the backup (`dependents` on the moved bead's entry).
+- the migrate output lists every one before the first row is removed;
+- each is recorded on its work bead, as a `dropped` entry in
+  `gc.migrated_cross_edges` (the shape `--from-rigs` uses: `dir`, `type`,
+  `other`, `other_status_at_import`, `payload`, `action`), so `gc bd show <id>`
+  still names the bead a bug was discovered from;
+- every one stays in the backup (`dependents` on the moved bead's entry,
+  marked `dropped`).
 
-A file or SQLite work store keeps them.
+A clear by an earlier build re-added such edges and recorded the ones a bd or
+native-Dolt work store refused in `.gc/storage-infra-cleared.json`; `gc storage
+status` still lists those under `lost cross-store edges`, and every
+`storage.binding.*` event that reads the note carries them as
+`lost_cross_edges`. This build adds none to that list.
 
 On a work store served by the city's managed Dolt server, the clear's
 deletes stay in the database's Dolt history, and the migrate output ends with
@@ -396,9 +428,8 @@ ends `AS OF` recovery from before the clear, so run it only once you no longer
 need that backstop. The migration never compacts on its own.
 
 The command is idempotent. Run it again on a converged city and it re-proves
-convergence and finishes any clear that did not complete — including the
-cross-store edges of rows an interrupted run already removed, which the note
-names until the clear finishes; that is also how a
+convergence and finishes any clear that did not complete, from the session the note names
+until the clear finishes; that is also how a
 city migrated by gc 1.5.0, which kept the work store's copies, is repaired (see
 below).
 
@@ -418,16 +449,20 @@ Each row keeps its id and is stamped `gc.root_store_ref = rig:<rig>` (wisps and
 steps included). Edges inside the moved set are copied; an open `blocks` edge
 onto rig work becomes a cross-store gate in the binding; every other boundary
 edge is dropped and recorded on the row (`gc.migrated_cross_edges`) and in the
-rig's backup. Shapes that would need a cross-store edge are refused by bead,
-with the fix. Per rig it writes `infra.rig.<rig>.migrated.beads` (the manifest)
-and `infra.rig.<rig>.migrated` beside `infra.migrated`, backs the rows up to
+rig's backup. A gate minted before the import onto one of the rig's graph beads
+(by the city copy in Step 4, or by another rig's import) keeps working once the
+import moves that bead: the gate lane reads the binding too, and closes the gate
+once the bead closes there. Shapes that would need a cross-store edge are
+refused by bead, with the fix. Per rig it writes
+`infra.rig.<rig>.migrated.beads` (the manifest) and `infra.rig.<rig>.migrated`
+beside `infra.migrated`, backs the rows up to
 `infra.rig.<rig>.retained-source.jsonl`, raises the rig's `min_hash_length` so a
 later short id cannot re-mint an imported one, then clears the rig's copies and
 marks `.gc/storage-infra-cleared.rig.<rig>.json` complete. A rig with no graph
 row is recorded `infra.rig.<rig>.clean`. Suspended rigs are imported without
 being resumed; a rig that cannot be read blocks only itself. Every step resumes:
-run the command again after any failure. A pending clear makes boot refuse
-until the re-run finishes it.
+run the command again after any failure. A pending clear makes boot refuse until
+the re-run finishes it.
 
 `gc storage status` exits non-zero while any rig awaits import, holds a pending
 clear, or holds rows written after its import.

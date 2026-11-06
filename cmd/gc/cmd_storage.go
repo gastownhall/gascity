@@ -542,8 +542,18 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// reads no store has passed (the controller, the shared-store identity and
 	// its co-tenants' locks, the attestation, the guard), and before the first
 	// that opens the work store (the shared-store row check). Closed before
-	// the guard, the co-tenants and the lock are released.
-	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	// the guard, the co-tenants and the lock are released. The copy's
+	// cross-boundary plan reads the bound rigs for blockers the work store
+	// does not hold (infraCityBoundaryProbe), so the window starts each rig
+	// scope bd owns a proxied scope for, as --from-rigs does.
+	cityRoot := resolveStoreScopeRoot(request.CityPath, request.CityPath)
+	var rigRoots []string
+	for _, rig := range request.Cfg.Rigs {
+		if root := resolveStoreScopeRoot(request.CityPath, rig.Path); strings.TrimSpace(rig.Path) != "" && !samePath(root, cityRoot) {
+			rigRoots = append(rigRoots, root)
+		}
+	}
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr, rigRoots...)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1

@@ -328,6 +328,11 @@ func TestMain(m *testing.M) {
 	resolveImportRegistryRelease = func(string, string) (packman.RegistryRelease, bool, error, error) {
 		return packman.RegistryRelease{}, false, nil, nil
 	}
+	// A storage migration raises the city work store's bd id floor before its
+	// clear (storage_id_floor.go). Test cities stub their work store, so the
+	// floor would reach for a bd that does not serve it; the tests that pin
+	// the floor install their own surface.
+	cityHashConfigOpener = func(string) (cityHashConfig, error) { return cityHashConfig{}, nil }
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
