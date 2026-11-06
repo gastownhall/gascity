@@ -55,6 +55,11 @@ type workflowInputPurgeFrame struct {
 // the whole city: a refused topology (which serving reads tolerate in part,
 // and proof must not), a frame gap (suspension or a prefix fault), or a work
 // leg that was never opened.
+//
+// An absence the by-id plan reports is confirmed through the live handle of
+// every leg the plan names (beads.LiveFor): the plan reads each leg's Store,
+// whose Get a caching store may answer from a cache that does not hold a
+// closed or evicted row, and such a miss must never stand as proof.
 func workflowInputPurgeFrameOver(reader waitDependencyPlanReader) (workflowInputPurgeFrame, error) {
 	if reader.topo.Refused != nil {
 		return workflowInputPurgeFrame{}, fmt.Errorf("%w: the city's residency topology is refused: %w", errWorkflowInputPurgeUnproven, reader.topo.Refused)
@@ -74,7 +79,30 @@ func workflowInputPurgeFrameOver(reader waitDependencyPlanReader) (workflowInput
 		prefixes = append(prefixes, binding.Prefixes...)
 	}
 	return workflowInputPurgeFrame{
-		get: reader.Get,
+		get: func(id string) (beads.Bead, error) {
+			b, err := reader.Get(id)
+			if !errors.Is(err, beads.ErrNotFound) {
+				return b, err
+			}
+			plan, err := byIDPlanForTopology(reader.topo, id)
+			if err != nil {
+				return beads.Bead{}, err
+			}
+			for _, leg := range plan.Legs {
+				live, liveErr := beads.LiveFor(leg.Leg.Store).Get(id)
+				switch {
+				case liveErr == nil:
+					return live, nil
+				case !errors.Is(liveErr, beads.ErrNotFound):
+					where := string(leg.Leg.Ref)
+					if leg.Leg.Ref == storeref.WorkRef {
+						where = "the city work store"
+					}
+					return beads.Bead{}, fmt.Errorf("confirming the absence of %q live in %s: %w", id, where, liveErr)
+				}
+			}
+			return beads.Bead{}, beads.ErrNotFound
+		},
 		represents: func(id string) bool {
 			return slices.ContainsFunc(prefixes, func(prefix string) bool {
 				return storeref.IDInNamespace(id, prefix)
