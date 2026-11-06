@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // These rows pin the foreign workflow hold on `gc hook --claim`'s eligible
@@ -479,4 +482,67 @@ func TestHookClaimLiveOwnershipUnavailable(t *testing.T) {
 			t.Fatalf("stderr does not disclose the unavailable check:\n%s", stderr.String())
 		}
 	})
+}
+
+// TestHookClaimLiveOwnershipLoopReporting pins how a withheld root reaches
+// the claim-loop guard. The controller keeps counting the root as routed
+// demand while its steps run, so every seat spawned for it would drain; each
+// withhold is reported as bead.claim_failed against the ROOT, with text that
+// names no member and no count, so distinct seats seeing different members
+// still repeat one error and the guard trips. The drain stays a healthy
+// no_work: the withhold is not a write failure.
+func TestHookClaimLiveOwnershipLoopReporting(t *testing.T) {
+	const template = "gk.polecat"
+	h := newClaimLoopHarness(t)
+	var texts []string
+	for seat := 1; seat <= claimLoopTripFailures; seat++ {
+		opts := liveOwnershipOptions()
+		opts.Env = []string{"GC_TEMPLATE=" + template, fmt.Sprintf("GC_SESSION_ID=gcg-session-%d", seat)}
+		members := []beads.Bead{liveOwnershipMember(fmt.Sprintf("gk-step-%d", seat), "in_progress", fmt.Sprintf("gk__polecat-%d", seat+10), nil)}
+		var reported []string
+		out := liveOwnershipRun(t, []beads.Bead{liveOwnershipRootBead()}, members, opts, hookClaimOps{
+			EmitClaimFailed: func(beadID string, opts hookClaimOptions, err error) {
+				reported = append(reported, beadID)
+				texts = append(texts, err.Error())
+				evt, ok := claimFailedEvent(beadID, opts, err)
+				if !ok {
+					t.Fatalf("claimFailedEvent(%s) recorded nothing for a seat of %s", beadID, template)
+				}
+				evt.Ts = h.now
+				h.guard.observe(evt)
+			},
+		})
+		if len(out.claims) != 0 {
+			t.Fatalf("seat %d attempted claim CASes %v", seat, out.claims)
+		}
+		if out.result.Action != "drain" || out.result.Reason != "no_work" {
+			t.Fatalf("seat %d result action=%q reason=%q, want a healthy no_work drain\nstderr: %s", seat, out.result.Action, out.result.Reason, out.stderr)
+		}
+		if len(reported) != 1 || reported[0] != liveOwnershipRoot {
+			t.Fatalf("seat %d reported claim failures for %v, want exactly the root %s", seat, reported, liveOwnershipRoot)
+		}
+		held := func() bool {
+			counts, demand := h.guard.withhold(
+				map[string]int{template: 1},
+				map[string]scaleCheckDemand{template: {Count: 1, WorkBeadIDs: []string{liveOwnershipRoot}}})
+			return counts[template] == 0 && len(demand[template].WorkBeadIDs) == 0
+		}()
+		if want := seat == claimLoopTripFailures; held != want {
+			t.Fatalf("after seat %d the root is withheld from default demand = %v, want %v", seat, held, want)
+		}
+		h.advance(time.Minute)
+	}
+	for _, text := range texts {
+		if text != texts[0] {
+			t.Fatalf("withhold texts differ between seats: %q", texts)
+		}
+	}
+	if want := "workflow root " + liveOwnershipRoot + " withheld: member steps in_progress under other sessions"; texts[0] != want {
+		t.Fatalf("withhold text = %q, want %q", texts[0], want)
+	}
+	// A write to the root resumes its demand, as for any held bead.
+	h.guard.observe(events.Event{Type: events.BeadUpdated, Subject: liveOwnershipRoot, Ts: h.now})
+	if h.records() != 0 {
+		t.Fatalf("guard still tracks %d records after the root changed", h.records())
+	}
 }
