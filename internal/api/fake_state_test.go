@@ -54,6 +54,7 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	mailBeadStore     beads.Store // relocated messaging store (Stores().Mail only); nil follows a relocated sessions store, as a whole split relocates both, else cityBeadStore (default backend)
 	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
 	// the nudges store.
 	nudgeQueue NudgeQueue
@@ -233,13 +234,21 @@ func (f *fakeState) Stores() storeref.Stores {
 }
 
 // relocatedClasses is every class a test relocated off the city store.
+// Messaging a test left unset follows a relocated sessions store: the split
+// the routes serve relocates every class into one binding, so the two never
+// part in production.
 func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
+	mail := f.mailBeadStore
+	if mail == nil {
+		mail = f.sessionsBeadStore
+	}
 	out := map[coordclass.Class]beads.Store{}
 	for class, relocated := range map[coordclass.Class]beads.Store{
-		coordclass.ClassGraph:    f.graphBeadStore,
-		coordclass.ClassSessions: f.sessionsBeadStore,
-		coordclass.ClassOrders:   f.ordersBeadStore,
-		coordclass.ClassNudges:   f.nudgesBeadStore,
+		coordclass.ClassGraph:     f.graphBeadStore,
+		coordclass.ClassSessions:  f.sessionsBeadStore,
+		coordclass.ClassOrders:    f.ordersBeadStore,
+		coordclass.ClassNudges:    f.nudgesBeadStore,
+		coordclass.ClassMessaging: mail,
 	} {
 		if relocated != nil && relocated != f.cityBeadStore {
 			out[class] = relocated
@@ -284,7 +293,8 @@ type accessorState interface {
 // return, for a fake that overrides some of them: the work store is
 // CityBeadStore, each class whose accessor answers another store is a binding
 // over that store (a zero handle's, nil, is a binding that failed to open),
-// and the rigs are BeadStore's. It applies no projection: the accessors
+// messaging follows a relocated sessions store, and the rigs are
+// BeadStore's. It applies no projection: the accessors
 // already did. A rig's graph placement follows the same rule as Stores': the
 // graph binding when graph is relocated, else the rig's own store.
 func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
@@ -299,6 +309,10 @@ func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
 		if store != work {
 			relocated[class] = store
 		}
+	}
+	// Messaging follows a relocated sessions store, as relocatedClasses has it.
+	if sessions, ok := relocated[coordclass.ClassSessions]; ok {
+		relocated[coordclass.ClassMessaging] = sessions
 	}
 	rigStores := make(map[string]beads.Store, len(rigs))
 	for _, rig := range rigs {

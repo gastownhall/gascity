@@ -56,8 +56,8 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	// is resolved against SESSION beads, and the identity expansion below reads
 	// one — so this store is the sessions class even though the caller is a work
 	// query. Identity to the work store on a city that relocates nothing.
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return []string{assignee}
 	}
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
@@ -86,7 +86,7 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	// front door. A non-session or absent id (the front door rejects it) simply
 	// contributes no extra identity terms — the base assignee/id terms above still
 	// drive the ?assignee filter.
-	if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+	if info, getErr := session.NewStore(store).Get(id); getErr == nil {
 		for _, identity := range session.AssigneeIdentities(info) {
 			add(identity)
 		}
@@ -104,8 +104,8 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	// RepairTypeBestEffort heal writes to it. Through the work store on a
 	// relocated city that create is a stranded infrastructure bead — the class
 	// binding never sees it and the boot containment re-check names it.
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return assignee, nil
 	}
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, assignee, apiSessionResolveOptions{})
@@ -118,7 +118,7 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 		}
 		return "", fmt.Errorf("resolving assignee %q: %w", assignee, err)
 	}
-	sessFront := session.NewStore(beads.SessionStore{Store: store})
+	sessFront := session.NewStore(store)
 	info, err := sessFront.Get(id)
 	if err != nil {
 		// The front door rejects a present-but-non-session bead with

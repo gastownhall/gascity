@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -84,19 +85,19 @@ func sessionStreamResumeToken(lastEventID, afterCursor string) string {
 }
 
 func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
 
-	catalog, err := s.workerSessionCatalog(store.Store)
+	catalog, err := s.workerSessionCatalog(store)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -109,7 +110,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	includeThinking := queryBoolParam(r, "include_thinking")
 	resumeToken := sessionStreamResumeToken(r.Header.Get("Last-Event-ID"), r.URL.Query().Get("after_cursor"))
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -1521,7 +1522,7 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore().Store, info.ID)
+	handle, err := s.workerHandleForSession(s.state.Stores().Sessions(), info.ID)
 	if err != nil {
 		return
 	}
@@ -1736,7 +1737,7 @@ func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, inf
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	handle, err := s.workerHandleForSession(s.state.SessionsBeadStore().Store, info.ID)
+	handle, err := s.workerHandleForSession(s.state.Stores().Sessions(), info.ID)
 	if err != nil {
 		return
 	}

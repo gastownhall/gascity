@@ -13,12 +13,12 @@ cmd/gc	raw-var	38
 cmd/gc	read-marker	31
 cmd/gc	unwrap	145
 internal/agentutil	raw-param	2
-internal/api	mint	37
-internal/api	raw-field	13
-internal/api	raw-param	135
+internal/api	mint	15
+internal/api	raw-field	11
+internal/api	raw-param	58
 internal/api	raw-result	24
 internal/api	read-marker	20
-internal/api	unwrap	173
+internal/api	unwrap	15
 internal/dispatch	mint	5
 internal/dispatch	raw-field	2
 internal/dispatch	raw-param	14
