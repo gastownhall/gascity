@@ -90,6 +90,14 @@ const (
 	FailureClassHard      = "hard"
 )
 
+// FailureReasonInputPurged is the value of FailureReasonMetadataKey
+// ("gc.failure_reason") a claim-time retirement stamps when it proves a
+// workflow's input convoy — or the work that convoy tracked — was purged
+// (#8729). It pairs with FailureClassHard and OutcomeFail, the disposition a
+// seat would write after burning its claim cycle discovering the spec was
+// gone, applied once at claim time instead of per seat.
+const FailureReasonInputPurged = "input_purged"
+
 // FormulaContractGraphV2 is the value of FormulaContractMetadataKey
 // ("gc.formula_contract") marking a workflow compiled under the graph.v2
 // contract — the single most-branched-on metadata value in the engine.

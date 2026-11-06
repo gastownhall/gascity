@@ -197,20 +197,22 @@ func crossStoreGateID(store beads.Store, control beads.Bead, blockerID string) s
 //     pass or fail (WorkflowSkippedCloseReason);
 //   - the finalizer's sweep of a canceled run (workflowCanceledMemberCloseReason);
 //   - POST /runs/{id}/cancel (sourceworkflow.RunCanceledCloseReason);
-//   - gc hook --claim's skip of a workflow whose input is already done, and
-//     the order-tracking sweep of stale order wisp subtrees (both close by
+//   - gc hook --claim's skip of a workflow whose input is already done, its
+//     retirement of a workflow whose input was proved purged (#8729), and
+//     the order-tracking sweep of stale order wisp subtrees (all close by
 //     gc.root_bead_id).
 //
 // A scope abort (scopeAbortSkippedCloseReason) closes only the members of one
 // scope, which a gate never is.
 var controllerCloseReasons = map[string]bool{
-	molecule.SubtreeClosedReason:                   true,
-	sourceworkflow.WorkflowSubtreeClosedReason:     true,
-	sourceworkflow.WorkflowSkippedCloseReason:      true,
-	sourceworkflow.RunCanceledCloseReason:          true,
-	workflowCanceledMemberCloseReason:              true,
-	sourceworkflow.HookSkipDoneWorkflowCloseReason: true,
-	sourceworkflow.StaleOrderWispCloseReason:       true,
+	molecule.SubtreeClosedReason:                       true,
+	sourceworkflow.WorkflowSubtreeClosedReason:         true,
+	sourceworkflow.WorkflowSkippedCloseReason:          true,
+	sourceworkflow.RunCanceledCloseReason:              true,
+	workflowCanceledMemberCloseReason:                  true,
+	sourceworkflow.HookSkipDoneWorkflowCloseReason:     true,
+	sourceworkflow.HookRetirePurgedWorkflowCloseReason: true,
+	sourceworkflow.StaleOrderWispCloseReason:           true,
 }
 
 // IsControllerClosedCrossStoreGate reports whether gate is a closed
