@@ -472,10 +472,10 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 // refuses the sling instead of degrading to the tolerated non-source-store
 // warning, because a binding fault is an error, never absence.
 //
-// It is skipped on a default (non-relocated) city, where GraphBeadStore() ==
-// CityBeadStore(), so the single-store enumeration stays byte-identical and no
-// store is scanned twice. Its ref reuses workflowStores()'s "graph:<city>"
-// spelling so the store_ref round trip has one parse, not two.
+// It is skipped on a default (non-relocated) city, where Stores().Graph()
+// wraps CityBeadStore(), so the single-store enumeration stays byte-identical
+// and no store is scanned twice. Its ref reuses workflowStores()'s
+// "graph:<city>" spelling so the store_ref round trip has one parse, not two.
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	cityStore := s.state.CityBeadStore()

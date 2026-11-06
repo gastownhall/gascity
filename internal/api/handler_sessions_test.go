@@ -3620,7 +3620,7 @@ func TestHumaCreateProviderSessionUsesACPTransportCommand(t *testing.T) {
 	}
 	srv := New(state)
 
-	out, err := srv.humaCreateProviderSession(context.Background(), fs.SessionsBeadStore(), sessionCreateBody{
+	out, err := srv.humaCreateProviderSession(context.Background(), fs.Stores().Sessions(), sessionCreateBody{
 		Kind: "provider",
 		Name: "opencode",
 	}, "opencode")
@@ -3821,7 +3821,7 @@ func TestHumaCreateProviderSessionRejectsACPProviderWithoutACPRouting(t *testing
 	}
 	srv := New(fs)
 
-	if _, err := srv.humaCreateProviderSession(context.Background(), fs.SessionsBeadStore(), sessionCreateBody{
+	if _, err := srv.humaCreateProviderSession(context.Background(), fs.Stores().Sessions(), sessionCreateBody{
 		Kind: "provider",
 		Name: "opencode",
 	}, "opencode"); err == nil {

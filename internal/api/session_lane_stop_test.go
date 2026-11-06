@@ -1725,7 +1725,7 @@ func TestRunCancelUnderLaneSkipsAHolderWhoseAgentIsDead(t *testing.T) {
 // newOpsTestStoreOver is the op store the API opens over fs's sessions store.
 func newOpsTestStoreOver(t *testing.T, fs *fakeState) *opjournal.Store {
 	t.Helper()
-	st, err := opjournal.NewStore(fs.SessionsBeadStore(), clock.Real{})
+	st, err := opjournal.NewStore(fs.Stores().Sessions(), clock.Real{})
 	if err != nil {
 		t.Fatalf("open op store: %v", err)
 	}

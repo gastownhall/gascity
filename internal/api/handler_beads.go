@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -161,6 +162,25 @@ func (s *Server) findStore(rig string) beads.Store {
 	return nil
 }
 
+// findWorkStore is findStore over st's work handles: rig's store when rig is
+// named, else the city's work store, else the sole store left after
+// deduplication. ok is false when no store answers (an unknown rig, or several
+// distinct stores and no rig).
+func findWorkStore(st storeref.Stores, cityName, rig string) (beads.WorkStore, bool) {
+	if rig != "" {
+		return st.Rig(rig)
+	}
+	if work := st.Work(); work != (beads.WorkStore{}) {
+		return work, true
+	}
+	stores := workStoresByName(st, cityName)
+	names := sortedWorkStoreNames(stores)
+	if len(names) == 1 {
+		return stores[names[0]], true
+	}
+	return beads.WorkStore{}, false
+}
+
 // resolveStoreByPrefix finds the store that owns a bead prefix by checking
 // routes.jsonl files in the city and each rig's .beads/ directory, then
 // mapping the resolved store path back to the correct store.
@@ -274,6 +294,45 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 			continue
 		}
 		seen[s] = true
+		deduped = append(deduped, name)
+	}
+	return deduped
+}
+
+// workStoresByName is State.BeadStores() as work handles from st: the city's
+// work store under cityName, then every rig's under its name, so a rig named
+// like the city replaces it. A city with no work store has no entry. Ranged
+// in sortedWorkStoreNames order, it reads the stores in exactly the order
+// sortedRigNames gives BeadStores(), which first-match lookups depend on.
+func workStoresByName(st storeref.Stores, cityName string) map[string]beads.WorkStore {
+	rigs := st.Rigs()
+	out := make(map[string]beads.WorkStore, len(rigs)+1)
+	if work := st.Work(); work != (beads.WorkStore{}) {
+		out[cityName] = work
+	}
+	for _, r := range rigs {
+		out[r.Name] = r.Work
+	}
+	return out
+}
+
+// sortedWorkStoreNames is sortedRigNames for work handles: the names in
+// sorted order, keeping only the first of names whose handles share one
+// physical store (beads.PhysicalStoreKey), as in legacy shared-file mode.
+func sortedWorkStoreNames(stores map[string]beads.WorkStore) []string {
+	names := make([]string, 0, len(stores))
+	for name := range stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]bool, len(names))
+	deduped := names[:0]
+	for _, name := range names {
+		key := beads.PhysicalStoreKey(stores[name])
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		deduped = append(deduped, name)
 	}
 	return deduped

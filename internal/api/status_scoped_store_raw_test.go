@@ -43,7 +43,7 @@ func TestStatusHandsScopedStoreLikeRawStores(t *testing.T) {
 	}
 	raw := map[beads.Store]bool{
 		state.CityBeadStore(): true, state.BeadStore("myrig"): true,
-		state.SessionsBeadStore().Store: true, state.GraphBeadStore().Store: true,
+		state.Stores().Sessions().Store: true, state.Stores().Graph().Store: true,
 	}
 	for _, s := range handed {
 		switch s.(type) {
