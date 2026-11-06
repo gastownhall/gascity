@@ -1907,6 +1907,77 @@ func TestLiveActiveBeadPrefersFirstStoreForSameIdentity(t *testing.T) {
 	}
 }
 
+// TestActiveWorkLookupHealthyPathMatchesLivePrecedence: with healthy stores
+// and budget to spare, the bounded list lookup resolves work exactly as the
+// live one does — the top identity wins across stores, the newest match wins
+// within one, the first store wins for the same identity, and no later store
+// is read once the top identity has matched. Suspension scope is pinned for
+// both arms by TestActiveBeadLookupSkipsSuspendedRig and siblings.
+func TestActiveWorkLookupHealthyPathMatchesLivePrecedence(t *testing.T) {
+	identities := []string{"session-id", "runtime-name", "alias", "template"}
+
+	t.Run("top identity wins across stores and newest wins within one", func(t *testing.T) {
+		a := &listCountingStore{Store: &beads.MemStore{IDPrefix: "a"}}
+		z := &listCountingStore{Store: &beads.MemStore{IDPrefix: "z"}}
+		fs := twoRigActiveWorkState(t, a, z)
+		srv := New(fs)
+		alias := addActiveWork(t, a, "alias") // later identity, earlier store
+		addActiveWork(t, z, "session-id")
+		newest := addActiveWork(t, z, "session-id")
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		if got := srv.findActiveBeadForAssigneesWithFreshness("", lookup, identities...); got != newest {
+			t.Fatalf("unscoped lookup = %q, want %q: the top identity beats a later one in an earlier store, and the newest match wins within it", got, newest)
+		}
+		lookup2 := newActiveWorkLookup(context.Background())
+		defer lookup2.cancel()
+		if got := srv.findActiveBeadForAssigneesWithFreshness("a", lookup2, identities...); got != alias {
+			t.Fatalf("rig-scoped lookup = %q, want %q", got, alias)
+		}
+		if a.listCalls == 0 || z.listCalls == 0 {
+			t.Fatalf("healthy reads a=%d z=%d, want both stores read", a.listCalls, z.listCalls)
+		}
+	})
+
+	t.Run("first store wins for the same identity", func(t *testing.T) {
+		a := &listCountingStore{Store: &beads.MemStore{IDPrefix: "a"}}
+		z := &listCountingStore{Store: &beads.MemStore{IDPrefix: "z"}}
+		fs := twoRigActiveWorkState(t, a, z)
+		first := addActiveWork(t, a, "alias")
+		addActiveWork(t, z, "alias")
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		if got := New(fs).findActiveBeadForAssigneesWithFreshness("", lookup, "session-id", "alias"); got != first {
+			t.Fatalf("active bead = %q, want %q from the first store", got, first)
+		}
+		// Identities run outer, stores inner: the unmatched first identity
+		// probes both stores once, then a's "alias" match ends the lookup
+		// before z is read for it.
+		if a.listCalls != 2 || z.listCalls != 1 {
+			t.Fatalf("reads a=%d z=%d, want 2 and 1", a.listCalls, z.listCalls)
+		}
+	})
+
+	t.Run("no later store is read once the top identity matches", func(t *testing.T) {
+		a := &listCountingStore{Store: &beads.MemStore{IDPrefix: "a"}}
+		z := &listCountingStore{Store: &beads.MemStore{IDPrefix: "z"}}
+		fs := twoRigActiveWorkState(t, a, z)
+		own := addActiveWork(t, a, "session-id")
+		addActiveWork(t, z, "template")
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		if got := New(fs).findActiveBeadForAssigneesWithFreshness("", lookup, "session-id", "template"); got != own {
+			t.Fatalf("active bead = %q, want the session's own %q", got, own)
+		}
+		if a.listCalls != 1 || z.listCalls != 0 {
+			t.Fatalf("reads a=%d z=%d, want 1 and 0: no later store can outrank the top identity", a.listCalls, z.listCalls)
+		}
+	})
+}
+
 func TestLiveActiveBeadIgnoresBlankIdentities(t *testing.T) {
 	state := newFakeState(t)
 	store := beads.NewMemStore()
