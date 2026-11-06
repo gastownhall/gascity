@@ -931,24 +931,30 @@ func TestReadyDeclaresJSONSupport(t *testing.T) {
 
 // TestReadyResultSchemaDescribesTheEmittedArray checks the published schema
 // against real output, so the declaration cannot drift from the bytes.
+//
+// The schema covers BOTH arms of the command: the row array (default and
+// --dispatchable) and the --census object. That is why the root is a oneOf
+// rather than a bare `type: array` — before the census existed the array was
+// the whole payload, and a caller running `--json-schema=result` then
+// validating a census would have failed against a schema that denied the
+// object it just received.
 func TestReadyResultSchemaDescribesTheEmittedArray(t *testing.T) {
 	schema, err := readBuiltinSchema([]string{"ready"}, jsonSchemaResultRole)
 	if err != nil {
 		t.Fatalf("read schemas/ready/result.schema.json: %v", err)
 	}
 	var declared struct {
-		Type    string `json:"type"`
-		RawJSON bool   `json:"x-gc-raw-json"`
-		Items   struct {
-			Properties           map[string]json.RawMessage `json:"properties"`
-			AdditionalProperties *bool                      `json:"additionalProperties"`
-		} `json:"items"`
+		Type    string            `json:"type"`
+		RawJSON bool              `json:"x-gc-raw-json"`
+		OneOf   []json.RawMessage `json:"oneOf"`
+		Defs    map[string]struct {
+			Type                 string `json:"type"`
+			Properties           map[string]json.RawMessage
+			AdditionalProperties *bool `json:"additionalProperties"`
+		} `json:"$defs"`
 	}
 	if err := json.Unmarshal(schema, &declared); err != nil {
 		t.Fatalf("decode result schema: %v", err)
-	}
-	if declared.Type != "array" {
-		t.Fatalf("result schema type = %q, want array — gc ready emits bd's bare array, not the gc object envelope", declared.Type)
 	}
 	// The bare array is a documented exception to the ok:true result envelope,
 	// taken through the repo's own escape hatch rather than by exempting the
@@ -958,16 +964,54 @@ func TestReadyResultSchemaDescribesTheEmittedArray(t *testing.T) {
 	if !declared.RawJSON {
 		t.Fatal("result schema does not declare x-gc-raw-json; a non-envelope payload must say so where the contract test can see it")
 	}
-	if declared.Items.AdditionalProperties == nil || *declared.Items.AdditionalProperties {
+	// Both arms must be declared, and the row arm must still be an array: that
+	// shape is bd's and other programs parse it.
+	if len(declared.OneOf) != 2 {
+		t.Fatalf("result schema declares %d alternatives; want 2 (the row array and the --census object)", len(declared.OneOf))
+	}
+	rowDef, ok := declared.Defs["readyRow"]
+	if !ok {
+		t.Fatal("result schema has no $defs/readyRow; the row arm must not be inlined twice and drift")
+	}
+	if rowDef.Type != "object" {
+		t.Fatalf("$defs/readyRow type = %q, want object", rowDef.Type)
+	}
+	if rowDef.AdditionalProperties == nil || *rowDef.AdditionalProperties {
 		t.Fatal("result schema allows additional row properties; the published field set must be closed or it stops being a contract")
 	}
-	got := make([]string, 0, len(declared.Items.Properties))
-	for name := range declared.Items.Properties {
+	got := make([]string, 0, len(rowDef.Properties))
+	for name := range rowDef.Properties {
 		got = append(got, name)
 	}
 	slices.Sort(got)
 	if want := jsonFieldNames(reflect.TypeOf(readywork.ReadyBead{})); !reflect.DeepEqual(got, want) {
 		t.Fatalf("schemas/ready/result.schema.json declares %v, but gc ready emits %v", got, want)
+	}
+	// And the array alternative must actually point at that definition, so the
+	// two cannot describe different rows.
+	var arrayAlt struct {
+		Type  string `json:"type"`
+		Items struct {
+			Ref string `json:"$ref"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(declared.OneOf[0], &arrayAlt); err != nil {
+		t.Fatalf("decode the array alternative: %v", err)
+	}
+	if arrayAlt.Type != "array" {
+		t.Fatalf("first alternative type = %q, want array — gc ready's default arm emits bd's bare array, not the gc object envelope", arrayAlt.Type)
+	}
+	if arrayAlt.Items.Ref != "#/$defs/readyRow" {
+		t.Fatalf("the array alternative's items ref = %q, want #/$defs/readyRow", arrayAlt.Items.Ref)
+	}
+	if censusDef, ok := declared.Defs["census"]; !ok {
+		t.Fatal("result schema has no $defs/census; the --census arm would be undeclared")
+	} else {
+		for _, want := range []string{"dispatchable", "total", "in_flight", "by_class"} {
+			if _, ok := censusDef.Properties[want]; !ok {
+				t.Fatalf("$defs/census is missing %q", want)
+			}
+		}
 	}
 }
 
