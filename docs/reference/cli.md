@@ -2219,6 +2219,19 @@ that leaves the session nothing to claim, each such bead is named on stderr
 with where its session runs. Without --claim, that session's output leaves
 the same work out.
 
+With --claim --root &lt;root-bead-id&gt;: continue only that workflow, using the
+canonical ready frontier with the root predicate applied before selection.
+Pass root_bead_id from the prior claim result explicitly. With --json, this
+returns schema_version "2": action "work" names an owned same-root step;
+"wait" means the root is live with no eligible work; "complete" means the
+root is terminal. Every result echoes root_bead_id. Wait reasons are
+workflow_blocked, workflow_no_ready, or different_workflow_assignment when
+this session already owns work in another workflow. Wait never acquires other
+work or acknowledges a drain. A missing root or failed store read exits
+nonzero. --root requires --claim and refuses --drain-ack. Without --root,
+generic acquisition retains schema_version "1". After continuation completes
+or is released, the caller may explicitly invoke generic acquisition.
+
 A work query that gets no answer from the bead store (a connection error, a
 timeout, a killed query, a locked database, or bd's circuit breaker failing
 fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
@@ -2264,6 +2277,7 @@ gc hook [agent] [flags]
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
 | `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
+| `--root` | string |  | with --claim, continue only this workflow root; emit v2 work/wait/complete results |
 
 | Subcommand | Description |
 |------------|-------------|
