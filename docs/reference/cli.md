@@ -2284,9 +2284,17 @@ it is running reads the stamp back here:
 
     BEAD_ID="$&#123;GC_BEAD_ID:-$(gc hook current --id-only)&#125;"
 
+The stamp is written best-effort, so it is verified against the live ledger
+before it is printed: the stamped bead must still be in progress, held by this
+session, and assigned to one of its identities. A stamp the ledger does not
+back is not printed — the id this command hands out is a close target, and an
+unreadable claim refuses instead of printing an id the caller might close. The
+command never repairs the stamp — that is the claim path's job.
+
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
-session identity and when the session has claimed nothing, so a caller that
-cannot name its bead fails loudly instead of skipping its own work.
+session identity, when the session has claimed nothing it can prove, and when
+the claim cannot be verified, so a caller that cannot name its bead fails
+loudly instead of skipping its own work.
 
 ```
 gc hook current [flags]

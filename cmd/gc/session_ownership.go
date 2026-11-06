@@ -136,6 +136,57 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 	return true
 }
 
+// hookCurrentStaleReason is why a work row does not qualify as a session's
+// printable current claim (gc hook current's strict predicate).
+type hookCurrentStaleReason string
+
+const (
+	hookCurrentStaleClosed     hookCurrentStaleReason = "closed"
+	hookCurrentStaleReleased   hookCurrentStaleReason = "released back to the queue"
+	hookCurrentStaleReclaimed  hookCurrentStaleReason = "claimed by another session"
+	hookCurrentStaleNotStarted hookCurrentStaleReason = "not in progress"
+	hookCurrentStaleUnassigned hookCurrentStaleReason = "unassigned"
+	hookCurrentStaleReassigned hookCurrentStaleReason = "assigned to another identity"
+	hookCurrentStaleGone       hookCurrentStaleReason = "gone"
+)
+
+// hookCurrentClaimHeld is the strict predicate `gc hook current` prints a
+// claim under. The drain veto's claimedWorkStillHeldBy deliberately holds on
+// open-but-assigned rows so a working session is never killed on a technical
+// reading; the id this command prints is handed to a caller as a close target,
+// so its bar is higher: the row must be in progress, still held by sessionID
+// (the shared fence decides; only the reason label below is local), and
+// assigned to an identity in the session's release scope — the narrow set
+// work is released under, which an unaliased pool claim's bead id, a
+// session_name, and a stable alias all belong to and a transient pool slot
+// alias never does. The verdict shares claimedWorkStillHeldBy's clauses rather
+// than restating them; the reason is derived only to name the refusal.
+func hookCurrentClaimHeld(work beads.Bead, sessionID string, scope ReleaseScope) (hookCurrentStaleReason, bool) {
+	if !claimedWorkStillHeldBy(work, sessionID) {
+		switch {
+		case work.Status == "closed":
+			return hookCurrentStaleClosed, false
+		case work.Status == "open" && strings.TrimSpace(work.Assignee) == "":
+			return hookCurrentStaleReleased, false
+		default:
+			return hookCurrentStaleReclaimed, false
+		}
+	}
+	if work.Status != "in_progress" {
+		return hookCurrentStaleNotStarted, false
+	}
+	assignee := strings.TrimSpace(work.Assignee)
+	if assignee == "" {
+		return hookCurrentStaleUnassigned, false
+	}
+	for _, id := range scope.scopeIDs() {
+		if id == assignee {
+			return "", true
+		}
+	}
+	return hookCurrentStaleReassigned, false
+}
+
 // liveBeadRead reads one bead through the store's authoritative live handle,
 // bypassing a caching layer (liveReads): without the peel the read would
 // silently fall back to the cache, as CachingStore.Get serves the cache first.

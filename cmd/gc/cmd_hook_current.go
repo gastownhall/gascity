@@ -11,10 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// hookCurrentSessionFrontDoor is the session-front-door seam `gc hook current`
-// reads through, overridable in tests.
-var hookCurrentSessionFrontDoor = sessionCurrentClaimFrontDoor
-
 func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
 	var idOnly bool
 	cmd := &cobra.Command{
@@ -32,9 +28,17 @@ it is running reads the stamp back here:
 
     BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"
 
+The stamp is written best-effort, so it is verified against the live ledger
+before it is printed: the stamped bead must still be in progress, held by this
+session, and assigned to one of its identities. A stamp the ledger does not
+back is not printed — the id this command hands out is a close target, and an
+unreadable claim refuses instead of printing an id the caller might close. The
+command never repairs the stamp — that is the claim path's job.
+
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
-session identity and when the session has claimed nothing, so a caller that
-cannot name its bead fails loudly instead of skipping its own work.`,
+session identity, when the session has claimed nothing it can prove, and when
+the claim cannot be verified, so a caller that cannot name its bead fails
+loudly instead of skipping its own work.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return exitForCode(cmdHookCurrent(idOnly, stdout, stderr))
@@ -45,7 +49,7 @@ cannot name its bead fails loudly instead of skipping its own work.`,
 }
 
 // cmdHookCurrent resolves the calling session from the environment and prints
-// its current claim. It is the thin env+front-door root over doHookCurrent, which
+// its current claim. It is the thin env+context root over doHookCurrent, which
 // holds the whole decision so it can be exercised without a city on disk.
 func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
@@ -53,29 +57,51 @@ func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc hook current: no session identity (set $GC_SESSION_ID); only a session that claimed work has a current bead") //nolint:errcheck
 		return 1
 	}
-	sessFront, err := hookCurrentSessionFrontDoor()
+	ctx, err := hookCurrentReadContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	return doHookCurrent(sessFront, sessionID, idOnly, stdout, stderr)
+	return doHookCurrent(ctx, sessionID, idOnly, stdout, stderr)
 }
 
-// doHookCurrent prints the bead id stamped on sessionID's bead by the claim
-// protocol. It exits 1 — never 0 with empty output — when nothing is stamped:
-// the whole point of the back-channel is that a step which cannot name its own
-// bead must fail loudly rather than let a caller substitute an empty string and
-// skip the close it owes.
-func doHookCurrent(sessFront *session.Store, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
-	beadID, err := sessFront.CurrentClaimBeadID(sessionID)
+// doHookCurrent prints the session's verified current claim: the stamped id
+// when the live ledger still backs it. It exits 1 — never 0 with empty output
+// — when no claim can be proven: the whole point of the back-channel is that
+// a step which cannot name its own bead must fail loudly rather than let a
+// caller substitute an empty string and skip the close it owes. The stamp is
+// written best-effort by the claim, so its word alone is not evidence.
+func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
+	info, err := ctx.sessFront.Get(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if beadID == "" {
+	if _, err := session.DecodeWorkStarted(info.WorkStartedRaw); err != nil {
+		fmt.Fprintf(stderr, "gc hook current: session %s: %v\n", sessionID, err) //nolint:errcheck
+		return 1
+	}
+	stamp := strings.TrimSpace(info.CurrentClaimBeadID)
+	if stamp == "" {
 		fmt.Fprintf(stderr, "gc hook current: session %s has no current claim (nothing claimed through gc hook --claim)\n", sessionID) //nolint:errcheck
 		return 1
 	}
+	read := newHookCurrentReader(ctx, sessionID, releaseScope(info, ctx.cfg))
+	v := read.verify(stamp)
+	if v.err != nil {
+		fmt.Fprintf(stderr, "gc hook current: %v\n", v.err) //nolint:errcheck
+		return 1
+	}
+	if v.held {
+		return hookCurrentPrint(stdout, sessionID, stamp, idOnly)
+	}
+	fmt.Fprintf(stderr, "gc hook current: session %s's stamped claim %s is no longer held (%s), and no live claim is recorded for the session\n", sessionID, stamp, v.reason) //nolint:errcheck
+	return 1
+}
+
+// hookCurrentPrint prints one verified claim in the command's two shapes:
+// bare for --id-only, else with the session that claimed it.
+func hookCurrentPrint(stdout io.Writer, sessionID, beadID string, idOnly bool) int {
 	if idOnly {
 		fmt.Fprintln(stdout, beadID) //nolint:errcheck
 		return 0
