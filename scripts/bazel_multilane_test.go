@@ -1476,6 +1476,8 @@ func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
 			`"args":{"x":"-----BEGIN PRIVATE KEY-----"}`,
 			`"args":{"x":"GITHUB_TOKEN=abc"}`,
 			`"name":"rbe-west.ops.gascity.com"`,
+			`"args":{"x":"https://example.com/x?token=abc"}`,
+			`"args":{"x":"ghs_0123456789abcdefghijABCDEFGHIJ"}`,
 		} {
 			if err := os.RemoveAll(filepath.Join(dir, "profile-upload")); err != nil {
 				t.Fatal(err)
