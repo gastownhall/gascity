@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,6 +35,12 @@ import (
 type hookCity struct {
 	path string
 	cfg  *config.City
+	// invokedAt is when the invocation began and now is its clock; claimOps
+	// hands both to the claim, so the claim window counts the time spent
+	// resolving the city, loading its config and fencing the session. Zero and
+	// nil leave them to hookClaimOps.applyDefaults.
+	invokedAt time.Time
+	now       func() time.Time
 
 	mu    sync.Mutex
 	front *session.Store
@@ -80,6 +87,8 @@ func (h *hookCity) recorder() events.Recorder {
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.InvokedAt = h.invokedAt
+	ops.Now = h.now
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}

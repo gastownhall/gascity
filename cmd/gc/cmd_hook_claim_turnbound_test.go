@@ -9,11 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // turnBoundRoutedWork is one open, routed, claimable candidate: the shape every
@@ -783,5 +787,105 @@ func TestHookClaimStraddleLeavesSessionClaimUntouched(t *testing.T) {
 	}
 	if len(sessSpy.beadIDs) != 0 {
 		t.Fatalf("session-claim seam writes = %v, want none: the straddle path stamps nothing, so it must clear nothing", sessSpy.beadIDs)
+	}
+}
+
+// hookPreambleClock is the clock one `gc hook --claim` invocation reads through
+// hookCommandOptions.Now. Only the slow session-fence open advances it, so the
+// test places the whole preamble delay before the work query without sleeping.
+type hookPreambleClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *hookPreambleClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *hookPreambleClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// runHookClaimWithSlowFence drives `gc hook --claim --json` on an active session
+// with one routed candidate (demand-1) and a 2s claim window, where opening the
+// session fence's store costs fenceOpen on the invocation's clock. It returns
+// the exit code, stdout, stderr, the fake bd's argv log and the city dir.
+func runHookClaimWithSlowFence(t *testing.T, fenceOpen time.Duration) (code int, stdout, stderr string, argvLog, cityDir string) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir = writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	argvLog = installNonTurnDemandProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "live-token")
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "2s")
+
+	clock := &hookPreambleClock{now: time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)}
+	prev := hookCityStoreOpener
+	hookCityStoreOpener = func(cityPath string, cfg *config.City) (beads.Store, error) {
+		clock.advance(fenceOpen)
+		return prev(cityPath, cfg)
+	}
+	t.Cleanup(func() { hookCityStoreOpener = prev })
+
+	var out, errOut bytes.Buffer
+	code = cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true, Now: clock.Now}, &out, &errOut)
+	return code, out.String(), errOut.String(), argvLog, cityDir
+}
+
+// hookClaimWindowExpiries decodes every execution.claim_window_expired event in
+// the city's event log.
+func hookClaimWindowExpiries(t *testing.T, cityDir string) []events.ExecutionClaimWindowExpiredPayload {
+	t.Helper()
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.ExecutionClaimWindowExpired})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reading claim-window-expired events: %v", err)
+	}
+	expiries := make([]events.ExecutionClaimWindowExpiredPayload, 0, len(evts))
+	for _, e := range evts {
+		var p events.ExecutionClaimWindowExpiredPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("decoding claim-window-expired payload %s: %v", e.Payload, err)
+		}
+		expiries = append(expiries, p)
+	}
+	return expiries
+}
+
+// TestHookClaimWindowCountsTimeBeforeTheWorkQuery pins that the claim window
+// opens when `gc hook --claim` starts: time spent resolving the city, loading
+// its config and opening the session fence's store counts against it, so a
+// fresh claim that reaches its work query only after the window has closed is
+// refused rather than claimed as fresh.
+func TestHookClaimWindowCountsTimeBeforeTheWorkQuery(t *testing.T) {
+	code, stdout, stderr, argvLog, cityDir := runHookClaimWithSlowFence(t, 2500*time.Millisecond)
+
+	if nonTurnProbeClaimed(t, argvLog) {
+		t.Fatalf("claimed demand-1 after the 2s claim window was spent before the work query; code=%d stdout=%q stderr=%s\nbd argv log:\n%s",
+			code, stdout, stderr, readFileForTest(t, argvLog))
+	}
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (the spent-window refusal); stdout=%q stderr=%s", code, stdout, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty: a spent window writes no drain record", stdout)
+	}
+	if !strings.Contains(stderr, "claim window is spent") {
+		t.Fatalf("stderr = %q, want the claim-window diagnostic", stderr)
+	}
+	expiries := hookClaimWindowExpiries(t, cityDir)
+	if len(expiries) != 1 {
+		t.Fatalf("claim-window-expired events = %+v, want exactly one", expiries)
+	}
+	if expiries[0].BeadID != "demand-1" {
+		t.Fatalf("expired candidate = %q, want demand-1", expiries[0].BeadID)
+	}
+	if expiries[0].InvocationAgeMS < 2500 {
+		t.Fatalf("invocation_age_ms = %d, want >= 2500: the age must count the slow fence open", expiries[0].InvocationAgeMS)
 	}
 }
