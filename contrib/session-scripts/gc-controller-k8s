@@ -16,6 +16,9 @@
 #   GC_K8S_CONTROLLER_IMAGE   — Controller image (default: gc-controller:latest)
 #   GC_K8S_CONTEXT            — kubectl context (default: current)
 #   GC_K8S_IMAGE              — Agent image (passed to controller env)
+#   GC_K8S_RUN_AS_USER        — optional generated-agent Pod UID override
+#   GC_K8S_RUN_AS_GROUP       — optional generated-agent Pod primary GID override
+#   GC_K8S_FS_GROUP           — optional generated-agent Pod filesystem GID
 #   GC_DOLT_HOST              — Canonical explicit Dolt host override for controller bootstrap
 #   GC_DOLT_PORT              — Canonical explicit Dolt port override for controller bootstrap
 #
@@ -282,6 +285,9 @@ case "$op" in
       --arg dolt_port "$EXPLICIT_DOLT_PORT" \
       --arg prebaked "${GC_K8S_PREBAKED:-false}" \
       --arg agent_sa "${GC_K8S_SERVICE_ACCOUNT:-}" \
+      --arg agent_run_as_user "${GC_K8S_RUN_AS_USER:-}" \
+      --arg agent_run_as_group "${GC_K8S_RUN_AS_GROUP:-}" \
+      --arg agent_fs_group "${GC_K8S_FS_GROUP:-}" \
       '{
         apiVersion: "v1",
         kind: "Pod",
@@ -322,6 +328,9 @@ case "$op" in
                 {name: "GC_MCP_MAIL_URL", value: "http://mcp-mail.gc.svc.cluster.local:8765"},
                 {name: "GC_MCP_MAIL_PROJECT", value: "/workspace"}
               ]
+              + (if $agent_run_as_user != "" then [{name: "GC_K8S_RUN_AS_USER", value: $agent_run_as_user}] else [] end)
+              + (if $agent_run_as_group != "" then [{name: "GC_K8S_RUN_AS_GROUP", value: $agent_run_as_group}] else [] end)
+              + (if $agent_fs_group != "" then [{name: "GC_K8S_FS_GROUP", value: $agent_fs_group}] else [] end)
               + (if $dolt_host != "" then [{name: "GC_DOLT_HOST", value: $dolt_host}] else [] end)
               + (if $dolt_port != "" then [{name: "GC_DOLT_PORT", value: $dolt_port}] else [] end)
             ),

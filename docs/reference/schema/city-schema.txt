@@ -1964,6 +1964,18 @@
           "type": "string",
           "description": "Context is the kubectl/kubeconfig context. Default: current."
         },
+        "run_as_user": {
+          "type": "integer",
+          "description": "RunAsUser is an optional numeric UID for generated agent pods. When unset,\nKubernetes admission may assign a UID; otherwise the image's numeric\nnon-root fallback is used. Gas City does not allocate UIDs."
+        },
+        "run_as_group": {
+          "type": "integer",
+          "description": "RunAsGroup is an optional primary GID for generated agent pods. When unset,\nthe image or cluster policy supplies the group identity. For a nonzero\nvalue, generated pods also join supplementary group 0 so image-layer HOME\nand prebaked workspace paths remain writable without changing the primary\nGID."
+        },
+        "fs_group": {
+          "type": "integer",
+          "description": "FSGroup is an optional supplemental filesystem GID. It lets kubelet make\nmounted workspace volumes writable by the pod's non-root identity."
+        },
         "cpu_request": {
           "type": "string",
           "description": "CPURequest is the pod CPU request. Default: \"500m\".",
@@ -1987,11 +1999,63 @@
         "prebaked": {
           "type": "boolean",
           "description": "Prebaked skips init container staging and EmptyDir volumes when true.\nUse with images built by `gc build-image` that have city content baked in."
+        },
+        "secret_env": {
+          "items": {
+            "$ref": "#/$defs/K8sSecretEnv"
+          },
+          "type": "array",
+          "description": "SecretEnv projects Kubernetes Secret keys into named container env vars.\nA non-empty list replaces the default GITHUB_TOKEN projection."
+        },
+        "secret_mounts": {
+          "items": {
+            "$ref": "#/$defs/K8sSecretMount"
+          },
+          "type": "array",
+          "description": "SecretMounts mounts Kubernetes Secrets read-only into the agent container.\nA non-empty list replaces the default claude-credentials mount."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "K8sConfig holds native K8s session provider settings."
+      "description": "K8sConfig holds native K8s session provider settings; identity fields run_as_user, run_as_group, and fs_group cannot be combined with LINUX_USERNAME, including through GC_K8S_* environment overrides."
+    },
+    "K8sSecretEnv": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "secret",
+        "key"
+      ],
+      "description": "K8sSecretEnv describes a Secret key projected into a container environment variable."
+    },
+    "K8sSecretMount": {
+      "properties": {
+        "secret": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "secret",
+        "mount_path"
+      ],
+      "description": "K8sSecretMount describes a Secret mounted read-only into an agent container."
     },
     "LocalDoctorCheck": {
       "properties": {
