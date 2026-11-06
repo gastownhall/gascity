@@ -207,6 +207,7 @@ func TestReadRuntimeJudgesByLaunchNamesOnRealTmux(t *testing.T) {
 		class    runtimeClass
 	}{
 		{"alive under its launch names", []string{"sleep"}, []string{"new-agent"}, rtAlive},
+		{"launched with no names: the pane alone", nil, []string{"new-agent"}, rtAlive},
 		{"its launch process gone, the template's running", []string{"agent"}, []string{"sleep"}, rtZombie},
 	} {
 		t.Run(c.name, func(t *testing.T) {
