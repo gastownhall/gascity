@@ -280,10 +280,13 @@ interrupting it (`interrupt_now`) can restart the session, and stopping a turn
 reports an error.
 
 A script written before `idle-boundary` existed, which declares only the
-first three, gets `timed_only`: its interactive sessions stop sleeping until
-it adds `idle-boundary`. Nothing else about it changes. gc no longer reads
-the first three as proof that the box runs tmux, because a runtime without
-tmux declares them too.
+first three, gets `timed_only` until it adds `idle-boundary`: its interactive
+sessions stop sleeping, and gc stops waiting for its idle boundary. A
+wait-idle nudge is queued instead of delivered at the boundary, and
+`interrupt_now` and stopping a turn get no idle wait. Non-interactive sleep,
+attachment and `exec` are unchanged. gc no longer reads the first three as
+proof that the box runs tmux, because a runtime without tmux declares them
+too.
 
 The `is-attached` rule above applies to every runtime that declares
 `report-attachment`, even without the other capabilities. gc runs the op

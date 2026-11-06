@@ -222,6 +222,28 @@ func TestRun_UnknownDeclaredCapabilityIgnored(t *testing.T) {
 	}
 }
 
+// idle-boundary is a capability gc honors, so the handshake check must not
+// call it unknown; it promises no op of its own, so it adds no capability
+// check (gc runtime conformance checks it as RPP-CONN-002).
+// Kills: a token gc acts on reported as ignored.
+func TestRun_IdleBoundaryCapabilityIsKnown(t *testing.T) {
+	state := t.TempDir()
+	body := strings.Replace(conformantScript(state),
+		`["report-attachment","report-activity"]`,
+		`["report-attachment","report-activity","idle-boundary"]`, 1)
+	res := runScript(t, body, Options{})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true with idle-boundary declared: %+v", res.Checks)
+	}
+	if c := findCheck(t, res, "protocol handshake"); strings.Contains(c.Detail, "unknown") {
+		t.Errorf("handshake detail = %q, want idle-boundary not reported as unknown", c.Detail)
+	}
+	if hasCheck(res, "capability idle-boundary") {
+		t.Error("idle-boundary produced a capability check")
+	}
+}
+
 func TestRun_DeclaredCapabilityNotImplementedFails(t *testing.T) {
 	state := t.TempDir()
 	// Declares report-attachment but the is-attached op falls through to

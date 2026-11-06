@@ -61,7 +61,10 @@ const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box
 // the session `main` exists while the box does (has-session) and its pane
 // shows the agent's command (capture-pane), as the idle-boundary declaration
 // promises; any other tmux command goes to the host's tmux unchanged. eval,
-// not sh -c, so the command sees the box's tmux.
+// not sh -c, so the command sees the box's tmux. The golden does not declare
+// proc.exec, so gc's own idle reads (tmux -u set-environment and
+// show-environment, whose first argument is -u) never reach this model;
+// declaring proc.exec here would need them modeled too.
 const goldenExec = `cmd=$(cat); ` +
 	`tmux() { case "$1" in has-session) [ -d "$box" ] ;; capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;; *) command tmux "$@" ;; esac; }; ` +
 	`eval "$cmd"`
