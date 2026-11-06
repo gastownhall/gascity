@@ -282,7 +282,7 @@ func TestRespawnRearmsTapAndClearsRecordInOneList(t *testing.T) {
 		}
 		relayed := shellquote.Join([]string{testCompanion, "relay", "--", testShell, "-c", "claude --x"})
 		want := append([]string{"-u"}, tmuxArgvList([][]string{
-			{"respawn-pane", "-k", "-t", "%5", "-c", "/w", relayed},
+			{"respawn-pane", "-k", "-t", "%5", "-c", "/w", "exec " + relayed},
 			{"display-message", "-p", "-t", "%5", "#{pane_id}"},
 			{"set-option", "-p", "-F", "-t", "%5", programTapOption, r + ".#{pane_id}"},
 			{"set-option", "-pu", "-t", "%5", programStatusOption},
@@ -428,12 +428,42 @@ func TestRelayWrapInsideEnvUnsetInsideSlice(t *testing.T) {
 	relayed := shellquote.Join([]string{testCompanion, "relay", "--", "/bin/sh", "-c", "claude"})
 	want := shellquote.Join([]string{
 		"systemd-run", "--user", "--scope", "--slice=gascity-agents.slice", "--collect", "--quiet", "--",
-		"sh", "-c", "env -u LC_ALL " + relayed,
+		"sh", "-c", "exec env -u LC_ALL " + relayed,
 	})
 	create := rec.calls[0]
 	sep := slices.Index(create, ";")
 	if sep < 1 || create[sep-1] != want {
 		t.Fatalf("pane command\n got %q\nwant %q", create, want)
+	}
+}
+
+// tmux runs a pane's command as its default-shell -c, and a shell that does
+// not exec the last command of -c (dash, /bin/sh on Debian and Ubuntu) would
+// stay the pane's root with the relay its child. The relay is execed, behind
+// any env -u withholding, so it is the pane's root under every POSIX shell.
+func TestRelayPaneCommandExecsTheRelay(t *testing.T) {
+	relayed := shellquote.Join([]string{testCompanion, "relay", "--", testShell, "-c", "claude"})
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"plain", nil, "exec " + relayed},
+		{"withheld env", map[string]string{"LC_ALL": ""}, "exec env -u LC_ALL " + relayed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm, rec, _, _ := captureTestTmux(t)
+			rec.outs = []string{"%2"}
+			arm := runtime.ProgramStatusArm{Capture: true, Relay: true}
+			if err := tm.newSessionWithCommandAndEnv("gc-exec", "", "claude", tc.env, arm); err != nil {
+				t.Fatal(err)
+			}
+			create := rec.calls[0]
+			sep := slices.Index(create, ";")
+			if sep < 1 || create[sep-1] != tc.want {
+				t.Fatalf("pane command\n got %q\nwant %q", create, tc.want)
+			}
+		})
 	}
 }
 
@@ -975,7 +1005,7 @@ func TestLiveSwitchOnArmsTheNextStart(t *testing.T) {
 			}
 			r := strings.TrimSuffix(create[i+1], ".#{pane_id}")
 			want := append([]string{"-u"}, tmuxArgvList([][]string{
-				{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-after", "-c", "/w", relayed},
+				{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-after", "-c", "/w", "exec " + relayed},
 				{"set-option", "-p", "-F", "-t", "=gc-after:", programTapOption, r + ".#{pane_id}"},
 				{"pipe-pane", "-O", "-t", "=gc-after:", wantTapCommand(r, "claude-code")},
 			})...)
@@ -987,7 +1017,7 @@ func TestLiveSwitchOnArmsTheNextStart(t *testing.T) {
 			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude", arm); err != nil {
 				t.Fatal(err)
 			}
-			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], relayed) || !slices.Contains(rec.calls[0], programTapOption) {
+			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], "exec "+relayed) || !slices.Contains(rec.calls[0], programTapOption) {
 				t.Fatalf("respawn after the flip is not relay-wrapped and tapped: %q", rec.calls)
 			}
 		})
