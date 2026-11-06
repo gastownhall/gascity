@@ -700,10 +700,28 @@ func TestHookClaimLiveOwnershipLoopReporting(t *testing.T) {
 	const template = "gk.polecat"
 	h := newClaimLoopHarness(t)
 	var texts []string
+	// recorded keeps each seat's bead.claim_failed, so a second guard can be
+	// fed the same withholds.
+	var recorded []events.Event
+	var memberIDs []string
+	held := func(g *claimLoopHarness) bool {
+		t.Helper()
+		counts, demand := g.guard.withhold(
+			map[string]int{template: 1},
+			map[string]scaleCheckDemand{template: {Count: 1, WorkBeadIDs: []string{liveOwnershipRoot}}})
+		return counts[template] == 0 && len(demand[template].WorkBeadIDs) == 0
+	}
 	for seat := 1; seat <= claimLoopTripFailures; seat++ {
 		opts := liveOwnershipOptions()
 		opts.Env = []string{"GC_TEMPLATE=" + template, fmt.Sprintf("GC_SESSION_ID=gcg-session-%d", seat)}
-		members := []beads.Bead{liveOwnershipMember(fmt.Sprintf("gk-step-%d", seat), "in_progress", fmt.Sprintf("gk__polecat-%d", seat+10), nil)}
+		// Each seat sees a different set of held members, one more than the
+		// seat before it.
+		var members []beads.Bead
+		for n := 1; n <= seat; n++ {
+			id := fmt.Sprintf("gk-step-%d-%d", seat, n)
+			memberIDs = append(memberIDs, id)
+			members = append(members, liveOwnershipMember(id, "in_progress", fmt.Sprintf("gk__polecat-%d", seat*10+n), nil))
+		}
 		var reported []string
 		out := liveOwnershipRun(t, []beads.Bead{liveOwnershipRootBead()}, members, opts, hookClaimOps{
 			EmitClaimFailed: func(beadID string, opts hookClaimOptions, err error) {
@@ -714,6 +732,7 @@ func TestHookClaimLiveOwnershipLoopReporting(t *testing.T) {
 					t.Fatalf("claimFailedEvent(%s) recorded nothing for a seat of %s", beadID, template)
 				}
 				evt.Ts = h.now
+				recorded = append(recorded, evt)
 				h.guard.observe(evt)
 			},
 		})
@@ -726,14 +745,8 @@ func TestHookClaimLiveOwnershipLoopReporting(t *testing.T) {
 		if len(reported) != 1 || reported[0] != liveOwnershipRoot {
 			t.Fatalf("seat %d reported claim failures for %v, want exactly the root %s", seat, reported, liveOwnershipRoot)
 		}
-		held := func() bool {
-			counts, demand := h.guard.withhold(
-				map[string]int{template: 1},
-				map[string]scaleCheckDemand{template: {Count: 1, WorkBeadIDs: []string{liveOwnershipRoot}}})
-			return counts[template] == 0 && len(demand[template].WorkBeadIDs) == 0
-		}()
-		if want := seat == claimLoopTripFailures; held != want {
-			t.Fatalf("after seat %d the root is withheld from default demand = %v, want %v", seat, held, want)
+		if want := seat == claimLoopTripFailures; held(h) != want {
+			t.Fatalf("after seat %d the root is withheld from default demand = %v, want %v", seat, !want, want)
 		}
 		h.advance(time.Minute)
 	}
@@ -745,9 +758,30 @@ func TestHookClaimLiveOwnershipLoopReporting(t *testing.T) {
 	if want := "workflow root " + liveOwnershipRoot + " withheld: member steps in_progress under other sessions"; texts[0] != want {
 		t.Fatalf("withhold text = %q, want %q", texts[0], want)
 	}
+	// A member's own write is not the root's: the hold stays. Member steps
+	// change as their holders work, and a member-only event need not resume
+	// the root's demand.
+	h.guard.observe(events.Event{Type: events.BeadUpdated, Subject: memberIDs[0], Ts: h.now})
+	if !held(h) {
+		t.Fatalf("an update to member %s lifted the root's hold; only the root's own changes may", memberIDs[0])
+	}
 	// A write to the root resumes its demand, as for any held bead.
 	h.guard.observe(events.Event{Type: events.BeadUpdated, Subject: liveOwnershipRoot, Ts: h.now})
 	if h.records() != 0 {
 		t.Fatalf("guard still tracks %d records after the root changed", h.records())
+	}
+	// A hold that runs out admits one probe, from the same captured withholds.
+	probe := newClaimLoopHarness(t)
+	for _, evt := range recorded {
+		evt.Ts = probe.now
+		probe.guard.observe(evt)
+		probe.advance(time.Minute)
+	}
+	if !held(probe) {
+		t.Fatal("the captured withholds did not hold the root on a fresh guard")
+	}
+	probe.advance(claimLoopHoldBase)
+	if held(probe) {
+		t.Fatal("a hold that ran out did not admit one probe")
 	}
 }
