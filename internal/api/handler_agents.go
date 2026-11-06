@@ -414,6 +414,12 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *act
 	if lookup == nil {
 		return findLiveActiveBeadInStores(stores, rigNames, unique)
 	}
+	// A previous row's failure ended the lookup: later rows — even ones a
+	// clean cache could answer — report no work, and the response is
+	// already partial.
+	if lookup.err != nil {
+		return ""
+	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
 			query := beads.ListQuery{

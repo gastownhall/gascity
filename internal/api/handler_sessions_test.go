@@ -9500,3 +9500,65 @@ func TestActiveWorkLookupFailureIsNamedLoggedOnceAndKeepsAggregationErrors(t *te
 		}
 	})
 }
+
+// TestActiveWorkLookupUsesCleanCacheAfterDeadline: an expired budget with no
+// recorded failure does not by itself degrade the lookup — authoritative
+// cache answers, hits and misses alike, still resolve rows with no uncached
+// read and no new partial error — while a recorded failure short-circuits
+// every later row, even one a clean cache could answer.
+func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
+	t.Run("clean cache answers after the deadline expired", func(t *testing.T) {
+		backing := &listCountingStore{Store: beads.NewMemStore()}
+		hit := addActiveWork(t, backing.Store, "session-id")
+		cache := beads.NewCachingStoreForTest(backing, nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		readsAfterPrime := backing.listCalls
+		fs := newFakeState(t)
+		fs.stores["myrig"] = cache
+		srv := New(fs)
+		parent, cancelParent := context.WithCancel(context.Background())
+		lookup := newActiveWorkLookup(parent)
+		defer lookup.cancel()
+		cancelParent() // the budget is spent; nothing has failed
+
+		if got := srv.findActiveBeadForAssigneesWithFreshness("myrig", lookup, "session-id"); got != hit {
+			t.Fatalf("cache hit after expiry = %q, want %q", got, hit)
+		}
+		if got := srv.findActiveBeadForAssigneesWithFreshness("myrig", lookup, "nobody"); got != "" {
+			t.Fatalf("authoritative cache miss after expiry = %q, want empty", got)
+		}
+		if errs := lookup.errors(); len(errs) != 0 {
+			t.Fatalf("errors = %q, want none: an expired budget alone is not a failure", errs)
+		}
+		if backing.listCalls != readsAfterPrime {
+			t.Fatalf("uncached reads after expiry = %d, want 0", backing.listCalls-readsAfterPrime)
+		}
+	})
+
+	t.Run("recorded failure short-circuits later rows, even cache-backed ones", func(t *testing.T) {
+		backingZ := &listCountingStore{Store: beads.NewMemStore()}
+		zWork := addActiveWork(t, backingZ.Store, "session-2")
+		cacheZ := beads.NewCachingStoreForTest(backingZ, nil)
+		if err := cacheZ.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		fs := twoRigActiveWorkState(t,
+			activeBeadErrStore{Store: beads.NewMemStore(), err: errors.New("store a is down")},
+			cacheZ)
+		srv := New(fs)
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		if got := srv.findActiveBeadForAssigneesWithFreshness("a", lookup, "session-1"); got != "" {
+			t.Fatalf("first row = %q, want empty after store a failed", got)
+		}
+		if got := srv.findActiveBeadForAssigneesWithFreshness("z", lookup, "session-2"); got != "" {
+			t.Fatalf("later cache-backed row = %q, want empty: the recorded failure short-circuits it (cached work %s)", got, zWork)
+		}
+		if errs := lookup.errors(); len(errs) != 1 {
+			t.Fatalf("errors = %q, want only the first failure", errs)
+		}
+	})
+}
