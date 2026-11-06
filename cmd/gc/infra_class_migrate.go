@@ -1314,8 +1314,8 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		}
 		// A restore under way owns the binding: a re-copy would race it, or
 		// copy over the database it is installing.
-		if cause, restoring := infraRestoreStaleCause(target); restoring {
-			return say(infraMigrationUncheckable, fmt.Errorf("%s claims convergence but %s; finish it with:  %s", target.MarkerPath(), cause, infraStaleBindingRemedy(target)))
+		if err := infraRestoreRecopyRefusal(target); err != nil {
+			return say(infraMigrationUncheckable, err)
 		}
 		if backedUp && from == infraMigrationFromWork {
 			// The work store's copies were cleared into the backup, so a re-copy

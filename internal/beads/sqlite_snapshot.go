@@ -76,9 +76,10 @@ func SQLiteIntegrityCheck(ctx context.Context, path string) error {
 }
 
 // sqliteSnapshotSourceDSN is the read-only DSN a snapshot reads its source
-// through. It is the store's read-only DSN without the mmap window: a copy
-// reads every page once, in order, so mapping the file buys nothing and would
-// count up to the whole window against the process's resident set.
+// through, and a restore the live database it checks. It is the store's
+// read-only DSN without the mmap window: a copy reads every page once, in
+// order, so mapping the file buys nothing and would count up to the whole
+// window against the process's resident set.
 func sqliteSnapshotSourceDSN(path string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
@@ -198,6 +199,35 @@ func SQLiteBeadIDs(ctx context.Context, path string) ([]string, error) {
 		return rows.Err()
 	})
 	return ids, err
+}
+
+// SQLiteMetadataValues lists, sorted, the distinct values the beads of the
+// database at path hold under metadata key, both tiers and closed rows
+// included. It reads them from the metadata index without reading a row, over
+// a read-only connection, so a live database is read with its WAL.
+func SQLiteMetadataValues(ctx context.Context, path, key string) ([]string, error) {
+	db, err := sql.Open("sqlite", sqliteSnapshotSourceDSN(path))
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s values of %s: %w", key, path, err)
+	}
+	defer db.Close() //nolint:errcheck // read-only handle
+	rows, err := db.QueryContext(ctx, "SELECT DISTINCT meta_value FROM metadata WHERE meta_key = ? ORDER BY meta_value", key)
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s values of %s: %w", key, path, err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only cursor
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, fmt.Errorf("reading the %s values of %s: %w", key, path, err)
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading the %s values of %s: %w", key, path, err)
+	}
+	return values, nil
 }
 
 // SQLiteSequenceHighWaterAt is the latest auto id under prefix the database

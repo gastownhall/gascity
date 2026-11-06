@@ -220,6 +220,51 @@ func TestSQLiteSnapshotHelpers(t *testing.T) {
 	}
 }
 
+// TestSQLiteMetadataValues reads the distinct values of one metadata key from
+// a live database whose rows are still in its WAL: both tiers and closed rows
+// count, each value once and sorted, and other keys and unstamped rows do not.
+func TestSQLiteMetadataValues(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := OpenSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.(*SQLiteStore).CloseStore() //nolint:errcheck // test cleanup
+	for _, b := range []Bead{
+		{Title: "committed", Metadata: map[string]string{"stamp": "rig:b"}},
+		{Title: "ephemeral", Ephemeral: true, Metadata: map[string]string{"stamp": "rig:a"}},
+		{Title: "the same stamp again", Metadata: map[string]string{"stamp": "rig:b"}},
+		{Title: "another key", Metadata: map[string]string{"other": "rig:c"}},
+		{Title: "unstamped"},
+	} {
+		if _, err := store.Create(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closed, err := store.Create(Bead{Title: "closed", Metadata: map[string]string{"stamp": "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(dir, sqliteStoreFilename)
+	if info, err := os.Stat(database + "-wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("the fixture's rows are not in a live WAL: %v", err)
+	}
+	got, err := SQLiteMetadataValues(ctx, database, "stamp")
+	if want := []string{"rig:a", "rig:b", "work"}; err != nil || strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("SQLiteMetadataValues = %v, %v; want %v", got, err, want)
+	}
+	if got, err := SQLiteMetadataValues(ctx, database, "absent"); err != nil || len(got) != 0 {
+		t.Fatalf("values of a key no row holds = %v, %v; want none", got, err)
+	}
+	if _, err := SQLiteMetadataValues(ctx, filepath.Join(t.TempDir(), sqliteStoreFilename), "stamp"); err == nil {
+		t.Fatal("reading a database that does not exist succeeded")
+	}
+}
+
 // TestRaiseSQLiteSequenceFloorPastAWrappedRange is round-3 C: a database an
 // older build wrapped holds negative auto ids, which come after every positive
 // one in allocation order. With the floor sidecar gone, the raise must land

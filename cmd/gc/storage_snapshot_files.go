@@ -346,11 +346,14 @@ func publishSnapshotManifest(ctx context.Context, dir string, manifest snapshotM
 }
 
 // readSnapshotManifest reads a snapshot's manifest. A directory without one
-// is an interrupted snapshot.
+// is an interrupted snapshot; no directory at all is no snapshot.
 func readSnapshotManifest(dir string) (snapshotManifest, error) {
 	var m snapshotManifest
 	data, err := os.ReadFile(filepath.Join(dir, storageSnapshotManifestName))
 	if errors.Is(err, os.ErrNotExist) {
+		if err := snapshotPresent(filepath.Dir(dir), filepath.Base(dir)); err != nil {
+			return m, err
+		}
 		return m, fmt.Errorf("%s has no %s: it is an interrupted snapshot, not a snapshot", dir, storageSnapshotManifestName)
 	}
 	if err != nil {
@@ -486,6 +489,26 @@ func snapshotIDs(to string) (complete, interrupted []string, err error) {
 		}
 	}
 	return complete, interrupted, nil
+}
+
+// snapshotPresent refuses an id with no directory in to, naming the complete
+// snapshots there, newest first: a snapshot looked for in the wrong directory
+// is missing, not interrupted.
+func snapshotPresent(to, id string) error {
+	if _, err := os.Stat(filepath.Join(to, id)); !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	complete, _, err := snapshotIDs(to)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("there is no snapshot %s: %s does not exist. Pass --to with the directory the snapshot was written to", id, to)
+	case err != nil:
+		return fmt.Errorf("there is no snapshot %s in %s, which cannot be listed: %w", id, to, err)
+	case len(complete) == 0:
+		return fmt.Errorf("there is no snapshot %s in %s, which holds none. Pass --to with the directory the snapshot was written to", id, to)
+	}
+	sort.Slice(complete, func(i, j int) bool { return snapshotIDLess(complete[j], complete[i]) })
+	return fmt.Errorf("there is no snapshot %s in %s, which holds %s", id, to, infraStrandedIDList(complete))
 }
 
 // sweepInterruptedSnapshots removes every snapshot directory in to that has

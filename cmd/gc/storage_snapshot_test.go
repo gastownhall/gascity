@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1994,16 +1995,12 @@ func TestSnapshotDiskPreflightCountsTheWAL(t *testing.T) {
 	}
 }
 
-// TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind is the content
-// check behind the record check: an operator moved a rig import's records
-// aside without first restoring the rig's store. The live binding still holds
-// the rows imported from the rig (stamped rig:<R>), which the snapshot lacks;
-// restoring would leave them in neither store, so it refuses, naming the rig
-// and the rows.
-func TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind(t *testing.T) {
-	city, id, _ := snapshottedCity(t)
-	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
-	binding, err := openInfraDestination(city.target)
+// writeRigImportedRows writes rows into the binding as a rig import leaves
+// them: under the rig's ids and created_at, with their metadata, stamped as
+// imported from rig.
+func writeRigImportedRows(t *testing.T, target infraBindingTarget, rig string, rows ...beads.Bead) {
+	t.Helper()
+	binding, err := openInfraDestination(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2011,17 +2008,534 @@ func TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind(t *testing.T) {
 	if !ok {
 		t.Fatal("the binding cannot pin an id")
 	}
-	if _, err := creator.CreateWithForeignID(beads.Bead{ID: "gp-aaa1", Title: "imported from gp", Type: "task", Metadata: map[string]string{infraMigrationStampKey: rigImportStamp("gp")}}); err != nil {
+	for _, b := range rows {
+		b.Metadata = maps.Clone(b.Metadata)
+		if b.Metadata == nil {
+			b.Metadata = map[string]string{}
+		}
+		b.Metadata[infraMigrationStampKey] = rigImportStamp(rig)
+		if _, err := creator.CreateWithForeignID(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Closed now: a handle left open is another process's connection as far
+	// as a restore can tell.
+	if err := closeBeadStoreHandle(binding); err != nil {
 		t.Fatal(err)
 	}
-	_ = closeBeadStoreHandle(binding)
+}
+
+// stubRigScopeStore serves store as every rig's own store and records the
+// store paths opened.
+func stubRigScopeStore(t *testing.T, store beads.Store) *[]string {
+	t.Helper()
+	var opened []string
+	prev := openStorageScopeStore
+	t.Cleanup(func() { openStorageScopeStore = prev })
+	openStorageScopeStore = func(storePath, _ string) (beads.Store, error) {
+		opened = append(opened, storePath)
+		return store, nil
+	}
+	return &opened
+}
+
+// TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind is the content
+// check behind the record check: an operator moved a rig import's records
+// aside without first restoring the rig's store. The live binding still holds
+// the rows imported from the rig (stamped rig:<R>), which neither the snapshot
+// nor the rig's own store holds; restoring would leave them in no store, so it
+// refuses, naming the rig and the rows, once it has read the rig's store.
+func TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
+	writeRigImportedRows(t, city.target, "gp", beads.Bead{ID: "gp-aaa1", Title: "imported from gp", Type: "task"})
+	opened := stubRigScopeStore(t, beads.NewMemStore())
 	before := mustReadFile(t, city.target.Database)
 	code, stderr := city.restore(t, id)
-	if code == 0 || !strings.Contains(stderr, "rig gp: 1 row(s), e.g. gp-aaa1") {
+	if code == 0 || !strings.Contains(stderr, "rig gp: 1 row(s), e.g. gp-aaa1") || !strings.Contains(stderr, "neither the snapshot nor the rig's own store") {
 		t.Fatalf("restore over rows a rig import left behind: exit %d: %s", code, stderr)
+	}
+	if len(*opened) != 1 {
+		t.Fatalf("rig stores read: %v, want gp's", *opened)
 	}
 	if !bytes.Equal(mustReadFile(t, city.target.Database), before) {
 		t.Fatal("a refused restore changed the binding")
+	}
+}
+
+// TestStorageSnapshotRestoreAcceptsRowsTheRigHoldsAgain drives the runbook's
+// "Rolling back past a rig import" to the end: the rig's own store holds the
+// imported rows again under their ids and created_at, one of each tier (a
+// committed row, an ephemeral one and a no-history one), and the import's
+// records were moved aside. The city is stopped, so the restore reads the
+// rig's store for the rows the snapshot lacks inside a maintenance window,
+// which starts the provider under the controller lock and stops it again,
+// finds each, and restores; a cross-store gate the import minted in the
+// binding was never the rig's row, and is not looked for. A rig reset to a
+// Dolt tag holds its committed rows only: the refusal says so for the others
+// and names the import's backup, which holds them. A row the rig holds under
+// another created_at is another row, and still refuses; so does every row of
+// a rig whose store cannot be read, or that the config no longer names, even
+// when no record names it either. A rig with no such row is not read, and no
+// provider starts.
+func TestStorageSnapshotRestoreAcceptsRowsTheRigHoldsAgain(t *testing.T) {
+	rigged := func(t *testing.T) (snapshotCity, string, []string, *beads.MemStore, []beads.Bead) {
+		t.Helper()
+		city, id, snapshotted := snapshottedCity(t)
+		city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
+		rig := beads.NewMemStore()
+		rig.HonorExplicitIDs = true
+		rows := []beads.Bead{
+			mustCreateInfraBead(t, rig, beads.Bead{ID: "gp-aaa1", Title: "imported from gp", Type: "task"}),
+			mustCreateInfraBead(t, rig, beads.Bead{ID: "gp-aaa2", Title: "imported from gp, ephemeral", Type: "task", Ephemeral: true}),
+			mustCreateInfraBead(t, rig, beads.Bead{ID: "gp-aaa3", Title: "imported from gp, no history", Type: "task", NoHistory: true}),
+		}
+		return city, id, snapshotted, rig, rows
+	}
+	t.Run("the rig holds them again", func(t *testing.T) {
+		city, id, snapshotted, rig, rows := rigged(t)
+		writeRigImportedRows(t, city.target, "gp", rows...)
+		provider := &migrationWindowProvider{down: true}
+		stubMigrationWindowProvider(t, provider)
+		var inWindow []bool
+		prev := openStorageScopeStore
+		t.Cleanup(func() { openStorageScopeStore = prev })
+		openStorageScopeStore = func(string, string) (beads.Store, error) {
+			inWindow = append(inWindow, provider.starts == 1 && provider.stops == 0)
+			return rig, nil
+		}
+		if code, stderr := city.restore(t, id); code != 0 {
+			t.Fatalf("restore once the rig's store holds the imported rows again: exit %d: %s", code, stderr)
+		}
+		if len(inWindow) != 1 || !inWindow[0] {
+			t.Fatalf("rig store opens inside the window: %v, want gp's, once, after the provider started and before it stopped", inWindow)
+		}
+		if provider.starts != 1 || provider.stops != 1 || !provider.lockHeldAtStart || !provider.lockHeldAtStop {
+			t.Fatalf("provider starts = %d, stops = %d, lock held at start = %v, at stop = %v; want the stopped provider started once and stopped once, both under the controller lock", provider.starts, provider.stops, provider.lockHeldAtStart, provider.lockHeldAtStop)
+		}
+		if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+			t.Fatalf("restored %v, want %v", got, snapshotted)
+		}
+	})
+	t.Run("with a gate the import minted", func(t *testing.T) {
+		// An open blocks edge onto rig work became a cross-store gate in the
+		// binding, stamped as the import's. The rig never held it: the restore
+		// drops it with the binding, and the edge goes back to the rig with
+		// its owner.
+		city, id, snapshotted, rig, rows := rigged(t)
+		writeRigImportedRows(t, city.target, "gp", rows...)
+		binding, err := openInfraDestination(city.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, err := binding.Get(rows[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate, err := createRigImportGate(binding, rigImportStamp("gp"), rigScopeRef("gp"), rigImportGate{Owner: owner, Blocker: "gp-work1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := closeBeadStoreHandle(binding); err != nil {
+			t.Fatal(err)
+		}
+		stubRigScopeStore(t, rig)
+		if code, stderr := city.restore(t, id); code != 0 {
+			t.Fatalf("restore over the import's cross-store gate %s: exit %d: %s", gate.ID, code, stderr)
+		}
+		if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+			t.Fatalf("restored %v, want %v", got, snapshotted)
+		}
+	})
+	t.Run("a rig reset to a Dolt tag", func(t *testing.T) {
+		backup := func(city snapshotCity) string {
+			return newRigImportLocation(city.target, city.request.CityPath, "gp").BackupPath()
+		}
+		t.Run("holds the committed row", func(t *testing.T) {
+			city, id, _, rig, rows := rigged(t)
+			writeRigImportedRows(t, city.target, "gp", rows...)
+			for _, b := range rows[1:] {
+				if err := rig.Delete(b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stubRigScopeStore(t, rig)
+			code, stderr := city.restore(t, id)
+			want := "rig gp: 2 row(s), e.g. gp-aaa2, gp-aaa3 (all of them are ephemeral or no-history rows, which bd keeps out of Dolt history, so no Dolt tag of the rig holds them; they are in the rig import's backup, " + backup(city) + ")."
+			if code == 0 || !strings.Contains(stderr, want) {
+				t.Fatalf("restore over a rig reset to a Dolt tag: exit %d: %s\nwant it to contain: %s", code, stderr, want)
+			}
+		})
+		t.Run("holds none of them", func(t *testing.T) {
+			city, id, _, _, rows := rigged(t)
+			writeRigImportedRows(t, city.target, "gp", rows...)
+			stubRigScopeStore(t, beads.NewMemStore())
+			code, stderr := city.restore(t, id)
+			want := "rig gp: 3 row(s), e.g. gp-aaa1, gp-aaa2, gp-aaa3 (2 of them, e.g. gp-aaa2, gp-aaa3, are ephemeral or no-history rows, which bd keeps out of Dolt history, so no Dolt tag of the rig holds them; they are in the rig import's backup, " + backup(city) + ")."
+			if code == 0 || !strings.Contains(stderr, want) {
+				t.Fatalf("restore over a rig holding none of its imported rows: exit %d: %s\nwant it to contain: %s", code, stderr, want)
+			}
+		})
+	})
+	t.Run("one the rig holds under another created_at", func(t *testing.T) {
+		city, id, _, rig, rows := rigged(t)
+		rows[0].CreatedAt = rows[0].CreatedAt.Add(time.Hour)
+		writeRigImportedRows(t, city.target, "gp", rows...)
+		stubRigScopeStore(t, rig)
+		if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "rig gp: 1 row(s), e.g. gp-aaa1.") {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+	})
+	t.Run("a rig store that cannot be read", func(t *testing.T) {
+		city, id, _, _, rows := rigged(t)
+		writeRigImportedRows(t, city.target, "gp", rows...)
+		prev := openStorageScopeStore
+		t.Cleanup(func() { openStorageScopeStore = prev })
+		openStorageScopeStore = func(string, string) (beads.Store, error) {
+			return nil, errors.New("the rig's Dolt is unreachable")
+		}
+		if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "rig gp: 3 row(s), e.g. gp-aaa1, gp-aaa2, gp-aaa3 (its store cannot be read: the rig's Dolt is unreachable).") {
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+	})
+	t.Run("a rig the config no longer names", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			cleanRecord bool
+		}{
+			// A clean record written since names the rig and is compatible.
+			{name: "named by a clean record", cleanRecord: true},
+			// Runbook step 2 moved its records aside: only its rows'
+			// stamps name it.
+			{name: "named by its rows alone"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				city, id, _, rig, rows := rigged(t)
+				if tc.cleanRecord {
+					if err := os.WriteFile(filepath.Join(city.target.Root, rigGraphCleanMarkerName("gone")), []byte("clean\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writeRigImportedRows(t, city.target, "gone", rows[0])
+				provider := &migrationWindowProvider{down: true}
+				stubMigrationWindowProvider(t, provider)
+				opened := stubRigScopeStore(t, rig)
+				if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "rig gone: 1 row(s), e.g. gp-aaa1 (its store cannot be read: the rig is not in this city's config)") {
+					t.Fatalf("exit %d: %s", code, stderr)
+				}
+				if len(*opened) != 0 || provider.starts != 0 {
+					t.Fatalf("rig stores read: %v, provider starts: %d; want none (gp holds no imported row, and no store of gone can be read)", *opened, provider.starts)
+				}
+			})
+		}
+	})
+	t.Run("a rig with no imported row", func(t *testing.T) {
+		city, id, snapshotted, rig, _ := rigged(t)
+		provider := &migrationWindowProvider{down: true}
+		stubMigrationWindowProvider(t, provider)
+		opened := stubRigScopeStore(t, rig)
+		if code, stderr := city.restore(t, id); code != 0 {
+			t.Fatalf("restore on a city whose rig imported nothing since the snapshot: exit %d: %s", code, stderr)
+		}
+		if len(*opened) != 0 || provider.starts != 0 {
+			t.Fatalf("rig stores read: %v, provider starts: %d; want none: no imported row needs the rig's store", *opened, provider.starts)
+		}
+		if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+			t.Fatalf("restored %v, want %v", got, snapshotted)
+		}
+	})
+}
+
+// TestStorageSnapshotRestoreAcceptsARetryOfAnImportedWorkflow: a rig import
+// carries the rig's workflows in flight into the binding, and the controller
+// runs them from there. After the snapshot, a transient failure of an imported
+// run makes the dispatcher mint the next attempt in the binding, cloned from
+// the imported rows. The clones are the binding's own rows, under its ids,
+// which the import did not write and no rig store or import backup holds, so
+// they carry no import stamp: the restore drops them with the binding's other
+// writes since the snapshot, reading no rig store, rather than refusing rows
+// no rollback can put back.
+func TestStorageSnapshotRestoreAcceptsARetryOfAnImportedWorkflow(t *testing.T) {
+	city := newSnapshotCity(t)
+	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
+	writeRigImportedRows(t, city.target, "gp",
+		beads.Bead{ID: "gp-root", Title: "workflow", Type: "task", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+		}},
+		beads.Bead{ID: "gp-logical", Title: "build", Type: "task", Metadata: map[string]string{
+			"gc.kind": "retry", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build",
+			"gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
+		}},
+		beads.Bead{ID: "gp-run1", Title: "build attempt 1", Type: "task", Status: "closed", Assignee: "worker-2", Labels: []string{"pool:worker"}, Metadata: map[string]string{
+			"gc.kind": "retry-run", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build.run.1",
+			"gc.logical_bead_id": "gp-logical", "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
+			"gc.outcome": "fail", "gc.failure_class": "transient", "gc.failure_reason": "rate_limited",
+		}},
+		beads.Bead{ID: "gp-eval1", Title: "build eval 1", Type: "task", Metadata: map[string]string{
+			"gc.kind": "retry-eval", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build.eval.1",
+			"gc.logical_bead_id": "gp-logical", "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
+		}},
+	)
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range [][2]string{{"gp-logical", "gp-eval1"}, {"gp-eval1", "gp-run1"}} {
+		if err := binding.DepAdd(edge[0], edge[1], "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
+		t.Fatal(stderr)
+	}
+	id, _ := onlySnapshot(t, city.to)
+	city.request.FleetStopped = true
+	snapshotted := bindingFingerprint(t, city.target)
+
+	binding, err = openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eval1, err := binding.Get("gp-eval1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := dispatch.ProcessControl(beadstest.Graph(binding), eval1, dispatch.ProcessOptions{
+		Work:           beadstest.Work(binding),
+		RecycleSession: func(beads.Bead) error { return nil },
+	})
+	if err != nil || !result.Processed || result.Action != "retry" {
+		t.Fatalf("ProcessControl(transient retry-eval) = %+v, %v; want a processed retry", result, err)
+	}
+	minted, err := binding.List(beads.ListQuery{Metadata: map[string]string{"gc.logical_bead_id": "gp-logical"}, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clones []string
+	for _, b := range minted {
+		switch b.Metadata["gc.step_ref"] {
+		case "demo.build.run.2", "demo.build.eval.2":
+			clones = append(clones, b.ID)
+			if stamp := b.Metadata[infraMigrationStampKey]; stamp != "" {
+				t.Errorf("retry clone %s carries the import stamp %q of the row it was cloned from", b.ID, stamp)
+			}
+		}
+	}
+	if len(clones) != 2 {
+		t.Fatalf("attempt 2 rows minted: %v, want the retry's run and eval", clones)
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	opened := stubRigScopeStore(t, beads.NewMemStore())
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatalf("restore after a retry of a workflow imported from gp minted %v: exit %d: %s", clones, code, stderr)
+	}
+	if len(*opened) != 0 || provider.starts != 0 {
+		t.Fatalf("rig stores read: %v, provider starts: %d; want none: every row imported from gp is in the snapshot", *opened, provider.starts)
+	}
+	if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+		t.Fatalf("restored %v, want %v", got, snapshotted)
+	}
+}
+
+// TestStorageSnapshotRestoreOverADamagedBindingWithARig: damage is what a
+// restore is often for. On a city with a rig, the content check cannot open a
+// live binding whose header is gone; the restore warns that its rig imports
+// went unchecked and restores, keeping the damaged database aside. It reads
+// no rig store, so it starts no provider.
+func TestStorageSnapshotRestoreOverADamagedBindingWithARig(t *testing.T) {
+	city, id, snapshotted := snapshottedCity(t)
+	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	opened := stubRigScopeStore(t, beads.NewMemStore())
+	damaged := mustReadFile(t, city.target.Database)
+	copy(damaged, bytes.Repeat([]byte{0xff}, 100))
+	if err := os.WriteFile(city.target.Database, damaged, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageSnapshotRestore(context.Background(), city.request, city.to, id, "restore", &stdout, &stderr); code != 0 {
+		t.Fatalf("restore over a damaged binding on a city with a rig: exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: the live binding cannot be read") || !strings.Contains(stderr.String(), "not checked against the snapshot") {
+		t.Errorf("the restore did not say the damaged binding's rig imports went unchecked: %s", stderr.String())
+	}
+	if len(*opened) != 0 || provider.starts != 0 {
+		t.Errorf("rig stores read: %v, provider starts: %d; want none", *opened, provider.starts)
+	}
+	if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+		t.Fatalf("restored %v, want %v", got, snapshotted)
+	}
+	aside, _ := filepath.Glob(city.target.Database + ".pre-restore-*")
+	if len(aside) != 1 || !bytes.Equal(mustReadFile(t, aside[0]), damaged) {
+		t.Fatalf("the damaged database is not kept aside as it was: %v", aside)
+	}
+	if !strings.Contains(stdout.String(), aside[0]) {
+		t.Errorf("the restore does not name %s, where it kept the damaged database:\n%s", aside[0], stdout.String())
+	}
+}
+
+// TestStorageSnapshotRestoreSupersedesAnUnfinishedRecopy: a re-copy that
+// stopped part way leaves infra.recopying, which holds the binding stale under
+// a remedy (the re-copy) that refuses the populated database a restore
+// installs. The installed snapshot is a whole binding, so the restore removes
+// that record, before its own: the binding converges. A restore stopped
+// between the two removals is still the one the stale binding names, and
+// running it again finishes.
+func TestStorageSnapshotRestoreSupersedesAnUnfinishedRecopy(t *testing.T) {
+	for _, killed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("killed between the removals: %v", killed), func(t *testing.T) {
+			city, id, snapshotted := snapshottedCity(t)
+			if err := writeInfraRecopyRecord(city.target, infraMigrationFromBackup); err != nil {
+				t.Fatal(err)
+			}
+			if cause := infraStaleCause(city.target); !strings.Contains(cause, "re-copy") {
+				t.Fatalf("the fixture's binding is not held stale by the re-copy: %q", cause)
+			}
+			if killed {
+				prev := storageSnapshotStep
+				t.Cleanup(func() { storageSnapshotStep = prev })
+				storageSnapshotStep = func(step string) error {
+					if step == "restore installed" {
+						return errors.New("killed")
+					}
+					return nil
+				}
+				if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "held stale until this restore finishes") {
+					t.Fatalf("exit %d: %s", code, stderr)
+				}
+				if _, err := os.Stat(city.target.RecopyRecordPath()); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("the re-copy's record outlived the install")
+				}
+				if remedy := infraStaleBindingRemedy(city.target); !strings.Contains(remedy, "gc storage snapshot restore "+id) {
+					t.Fatalf("a restore stopped past the install leaves the remedy %q, want the restore", remedy)
+				}
+				storageSnapshotStep = prev
+			}
+			if code, stderr := city.restore(t, id); code != 0 {
+				t.Fatal(stderr)
+			}
+			if state, err := readInfraConvergenceState(city.target); err != nil || state != infraConvergenceMarked {
+				t.Fatalf("after the restore the binding is %v (%v), want marked", state, err)
+			}
+			for _, record := range []string{city.target.RecopyRecordPath(), city.target.RestoreRecordPath()} {
+				if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s survived the restore", record)
+				}
+			}
+			if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+				t.Fatalf("restored %v, want %v", got, snapshotted)
+			}
+		})
+	}
+}
+
+// TestStorageSnapshotRestoreRerunKeepsTheEarlierRunsFiles: a restore stopped
+// after it moved the live database aside leaves the only record naming that
+// file. A re-run that stops before it moves anything must not lose it:
+// killed, its own record still names the file; failing, it puts the earlier
+// record back. The run that finishes names it among the files kept, and the
+// rows written since the snapshot are in it.
+func TestStorageSnapshotRestoreRerunKeepsTheEarlierRunsFiles(t *testing.T) {
+	city, id, snapshotted := snapshottedCity(t)
+	since := addBindingRows(t, city.target, 1)
+	prev := storageSnapshotStep
+	t.Cleanup(func() { storageSnapshotStep = prev })
+	storageSnapshotStep = func(step string) error {
+		if step == "restore moved beads.sqlite" {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	if code, _ := city.restore(t, id); code == 0 {
+		t.Fatal("the killed restore succeeded")
+	}
+	moved, _ := filepath.Glob(city.target.Database + ".pre-restore-*")
+	if len(moved) != 1 {
+		t.Fatalf("files aside after the first run: %v, want the database", moved)
+	}
+	first := mustReadFile(t, city.target.RestoreRecordPath())
+
+	var killedCause string
+	storageSnapshotStep = func(step string) error {
+		if step == "restore copied" {
+			killedCause = infraStaleCause(city.target)
+			return errors.New("killed")
+		}
+		return nil
+	}
+	if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "Nothing was moved") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(killedCause, "moved aside as "+moved[0]) {
+		t.Errorf("a re-run killed before its moves leaves the cause %q, which does not name %s", killedCause, moved[0])
+	}
+	if !bytes.Equal(mustReadFile(t, city.target.RestoreRecordPath()), first) {
+		t.Error("a re-run that failed before its moves did not put the earlier record back")
+	}
+	storageSnapshotStep = prev
+
+	prevTemp := snapshotRestoreCreateTemp
+	t.Cleanup(func() { snapshotRestoreCreateTemp = prevTemp })
+	snapshotRestoreCreateTemp = func(string, string) (*os.File, error) { return nil, errors.New("no space left on device") }
+	if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "Nothing was moved") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if !bytes.Equal(mustReadFile(t, city.target.RestoreRecordPath()), first) {
+		t.Error("a re-run that could not make its copy did not put the earlier record back")
+	}
+	if cause := infraStaleCause(city.target); !strings.Contains(cause, "moved aside as "+moved[0]) {
+		t.Errorf("after the failed re-run the cause is %q, which does not name %s", cause, moved[0])
+	}
+	if remedy := infraStaleBindingRemedy(city.target); !strings.Contains(remedy, "gc storage snapshot restore "+id) {
+		t.Errorf("after the failed re-run the remedy is %q, want the restore", remedy)
+	}
+	snapshotRestoreCreateTemp = prevTemp
+
+	var stdout, stderr bytes.Buffer
+	if code := doStorageSnapshotRestore(context.Background(), city.request, city.to, id, "restore", &stdout, &stderr); code != 0 {
+		t.Fatal(stderr.String())
+	}
+	if !strings.Contains(stdout.String(), moved[0]) {
+		t.Errorf("the finished restore does not name %s, the database the first run moved aside:\n%s", moved[0], stdout.String())
+	}
+	if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+		t.Fatalf("restored %v, want %v", got, snapshotted)
+	}
+	ids, err := beads.SQLiteBeadIDs(context.Background(), moved[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ids, since[0]) {
+		t.Fatalf("%s does not hold %s, the row written since the snapshot", moved[0], since[0])
+	}
+}
+
+// TestStorageSnapshotRestoreNamesAMissingSnapshot: an id with no directory in
+// --to (the binding-snapshot order's archive is not the default directory) is
+// reported as not there, with the snapshots that are, not as an interrupted
+// snapshot; a --to that does not exist says so. Verify answers the same.
+func TestStorageSnapshotRestoreNamesAMissingSnapshot(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	const absent = "20991231T235959Z"
+	if code, stderr := city.restore(t, absent); code == 0 || !strings.Contains(stderr, "there is no snapshot "+absent+" in "+city.to+", which holds "+id) || strings.Contains(stderr, "interrupted") {
+		t.Fatalf("restore of a snapshot not in --to: exit %d: %s", code, stderr)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doStorageSnapshotVerify(context.Background(), city.to, absent, "verify", &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "there is no snapshot "+absent+" in "+city.to) {
+		t.Fatalf("verify of a snapshot not in --to: exit %d: %s", code, stderr.String())
+	}
+	city.to = filepath.Join(t.TempDir(), "binding-archive")
+	if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, city.to+" does not exist") {
+		t.Fatalf("restore from a --to that does not exist: exit %d: %s", code, stderr)
 	}
 }
 
@@ -2198,110 +2712,5 @@ func TestStorageSnapshotRestoreStaleMessagesTellTheTruth(t *testing.T) {
 	}
 	if cause := infraStaleCause(city.target); !strings.Contains(cause, "the snapshot's database is installed") || strings.Contains(cause, "nothing has moved") {
 		t.Fatalf("message after the install = %q", cause)
-	}
-}
-
-// TestStorageSnapshotRestoreAcceptsARetryOfAnImportedWorkflow: a rig import
-// carries the rig's workflows in flight into the binding, and the controller
-// runs them from there. After the snapshot, a transient failure of an imported
-// run makes the dispatcher (the real dispatch.ProcessControl) mint the next
-// attempt in the binding, cloned from the imported rows. The clones are the
-// binding's own rows, which the import did not write, so they are born without
-// its stamp (clearRetryEphemera) and the restore drops them with the binding's
-// other writes since the snapshot, instead of refusing them as rows the rig
-// import left behind.
-func TestStorageSnapshotRestoreAcceptsARetryOfAnImportedWorkflow(t *testing.T) {
-	city := newSnapshotCity(t)
-	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
-	binding, err := openInfraDestination(city.target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	creator, ok := beads.As[beads.ForeignIDCreator](binding)
-	if !ok {
-		t.Fatal("the binding cannot pin an id")
-	}
-	stamp := func(meta map[string]string) map[string]string {
-		meta[infraMigrationStampKey] = rigImportStamp("gp")
-		return meta
-	}
-	for _, b := range []beads.Bead{
-		{ID: "gp-root", Title: "workflow", Type: "task", Metadata: stamp(map[string]string{
-			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
-		})},
-		{ID: "gp-logical", Title: "build", Type: "task", Metadata: stamp(map[string]string{
-			"gc.kind": "retry", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build",
-			"gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
-		})},
-		{ID: "gp-run1", Title: "build attempt 1", Type: "task", Status: "closed", Assignee: "worker-2", Labels: []string{"pool:worker"}, Metadata: stamp(map[string]string{
-			"gc.kind": "retry-run", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build.run.1",
-			"gc.logical_bead_id": "gp-logical", "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
-			"gc.outcome": "fail", "gc.failure_class": "transient", "gc.failure_reason": "rate_limited",
-		})},
-		{ID: "gp-eval1", Title: "build eval 1", Type: "task", Metadata: stamp(map[string]string{
-			"gc.kind": "retry-eval", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build.eval.1",
-			"gc.logical_bead_id": "gp-logical", "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
-		})},
-	} {
-		if _, err := creator.CreateWithForeignID(b); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, edge := range [][2]string{{"gp-logical", "gp-eval1"}, {"gp-eval1", "gp-run1"}} {
-		if err := binding.DepAdd(edge[0], edge[1], "blocks"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := closeBeadStoreHandle(binding); err != nil {
-		t.Fatal(err)
-	}
-	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
-		t.Fatal(stderr)
-	}
-	id, _ := onlySnapshot(t, city.to)
-	city.request.FleetStopped = true
-	snapshotted := bindingFingerprint(t, city.target)
-
-	binding, err = openInfraDestination(city.target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	eval1, err := binding.Get("gp-eval1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := dispatch.ProcessControl(beadstest.Graph(binding), eval1, dispatch.ProcessOptions{
-		Work:           beadstest.Work(binding),
-		RecycleSession: func(beads.Bead) error { return nil },
-	})
-	if err != nil || !result.Processed || result.Action != "retry" {
-		t.Fatalf("ProcessControl(transient retry-eval) = %+v, %v; want a processed retry", result, err)
-	}
-	minted, err := binding.List(beads.ListQuery{Metadata: map[string]string{"gc.logical_bead_id": "gp-logical"}, IncludeClosed: true, AllowScan: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var clones []string
-	for _, b := range minted {
-		switch b.Metadata["gc.step_ref"] {
-		case "demo.build.run.2", "demo.build.eval.2":
-			clones = append(clones, b.ID)
-			if stamp := b.Metadata[infraMigrationStampKey]; stamp != "" {
-				t.Errorf("retry clone %s carries the import stamp %q of the row it was cloned from", b.ID, stamp)
-			}
-		}
-	}
-	if len(clones) != 2 {
-		t.Fatalf("attempt 2 rows minted: %v, want the retry's run and eval", clones)
-	}
-	if err := closeBeadStoreHandle(binding); err != nil {
-		t.Fatal(err)
-	}
-
-	if code, stderr := city.restore(t, id); code != 0 {
-		t.Fatalf("restore after a retry of a workflow imported from gp minted %v: exit %d: %s", clones, code, stderr)
-	}
-	if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
-		t.Fatalf("restored %v, want %v", got, snapshotted)
 	}
 }
