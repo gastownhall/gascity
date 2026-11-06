@@ -252,3 +252,38 @@ func TestHookCityClaimOpsCarryTheInvocationStart(t *testing.T) {
 		t.Fatalf("ops invocation age = %s, want 3s measured on the invocation's clock", got)
 	}
 }
+
+// TestHookCityClaimOpsWithoutAStartFallBackToApplyDefaults pins the fallback the
+// entry stamp preserves: ops built without an invocation start — a plain city,
+// or a caller driving a claim tier directly — get their start stamped by
+// applyDefaults from the clock they carry, once, and a later defaulting (the
+// federated loop copies ops and defaults again) must not refresh it.
+func TestHookCityClaimOpsWithoutAStartFallBackToApplyDefaults(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := writeFenceTestCity(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	build := map[string]func() hookClaimOps{
+		"a plain city":        func() hookClaimOps { return newHookCity(cityDir, cfg).claimOps() },
+		"direct construction": func() hookClaimOps { return hookClaimOps{} },
+	}
+	for name, makeOps := range build {
+		t.Run(name, func(t *testing.T) {
+			ops := makeOps()
+			clock := time.Now()
+			ops.Now = func() time.Time { return clock }
+			ops.applyDefaults()
+			first := ops.InvokedAt
+			if !first.Equal(clock) {
+				t.Fatalf("first defaulting stamped %v, want the supplied clock's instant %v", first, clock)
+			}
+			clock = clock.Add(time.Minute)
+			ops.applyDefaults()
+			if !ops.InvokedAt.Equal(first) {
+				t.Fatalf("second defaulting moved the start to %v, want it preserved at %v", ops.InvokedAt, first)
+			}
+		})
+	}
+}
