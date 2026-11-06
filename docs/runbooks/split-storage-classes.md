@@ -1318,6 +1318,13 @@ rig import since. A rig marked clean since, and a marker that only gained its
 (`infra.rig.<rig>.migrated` and its cleared note). The binding's database is
 only half of the rollback: the rig's rows left the rig's store. To go back:
 
+> **Step 1 must come first.** Moving the rig's records aside without first
+> restoring the rig's store would make the binding restore drop the rows the
+> import carried (they are in the binding and no longer in the rig), so they
+> would end up in neither store. The restore refuses that case: it checks the
+> live binding for rows stamped as imported from a rig that the snapshot lacks,
+> and names the rig and the rows.
+
 1. Restore the rig's own Dolt store from the backup taken before the import
    (`dolt backup restore`, or `CALL DOLT_RESET('--hard', '<tag>')` where a
    snapshot tagged it).

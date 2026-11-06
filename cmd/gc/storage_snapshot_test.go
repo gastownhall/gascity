@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1685,7 +1686,7 @@ func TestStorageSnapshotRestoreSupersedesAnAbandonedRecord(t *testing.T) {
 	if state, _ := readInfraConvergenceState(city.target); state != infraConvergenceStale {
 		t.Fatalf("a binding under an unfinished restore's record is %v, want stale", state)
 	}
-	if cause := infraStaleCause(city.target); !strings.Contains(cause, "still in place") || !strings.Contains(cause, "remove "+city.target.RestoreRecordPath()) {
+	if cause := infraStaleCause(city.target); !strings.Contains(cause, "nothing has moved") || !strings.Contains(cause, "remove "+city.target.RestoreRecordPath()) {
 		t.Fatalf("stale cause = %q", cause)
 	}
 	prev := storageSnapshotStep
@@ -1892,7 +1893,7 @@ func TestStorageSnapshotNamesAnInconsistentRow(t *testing.T) {
 	}
 	_ = db.Close()
 	code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true})
-	if code == 0 || !strings.Contains(stderr, victim) || !strings.Contains(stderr, "inconsistent") {
+	if code == 0 || !strings.Contains(stderr, victim) || !strings.Contains(stderr, "inconsistent") || strings.Contains(stderr, "as )") || strings.Contains(stderr, "as ),") {
 		t.Fatalf("snapshot over an inconsistent row %s: exit %d: %s", victim, code, stderr)
 	}
 }
@@ -1927,5 +1928,212 @@ func TestSnapshotDiskPreflightCountsTheWAL(t *testing.T) {
 	}
 	if err := snapshotDiskPreflight(dir, database, "x", &stderr); err != nil {
 		t.Fatalf("without the WAL the same free space should fit: %v", err)
+	}
+}
+
+// TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind is the content
+// check behind the record check: an operator moved a rig import's records
+// aside without first restoring the rig's store. The live binding still holds
+// the rows imported from the rig (stamped rig:<R>), which the snapshot lacks;
+// restoring would leave them in neither store, so it refuses, naming the rig
+// and the rows.
+func TestStorageSnapshotRestoreRefusesRowsARigImportLeftBehind(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator, ok := beads.As[beads.ForeignIDCreator](binding)
+	if !ok {
+		t.Fatal("the binding cannot pin an id")
+	}
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: "gp-aaa1", Title: "imported from gp", Type: "task", Metadata: map[string]string{infraMigrationStampKey: rigImportStamp("gp")}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeBeadStoreHandle(binding)
+	before := mustReadFile(t, city.target.Database)
+	code, stderr := city.restore(t, id)
+	if code == 0 || !strings.Contains(stderr, "rig gp: 1 row(s), e.g. gp-aaa1") {
+		t.Fatalf("restore over rows a rig import left behind: exit %d: %s", code, stderr)
+	}
+	if !bytes.Equal(mustReadFile(t, city.target.Database), before) {
+		t.Fatal("a refused restore changed the binding")
+	}
+}
+
+// TestStorageMigrateRefusesARecopyWhileARestoreIsRecorded is R3-7: a stale
+// binding under a restore's record is the restore's to finish. A re-copy would
+// race it or copy over the database it installs, so migrate refuses, naming
+// the restore, and writes nothing.
+func TestStorageMigrateRefusesARecopyWhileARestoreIsRecorded(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	if err := writeInfraRestoreRecord(city.target, infraRestoreRecord{Snapshot: id, Database: city.target.Database, StartedAt: time.Now().UTC(), Command: snapshotRestoreInstruction(id, city.to)}); err != nil {
+		t.Fatal(err)
+	}
+	before := mustReadFile(t, city.target.Database)
+	var log bytes.Buffer
+	report := migrateInfraClasses(t, city.request.CityPath, city.request.Cfg, &log)
+	if report.Outcome == infraMigrationConverged || report.Fault == nil || !strings.Contains(report.Fault.Error(), "gc storage snapshot restore "+id) {
+		t.Fatalf("a re-copy under a restore's record: outcome %v, fault %v\n%s", report.Outcome, report.Fault, log.String())
+	}
+	if _, err := os.Stat(city.target.RecopyRecordPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the refused re-copy wrote its record")
+	}
+	if !bytes.Equal(mustReadFile(t, city.target.Database), before) {
+		t.Fatal("the refused re-copy changed the binding")
+	}
+}
+
+// TestStorageSnapshotRestoreRefusesAChangedCleanRecord is R3-3: a .clean
+// record added since is compatible, but one the snapshot recorded that has
+// changed since is not.
+func TestStorageSnapshotRestoreRefusesAChangedCleanRecord(t *testing.T) {
+	city := newSnapshotCity(t)
+	clean := filepath.Join(city.target.Root, rigGraphCleanMarkerName("quiet"))
+	if err := os.WriteFile(clean, []byte("clean\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
+		t.Fatal(stderr)
+	}
+	id, _ := onlySnapshot(t, city.to)
+	if err := os.WriteFile(clean, []byte("clean, then rewritten\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	city.request.FleetStopped = true
+	if code, stderr := city.restore(t, id); code == 0 || !strings.Contains(stderr, "binding/infra.rig.quiet.clean (changed since the snapshot)") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+}
+
+// TestStorageSnapshotRestoreFailurePathsLeaveNoRecord is R3-8 and R3-9: a
+// restore that fails creating its temp copy, or moving the live database
+// aside, has changed nothing, so it leaves no record holding the binding
+// stale.
+func TestStorageSnapshotRestoreFailurePathsLeaveNoRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		breakIt func(t *testing.T)
+	}{
+		{"temp copy", func(t *testing.T) {
+			prev := snapshotRestoreCreateTemp
+			t.Cleanup(func() { snapshotRestoreCreateTemp = prev })
+			snapshotRestoreCreateTemp = func(string, string) (*os.File, error) { return nil, errors.New("disk full") }
+		}},
+		{"first move", func(t *testing.T) {
+			prev := snapshotRestoreRename
+			t.Cleanup(func() { snapshotRestoreRename = prev })
+			snapshotRestoreRename = func(string, string) error { return errors.New("read-only filesystem") }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, id, snapshotted := snapshottedCity(t)
+			addBindingRows(t, city.target, 1)
+			before := bindingFingerprint(t, city.target)
+			tc.breakIt(t)
+			code, stderr := city.restore(t, id)
+			if code == 0 || !strings.Contains(stderr, "Nothing was moved") {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			if _, err := os.Stat(city.target.RestoreRecordPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("a restore that changed nothing left its record, holding the binding stale")
+			}
+			if state, _ := readInfraConvergenceState(city.target); state != infraConvergenceMarked {
+				t.Fatalf("the binding is %v after a restore that changed nothing, want marked", state)
+			}
+			if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(before, ",") || len(got) == len(snapshotted) {
+				t.Fatal("the binding changed")
+			}
+		})
+	}
+}
+
+// TestStorageSnapshotRestoresInOneSecondKeepEveryAsideFile: two restores in
+// the same second each keep the database they replaced, under distinct names.
+func TestStorageSnapshotRestoresInOneSecondKeepEveryAsideFile(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	at := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	prev := snapshotRestoreNow
+	t.Cleanup(func() { snapshotRestoreNow = prev })
+	snapshotRestoreNow = func() time.Time { return at }
+	first := addBindingRows(t, city.target, 1)
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	second := addBindingRows(t, city.target, 1)
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	aside, _ := filepath.Glob(city.target.Database + ".pre-restore-*")
+	sort.Strings(aside)
+	if len(aside) != 2 {
+		t.Fatalf("aside files = %v, want one per restore", aside)
+	}
+	for i, want := range [][]string{first, second} {
+		ids, err := beads.SQLiteBeadIDs(context.Background(), aside[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(ids, want[0]) {
+			t.Errorf("%s does not hold %s, the row only its restore replaced", aside[i], want[0])
+		}
+	}
+}
+
+// TestStorageSnapshotRefusesWhileARestoreIsRecorded: a snapshot during a
+// restore would copy a binding mid-replacement, and its retention could
+// remove the snapshot the restore reads.
+func TestStorageSnapshotRefusesWhileARestoreIsRecorded(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	if err := writeInfraRestoreRecord(city.target, infraRestoreRecord{Snapshot: id, Database: city.target.Database, StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true, Keep: 1}); code == 0 || !strings.Contains(stderr, "a restore of the binding is in flight") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if dirs := snapshotDirs(t, city.to); len(dirs) != 1 || dirs[0] != id {
+		t.Fatalf("snapshots = %v, want the restore's %s untouched", dirs, id)
+	}
+}
+
+// TestStorageSnapshotRestoreStaleMessagesTellTheTruth covers the three crash
+// points' messages: nothing moved, moved aside (naming the files, for someone
+// abandoning it), and installed with only the record left.
+func TestStorageSnapshotRestoreStaleMessagesTellTheTruth(t *testing.T) {
+	city, id, _ := snapshottedCity(t)
+	prev := storageSnapshotStep
+	t.Cleanup(func() { storageSnapshotStep = prev })
+	var moved string
+	storageSnapshotStep = func(step string) error {
+		if step == "restore moved beads.sqlite" {
+			moved = infraStaleCause(city.target)
+			return errors.New("killed")
+		}
+		return nil
+	}
+	if code, _ := city.restore(t, id); code == 0 {
+		t.Fatal("the killed restore succeeded")
+	}
+	if !strings.Contains(moved, "moved aside as") || !strings.Contains(moved, ".pre-restore-") || !strings.Contains(moved, "move those files back") {
+		t.Fatalf("message after the first move = %q", moved)
+	}
+	storageSnapshotStep = prev
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatal(stderr)
+	}
+	// Installed, with only the record left: put a record back by hand, as a
+	// crash between the install and the record's removal leaves it.
+	rec := infraRestoreRecord{Snapshot: id, Database: city.target.Database, StartedAt: time.Now().UTC()}
+	aside, _ := filepath.Glob(city.target.Database + ".pre-restore-*")
+	if len(aside) == 0 {
+		t.Fatal("no aside file")
+	}
+	rec.AsideSuffix = aside[0][len(city.target.Database):]
+	if err := writeInfraRestoreRecord(city.target, rec); err != nil {
+		t.Fatal(err)
+	}
+	if cause := infraStaleCause(city.target); !strings.Contains(cause, "the snapshot's database is installed") || strings.Contains(cause, "nothing has moved") {
+		t.Fatalf("message after the install = %q", cause)
 	}
 }

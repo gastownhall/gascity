@@ -9,7 +9,10 @@ package main
 // restore puts back only the database, so it refuses unless those records are
 // compatible with the ones the snapshot recorded (snapshotRecordsCompatible):
 // restoring a database from before a rig import, under the import's records,
-// would leave the rig's rows nowhere. It refuses a snapshot of another work
+// would leave the rig's rows nowhere. Records moved aside by hand do not get
+// past it either: rows the live binding holds stamped as imported from a rig,
+// which the snapshot lacks, refuse too (snapshotRigImportsLost). It refuses a
+// snapshot of another work
 // store too, judged as boot judges a marker (workStoreIdentityMismatch).
 //
 // Under the controller lock, the migration guard and the snapshot directory's
@@ -31,7 +34,8 @@ package main
 //     floor, the snapshot's and the live database's high-water, so no id the
 //     replaced database held is minted again, a wrapped range included;
 //  6. moves the live database, then its -wal, -shm and -journal, aside as
-//     *.pre-restore-<ts>, and renames the copy into place;
+//     *.pre-restore-<ts> (numbered when a restore of the same second used
+//     that name), and renames the copy into place;
 //  7. removes infra.restoring.
 //
 // A refusal before step 6 changes nothing (the copy and the record go). Once
@@ -69,9 +73,18 @@ type infraRestoreRecord struct {
 	To        string    `json:"to"`
 	Database  string    `json:"database"`
 	StartedAt time.Time `json:"started_at"`
+	// AsideSuffix is what the files it moves aside are renamed with.
+	AsideSuffix string `json:"aside_suffix"`
 	// Command finishes the restore.
 	Command string `json:"command"`
 }
+
+// Test seams for the restore's failure paths, and its clock.
+var (
+	snapshotRestoreRename     = os.Rename
+	snapshotRestoreCreateTemp = os.CreateTemp
+	snapshotRestoreNow        = time.Now
+)
 
 // readInfraRestoreRecord reads infra.restoring. present=false with no error
 // means no restore is under way.
@@ -125,7 +138,9 @@ func snapshotRestoreInstruction(id, to string) string {
 }
 
 // infraRestoreStaleCause says what an unfinished restore has done, for a
-// stale binding's message; ok=false when none is recorded.
+// stale binding's message; ok=false when none is recorded. It tells the three
+// crash points apart: nothing moved yet, the live database moved aside, and
+// the snapshot's database installed with only the record left.
 func infraRestoreStaleCause(target infraBindingTarget) (string, bool) {
 	rec, present, err := readInfraRestoreRecord(target)
 	switch {
@@ -134,10 +149,21 @@ func infraRestoreStaleCause(target infraBindingTarget) (string, bool) {
 	case err != nil:
 		return fmt.Sprintf("a restore of %s is under way and its record cannot be read (%v)", target.Database, err), true
 	}
-	if present, _ := infraPathExists(target.Database); present {
-		return fmt.Sprintf("a restore of snapshot %s into %s began at %s and has not finished; the database it would replace is still in place. Re-run the restore, or remove %s to keep that database", rec.Snapshot, target.Database, rec.StartedAt.Format(time.RFC3339), target.RestoreRecordPath()), true
+	began := fmt.Sprintf("a restore of snapshot %s into %s began at %s and has not finished", rec.Snapshot, target.Database, rec.StartedAt.Format(time.RFC3339))
+	var aside []string
+	if rec.AsideSuffix != "" {
+		aside, _ = filepath.Glob(target.Database + "*" + rec.AsideSuffix)
 	}
-	return fmt.Sprintf("a restore of snapshot %s into %s began at %s and has not finished; the database it replaces is moved aside", rec.Snapshot, target.Database, rec.StartedAt.Format(time.RFC3339)), true
+	dbPresent, _ := infraPathExists(target.Database)
+	switch {
+	case dbPresent && len(aside) == 0:
+		return began + fmt.Sprintf("; nothing has moved, so the database in place is the one it would replace. Re-run the restore, or remove %s to keep that database", target.RestoreRecordPath()), true
+	case dbPresent:
+		return began + fmt.Sprintf("; the snapshot's database is installed and the one it replaced is kept as %s, but the restore stopped before it removed its record. Re-run the restore to finish", strings.Join(aside, ", ")), true
+	case len(aside) > 0:
+		return began + fmt.Sprintf("; the database it replaces is moved aside as %s, and the snapshot's is not yet in place. Re-run the restore to finish; to abandon it instead, move those files back to %s and remove %s", strings.Join(aside, ", "), target.Database, target.RestoreRecordPath()), true
+	}
+	return began + "; the database it replaces is gone and the snapshot's is not in place. Re-run the restore to finish", true
 }
 
 // infraStaleBindingRemedy is the command that repairs a stale binding: the
@@ -268,11 +294,11 @@ func doStorageSnapshotRestore(ctx context.Context, request storageOperatorReques
 	if err != nil {
 		return fail(fmt.Errorf("snapshot %s does not verify, so nothing was restored: %w", id, err))
 	}
-	file, err := snapshotRestorable(m, request, target)
+	file, err := snapshotRestorable(m, dir, request, target)
 	if err != nil {
 		return fail(fmt.Errorf("snapshot %s cannot be restored here, so nothing was restored: %w", id, err))
 	}
-	rec := infraRestoreRecord{Snapshot: id, To: to, Database: target.Database, StartedAt: time.Now().UTC(), Command: snapshotRestoreInstruction(id, to)}
+	rec := infraRestoreRecord{Snapshot: id, To: to, Database: target.Database, StartedAt: snapshotRestoreNow().UTC(), Command: snapshotRestoreInstruction(id, to)}
 	aside, err := installSnapshotBinding(ctx, target, filepath.Join(dir, file.Path), file.SHA256, m.Binding.SequenceFloor, rec)
 	if err != nil {
 		if len(aside) == 0 {
@@ -291,7 +317,7 @@ func doStorageSnapshotRestore(ctx context.Context, request storageOperatorReques
 // snapshotRestorable is the binding copy of m, refused when m is of another
 // work store, or when the binding's records are no longer compatible with
 // the ones m recorded.
-func snapshotRestorable(m snapshotManifest, request storageOperatorRequest, target infraBindingTarget) (snapshotFile, error) {
+func snapshotRestorable(m snapshotManifest, snapshotDir string, request storageOperatorRequest, target infraBindingTarget) (snapshotFile, error) {
 	var file *snapshotFile
 	for _, rec := range m.Stores {
 		if rec.Name == "binding" && rec.Exact.Method == snapshotMethodVacuumInto {
@@ -319,7 +345,77 @@ func snapshotRestorable(m snapshotManifest, request storageOperatorRequest, targ
 	if diff := snapshotRecordsCompatible(m.Binding.Records, records.Records); len(diff) > 0 {
 		return snapshotFile{}, fmt.Errorf("the binding's records have changed since it was taken: %s. A restore puts back only the database, so it would serve rows those records no longer describe (a rig import since the snapshot would leave that rig's rows in neither store). Restore a snapshot taken since, or roll the change back first (the runbook's \"Restoring the binding\" names the steps)", strings.Join(diff, "; "))
 	}
+	if lost, err := snapshotRigImportsLost(target, filepath.Join(snapshotDir, file.Path), snapshotRigNames(request, m.Binding.Records, records.Records)); err != nil {
+		return snapshotFile{}, err
+	} else if len(lost) > 0 {
+		return snapshotFile{}, fmt.Errorf("the binding holds rows imported from rigs since the snapshot, which the snapshot lacks: %s. Restoring it would leave those rows in neither store; restore each rig's own store from before its import first (the runbook's \"Rolling back past a rig import\"), then run this again", strings.Join(lost, "; "))
+	}
 	return *file, nil
+}
+
+// snapshotRigNames is every rig a restore must check for imported rows: the
+// configured rigs and every rig a record names, then or now (a rig's records
+// moved aside still leave its rows stamped in the binding).
+func snapshotRigNames(request storageOperatorRequest, recorded, current []snapshotRecord) []string {
+	seen := map[string]bool{}
+	for _, rig := range request.Cfg.Rigs {
+		seen[rig.Name] = true
+	}
+	for _, records := range [][]snapshotRecord{recorded, current} {
+		for _, r := range records {
+			name := strings.TrimPrefix(r.Name, "binding/infra.rig.")
+			if name == r.Name {
+				continue
+			}
+			if dot := strings.LastIndex(name, "."); dot > 0 {
+				seen[name[:dot]] = true
+			}
+		}
+	}
+	return sortedMapKeys(seen)
+}
+
+// snapshotRigImportsLost names, per rig, rows the live binding holds stamped
+// as imported from it (gc.infra_migrated_from=rig:<R>) that the snapshot's
+// copy lacks: rows a restore would leave in neither store, because the import
+// cleared them from the rig. It is the content check behind the record check,
+// for records moved aside by hand. A live database that is gone (a restore
+// killed mid-move) cannot be read and is not checked; the run that moved it
+// was checked.
+func snapshotRigImportsLost(target infraBindingTarget, copyPath string, rigs []string) ([]string, error) {
+	if present, err := infraPathExists(target.Database); err != nil || !present || len(rigs) == 0 {
+		return nil, err
+	}
+	ids, err := beads.SQLiteBeadIDs(context.Background(), copyPath)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		held[id] = true
+	}
+	live, err := openInfraBindingReadOnly(target)
+	if err != nil {
+		return nil, fmt.Errorf("opening the live binding to check its rig imports: %w", err)
+	}
+	defer closeBeadStoreHandle(live) //nolint:errcheck // read-only
+	var out []string
+	for _, rig := range rigs {
+		rows, err := live.List(beads.ListQuery{Metadata: map[string]string{infraMigrationStampKey: rigImportStamp(rig)}, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+		if err != nil {
+			return nil, fmt.Errorf("listing the live binding's rows imported from rig %s: %w", rig, err)
+		}
+		var missing []string
+		for _, b := range rows {
+			if !held[b.ID] {
+				missing = append(missing, b.ID)
+			}
+		}
+		if len(missing) > 0 {
+			out = append(out, fmt.Sprintf("rig %s: %d row(s), e.g. %s", rig, len(missing), infraStrandedIDList(missing)))
+		}
+	}
+	return out, nil
 }
 
 // snapshotRecordsCompatible is diffSnapshotRecords less the changes a restore
@@ -349,6 +445,7 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 	if err := quiesceSnapshotRestoreTarget(ctx, database); err != nil {
 		return nil, err
 	}
+	rec.AsideSuffix = snapshotAsideSuffix(database, rec.StartedAt)
 	if err := writeInfraRestoreRecord(target, rec); err != nil {
 		return nil, err
 	}
@@ -358,7 +455,7 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 			_ = os.Remove(p)
 		}
 	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(database)+".restore-*")
+	tmp, err := snapshotRestoreCreateTemp(dir, filepath.Base(database)+".restore-*")
 	if err != nil {
 		return nil, errors.Join(err, os.Remove(target.RestoreRecordPath()))
 	}
@@ -401,13 +498,13 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 	if _, err := beads.RaiseSQLiteSequenceFloorPast(target.Dir, prefix, []int64{floor}, database); err != nil {
 		return failCopy(fmt.Errorf("raising the binding's id floor: %w", err))
 	}
-	suffix := ".pre-restore-" + rec.StartedAt.Format("20060102T150405Z")
+	suffix := rec.AsideSuffix
 	var aside []string
 	for _, p := range []string{database, database + "-wal", database + "-shm", database + "-journal"} {
 		if _, err := os.Lstat(p); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err := os.Rename(p, p+suffix); err != nil {
+		if err := snapshotRestoreRename(p, p+suffix); err != nil {
 			if len(aside) == 0 {
 				return failCopy(fmt.Errorf("moving %s aside: %w", p, err))
 			}
@@ -427,6 +524,26 @@ func installSnapshotBinding(ctx context.Context, target infraBindingTarget, src,
 	}
 	syncInfraDir(target.Root)
 	return aside, nil
+}
+
+// snapshotAsideSuffix is the suffix a restore renames the files it replaces
+// with: .pre-restore-<ts>, numbered when an earlier restore of the same second
+// already used it, so no restore's kept files are overwritten.
+func snapshotAsideSuffix(database string, at time.Time) string {
+	base := ".pre-restore-" + at.UTC().Format("20060102T150405Z")
+	suffix := base
+	for n := 2; ; n++ {
+		taken := false
+		for _, p := range []string{database, database + "-wal", database + "-shm", database + "-journal"} {
+			if _, err := os.Lstat(p + suffix); err == nil {
+				taken = true
+			}
+		}
+		if !taken {
+			return suffix
+		}
+		suffix = fmt.Sprintf("%s-%d", base, n)
+	}
 }
 
 // quiesceSnapshotRestoreTarget folds the live database's WAL into it, so a

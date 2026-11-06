@@ -416,6 +416,11 @@ func snapshotInFlightRefusal(target infraBindingTarget) error {
 	if present {
 		return fmt.Errorf("a re-copy of the binding is in flight (%s); a snapshot of it would hold a partial copy. Finish it first", target.RecopyRecordPath())
 	}
+	// A restore under way reads a snapshot from a directory this snapshot's
+	// retention could prune, and its binding is mid-replacement.
+	if rec, restoring, _ := readInfraRestoreRecord(target); restoring {
+		return fmt.Errorf("a restore of the binding is in flight (%s, snapshot %s); a snapshot now would copy a binding mid-replacement, and its retention could remove the snapshot the restore needs. Finish the restore first", target.RestoreRecordPath(), rec.Snapshot)
+	}
 	inFlight, err := filepath.Glob(filepath.Join(target.Root, rigGraphInFlightName("*")))
 	if err != nil {
 		return err
@@ -541,7 +546,11 @@ func snapshotPageConsistency(page []string, rows []beads.Bead) error {
 	}
 	missing := sortedMapKeys(want)
 	sort.Strings(foreign)
-	return fmt.Errorf("the binding is inconsistent: row(s) %s are stored under an id their bead does not carry (it reads back as %s), so no JSONL can record them faithfully. Repair those rows, then snapshot again", strings.Join(missing, ", "), strings.Join(foreign, ", "))
+	readBack := "no row reads back under it"
+	if len(foreign) > 0 {
+		readBack = "the page read back as " + strings.Join(foreign, ", ")
+	}
+	return fmt.Errorf("the binding is inconsistent: row(s) %s are stored under an id their bead does not carry (%s), so no JSONL can record them faithfully. Repair those rows, then snapshot again", strings.Join(missing, ", "), readBack)
 }
 
 // snapshotScope snapshots the city's work store or one rig's: the exact copy
