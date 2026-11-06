@@ -4927,6 +4927,12 @@ Submit a user message to a session without choosing provider transport details.
 The runtime decides whether to wake, inject immediately, or queue the message
 according to the selected semantic intent.
 
+When the conversation lane delivers messages (message listed in [ops]
+authoritative), default already waits for the session's boundary, after the
+running turn, which is what follow_up asks for, so the lane records follow_up
+as the default request. interrupt_now interrupts the running turn and then
+delivers the message.
+
 ```
 gc session submit <id-or-alias> <message...> [flags]
 ```
