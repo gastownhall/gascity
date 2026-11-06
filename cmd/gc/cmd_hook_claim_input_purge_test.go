@@ -646,3 +646,87 @@ func TestDoHookClaimServesWhenPurgeUnproved(t *testing.T) {
 		t.Errorf("claimed = %q, want %q: an unproved purge must serve the candidate (stdout=%q stderr=%q)", claimedID, step.ID, stdout.String(), stderr.String())
 	}
 }
+
+// A resolved input is the every-day case: the probe holds no evidence, so
+// the frame — the complete read set the proof needs — never opens. Only a
+// candidate with evidence worth proving pays for it (#8729).
+func TestWorkflowInputPurgedOpensNoFrameWhenInputResolves(t *testing.T) {
+	store, root, _ := seedDoneWorkflow(t, "open") // member present: resolved
+	framesOpened := 0
+	openFrame := func() (inputPurgeFrame, error) {
+		framesOpened++
+		return inputPurgeFrameForReaders(beads.HandlesFor(store).Live), nil
+	}
+
+	if _, err := workflowInputPurgedAcross(beads.HandlesFor(store), beads.HandlesFor(store), root, openFrame); err != nil {
+		t.Fatalf("workflowInputPurgedAcross: %v", err)
+	}
+	plain, err := store.Create(beads.Bead{Title: "unlinked work"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := workflowInputPurgedAcross(beads.HandlesFor(store), beads.HandlesFor(store), plain, openFrame); err != nil {
+		t.Fatalf("workflowInputPurgedAcross(plain): %v", err)
+	}
+	if framesOpened != 0 {
+		t.Fatalf("frame opened %d time(s) for resolved inputs, want 0", framesOpened)
+	}
+
+	if err := store.Delete(root.Metadata[beadmeta.InputConvoyIDMetadataKey]); err != nil {
+		t.Fatalf("purge convoy: %v", err)
+	}
+	verdict, err := workflowInputPurgedAcross(beads.HandlesFor(store), beads.HandlesFor(store), root, openFrame)
+	if err != nil {
+		t.Fatalf("workflowInputPurgedAcross(purged): %v", err)
+	}
+	if !verdict.Purged || framesOpened != 1 {
+		t.Fatalf("verdict = %+v with %d frame(s), want purged over exactly one frame", verdict, framesOpened)
+	}
+}
+
+// A done input stays the skip path's decision, never the purge probe's: the
+// candidate is retired as skipped, and the probe is not even consulted.
+func TestDoHookClaimSkipsDoneInputWithoutConsultingThePurgeProbe(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "closed") // member terminal: done
+	output, err := json.Marshal([]beads.Bead{step})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return string(output), nil },
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			t.Fatalf("unexpected claim of %s: a done input skips", beadID)
+			return beads.Bead{}, false, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
+			return workflowInputDone(store, candidate, ids)
+		},
+		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+			return skipDoneWorkflow(store, rootID)
+		},
+		InputPurged: func(_ context.Context, _ string, _ []string, _ beads.Bead) (hookInputPurgeVerdict, error) {
+			t.Fatal("InputPurged consulted for a done input; the skip decision is unchanged")
+			return hookInputPurgeVerdict{}, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"rig/worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	got, err := store.Get(step.ID)
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped {
+		t.Errorf("step = %s/%s, want closed as skipped (stdout=%q stderr=%q)", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], stdout.String(), stderr.String())
+	}
+	if root.ID != step.Metadata[beadmeta.RootBeadIDMetadataKey] {
+		t.Fatalf("seed shape changed: step %s not under root %s", step.ID, root.ID)
+	}
+}
