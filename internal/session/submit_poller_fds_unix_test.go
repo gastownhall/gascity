@@ -1,0 +1,36 @@
+//go:build unix
+
+package session
+
+import (
+	"os"
+	"syscall"
+	"testing"
+)
+
+// Kills: the submit poller spawn site handing its detached child a descriptor
+// the caller holds open without close-on-exec, which would pin the caller's
+// flock until the poller exits. The behavior of the scrub itself is pinned in
+// internal/nudgepoller; this pins that the spawn site applies it.
+func TestSessionSubmitPollerCommandClosesInheritedFDs(t *testing.T) {
+	// A duplicate of a lock file's descriptor without close-on-exec, the shape
+	// a shell caller leaves behind with `exec 9>lock; flock 9`.
+	f, err := os.CreateTemp(t.TempDir(), "held-*.lock")
+	if err != nil {
+		t.Fatalf("creating lock file: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	planted, err := syscall.Dup(int(f.Fd()))
+	if err != nil {
+		t.Fatalf("dup lock file: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(planted) })
+
+	cmd, err := newSessionSubmitPollerCommand("/bin/gc", []string{"PATH=/usr/bin"}, "/city", "worker", "coordinator")
+	if err != nil {
+		t.Fatalf("newSessionSubmitPollerCommand: %v", err)
+	}
+	if slot := planted - 3; slot >= len(cmd.ExtraFiles) || cmd.ExtraFiles[slot] != nil {
+		t.Fatalf("ExtraFiles (len %d) does not close planted fd %d in the child", len(cmd.ExtraFiles), planted)
+	}
+}
