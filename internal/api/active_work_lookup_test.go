@@ -476,3 +476,53 @@ func TestListActiveWorkLookupPreservesPrecedence(t *testing.T) {
 		}
 	})
 }
+
+// TestAgentListActiveWorkPartialNotCached: an agent list whose active-work
+// lookup failed is partial, so the response cache does not keep it; once the
+// store recovers, the next request rebuilds the rows. The graph-store
+// fallback still names a row's active bead while the work store is down.
+func TestAgentListActiveWorkPartialNotCached(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	t.Run("work store", func(t *testing.T) {
+		state := newFakeState(t)
+		work := &faultyActiveWorkStore{Store: beads.NewMemStore(), err: errors.New("bd list: timed out")}
+		state.stores["myrig"] = work
+		want := addActiveWork(t, work.Store, "myrig/worker")
+		h := newTestCityHandlerWith(t, state, New(state))
+
+		degraded, _ := getActiveWorkList(t, h, httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+		if !degraded.Partial || degraded.activeBeadOf(t, "myrig/worker") != "" {
+			t.Fatalf("first list = %+v, want partial with no active bead", degraded)
+		}
+		work.healthy.Store(true)
+		recovered, _ := getActiveWorkList(t, h, httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+		if recovered.Partial || recovered.activeBeadOf(t, "myrig/worker") != want {
+			t.Fatalf("list after recovery = %+v, want rebuilt with active bead %q", recovered, want)
+		}
+	})
+	t.Run("graph fallback", func(t *testing.T) {
+		st := bdDogState(t)
+		city := &faultyActiveWorkStore{Store: beads.NewMemStore(), err: errors.New("bd list: timed out")}
+		st.cityBeadStore = city
+		graph := beads.NewMemStore()
+		st.graphBeadStore = graph
+		wisp := seedGraphWisp(t, graph, "bd__dog", "917c4dd26bd772e2463919029a889e0e")
+		h := newTestCityHandlerWith(t, st, New(st))
+
+		degraded, _ := getActiveWorkList(t, h, httptest.NewRequest("GET", cityURL(st, "/agents"), nil))
+		if got := degraded.activeBeadOf(t, "bd.dog"); got != wisp {
+			t.Errorf("active_bead = %q, want graph bead %q while the work store is down", got, wisp)
+		}
+		if !degraded.Partial || !degraded.hasActiveWorkError(st.cityName) {
+			t.Errorf("partial = %v, partial_errors = %q; want partial naming the active-work read of %s", degraded.Partial, degraded.PartialErrors, st.cityName)
+		}
+		city.healthy.Store(true)
+		recovered, _ := getActiveWorkList(t, h, httptest.NewRequest("GET", cityURL(st, "/agents"), nil))
+		if recovered.Partial {
+			t.Errorf("list after recovery partial_errors = %q, want a rebuilt complete list", recovered.PartialErrors)
+		}
+	})
+}
