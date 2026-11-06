@@ -158,6 +158,178 @@ func perBeadWorkDirConfig() runtime.Config {
 
 const perBeadPodWorkDir = "/workspace/rigs/testrig/tr-abc-slug"
 
+func TestBuildPod_UsesRestrictedSecurityWithoutPinningIdentity(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	pod, err := buildPod("test-session", perBeadWorkDirConfig(), p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+
+	podSecurity := pod.Spec.SecurityContext
+	if podSecurity == nil {
+		t.Fatal("pod securityContext is nil")
+	}
+	if podSecurity.RunAsNonRoot == nil || !*podSecurity.RunAsNonRoot {
+		t.Errorf("pod RunAsNonRoot = %v, want true", podSecurity.RunAsNonRoot)
+	}
+	if podSecurity.RunAsUser != nil || podSecurity.RunAsGroup != nil || podSecurity.FSGroup != nil {
+		t.Errorf("pod identity is pinned by default: runAsUser=%v runAsGroup=%v fsGroup=%v", podSecurity.RunAsUser, podSecurity.RunAsGroup, podSecurity.FSGroup)
+	}
+	if podSecurity.SeccompProfile == nil || podSecurity.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod seccompProfile = %v, want RuntimeDefault", podSecurity.SeccompProfile)
+	}
+
+	assertRestrictedContainer := func(name string, security *corev1.SecurityContext) {
+		t.Helper()
+		if security == nil {
+			t.Fatalf("%s securityContext is nil", name)
+		}
+		if security.RunAsNonRoot == nil || !*security.RunAsNonRoot {
+			t.Errorf("%s RunAsNonRoot = %v, want true", name, security.RunAsNonRoot)
+		}
+		if security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation {
+			t.Errorf("%s AllowPrivilegeEscalation = %v, want false", name, security.AllowPrivilegeEscalation)
+		}
+		if security.Capabilities == nil || len(security.Capabilities.Drop) != 1 || security.Capabilities.Drop[0] != corev1.Capability("ALL") {
+			t.Errorf("%s capabilities = %v, want drop ALL", name, security.Capabilities)
+		}
+		if security.RunAsUser != nil || security.RunAsGroup != nil {
+			t.Errorf("%s pins container identity: runAsUser=%v runAsGroup=%v", name, security.RunAsUser, security.RunAsGroup)
+		}
+	}
+	assertRestrictedContainer("agent", pod.Spec.Containers[0].SecurityContext)
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("len(InitContainers) = %d, want 1", len(pod.Spec.InitContainers))
+	}
+	assertRestrictedContainer("stage", pod.Spec.InitContainers[0].SecurityContext)
+}
+
+func TestBuildPod_AppliesOptionalPodIdentityConfiguration(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	runAsUser, runAsGroup, fsGroup := int64(12345), int64(2000), int64(1001)
+	p.podSecurity = PodSecurityConfig{
+		RunAsUser:  &runAsUser,
+		RunAsGroup: &runAsGroup,
+		FSGroup:    &fsGroup,
+	}
+
+	pod, err := buildPod("test-session", perBeadWorkDirConfig(), p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	security := pod.Spec.SecurityContext
+	if security == nil {
+		t.Fatal("pod securityContext is nil")
+	}
+	if security.RunAsUser == nil || *security.RunAsUser != runAsUser {
+		t.Errorf("pod RunAsUser = %v, want %d", security.RunAsUser, runAsUser)
+	}
+	if security.RunAsGroup == nil || *security.RunAsGroup != runAsGroup {
+		t.Errorf("pod RunAsGroup = %v, want %d", security.RunAsGroup, runAsGroup)
+	}
+	if security.FSGroup == nil || *security.FSGroup != fsGroup {
+		t.Errorf("pod FSGroup = %v, want %d", security.FSGroup, fsGroup)
+	}
+	if len(security.SupplementalGroups) != 1 || security.SupplementalGroups[0] != 0 {
+		t.Errorf("pod SupplementalGroups = %v, want [0] while preserving primary GID %d", security.SupplementalGroups, runAsGroup)
+	}
+	if strings.Contains(strings.Join(pod.Spec.Containers[0].Args, " "), "chown") {
+		t.Error("normal non-legacy pod entrypoint contains runtime chown")
+	}
+}
+
+func TestBuildPod_LinuxUsernameRejectsConfiguredPodIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured PodSecurityConfig
+	}{
+		{name: "run_as_user", configured: PodSecurityConfig{RunAsUser: int64Ptr(12345)}},
+		{name: "run_as_group", configured: PodSecurityConfig{RunAsGroup: int64Ptr(2000)}},
+		{name: "fs_group", configured: PodSecurityConfig{FSGroup: int64Ptr(1001)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newProviderWithOps(newFakeK8sOps())
+			p.podSecurity = tc.configured
+			cfg := perBeadWorkDirConfig()
+			cfg.Env["LINUX_USERNAME"] = "developer"
+
+			if _, err := buildPod("test-session", cfg, p); err == nil ||
+				!strings.Contains(err.Error(), "LINUX_USERNAME") ||
+				!strings.Contains(err.Error(), "pod identity") {
+				t.Fatalf("buildPod error = %v, want identity conflict", err)
+			}
+		})
+	}
+}
+
+func TestBuildPod_LinuxUsernameRejectsEnvironmentPodIdentityOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   string
+		value string
+	}{
+		{name: "run_as_user", env: "GC_K8S_RUN_AS_USER", value: "12345"},
+		{name: "run_as_group", env: "GC_K8S_RUN_AS_GROUP", value: "2000"},
+		{name: "fs_group", env: "GC_K8S_FS_GROUP", value: "1001"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearSchedulingEnv(t)
+			t.Setenv(tc.env, tc.value)
+			podIdentity, err := resolvePodSecurityConfig(PodSecurityConfig{})
+			if err != nil {
+				t.Fatalf("resolvePodSecurityConfig: %v", err)
+			}
+			p := newProviderWithOps(newFakeK8sOps())
+			p.podSecurity = podIdentity
+			cfg := perBeadWorkDirConfig()
+			cfg.Env["LINUX_USERNAME"] = "developer"
+
+			if _, err := buildPod("test-session", cfg, p); err == nil ||
+				!strings.Contains(err.Error(), "LINUX_USERNAME") ||
+				!strings.Contains(err.Error(), "pod identity") {
+				t.Fatalf("buildPod error = %v, want identity conflict", err)
+			}
+		})
+	}
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
+}
+
+func TestBuildPod_LinuxUsernameKeepsLegacyRootSetup(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+	cfg := perBeadWorkDirConfig()
+	cfg.Env["LINUX_USERNAME"] = "developer"
+
+	pod, err := buildPod("test-session", cfg, p)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	security := pod.Spec.Containers[0].SecurityContext
+	if security == nil || security.RunAsUser == nil || *security.RunAsUser != 0 {
+		t.Fatalf("legacy Linux username securityContext = %v, want runAsUser 0", security)
+	}
+	args := strings.Join(pod.Spec.Containers[0].Args, " ")
+	for _, want := range []string{"useradd", "/etc/sudoers.d/", "chown -R"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("legacy Linux username startup is missing %q: %s", want, args)
+		}
+	}
+	startupTokens := shellquote.Split(pod.Spec.Containers[0].Args[0])
+	hasSuInvocation := false
+	for i := 0; i+3 < len(startupTokens); i++ {
+		if startupTokens[i] == "su" && startupTokens[i+1] == "-" &&
+			startupTokens[i+2] == "developer" && startupTokens[i+3] == "-c" {
+			hasSuInvocation = true
+			break
+		}
+	}
+	if !hasSuInvocation {
+		t.Errorf("legacy Linux username startup is missing su - developer -c invocation: %v", startupTokens)
+	}
+}
+
 // TestBuildPod_WorkingDirIsAlwaysAnExistingPath pins that the pod spec never
 // names a directory that may not exist yet. The kubelet chdirs into the
 // container's WorkingDir before the entrypoint runs, so a per-bead WorkingDir
