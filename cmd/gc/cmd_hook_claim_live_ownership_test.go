@@ -968,3 +968,79 @@ func TestClassRoutedWorkflowMembersFollowRootResidence(t *testing.T) {
 		}
 	})
 }
+
+// TestHookClaimLiveOwnershipUnavailable pins the fail-open trade: the member
+// read is one more pre-claim read on every routed root, and a store that
+// cannot answer it must not idle the seat — the same trade the stop gate
+// makes. The unavailability is named on stderr, and the claim attempt
+// proceeds exactly as before.
+func TestHookClaimLiveOwnershipUnavailable(t *testing.T) {
+	claimDirectly := func(t *testing.T, ops hookClaimOps, candidate beads.Bead) (hookClaimResult, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		res := claimFirstEligibleHookCandidate([]beads.Bead{candidate}, hookClaimOptions{
+			Assignee:           "worker-1",
+			IdentityCandidates: []string{"worker-1"},
+			RouteTargets:       []string{"worker"},
+		}, ops, "/work", &stdout, &stderr)
+		return res, stderr.String()
+	}
+
+	t.Run("a missing seam proceeds with the claim", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		f.step(root.ID, "in_progress", "seat-x", nil)
+		ops := f.ops()
+		ops.ListWorkflowMembers = nil
+
+		res, stderr := claimDirectly(t, ops, root)
+
+		if !res.terminal || res.code != 0 {
+			t.Fatalf("tier result = terminal:%v code:%d, want the root claim delivered; stderr=%s", res.terminal, res.code, stderr)
+		}
+		if len(f.claims) != 1 || f.claims[0] != root.ID {
+			t.Fatalf("claims = %v, want the claim attempt to proceed on %s exactly as before", f.claims, root.ID)
+		}
+		if !strings.Contains(stderr, "foreign workflow hold check unavailable for "+root.ID) {
+			t.Fatalf("stderr=%q, want the unavailability named for %s", stderr, root.ID)
+		}
+	})
+
+	t.Run("a failing member read proceeds with the claim", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		f.step(root.ID, "in_progress", "seat-x", nil)
+		ops := f.ops()
+		ops.ListWorkflowMembers = func(context.Context, string, []string, string) ([]beads.Bead, error) {
+			return nil, errors.New("member read timed out")
+		}
+
+		res, stderr := claimDirectly(t, ops, root)
+
+		if !res.terminal || res.code != 0 {
+			t.Fatalf("tier result = terminal:%v code:%d, want the root claim delivered; stderr=%s", res.terminal, res.code, stderr)
+		}
+		if len(f.claims) != 1 || f.claims[0] != root.ID {
+			t.Fatalf("claims = %v, want the claim attempt to proceed on %s exactly as before", f.claims, root.ID)
+		}
+		if !strings.Contains(stderr, "foreign workflow hold check unavailable for "+root.ID) || !strings.Contains(stderr, "member read timed out") {
+			t.Fatalf("stderr=%q, want the unavailability and its reason named", stderr)
+		}
+	})
+
+	t.Run("a non-root candidate never pays the read", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		live := f.task("plain work")
+		ops := f.ops()
+		ops.ListWorkflowMembers = nil // scope precedes the seam check
+
+		res, stderr := claimDirectly(t, ops, live)
+
+		if !res.terminal || res.code != 0 || len(f.claims) != 1 || f.claims[0] != live.ID {
+			t.Fatalf("tier result = terminal:%v code:%d claims=%v, want the plain claim delivered; stderr=%s", res.terminal, res.code, f.claims, stderr)
+		}
+		if strings.Contains(stderr, "foreign workflow hold check unavailable") {
+			t.Fatalf("stderr=%q: an out-of-scope candidate must short-circuit before the seam is ever read", stderr)
+		}
+	})
+}
