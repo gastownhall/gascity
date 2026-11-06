@@ -436,7 +436,7 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *act
 			// clone so cancellation reaches the backend where it can.
 			matches, err := statusListStoreWithTimeout(lookup.ctx, s.state, stores[rn], query)
 			if err != nil {
-				lookup.fail(err)
+				lookup.fail(rn, err)
 				return ""
 			}
 			if len(matches) > 0 {

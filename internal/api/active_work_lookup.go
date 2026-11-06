@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"log"
 )
 
 // activeWorkLookup is the request-wide read budget a list response's
@@ -25,10 +27,15 @@ func newActiveWorkLookup(requestCtx context.Context) *activeWorkLookup {
 	return &activeWorkLookup{ctx: ctx, cancel: cancel}
 }
 
-// fail records the lookup's first read failure; later uncached reads are
-// not initiated once the shared deadline has passed.
-func (l *activeWorkLookup) fail(err error) {
-	l.err = err
+// fail records the lookup's first read failure, naming the rig the failed
+// read reached, and logs that failure once. A request's later rows see the
+// failure through errors() instead of re-reading.
+func (l *activeWorkLookup) fail(rig string, err error) {
+	if l.err != nil {
+		return
+	}
+	l.err = fmt.Errorf("looking up active work in rig %q: %w", rig, err)
+	log.Printf("api: %v", l.err)
 }
 
 // errors returns the recorded read failures for the response's

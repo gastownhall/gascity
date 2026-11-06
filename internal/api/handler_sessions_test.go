@@ -9441,3 +9441,62 @@ func TestActiveWorkLookupCancelsScopedStoreAndPreservesPriority(t *testing.T) {
 		}
 	})
 }
+
+// TestActiveWorkLookupFailureIsNamedLoggedOnceAndKeepsAggregationErrors: the
+// recorded active-work failure names the lookup and the rig it failed on, is
+// logged once per request however many rows follow, and reaches the response
+// alongside — not instead of — the aggregation errors the list already
+// collected.
+func TestActiveWorkLookupFailureIsNamedLoggedOnceAndKeepsAggregationErrors(t *testing.T) {
+	t.Run("error names the rig and is logged once", func(t *testing.T) {
+		fs := twoRigActiveWorkState(t,
+			activeBeadErrStore{Store: beads.NewMemStore(), err: errors.New("store a is down")},
+			&listCountingStore{Store: beads.NewMemStore()})
+		srv := New(fs)
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		var logs bytes.Buffer
+		t.Cleanup(captureLog(t, &logs))
+		for range 3 {
+			srv.findActiveBeadForAssigneesWithFreshness("", lookup, "session-id")
+		}
+		errs := lookup.errors()
+		if len(errs) != 1 {
+			t.Fatalf("errors = %q, want exactly the first failure", errs)
+		}
+		if !strings.Contains(errs[0], `looking up active work in rig "a"`) || !strings.Contains(errs[0], "store a is down") {
+			t.Fatalf("error = %q, want it to name the active-work lookup and rig a with the cause", errs[0])
+		}
+		if n := strings.Count(logs.String(), "looking up active work in rig"); n != 1 {
+			t.Fatalf("failure logged %d times over 3 rows, want 1; log:\n%s", n, logs.String())
+		}
+	})
+
+	t.Run("agents list keeps the aggregation error and names the lookup failure", func(t *testing.T) {
+		state := onDemandPoolState(t)
+		state.sp = runtime.NewFailFake()
+		state.stores["myrig"] = activeBeadErrStore{Store: beads.NewMemStore(), err: errors.New("work store is down")}
+
+		resp := getAgentList(t, state, "")
+
+		if !resp.Partial {
+			t.Fatal("partial = false, want true")
+		}
+		var agg, work bool
+		for _, msg := range resp.PartialErrors {
+			if strings.Contains(msg, "myrig/claude") {
+				agg = true
+			}
+			if strings.Contains(msg, `looking up active work in rig "myrig"`) {
+				work = true
+			}
+		}
+		if !agg {
+			t.Fatalf("partial_errors = %q, want the retained pool-listing aggregation error", resp.PartialErrors)
+		}
+		if !work {
+			t.Fatalf("partial_errors = %q, want an entry naming the failed active-work lookup on myrig", resp.PartialErrors)
+		}
+	})
+}
