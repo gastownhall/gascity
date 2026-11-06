@@ -322,6 +322,13 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, nil); err != nil {
+		if errors.Is(err, ErrPendingInteraction) {
+			// The interrupted session raised a dialog instead of settling
+			// (its program's own record says so, under program_status
+			// "on"): no more keys, no restart, and the message waits behind
+			// the dialog, as a refusal at the send below would.
+			return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, false, err)
+		}
 		if mode == runtime.TurnInterruptProtocol {
 			// A protocol runtime's Stop may leave it running, so a restart
 			// would interrupt nothing and nudge the message into the turn.
@@ -489,8 +496,10 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 			return waitForIdle(15 * time.Second)
 		}
 		waited := waitForIdle(softInterruptFallbackWait)
-		if waited == nil {
-			return nil
+		if waited == nil || errors.Is(waited, ErrPendingInteraction) {
+			// A wait that ended on a dialog the interrupted session raised
+			// sends no fallback interrupt: the key would land in the dialog.
+			return waited
 		}
 		if err := followUp("interrupting session with control-c fallback", waited); err != nil {
 			return err

@@ -79,6 +79,7 @@ type ProfileBackend interface {
 	SessionBindingProvider
 	SessionObjectKiller
 	SessionRosterProvider
+	StartupNudgeHandbackProvider
 	TurnEventProvider
 	TurnFenceProvider
 	TurnObservationProvider
@@ -127,6 +128,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 			ServerLifecycleProvider:       b,
 			SessionObjectKiller:           b,
 			SessionRosterProvider:         b,
+			StartupNudgeHandbackProvider:  b,
 			TurnRunningProvider:           b,
 			UnattendedSessionStopper:      b,
 			sleepTrait:                    sleepTrait{SessionSleepCapabilityFull},
@@ -241,6 +243,7 @@ type (
 		ServerLifecycleProvider
 		SessionObjectKiller
 		SessionRosterProvider
+		StartupNudgeHandbackProvider
 		TurnRunningProvider
 		UnattendedSessionStopper
 		sleepTrait

@@ -12,7 +12,31 @@ var (
 
 	_ ProgramStatusShadowProvider = FullFake{}
 	_ ProgramStatusHoldProvider   = FullFake{}
+
+	_ StartupNudgeHandbackProvider = FullFake{}
 )
+
+// SetStartupNudgeHandback sets the startup nudge a FullFake hands back for
+// session name ([Fake.StartupNudgeHandbacks]) under the fake's lock.
+func (f *Fake) SetStartupNudgeHandback(name, nudge string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.StartupNudgeHandbacks == nil {
+		f.StartupNudgeHandbacks = map[string]string{}
+	}
+	f.StartupNudgeHandbacks[name] = nudge
+}
+
+// TakeStartupNudgeHandback implements [StartupNudgeHandbackProvider]: name's
+// handed-back startup nudge ([Fake.StartupNudgeHandbacks]), once. It records
+// no call: a start's caller takes it after every Start.
+func (f FullFake) TakeStartupNudgeHandback(name string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	nudge, ok := f.StartupNudgeHandbacks[name]
+	delete(f.StartupNudgeHandbacks, name)
+	return nudge, ok
+}
 
 // SetProgramHold marks session name's agent-pane row as declaring the
 // mid-turn hold, or not ([ProgramPaneRow.HoldDeclared]), under the fake's

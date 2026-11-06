@@ -135,6 +135,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Start types into the incarnation it creates, never under a caller's
 	// input fence (FI9).
 	ctx = withoutInputFence(ctx)
+	p.tm.handbacks.set(name, "")
 	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
@@ -303,6 +304,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// neither confirmed delivery nor the durable evidence that suppression
 	// is predicated on.
 	// Like Start, never under a caller's input fence (FI9).
+	p.tm.handbacks.set(name, "")
 	if err := doRelaunchSession(withoutInputFence(ctx), p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
@@ -348,6 +350,8 @@ func (p *Provider) Interrupt(name string) error {
 func (p *Provider) interrupt(ctx context.Context, name string) error {
 	if p.tm.shadowing() {
 		p.tm.shadowNoteInterrupt(name)
+	} else {
+		p.tm.noteProgramInterrupt(name)
 	}
 	if p.tm.isClaudeTarget(name) {
 		handled, err := p.tm.cancelClaudeApproval(ctx, name)
@@ -1688,6 +1692,29 @@ func (o *tmuxStartOps) shadowStartupLadder(name string, send func() error, busy 
 	return o.tm.shadowStartupLadder(name, send, busy)
 }
 
+// startupLadderDecider is the start ops' seam for the startup ladder's
+// decisions under the program-status switch on (Tmux.programStartupLadder),
+// and for the nudge a ladder the program's record held back through hands
+// back to the start's caller; ops that do not implement it decide with the
+// scan alone.
+type startupLadderDecider interface {
+	programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error))
+	handBackStartupNudge(name, nudge string)
+}
+
+// programStartupLadder wraps send and busy to decide with the program's
+// record under the switch on (Tmux.programStartupLadder). Off on, both are
+// returned as they are.
+func (o *tmuxStartOps) programStartupLadder(name string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	return o.tm.programStartupLadder(name, send, busy)
+}
+
+// handBackStartupNudge keeps nudge for the start's caller to take
+// (Provider.TakeStartupNudgeHandback).
+func (o *tmuxStartOps) handBackStartupNudge(name, nudge string) {
+	o.tm.handbacks.set(name, nudge)
+}
+
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 	return o.tm.HasSession(name)
 }
@@ -2304,6 +2331,10 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		if sh, ok := ops.(startupLadderShadower); ok {
 			send, busy = sh.shadowStartupLadder(name, send, busy)
 		}
+		decider, decides := ops.(startupLadderDecider)
+		if decides {
+			send, busy = decider.programStartupLadder(name, send, busy)
+		}
 		if err := sendStartupNudgeWithRetry(ctx,
 			send,
 			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
@@ -2330,7 +2361,17 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// startup turn started from an argv prompt can outlast the
 			// ladder. That is a warning too, with no claim of delivery. Any
 			// other error still fails the start.
+			// A nudge the program's own record held back through the whole
+			// ladder (errStartupNudgeBlocked, switch on only: a dialog the
+			// nudge would answer) was not typed. It is a warning too, never a
+			// start failure (design §10.2 row A20), and the nudge is handed
+			// back for the start's caller to queue behind the dialog.
 			switch {
+			case errors.Is(err, errStartupNudgeBlocked):
+				fmt.Fprintf(os.Stderr, "warning: startup nudge to %q not delivered: %v\n", name, err)
+				if decides {
+					decider.handBackStartupNudge(name, cfg.Nudge)
+				}
 			case errors.Is(err, runtime.ErrSessionBusy), errors.Is(err, errNudgeSubmitHeld):
 				fmt.Fprintf(os.Stderr, "warning: startup nudge to %q not delivered: a running turn held its submit back: %v\n", name, err)
 			case errors.Is(err, ErrNudgeSubmitUnconfirmed), errors.Is(err, ErrNudgeSubmitDeliveredUnobserved):
@@ -2453,7 +2494,7 @@ func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep fun
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = send()
-		if err == nil || (!errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, runtime.ErrSessionBusy)) {
+		if err == nil || (!errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, runtime.ErrSessionBusy) && !errors.Is(err, errStartupNudgeBlocked)) {
 			return err
 		}
 		if attempt >= len(startupNudgeRetryBackoffs) {

@@ -45,6 +45,7 @@ go_library(
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
+        "startup_nudge_handback.go",
         "steer.go",
         "tmux_activity.go",
         "tmux_agent_pane.go",
