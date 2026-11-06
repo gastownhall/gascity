@@ -369,6 +369,16 @@ used: the test binary panics at init, naming the directory to remove.
   it, or the repos that child creates lose the guard, and a child that is a
   test binary installs a template of its own in its temp dir.
   `internal/git`'s `SanitizedEnv` and `HermeticEnv` keep it.
+- Go-native runs (the Makefile's `TEST_ENV` and the shard runners) also
+  point `GIT_CONFIG_GLOBAL` at a seed that sets `maintenance.auto = false`
+  and `gc.auto = 0` (`scripts/test-gitconfig-path`), which every git process
+  that keeps the variable reads, whatever repo it works in. Bazel runs have
+  no seed and rely on the template alone.
+- A script that rebuilds git's environment, pinning `GIT_CONFIG_GLOBAL` and
+  unsetting the other `GIT_*` variables, gets neither guard. It must pass
+  `-c maintenance.auto=false -c gc.auto=0` on its own git calls, as
+  `.github/actions/rbe-worker/fetch.sh` does through its `git()` wrapper
+  (`TestRBEWorkerFetchScriptInvariants`).
 - A testscript subcommand (the test binary re-invoked as `gc` or `bd`) is not
   seeded; the testscript owns that env.
 - To check that a test path spawns no auto-maintenance (for humans working
