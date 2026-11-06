@@ -917,6 +917,169 @@ func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
 	}
 }
 
+// toggleErrStore fails its List reads while fail is set, so a test can
+// degrade and then recover the work store between two requests.
+type toggleErrStore struct {
+	beads.Store
+	fail bool
+}
+
+func (s *toggleErrStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.fail {
+		return nil, errors.New("work store is down")
+	}
+	return s.Store.List(query)
+}
+
+// TestAgentListActiveWorkPartialNotCached: an agents list degraded by a
+// failed active-work read is never stored in the response cache, so the
+// next request after the backend recovers rebuilds active work instead of
+// serving the degraded body. A concurrent aggregation error keeps the
+// response partial without suppressing the rebuild, and the graph-work
+// fallback still fills rows while the work-store lookup fails.
+func TestAgentListActiveWorkPartialNotCached(t *testing.T) {
+	// One wide time bucket keeps both requests of a case in the same cache
+	// slot, so a stored degraded body would deterministically be served; no
+	// parallel tests while the bucket width is pinned.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	defer func() { timeBucketResponseCacheTTL = oldTTL }()
+
+	fetch := func(t *testing.T, h http.Handler, state *fakeState) agentListWire {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /agents status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		var resp agentListWire
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode /agents: %v", err)
+		}
+		return resp
+	}
+	namesWorkFailure := func(resp agentListWire) (workErr bool, msgs string) {
+		for _, msg := range resp.PartialErrors {
+			if strings.Contains(msg, `looking up active work in rig "myrig"`) {
+				workErr = true
+			}
+		}
+		return workErr, strings.Join(resp.PartialErrors, "; ")
+	}
+
+	t.Run("degraded body is not served after recovery", func(t *testing.T) {
+		state := newFakeState(t)
+		sessionName := "myrig--worker"
+		if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", sessionName, err)
+		}
+		if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", "mc-session"); err != nil {
+			t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+		}
+		store := &toggleErrStore{Store: beads.NewMemStore(), fail: true}
+		state.stores["myrig"] = store
+		srv := New(state)
+		h := newTestCityHandlerWith(t, state, srv)
+
+		first := fetch(t, h, state)
+		if !first.Partial {
+			t.Fatal("first response partial = false, want true while the work store is down")
+		}
+		if workErr, msgs := namesWorkFailure(first); !workErr || len(first.PartialErrors) != 1 {
+			t.Fatalf("first partial_errors = [%s], want only the named work-store failure", msgs)
+		}
+		if got := first.Items[0].ActiveBead; got != "" {
+			t.Fatalf("first response active_bead = %q, want empty", got)
+		}
+
+		store.fail = false
+		work := addActiveWork(t, store.Store, "mc-session")
+
+		// Same server and same time bucket: only a stored degraded body
+		// could answer this stale.
+		second := fetch(t, h, state)
+		if second.Partial {
+			t.Fatalf("second response partial = true with errors [%s], want a clean rebuild", strings.Join(second.PartialErrors, "; "))
+		}
+		if got := second.Items[0].ActiveBead; got != work {
+			t.Fatalf("second response active_bead = %q, want rebuilt %q", got, work)
+		}
+	})
+
+	t.Run("aggregation error keeps the response partial without blocking the rebuild", func(t *testing.T) {
+		state := onDemandPoolState(t)
+		state.sp = runtime.NewFailFake()
+		store := &toggleErrStore{Store: beads.NewMemStore(), fail: true}
+		state.stores["myrig"] = store
+		srv := New(state)
+		h := newTestCityHandlerWith(t, state, srv)
+
+		first := fetch(t, h, state)
+		if !first.Partial {
+			t.Fatal("first response partial = false, want true")
+		}
+		var agg bool
+		var workErr bool
+		for _, msg := range first.PartialErrors {
+			if strings.Contains(msg, "myrig/claude") {
+				agg = true
+			}
+			if strings.Contains(msg, `looking up active work in rig "myrig"`) {
+				workErr = true
+			}
+		}
+		if !agg || !workErr {
+			t.Fatalf("first partial_errors = %q, want the pool aggregation error and the work-store failure", first.PartialErrors)
+		}
+
+		store.fail = false
+		work := addActiveWork(t, store.Store, "myrig--worker")
+
+		second := fetch(t, h, state)
+		if !second.Partial {
+			t.Fatal("second response partial = false, want the aggregation error to persist")
+		}
+		if len(second.PartialErrors) != 1 || !strings.Contains(second.PartialErrors[0], "myrig/claude") {
+			t.Fatalf("second partial_errors = %q, want only the retained aggregation error", second.PartialErrors)
+		}
+		for _, it := range second.Items {
+			if it.ActiveBead == work {
+				return
+			}
+		}
+		t.Fatalf("no row rebuilt active_bead = %q after recovery; items: %+v", work, second.Items)
+	})
+
+	t.Run("graph-work fallback fills rows while the work-store lookup fails", func(t *testing.T) {
+		st := bdDogState(t)
+		graph := beads.NewMemStore()
+		st.graphBeadStore = graph
+		beadID := seedGraphWisp(t, graph, "bd__dog", "917c4dd26bd772e2463919029a889e0e")
+		st.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/tmp/myrig"}}
+		st.stores["myrig"] = &toggleErrStore{Store: beads.NewMemStore(), fail: true}
+		srv := New(st)
+		h := newTestCityHandlerWith(t, st, srv)
+
+		resp := fetch(t, h, st)
+		if !resp.Partial {
+			t.Fatal("partial = false, want the failed work-store read reported")
+		}
+		if workErr, msgs := namesWorkFailure(resp); !workErr {
+			t.Fatalf("partial_errors = [%s], want the work-store failure named", msgs)
+		}
+		for _, it := range resp.Items {
+			if it.Name != "bd.dog" {
+				continue
+			}
+			if it.ActiveBead != beadID {
+				t.Fatalf("bd.dog active_bead = %q, want graph work %q despite the failed work-store lookup", it.ActiveBead, beadID)
+			}
+			return
+		}
+		t.Fatalf("bd.dog row missing from /agents (%d items)", len(resp.Items))
+	})
+}
+
 func TestAgentGetActiveBeadUsesLiveLookup(t *testing.T) {
 	state := newFakeState(t)
 	sessionName := "myrig--worker"
