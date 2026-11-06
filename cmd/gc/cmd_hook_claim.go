@@ -1378,7 +1378,10 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 // left exactly as it is — routed, for the next poll — and never closed: the
 // hold lifts when its members change hands or settle.
 func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
-	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) != beadmeta.KindWorkflow {
+	// Scoped to exactly the latch the pool hands out whole: an unstamped
+	// workflow root with no workflow above it. Every other candidate leaves
+	// here without a store read.
+	if !workflowRunTargetFallbackEligible(candidate) || hookClaimWorkflowLinked(candidate) {
 		return false
 	}
 	members, err := ops.listWorkflowMembers(ctx, dir, opts.Env, candidate.ID)
