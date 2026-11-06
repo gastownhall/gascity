@@ -46,6 +46,15 @@ const (
 	// the pack an idle boundary (WaitForIdle, the ready-prompt publication and
 	// the idle-proof budget) and full idle sleep; without it those three alone
 	// report timed-only sleep, because nothing else proves the box runs tmux.
+	//
+	// The name states the guarantee gc relies on (it may read the agent's idle
+	// boundary), not the mechanism, so it keeps its meaning once carriers other
+	// than tmux exist. When a pack can select its carrier (gh#8903), this
+	// definition widens from
+	// "tmux in the box" to "the carrier the pack declares can answer a Peek",
+	// and RPP-CONN-002 checks the declared carrier's liveness and read; tmux's
+	// check stays the one it runs today. A non-tmux carrier reuses this token
+	// rather than adding one.
 	ProtocolCapabilityIdleBoundary = "idle-boundary"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from

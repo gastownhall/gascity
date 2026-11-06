@@ -286,7 +286,7 @@ wait-idle nudge is queued instead of delivered at the boundary, and
 `interrupt_now` and stopping a turn get no idle wait. Non-interactive sleep,
 attachment and `exec` are unchanged. gc no longer reads the first three as
 proof that the box runs tmux, because a runtime without tmux declares them
-too.
+too. `gc runtime check` warns about a script in this state.
 
 The `is-attached` rule above applies to every runtime that declares
 `report-attachment`, even without the other capabilities. gc runs the op
