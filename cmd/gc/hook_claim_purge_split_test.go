@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // These rows pin the retirement half of the purge arm of `gc hook --claim`
@@ -29,7 +30,7 @@ func purgeSplitOps(t *testing.T, f doneWorkflowSplitFixture) hookClaimOps {
 	t.Helper()
 	base := f.baseOps(t)
 	base.InputVerdict = func(_ context.Context, _ string, _ []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
-		return workflowInputDoneAcross(f.work, f.work, candidate, identityCandidates)
+		return workflowInputDoneAcross(f.work, beadstest.Work(f.work), candidate, identityCandidates)
 	}
 	base.InputPurged = proveOver(purgeFrameOverWork(t, f.work))
 	base.RetirePurgedWorkflow = func(ctx context.Context, _ string, _ []string, rootID string) error {

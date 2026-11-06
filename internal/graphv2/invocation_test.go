@@ -1324,7 +1324,7 @@ func TestCreateSingleItemInputConvoyRecordsTargetIndependentlyOfTrackingEdge(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := CreateSingleItemInputConvoy(mem, target)
+	created, err := CreateSingleItemInputConvoy(beadstest.Work(mem), target)
 	if err != nil {
 		t.Fatalf("CreateSingleItemInputConvoy: %v", err)
 	}

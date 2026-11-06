@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -83,7 +84,7 @@ func seedSyntheticInputWorkflow(t *testing.T, store beads.Store) (target, conv, 
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
-	conv, err = graphv2.CreateSingleItemInputConvoy(store, target)
+	conv, err = graphv2.CreateSingleItemInputConvoy(beadstest.Work(store), target)
 	if err != nil {
 		t.Fatalf("pour input convoy: %v", err)
 	}
@@ -114,7 +115,7 @@ func purgeClaimOps(t *testing.T, store beads.Store, inputPurged hookInputPurgedF
 			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress"}, true, nil
 		},
 		InputVerdict: func(_ context.Context, _ string, _ []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
-			return workflowInputDoneAcross(store, store, candidate, identityCandidates)
+			return workflowInputDoneAcross(store, beadstest.Work(store), candidate, identityCandidates)
 		},
 		InputPurged: inputPurged,
 		RetirePurgedWorkflow: func(ctx context.Context, _ string, _ []string, rootID string) error {
@@ -590,7 +591,7 @@ func TestWorkflowInputVerdictPurgedWhenConvoyProvenAbsent(t *testing.T) {
 	frame := purgeFrameOverWork(t, store)
 
 	for _, candidate := range []beads.Bead{root, open, stamped} {
-		verdict, err := workflowInputDoneAcross(store, store, candidate, nil)
+		verdict, err := workflowInputDoneAcross(store, beadstest.Work(store), candidate, nil)
 		if err != nil {
 			t.Fatalf("workflowInputDoneAcross(%s): %v", candidate.ID, err)
 		}
@@ -723,7 +724,7 @@ func TestDoHookClaimRetiresWorkflowWhoseInputIsPurged(t *testing.T) {
 // nothing, says why, and serves the step.
 func TestDoHookClaimServesWorkflowWhoseOrdinaryInputConvoyLostItsTrackedWork(t *testing.T) {
 	store, root, step := seedDoneWorkflow(t, "open")
-	members, err := convoy.Members(store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
 	if err != nil || len(members) != 1 {
 		t.Fatalf("members = %v, %v; want one", members, err)
 	}

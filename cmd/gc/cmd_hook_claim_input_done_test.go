@@ -90,7 +90,7 @@ func TestWorkflowInputDoneDetectsTerminalConvoyMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create stamped step: %v", err)
 	}
-	rootID, done, err = workflowInputDone(store, stamped, nil)
+	rootID, done, err = workflowInputDone(beadstest.Work(store), stamped, nil)
 	if err != nil {
 		t.Fatalf("workflowInputDone(stamped step): %v", err)
 	}

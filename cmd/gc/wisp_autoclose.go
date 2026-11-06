@@ -94,6 +94,8 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	if graphStore == nil {
 		graphStore = store
 	}
+	// graphStore may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	graphMolecule := beads.GraphMolecule(beads.GraphStore{Store: graphStore})
 	parent, err := beads.HandlesFor(store).Live.Get(beadID)
 	// An open parent's attachments are its live work, finished or not: a
 	// spurious bead.closed (a false scan close, a replay) must not close them.
@@ -113,7 +115,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	for _, a := range located {
 		seen[a.Bead.ID] = true
 	}
-	inputRoots, discoverErr := collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)
+	inputRoots, discoverErr := collectInputConvoyWorkflowRoots(store, graphStore, graphMolecule, parent, seen)
 	run.note(discoverErr)
 	inputOf := make(map[string]inputConvoyRoot, len(inputRoots))
 	for _, input := range inputRoots {
@@ -181,8 +183,7 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	if !sourceworkflow.IsWorkflowRoot(parent) {
 		return run
 	}
-	// graphStore may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
-	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(beads.GraphMolecule(beads.GraphStore{Store: graphStore}), parent.ID, "")
+	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphMolecule, parent.ID, "")
 	if err != nil || closed == 0 {
 		return run
 	}
@@ -237,8 +238,9 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // inputConvoyWorkflowIdle holds, so an orchestrated workflow whose step beads
 // are still in flight stays open and closes later via its workflow-finalize
 // control instead. A failed read is returned with whatever was found: the
-// caller reports it so the run is retried.
-func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) ([]inputConvoyRoot, error) {
+// caller reports it so the run is retried. graphMolecule is graphStore as the
+// molecule target a root's subtree is read through.
+func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, graphMolecule beads.MoleculeTarget, parent beads.Bead, seen map[string]bool) ([]inputConvoyRoot, error) {
 	// The tracks edge is co-resident with the tracking convoy, and the two
 	// owning candidates differ on a split city: every convoy is WORK class
 	// (coordclass), minted co-resident with the issue it tracks, so a
@@ -247,7 +249,8 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 	// side. TrackingConvoysForItem is single-store by contract, so probe both.
 	// On a single-store city graphStore == workStore and this collapses to
 	// the pre-split single read.
-	workConvoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: workStore}, parent.ID)
+	work := beads.WorkStore{Store: workStore}
+	workConvoys, err := convoycore.TrackingConvoysForItem(work, parent.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -255,15 +258,18 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 	for _, c := range workConvoys {
 		convoys = append(convoys, trackingConvoy{bead: c})
 	}
+	var graphLeg beads.WorkStore
 	if graphStore != workStore {
 		// The graph leg of the two-store probe above: a miss here is
 		// covered by the work leg.
+		// graphStore is a federated leg, not the work class: the convoys a
+		// graph store may hold, and their members, are read through it here
+		// (typed-store T7).
+		graphLeg = beads.WorkStore{Store: graphStore}
 		var graphConvoys []beads.Bead
 		gerr := beads.FederatedRead(func() error {
 			var listErr error
-			// graphStore is a federated leg, not the work class: the convoys a
-			// graph store may hold are read through it here (typed-store T7).
-			graphConvoys, listErr = convoycore.TrackingConvoysForItem(beads.WorkStore{Store: graphStore}, parent.ID)
+			graphConvoys, listErr = convoycore.TrackingConvoysForItem(graphLeg, parent.ID)
 			return listErr
 		})
 		if gerr != nil {
@@ -299,15 +305,15 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 		}
 		// The members are read with the convoy's own store owning its edges
 		// and the just-closed bead's store as the member class.
-		classes := convoycore.MemberClasses{Convoy: workStore, Work: []beads.Store{workStore}} // residency:allow — constructor input to convoycore.MemberClasses
+		classes := convoycore.MemberClasses{Convoy: work, Work: []beads.WorkStore{work}}
 		if convoy.onGraph {
-			classes.Convoy = graphStore
+			classes.Convoy = graphLeg
 		}
 		convoyID := convoy.bead.ID
 		reads := inputWorkflowReads{
 			root:    beads.HandlesFor(graphStore).Live.Get,
 			members: func() ([]beads.Bead, error) { return convoycore.MembersIn(classes, convoyID, true) },
-			subtree: func(rootID string) ([]beads.Bead, error) { return molecule.ListSubtree(graphStore, rootID) },
+			subtree: func(rootID string) ([]beads.Bead, error) { return molecule.ListSubtree(graphMolecule, rootID) },
 		}
 		for _, root := range matches {
 			if seen[root.ID] {
