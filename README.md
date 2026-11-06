@@ -48,17 +48,21 @@ If you use Oh My Zsh, its `git` plugin aliases `gc` to `git commit`; run
 **2. Give Dolt your identity.** Gas City stores work in
 [beads](https://github.com/gastownhall/beads), which keeps its data in Dolt,
 and Dolt needs an author. This is required: `gc init` stops with "startup is
-blocked by Dolt author identity" without it. Run this before step 3; it copies
-your git identity into Dolt only where Dolt has none:
+blocked by Dolt author identity" without it.
+
+Git needs an identity first: the commands below copy it, and step 4 commits
+with it. If `git config --global user.name` or `git config --global user.email`
+prints nothing, set it with `git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email.
+
+Then run this before step 3. It copies your git identity into Dolt wherever
+Dolt's name or email is missing or empty:
 
 ```bash
-dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
-dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+[ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+[ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
 ```
-
-If git has no identity either, set one first with
-`git config --global user.name "Your Name"` and
-`git config --global user.email "you@example.com"`.
 
 **3. Create a city.** A city is a directory that holds your Gas City
 configuration. The defaults are the recommended setup.
@@ -95,6 +99,11 @@ agent reads the task, does it, and closes it.
 ```bash
 gc sling hello-world/claude "Create hello.sh that prints hello world and commit it" --on mol-do-work
 ```
+
+The target is the rig, then the provider. If you chose `codex` or `gemini` in
+step 3, sling to `hello-world/codex` or `hello-world/gemini`. If you added your
+own repository in step 4, put the rig name `gc rig add` printed (the
+directory's name) in place of `hello-world`.
 
 `gc sling` prints a `Dashboard:` link to the formula run, for example:
 

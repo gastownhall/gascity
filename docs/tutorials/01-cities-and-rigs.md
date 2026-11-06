@@ -25,12 +25,18 @@ $ gc version
 ```
 
 Gas City stores work in Dolt, which needs an author identity before a city can
-start. This copies your git identity into Dolt only where Dolt has none:
+start. Git needs an identity first: the commands below copy it, and you commit
+with git when you add a rig. If `git config --global user.name` or
+`git config --global user.email` prints nothing, set it with
+`git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email. Then copy your git identity into Dolt wherever Dolt's name or email is
+missing or empty:
 
 ```shell
 ~
-$ dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
-$ dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+$ [ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+$ [ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
 ```
 
 <Tip>
@@ -299,8 +305,9 @@ Rigs in /Users/you/my-city:
 ## Slinging your first work
 
 You assign work to agents by "slinging" it. Target the rig-scoped agent
-explicitly to keep the work on this rig; hop into the rig directory to inspect
-the results:
+explicitly to keep the work on this rig: `my-project/claude` here, or
+`my-project/codex` or `my-project/gemini` if you chose that provider. Hop into
+the rig directory to inspect the results:
 
 ```shell
 ~/my-city

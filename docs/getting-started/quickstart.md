@@ -23,17 +23,21 @@ See [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hide
 ## 1. Give Dolt your identity
 
 Gas City stores work as beads in Dolt, and Dolt needs an author. `gc init`
-stops with "startup is blocked by Dolt author identity" without one. This
-copies your git identity into Dolt only where Dolt has none:
+stops with "startup is blocked by Dolt author identity" without one.
+
+Git needs an identity first: the commands below copy it, and step 3 commits
+with it. If `git config --global user.name` or `git config --global user.email`
+prints nothing, set it with `git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email.
+
+Then copy your git identity into Dolt wherever Dolt's name or email is missing
+or empty:
 
 ```bash
-dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
-dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+[ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+[ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
 ```
-
-If git has no identity either, set one first with
-`git config --global user.name "Your Name"` and
-`git config --global user.email "you@example.com"`.
 
 ## 2. Create a City
 
@@ -73,6 +77,9 @@ database, hook installation, and routing context.
 ```bash
 gc sling hello-world/claude "Create hello.sh that prints hello world and commit it" --on mol-do-work
 ```
+
+The target is the rig, then the provider: if you chose `codex` or `gemini` in
+step 2, sling to `hello-world/codex` or `hello-world/gemini`.
 
 `gc sling` creates a bead for the task and runs the `mol-do-work` formula on
 it: one agent reads the task, does it, and closes it. It prints a `Dashboard:`

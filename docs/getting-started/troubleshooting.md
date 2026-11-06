@@ -12,18 +12,21 @@ match the final `FATAL:` line to the likely cause and resolution.
 ## Startup is blocked by Dolt author identity
 
 `gc init` and `gc start` stop with "startup is blocked by Dolt author identity"
-when Dolt has no author name or email. Copy your git identity into Dolt, then
-run `gc start` in the city:
+when Dolt's author name or email is missing or empty. The fix copies your git
+identity, so git needs one first: if `git config --global user.name` or
+`git config --global user.email` prints nothing, set it with
+`git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email.
+
+Then copy your git identity into Dolt wherever Dolt's name or email is missing
+or empty, and run `gc start` in the city:
 
 ```bash
-dolt config --global --get user.name  || dolt config --global --add user.name  "$(git config --global user.name)"
-dolt config --global --get user.email || dolt config --global --add user.email "$(git config --global user.email)"
+[ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+[ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
 gc start
 ```
-
-If git has no identity either, set one first with
-`git config --global user.name "Your Name"` and
-`git config --global user.email "you@example.com"`.
 
 ## A new city is still setting up
 
