@@ -7,13 +7,11 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/gastownhall/gascity/internal/session"
 )
 
-// hookCurrentSessionFrontDoor is the session-front-door seam `gc hook current`
-// reads through, overridable in tests.
-var hookCurrentSessionFrontDoor = sessionCurrentClaimFrontDoor
+// hookCurrentOpen opens the context `gc hook current` verifies the claim
+// stamp against, overridable in tests.
+var hookCurrentOpen = openHookCurrentContext
 
 func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
 	var idOnly bool
@@ -53,27 +51,23 @@ func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc hook current: no session identity (set $GC_SESSION_ID); only a session that claimed work has a current bead") //nolint:errcheck
 		return 1
 	}
-	sessFront, err := hookCurrentSessionFrontDoor()
+	ctx, err := hookCurrentOpen()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	return doHookCurrent(sessFront, sessionID, idOnly, stdout, stderr)
+	return doHookCurrent(ctx, sessionID, idOnly, stdout, stderr)
 }
 
-// doHookCurrent prints the bead id stamped on sessionID's bead by the claim
-// protocol. It exits 1 — never 0 with empty output — when nothing is stamped:
-// the whole point of the back-channel is that a step which cannot name its own
-// bead must fail loudly rather than let a caller substitute an empty string and
-// skip the close it owes.
-func doHookCurrent(sessFront *session.Store, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
-	beadID, err := sessFront.CurrentClaimBeadID(sessionID)
+// doHookCurrent prints the claim sessionID currently holds
+// (resolveHookCurrent). It exits 1 — never 0 with empty output — when there is
+// none it can verify: the whole point of the back-channel is that a step which
+// cannot name its own bead must fail loudly rather than let a caller
+// substitute an empty string, or someone else's bead, and close it.
+func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
+	beadID, err := resolveHookCurrent(ctx, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if beadID == "" {
-		fmt.Fprintf(stderr, "gc hook current: session %s has no current claim (nothing claimed through gc hook --claim)\n", sessionID) //nolint:errcheck
 		return 1
 	}
 	if idOnly {

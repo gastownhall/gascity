@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -134,6 +135,43 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 		return false
 	}
 	return true
+}
+
+// claimStaleReason is why a recorded claim is not one its session currently
+// holds (currentClaimStaleReason); "" is a claim it holds.
+type claimStaleReason string
+
+const (
+	claimStaleGone          claimStaleReason = "not found in any work leg"
+	claimStaleClosed        claimStaleReason = "closed"
+	claimStaleReleased      claimStaleReason = "released back to the queue"
+	claimStaleNotInProgress claimStaleReason = "not in progress"
+	claimStaleOtherSession  claimStaleReason = "claimed by another session"
+	claimStaleOtherAssignee claimStaleReason = "assigned outside this session"
+)
+
+// currentClaimStaleReason is the strict form of claimedWorkStillHeldBy for a
+// claim a caller is about to act on as its current one (`gc hook current`):
+// work must be in_progress, not re-claimed by another session, and assigned
+// to one of the session's release-scope identities. A control claim carrying
+// no gc.session_id passes on the assignee fence alone. It returns "" when
+// sessionID currently holds work.
+func currentClaimStaleReason(work beads.Bead, sessionID string, scope ReleaseScope) claimStaleReason {
+	switch {
+	case work.Status == "closed":
+		return claimStaleClosed
+	case work.Status == "open" && strings.TrimSpace(work.Assignee) == "":
+		return claimStaleReleased
+	case work.Status != "in_progress":
+		return claimStaleNotInProgress
+	case !claimedWorkStillHeldBy(work, sessionID):
+		return claimStaleOtherSession
+	}
+	assignee := strings.TrimSpace(work.Assignee)
+	if assignee == "" || !slices.Contains(scope.scopeIDs(), assignee) {
+		return claimStaleOtherAssignee
+	}
+	return ""
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,

@@ -431,6 +431,7 @@ go_library(
         "hook_city.go",
         "hook_claim_bead_events.go",
         "hook_cross_store.go",
+        "hook_current_verify.go",
         "hook_deadline.go",
         "hook_identity.go",
         "hook_output.go",

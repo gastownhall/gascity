@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -16,24 +17,83 @@ import (
 // the absent-session case deliberately asks for a different one.
 const hookCurrentSessionID = "mc-sess1"
 
-// hookCurrentFrontDoor builds a session front door over an in-memory store
-// holding one session bead carrying claim (empty claim ⇒ nothing stamped).
-func hookCurrentFrontDoor(t *testing.T, claim string) *session.Store {
+// hookCurrentFixture is a single-store city holding one session bead and the
+// work it may have claimed, with the verified context `gc hook current` reads.
+type hookCurrentFixture struct {
+	store *beads.MemStore
+	ctx   hookCurrentContext
+}
+
+// hookCurrentWork is a work bead with status and assignee, carrying the
+// metadata key/value pairs in kv.
+func hookCurrentWork(id, status, assignee string, kv ...string) beads.Bead {
+	meta := map[string]string{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		meta[kv[i]] = kv[i+1]
+	}
+	return beads.Bead{ID: id, Type: "task", Title: "step " + id, Status: status, Assignee: assignee, Metadata: meta}
+}
+
+// hookCurrentHeld is a work bead this fixture's session holds: in_progress,
+// assigned to the session, stamped with its gc.session_id.
+func hookCurrentHeld(id string) beads.Bead {
+	return hookCurrentWork(id, "in_progress", hookCurrentSessionID, beadmeta.SessionIDMetadataKey, hookCurrentSessionID)
+}
+
+// hookCurrentStartedCell is a work_started cell recording beadIDs newest
+// first, as the claim path writes it.
+func hookCurrentStartedCell(beadIDs ...string) string {
+	var w session.WorkStarted
+	for _, id := range beadIDs {
+		w.Claims = append(w.Claims, session.WorkStartedEntry{Bead: id, Via: session.WorkStartedViaClaim, Gen: 1})
+	}
+	return session.EncodeWorkStarted(w)
+}
+
+// newHookCurrentFixture builds the city: the session bead carries claim as its
+// stamp (empty ⇒ nothing stamped) and startedCell as its work_started cell
+// (empty ⇒ no cell), beside work.
+func newHookCurrentFixture(t *testing.T, claim, startedCell string, work ...beads.Bead) *hookCurrentFixture {
 	t.Helper()
-	sessionID := hookCurrentSessionID
-	meta := map[string]string{"state": string(session.StateActive)}
+	meta := map[string]string{"state": string(session.StateActive), "session_name": "worker-1"}
 	if claim != "" {
 		meta[beadmeta.CurrentClaimBeadIDMetadataKey] = claim
 	}
-	bead := beads.Bead{
-		ID:       sessionID,
+	if startedCell != "" {
+		meta[session.WorkStartedKey] = startedCell
+	}
+	sess := beads.Bead{
+		ID:       hookCurrentSessionID,
 		Type:     session.BeadType,
 		Status:   "open",
 		Title:    "session",
 		Labels:   []string{session.LabelSession},
 		Metadata: meta,
 	}
-	return session.NewStore(beads.SessionStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{bead}, nil)})
+	store := beads.NewMemStoreFrom(100, append([]beads.Bead{sess}, work...), nil)
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	return &hookCurrentFixture{store: store, ctx: hookCurrentContext{
+		sessFront: session.NewStore(beads.SessionStore{Store: store}),
+		cfg:       cfg,
+		legs:      testWorkLegs("", cfg, store, nil),
+	}}
+}
+
+// hookCurrentFrontDoor is the fixture context for a session stamped with a
+// claim it still holds (empty claim ⇒ nothing stamped, no work).
+func hookCurrentFrontDoor(t *testing.T, claim string) hookCurrentContext {
+	t.Helper()
+	if claim == "" {
+		return newHookCurrentFixture(t, "", "").ctx
+	}
+	return newHookCurrentFixture(t, claim, hookCurrentStartedCell(claim), hookCurrentHeld(claim)).ctx
+}
+
+// run runs doHookCurrent over the fixture.
+func (f *hookCurrentFixture) run(idOnly bool) (code int, stdout, stderr string) {
+	var out, errOut bytes.Buffer
+	code = doHookCurrent(f.ctx, hookCurrentSessionID, idOnly, &out, &errOut)
+	return code, out.String(), errOut.String()
 }
 
 // TestDoHookCurrentPrintsTheStampedClaim is the primary read-back test: a session
@@ -105,11 +165,11 @@ func TestDoHookCurrentExitsOneOnAnUnreadableSession(t *testing.T) {
 func TestCmdHookCurrentRequiresASessionIdentity(t *testing.T) {
 	t.Setenv("GC_SESSION_ID", "")
 	opened := false
-	restore := hookCurrentSessionFrontDoor
-	t.Cleanup(func() { hookCurrentSessionFrontDoor = restore })
-	hookCurrentSessionFrontDoor = func() (*session.Store, error) {
+	restore := hookCurrentOpen
+	t.Cleanup(func() { hookCurrentOpen = restore })
+	hookCurrentOpen = func() (hookCurrentContext, error) {
 		opened = true
-		return nil, errors.New("must not be reached")
+		return hookCurrentContext{}, errors.New("must not be reached")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -129,9 +189,9 @@ func TestCmdHookCurrentRequiresASessionIdentity(t *testing.T) {
 // under — rather than any other identity variable.
 func TestCmdHookCurrentReadsTheCallingSessionFromEnv(t *testing.T) {
 	t.Setenv("GC_SESSION_ID", "mc-sess1")
-	restore := hookCurrentSessionFrontDoor
-	t.Cleanup(func() { hookCurrentSessionFrontDoor = restore })
-	hookCurrentSessionFrontDoor = func() (*session.Store, error) {
+	restore := hookCurrentOpen
+	t.Cleanup(func() { hookCurrentOpen = restore })
+	hookCurrentOpen = func() (hookCurrentContext, error) {
 		return hookCurrentFrontDoor(t, "gcg-42"), nil
 	}
 
@@ -186,5 +246,45 @@ func TestHookCurrentDocNamesNoTriggerEnv(t *testing.T) {
 	long := newHookCurrentCmd(io.Discard, io.Discard).Long
 	if strings.Contains(long, "GC_TRIGGER_") {
 		t.Errorf("help text still documents a GC_TRIGGER_* shell variable; got:\n%s", long)
+	}
+}
+
+// TestDoHookCurrentPrintsAQualifyingStampWithCleanStderr is AC-1: a stamp the
+// session still holds by the live ledger (in_progress, its own gc.session_id,
+// assigned to one of its identities), with no newer live delivery recorded
+// ahead of it, prints exactly the id and a newline with nothing on stderr.
+// Older live entries behind the stamp in the delivery cell are not read: the
+// stamp is the most recent claim.
+func TestDoHookCurrentPrintsAQualifyingStampWithCleanStderr(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cell string
+		work []beads.Bead
+	}{
+		{name: "no delivery cell", work: []beads.Bead{hookCurrentHeld("gcg-42")}},
+		{name: "stamp heads the cell", cell: hookCurrentStartedCell("gcg-42"), work: []beads.Bead{hookCurrentHeld("gcg-42")}},
+		{
+			name: "older live delivery behind the stamp",
+			cell: hookCurrentStartedCell("gcg-42", "gcg-7"),
+			work: []beads.Bead{hookCurrentHeld("gcg-42"), hookCurrentHeld("gcg-7")},
+		},
+		{
+			name: "newer delivery no longer held",
+			cell: hookCurrentStartedCell("gcg-50", "gcg-42"),
+			work: []beads.Bead{hookCurrentHeld("gcg-42"), hookCurrentWork("gcg-50", "closed", hookCurrentSessionID)},
+		},
+		{
+			name: "assigned by session name",
+			cell: hookCurrentStartedCell("gcg-42"),
+			work: []beads.Bead{hookCurrentWork("gcg-42", "in_progress", "worker-1", beadmeta.SessionIDMetadataKey, hookCurrentSessionID)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookCurrentFixture(t, "gcg-42", tc.cell, tc.work...)
+			code, stdout, stderr := f.run(true)
+			if code != 0 || stdout != "gcg-42\n" || stderr != "" {
+				t.Fatalf("--id-only = (%d, %q, %q), want (0, %q, \"\")", code, stdout, stderr, "gcg-42\n")
+			}
+		})
 	}
 }
