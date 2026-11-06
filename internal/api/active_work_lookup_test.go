@@ -413,3 +413,66 @@ func TestActiveWorkLookupUsesCleanCacheAfterDeadline(t *testing.T) {
 		})
 	}
 }
+
+// TestListActiveWorkLookupPreservesPrecedence: with healthy stores the bounded
+// list lookup answers as before: identity order beats store order, the newest
+// match wins within a store, and a rig-scoped agent row reads its rig alone.
+// A single-session read stays live and outside the list's window.
+func TestListActiveWorkLookupPreservesPrecedence(t *testing.T) {
+	for _, route := range activeWorkListRoutes[:2] {
+		t.Run(route.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			a, z := beads.NewMemStore(), beads.NewMemStore()
+			fs.stores = map[string]beads.Store{"a": a, "z": z}
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Session")
+			addActiveWork(t, a, info.Template)
+			addActiveWork(t, z, info.ID)
+			newest := addActiveWork(t, z, info.ID)
+			srv := New(fs)
+
+			body, _ := getActiveWorkList(t, route.handler(t, fs, srv), httptest.NewRequest("GET", route.path(fs), nil))
+
+			if got := body.activeBeadOf(t, info.ID); got != newest {
+				t.Errorf("active_bead = %q, want %q: the session id outranks the template, newest first", got, newest)
+			}
+			if body.Partial {
+				t.Errorf("partial_errors = %q, want none", body.PartialErrors)
+			}
+		})
+	}
+	t.Run("agents", func(t *testing.T) {
+		state := newFakeState(t)
+		other := beads.NewMemStore()
+		state.stores["a"] = other
+		addActiveWork(t, other, "myrig--worker")
+		want := addActiveWork(t, state.stores["myrig"], "myrig/worker")
+		srv := New(state)
+
+		body, _ := getActiveWorkList(t, newTestCityHandlerWith(t, state, srv), httptest.NewRequest("GET", cityURL(state, "/agents"), nil))
+
+		if got := body.activeBeadOf(t, "myrig/worker"); got != want {
+			t.Errorf("active_bead = %q, want %q from rig myrig only", got, want)
+		}
+	})
+	t.Run("session detail stays live", func(t *testing.T) {
+		pinStatusStoreReadTimeout(t, 0)
+		fs := newSessionFakeState(t)
+		info := createTestSession(t, fs.cityBeadStore, fs.sp, "Session")
+		want := addActiveWork(t, fs.stores["myrig"], info.ID)
+		srv := New(fs)
+		h := newTestCityHandlerWith(t, fs, srv)
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/session/"+info.ID), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var resp sessionResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.ActiveBead != want {
+			t.Errorf("active_bead = %q, want live %q", resp.ActiveBead, want)
+		}
+	})
+}
