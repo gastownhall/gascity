@@ -178,9 +178,8 @@ func newHookCurrentReader(ctx hookCurrentContext, sessionID string, scope Releas
 
 // verify reads id live and holds it to the strict predicate. A clean miss is
 // the stale reason "gone"; a miss while a bound rig store failed to open is an
-// error, because absence is only a verdict under complete coverage; a row
-// whose owner answers with a different id than the one asked for is an error
-// too, not a match.
+// error, because absence is only a verdict under complete coverage. readLive
+// itself guarantees a found row carries the id asked for.
 func (r hookCurrentReader) verify(id string) hookCurrentRow {
 	if v, ok := r.cache[id]; ok {
 		return v
@@ -190,8 +189,6 @@ func (r hookCurrentReader) verify(id string) hookCurrentRow {
 	switch {
 	case err != nil:
 		v.err = fmt.Errorf("reading claim %s: %w", id, err)
-	case found && b.ID != id:
-		v.err = fmt.Errorf("reading claim %s: its owner returned the row of %s", id, b.ID)
 	case !found:
 		if len(r.short) > 0 {
 			v.err = fmt.Errorf("reading claim %s: not found, and residency coverage is incomplete (%s), so its absence cannot be proven", id, hookCurrentShortWhy(r.short))

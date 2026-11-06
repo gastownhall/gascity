@@ -67,13 +67,36 @@ func hookCurrentWorkBead(id string) beads.Bead {
 // the work legs a controller of that city would mint over it.
 func hookCurrentTestContext(t *testing.T, rows ...beads.Bead) hookCurrentContext {
 	t.Helper()
-	store := beads.NewMemStoreFrom(1, rows, nil)
+	return hookCurrentContextOver(t, beads.NewMemStoreFrom(1, rows, nil))
+}
+
+// hookCurrentContextOver is the verified read context over one already-built
+// store, for the cases that wrap the store to fail a chosen read.
+func hookCurrentContextOver(t *testing.T, store beads.Store) hookCurrentContext {
+	t.Helper()
 	cfg := &config.City{Workspace: config.Workspace{Name: "hook-current-city"}}
 	return hookCurrentContext{
 		sessFront: session.NewStore(beads.SessionStore{Store: store}),
 		cfg:       cfg,
 		legs:      testWorkLegs("", cfg, store, nil),
 	}
+}
+
+// hookCurrentFailingGetStore serves every read from the embedded store except
+// the ids in fail, whose Get reports the mapped error: the live read path
+// (WorkLegs.readLive reads through HandlesFor(...).Live, whose logical reader
+// delegates to Get) then errors for exactly those ids.
+type hookCurrentFailingGetStore struct {
+	beads.Store
+	fail map[string]error
+}
+
+// Get serves every id but fail's, which reports its mapped error.
+func (s hookCurrentFailingGetStore) Get(id string) (beads.Bead, error) {
+	if err, ok := s.fail[id]; ok {
+		return beads.Bead{}, err
+	}
+	return s.Store.Get(id)
 }
 
 // TestDoHookCurrentPrintsTheStampedClaim is the primary read-back test: a
@@ -296,6 +319,134 @@ func TestDoHookCurrentExitsOneWhenNothingIsStamped(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "no current claim") {
 		t.Errorf("stderr = %q, want a message naming the missing claim", stderr.String())
+	}
+}
+
+// TestDoHookCurrentRefusesAMalformedWorkStartedCell pins the decode arm: the
+// cell is read before any decision, and a cell that cannot decode refuses —
+// it may hold the only record of the session's live claim, so a caller must
+// never receive an id decided over an unreadable cell.
+func TestDoHookCurrentRefusesAMalformedWorkStartedCell(t *testing.T) {
+	sess := hookCurrentSessionBead("gcg-42", hookCurrentEntry("gcg-42"))
+	sess.Metadata[session.WorkStartedKey] = "{not a work_started cell"
+	ctx := hookCurrentTestContext(t, sess, hookCurrentWorkBead("gcg-42"))
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (malformed cell) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed over an undecodable cell", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), hookCurrentSessionID) {
+		t.Errorf("stderr = %q, want the session named", stderr.String())
+	}
+}
+
+// TestDoHookCurrentExitsOneNamingTheClaimAReadFailed pins the read-error arm:
+// a live read that errors is an error, not a miss and not a print — the id
+// this command hands out is a close target, and an unreadable claim must not
+// be guessed at. The refusal names the id it failed to read.
+func TestDoHookCurrentExitsOneNamingTheClaimAReadFailed(t *testing.T) {
+	ctx := hookCurrentContextOver(t, hookCurrentFailingGetStore{
+		Store: beads.NewMemStoreFrom(1, []beads.Bead{
+			hookCurrentSessionBead("gcg-42", hookCurrentEntry("gcg-42")),
+			hookCurrentWorkBead("gcg-42"),
+		}, nil),
+		fail: map[string]error{"gcg-42": errors.New("dolt: connection refused")},
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (unreadable claim) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed for an unreadable claim", stdout.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "reading claim gcg-42") || !strings.Contains(errText, "connection refused") {
+		t.Errorf("stderr = %q, want the failed read named with its id and cause", errText)
+	}
+}
+
+// TestDoHookCurrentRefusesAMissingClaimWhileCoverageIsIncomplete is the
+// coverage fence: a claim id no leg can find is NOT "gone" while a bound rig
+// store failed to open — the unopened rig may hold the row, so absence is
+// unprovable and the command refuses naming the short rig, rather than
+// telling a caller its claim vanished.
+func TestDoHookCurrentRefusesAMissingClaimWhileCoverageIsIncomplete(t *testing.T) {
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-missing", hookCurrentEntry("gcg-missing")),
+	)
+	ctx.short = []rigStoreOpenFailure{{rig: "rig-1", err: errors.New("dolt server down")}}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (missing claim, short coverage) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed", stdout.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "reading claim gcg-missing") || !strings.Contains(errText, "rig-1") || !strings.Contains(errText, "cannot be proven") {
+		t.Errorf("stderr = %q, want the missing claim, the short rig, and the unprovability named", errText)
+	}
+	if strings.Contains(errText, "no longer held") {
+		t.Errorf("stderr = %q, a miss under incomplete coverage must not read as a stale verdict", errText)
+	}
+}
+
+// TestDoHookCurrentReadsAMissingClaimAsGoneUnderFullCoverage is the fence's
+// complement: with every bound rig open, a claim no leg can find is provably
+// absent — a stale verdict ("gone"), not an error, and the command refuses on
+// the stale arm instead of blaming the stores.
+func TestDoHookCurrentReadsAMissingClaimAsGoneUnderFullCoverage(t *testing.T) {
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-missing", hookCurrentEntry("gcg-missing")),
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (missing claim, full coverage) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gone") {
+		t.Errorf("stderr = %q, want the miss read as gone, not as a store failure", stderr.String())
+	}
+}
+
+// TestDoHookCurrentAbortsTheScanWhenALaterEntryFailsToRead pins the abort: a
+// candidate found early in the cell does not print when a later entry's read
+// errors — the entries never reached could have made the count two, and
+// printing the first would be the guess the command exists to avoid.
+func TestDoHookCurrentAbortsTheScanWhenALaterEntryFailsToRead(t *testing.T) {
+	ctx := hookCurrentContextOver(t, hookCurrentFailingGetStore{
+		Store: beads.NewMemStoreFrom(1, []beads.Bead{
+			hookCurrentSessionBead("",
+				hookCurrentEntry("gcg-ok"),
+				hookCurrentEntry("gcg-bad"),
+			),
+			hookCurrentWorkBead("gcg-ok"),
+		}, nil),
+		fail: map[string]error{"gcg-bad": errors.New("dolt: connection refused")},
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookCurrent (later entry unreadable) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed: an aborted scan has no sole claim", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gcg-bad") {
+		t.Errorf("stderr = %q, want the unreadable entry named", stderr.String())
 	}
 }
 
