@@ -107,14 +107,22 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // detection, command launch verification, permission warning dismissal,
 // and runtime readiness polling. Steps are conditional on Config fields;
 // an agent with no startup hints gets fire-and-forget.
-func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) (err error) {
+	// A handback belongs to this start alone: cleared before anything can
+	// return, and again when the start fails, so its caller takes only the
+	// nudge of a start that succeeded.
+	p.tm.handbacks.set(name, "")
+	defer func() {
+		if err != nil {
+			p.tm.handbacks.set(name, "")
+		}
+	}()
 	if cfg.FreshOnly {
 		// Refuse a held name before any file is staged or pre_start runs.
 		if err := refuseHeldName(p.startOps(cfg, true), name); err != nil {
 			return err
 		}
 	}
-	var err error
 	cfg.Env, err = ensureInstanceToken(cfg.Env)
 	if err != nil {
 		return fmt.Errorf("ensuring instance token: %w", err)
@@ -135,7 +143,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Start types into the incarnation it creates, never under a caller's
 	// input fence (FI9).
 	ctx = withoutInputFence(ctx)
-	p.tm.handbacks.set(name, "")
 	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
@@ -306,6 +313,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// Like Start, never under a caller's input fence (FI9).
 	p.tm.handbacks.set(name, "")
 	if err := doRelaunchSession(withoutInputFence(ctx), p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
+		p.tm.handbacks.set(name, "")
 		return err
 	}
 	p.cache.Invalidate()

@@ -17,12 +17,16 @@ import "time"
 // staleness: a turn that keeps drawing holds past it, and a record no
 // activity refreshed holds nothing once it passes.
 //
-// Every other delivery decides as it does without the record: a program
-// may report working with no turn running (Codex while a background
-// terminal runs), and the activity clock already holds a running turn that
-// keeps its pane drawing. Under off or shadow nothing is read; a reading
-// that is not valid, a pane that does not declare the hold, and a read that
-// fails hold nothing.
+// A program may report working with no turn running (Codex while a
+// background terminal runs). Those two decisions hold on such a record too:
+// a lane delivery to a Codex session idle at its composer with a background
+// terminal open waits until the record leaves working or its hold bound
+// passes (no output for ProgramStatusHoldLimit), a residual the second
+// shadow did not see harm from. Every other delivery decides as it does
+// without the record, since the activity clock already holds a running turn
+// that keeps its pane drawing. Under off or shadow nothing is read; a
+// reading that is not valid, a pane that does not declare the hold, and a
+// read that fails hold nothing.
 
 // ProgramHoldReading is one fresh reading taken for a hold decision: the
 // agent pane's judged record and the pane's own last activity, read together.

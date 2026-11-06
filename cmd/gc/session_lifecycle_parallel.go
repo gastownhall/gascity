@@ -2021,7 +2021,7 @@ func runPreparedStartCandidate(
 	startCtxErr := startCtx.Err()
 	// A startup nudge the session's program held back behind a dialog
 	// (program_status = "on", row A20) is queued, never typed or failed.
-	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), time.Now()); qerr != nil {
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
 		log.Printf("gc start: %v", qerr)
 	}
 	// diedDuringStartup starts true when the provider/resume layer already

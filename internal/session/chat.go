@@ -504,6 +504,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		return false, fmt.Errorf("fresh start after stale key: %w", err)
 	}
+	m.queueStartupNudgeHandbackLocked(*b, sessName)
 	if inc != nil {
 		*inc = next
 	}
@@ -1025,6 +1026,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				return startFailure(resumeCommand, b.Metadata, err)
 			}
 		} else {
+			m.queueStartupNudgeHandbackLocked(b, sessName)
 			started = true
 		}
 		if started {
@@ -1269,6 +1271,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		started = true
 	}
 	if started && b.Metadata["session_key"] != "" {

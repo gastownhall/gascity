@@ -45,7 +45,10 @@ var errStartupNudgeBlocked = fmt.Errorf("%w: the program reports a dialog, so th
 // nothing is read.
 //
 //   - Before each send, a live blocked record holds it: errStartupNudgeBlocked,
-//     nothing typed.
+//     nothing typed. Once an earlier attempt typed the nudge, a dialog
+//     reported after it is the program's answer to a nudge it took (design
+//     §10.2 row N3): the ladder ends delivered but unobserved
+//     (ErrNudgeSubmitDeliveredUnobserved), and nothing is handed back.
 //   - A send the scan could not confirm (ErrNudgeSubmitUnconfirmed, or
 //     delivered but never seen busy) is confirmed by a record that advanced
 //     past the baseline (runtime.ProgramStartupVerdict confirmed).
@@ -67,11 +70,16 @@ func (t *Tmux) programStartupLadder(session string, send func() error, busy func
 		}
 		return runtime.ProgramStartupVerdict(d.reading.Status, baseline, d.reading.Activity, d.at), true
 	}
+	typed := false
 	decidedSend := func() error {
 		if v, ok := verdict(); ok && v == runtime.ProgramVerdictPending {
+			if typed {
+				return fmt.Errorf("%w: session %q: the program reports a dialog after the startup nudge was typed", ErrNudgeSubmitDeliveredUnobserved, session)
+			}
 			return fmt.Errorf("session %q: %w", session, errStartupNudgeBlocked)
 		}
 		err := send()
+		typed = typed || startupSendTyped(err)
 		if errors.Is(err, ErrNudgeSubmitUnconfirmed) || errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 			if v, ok := verdict(); ok && v == runtime.ProgramVerdictConfirmed {
 				return nil
@@ -96,20 +104,39 @@ func (t *Tmux) programStartupLadder(session string, send func() error, busy func
 	return decidedSend, decidedBusy
 }
 
+// startupSendTyped reports whether a startup send that returned err typed
+// the nudge into the pane: it succeeded, or its submit went out unconfirmed.
+// A send a running turn held back (runtime.ErrSessionBusy, errNudgeSubmitHeld)
+// or a pending interaction refused typed nothing that stands.
+func startupSendTyped(err error) bool {
+	return err == nil || errors.Is(err, ErrNudgeSubmitUnconfirmed) || errors.Is(err, ErrNudgeSubmitDeliveredUnobserved)
+}
+
+// programInterruptWindow bounds how long after an interrupt the leaf sent
+// under the switch on an idle wait is read as that interrupt's settle
+// (programSettle): the interrupting caller waits at once (a Ctrl-C, then
+// its idle wait), so a note older than this belongs to an interrupt no wait
+// followed, and a later, unrelated wait is the scan's.
+const programInterruptWindow = 5 * time.Second
+
 // programSettle returns the record's check on an idle wait that follows an
-// interrupt gc noted for session (noteInterrupt) within
-// shadowInterruptWindow, under the switch on, and forgets the note: settled
+// interrupt gc noted for session (noteProgramInterrupt) within
+// programInterruptWindow, under the switch on, and forgets the note: settled
 // (true) at the first root boundary past the pre-interrupt baseline under
 // its nonce, and an error wrapping runtime.ErrPendingInteraction on a live
-// blocked root. Anything else, a reading that does not decide included,
-// leaves the scan to decide (false, nil). ok is false, and the wait is the
-// scan's alone, when the switch is not on or no interrupt was noted.
+// blocked root that moved past the baseline (the same nonce, a later Seq):
+// a dialog raised since the interrupt. A blocked record the interrupt has not
+// moved yet (the dialog its keys may be canceling, before the program
+// reports again) decides nothing. Anything else, a reading that does not
+// decide included, leaves the scan to decide (false, nil). ok is false, and
+// the wait is the scan's alone, when the switch is not on or no interrupt
+// was noted within the window.
 func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, error), ok bool) {
 	if t.programStatusMode() != runtime.ProgramStatusOn {
 		return nil, false
 	}
 	mark, noted := t.takeShadowInterrupt(session, at)
-	if !noted {
+	if !noted || at.Sub(mark.at) > programInterruptWindow {
 		return nil, false
 	}
 	return func() (bool, error) {
@@ -117,10 +144,14 @@ func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, 
 		if !ok {
 			return false, nil
 		}
-		switch runtime.ProgramSettleVerdict(d.reading.Status, mark.baseline, d.reading.Activity, d.at) {
+		s := d.reading.Status
+		switch runtime.ProgramSettleVerdict(s, mark.baseline, d.reading.Activity, d.at) {
 		case runtime.ProgramVerdictSettled:
 			return true, nil
 		case runtime.ProgramVerdictPending:
+			if s.Nonce != mark.baseline.Nonce || s.Seq <= mark.baseline.Seq {
+				return false, nil
+			}
 			return false, fmt.Errorf("session %q: the program reports a dialog after the interrupt, so it has not settled: %w", session, runtime.ErrPendingInteraction)
 		}
 		return false, nil

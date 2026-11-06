@@ -229,3 +229,29 @@ func TestLaneQuietBoundaryRecordHoldVetoedAtTheSendLook(t *testing.T) {
 		t.Fatalf("typed %+v; want the prompt once", typed)
 	}
 }
+
+// Kills a quiescence boundary the probe opens on a live working record (the
+// send look alone would then hold every delivery, taking the op each pass):
+// under "on" the probe's own boundary reads No for a Codex session whose
+// record says a turn is working, and Yes under "off".
+func TestLaneProbeClosesTheQuietBoundaryOnAWorkingRecord(t *testing.T) {
+	for _, c := range []struct {
+		sw   string
+		want opjournal.Tri
+	}{{"on", opjournal.TriNo}, {"off", opjournal.TriYes}} {
+		t.Run(c.sw, func(t *testing.T) {
+			s, _ := newRecordHoldLane(t, "codex", codexAgentCity(c.sw), runtime.ProgramWorking)
+			s.f.sp.SetActivity(s.f.name, s.f.clk.Now().Add(-time.Minute))
+			v, row := s.f.view(t)
+			e := newConversationLaneExec(s.deps, row)
+			quiescenceOnFixtureClock(s.f, e)
+			p, err := e.Probe(context.Background(), v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Boundary != c.want {
+				t.Fatalf("switch %s: probe boundary %v; want %v", c.sw, p.Boundary, c.want)
+			}
+		})
+	}
+}

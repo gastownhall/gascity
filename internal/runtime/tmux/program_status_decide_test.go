@@ -327,3 +327,107 @@ func TestDecisionReadIsFreshAndOnOnly(t *testing.T) {
 		t.Fatalf("reads %q; want one list-panes", ex.reads)
 	}
 }
+
+// Kills a ladder that ignores the record's confirmation of a send the scan
+// saw delivered but never busy (record says confirmed, scan says
+// unobserved): no busy look follows such a send, so only the post-send
+// read can confirm it, and the start records no unconfirmed nudge.
+func TestStartupLadderConfirmsADeliveredUnobservedSend(t *testing.T) {
+	idle := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince)
+	started := psRecord(t, holdNonce, runtime.ProgramWorking, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnStarts = 2, 2 })
+	on := runStartupLadder(t, runtime.ProgramStatusOn, []error{ErrNudgeSubmitDeliveredUnobserved}, startupRows(idle, started))
+	if on.err != nil || on.count("sendKeys") != 1 || on.count("recordUnconfirmedNudge") != 0 {
+		t.Fatalf("on: err %v, calls %v; want the send confirmed by the record, nothing recorded", on.err, on.ops.callMethods())
+	}
+	off := runStartupLadder(t, runtime.ProgramStatusOff, []error{ErrNudgeSubmitDeliveredUnobserved}, startupRows(idle, started))
+	if off.err != nil || off.count("recordUnconfirmedNudge") != 1 {
+		t.Fatalf("off: err %v, calls %v; want the scan's warning recorded", off.err, off.ops.callMethods())
+	}
+}
+
+// Kills a ladder that hands back, or re-types, a nudge it already typed when
+// the program reports a dialog after it (design §10.2 row N3: blocked after
+// the first Enter is delivered but unobserved), and a busy look that reads a
+// blocked record as the nudge landing: the ladder types once, ends delivered
+// but unobserved (recorded), and hands nothing back.
+func TestStartupLadderBlockedAfterTypingIsDeliveredUnobserved(t *testing.T) {
+	idle := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince)
+	blocked := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 2 })
+	rows := func(n int) string {
+		if n < 2 {
+			return holdPaneRow(idle, "", 0)
+		}
+		return holdPaneRow(blocked, "", 0)
+	}
+	got := runStartupLadder(t, runtime.ProgramStatusOn, []error{ErrNudgeSubmitUnconfirmed}, rows)
+	if got.err != nil {
+		t.Fatalf("start failed %v; a dialog never fails a start", got.err)
+	}
+	if got.count("sendKeys") != 1 || got.count("recordUnconfirmedNudge") != 1 || got.handed {
+		t.Fatalf("calls %v, handed %v (%q); want one send, the unobserved delivery recorded, nothing handed back", got.ops.callMethods(), got.handed, got.handback)
+	}
+}
+
+// Kills a settle that reports a dialog the interrupt is canceling: the
+// baseline's own blocked record, unchanged since the interrupt (the relay
+// has not republished yet), decides nothing and leaves the scan to wait; the
+// record the interrupt moves to a boundary then settles it. A blocked record
+// that never moves is the scan's to time out, never a pending interaction.
+func TestInterruptSettleUnmovedBlockedBaselineIsTheScans(t *testing.T) {
+	dialog := psRecord(t, holdNonce, runtime.ProgramBlocked, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
+	cleared := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq, s.TurnEnds, s.QuietSince = 6, 1, time.Now() })
+	tm, _ := settleTmux(t, runtime.ProgramStatusOn, func(n int) string {
+		if n < 3 {
+			return holdPaneRow(dialog, "", 0)
+		}
+		return holdPaneRow(cleared, "", 0)
+	})
+	if err := tm.WaitForIdle(context.Background(), "s", 5*time.Second); err != nil {
+		t.Fatalf("WaitForIdle = %v; want settled once the interrupt cleared the dialog", err)
+	}
+	tm, _ = settleTmux(t, runtime.ProgramStatusOn, func(int) string { return holdPaneRow(dialog, "", 0) })
+	err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond)
+	if !errors.Is(err, ErrIdleTimeout) || errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("WaitForIdle = %v; want the scan's timeout, no pending interaction from the baseline's own record", err)
+	}
+}
+
+// Kills an interrupt note that outlives its interrupt's own wait: a wait
+// that comes past programInterruptWindow is the scan's, and takes no
+// decision read.
+func TestInterruptSettleNoteExpires(t *testing.T) {
+	stopped := psRecord(t, holdNonce, runtime.ProgramIdle, liveSince, func(s *runtime.ProgramStatus) { s.Seq = 5 })
+	tm, ex := holdTmux(runtime.ProgramStatusOn, &paneScriptExecutor{captures: []scriptedCapture{{out: busyPane}}}, func(int) string { return holdPaneRow(stopped, "", 0) })
+	baseline := runtime.ProgramBaseline{Nonce: holdNonce, Seq: 4, State: runtime.ProgramWorking}
+	tm.keepInterrupt("s", shadowInterrupt{baseline: baseline, at: time.Now().Add(-programInterruptWindow - time.Second)})
+	if err := tm.WaitForIdle(context.Background(), "s", 300*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("WaitForIdle = %v; want the scan's timeout past the note's window", err)
+	}
+	if ex.holdReads() != 0 {
+		t.Fatalf("%d decision reads after the note expired; want none", ex.holdReads())
+	}
+}
+
+// Kills a Start or Relaunch that leaves a handback its caller may take after
+// the start failed: each clears the session's handback before anything can
+// return, and a failed one hands nothing back.
+func TestFailedStartHandsNothingBack(t *testing.T) {
+	ex := &fakeExecutor{err: errors.New("no server")}
+	cfg := DefaultConfig()
+	tm := &Tmux{cfg: cfg, exec: ex}
+	p := &Provider{tm: tm, cfg: cfg, cache: NewStateCache(nil, time.Hour), workDirs: map[string]string{}}
+	tm.handbacks.set("s", "an earlier start's nudge")
+	if err := p.Start(context.Background(), "s", runtime.Config{Command: "agent", Nudge: "start working"}); err == nil {
+		t.Fatal("Start succeeded over a failing server")
+	}
+	if nudge, ok := p.TakeStartupNudgeHandback("s"); ok {
+		t.Fatalf("failed Start handed back %q", nudge)
+	}
+	tm.handbacks.set("s", "an earlier start's nudge")
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Nudge: "start working"}); err == nil {
+		t.Fatal("Relaunch succeeded over a failing server")
+	}
+	if nudge, ok := p.TakeStartupNudgeHandback("s"); ok {
+		t.Fatalf("failed Relaunch handed back %q", nudge)
+	}
+}

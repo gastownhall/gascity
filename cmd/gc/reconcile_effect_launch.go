@@ -354,7 +354,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	stop()
 	// A startup nudge the session's program held back behind a dialog
 	// (program_status = "on", row A20) is queued, never typed or failed.
-	if err := queueStartupNudgeHandback(in.w.CityPath, launchCityConfig(in.w), leaf, launchHandbackRow(in), name, c.start.clock.Now()); err != nil && c.start.stderr != nil {
+	if err := queueStartupNudgeHandback(in.w.CityPath, launchCityConfig(in.w), leaf, launchHandbackRow(in), name, out.err == nil, c.start.clock.Now()); err != nil && c.start.stderr != nil {
 		fmt.Fprintf(c.start.stderr, "v2 start %s: %v\n", in.row.ID, err) //nolint:errcheck // best-effort stderr
 	}
 	// The commit lands on a runtime alive with the PreWake token whatever the

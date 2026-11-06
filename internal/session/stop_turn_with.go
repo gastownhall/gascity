@@ -337,6 +337,13 @@ func restartWithheld(ctx context.Context, what string, refusal, waitErr error) e
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < stopTurnRestartBound {
 		return fmt.Errorf("%s: the caller's deadline leaves less than the %s a restart may take, not restarting it: %w: %w (%s)", what, stopTurnRestartBound, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
 	}
+	if errors.Is(waitErr, ErrPendingInteraction) {
+		// The interrupted session shows a pending interaction (under
+		// program_status "on", its program reports a dialog raised since the
+		// interrupt): a restart would discard the dialog and whatever the
+		// turn left with it. It waits for its answer instead.
+		return fmt.Errorf("%s: the interrupted session waits on a pending interaction, not restarting it: %w", what, waitErr)
+	}
 	if refusal != nil {
 		return fmt.Errorf("%s: the check refused the follow-up interrupt (%s), so another turn may run now, not restarting it: %w: %w (%s)", what, refusal.Error(), ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
 	}
