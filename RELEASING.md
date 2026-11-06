@@ -93,12 +93,39 @@ test -n "$old" && git grep -l "$old" -- internal/config/public_packs.go examples
 ```
 
 That moves the pin, and the examples that import the bundled packs, to the
-branch tip. Then append `"sha:<old>",` to `SupersededBundledPackImportVersions`
-with a comment naming the release, so the release keeps serving its embedded
-packs to cities an earlier release pinned at the old commit. Commit it as
+branch tip. `SupersededBundledPackImportVersions` must then list every pin an
+earlier gc wrote as canonical. The release serves its embedded packs for a
+listed pin, and `gc doctor --fix` moves the city to the new pin. Any other pin
+counts as deliberate: a city an earlier release created at such a pin stops
+loading, and `gc import install` then fetches that commit's older packs in
+place of the release's. Append `"sha:<old>",`, then every pin the previous
+release shipped that the list lacks, each with a comment naming where it came
+from. This prints those pins:
+
+```bash
+prev=vX.Y.Z   # the previous release's tag
+git show "$prev:internal/config/public_packs.go" |
+  sed -n -e 's/.*BundledPackImportVersion = "\(sha:[0-9a-f]*\)".*/\1/p' \
+    -e '/^var SupersededBundledPackImportVersions/,/^}/s/^[[:space:]]*"\(sha:[0-9a-f]*\)",.*/\1/p' |
+  while read -r pin; do grep -q "\"$pin\"" internal/config/public_packs.go || echo "$pin"; done
+```
+
+A branch cut from the previous release's tag lists them already.
+`[release-only]` commits never reach `main`, so a branch cut from `main` lacks
+the pins of a release shipped from a hotfix branch until they are added to
+`main` (below).
+
+Commit the re-pin as
 `[release-only] chore(pins): re-pin the bundled packs to <new>` and push.
 `scripts/check-embedded-pins --bd-advisory` runs the RC Gate's check locally.
 Re-pin again if a later backport changes the bundled packs.
+
+After the release, add its pins to `main` too, or `main` builds treat the
+cities the release created as deliberately pinned to an old commit. On a
+branch from `main`, run the command above with `prev` set to the new release's
+tag, append what it prints to `SupersededBundledPackImportVersions`, and open
+a pull request. The command skips `main`'s own pin, which stays canonical
+there.
 
 ### Manual
 
@@ -171,7 +198,7 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 | Git tag `vX.Y.Z` | Created and pushed | `scripts/bump-version.sh` |
 | GitHub Release page | Created with binaries + grouped changelog | GoReleaser in `release.yml` |
 | Release SBOM + attestations | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml` |
-| `internal/config/public_packs.go` and the example cities | `BundledPackImportVersion` re-pinned on the release branch | [Re-pin the bundled packs](#re-pin-the-bundled-packs) |
+| `internal/config/public_packs.go` and the example cities | `BundledPackImportVersion` re-pinned on the release branch; after the release, its pins added to `main`'s `SupersededBundledPackImportVersions` | [Re-pin the bundled packs](#re-pin-the-bundled-packs) |
 | `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated | `update-homebrew-formula` in `release.yml` |
 | `Homebrew/homebrew-core` `Formula/g/gascity.rb` | source `url` + `sha256` bumped | BrewTestBot's autobump PR |
 
