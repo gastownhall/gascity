@@ -945,8 +945,12 @@ func TestLiveSwitchOffArmsNothingWhateverTheArm(t *testing.T) {
 				{"display-message", "-p", "-t", "%1", "#{pane_id}"},
 				{"if-shell", "-F", "-t", "%1", "#{m:*.#{pane_id},#{@gc_ps_tap}}", offDisarmLine("%1")},
 			})...)
-			if len(rec.calls) != 1 || !slices.Equal(rec.calls[0], wantRespawn) {
-				t.Fatalf("respawn under switch off\n got %q\nwant [%q]", rec.calls, wantRespawn)
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn under switch off must spend credit then respawn: %q", rec.calls)
+			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%1")
+			if !slices.Equal(rec.calls[1], wantRespawn) {
+				t.Fatalf("respawn under switch off\n got %q\nwant %q", rec.calls[1], wantRespawn)
 			}
 			if *probes != 0 {
 				t.Fatalf("switch off evaluated the capability gate %d times", *probes)
@@ -1000,8 +1004,30 @@ func TestLiveSwitchOnArmsTheNextStart(t *testing.T) {
 			if err := tm.respawnPaneWithWorkDir("%2", "/w", "claude", arm); err != nil {
 				t.Fatal(err)
 			}
-			if len(rec.calls) != 1 || !slices.Contains(rec.calls[0], relayed) || !slices.Contains(rec.calls[0], programTapOption) {
-				t.Fatalf("respawn after the flip is not relay-wrapped and tapped: %q", rec.calls)
+			if len(rec.calls) != 2 {
+				t.Fatalf("respawn must spend credit then run one relay/tap list: %q", rec.calls)
+			}
+			assertBootstrapSpendCall(t, rec.calls[0], "%2")
+			respawn := rec.calls[1]
+			i = slices.Index(respawn, programTapOption)
+			if i < 0 || i+1 >= len(respawn) {
+				t.Fatalf("respawn after the flip did not arm: %q", respawn)
+			}
+			respawnNonce := strings.TrimSuffix(respawn[i+1], ".#{pane_id}")
+			if respawnNonce == r || !programstatus.ValidNonce(respawnNonce+".%2") {
+				t.Fatalf("respawn nonce %q must be valid and distinct from create nonce %q", respawnNonce, r)
+			}
+			wantRespawn := append([]string{"-u"}, tmuxArgvList([][]string{
+				{"respawn-pane", "-k", "-t", "%2", "-c", "/w", relayed},
+				{"display-message", "-p", "-t", "%2", "#{pane_id}"},
+				{"set-option", "-p", "-F", "-t", "%2", programTapOption, respawnNonce + ".#{pane_id}"},
+				{"set-option", "-pu", "-t", "%2", programStatusOption},
+				{"set-option", "-pu", "-t", "%2", programTextOption},
+				{"set-option", "-pu", "-t", "%2", programHoldOption},
+				{"pipe-pane", "-O", "-t", "%2", wantTapCommand(respawnNonce, "claude-code")},
+			})...)
+			if !slices.Equal(respawn, wantRespawn) {
+				t.Fatalf("respawn after the flip\n got %q\nwant %q", respawn, wantRespawn)
 			}
 		})
 	}

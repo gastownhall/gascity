@@ -68,6 +68,7 @@ func TestHandleStatusFreshBuildsInsteadOfServingTheSavedBody(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -185,6 +186,7 @@ func TestHandleStatusFreshAnswersWithTheSavedBodyWhenItsBuildOverruns(t *testing
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -294,6 +296,7 @@ func TestHandleStatusFreshWithNothingSavedWaitsForItsBuild(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	if _, err := store.Create(beads.Bead{Title: "new work", Type: "task"}); err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +334,7 @@ func TestHandleStatusFreshWithNothingSavedWaitsForItsBuild(t *testing.T) {
 		t.Error("fresh read X-GC-Cache-Refresh = rebuilding, want never on a body built for the read")
 	}
 	srv.waitForBackground()
-	saved, _, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status")
+	saved, _, ok := staleResponseAs[cachedStatusResponse](srv, "status")
 	if !ok || saved.Body.Work.Open != 1 {
 		t.Errorf("saved /status entry = %+v (ok=%v), want the fresh read's build, Work.Open 1", saved.Body.Work, ok)
 	}
@@ -345,6 +348,7 @@ func TestHandleStatusFreshReadEndsWithItsRequest(t *testing.T) {
 	shortenStatusFreshBuildWait(t, 0)
 
 	state := newFakeState(t)
+	state.cityBeadStore = state.stores["myrig"]
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 	release := make(chan struct{})
@@ -367,7 +371,7 @@ func TestHandleStatusFreshReadEndsWithItsRequest(t *testing.T) {
 	}
 	closeRelease()
 	srv.waitForBackground()
-	if _, _, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status"); !ok {
+	if _, _, ok := staleResponseAs[cachedStatusResponse](srv, "status"); !ok {
 		t.Fatal("no /status body saved: the build must run on after its read ended")
 	}
 }
@@ -443,6 +447,7 @@ func TestHandleStatusFreshLiteBuildsTheLiteBody(t *testing.T) {
 	pinStatusBucket(t)
 
 	state := newFakeState(t)
+	state.cityBeadStore = state.stores["myrig"]
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -479,6 +484,7 @@ func TestHandleStatusFreshFalseKeepsTheCache(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
+	state.cityBeadStore = store.Store
 	h := newTestCityHandler(t, state)
 
 	getStatusBody(t, h, state, "/status")

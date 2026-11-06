@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -634,7 +635,7 @@ func TestLaneExecHoldsActualDirectCreateUntilStartupResolves(t *testing.T) {
 		t.Run(fmt.Sprintf("startup failure=%v", fail), func(t *testing.T) {
 			f := &laneFixture{dir: t.TempDir(), cfg: &config.City{}, store: newLaneTestStore(), sp: runtime.NewFake(), clk: &laneTestClock{now: laneT0}}
 			sp := &laneDirectCreateStart{Fake: f.sp, entered: make(chan string, 1), release: make(chan struct{}), fail: fail}
-			mgr := session.NewManagerWithOptions(f.store, sp, session.WithCityPath(f.dir), session.WithClock(f.clk))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(f.store), sp, session.WithCityPath(f.dir), session.WithClock(f.clk))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			type createResult struct {

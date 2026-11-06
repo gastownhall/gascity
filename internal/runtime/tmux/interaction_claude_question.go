@@ -203,6 +203,9 @@ func cloneClaudeQuestionForm(questions []claudeQuestion, index int) *claudeQuest
 // raised again cannot accept a response to the first one. Older runtimes with
 // no native identity stay visible and guarded, but offer terminal answers only.
 func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
+	if q.Review {
+		return nil
+	}
 	read := t.claudeQuestionTranscript
 	if read == nil {
 		read = t.readClaudeQuestionTranscript
@@ -379,7 +382,7 @@ func (t *Tmux) bindClaudeQuestion(target string, q *parsedQuestion) error {
 }
 
 func isClaudeQuestionFormReview(q *parsedQuestion) bool {
-	return q.Provider != "codex" && strings.HasPrefix(strings.Join(strings.Fields(q.Question), " "), "Review your answers ")
+	return q.Review && q.Provider != "codex" && strings.HasPrefix(strings.Join(strings.Fields(q.ReviewText), " "), "Review your answers ")
 }
 
 func sameClaudeQuestionForm(a, b *claudeQuestionForm) bool {
@@ -409,7 +412,7 @@ func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionFor
 		return false
 	}
 	normalize := func(text string) string { return strings.Join(strings.Fields(text), " ") }
-	remaining, ok := strings.CutPrefix(normalize(review.Question), "Review your answers ")
+	remaining, ok := strings.CutPrefix(normalize(review.ReviewText), "Review your answers ")
 	if !ok {
 		return false
 	}
@@ -470,7 +473,7 @@ func matchesClaudeQuestionReview(review *parsedQuestion, form *claudeQuestionFor
 func (t *Tmux) submitClaudeQuestionFormReview(ctx context.Context, target string, answered *parsedQuestion, answer string, selections []string, review *parsedQuestion) error {
 	verify := func(current *parsedQuestion) error {
 		if current == nil || !matchesClaudeQuestionReview(current, answered.ClaudeForm, answer, selections) ||
-			current.Question != review.Question || !slices.Equal(current.Choices, review.Choices) {
+			current.ReviewText != review.ReviewText || !slices.Equal(current.Choices, review.Choices) {
 			return fmt.Errorf("%w: native question review changed or is incomplete", runtime.ErrInteractionGone)
 		}
 		probe := *answered
@@ -527,7 +530,7 @@ func (t *Tmux) submitClaudeQuestionFormReview(ctx context.Context, target string
 		if err != nil {
 			return interactionAnswerUnconfirmed(fmt.Errorf("verifying native question review submission: %w", err))
 		}
-		if next.question == nil || !isClaudeQuestionFormReview(next.question) || next.question.Question != review.Question {
+		if next.question == nil || !isClaudeQuestionFormReview(next.question) || next.question.ReviewText != review.ReviewText {
 			return nil
 		}
 	}

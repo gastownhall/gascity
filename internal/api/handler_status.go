@@ -91,7 +91,7 @@ type StatusInput struct {
 	// saved body. It shares orders/check's ?fresh=true name and its
 	// response-cache bypass, but it still reads through the bead cache, and
 	// it waits for its build only so long (freshStatusOutput).
-	Fresh bool `query:"fresh" required:"false" doc:"When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers."`
+	Fresh bool `query:"fresh" required:"false" doc:"When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers."`
 }
 
 // cachedStatusResponse freezes the source-age hint with the body it describes.
@@ -260,11 +260,11 @@ func (s *Server) savedStatusOutput(cacheKey string, cache cacheFreshness) (*Inde
 	if !ok {
 		return nil, false
 	}
-	f := statusCacheFreshness(hit.Body, cache)
-	if built := age.Seconds(); built > f.ageS {
-		f.ageS, f.refresh.State = built, CacheRefreshRebuilding
+	current := statusCacheFreshness(hit.Body, cache)
+	f := hit.freshness(cache)
+	if built := age.Seconds(); built > current.ageS {
+		f.ageS, f.refresh.State = max(f.ageS, built), CacheRefreshRebuilding
 	}
-	f = hit.freshness(f)
 	return &IndexOutput[StatusBody]{
 		Index:        hit.Index,
 		CacheAgeS:    f.ageS,
@@ -380,15 +380,15 @@ func (s *Server) runStatusBuild(cacheKey string, lite bool, b *statusBuild) {
 			SourceAgeS: cacheAgeSeconds(s.state.CityBeadStore()).ageS,
 		}
 		resp := s.buildStatusBody(ctx, lite)
+		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
+		b.built = &observation
 		// Keep any prior complete snapshot with its original index/age. A
 		// partial refresh is not a newer reusable observation; the next stale
 		// request can try the same bounded, coalesced refresh again.
 		if resp.Partial {
 			return
 		}
-		observation.indexedResponse = indexedResponse[StatusBody]{Index: index, Body: resp}
 		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), observation)
-		b.built = &observation
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 
@@ -195,7 +196,7 @@ func availabilityProviderFixture(t *testing.T, profile ...worker.Profile) (*fake
 		diagnostic: &runtime.ProviderAvailability{State: "unavailable", Code: "connection_restore_failed", Source: "native_ui", ObservedAt: time.Date(2026, 11, 3, 1, 2, 3, 0, time.UTC)},
 	}
 	fs.sessionProvider = provider
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), provider, session.WithCityPath(fs.cityPath))
 	providerName := "codex"
 	metadata := map[string]string{"session_origin": "manual"}
 	if len(profile) > 1 {

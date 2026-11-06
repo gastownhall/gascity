@@ -544,6 +544,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	if p.supportsSeparableLaunch() {
 		return p.launchAgent(ctx, name, cfg)
 	}

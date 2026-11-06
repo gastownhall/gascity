@@ -750,6 +750,10 @@ stale-while-revalidate hits, add elapsed time to that frozen age; later point
 reads or writes must never make an older body appear younger. Preserve cache
 TTLs, coalescing, body/index pairing, partial metadata and uncached behavior.
 
+Fresh build waiters receive partial bodies and their diagnostics even when the
+partial result is excluded from the response cache. Keep response-entry age on
+saved bodies that read no stores; their source observation age stays inapplicable.
+
 Do not cache a partial status build. A cold partial response keeps its survivor
 counts and diagnostics for that request; a partial background refresh leaves
 the last complete body, index and observation age intact. A later complete

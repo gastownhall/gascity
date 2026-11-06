@@ -302,6 +302,9 @@ func (p *Provider) killObject(name string, req killObjectRequest) (runtime.Sessi
 // held since with exit 73 or its collision phrase. No input fence is
 // cleared: the name was vacant.
 func (p *Provider) startFresh(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.validateReconcilerOwnedStaging(cfg); err != nil {
+		return err
+	}
 	if !p.v2Ready() {
 		return fmt.Errorf("%w: exec provider %s: a fresh-only start needs %s", runtime.ErrRuntimeUnavailable, p.script, runtime.ProtocolCapabilityObserveV1)
 	}

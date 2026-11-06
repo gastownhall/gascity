@@ -33,8 +33,8 @@ func (p *Provider) acceptStartupDialogs(ctx context.Context, paneID, workDir str
 
 // confirmSurvivedStartupDialogs is tmux's Step 5 for the dialog passes: a
 // session that ended during them died during startup. A dialog answer can end
-// the agent. The rate-limit step selects Stop on purpose, and the bypass step
-// sends a blind Down then Enter, so a dropped Down confirms "No, exit". A kind
+// the agent. A confirmed Stop intentionally ends it; an agent can also exit
+// unexpectedly after another safely confirmed startup answer. A kind
 // launch's shell outlives its agent, and going on would type the first turn
 // into that shell. A check that cannot answer proves nothing either way, so
 // it warns and Start goes on: deliverStartupTurn never types into a kind

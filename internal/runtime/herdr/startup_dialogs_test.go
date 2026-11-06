@@ -437,14 +437,14 @@ func TestStartSurvivesReadinessWaitDeadlineOnlyWithALiveAgent(t *testing.T) {
 }
 
 // A startup-dialog answer can end the agent: the rate-limit step selects Stop
-// on purpose, and the bypass step sends a blind Down then Enter, so a dropped
-// Down confirms "No, exit". herdr's `agent start` types the agent's command
+// on purpose, and the agent can also exit after confirmed bypass acceptance.
+// These modeled frames start with the safe row selected. herdr's `agent start` types the agent's command
 // into the pane's shell, which outlives the agent. Start fails as tmux's Step 5
 // does, instead of going on to type the first turn into that shell.
 func TestStartFailsWhenAStartupDialogAnswerEndsTheAgent(t *testing.T) {
 	const (
-		rateLimit = "Usage limit reached\n\n❯ 1. Keep trying\n  2. Stop\n"
-		bypass    = "WARNING: Claude Code running in Bypass Permissions mode\n\n❯ 1. No, exit\n  2. Yes, I accept\n"
+		rateLimit = "Usage limit reached\n\n  1. Keep trying\n❯ 2. Stop\nEnter to confirm\n"
+		bypass    = "WARNING: Claude Code running in Bypass Permissions mode\n\n  1. No, exit\n❯ 2. Yes, I accept\nEnter to confirm\n"
 	)
 	for _, tc := range []struct {
 		name  string
@@ -452,7 +452,7 @@ func TestStartFailsWhenAStartupDialogAnswerEndsTheAgent(t *testing.T) {
 		nudge string
 	}{
 		{"rate-limit dialog answered Stop", rateLimit, "do work"},
-		{"bypass warning confirmed No, exit after a dropped Down", bypass, "do work"},
+		{"agent exits after confirmed Yes acceptance", bypass, "do work"},
 		{"no first turn", rateLimit, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -602,5 +602,48 @@ func TestMatchedStatusOutcome(t *testing.T) {
 		if got := matchedStatusOutcome(json.RawMessage(tc.res)); got != tc.want {
 			t.Errorf("matchedStatusOutcome(%q) = %q, want %q", tc.res, got, tc.want)
 		}
+	}
+}
+
+func TestStartWithholdsFirstTurnForUnconfirmedStartupMenu(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		frame    string
+		movement bool
+	}{
+		{"missing confirmation footer", "Usage limit reached\n\n❯ 1. Keep trying\n  2. Stop\n", false},
+		{"dropped movement leaves No selected", "WARNING: Claude Code running in Bypass Permissions mode\n\n❯ 1. No, exit\n  2. Yes, I accept\nEnter to confirm\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			warnings := captureStartupDialogWarnings(t)
+			if err := os.WriteFile(filepath.Join(state, "exit_dialog"), []byte(tc.frame), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}, Nudge: "do work"}
+			if err := p.Start(startDeadlineCtx(t), "gc-held-startup", cfg); err != nil {
+				t.Fatalf("live held startup failed: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if tc.movement && !strings.Contains(calls, "pane send-keys %5 down") {
+				t.Fatalf("fixture did not exercise dropped menu movement:\n%s", calls)
+			}
+			if !strings.Contains(warnings.String(), runtime.ErrStartupSelectionUnconfirmed.Error()) {
+				t.Fatalf("fixture did not reach a refused native menu: %q", warnings.String())
+			}
+			if _, err := os.Stat(filepath.Join(state, "registered")); err != nil {
+				t.Fatalf("held menu lost its live agent: %v", err)
+			}
+			for _, verb := range []string{"pane send-keys %5 enter", "agent prompt", "pane run"} {
+				if strings.Contains(calls, verb) {
+					t.Fatalf("unconfirmed menu received startup input (%s):\n%s", verb, calls)
+				}
+			}
+			marker, err := p.GetMeta("gc-held-startup", metaStartupUnconfirmed)
+			if err != nil || !strings.Contains(marker, "first turn withheld") || !strings.Contains(marker, runtime.ErrStartupSelectionUnconfirmed.Error()) {
+				t.Fatalf("withheld first turn was not recorded: %q, %v", marker, err)
+			}
+		})
 	}
 }

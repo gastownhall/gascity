@@ -446,14 +446,7 @@ func adoptStoreRecordingPrefix(t *testing.T, prefix string, rec prefixRecord) (D
 			t.Fatal(err)
 		}
 	}
-	if !rec.inConfigYAML {
-		deps.ReadStorePrefix = (&storePrefixStub{}).reader(prefix, nil)
-		return deps, req
-	}
-	deps.ReadStorePrefix = func(string) (string, error) {
-		t.Error("ReadStorePrefix consulted although config.yaml records the prefix")
-		return prefix, nil
-	}
+	deps.ReadStorePrefix = (&storePrefixStub{}).reader(prefix, nil)
 	return deps, req
 }
 

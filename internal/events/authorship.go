@@ -204,6 +204,7 @@ var builtinAuthorship = map[string]Authorship{
 	ReconcilerAlert:                       AuthorController,
 	ProviderHealthGateAlert:               AuthorController,
 	ProviderSwapped:                       AuthorController,
+	ProviderUnresolved:                    AuthorController,
 
 	// Controller: bead repairs and graph execution facts the controller
 	// derives. A logged execution.step_completed is read as journal-confirmed

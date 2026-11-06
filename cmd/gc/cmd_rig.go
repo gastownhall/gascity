@@ -684,7 +684,7 @@ var rigAdoptStorePrefix = readAdoptedStoreIssuePrefix
 // adoption is decided. The proxied read is an ordinary bd command: it may
 // start the workspace's proxy and run bd's version-bump maintenance even when
 // the adopt is then refused.
-func readAdoptedStoreIssuePrefix(cityPath, rigPath string) (string, error) {
+func readAdoptedStoreIssuePrefix(_ string, rigPath string) (string, error) {
 	metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, metaPath)
 	if err != nil {

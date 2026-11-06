@@ -3928,3 +3928,32 @@ func TestDoRelaunchSession_DeadlineErrorNamesStage(t *testing.T) {
 		},
 	})
 }
+
+func TestDoStartSessionWithholdsFirstTurnForUnconfirmedStartupMenu(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"trust", runtime.ErrWorkspaceTrustUnconfirmed},
+		{"selection", runtime.ErrStartupSelectionUnconfirmed},
+		{"update", runtime.ErrCodexUpdateUnconfirmed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeStartOps{hasSessionResult: true, acceptStartupDialogsErr: fmt.Errorf("startup dialog: %w", tc.err)}
+			cfg := runtime.Config{Command: "claude", ProcessNames: []string{"claude"}, ReadyPromptPrefix: "> ", Nudge: "do work"}
+			if err := doStartSession(context.Background(), ops, "gc-held-startup", cfg, DefaultConfig().SetupTimeout); err != nil {
+				t.Fatalf("live held startup failed: %v", err)
+			}
+			counts := map[string]int{}
+			for _, call := range ops.calls {
+				counts[call.method]++
+			}
+			if counts["acceptStartupDialogs"] != 2 || counts["hasSession"] == 0 || counts["isSessionRunning"] == 0 {
+				t.Fatalf("held menu skipped dialog or liveness checks: %v", counts)
+			}
+			if counts["sendKeys"] != 0 || counts["killSession"] != 0 || counts["recordUnconfirmedNudge"] != 1 {
+				t.Fatalf("unconfirmed menu must retain the live session and record its withheld first turn: %v", counts)
+			}
+		})
+	}
+}

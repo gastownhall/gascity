@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // A real native/SQLite writer advertises its pinned namespace. This fixture
@@ -31,7 +32,7 @@ func TestGuardedPublicAndOutboundAppendsShareSequenceReservation(t *testing.T) {
 				_, err := publicTestAdmission(t, mem).Admit(context.Background(), input)
 				errs <- err
 			} else {
-				_, err := NewServices(mem).Transcript.Append(context.Background(), AppendTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageOutbound, Text: "native reply", ProviderMessageID: fmt.Sprintf("outbound-%d", n)})
+				_, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.Append(context.Background(), AppendTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageOutbound, Text: "native reply", ProviderMessageID: fmt.Sprintf("outbound-%d", n)})
 				errs <- err
 			}
 		}()
@@ -43,7 +44,7 @@ func TestGuardedPublicAndOutboundAppendsShareSequenceReservation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	rows, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
+	rows, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
 	if err != nil || len(rows) != 16 {
 		t.Fatalf("rows=%d err=%v", len(rows), err)
 	}
@@ -64,16 +65,16 @@ func TestGuardedPublicAndOutboundAppendsShareSequenceReservation(t *testing.T) {
 func TestGuardedOutboundAppendDeduplicatesAndRetainsPayloadGuard(t *testing.T) {
 	mem := &publicNamespacedStore{MemStore: publicTestStore()}
 	input := AppendTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageInbound, Text: "first", ProviderMessageID: "inbound-one"}
-	first, err := NewServices(mem).Transcript.Append(context.Background(), input)
+	first, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.Append(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	retry, err := NewServices(mem).Transcript.Append(context.Background(), input)
+	retry, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.Append(context.Background(), input)
 	if err != nil || retry.ID != first.ID {
 		t.Fatalf("retry=%v err=%v", retry, err)
 	}
 	input.Text = "changed"
-	if _, err := NewServices(mem).Transcript.Append(context.Background(), input); err == nil {
+	if _, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.Append(context.Background(), input); err == nil {
 		t.Fatal("changed inbound payload accepted")
 	}
 }
@@ -111,11 +112,11 @@ func (s *guardedInboundCollision) ApplyGuarded(ctx context.Context, b beads.Guar
 func TestGuardedInboundAppendRejectsConflictAfterLostCreateRace(t *testing.T) {
 	mem := &guardedInboundCollision{publicNamespacedStore: &publicNamespacedStore{MemStore: publicTestStore()}}
 	input := AppendTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageInbound, Text: "loser payload", ProviderMessageID: "race-message"}
-	_, err := NewServices(mem).Transcript.Append(context.Background(), input)
+	_, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.Append(context.Background(), input)
 	if !errors.Is(err, ErrMessageConflict) {
 		t.Fatalf("conflicting readback accepted: %v", err)
 	}
-	rows, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
+	rows, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
 	if err != nil || len(rows) != 1 || rows[0].Text != "winner payload" {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}

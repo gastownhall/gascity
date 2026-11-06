@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/execenv"
 )
@@ -36,7 +37,7 @@ func TestRunRalphCheckExitConfigIsDriftPending(t *testing.T) {
 	subject := beads.Bead{ID: "run-config", Type: "task"}
 	opts := ProcessOptions{CityPath: cityPath}
 
-	_, err := runRalphCheck(store, check, subject, 1, opts)
+	_, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, opts)
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("runRalphCheck error = %v, want ErrControlDriftPending", err)
 	}
@@ -54,7 +55,7 @@ func TestRunRalphCheckExitConfigIsDriftPending(t *testing.T) {
 	}
 	// The cmd layer freezes bookkeeping on a verbatim repeat, so the hold
 	// text must be stable across sweeps.
-	_, again := runRalphCheck(store, check, subject, 1, opts)
+	_, again := runRalphCheck(beadstest.Graph(store), check, subject, 1, opts)
 	if again == nil || again.Error() != msg {
 		t.Fatalf("second runRalphCheck error = %v, want verbatim repeat %q", again, msg)
 	}
@@ -68,7 +69,7 @@ func TestRunRalphCheckExitConfigWithoutStderrHasPlaceholderReason(t *testing.T) 
 	checkPath := writeCheckScript(t, cityPath, "silent.sh", "#!/bin/sh\nexit 78\n")
 	check := beads.Bead{ID: "check-silent", Type: "task", Metadata: map[string]string{beadmeta.CheckPathMetadataKey: checkPath}}
 
-	_, err := runRalphCheck(beads.NewMemStore(), check, beads.Bead{ID: "run-silent", Type: "task"}, 1, ProcessOptions{CityPath: cityPath})
+	_, err := runRalphCheck(beadstest.Graph(beads.NewMemStore()), check, beads.Bead{ID: "run-silent", Type: "task"}, 1, ProcessOptions{CityPath: cityPath})
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("runRalphCheck error = %v, want ErrControlDriftPending", err)
 	}
@@ -146,7 +147,7 @@ func TestRunRalphCheckExitConfigWinsOverInfraMarker(t *testing.T) {
 	store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 2)
 	mustClose(t, store, run1.ID)
 
-	_, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	_, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending (exit 78 beats the stderr fallback)", err)
 	}
@@ -171,7 +172,7 @@ func TestRunRalphCheckOtherExitCodesAreNotHeld(t *testing.T) {
 			checkPath := writeCheckScript(t, cityPath, "exit.sh", "#!/bin/sh\necho 'not a config problem' >&2\nexit "+code+"\n")
 			check := beads.Bead{ID: "check-" + code, Type: "task", Metadata: map[string]string{beadmeta.CheckPathMetadataKey: checkPath}}
 
-			result, err := runRalphCheck(beads.NewMemStore(), check, beads.Bead{ID: "run-" + code, Type: "task"}, 1, ProcessOptions{CityPath: cityPath})
+			result, err := runRalphCheck(beadstest.Graph(beads.NewMemStore()), check, beads.Bead{ID: "run-" + code, Type: "task"}, 1, ProcessOptions{CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("runRalphCheck error = %v, want a graded result", err)
 			}
@@ -196,7 +197,7 @@ func TestProcessRalphControlCheckExitConfigStaysOpen(t *testing.T) {
 	opts := ProcessOptions{CityPath: cityPath}
 	beadsBefore := countAllBeads(t, store)
 
-	_, err := ProcessControl(store, control, opts)
+	_, err := ProcessControl(beadstest.Graph(store), control, opts)
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
 	}
@@ -204,7 +205,7 @@ func TestProcessRalphControlCheckExitConfigStaysOpen(t *testing.T) {
 
 	// The operator fixes the environment; the same script now passes.
 	writeExecutableScript(t, scriptPath, "#!/bin/sh\nexit 0\n")
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl after the fix: %v", err)
 	}
@@ -231,7 +232,7 @@ func TestProcessRalphControlCheckExitConfigThenVerdictSpendsOneAttempt(t *testin
 	opts := ProcessOptions{CityPath: cityPath}
 
 	for i := range 3 {
-		_, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+		_, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 		if !errors.Is(err, ErrControlDriftPending) {
 			t.Fatalf("sweep %d error = %v, want ErrControlDriftPending", i+1, err)
 		}
@@ -244,7 +245,7 @@ func TestProcessRalphControlCheckExitConfigThenVerdictSpendsOneAttempt(t *testin
 	// max_attempts = 1 that verdict exhausts the budget, so the step closes
 	// failed with exactly one attempt-log entry: attempt 1, the real reason.
 	writeExecutableScript(t, scriptPath, "#!/bin/sh\necho 'front matter missing required fields' >&2\nexit 1\n")
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl with a real verdict: %v", err)
 	}
@@ -284,7 +285,7 @@ func TestProcessRalphCheckExitConfigStaysOpen(t *testing.T) {
 	mustClose(t, store, run1.ID)
 	beadsBefore := countAllBeads(t, store)
 
-	_, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	_, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
 	}
@@ -329,7 +330,7 @@ func TestProcessRalphCheckExitConfigKeepsPendingBudget(t *testing.T) {
 	}
 	mustClose(t, store, run1.ID)
 
-	_, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	_, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
 	}
@@ -359,7 +360,7 @@ func TestProcessRalphCheckExitConfigHealClearsPendingBudget(t *testing.T) {
 	}
 	mustClose(t, store, run1.ID)
 
-	result, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}

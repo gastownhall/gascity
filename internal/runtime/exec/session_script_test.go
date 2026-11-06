@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -86,9 +87,6 @@ func testScreenSessionScriptPreservesOwnedHookAndStagesSiblings(t *testing.T, ru
 	}
 
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "screen"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake screen: %v", err)
-	}
 	payload, err := json.Marshal(map[string]any{
 		"command":                          "echo hi",
 		"work_dir":                         workDir,
@@ -105,12 +103,16 @@ func testScreenSessionScriptPreservesOwnedHookAndStagesSiblings(t *testing.T, ru
 
 	cmd := run(t, "start", "mayor")
 	cmd.Stdin = bytes.NewReader(payload)
-	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GC_EXEC_STATE_DIR="+t.TempDir(),
-	)
+	callsPath := configureOwnedScreenFixture(t, cmd, binDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("gc-session-screen start: %v\n%s", err, out)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(calls), "-dmS "); n != 1 {
+		t.Fatalf("successful staging started %d screens, want one: %s", n, calls)
 	}
 
 	got, err := os.ReadFile(canonicalPath)
@@ -153,8 +155,7 @@ func testScreenSessionScriptFailsClosedWhenOwnedOverlayFilterFails(t *testing.T,
 	}
 	binDir := t.TempDir()
 	for name, script := range map[string]string{
-		"screen": "#!/bin/sh\nexit 0\n",
-		"tar":    "#!/bin/sh\nexit 42\n",
+		"tar": "#!/bin/sh\nexit 42\n",
 	} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
 			t.Fatalf("write fake %s: %v", name, err)
@@ -175,16 +176,20 @@ func testScreenSessionScriptFailsClosedWhenOwnedOverlayFilterFails(t *testing.T,
 	}
 	cmd := run(t, "start", "mayor")
 	cmd.Stdin = bytes.NewReader(payload)
-	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GC_EXEC_STATE_DIR="+t.TempDir(),
-	)
+	callsPath := configureOwnedScreenFixture(t, cmd, binDir)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("gc-session-screen unexpectedly started after tar failure; output:\n%s", out)
 	}
 	if !bytes.Contains(out, []byte("failed to filter reconciler-owned overlay paths")) {
 		t.Fatalf("error output = %q, want owned-overlay filter failure", out)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "-dmS ") {
+		t.Fatalf("failed staging started a screen: %s", calls)
 	}
 }
 
@@ -306,4 +311,77 @@ func screenSessionScriptPath(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "contrib", "session-scripts", "gc-session-screen"))
+}
+
+// configureOwnedScreenFixture models only startup for the staging controls.
+// It does not launch screen or an agent. Returns the invocation log path.
+func configureOwnedScreenFixture(t *testing.T, cmd *osexec.Cmd, binDir string) string {
+	t.Helper()
+	fixture := t.TempDir()
+	state, err := os.MkdirTemp("/tmp", "gcs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(state) })
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(binDir, "screen"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$GC_TEST_SCREEN_CALLS"
+rows="$SCREENDIR/owned-fixture.rows"
+case "$1" in
+  -ls)
+    if [ -s "$rows" ]; then
+      printf 'There is a screen on:\n'
+      cat "$rows"
+      printf '1 Socket in %s.\n' "$SCREENDIR"
+      exit 0
+    fi
+    printf 'No Sockets found in %s.\n' "$SCREENDIR"
+    exit 1
+    ;;
+  -dmS)
+    printf '\t4194999.%s\t(11/02/2026 01:00:00 PM)\t(Detached)\n' "$2" > "$rows"
+    ;;
+  *) printf 'unexpected fixture screen operation: %s\n' "$*" >&2; exit 64 ;;
+esac
+`)
+	write(filepath.Join(binDir, "ps"), `#!/bin/sh
+set -eu
+case "$*" in
+  '-o lstart= -p 4194999'|'-o lstart= -p 4195000')
+    printf 'Mon Nov  2 00:00:00 2026\n'
+    ;;
+  '-e -o pid= -o ppid=')
+    printf '4194999 1\n4195000 4194999\n'
+    ;;
+  *) printf 'unexpected fixture ps operation: %s\n' "$*" >&2; exit 64 ;;
+esac
+`)
+	src, err := os.ReadFile(screenSessionScriptPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const procLine = "\nPROC=/proc\n"
+	if strings.Count(string(src), procLine) != 1 {
+		t.Fatal("expected one production PROC assignment")
+	}
+	// fixture is a test-created path without shell metacharacters; %q matches
+	// the existing main Screen fake's test-only script-copy mechanism.
+	patched := strings.Replace(string(src), procLine,
+		"\nPROC="+fmt.Sprintf("%q", filepath.Join(fixture, "proc"))+"\n", 1)
+	script := filepath.Join(fixture, "gc-session-screen")
+	write(script, patched)
+	cmd.Path, cmd.Args[0] = script, script
+	calls := filepath.Join(fixture, "screen.calls")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_EXEC_STATE_DIR="+state,
+		"GC_EXEC_CITY_PATH=/owned-screen-staging-fixture",
+		"GC_TEST_SCREEN_CALLS="+calls)
+	return calls
 }

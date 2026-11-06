@@ -26,6 +26,65 @@ type countingStore struct {
 	listByAssigneeCalls int
 }
 
+func TestHandleStatusFreshPartialReturnsBodyWithoutReplacingCompleteCache(t *testing.T) {
+	pinStatusBucket(t)
+	state := newFakeState(t)
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{Type: "task", Title: "retained complete observation"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &failingBeadStore{Store: backing}
+	state.cityBeadStore = store
+	state.stores["myrig"] = store
+	srv := New(state)
+	t.Cleanup(srv.waitForBackground)
+	h := newTestCityHandlerWith(t, state, srv)
+	complete, _ := getStatusBody(t, h, state, "/status")
+	if complete.Partial || complete.Work.Ready != 1 {
+		t.Fatalf("initial complete observation = %+v", complete)
+	}
+	before := savedStatusAt(t, srv, "status")
+	store.readyErr = fmt.Errorf("ready unavailable: %w", beads.ErrCacheUnavailable)
+	partial, rec := getStatusBody(t, h, state, "/status?fresh=true")
+	if !partial.Partial || partial.Work.Open != 1 || !statusPartialErrorsContain(partial.PartialErrors, "city work ready:") {
+		t.Fatalf("fresh partial response lost its survivor or diagnostic: %+v", partial)
+	}
+	if got := rec.Header().Get("X-GC-Cache-Refresh"); got == "rebuilding" {
+		t.Fatal("a body built for this request must not report a saved-body fallback")
+	}
+	if got := savedStatusAt(t, srv, "status"); !got.Equal(before) {
+		t.Fatalf("partial fresh build replaced complete cache: before=%v after=%v", before, got)
+	}
+	retained, _ := getStatusBody(t, h, state, "/status")
+	if retained.Partial || retained.Work.Ready != 1 {
+		t.Fatalf("poller lost the last complete snapshot: %+v", retained)
+	}
+	store.readyErr = nil
+	recovered, _ := getStatusBody(t, h, state, "/status?fresh=true")
+	if recovered.Partial || recovered.Work.Ready != 1 {
+		t.Fatalf("fresh read did not recover: %+v", recovered)
+	}
+}
+
+func TestSavedStatusWithoutStoreReadsRetainsResponseAge(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	now := time.Now()
+	srv.storeResponse("status", responseCacheTimeBucket(now), cachedStatusResponse{
+		indexedResponse: indexedResponse[StatusBody]{Body: StatusBody{StoresNotRead: true}},
+		ObservedAt:      now.Add(-30 * time.Second), SourceAgeS: 180,
+	})
+	srv.responseCacheMu.Lock()
+	entry := srv.responseCacheEntries["status"]
+	entry.storedAt = now.Add(-5 * time.Second)
+	srv.responseCacheEntries["status"] = entry
+	srv.responseCacheMu.Unlock()
+	out, ok := srv.savedStatusOutput("status", cacheFreshness{})
+	if !ok || out.CacheAgeS < 5 || out.CacheAgeS >= 180 || out.State != CacheRefreshRebuilding {
+		t.Fatalf("saved no-store body must retain entry age without borrowing source age: output=%+v found=%v", out, ok)
+	}
+}
+
 // These cache fixtures wrap an in-memory store. Preserve its bounded Ready
 // capability instead of accidentally making every status build partial.
 func (s *countingStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
@@ -655,7 +714,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	if got := fastStore.listCalls - listCallsBeforeRefresh; got != 1 {
 		t.Fatalf("rig List calls during background refresh = %d, want exactly 1 (%d concurrent misses must coalesce onto one rebuild)", got, concurrentMisses+1)
 	}
-	refreshed, _, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status")
+	refreshed, _, ok := staleResponseAs[cachedStatusResponse](srv, "status")
 	if !ok {
 		t.Fatal("no cached /status entry after the background refresh")
 	}

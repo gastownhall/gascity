@@ -17,3 +17,8 @@ Preserve exact ID/store identity and backing errors; never substitute stale
 data, an empty row or an unbounded background read. Federated point reads keep
 their declared residency plan and refusal policy; independent stores are not
 an atomic snapshot.
+
+An existing GC endpoint-origin stamp excludes provider-owned classification,
+including when an inherited mirror has drifted and boot normalization must
+repair it. This ownership claim does not authorize adoption, connection or
+mutation; those boundaries retain strict canonical validation.

@@ -772,11 +772,18 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 
 	if dialog.question != nil {
 		t.approvalDedup().clear(name)
+		prompt := dialog.question.Question
+		var options []string
+		if dialog.question.NativeID == "" {
+			prompt = boundPromptText(prompt)
+		} else {
+			options = dialog.question.answerChoices()
+		}
 		return &runtime.PendingInteraction{
 			RequestID: dialog.question.requestID(),
 			Kind:      "question",
-			Prompt:    boundPromptText(dialog.question.Question),
-			Options:   dialog.question.answerChoices(),
+			Prompt:    prompt,
+			Options:   options,
 			Metadata:  questionMetadata(dialog.question),
 		}, nil
 	}

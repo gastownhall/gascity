@@ -467,7 +467,7 @@ func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
 	if err := repairedStore.SetMetadata(repairedControl.ID, beadmeta.WorkDirMetadataKey, workDir); err != nil {
 		t.Fatal(err)
 	}
-	repaired, err := ProcessControl(repairedStore, mustGet(t, repairedStore, repairedControl.ID), ProcessOptions{CityPath: cityPath})
+	repaired, err := ProcessControl(beadstest.Graph(repairedStore), mustGet(t, repairedStore, repairedControl.ID), ProcessOptions{Work: beadstest.Work(repairedStore), CityPath: cityPath})
 	if err != nil || repaired.Action != "pass" {
 		t.Fatalf("ProcessControl with the workdir restored = %+v, %v; want pass", repaired, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -28,7 +29,7 @@ func newPublicAdmissionEnv(t *testing.T) (*opsEnv, *publicAdmissionTestState, ex
 	t.Helper()
 	e, lane := newLaneOpsEnv(t, "message")
 	messages := newOpsTestStore()
-	services := extmsg.NewServices(messages)
+	services := extmsg.NewServices(beadstest.Mail(messages), lane.SessionsBeadStore())
 	e.fs.adapterReg = extmsg.NewAdapterRegistry()
 	e.fs.extmsgSvc = &services
 	state := &publicAdmissionTestState{lanePokeState: lane, messaging: beads.MailStore{Store: messages}}

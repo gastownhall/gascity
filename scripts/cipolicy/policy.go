@@ -372,8 +372,10 @@ const (
 	// the workflow DOLT_VERSION env value only. Then Beads v1.3.2 -> v1.3.3:
 	// the workflow BD_VERSION env value only. Then Beads v1.3.3 -> v1.3.4:
 	// the workflow BD_VERSION env value only.
-	// RFC8191 also retains the installed beginner qualification job.
-	expectedNightlyExecutionHash = "e2fb893fdaf435dc264f782c6569c5fb7b7ff7546c10dca92abf273f944bdb64"
+	// RFC8191 retains the installed beginner qualification job beside those
+	// updated pins: one reusable workflow call, contents:read, and its existing
+	// OLLAMA_API_KEY binding. No trigger change or extra workflow permission.
+	expectedNightlyExecutionHash = "1384d8dca4888af366e63a0cfa68675ff051090243893ed3a43f25c1273c121e"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

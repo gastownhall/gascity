@@ -723,7 +723,7 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, dir); err != nil {
 		return nil, err
 	} else if local {
-		applyProviderOwnedDirectLocalEnv(env)
+		applyBdOwnedDirectEnv(env)
 	}
 	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return nil, err
@@ -3739,7 +3739,7 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot); err != nil {
 		return nil, err
 	} else if local {
-		env, err := providerOwnedDirectLocalRuntimeEnv(cityPath, scopeRoot, nil)
+		env, err := bdOwnedDirectRuntimeEnv(cityPath, scopeRoot, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -3747,13 +3747,13 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 		// Retain the qualified executable path and process context, then drop
 		// ambient city database coordinates before resolving the lifecycle.
 		env = runtimeEnvEntriesToMap(mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), env))
-		applyProviderOwnedDirectLocalEnv(env)
+		applyBdOwnedDirectEnv(env)
 		projected, err := providerLifecycleProcessEnvFromBase(cityPath, provider, mergeRuntimeEnv(nil, env))
 		if err != nil {
 			return nil, err
 		}
 		env = runtimeEnvEntriesToMap(projected)
-		applyProviderOwnedDirectLocalEnv(env)
+		applyBdOwnedDirectEnv(env)
 		return mergeRuntimeEnv(nil, env), nil
 	}
 	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)

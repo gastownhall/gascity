@@ -16,6 +16,10 @@ city topology. Preserve the original rig metadata/config snapshots through the
 plan and refuse observed drift before the first topology write; this observation
 is not a cross-file concurrency lock. Do not bypass provider-owned classification.
 
+Native-local ownership classification must honor the same existing GC claim
+as direct-external classification before validating a drifted inherited mirror.
+Keep strict validation at adoption and connection admission.
+
 A resolved resume command must not append the one-shot `initial_message`, even
 when the controller start hash is absent. Keep the retained native conversation
 and the stored message; first-start classification alone does not authorize
@@ -34,3 +38,10 @@ must leave unrelated detached scopes alone; an unreadable inventory fails cold.
 Construct doctor order-history resolvers only when their gated lookup runs.
 Registration and `--check` selection must not open relocated storage before
 a stopped or suspended store can be excluded.
+
+A proven direct-external bd rig resolves its own recorded endpoint before any
+city database resolution or recovery. Use the existing target/auth/scoped
+projection helpers; preserve hooks-only initialization for an unowned store.
+Only direct Dolt server metadata may enter that fallback: complete library
+bindings and other backends retain their own routing. Honor canceled contexts
+before these early read paths and preserve the caller's environment on refusal.

@@ -28,7 +28,7 @@ func publicRoutedParityFixture(t *testing.T) (*opsEnv, *publicAdmissionTestState
 		t.Fatal(err)
 	}
 	targets = append(targets, extmsg.PublicRecipient{SessionID: peer.ID, Policy: targets[0].Policy})
-	services, err := extmsg.NewServicesWithSessionDirectory(state.messaging.Store, session.NewStore(state.SessionsBeadStore()))
+	services, err := extmsg.NewServicesWithSessionDirectory(state.messaging, session.NewStore(state.SessionsBeadStore()))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,8 @@ existing queue and a missing destination when changing this boundary.
 Adoption must keep the existing queue namespace. Resolve it before deriving a
 prefix from the rig name. Use ReadStorePrefix for native stores; a YAML mirror
 that disagrees with the stored namespace must be rejected.
+After matching a native namespace, preserve whether YAML records that prefix so
+rename remedies include the required YAML update as well as the database rename.
 A preview lookup must not start a provider or open a writable store. Preserve
 explicit-prefix mismatch and city-prefix collision checks; an unreadable or
 empty namespace is an error, never a reason to use the requested prefix.

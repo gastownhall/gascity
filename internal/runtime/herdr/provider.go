@@ -362,11 +362,11 @@ func (p *Provider) launchOrchestration(ctx context.Context, name string, cfg run
 	if startupText == "" {
 		return nil
 	}
-	// A trust dialog the last pass could not confirm is still on screen with
-	// its cursor off the trust row, possibly on "No, exit", and the first
-	// turn's submit Enter would answer it. Withhold the turn and record the
-	// strand instead.
-	if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) {
+	// An unconfirmed native menu is still on screen. The first turn's submit
+	// could answer that menu, so withhold the turn and record the strand.
+	if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) ||
+		errors.Is(dialogErr, runtime.ErrStartupSelectionUnconfirmed) ||
+		errors.Is(dialogErr, runtime.ErrCodexUpdateUnconfirmed) {
 		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, fmt.Errorf("first turn withheld: %w", dialogErr))
 		return nil
 	}

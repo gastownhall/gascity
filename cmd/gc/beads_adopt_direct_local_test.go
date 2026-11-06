@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -134,7 +136,7 @@ func TestAdoptNativeDirectLocalCustomTypesUseOriginalScope(t *testing.T) {
 }
 
 func TestAdoptNativeDirectLocalRefusesUnprovenStorageBeforeMutation(t *testing.T) {
-	for _, kind := range []string{"missing database", "unsafe database", "incomplete native records", "symlink database", "shared-server", "custom data-dir", "missing project identity", "partial host", "partial port", "local endpoint", "socket endpoint"} {
+	for _, kind := range []string{"missing database", "unsafe database", "incomplete native records", "symlink database", "shared-server", "custom data-dir", "missing project identity", "partial host", "partial port", "socket endpoint"} {
 		t.Run(kind, func(t *testing.T) {
 			city, rig, _ := nativeDirectAdoptFixture(t)
 			database := filepath.Join(rig, ".beads/dolt/gc_setup_3d575b641de741c6acf637cd76711805")
@@ -291,8 +293,120 @@ func mutateNativeDirectIdentity(t *testing.T, rig, kind string) {
 	}
 }
 
+func registerNativeDirectAdoptFixture(t *testing.T, city, rig string) {
+	t.Helper()
+	writeSchema2RigCity(t, city, "adopt-preserve",
+		"[workspace]\n[beads]\nprovider=\"exec:"+gcBeadsBdScriptPath(city)+"\"\n[[rigs]]\nname=\"existing\"\nprefix=\"kept3d575b64\"\n",
+		fmt.Sprintf("workspace_name=\"adopt-preserve\"\n[[rig]]\nname=\"existing\"\npath=%q\n", rig))
+}
+
+// A complete loopback binding on a port the city never owned is an external
+// store, even when stale native-local directories and records remain beside it.
+func TestAdoptNativeDirectLocalCompleteLoopbackBindingRemainsExternal(t *testing.T) {
+	city, rig, before := nativeDirectAdoptFixture(t)
+	mutateNativeDirectIdentity(t, rig, "local endpoint")
+	metadata, err := os.ReadFile(filepath.Join(rig, ".beads/metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before[".beads/metadata.json"] = metadata
+	registerNativeDirectAdoptFixture(t, city, rig)
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if owned, err := scopeProviderOwned(city, rig); err != nil || owned {
+		t.Fatalf("explicit external binding classified as provider-owned: owned=%v err=%v", owned, err)
+	}
+	if err := prepareRigAdoptProviderState(city, rig); err != nil {
+		t.Fatal(err)
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, city, rig)
+	if err != nil || !target.External || target.Host != "127.0.0.1" || target.Port != "4406" {
+		t.Fatalf("external target=%+v err=%v", target, err)
+	}
+	for name, cityState := range map[string]contract.ConfigState{
+		"different city endpoint": {
+			IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginCityCanonical,
+			EndpointStatus: contract.EndpointStatusVerified, DoltMode: "server",
+			DoltHost: "city.example", DoltPort: "43361",
+		},
+		"unavailable managed city": {
+			IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity,
+			EndpointStatus: contract.EndpointStatusUnverified, DoltMode: "server",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(city, ".beads/config.yaml"), cityState); err != nil {
+				t.Fatal(err)
+			}
+			for name, read := range map[string]func(string, string) (map[string]string, error){
+				"normal": func(city, rig string) (map[string]string, error) {
+					return bdRuntimeEnvForRigWithErrorNoRecovery(city, nil, rig)
+				},
+				"doctor custom types": func(city, rig string) (map[string]string, error) {
+					entries, err := doctor.CustomTypesStoreEnv(city, rig)
+					return runtimeEnvEntriesToMap(entries), err
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					env, err := read(city, rig)
+					if err != nil || env["BEADS_DIR"] != filepath.Join(rig, ".beads") {
+						t.Fatalf("scope=%q err=%v", env["BEADS_DIR"], err)
+					}
+					for key, want := range map[string]string{
+						"GC_DOLT_HOST": target.Host, "GC_DOLT_PORT": target.Port,
+						"BEADS_DOLT_SERVER_HOST": target.Host, "BEADS_DOLT_SERVER_PORT": target.Port,
+					} {
+						if env[key] != want {
+							t.Fatalf("%s=%q, want external rig target %q", key, env[key], want)
+						}
+					}
+				})
+			}
+		})
+	}
+	t.Run("canceled request", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if env, _, err := bdRuntimeEnvForRigReportingContext(ctx, city, nil, rig, true); !errors.Is(err, context.Canceled) || env != nil {
+			t.Fatalf("canceled normal read: env returned=%v err=%v", env != nil, err)
+		}
+		env := map[string]string{"sentinel": "kept"}
+		if err := applyResolvedRigDoltEnvContext(ctx, env, city, rig, nil, true); !errors.Is(err, context.Canceled) || len(env) != 1 || env["sentinel"] != "kept" {
+			t.Fatalf("canceled direct projection changed its environment: keys=%d err=%v", len(env), err)
+		}
+	})
+	assertNativeDirectPreserved(t, rig, before)
+}
+
+// Stale direct endpoint fields cannot select native Dolt projection over a
+// complete library binding, another backend, or a partial opaque binding.
+func TestDirectReadBindingSelectionPreservesOtherBackendAuthority(t *testing.T) {
+	for name, metadata := range map[string]string{
+		"complete opaque binding":      `{"backend":"postgres","storage_endpoint":"postgres://db.example.test:5432","storage_database":"original","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":4406}`,
+		"doltlite with stale endpoint": `{"backend":"doltlite","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":4406}`,
+		"partial opaque binding":       `{"backend":"postgres","storage_endpoint":"postgres://db.example.test:5432","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":4406}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			city, rig, _ := nativeDirectAdoptFixture(t)
+			path := scopeMetadataJSONPath(rig)
+			if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			selected, err := scopeHasBdOwnedDirectReadBinding(city, rig)
+			if selected || (name == "partial opaque binding") != (err != nil) {
+				t.Fatalf("direct read selection=%v err=%v", selected, err)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || string(after) != metadata {
+				t.Fatalf("binding changed: err=%v", readErr)
+			}
+		})
+	}
+}
+
 func TestAdoptNativeDirectLocalMissingStorageRefusesRegisteredReads(t *testing.T) {
-	for _, kind := range []string{"missing database", "shared-server", "custom data-dir", "missing project identity", "partial host", "partial port", "local endpoint", "socket endpoint"} {
+	for _, kind := range []string{"missing database", "shared-server", "custom data-dir", "missing project identity", "partial host", "partial port", "socket endpoint"} {
 		t.Run(kind, func(t *testing.T) {
 			city, rig, _ := nativeDirectAdoptFixture(t)
 			switch {
@@ -312,9 +426,7 @@ func TestAdoptNativeDirectLocalMissingStorageRefusesRegisteredReads(t *testing.T
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\n[beads]\nprovider=\"exec:"+gcBeadsBdScriptPath(city)+"\"\n[[rigs]]\nname=\"existing\"\npath=\""+rig+"\"\nprefix=\"kept3d575b64\"\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			registerNativeDirectAdoptFixture(t, city, rig)
 			if env, err := bdRuntimeEnvForRigWithErrorNoRecovery(city, nil, rig); err == nil || env != nil {
 				t.Fatalf("unproven local storage reached normal read projection: env=%v err=%v", env, err)
 			}

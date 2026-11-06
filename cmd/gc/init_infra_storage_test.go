@@ -137,7 +137,7 @@ func TestNativeInfrastructureFailedProvisionResumesSameIdentity(t *testing.T) {
 	if cfg.Storage == nil || cfg.Storage.Classes.Sessions != "infra" || cfg.Storage.Classes.Work != "work" || cfg.Storage.Bindings["infra"].Provider != "beads-workspace" {
 		t.Fatalf("wrong storage: %+v", cfg.Storage)
 	}
-	if !slices.Equal(cfg.Ops.Authoritative, []string{"message", "interrupt", "respond"}) {
+	if !slices.Equal(cfg.Ops.AuthoritativeKinds(), []string{"message", "interrupt", "respond"}) {
 		t.Fatalf("authoritative=%v", cfg.Ops.Authoritative)
 	}
 	got, _ = os.ReadFile(filepath.Join(city, "city.toml"))

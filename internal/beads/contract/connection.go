@@ -929,7 +929,7 @@ func validateSocketTarget(socket, host, port string) error {
 //     for the city's managed Dolt (cityRecordsManagedDoltPort).
 //   - config.yaml carries no claim of gc's. gc stamps its endpoint origin into
 //     every scope it canonicalises, and a stamped config stays gc's even when
-//     it has drifted out of validity (scopeConfigClaimedByGC); a scope
+//     it has drifted out of validity (ScopeConfigClaimedByGC); a scope
 //     carrying only bd's template (or no config at all) has never been
 //     claimed.
 //
@@ -954,7 +954,7 @@ func ScopeCarriesBdOwnedDirectBinding(fs fsys.FS, cityRoot, scopeRoot, issuePref
 	if !bindingMayNameForeignServer(binding) {
 		return false, nil
 	}
-	claimed, err := scopeConfigClaimedByGC(fs, cityRoot, scopeRoot, issuePrefix)
+	claimed, err := ScopeConfigClaimedByGC(fs, cityRoot, scopeRoot, issuePrefix)
 	if err != nil || claimed {
 		return false, err
 	}
@@ -968,14 +968,16 @@ func ScopeCarriesBdOwnedDirectBinding(fs fsys.FS, cityRoot, scopeRoot, issuePref
 	return !recorded, nil
 }
 
-// scopeConfigClaimedByGC reports whether a scope's config.yaml carries gc's
+// ScopeConfigClaimedByGC reports whether a scope's config.yaml carries gc's
 // claim. gc.endpoint_origin is gc's own stamp, so a config carrying one is
 // claimed whether or not it still validates: an inherited_city mirror the
 // city's endpoint has moved away from is drift the boot sync re-mirrors, and
 // validating it here would fail the classification before that repair runs. A
 // config without the stamp is claimed when it resolves as authoritative, which
-// is how a legacy gc config carries its endpoint.
-func scopeConfigClaimedByGC(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (bool, error) {
+// is how a legacy gc config carries its endpoint. A claim only excludes
+// provider-owned classification; it does not validate a connection or authorize
+// adoption, initialization or endpoint mutation.
+func ScopeConfigClaimedByGC(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (bool, error) {
 	cfg, ok, err := ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml"))
 	if err != nil || !ok {
 		return false, err

@@ -224,7 +224,7 @@ func TestNativeInfrastructureAuthoredScaffoldNeverCreatesSplitIntent(t *testing.
 				if policy == "include-native-off" && cfg.Beads.NativeTransport != "off" {
 					t.Fatalf("lost native transport policy: %+v", cfg.Beads)
 				}
-				if policy == "include-ops" && len(cfg.Ops.Authoritative) != 0 {
+				if policy == "include-ops" && (!cfg.Ops.AuthoritativeSet() || len(cfg.Ops.AuthoritativeKinds()) != 0) {
 					t.Fatalf("lost explicit operations policy: %+v", cfg.Ops)
 				}
 				if policy == "agent-defaults" && cfg.AgentDefaults.Model != "gpt-6.1-sol" {

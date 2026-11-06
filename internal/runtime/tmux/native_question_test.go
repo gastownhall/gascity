@@ -1163,3 +1163,55 @@ func TestNativeApprovalWithoutTypedAnswersKeepsExistingActions(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeClaudeReviewCannotBindAsAnAuthoredQuestion(t *testing.T) {
+	review := strings.Replace(nativeClaudeFormReview, " ● Which qualification color?\n   → Green\n", " ● Ready to submit your answers?\n   → Submit answers\n", 1)
+	for _, tc := range []struct {
+		name  string
+		frame string
+	}{
+		{"tabbed review", review},
+		{"heading-only review", strings.SplitN(review, "\n", 2)[1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm, ex, projection := nativeClaudeFormTmux(t, tc.frame)
+			ex.pane = tc.frame
+			projection.Questions[1].Question = "Ready to submit your answers?"
+			projection.Questions[1].Options[0].Label = "Submit answers"
+			projection.Questions[1].Options[1].Label = "Cancel"
+			pending, err := tm.Pending("q")
+			if err != nil || pending == nil || pending.Kind != "question" {
+				t.Fatalf("review must remain visible: Pending=%+v, %v", pending, err)
+			}
+			if len(pending.Options) != 0 || pending.Metadata["answer_action"] != "" {
+				t.Fatalf("review gained ordinary question authority from matching authored text: %+v", pending)
+			}
+			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Submit answers"}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+				t.Fatalf("ordinary answer to review = %v, want unavailable", err)
+			}
+			requireNoKeys(t, ex.calls, false)
+			if ex.entered != 0 || len(ex.literal) != 0 {
+				t.Fatalf("review was submitted outside its complete native form proof: Enter=%d literal=%q", ex.entered, ex.literal)
+			}
+		})
+	}
+}
+
+func TestNativeClaudeHeaderlessReviewRemainsManualAfterLastAnswer(t *testing.T) {
+	review := strings.SplitN(nativeClaudeFormReview, "\n", 2)[1]
+	tm, ex, _ := nativeClaudeFormTmux(t, review)
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["answer_action"] != "answer" {
+		t.Fatalf("initial authored question must be answerable: %+v, %v", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Green"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ex.keys, []string{"Down", "Enter"}) || ex.entered != 1 || len(ex.literal) != 0 {
+		t.Fatalf("broad review fallback gained automatic submission: keys=%q Enter=%d literal=%q", ex.keys, ex.entered, ex.literal)
+	}
+	held, err := tm.Pending("q")
+	if err != nil || held == nil || held.Kind != "question" || len(held.Options) != 0 || held.Metadata["answer_action"] != "" {
+		t.Fatalf("headerless review must remain visible and read-only: %+v, %v", held, err)
+	}
+}

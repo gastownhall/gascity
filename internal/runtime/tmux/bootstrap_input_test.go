@@ -990,6 +990,7 @@ func TestBootstrapRawProviderStartPreservesCandidateThroughVerifiedStartupContro
 				}
 			}
 			provider := fenceModelProvider(model)
+			provider.tm.SetProgramStatusMode(runtime.ProgramStatusOn)
 			executor := &bootstrapProviderStartExecutor{model: model}
 			provider.tm.exec = executor
 			provider.tm.capture.probe = func() (captureCapability, error) {

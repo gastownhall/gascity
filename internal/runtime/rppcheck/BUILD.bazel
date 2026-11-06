@@ -19,8 +19,8 @@ go_test(
     ],
     embed = [":rppcheck"],
     deps = [
-        "//internal/runtime/runtimecontract/reference",
         "//internal/runtime",
+        "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],
 )

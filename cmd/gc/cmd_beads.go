@@ -371,7 +371,7 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 	var stores []convoyStoreView
 	var code int
 	if strictRead {
-		stores, code = openAllConvoyStoresAt(cityPath, stderr, cmdName, true)
+		stores, code = openAllConvoyStoresAt(cityPath, stderr, cmdName, true) // residency:allow — reuses the existing all-work-scope inventory with strict preflight/failure; binding federation and migration-copy suppression stay in the shared convoy view helpers
 	} else {
 		stores, code = openEveryStoreAt(cityPath, stderr, cmdName, "bead", false)
 	}

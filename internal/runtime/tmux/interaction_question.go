@@ -108,6 +108,12 @@ const (
 type parsedQuestion struct {
 	Header   string
 	Question string
+	// ReviewText retains the full rendered review used for native submission
+	// proof separately from the question shown to a client.
+	ReviewText string
+	// Review marks a recognized review page even when only the broad
+	// read-only matcher recognizes its layout.
+	Review bool
 	// Choices are the numbered options' labels in pane order.
 	Choices []string
 	// Focused is the label of the highlighted option.
@@ -134,8 +140,10 @@ type parsedQuestion struct {
 // show, or nil when they show none.
 func parseAskUserQuestion(lines []string) *parsedQuestion {
 	footer := askUserQuestionFooter(lines)
+	review := false
 	if footer < 0 {
 		footer = askUserQuestionReviewEnd(lines)
+		review = footer >= 0
 	}
 	if footer < 0 {
 		return nil
@@ -202,6 +210,11 @@ func parseAskUserQuestion(lines []string) *parsedQuestion {
 		return nil
 	}
 	q.Question = strings.Join(question, " ")
+	if review {
+		q.Review = true
+		q.ReviewText = q.Question
+		q.Question = "Ready to submit your answers?"
+	}
 	return q
 }
 
@@ -298,7 +311,6 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 		}
 	}
 	var question []string
-	var continuations [][]string
 	for _, line := range block[top:footer] {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -306,11 +318,7 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 		}
 		if m := askUserQuestionOptionRe.FindStringSubmatch(trimmed); m != nil {
 			label := strings.TrimSpace(m[3])
-			if q.FreeNumber > 0 && label == "Chat about this" {
-				q.ChatNumber, _ = strconv.Atoi(m[2])
-			}
 			q.Choices = append(q.Choices, label)
-			continuations = append(continuations, nil)
 			number, _ := strconv.Atoi(m[2])
 			q.Numbers = append(q.Numbers, number)
 			if m[1] != "" {
@@ -318,18 +326,6 @@ func parseQuestionPage(lines []string) *parsedQuestion {
 				q.FocusedNumber = number
 			}
 			continue
-		}
-		if strings.HasPrefix(trimmed, "──") && len(q.Choices) > 0 {
-			last := len(q.Choices) - 1
-			q.FreeNumber = q.Numbers[last]
-			if q.Choices[last] != "Type something." {
-				q.Draft = strings.Join(append([]string{q.Choices[last]}, continuations[last]...), "\n")
-			}
-			q.Choices[last] = "Type something."
-		}
-		if len(q.Choices) > 0 && q.FreeNumber == 0 && trimmed != "" && !strings.HasPrefix(trimmed, "──") {
-			last := len(continuations) - 1
-			continuations[last] = append(continuations[last], trimmed)
 		}
 		if len(q.Choices) == 0 && trimmed != "" {
 			question = append(question, strings.TrimSpace(strings.TrimPrefix(trimmed, "│")))
@@ -401,7 +397,7 @@ func parseReviewPage(lines []string) *parsedQuestion {
 		return nil
 	}
 	prompt := rows[0]
-	q := &parsedQuestion{Question: "Ready to submit your answers?"}
+	q := &parsedQuestion{Question: "Ready to submit your answers?", Review: true}
 	labels := []string{"Submit answers", "Cancel"}
 	for k, row := range rows[1:] {
 		m := askUserQuestionOptionRe.FindStringSubmatch(strings.TrimSpace(lines[row]))

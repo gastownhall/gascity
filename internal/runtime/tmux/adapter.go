@@ -2290,12 +2290,13 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
+	var dialogErr error
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		// Best-effort, but a trust dialog this last pass still could not
-		// confirm is left on screen with the cursor off the trust row, where
-		// any later Enter would answer it. Say so instead of dropping it.
-		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
-			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
+		dialogErr = ops.acceptStartupDialogs(ctx, name)
+		if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrStartupSelectionUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrCodexUpdateUnconfirmed) {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, dialogErr)
 		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, "accepting startup dialogs after readiness", err)
@@ -2325,6 +2326,12 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return fmt.Errorf("running session_setup: %w", err)
 	}
 	if cfg.Nudge != "" {
+		if errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrStartupSelectionUnconfirmed) ||
+			errors.Is(dialogErr, runtime.ErrCodexUpdateUnconfirmed) {
+			ops.recordUnconfirmedNudge(name, cfg.Nudge, fmt.Errorf("first turn withheld: %w", dialogErr))
+			return nil
+		}
 		send := func() error { return ops.sendKeys(name, cfg.Nudge) }
 		busy := func() (bool, error) { return ops.paneBusy(name) }
 		if sh, ok := ops.(startupLadderShadower); ok {

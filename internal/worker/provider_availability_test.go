@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -74,7 +75,7 @@ func (p *availabilityRuntimeFixture) ObserveProviderAvailability(_ context.Conte
 
 func TestProviderAvailabilityUsesExactSessionFamilyAndExistingIncarnationFence(t *testing.T) {
 	sp := &availabilityRuntimeFixture{Fake: runtime.NewFake()}
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{Manager: manager, Session: SessionSpec{Profile: ProfileCodexTmuxCLI, Template: "probe", Title: "Probe", Command: "codex", WorkDir: t.TempDir(), Provider: "custom-alias"}})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +110,7 @@ func TestProviderAvailabilityRejectsSessionReassignmentBeforeAndDuringProbe(t *t
 	for _, during := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before probe", true: "during capture"}[during], func(t *testing.T) {
 			sp := &availabilityRuntimeFixture{Fake: runtime.NewFake()}
-			manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), sp, sessionpkg.WithCityPath(t.TempDir()))
+			manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(t.TempDir()))
 			newHandle := func(title string) *SessionHandle {
 				t.Helper()
 				h, err := NewSessionHandle(SessionHandleConfig{Manager: manager, Session: SessionSpec{Profile: ProfileCodexTmuxCLI, Template: title, Title: title, Command: "codex", WorkDir: t.TempDir(), Provider: "codex"}})

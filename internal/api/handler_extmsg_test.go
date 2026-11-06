@@ -264,7 +264,7 @@ func TestExtmsgNotifyMembersDedupesMembershipsResolvingToSameSession(t *testing.
 		t.Run(name, func(t *testing.T) {
 			fs := newSessionFakeState(t)
 			srv := New(fs)
-			services := extmsg.NewServices(fs.cityBeadStore)
+			services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 			fs.extmsgSvc = &services
 
 			recipient := createTestSession(t, fs.cityBeadStore, fs.sp, "Recipient")
@@ -294,7 +294,7 @@ func TestExtmsgNotifyMembersDedupesMembershipsResolvingToSameSession(t *testing.
 func TestExtmsgNotifyMembersDedupesMaterializedNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	services := extmsg.NewServices(fs.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(fs.cityBeadStore), beadstest.Sessions(fs.cityBeadStore))
 	fs.extmsgSvc = &services
 
 	ref := extmsg.ConversationRef{
@@ -754,7 +754,7 @@ func TestExtMsgGroupMetadataUpsertPreservesPolicyAndExplicitRouteUpdates(t *test
 	for _, change := range []string{"omitted", "replace", "clear"} {
 		t.Run(change, func(t *testing.T) {
 			state := newSessionFakeState(t)
-			services := extmsg.NewServices(state.cityBeadStore)
+			services := extmsg.NewServices(beadstest.Mail(state.cityBeadStore), beadstest.Sessions(state.cityBeadStore))
 			state.extmsgSvc = &services
 			server := New(state)
 			ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "zoo", AccountID: "account", ConversationID: "room", Kind: extmsg.ConversationThread}
@@ -806,7 +806,7 @@ func TestExtMsgGroupMetadataUpsertPreservesPolicyAndExplicitRouteUpdates(t *test
 // the first HTTP upsert, when there is no prior group from which to retain it.
 func TestExtMsgGroupCreateKeepsExplicitDefaultRoute(t *testing.T) {
 	state := newSessionFakeState(t)
-	services := extmsg.NewServices(state.cityBeadStore)
+	services := extmsg.NewServices(beadstest.Mail(state.cityBeadStore), beadstest.Sessions(state.cityBeadStore))
 	state.extmsgSvc = &services
 	server := New(state)
 	ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "zoo", AccountID: "account", ConversationID: "new-room", Kind: extmsg.ConversationThread}

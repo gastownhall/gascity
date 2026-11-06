@@ -1251,9 +1251,9 @@ func clearProjectedDoltEnv(env map[string]string) {
 	}
 }
 
-// providerOwnedDirectLocalRuntimeEnv builds the ordinary bd safeguards and
+// bdOwnedDirectRuntimeEnv builds the ordinary bd safeguards and
 // workspace binary pin without resolving or recovering the city's database.
-func providerOwnedDirectLocalRuntimeEnv(cityPath, scopeRoot string, cfg *config.City) (map[string]string, error) {
+func bdOwnedDirectRuntimeEnv(cityPath, scopeRoot string, cfg *config.City) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return nil, err
@@ -1270,17 +1270,52 @@ func providerOwnedDirectLocalRuntimeEnv(cityPath, scopeRoot string, cfg *config.
 	applyBdContributorRoutingOptOut(env)
 	applyBdCLIRemoteSyncOptOut(env)
 	applyBdAutoBackupOptOut(env)
-	applyProviderOwnedDirectLocalEnv(env)
+	applyBdOwnedDirectEnv(env)
 	return env, nil
 }
 
-// applyProviderOwnedDirectLocalEnv lets bd resolve its own existing local
-// database and restart its own server. It must never inherit city coordinates.
-func applyProviderOwnedDirectLocalEnv(env map[string]string) {
+// applyBdOwnedDirectEnv withholds city coordinates and lifecycle controls
+// for a direct store whose connection metadata belongs to bd.
+func applyBdOwnedDirectEnv(env map[string]string) {
 	clearProjectedDoltEnv(env)
 	clearManagedDoltLifecycleEnv(env)
 	env["GC_BEADS_BACKEND"] = "dolt"
 	env["BEADS_BACKEND"] = "dolt"
+}
+
+// scopeHasBdOwnedDirectReadBinding limits the legacy direct binding fallback
+// to direct Dolt metadata. Complete bindings and other backends retain their
+// existing projection paths even when stale legacy endpoint fields remain.
+func scopeHasBdOwnedDirectReadBinding(cityPath, scopeRoot string) (bool, error) {
+	if complete, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(scopeRoot)); err != nil || complete {
+		return false, err
+	}
+	metadata, exists, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !exists {
+		return false, err
+	}
+	if metadata.Backend != "dolt" || metadata.DoltMode != "server" {
+		return false, nil
+	}
+	return scopeIsBdOwnedDirectExternal(cityPath, scopeRoot)
+}
+
+// applyBdOwnedDirectExternalEnv projects the scope's recorded external target
+// without recovering or inheriting the city's database or lifecycle controls.
+func applyBdOwnedDirectExternalEnv(env map[string]string, cityPath, scopeRoot string) error {
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return fmt.Errorf("resolving external bd binding for %q: %w", scopeRoot, err)
+	}
+	if !target.External {
+		return fmt.Errorf("external bd binding for %q no longer resolves to an external target", scopeRoot)
+	}
+	applyBdOwnedDirectEnv(env)
+	env["BEADS_DOLT_AUTO_START"] = "0"
+	applyCanonicalDoltTargetEnv(env, target)
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
+	mirrorBeadsDoltScopeEnv(env, target)
+	return nil
 }
 
 // clearManagedDoltLifecycleEnv removes Gas City's direct sql-server control
@@ -1853,11 +1888,19 @@ func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, ex
 }
 
 func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, rigPath); err != nil {
 		return err
 	} else if local {
-		applyProviderOwnedDirectLocalEnv(env)
+		applyBdOwnedDirectEnv(env)
 		return nil
+	}
+	if external, err := scopeHasBdOwnedDirectReadBinding(cityPath, rigPath); err != nil {
+		return err
+	} else if external {
+		return applyBdOwnedDirectExternalEnv(env, cityPath, rigPath)
 	}
 	if usedCanonical, err := applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
@@ -1959,11 +2002,26 @@ func rigManagedRuntimeUnavailable(cityPath string, cfg *config.City, rigPath str
 // recoverable resolution failure (isRecoverableManagedDoltEnvError) that the env
 // answers with its Dolt coordinates cleared rather than with an error.
 func bdRuntimeEnvForRigReportingContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, rigPath); err != nil {
 		return nil, false, err
 	} else if local {
-		env, err := providerOwnedDirectLocalRuntimeEnv(cityPath, rigPath, cfg)
+		env, err := bdOwnedDirectRuntimeEnv(cityPath, rigPath, cfg)
 		return env, false, err
+	}
+	if external, err := scopeHasBdOwnedDirectReadBinding(cityPath, rigPath); err != nil {
+		return nil, false, err
+	} else if external {
+		env, err := bdOwnedDirectRuntimeEnv(cityPath, rigPath, cfg)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := applyBdOwnedDirectExternalEnv(env, cityPath, rigPath); err != nil {
+			return nil, false, err
+		}
+		return env, false, nil
 	}
 	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath)
 	if ok {
@@ -2231,7 +2289,7 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	if local, err := scopeBindingIsProviderOwnedDirectLocal(cityPath, cityPath); err != nil {
 		return env, err
 	} else if local {
-		applyProviderOwnedDirectLocalEnv(env)
+		applyBdOwnedDirectEnv(env)
 		return env, nil
 	}
 	if err := applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery); err != nil {

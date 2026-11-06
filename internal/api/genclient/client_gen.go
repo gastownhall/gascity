@@ -1046,23 +1046,23 @@ func (e SessionProgramStatusShadowPayloadKind) Valid() bool {
 
 // Defines values for SessionProgramStatusShadowPayloadPoint.
 const (
-	ClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
-	DrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
-	EscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
-	ExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
-	InterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
-	Observation       SessionProgramStatusShadowPayloadPoint = "observation"
-	Pending           SessionProgramStatusShadowPayloadPoint = "pending"
-	ProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
-	QueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
-	Readiness         SessionProgramStatusShadowPayloadPoint = "readiness"
-	StartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
-	StarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
-	SubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
-	TypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
-	WaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
-	WaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
-	WorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
+	SessionProgramStatusShadowPayloadPointClaimNudgeHold    SessionProgramStatusShadowPayloadPoint = "claim_nudge_hold"
+	SessionProgramStatusShadowPayloadPointDrainReminder     SessionProgramStatusShadowPayloadPoint = "drain_reminder"
+	SessionProgramStatusShadowPayloadPointEscapeResend      SessionProgramStatusShadowPayloadPoint = "escape_resend"
+	SessionProgramStatusShadowPayloadPointExecutionBackstop SessionProgramStatusShadowPayloadPoint = "execution_backstop"
+	SessionProgramStatusShadowPayloadPointInterruptSettle   SessionProgramStatusShadowPayloadPoint = "interrupt_settle"
+	SessionProgramStatusShadowPayloadPointObservation       SessionProgramStatusShadowPayloadPoint = "observation"
+	SessionProgramStatusShadowPayloadPointPending           SessionProgramStatusShadowPayloadPoint = "pending"
+	SessionProgramStatusShadowPayloadPointProvedIdle        SessionProgramStatusShadowPayloadPoint = "proved_idle"
+	SessionProgramStatusShadowPayloadPointQueuedDelivery    SessionProgramStatusShadowPayloadPoint = "queued_delivery"
+	SessionProgramStatusShadowPayloadPointReadiness         SessionProgramStatusShadowPayloadPoint = "readiness"
+	SessionProgramStatusShadowPayloadPointStartupLadder     SessionProgramStatusShadowPayloadPoint = "startup_ladder"
+	SessionProgramStatusShadowPayloadPointStarvedBypass     SessionProgramStatusShadowPayloadPoint = "starved_bypass"
+	SessionProgramStatusShadowPayloadPointSubmitConfirm     SessionProgramStatusShadowPayloadPoint = "submit_confirm"
+	SessionProgramStatusShadowPayloadPointTypingGate        SessionProgramStatusShadowPayloadPoint = "typing_gate"
+	SessionProgramStatusShadowPayloadPointWaitForIdle       SessionProgramStatusShadowPayloadPoint = "wait_for_idle"
+	SessionProgramStatusShadowPayloadPointWaitIdlePreread   SessionProgramStatusShadowPayloadPoint = "wait_idle_preread"
+	SessionProgramStatusShadowPayloadPointWorkLadder        SessionProgramStatusShadowPayloadPoint = "work_ladder"
 )
 
 // Valid indicates whether the value is a known member of the SessionProgramStatusShadowPayloadPoint enum.
@@ -1090,9 +1090,9 @@ func (e SessionProgramStatusShadowPayloadPoint) Valid() bool {
 		return true
 	case SessionProgramStatusShadowPayloadPointStartupLadder:
 		return true
-	case StarvedBypass:
+	case SessionProgramStatusShadowPayloadPointStarvedBypass:
 		return true
-	case SubmitConfirm:
+	case SessionProgramStatusShadowPayloadPointSubmitConfirm:
 		return true
 	case SessionProgramStatusShadowPayloadPointTypingGate:
 		return true
@@ -6173,9 +6173,9 @@ type SessionResponse struct {
 	Pool                   *string                      `json:"pool,omitempty"`
 	ProgramStatus          *SessionProgramStatus        `json:"program_status,omitempty"`
 	Provider               string                       `json:"provider"`
+	ProviderAvailability   *SessionProviderAvailability `json:"provider_availability,omitempty"`
 	Reason                 *string                      `json:"reason,omitempty"`
 	Rig                    *string                      `json:"rig,omitempty"`
-	ProviderAvailability   *SessionProviderAvailability `json:"provider_availability,omitempty"`
 
 	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
@@ -13843,7 +13843,7 @@ type GetV0CityByCityNameStatusParams struct {
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
 	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
 
-	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every build saves its body for later reads. Default false keeps stale-while-revalidate for pollers.
+	// Fresh When true, skip the time-bucket and TTL-floor reuse and wait for a build of the body that starts no earlier than the read: one the read starts, or, while another build of this view runs, the one queued behind it, which every read that queued shares. If that build is not done within 10 s, it finishes in the background and the read is answered with the saved body, as a stale-while-revalidate serve is (X-GC-Cache-Refresh rebuilding when the saved body is older than the bead cache); with no saved body the read waits for the build. Every complete build saves its body for later reads. Partial builds return survivor counts and diagnostics to their waiting reads while leaving the last complete saved body intact. Default false keeps stale-while-revalidate for pollers.
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 

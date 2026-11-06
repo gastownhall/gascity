@@ -116,6 +116,7 @@ func readAdoptedStorePrefix(deps Deps, rigPath string, readOnly bool) adoptedSto
 	if ok && yaml.prefix != "" && yaml.prefix != stored.prefix {
 		return adoptedStorePrefix{err: fmt.Errorf("--adopt: YAML issue_prefix %q conflicts with stored Beads namespace %q; reconcile the existing queue configuration", yaml.prefix, stored.prefix)}
 	}
+	stored.inConfigYAML = ok && yaml.prefix != ""
 	return stored
 }
 

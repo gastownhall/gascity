@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -44,7 +45,7 @@ func TestSessionTypedAnswersRefuseUnknownBeforeOpAdmission(t *testing.T) {
 			if n := e.fs.sp.CountCalls("Respond", info.SessionName); n != 0 {
 				t.Fatalf("unknown label reached runtime %d times", n)
 			}
-			mgr := e.server(t).sessionManager(e.store)
+			mgr := e.server(t).sessionManager(beadstest.Sessions(e.store))
 			if _, err := laneRespondPending(mgr, info.ID, runtime.InteractionResponse{RequestID: "q", Action: "answer", Answers: []string{"Fox"}}); !errors.Is(err, session.ErrInteractionMismatch) {
 				t.Fatalf("lane front door accepted unknown authored label: %v", err)
 			}

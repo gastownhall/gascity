@@ -60,7 +60,7 @@ name="${2:-}"
 # The handshake reads no state and answers the same for every city, so it is
 # answered before any state is set up.
 if [ "$op" = protocol ]; then
-  echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped"],"locality":"local"}'
+  echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped","staging.reconciler-owned-mergeable-paths"],"locality":"local"}'
   exit 0
 fi
 
@@ -582,10 +582,6 @@ validate_reconciler_owned_copy_files() {
 }
 
 case "$op" in
-  protocol)
-    printf '%s\n' '{"version":0,"capabilities":["staging.reconciler-owned-mergeable-paths"]}'
-    ;;
-
   start)
     config=$(cat)
     valid_name "$name"

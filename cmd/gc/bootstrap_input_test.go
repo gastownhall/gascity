@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -41,7 +42,7 @@ func TestBootstrapInputOriginFreshDeferredBuiltinUsesActualPreparedLaunch(t *tes
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
 			city, work := t.TempDir(), t.TempDir()
-			manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(city))
+			manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city))
 			h, err := worker.NewSessionHandle(worker.SessionHandleConfig{Manager: manager, Session: worker.SessionSpec{
 				Template: "worker", Title: "Fresh builtin", Provider: "alias", Command: rp.CommandString(), WorkDir: work,
 				Hints:  runtime.Config{ProviderName: resolvedProviderLaunchFamily(rp)},
@@ -135,7 +136,7 @@ func TestBootstrapInputOriginInitialMessageAssemblyCannotGrantCredit(t *testing.
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
 			work := t.TempDir()
-			manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
+			manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(t.TempDir()))
 			h, err := worker.NewSessionHandle(worker.SessionHandleConfig{Manager: manager, Session: worker.SessionSpec{Template: "worker", Title: "Initial input", Provider: family, Command: rp.CommandString(), WorkDir: work}})
 			if err != nil {
 				t.Fatal(err)
@@ -221,7 +222,7 @@ func TestBootstrapInputOriginConfiguredWorkerBeaconRefusesCreditWithExactOptions
 				t.Fatal(err)
 			}
 			store, sp := beads.NewMemStore(), runtime.NewFake()
-			manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(cityPath))
+			manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(cityPath))
 			h, err := worker.NewSessionHandle(worker.SessionHandleConfig{Manager: manager, Session: worker.SessionSpec{
 				Template: "worker", Title: "Actual public options", Provider: "alias", Transport: config.SessionTransportTmux,
 				Command: launch.Command, WorkDir: work, Hints: tp.Hints.ToRuntimeConfig(),

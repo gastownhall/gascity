@@ -417,7 +417,7 @@ func TestCachedStatusOfASuspendedCityReportsNoCacheAge(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/suspended=%v", tc.name, suspended), func(t *testing.T) {
 				timeBucketResponseCacheTTL, statusResponseTTLFloor = tc.bucket, tc.floor
 				state := newFakeState(t)
-				state.cityBeadStore = stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-45 * time.Second)}
+				state.cityBeadStore = statusCacheLivenessReporter{stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-45 * time.Second)}}
 				setCitySuspendedForTest(t, state.cityPath, suspended)
 				srv := New(state)
 				h := newTestCityHandlerWith(t, state, srv)
@@ -458,7 +458,7 @@ func TestStaleStatusServeNamesTheRebuild(t *testing.T) {
 	timeBucketResponseCacheTTL, statusResponseTTLFloor = time.Nanosecond, 0
 
 	state := newFakeState(t)
-	state.cityBeadStore = stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-5 * time.Second)}
+	state.cityBeadStore = statusCacheLivenessReporter{stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-5 * time.Second)}}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -494,7 +494,7 @@ func TestFreshStatusReadReportsTheCacheNotARebuild(t *testing.T) {
 	timeBucketResponseCacheTTL, statusResponseTTLFloor = time.Nanosecond, 0
 
 	state := newFakeState(t)
-	state.cityBeadStore = stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-5 * time.Second)}
+	state.cityBeadStore = statusCacheLivenessReporter{stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-5 * time.Second)}}
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -515,7 +515,7 @@ func TestFreshStatusReadReportsTheCacheNotARebuild(t *testing.T) {
 	if len(srv.statusBuilds) != 0 {
 		t.Errorf("statusBuilds = %v, want empty: the fresh read's build has ended", srv.statusBuilds)
 	}
-	if _, age, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status"); !ok || age >= 140*time.Second {
+	if _, age, ok := staleResponseAs[cachedStatusResponse](srv, "status"); !ok || age >= 140*time.Second {
 		t.Errorf("saved /status entry age = %v (ok=%v), want under 140s: the fresh read's build replaces the saved body", age, ok)
 	}
 

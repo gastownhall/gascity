@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -555,7 +556,7 @@ func TestInitSplitFloorAppliesToOSSPinnedInventoriesOnly(t *testing.T) {
 		t.Run(inv.Name, func(t *testing.T) {
 			stubInitBDVersion(t, "bd version "+inv.Version)
 			stubInitSplitBDJudge(t, inv.Name, nil)
-			belowFloor := compareVersions(inv.Version, initSplitBDMinVersion) < 0
+			belowFloor := deps.CompareVersions(inv.Version, initSplitBDMinVersion) < 0
 			enterprise := inventoryIsEnterprise(inv)
 			if belowFloor && enterprise {
 				sawEnterpriseBelowFloor = true

@@ -8122,23 +8122,33 @@ func TestCarryOverSupervisorServiceEnvGate(t *testing.T) {
 			omitProviderCreds: "1",
 			extra:             nil,
 			previous: map[string]string{
-				"TMUX_TMPDIR": "/run/user/1000",
+				"TMPDIR": "/run/user/1000",
 			},
 			wantExtra:   nil,
-			wantDropped: []string{"TMUX_TMPDIR"},
+			wantDropped: []string{"TMPDIR"},
 		},
 		{
 			name:              "non-allowlisted key is carried with GC_SUPERVISOR_ENV opt-in",
-			supervisorEnv:     "TMUX_TMPDIR",
+			supervisorEnv:     "TMPDIR",
 			omitProviderCreds: "1",
 			extra:             nil,
 			previous: map[string]string{
-				"TMUX_TMPDIR": "/run/user/1000",
+				"TMPDIR": "/run/user/1000",
 			},
 			wantExtra: []supervisorServiceEnvVar{
-				{Name: "TMUX_TMPDIR", Value: "/run/user/1000"},
+				{Name: "TMPDIR", Value: "/run/user/1000"},
 			},
 			wantDropped: nil,
+		},
+		{
+			name:              "tmux socket directory is carried without opt-in",
+			omitProviderCreds: "1",
+			previous: map[string]string{
+				"TMUX_TMPDIR": "/run/user/1000/city-a",
+			},
+			wantExtra: []supervisorServiceEnvVar{
+				{Name: "TMUX_TMPDIR", Value: "/run/user/1000/city-a"},
+			},
 		},
 		{
 			name:              "provider credential is dropped and reported when OMIT is empty",
@@ -8292,6 +8302,7 @@ func TestInstallSupervisorSystemdCarriesOverServiceFilePins(t *testing.T) {
 	t.Setenv("GC_SUPERVISOR_OMIT_PROVIDER_CREDS", "1")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("TMUX_TMPDIR", "")
+	t.Setenv("TMPDIR", "")
 
 	stubSupervisorSystemctlUserAvailable(t, true)
 	oldRun, oldActive, oldGetenv := supervisorSystemctlRun, supervisorSystemctlActive, supervisorLaunchctlGetenv
@@ -8323,7 +8334,8 @@ func TestInstallSupervisorSystemdCarriesOverServiceFilePins(t *testing.T) {
 
 	pinned := first +
 		"Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-a\"\n" +
-		"Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"\n"
+		"Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"\n" +
+		"Environment=TMPDIR=\"/run/user/1000/old-tmp\"\n"
 	if err := os.WriteFile(path, []byte(pinned), 0o600); err != nil {
 		t.Fatalf("write pinned unit: %v", err)
 	}
@@ -8332,39 +8344,48 @@ func TestInstallSupervisorSystemdCarriesOverServiceFilePins(t *testing.T) {
 	if !strings.Contains(second, "Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-a\"") {
 		t.Errorf("install 2: unit missing CLAUDE_CONFIG_DIR, want keep /h/.claude-city-a; unit:\n%s", second)
 	}
-	if strings.Contains(second, "TMUX_TMPDIR") {
-		t.Errorf("install 2: unit contains TMUX_TMPDIR, want drop; unit:\n%s", second)
+	// Normal service data explicitly records the calling context's default
+	// socket directory. This selected value outranks previous-file fallback.
+	if value, present := supervisorServiceFileEnv(".service", []byte(second))["TMUX_TMPDIR"]; !present || value != "" {
+		t.Errorf("install 2: want explicit default TMUX_TMPDIR; present=%v value=%q", present, value)
 	}
-	if !strings.Contains(stderr2, "TMUX_TMPDIR") {
-		t.Errorf("install 2: stderr=%q missing TMUX_TMPDIR, want drop report", stderr2)
+	if strings.Contains(stderr2, "TMUX_TMPDIR") {
+		t.Errorf("install 2: stderr=%q reports the retained tmux socket directory as dropped", stderr2)
+	}
+	if strings.Contains(second, "Environment=TMPDIR=") || !strings.Contains(stderr2, "TMPDIR") {
+		t.Errorf("install 2: want non-allowlisted TMPDIR dropped and reported; unit=%q stderr=%q", second, stderr2)
 	}
 	if strings.Contains(stderr2, "CLAUDE_CONFIG_DIR") {
 		t.Errorf("install 2: stderr=%q mentions CLAUDE_CONFIG_DIR, want keep without drop report", stderr2)
 	}
 
-	pinned3 := second + "Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"\n"
+	pinned3 := second + "Environment=TMPDIR=\"/run/user/1000/old-tmp\"\n"
 	if err := os.WriteFile(path, []byte(pinned3), 0o600); err != nil {
 		t.Fatalf("write pinned3 unit: %v", err)
 	}
-	t.Setenv("GC_SUPERVISOR_ENV", "TMUX_TMPDIR")
+	t.Setenv("GC_SUPERVISOR_ENV", "TMPDIR")
 	third, stderr3 := install("install 3")
 	if !strings.Contains(third, "Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-a\"") {
 		t.Errorf("install 3: unit missing CLAUDE_CONFIG_DIR, want keep /h/.claude-city-a; unit:\n%s", third)
 	}
-	if !strings.Contains(third, "Environment=TMUX_TMPDIR=\"/run/user/1000/city-a\"") {
-		t.Errorf("install 3: unit missing TMUX_TMPDIR, want keep /run/user/1000/city-a; unit:\n%s", third)
+	if value, present := supervisorServiceFileEnv(".service", []byte(third))["TMUX_TMPDIR"]; !present || value != "" {
+		t.Errorf("install 3: want explicit default TMUX_TMPDIR; present=%v value=%q", present, value)
 	}
-	if strings.Contains(stderr3, "TMUX_TMPDIR") {
-		t.Errorf("install 3: stderr=%q mentions TMUX_TMPDIR, want keep without drop report", stderr3)
+	if !strings.Contains(third, "Environment=TMPDIR=\"/run/user/1000/old-tmp\"") || strings.Contains(stderr3, "TMPDIR") {
+		t.Errorf("install 3: want explicitly opted-in TMPDIR retained without a drop report; unit=%q stderr=%q", third, stderr3)
 	}
 
 	t.Setenv("CLAUDE_CONFIG_DIR", "/h/.claude-city-b")
+	t.Setenv("TMUX_TMPDIR", "/run/user/1000/city-b")
 	fourth, _ := install("install 4")
 	if !strings.Contains(fourth, "Environment=CLAUDE_CONFIG_DIR=\"/h/.claude-city-b\"") {
 		t.Errorf("install 4: unit missing CLAUDE_CONFIG_DIR city-b, want keep /h/.claude-city-b; unit:\n%s", fourth)
 	}
 	if strings.Contains(fourth, "/h/.claude-city-a") {
 		t.Errorf("install 4: unit contains city-a, want drop in favor of shell value city-b; unit:\n%s", fourth)
+	}
+	if value := supervisorServiceFileEnv(".service", []byte(fourth))["TMUX_TMPDIR"]; value != "/run/user/1000/city-b" {
+		t.Errorf("install 4: TMUX_TMPDIR=%q, want the current shell's city-b directory", value)
 	}
 }
 
@@ -8484,7 +8505,7 @@ func TestInstallSupervisorLaunchdCarriesOverPlistPins(t *testing.T) {
 	}
 	dictEnd := envIdx + dictRelIdx + len("<dict>")
 	target := plistStr[envIdx:dictEnd]
-	pins := "\n        <key>CLAUDE_CONFIG_DIR</key><string>/h/a</string>\n        <key>TMUX_TMPDIR</key><string>/run/t</string>\n        <key>ANTHROPIC_API_KEY</key><string>sk-ant-plist</string>"
+	pins := "\n        <key>CLAUDE_CONFIG_DIR</key><string>/h/a</string>\n        <key>TMUX_TMPDIR</key><string>/run/t</string>\n        <key>TMPDIR</key><string>/run/old-tmp</string>\n        <key>ANTHROPIC_API_KEY</key><string>sk-ant-plist</string>"
 	edited := strings.Replace(plistStr, target, target+pins, 1)
 
 	if err := os.WriteFile(plistPath, []byte(edited), 0o600); err != nil {
@@ -8514,11 +8535,17 @@ func TestInstallSupervisorLaunchdCarriesOverPlistPins(t *testing.T) {
 	if got := env["CLAUDE_CONFIG_DIR"]; got != "/h/a" {
 		t.Errorf("new plist CLAUDE_CONFIG_DIR = %q, want keep %q", got, "/h/a")
 	}
-	if got, ok := env["TMUX_TMPDIR"]; ok {
-		t.Errorf("new plist TMUX_TMPDIR = %q, want drop", got)
+	if got := env["TMUX_TMPDIR"]; got != "/run/t" {
+		t.Errorf("new plist TMUX_TMPDIR = %q, want keep /run/t", got)
 	}
-	if !strings.Contains(stderr2.String(), "TMUX_TMPDIR") {
-		t.Errorf("install 2 stderr = %q, want drop report naming TMUX_TMPDIR", stderr2.String())
+	if strings.Contains(stderr2.String(), "TMUX_TMPDIR") {
+		t.Errorf("install 2 stderr = %q, want no drop report for retained TMUX_TMPDIR", stderr2.String())
+	}
+	if got, ok := env["TMPDIR"]; ok {
+		t.Errorf("new plist TMPDIR = %q, want drop", got)
+	}
+	if !strings.Contains(stderr2.String(), "TMPDIR") {
+		t.Errorf("install 2 stderr = %q, want drop report naming TMPDIR", stderr2.String())
 	}
 	if got, ok := env["ANTHROPIC_API_KEY"]; ok {
 		t.Errorf("new plist ANTHROPIC_API_KEY = %q, want drop", got)

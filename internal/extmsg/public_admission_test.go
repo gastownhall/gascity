@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
 
@@ -102,7 +103,7 @@ func TestPublicAdmissionBindsPayloadAndRecipientSelection(t *testing.T) {
 			if _, err := recreated.Admit(context.Background(), input); !errors.Is(err, ErrMessageConflict) {
 				t.Fatalf("changed retry=%v", err)
 			}
-			rows, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Message.Conversation})
+			rows, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Message.Conversation})
 			if err != nil || len(rows) != 1 || rows[0].ID != first.TranscriptID {
 				t.Fatalf("transcript=%+v err=%v", rows, err)
 			}
@@ -148,7 +149,7 @@ func TestPublicAdmissionConcurrentLostAckAndProcessRecreation(t *testing.T) {
 	if err != nil || len(pending) != 2 {
 		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
-	rows, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
+	rows, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("public append count=%d err=%v", len(rows), err)
 	}
@@ -242,7 +243,7 @@ func TestPublicOutboxCrashBeforeLaneAfterLaneAndLostAck(t *testing.T) {
 			if err != nil || len(pending) != 0 {
 				t.Fatalf("pending=%v err=%v", pending, err)
 			}
-			rows, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Message.Conversation})
+			rows, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Message.Conversation})
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("append count=%d err=%v", len(rows), err)
 			}
@@ -304,7 +305,7 @@ func TestPublicAdmissionDifferentMessagesSerializeTranscriptSequence(t *testing.
 			t.Fatal(err)
 		}
 	}
-	rows, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
+	rows, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: testConversationRef()})
 	if err != nil || len(rows) != 12 {
 		t.Fatalf("rows=%d err=%v", len(rows), err)
 	}
@@ -455,7 +456,7 @@ func TestPublicInvalidationRecoversLostAckWithoutReadmittingMessage(t *testing.T
 	if len(lane.ops) != 1 {
 		t.Fatalf("operations=%v", lane.ops)
 	}
-	records, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Message.Conversation})
+	records, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{Caller: testControllerCaller(), Conversation: input.Message.Conversation})
 	if err != nil || len(records) != 1 {
 		t.Fatalf("records=%v error=%v", records, err)
 	}

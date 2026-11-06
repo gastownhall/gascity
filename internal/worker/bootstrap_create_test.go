@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBootstrapInputFreshCreateIsNotReusedOnSameHandleWake(t *testing.T) {
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{Manager: manager, Session: SessionSpec{
 		Template: "codex", Title: "Fresh only", Command: "codex", Provider: "codex", WorkDir: t.TempDir(),
 		Hints: runtime.Config{BootstrapInputOrigin: runtime.BootstrapInputFreshBuiltin, ProviderName: "codex"},

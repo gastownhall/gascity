@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -3953,8 +3954,17 @@ func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
 // makes it fail instead.
 func installAdoptPrefixFakeBd(t *testing.T, exitCode int) string {
 	t.Helper()
+	return installAdoptPrefixFakeBdForPrefix(t, exitCode, "hv")
+}
+
+func installAdoptPrefixFakeBdForPrefix(t *testing.T, exitCode int, prefix string) string {
+	t.Helper()
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
+	response, err := json.Marshal(map[string]any{"key": "issue_prefix", "schema_version": 1, "value": prefix})
+	if err != nil {
+		t.Fatal(err)
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 {
   echo "argv=$*"
@@ -3965,8 +3975,8 @@ if [ %d -ne 0 ]; then
   echo "bd: no beads database found" >&2
   exit %d
 fi
-echo '{"key":"issue_prefix","schema_version":1,"value":"hv"}'
-`, logPath, exitCode, exitCode)
+echo %s
+`, logPath, exitCode, exitCode, shellquote.Quote(string(response)))
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4310,6 +4320,7 @@ func TestAdoptLoopbackBdServerStoreLeavesItsFilesAlone(t *testing.T) {
 	}
 	t.Setenv("GC_BEADS", "exec:"+provider)
 	t.Setenv("GC_DOLT", "")
+	prefixLog := installAdoptPrefixFakeBdForPrefix(t, 0, "ar")
 
 	origEnsure := initDirIfReadyEnsureBeadsProvider
 	origWait := initDirIfReadyWaitForManagedDolt
@@ -4342,6 +4353,9 @@ func TestAdoptLoopbackBdServerStoreLeavesItsFilesAlone(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(calls); strings.Contains(string(data), "init") {
 		t.Fatalf("provider init op ran for a store gc does not serve; calls:\n%s", data)
+	}
+	if got := readAdoptPrefixFakeBdLog(t, prefixLog); !strings.Contains(got, "argv=--readonly config get --json issue_prefix") || !strings.Contains(got, "beads_dir="+beads) {
+		t.Fatalf("adopt must verify the existing store namespace read-only: %s", got)
 	}
 	for name, want := range before {
 		got, err := os.ReadFile(filepath.Join(beads, name))

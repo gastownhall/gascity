@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 )
 
 // initStorageChoice is gc init's --storage: whether the new city keeps every
@@ -136,7 +137,7 @@ func splitBDFloorNotice() string {
 	if inv == nil {
 		return fmt.Sprintf("gc init: the command tree of bd%s at %s matches no pinned gc bd inventory (%s), so a split city's gc bd would refuse it; this city starts single-store. %s", versionLabel(version), bdPath, pinnedBdInventoryNames(), initSplitBDRemedy)
 	}
-	if version != "" && compareVersions(version, initSplitBDMinVersion) < 0 && compareVersions(version, inv.Version) != 0 {
+	if version != "" && deps.CompareVersions(version, initSplitBDMinVersion) < 0 && deps.CompareVersions(version, inv.Version) != 0 {
 		return fmt.Sprintf("gc init: bd v%s at %s is older than v%s, the oldest bd release a split city admits; this city starts single-store. %s", version, bdPath, initSplitBDMinVersion, initSplitBDRemedy)
 	}
 	return ""

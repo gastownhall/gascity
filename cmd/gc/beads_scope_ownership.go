@@ -382,12 +382,8 @@ func scopeBindingIsProviderOwnedDirectLocal(cityPath, scopeRoot string) (bool, e
 	}
 	// Explicit upstreams and gc-authoritative config have their own ownership
 	// contracts. A leftover local database cannot override either one.
-	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
-	if err != nil {
+	if claimed, err := contract.ScopeConfigClaimedByGC(fsys.OSFS{}, cityPath, scopeRoot, ""); err != nil || claimed {
 		return false, err
-	}
-	if resolved.Kind == contract.ScopeConfigAuthoritative {
-		return false, nil
 	}
 	if external, err := scopeIsBdOwnedDirectExternal(cityPath, scopeRoot); err != nil || external {
 		return false, err

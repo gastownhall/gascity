@@ -1,5 +1,11 @@
 # internal/runtime — native input authority
 
+Exec adapters validate reconciler-owned staging before backend effects on every
+launch entry, including fresh-only starts and relaunches. An invalid copy proof
+or undeclared ownership capability must not reach observe, stop or launch. The
+maintained scripts advertise ownership support in their effective state-free
+protocol response and verify the exact self-copy handoff before staging.
+
 Only explicit fresh builtin launch provenance at incarnation1/1 may seed a
 versioned origin/family/pane/process/fence-bound first-input credit. Promote
 only after successful startup and require a branded pristine native composer.
@@ -57,3 +63,19 @@ countdown (` · 20s`). Recognize only that exact optional decoration. The live
 queue heading and answer hint, owned native rollout, unresolved request count,
 request ID and input fence remain required. A countdown is presentation, never
 answer authority; malformed suffixes and unmatched native requests refuse.
+
+Pending questions bound to a verified native invocation expose the complete
+authored question. Keep the visible-only fallback and refusal summaries bounded;
+those bounds must not truncate the content an operator is asked to answer.
+
+A startup menu left unconfirmed must withhold the first turn in both tmux and
+herdr. Record the withheld delivery after checking that the launched agent is
+still alive; failed confirmation never authorizes a submit into that menu.
+
+Question-review display text stays separate from the complete rendered review
+used to verify native form submission. Compare every reviewed value and the
+original invocation again under the incarnation fence before submitting once.
+
+Recognized review screens cannot bind as ordinary native questions, even when
+authored question text and choices match their submit menu. A broad review
+match stays read-only and does not expand automatic form-submission authority.

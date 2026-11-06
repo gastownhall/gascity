@@ -3266,7 +3266,7 @@ func TestEnsureGroupAvoidsUnchangedStorageWrites(t *testing.T) {
 	for _, change := range []string{"none", "metadata", "routing", "title"} {
 		t.Run(change, func(t *testing.T) {
 			probe := &groupWriteProbe{Store: beads.NewMemStore()}
-			svc := NewGroupService(probe)
+			svc := NewGroupService(beadstest.Mail(probe), beadstest.Sessions(probe))
 			input := EnsureGroupInput{RootConversation: testConversationRef(), Mode: GroupModeLauncher, DefaultHandle: "alpha", Metadata: map[string]string{"intent": "first"}}
 			group, err := svc.EnsureGroup(context.Background(), testControllerCaller(), input)
 			if err != nil {
@@ -3329,13 +3329,13 @@ func TestInboundTranscriptRetryBindsPayloadAcrossServiceRecreation(t *testing.T)
 		t.Run(field, func(t *testing.T) {
 			store := beads.NewMemStore()
 			input := AppendTranscriptInput{Caller: testAdapterCaller(), Conversation: testConversationRef(), Kind: TranscriptMessageInbound, Provenance: TranscriptProvenanceLive, ProviderMessageID: "immutable-public-message", Actor: ExternalActor{ID: "github:42", DisplayName: "Keeper"}, Text: "original", ExplicitTarget: "worker", ReplyToMessageID: "parent", Attachments: []ExternalAttachment{{ProviderID: "asset", URL: "https://example.invalid/a.png", MIMEType: "image/png"}}, CreatedAt: testNow()}
-			original, err := NewServices(store).Transcript.Append(context.Background(), input)
+			original, err := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript.Append(context.Background(), input)
 			if err != nil {
 				t.Fatal(err)
 			}
 			retry := input
 			retry.CreatedAt = input.CreatedAt.Add(time.Hour)
-			recreated := NewServices(store).Transcript
+			recreated := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Transcript
 			same, err := recreated.Append(context.Background(), retry)
 			if err != nil || same.ID != original.ID {
 				t.Fatalf("identical retry after recreation: got=%v err=%v", same.ID, err)
@@ -3368,7 +3368,8 @@ func TestInboundTranscriptRetryBindsPayloadAcrossServiceRecreation(t *testing.T)
 // Full service upserts still own all settings: an explicit all-zero policy
 // and empty route clear them, unlike an HTTP metadata update's omissions.
 func TestEnsureGroupFullUpsertCanClearPolicyAndRoute(t *testing.T) {
-	svc := NewGroupService(beads.NewMemStore())
+	store := beads.NewMemStore()
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	input := EnsureGroupInput{
 		RootConversation: ref, Mode: GroupModeLauncher, DefaultHandle: "alpha",

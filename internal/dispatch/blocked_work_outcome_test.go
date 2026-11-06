@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -90,7 +91,7 @@ func TestProcessRetryControlBlockedScopeMismatchHardFails(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestProcessRalphCheckBlockedSubjectEndsLoop(t *testing.T) {
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{CityPath: cityPath, Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -266,7 +267,7 @@ func TestBlockedRepairReviewSettlesWorkflowOnEveryStore(t *testing.T) {
 			t.Parallel()
 			city := newCompiledRalphCity(t, "blocked-repair-review", compiledBlockedRepairFormula, 0)
 			store := tc.open(t)
-			cooked, err := molecule.Cook(context.Background(), store, city.name, []string{city.formulaDir}, molecule.Options{})
+			cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), city.name, []string{city.formulaDir}, molecule.Options{})
 			if err != nil {
 				t.Fatalf("Cook: %v", err)
 			}
@@ -276,7 +277,7 @@ func TestBlockedRepairReviewSettlesWorkflowOnEveryStore(t *testing.T) {
 				"finalize":      workerBlocked,
 				"publish":       workerBlocked,
 			}
-			opts := ProcessOptions{CityPath: city.cityPath}
+			opts := ProcessOptions{CityPath: city.cityPath, Work: beadstest.Work(store)}
 
 			for turn := 0; ; turn++ {
 				if turn == 40 {
@@ -294,7 +295,7 @@ func TestBlockedRepairReviewSettlesWorkflowOnEveryStore(t *testing.T) {
 					case b.ID == rootID || kind == beadmeta.KindSpec || kind == beadmeta.KindScope:
 						continue
 					case beadmeta.IsControlKind(kind):
-						result, err := ProcessControl(store, b, opts)
+						result, err := ProcessControl(beadstest.Graph(store), b, opts)
 						if errors.Is(err, ErrControlPending) {
 							continue
 						}
@@ -309,7 +310,7 @@ func TestBlockedRepairReviewSettlesWorkflowOnEveryStore(t *testing.T) {
 						if !ok {
 							t.Fatalf("Ready offered %s (step %q, step_ref %q), which no worker plays", b.ID, step, b.Metadata[beadmeta.StepRefMetadataKey])
 						}
-						if err := updateMetadataAndClose(store, b.ID, meta); err != nil {
+						if err := updateMetadataAndClose(beadstest.Graph(store), b.ID, meta); err != nil {
 							t.Fatalf("worker close %s: %v", b.ID, err)
 						}
 						acted = true

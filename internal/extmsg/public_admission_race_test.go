@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // publicAdmissionReadInterleaving commits a real competing admission exactly
@@ -70,7 +71,7 @@ func TestPublicAdmissionRecoversReceiptCommittedBeforeTranscriptLookup(t *testin
 			} else if err != nil || got.ID != winner.ID || got.TranscriptID != winner.TranscriptID || got.PayloadDigest != winner.PayloadDigest {
 				t.Fatalf("identical replay failed to recover committed receipt: got=%+v winner=%+v err=%v", got, winner, err)
 			}
-			records, err := NewServices(mem).Transcript.List(context.Background(), ListTranscriptInput{
+			records, err := NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.List(context.Background(), ListTranscriptInput{
 				Caller: testControllerCaller(), Conversation: winnerInput.Message.Conversation,
 			})
 			if err != nil || len(records) != 1 || records[0].ID != winner.TranscriptID || records[0].Text != winnerInput.Message.Text {
@@ -93,7 +94,7 @@ func TestPublicAdmissionStillRefusesLegacyTranscriptWithoutReceiptAfterLookupRac
 	var legacy ConversationTranscriptRecord
 	raced.beforeTranscriptRead = func() error {
 		var err error
-		legacy, err = NewServices(mem).Transcript.Append(context.Background(), AppendTranscriptInput{
+		legacy, err = NewServices(beadstest.Mail(mem), beadstest.Sessions(mem)).Transcript.Append(context.Background(), AppendTranscriptInput{
 			Caller: testControllerCaller(), Conversation: input.Message.Conversation, Kind: TranscriptMessageInbound,
 			ProviderMessageID: input.Message.ProviderMessageID, Actor: input.Message.Actor, Text: input.Message.Text,
 		})
