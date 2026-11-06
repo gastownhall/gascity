@@ -5,11 +5,13 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -238,5 +240,37 @@ func TestStateResidueAccessorCallers(t *testing.T) {
 		if n := got[key]; n < want {
 			t.Errorf("%s: %d call(s), the table lists %d: shrink the reviewed table", key, n, want)
 		}
+	}
+}
+
+// TestResidueReadsTakeEachClassFromStores pins the T7 residue that unwraps a
+// class handle from Stores() to the class it names, on a city that relocates
+// graph, sessions, orders and nudges to four distinct stores: the API
+// residency topology's accessors and the retired-session sweep's graph leg.
+func TestResidueReadsTakeEachClassFromStores(t *testing.T) {
+	f := newFakeState(t)
+	f.cityBeadStore = beads.NewMemStore()
+	graph, sessions, orders, nudges := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+	f.graphBeadStore, f.sessionsBeadStore, f.ordersBeadStore, f.nudgesBeadStore = graph, sessions, orders, nudges
+	s := New(f)
+
+	want := map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:    graph,
+		coordclass.ClassSessions: sessions,
+		coordclass.ClassOrders:   orders,
+		coordclass.ClassNudges:   nudges,
+	}
+	for _, acc := range s.classStoreAccessors() {
+		if acc.store != want[acc.class] {
+			t.Errorf("classStoreAccessors: %s is served from %v, want %v", acc.class, acc.store, want[acc.class])
+		}
+	}
+
+	swept := s.retiredSessionWorkStores(sessions)
+	if !slices.ContainsFunc(swept, func(st beads.Store) bool { return beads.SameStore(st, graph) }) {
+		t.Errorf("the retired-session sweep lists %v, want the graph binding among them", swept)
+	}
+	if slices.ContainsFunc(swept, func(st beads.Store) bool { return beads.SameStore(st, orders) }) {
+		t.Errorf("the retired-session sweep lists %v, want no orders binding: orders hold no assigned work", swept)
 	}
 }

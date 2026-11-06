@@ -558,3 +558,23 @@ func TestStatusCachedBodiesReportTheWorkStoreCacheAge(t *testing.T) {
 		})
 	}
 }
+
+// TestRigIdempotencyTreatsAZeroWorkHandleAsNoStore pins the zero-handle
+// guards that replaced the nil-store ones: a city with no work store answers
+// a rig create 503 before any admission, and the manifest persist and the
+// boot sweep do nothing over a zero handle (a method call on one panics).
+func TestRigIdempotencyTreatsAZeroWorkHandleAsNoStore(t *testing.T) {
+	state := newFakeMutatorState(t)
+	state.cityBeadStore = nil
+	h := newTestCityHandler(t, state)
+	if got := workRequest(t, h, state, http.MethodPost, "/rigs", `{"name":"gitrig","git_url":"https://example.com/repo.git","request_id":"req-nostore-01"}`, http.StatusServiceUnavailable); !strings.Contains(got, "no bead store configured") {
+		t.Errorf("POST /rigs answered %s, want no bead store configured", got)
+	}
+	if err := persistManifest(beads.WorkStore{}, "gc-1", RigProvisionManifest{CreatedDir: "/tmp/rig"}); err != nil {
+		t.Errorf("persistManifest over a zero handle = %v, want nil", err)
+	}
+	deps := &fakeSweepDeps{}
+	if err := SweepOrphanRigProvisions(t.Context(), beads.WorkStore{}, "c1", deps); err != nil || len(deps.teardowns) != 0 {
+		t.Errorf("SweepOrphanRigProvisions over a zero handle = %v after %d teardowns, want nil and none", err, len(deps.teardowns))
+	}
+}

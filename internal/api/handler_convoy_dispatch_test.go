@@ -1017,6 +1017,24 @@ func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
 	}
 }
 
+// TestWorkflowStoreByRefResolvesTheGraphBinding is the graph twin of the
+// orders test above: on a city that relocates graph alone, the graph: ref
+// resolves to the graph binding, not to the orders class's store.
+func TestWorkflowStoreByRefResolvesTheGraphBinding(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.graphBeadStore = binding
+	state.stores = nil
+	state.cfg.Rigs = nil
+
+	info, ok := workflowStoreByRef(state, "graph:bright-lights")
+	if !ok || info.store != beads.Store(binding) {
+		t.Fatalf("workflowStoreByRef(graph:bright-lights) = %+v, %v; want the graph binding", info, ok)
+	}
+}
+
 // TestWorkflowStorePathSkipsClassRefs pins that a class ref — one naming a
 // binding rather than a scope root — yields no rig/city path to run SQL against.
 // Answering the city path for the orders binding would point the workflow SQL
