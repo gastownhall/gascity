@@ -543,7 +543,10 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 		// Each install command its own: under set -e a failed apt-get update
 		// stops the step, where an && would carry on to the promotion.
 		"command -v zstd >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq zstd >/dev/null; }",
-		`trap 'shred -u "$pki"/*.pem 2>/dev/null; rm -rf "$pki"' EXIT`,
+		// The step runs under set -e, which holds inside the EXIT trap too:
+		// a failed shred (none on macOS) would end the trap before the rm and
+		// leave the certificates behind.
+		`trap 'shred -u "$pki"/*.pem 2>/dev/null || true; rm -rf "$pki"' EXIT`,
 		`(umask 077 && printf '%s' "$CERT_B64" | base64 -d >"$pki/cert.pem" && printf '%s' "$KEY_B64" | base64 -d >"$pki/key.pem")`,
 		`out=$(env -u CERT_B64 -u KEY_B64 DIGEST="$DIGEST" CERT="$pki/cert.pem" KEY="$pki/key.pem"`,
 		"bash .github/rbe-hot/rbe-hot-precheck.sh 2>&1) || true",
@@ -563,6 +566,14 @@ func TestRBEHotPrecheckInput(t *testing.T) {
 	// Secrets reach the pre-check step alone in this job.
 	if n := strings.Count(text, "secrets.RBE_FORK_WORKER_TLS_"); n != 4 {
 		t.Errorf("fork worker certificate secrets referenced %d times, want 4 (the worker step 2, the pre-check 2)", n)
+	}
+
+	// The step's first command checks the script with sha256sum --strict -c,
+	// which the job's Ubuntu runner has and a host without coreutils does not.
+	for _, tool := range []string{"bash", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH; the pre-check step runs on the job's Ubuntu runner", tool)
+		}
 	}
 
 	// The pre-check step, run as the job runs it: from the checkout, with path
