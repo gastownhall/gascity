@@ -921,6 +921,11 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		// ships x/text >= 0.41.0 yet. The statement in .trivyignore.yaml carries the
 		// reasoning.
 		"CVE-2026-56851": {"usr/local/bin/kubectl": true},
+		// Owner-approved 2026-11-06: no kubectl release ships x/net >= 0.62.0 yet,
+		// and the x/net/html tokenizer it fixes is reached only through
+		// `kubectl proxy`, which gc never runs. The statement in .trivyignore.yaml
+		// carries the reasoning.
+		"CVE-2026-78661": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
 
