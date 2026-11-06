@@ -18,8 +18,9 @@ name: rbe-fork-pool
 # counts bazel-allocator[bot]'s runs alone, so a hand canary never trips it;
 # their pool size counts every unfinished run of this workflow (max workers,
 # the floor, booting, the drift cap, the daily budget), a canary too:
-# one worker more, harmless.
-run-name: ${{ format('rbe-fork-pool ({0}, idle {1}m){2}', inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}
+# one worker more, harmless. A hot tier pre-check (hot_precheck_digest) is
+# named hot-precheck with its digest, and starts no worker at all.
+run-name: ${{ format('rbe-fork-pool ({0}, idle {1}m){2}', inputs.hot_precheck_digest && 'hot-precheck' || inputs.rbe_worker_sha && 'canary' || inputs.role || 'burst', inputs.idle_minutes, inputs.hot_precheck_digest && format(' digest {0}', inputs.hot_precheck_digest) || inputs.rbe_worker_sha && format(' rbe-worker {0}', inputs.rbe_worker_sha) || '') }}
 
 on:
   workflow_dispatch:
@@ -48,6 +49,16 @@ on:
           at 60. Empty (the default): the pin.
         default: ""
         type: string
+      hot_precheck_digest:
+        description: >
+          By hand only: run the hot tier's B3 pre-check (infra
+          rbe-hot-precheck.sh, vendored in .github/rbe-hot) for this
+          <64-hex sha256>-<size> blob (64 MiB or more, one the fork tier
+          holds and R2 does not yet), on a Blacksmith runner with the fork
+          worker certificate, and start no worker. It promotes the blob for
+          real (one PUT). Empty (the default): a pool worker as always.
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -55,7 +66,8 @@ permissions:
 jobs:
   worker:
     name: rbe fork pool worker (Blacksmith, fork scheduler)
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # No worker on a hot tier pre-check run (hot_precheck_digest).
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.hot_precheck_digest == ''
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 150
     steps:
@@ -176,12 +188,65 @@ jobs:
           CAS_MAX_BYTES: ${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
+  # The hot tier's B3 pre-check (infra nativelink-cas/west README "Hot blobs
+  # on R2"), by hand, instead of a worker: the WAF admits Blacksmith's range
+  # alone, and the promotion needs the fork worker certificate. The script is
+  # infra's, vendored with its sha256 (infra is private; this job cannot read
+  # it) and one decode fix infra does not have yet: .github/rbe-hot/. It fails
+  # unless the script prints "precheck: ok". The certificate exists in files
+  # for that step alone; a failed zstd install stops the step before them.
+  hot-precheck:
+    name: rbe hot tier pre-check (Blacksmith, fork worker certificate)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.hot_precheck_digest != ''
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # Never from an App or bot, a strict digest of 64 MiB or more, and
+      # never together with a canary commit. Every value through env.
+      - name: Pre-check input
+        env:
+          DIGEST: ${{ inputs.hot_precheck_digest }}
+          ACTOR: ${{ github.triggering_actor }}
+          CANARY: ${{ inputs.rbe_worker_sha }}
+        run: |
+          set -euo pipefail
+          if [[ $ACTOR == *"[bot]" ]]; then
+            echo "::error title=rbe hot pre-check::dispatched by a person, never an App or bot ($ACTOR); refused"
+            exit 1
+          fi
+          [ -z "$CANARY" ] || { echo "::error title=rbe hot pre-check::not together with rbe_worker_sha"; exit 1; }
+          [[ $DIGEST =~ ^[0-9a-f]{64}-[1-9][0-9]{7,10}$ ]] ||
+            { echo "::error title=rbe hot pre-check::hot_precheck_digest must be <64-hex sha256>-<size>"; exit 1; }
+          (( ${DIGEST#*-} >= 67108864 )) || { echo "::error title=rbe hot pre-check::the blob must be 64 MiB or more (the hot tier's minimum)"; exit 1; }
+          echo "rbe hot pre-check $DIGEST by $ACTOR" >>"$GITHUB_STEP_SUMMARY"
+      - name: Hot tier pre-check (rbe-hot-precheck.sh)
+        env:
+          DIGEST: ${{ inputs.hot_precheck_digest }}
+          CERT_B64: ${{ secrets.RBE_FORK_WORKER_TLS_CERT }}
+          KEY_B64: ${{ secrets.RBE_FORK_WORKER_TLS_KEY }}
+        run: |
+          set -euo pipefail
+          (cd .github/rbe-hot && sha256sum --strict -c rbe-hot-precheck.sha256)
+          command -v zstd >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq zstd >/dev/null; }
+          pki=$(mktemp -d)
+          trap 'shred -u "$pki"/*.pem 2>/dev/null; rm -rf "$pki"' EXIT
+          (umask 077 && printf '%s' "$CERT_B64" | base64 -d >"$pki/cert.pem" && printf '%s' "$KEY_B64" | base64 -d >"$pki/key.pem")
+          out=$(env -u CERT_B64 -u KEY_B64 DIGEST="$DIGEST" CERT="$pki/cert.pem" KEY="$pki/key.pem" \
+            bash .github/rbe-hot/rbe-hot-precheck.sh 2>&1) || true
+          printf '%s\n' "$out"
+          { echo '```'; printf '%s\n' "$out"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          grep -qx 'precheck: ok' <<<"$out" || { echo "::error title=rbe hot pre-check::the pre-check did not print 'precheck: ok'"; exit 1; }
+
   # As in rbe-worker-pool.yml: drift is reported while the worker serves.
   await-drift:
     name: worker-env drift watch
     # Never on a canary (rbe_worker_sha): its commit may measure what the
-    # pin does not, and a drift issue would cap both pools for the pin.
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.rbe_worker_sha == ''
+    # pin does not, and a drift issue would cap both pools for the pin. Nor
+    # on a hot tier pre-check, which runs no worker.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.rbe_worker_sha == '' && inputs.hot_precheck_digest == ''
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

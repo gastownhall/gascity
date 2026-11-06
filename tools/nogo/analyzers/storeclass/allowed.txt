@@ -12,10 +12,11 @@ cmd/gc/city_stores.go	cityTopology	raw-result	1
 cmd/gc/city_stores.go	classRefusal	raw-result	1
 cmd/gc/city_stores.go	cliStores	raw-param	1
 cmd/gc/city_stores.go	mintCityStores	mint	1
-cmd/gc/city_stores.go	mintCityStores	raw-param	1
+cmd/gc/city_stores.go	mintCityStores	raw-param	2
 cmd/gc/city_stores.go	placeClass	mint	1
 cmd/gc/city_stores.go	placeClass	raw-param	1
 cmd/gc/city_stores.go	placeClass	raw-result	1
+cmd/gc/city_stores.go	rigSet	raw-field	1
 cmd/gc/city_stores.go	routesBindings	raw-field	2
 cmd/gc/city_stores.go	scopeStores	raw-param	1
 cmd/gc/city_stores.go	storesEpoch	raw-field	1
