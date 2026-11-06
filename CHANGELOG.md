@@ -894,6 +894,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gc ready --dispatchable` and `gc ready --census` report how much of the
+  ready set a worker could actually be handed (#8935).** A row being ready
+  does not make it supply: gc mints one synthetic convoy carrier per
+  dispatch, and molecule step beads, deliberately parked beads
+  (`deploy-handoff`, `hold:*`, `owner-action`, `human-decision`, `human`),
+  already-routed beads and already-assigned beads are all open by the store's
+  definition while no pool can be handed them. On one city's `gk` store 40
+  raw ready rows classified to 0 dispatchable, and the largest class is
+  monotonic — carriers are minted as work is dispatched — so a count that
+  admits them reads healthiest exactly when the pool is being consumed
+  hardest. `--dispatchable` returns the surviving rows; `--census` returns
+  `{"dispatchable","total","in_flight","by_class"}` instead of rows, with
+  every class present so a consumer never has to tell absent from zero. A
+  plain `gc ready` is unchanged and still returns convoy rows, which its
+  other callers need; both new flags read unbounded and cut `--limit` after
+  the filter, because the top N ready rows are not the top N dispatchable
+  ones. `--census` is not bd's `--explain`, which answers with rows. The
+  Automation Charter's `>=5` queue floor is measured against
+  `gc ready --census` → `dispatchable`.
+
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:
