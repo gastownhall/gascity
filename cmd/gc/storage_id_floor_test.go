@@ -155,10 +155,10 @@ func TestReserveCityIDsRaisesNeverLowersAndIsIdempotent(t *testing.T) {
 	if !strings.Contains(got.String(), "already 8") {
 		t.Fatalf("second run says %q", got)
 	}
-	higher := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "12", bdMaxHashLengthKey: "14"}}
+	higher := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "8"}}
 	stubCityHashConfig(t, cityHashConfig{Conf: higher, Prefix: "mc"})
-	got, err = reserveCityIDs("/city", carried)
-	if err != nil || len(higher.sets) != 0 || got.Floor != 12 {
+	got, err = reserveCityIDs("/city", []string{"mc-q1w2e"})
+	if err != nil || len(higher.sets) != 0 || got.Floor != 8 {
 		t.Fatalf("a higher floor = %+v (%v), writes %v; want it kept, nothing written", got, err, higher.sets)
 	}
 }
@@ -479,9 +479,9 @@ func TestAConvergedRerunAppliesTheFloor(t *testing.T) {
 }
 
 // TestAMaxAboveBdsCapIsBroughtDownTo8: an earlier import may have set
-// max_hash_length past 8 (a hosted bd serve then pads every id to it); the
-// reservation brings it back to 8, the one lowering it makes, unless the min
-// is above 8 too, and a second run writes nothing.
+// max_hash_length, or both settings, past 8 (bd mints no more; a hosted bd
+// serve pads every id to it). The reservation brings each back to 8, the
+// floor's one documented lowering, and a second run writes nothing.
 func TestAMaxAboveBdsCapIsBroughtDownTo8(t *testing.T) {
 	conf := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "13"}}
 	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
@@ -497,10 +497,15 @@ func TestAMaxAboveBdsCapIsBroughtDownTo8(t *testing.T) {
 	if _, err := raiseBdHashFloor(at, 6); err != nil || strings.Join(at.sets, ",") != "min_hash_length=6" {
 		t.Fatalf("a max of exactly 8 writes %v (%v), want it left alone", at.sets, err)
 	}
-	// A min above the cap as well stays, and the max with it: never below the
-	// min (TestReserveCityIDsRaisesNeverLowersAndIsIdempotent's 12/14).
+	// A min above the cap as well (an earlier import's 13/13) comes down to
+	// 8 with the max: the floor's one documented lowering. A second run
+	// writes nothing.
 	both := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "13", bdMaxHashLengthKey: "13"}}
-	if floor, err := raiseBdHashFloor(both, 6); err != nil || floor != 13 || len(both.sets) != 0 {
-		t.Fatalf("min and max 13 = floor %d (%v), writes %v; want both left alone", floor, err, both.sets)
+	if floor, err := raiseBdHashFloor(both, 6); err != nil || floor != 8 || strings.Join(both.sets, ",") != "min_hash_length=8,max_hash_length=8" {
+		t.Fatalf("min and max 13 = floor %d (%v), writes %v; want both brought down to 8", floor, err, both.sets)
+	}
+	both.sets = nil
+	if floor, err := raiseBdHashFloor(both, 6); err != nil || floor != 8 || len(both.sets) != 0 {
+		t.Fatalf("a second run = floor %d (%v), writes %v; want nothing", floor, err, both.sets)
 	}
 }

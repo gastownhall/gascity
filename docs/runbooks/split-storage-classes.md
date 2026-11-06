@@ -251,9 +251,10 @@ What the command does, in order:
    the longest hash suffix among the carried ids of the store's own prefix
    (only suffixes bd mints count: base36, 3 to 8 characters, so a cross-store
    gate's `xsg-` id does not; neither setting goes above 8, the longest suffix
-   bd mints; it never lowers either, and raises `max_hash_length` with it when
-   needed; an earlier `--from-rigs` may have set `max_hash_length` above 8, and
-   that alone is brought back down to 8), so bd does not mint a carried id
+   bd mints; it raises `max_hash_length` with it when needed, and never lowers
+   either, with one exception: an earlier `--from-rigs` may have set either
+   above 8, which bd's minting ignores and a hosted `bd serve` only pads ids
+   to, and each is brought back down to 8), so bd does not mint a carried id
    again once the clear removes it: every id it mints has a longer suffix than
    any carried one. Where a carried suffix already has 8 characters the floor
    stops at 8, and a new 8-character id only rarely could repeat one. A file

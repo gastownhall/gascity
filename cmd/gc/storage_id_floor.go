@@ -14,8 +14,14 @@ package main
 // ever gave up, and so cannot be one. At bd's cap of 8 characters that
 // guarantee becomes a probability: a store that gave up an 8-character
 // suffix gets a floor of 8, and a new 8-character id could, very rarely,
-// repeat one. The floor is never lowered; max_hash_length is lowered only
-// to bd's cap of 8.
+// repeat one.
+//
+// The floor is never lowered, with one exception: a min_hash_length or
+// max_hash_length above bd's cap of 8 (an earlier rig import could set both
+// to 13) is brought down to 8. It never protected anything: bd's CLI and
+// native minting stop at 8 whatever the setting says, and a hosted `bd serve`
+// only pads every id it mints to that length with zeros. Capping both at 8
+// loses nothing.
 //
 // A store that mints from a sequence (the file store) never rewinds it, and
 // SQLite stores recover their sequence floor from the ids they hold on open
@@ -49,8 +55,9 @@ func cityIDFloor(ids []string, prefix string) int {
 
 // raiseBdHashFloor raises min_hash_length to floor, never lowering it, and
 // max_hash_length with it when the floor is above it (bd sizes ids between
-// the two). Neither is raised past bdMaxMintedHashLength. It returns the
-// floor in force, 0 when floor is 0.
+// the two). Neither is raised past bdMaxMintedHashLength, and either already
+// past it is brought down to it: the floor's one documented lowering (file
+// comment). It returns the floor in force, 0 when floor is 0.
 func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
 	if floor == 0 || conf == nil {
 		return 0, nil
@@ -60,10 +67,21 @@ func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
 	}
-	if n, perr := strconv.Atoi(strings.TrimSpace(current)); perr == nil && n >= floor {
+	n, perr := strconv.Atoi(strings.TrimSpace(current))
+	switch {
+	case perr == nil && n > bdMaxMintedHashLength:
+		// The documented exception (file comment): above bd's cap the min
+		// protects nothing, so it comes down to the cap.
+		if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(bdMaxMintedHashLength)); err != nil {
+			return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, bdMaxMintedHashLength, err)
+		}
+		floor = bdMaxMintedHashLength
+	case perr == nil && n >= floor:
 		floor = n
-	} else if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
-		return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, floor, err)
+	default:
+		if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
+			return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, floor, err)
+		}
 	}
 	maxText, err := conf.ConfigGet(bdMaxHashLengthKey)
 	if err != nil {
@@ -78,12 +96,9 @@ func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
 		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(floor)); err != nil {
 			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, floor, err)
 		}
-	case maxLen > bdMaxMintedHashLength && floor <= bdMaxMintedHashLength:
-		// The one lowering: a max an earlier import set past bd's cap
-		// (S4b's floor had none) makes a hosted bd serve pad every id it
-		// mints to that length with zeros, and buys nothing bd mints. A min
-		// above the cap too is left as it is, max with it: lowering only the
-		// max would put it below the min, and the min is never lowered.
+	case maxLen > bdMaxMintedHashLength:
+		// The same exception for the max (file comment); the min is at most
+		// the cap by now, so the max never falls below it.
 		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(bdMaxMintedHashLength)); err != nil {
 			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, bdMaxMintedHashLength, err)
 		}

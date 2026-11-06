@@ -5555,9 +5555,10 @@ max_hash_length with it when needed, so bd does not mint a carried id again
 after the clear removed it: every id it mints has a longer suffix than any
 carried one. Neither is set above 8, the longest suffix bd mints, so where a
 carried suffix already has 8 characters a new 8-character id only rarely
-could repeat one. It never lowers min_hash_length, and lowers max_hash_length
-only to 8 (an earlier import may have set it higher), so a second run
-changes nothing. It holds the controller lock and refuses while
+could repeat one. It never lowers either setting, with one exception: one
+above 8 (an earlier import may have set both higher) is brought down to 8,
+since bd mints nothing longer and a hosted bd serve only pads ids to it. A
+second run changes nothing. It holds the controller lock and refuses while
 the city runs, like every writing storage verb. A file store needs no floor
 and a generic exec store cannot take one; both are reported and skipped. On a
 hosted bd store that refuses the write it names the value to set out of
