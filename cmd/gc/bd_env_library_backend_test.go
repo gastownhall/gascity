@@ -205,9 +205,7 @@ func TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope(t *test
 	if err != nil {
 		t.Fatalf("openControlStoreAtForCity: %v", err)
 	}
-	if _, ok := store.(*beads.BdStore); !ok {
-		t.Fatalf("store = %T, want the raw control bd store", store)
-	}
+	requireControlBdStoreUnderRouteClearing(t, store)
 }
 
 // A registered extension does not loosen the partial-binding refusal: storage
@@ -260,4 +258,22 @@ func TestLibraryExtensionBackendWithholdsProjectedBackendEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireControlBdStoreUnderRouteClearing fails unless store is the control
+// path's bd store wrapped in exactly one route-clearing decorator
+// (openControlBdStoreThroughFactory), and returns the bd store beneath it. The
+// control path never takes a native or library-backend store, so the engine
+// under the decorator must be the raw *beads.BdStore.
+func requireControlBdStoreUnderRouteClearing(t *testing.T, store beads.Store) *beads.BdStore {
+	t.Helper()
+	inner, wrapped := beads.UnwrapRouteChangeClearing(store)
+	if !wrapped {
+		t.Fatalf("store = %T, want the control bd store under the route-clearing decorator", store)
+	}
+	bd, ok := inner.(*beads.BdStore)
+	if !ok {
+		t.Fatalf("store under the route-clearing decorator = %T, want the raw control bd store", inner)
+	}
+	return bd
 }

@@ -16,7 +16,8 @@ import (
 // per-item path. Each capability has its own sentinel and its own consumer:
 // ErrBatchCopyUnsupported for the foreign-id create and the dependency add,
 // ErrDepRemoveBatchUnsupported, ErrConditionalTransferUnsupported,
-// ErrDepListBatchUnsupported and ErrDepMetadataUnsupported for the others.
+// ErrDepListBatchUnsupported and ErrDepMetadataUnsupported for the others;
+// ChildrenOfAny has no sentinel, it answers per parent.
 
 var (
 	_ ForeignIDBatchCreator           = (*routeChangeClearingStore)(nil)
@@ -29,6 +30,7 @@ var (
 	_ AbsentBlockedReader             = (*routeChangeClearingStore)(nil)
 	_ journalops.Journal              = (*routeChangeClearingStore)(nil)
 	_ CachedReadExact                 = (*routeChangeClearingStore)(nil)
+	_ ChildrenBatchLister             = (*routeChangeClearingStore)(nil)
 	_ listDependencyCompletenessStore = (*completeEdgesRouteChangeClearingStore)(nil)
 	_ routeClearingGate               = (*completeEdgesRouteChangeClearingStore)(nil)
 )
@@ -111,6 +113,19 @@ func (w *routeChangeClearingStore) ReadyBlockedByAbsent(query ReadyQuery) ([]Bea
 		return nil, nil
 	}
 	return reader.ReadyBlockedByAbsent(query)
+}
+
+// ChildrenOfAny forwards the backing's batched children read, so a cache above
+// this decorator keeps reading a frontier's children in one round trip. A
+// backing without the batch is read one parent at a time through the
+// decorator's own Children (ChildrenOfAnyPerParent), the contract
+// ChildrenBatchLister gives a forwarding wrapper.
+func (w *routeChangeClearingStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+	batch, ok := w.Store.(ChildrenBatchLister)
+	if !ok {
+		return ChildrenOfAnyPerParent(w, parentIDs, opts...)
+	}
+	return batch.ChildrenOfAny(parentIDs, opts...)
 }
 
 // EventsJournalActive reports the backing's journal activation.

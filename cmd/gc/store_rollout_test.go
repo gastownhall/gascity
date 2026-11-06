@@ -681,9 +681,7 @@ func TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug(t *testing.T) {
 			if err != nil {
 				t.Fatalf("openControlStoreAtForCity: %v", err)
 			}
-			if _, ok := store.(*beads.BdStore); !ok {
-				t.Fatalf("store = %T, want the raw control bd store", store)
-			}
+			requireControlBdStoreUnderRouteClearing(t, store)
 			pinned := 0
 			for _, r := range logs.records {
 				if r.Message != "native_store_unavailable" {
