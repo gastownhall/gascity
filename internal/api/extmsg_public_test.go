@@ -35,7 +35,7 @@ func newPublicAdmissionEnv(t *testing.T) (*opsEnv, *publicAdmissionTestState, ex
 	state := &publicAdmissionTestState{lanePokeState: lane, messaging: beads.MailStore{Store: messages}}
 	e.resolver.state = state
 	info := e.session(t, "public recipient")
-	ref := extmsg.ConversationRef{ScopeID: "fixture", Provider: "zoo", AccountID: "local", ConversationID: "public-room", Kind: extmsg.ConversationRoom}
+	ref := extmsg.ConversationRef{ScopeID: "fixture", Provider: "chat", AccountID: "local", ConversationID: "public-room", Kind: extmsg.ConversationRoom}
 	_, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
 		Caller: extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, Conversation: ref, SessionID: info.ID,
 		Owner: extmsg.MembershipOwnerManual, BackfillPolicy: extmsg.MembershipBackfillSinceJoin, Now: time.Now(),

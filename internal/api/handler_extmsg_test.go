@@ -757,7 +757,7 @@ func TestExtMsgGroupMetadataUpsertPreservesPolicyAndExplicitRouteUpdates(t *test
 			services := extmsg.NewServices(beadstest.Mail(state.cityBeadStore), beadstest.Sessions(state.cityBeadStore))
 			state.extmsgSvc = &services
 			server := New(state)
-			ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "zoo", AccountID: "account", ConversationID: "room", Kind: extmsg.ConversationThread}
+			ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "chat", AccountID: "account", ConversationID: "room", Kind: extmsg.ConversationThread}
 			caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
 			policy := extmsg.FanoutPolicy{Enabled: true, AllowUntargetedPublication: true, MaxPeerTriggeredPublishes: 3, MaxTotalPeerDeliveries: 17}
 			original, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
@@ -809,7 +809,7 @@ func TestExtMsgGroupCreateKeepsExplicitDefaultRoute(t *testing.T) {
 	services := extmsg.NewServices(beadstest.Mail(state.cityBeadStore), beadstest.Sessions(state.cityBeadStore))
 	state.extmsgSvc = &services
 	server := New(state)
-	ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "zoo", AccountID: "account", ConversationID: "new-room", Kind: extmsg.ConversationThread}
+	ref := extmsg.ConversationRef{ScopeID: "scope", Provider: "chat", AccountID: "account", ConversationID: "new-room", Kind: extmsg.ConversationThread}
 	raw, err := json.Marshal(map[string]any{"root_conversation": ref, "default_handle": "alpha"})
 	if err != nil {
 		t.Fatal(err)
