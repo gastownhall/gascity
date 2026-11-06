@@ -100,6 +100,7 @@ func starvedQueuedNudgeBypass(target nudgeTarget, sp runtime.Provider, now time.
 // switch on (programHoldDeclared), and decided is false wherever it took
 // none.
 func starvedBypassLook(target nudgeTarget, sp runtime.Provider, now time.Time) (how worker.NudgeDelivery, hold, decided bool, err error) {
+	programShadowDecideForTarget(target)
 	how, hold, err = starvedQueuedNudgeDelivery(sp, target.sessionName)
 	if err != nil || how != worker.NudgeDeliveryImmediate {
 		return how, hold, false, err

@@ -3220,6 +3220,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	programShadowDecideFor(sessionID)
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		op.finishMessage(false, err)

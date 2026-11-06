@@ -1896,6 +1896,7 @@ go_test(
         "program_capture_heal_test.go",
         "program_status_hold_test.go",
         "program_status_mode_test.go",
+        "program_status_shadow_scope_test.go",
         "program_status_shadow_test.go",
         "program_status_shadow_wiring_test.go",
         "program_status_wiring_test.go",
