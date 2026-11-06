@@ -1134,6 +1134,44 @@ its `cmd/product-check`, which is stdlib-only and quick. It measures only
 when the change touches the worker host. product-check is skipped if H5 or
 the fetch failed, and still runs if the measurement failed.
 
+### The hot tier's B3 pre-check (rbe-fork-pool.yml hot_precheck_digest)
+
+Before the fork pool reads big blobs from rbe-west's R2 hot tier
+(`RBE_FORK_HOT_URL`; infra `nativelink-cas/west` README "Hot blobs on R2"),
+the edge is checked once from a Blacksmith runner: the WAF admits
+Blacksmith alone, and the promotion needs the fork worker certificate. By
+hand, on main:
+
+```
+gh workflow run rbe-fork-pool.yml -R gastownhall/gascity -f hot_precheck_digest=<64-hex sha256>-<size>
+```
+
+The digest is a blob of 64 MiB or more that the fork tier holds (rbe-west's
+`fork-big` or `cas-big`) and that R2 does not hold yet: the check aborts on
+one already promoted. The run (named `hot-precheck`) starts no worker and no
+drift job. It runs infra's `rbe-hot-precheck.sh`, vendored in
+`.github/rbe-hot/` with its sha256 (infra is private; the job checks the
+sha256 first) and one fix infra does not have yet: the decode check also
+fails when zstd rejects the stream. The fork worker certificate is in 0600
+files for that one step, and the job fails unless the script prints
+`precheck: ok`. The promotion is real: one PUT of about a quarter of the
+blob's size. A dispatch by any `*[bot]`, or together with `rbe_worker_sha`,
+is refused. Two cautions before you dispatch it:
+
+- The fork scaler counts the run in its pool size like any unfinished run,
+  and for its first 3 minutes also as a booting worker, one that never
+  registers: for those minutes it can dispatch one worker fewer for a fork
+  queue. Run the pre-check while the fork queue is quiet.
+- rbe-west's fork off switch (`/etc/rbe-fork/enabled`, which the fork scaler
+  obeys) does not stop a hand dispatch, but the promotion goes through the
+  fork edge's `:8444`, which the switch closes: while the edge is dark the
+  pre-check fails, and nothing is promoted.
+
+A new infra version of the script: copy it, keep the decode fix until infra
+has it (the test's decode cases fail without it), update
+`rbe-hot-precheck.sha256`, and update the two constants in
+`scripts/rbe_fork_pool_test.go`.
+
 ## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**

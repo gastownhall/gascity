@@ -547,11 +547,19 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 				t.Errorf("permissions %v, want contents: read (jobs widen their own)", wf.Permissions)
 			}
-			if got := rbeSortedKeys(wf.Jobs); strings.Join(got, ",") != "await-drift,report-drift,worker" {
-				t.Fatalf("jobs %v, want worker, await-drift, report-drift (no gate)", got)
+			// The fork pool also has hot-precheck (by hand, no worker:
+			// TestRBEHotPrecheckInput), which neither job waits for.
+			wantJobs, workerIf, awaitIf := "await-drift,report-drift,worker", defaultBranch, defaultBranch+" && inputs.rbe_worker_sha == ''"
+			if path == rbeForkPoolWorkflow {
+				wantJobs = "await-drift,hot-precheck,report-drift,worker"
+				workerIf += " && inputs.hot_precheck_digest == ''"
+				awaitIf += " && inputs.hot_precheck_digest == ''"
+			}
+			if got := rbeSortedKeys(wf.Jobs); strings.Join(got, ",") != wantJobs {
+				t.Fatalf("jobs %v, want %s (no gate)", got, wantJobs)
 			}
 			worker := wf.Jobs["worker"]
-			if worker.Needs != nil || worker.If != defaultBranch {
+			if worker.Needs != nil || worker.If != workerIf {
 				t.Errorf("worker needs %v if %q, want nothing but the default branch", worker.Needs, worker.If)
 			}
 			if len(worker.Permissions) != 0 {
@@ -588,7 +596,7 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 
 			await := wf.Jobs["await-drift"]
 			// Never on a canary run (rbe_worker_sha; TestRBEPoolCanaryInput).
-			if await.Needs != nil || await.If != defaultBranch+" && inputs.rbe_worker_sha == ''" || await.RunsOn != "ubuntu-latest" {
+			if await.Needs != nil || await.If != awaitIf || await.RunsOn != "ubuntu-latest" {
 				t.Errorf("await-drift needs %v if %q runs-on %q, want beside the worker on ubuntu-latest", await.Needs, await.If, await.RunsOn)
 			}
 			if len(await.Permissions) != 2 || await.Permissions["contents"] != "read" || await.Permissions["actions"] != "read" {
