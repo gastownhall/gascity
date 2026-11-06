@@ -2291,6 +2291,11 @@ back is not printed — the id this command hands out is a close target, and an
 unreadable claim refuses instead of printing an id the caller might close. The
 command never repairs the stamp — that is the claim path's job.
 
+When the stamp no longer holds — stale, or never written — the session's
+recorded hook deliveries are verified the same way, and the one live claim
+they still name is printed, with the substitution disclosed on stderr only.
+Zero or several live claims refuse: the command never guesses.
+
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
 session identity, when the session has claimed nothing it can prove, and when
 the claim cannot be verified, so a caller that cannot name its bead fails

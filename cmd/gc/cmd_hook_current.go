@@ -35,6 +35,11 @@ back is not printed — the id this command hands out is a close target, and an
 unreadable claim refuses instead of printing an id the caller might close. The
 command never repairs the stamp — that is the claim path's job.
 
+When the stamp no longer holds — stale, or never written — the session's
+recorded hook deliveries are verified the same way, and the one live claim
+they still name is printed, with the substitution disclosed on stderr only.
+Zero or several live claims refuse: the command never guesses.
+
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
 session identity, when the session has claimed nothing it can prove, and when
 the claim cannot be verified, so a caller that cannot name its bead fails
@@ -66,36 +71,65 @@ func cmdHookCurrent(idOnly bool, stdout, stderr io.Writer) int {
 }
 
 // doHookCurrent prints the session's verified current claim: the stamped id
-// when the live ledger still backs it. It exits 1 — never 0 with empty output
-// — when no claim can be proven: the whole point of the back-channel is that
-// a step which cannot name its own bead must fail loudly rather than let a
+// when the live ledger still backs it, else the one live claim the session's
+// recorded deliveries still name. It exits 1 — never 0 with empty output —
+// when no claim can be proven: the whole point of the back-channel is that a
+// step which cannot name its own bead must fail loudly rather than let a
 // caller substitute an empty string and skip the close it owes. The stamp is
-// written best-effort by the claim, so its word alone is not evidence.
+// written best-effort by the claim, so its word alone is not evidence; a
+// recovered claim is disclosed on stderr, stdout stays the id alone.
 func doHookCurrent(ctx hookCurrentContext, sessionID string, idOnly bool, stdout, stderr io.Writer) int {
 	info, err := ctx.sessFront.Get(sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if _, err := session.DecodeWorkStarted(info.WorkStartedRaw); err != nil {
+	cell, err := session.DecodeWorkStarted(info.WorkStartedRaw)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc hook current: session %s: %v\n", sessionID, err) //nolint:errcheck
 		return 1
 	}
 	stamp := strings.TrimSpace(info.CurrentClaimBeadID)
-	if stamp == "" {
-		fmt.Fprintf(stderr, "gc hook current: session %s has no current claim (nothing claimed through gc hook --claim)\n", sessionID) //nolint:errcheck
-		return 1
-	}
 	read := newHookCurrentReader(ctx, sessionID, releaseScope(info, ctx.cfg))
-	v := read.verify(stamp)
-	if v.err != nil {
-		fmt.Fprintf(stderr, "gc hook current: %v\n", v.err) //nolint:errcheck
+	if stamp != "" {
+		v := read.verify(stamp)
+		if v.err != nil {
+			fmt.Fprintf(stderr, "gc hook current: %v\n", v.err) //nolint:errcheck
+			return 1
+		}
+		if v.held {
+			return hookCurrentPrint(stdout, sessionID, stamp, idOnly)
+		}
+		live, err := hookCurrentQualifyingIDs(read, cell)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		switch len(live) {
+		case 1:
+			fmt.Fprintf(stderr, "gc hook current: session %s's stamped claim %s is no longer held (%s); printing its live recorded claim %s instead\n", sessionID, stamp, v.reason, live[0]) //nolint:errcheck
+			return hookCurrentPrint(stdout, sessionID, live[0], idOnly)
+		case 0:
+			fmt.Fprintf(stderr, "gc hook current: session %s's stamped claim %s is no longer held (%s), and no live claim is recorded for the session\n", sessionID, stamp, v.reason) //nolint:errcheck
+		default:
+			fmt.Fprintf(stderr, "gc hook current: session %s holds more than one live claim; refusing to pick one\n", sessionID) //nolint:errcheck
+		}
 		return 1
 	}
-	if v.held {
-		return hookCurrentPrint(stdout, sessionID, stamp, idOnly)
+	live, err := hookCurrentQualifyingIDs(read, cell)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook current: %v\n", err) //nolint:errcheck
+		return 1
 	}
-	fmt.Fprintf(stderr, "gc hook current: session %s's stamped claim %s is no longer held (%s), and no live claim is recorded for the session\n", sessionID, stamp, v.reason) //nolint:errcheck
+	switch len(live) {
+	case 1:
+		fmt.Fprintf(stderr, "gc hook current: session %s has no claim stamped; printing its one live recorded claim %s\n", sessionID, live[0]) //nolint:errcheck
+		return hookCurrentPrint(stdout, sessionID, live[0], idOnly)
+	case 0:
+		fmt.Fprintf(stderr, "gc hook current: session %s has no current claim (nothing claimed through gc hook --claim)\n", sessionID) //nolint:errcheck
+	default:
+		fmt.Fprintf(stderr, "gc hook current: session %s holds more than one live claim; refusing to pick one\n", sessionID) //nolint:errcheck
+	}
 	return 1
 }
 

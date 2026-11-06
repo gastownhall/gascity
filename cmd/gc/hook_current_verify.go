@@ -79,6 +79,45 @@ func hookCurrentVerifiedReadContext() (hookCurrentContext, error) {
 	}, nil
 }
 
+// hookCurrentEntryIDs is the work_started cell's recorded delivery ids:
+// trimmed, nonempty, deduplicated, the cell's newest-first order preserved.
+// The cell's store spellings are deliberately not consulted — residency, not
+// the store a past hook ran in, decides which leg holds each id.
+func hookCurrentEntryIDs(cell session.WorkStarted) []string {
+	seen := make(map[string]struct{}, len(cell.Claims))
+	var ids []string
+	for _, c := range cell.Claims {
+		id := strings.TrimSpace(c.Bead)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// hookCurrentQualifyingIDs verifies every recorded delivery id and returns the
+// qualifying ones, the cell's newest-first order preserved. A read error
+// aborts the scan whole: a candidate found before the error does not print,
+// because the ids that were never reached could change the count.
+func hookCurrentQualifyingIDs(read hookCurrentReader, cell session.WorkStarted) ([]string, error) {
+	var live []string
+	for _, id := range hookCurrentEntryIDs(cell) {
+		v := read.verify(id)
+		if v.err != nil {
+			return nil, v.err
+		}
+		if v.held {
+			live = append(live, id)
+		}
+	}
+	return live, nil
+}
+
 // hookCurrentRow is one work id's verdict: why the read failed (err), or why
 // the row does not qualify (reason) when it does not.
 type hookCurrentRow struct {

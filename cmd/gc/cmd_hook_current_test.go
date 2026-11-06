@@ -138,10 +138,65 @@ func TestDoHookCurrentRefusesAStampTheLedgerContradicts(t *testing.T) {
 	}
 }
 
+// TestDoHookCurrentReplacesClosedStampWithLiveStartedClaim is the recovery
+// case the work_started cell exists for: the stamp names a claim the ledger
+// has since closed, but the session's recorded deliveries still name exactly
+// one live claim. That claim is the session's current work — it is what the
+// step must close — so it prints (stdout stays the machine-clean id for
+// --id-only) and the substitution is disclosed on stderr only.
+func TestDoHookCurrentReplacesClosedStampWithLiveStartedClaim(t *testing.T) {
+	closed := hookCurrentWorkBead("gcg-old")
+	closed.Status = "closed"
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("gcg-old",
+			hookCurrentEntry("gcg-live"),
+			hookCurrentEntry("gcg-old"),
+		),
+		closed,
+		hookCurrentWorkBead("gcg-live"),
+	)
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookCurrent (stale stamp, one live recorded claim) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); got != "gcg-live\n" {
+		t.Fatalf("--id-only stdout = %q, want the recovered live claim id", got)
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "gcg-old") || !strings.Contains(errText, "gcg-live") {
+		t.Errorf("stderr = %q, want the refused stamp and the printed claim both disclosed", errText)
+	}
+}
+
+// TestDoHookCurrentPrintsTheOnlyRecordedClaimWhenNothingIsStamped covers the
+// stamp write that never landed: nothing is stamped, but the session's
+// recorded deliveries name exactly one live claim. The claim is real and
+// provably the session's, so it prints with the absence disclosed on stderr;
+// an unstamped session is no longer a blanket refusal.
+func TestDoHookCurrentPrintsTheOnlyRecordedClaimWhenNothingIsStamped(t *testing.T) {
+	ctx := hookCurrentTestContext(t,
+		hookCurrentSessionBead("", hookCurrentEntry("gcg-solo")),
+		hookCurrentWorkBead("gcg-solo"),
+	)
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookCurrent(ctx, hookCurrentSessionID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookCurrent (no stamp, one live recorded claim) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); got != "gcg-solo\n" {
+		t.Fatalf("--id-only stdout = %q, want the recorded claim id", got)
+	}
+	if !strings.Contains(stderr.String(), "gcg-solo") {
+		t.Errorf("stderr = %q, want the recovered claim disclosed", stderr.String())
+	}
+}
+
 // TestDoHookCurrentExitsOneWhenNothingIsStamped is the fail-loud half of the
-// contract: an unstamped session must NOT print an empty line and exit 0, or a
-// caller substituting the output would silently derive an empty bead id — the
-// exact fail-open the back-channel exists to close.
+// contract: a session with nothing stamped AND nothing recorded live must NOT
+// print an empty line and exit 0, or a caller substituting the output would
+// silently derive an empty bead id — the exact fail-open the back-channel
+// exists to close.
 func TestDoHookCurrentExitsOneWhenNothingIsStamped(t *testing.T) {
 	ctx := hookCurrentTestContext(t, hookCurrentSessionBead(""))
 
