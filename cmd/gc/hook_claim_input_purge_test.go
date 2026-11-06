@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/graphv2"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // purgeFixtureCityConfig is the city the purge fixtures' frame is cut over:
@@ -86,10 +89,17 @@ func seedSyntheticInputWorkflow(t *testing.T, store beads.Store) (target, conv, 
 	return target, conv, root, open
 }
 
+// proveOver is the purge probe the claim path installs, over frame.
+func proveOver(frame workflowInputPurgeFrame) hookInputPurgedFunc {
+	return func(verdict workflowInputVerdict) ([]string, error) {
+		return proveWorkflowInputPurged(frame, verdict)
+	}
+}
+
 // purgeClaimOps are the claim ops of a single-store city over store: the real
-// verdict, proof and retirement, and stub claim-time writes that record which
-// candidate was claimed.
-func purgeClaimOps(t *testing.T, store beads.Store, frame workflowInputPurgeFrame, candidates []beads.Bead, claimed *string) hookClaimOps {
+// verdict and retirement, the purge probe inputPurged, and stub claim-time
+// writes that record which candidate was claimed.
+func purgeClaimOps(t *testing.T, store beads.Store, inputPurged hookInputPurgedFunc, candidates []beads.Bead, claimed *string) hookClaimOps {
 	t.Helper()
 	output, err := json.Marshal(candidates)
 	if err != nil {
@@ -104,9 +114,7 @@ func purgeClaimOps(t *testing.T, store beads.Store, frame workflowInputPurgeFram
 		InputVerdict: func(_ context.Context, _ string, _ []string, candidate beads.Bead, identityCandidates []string) (workflowInputVerdict, error) {
 			return workflowInputDoneAcross(store, store, candidate, identityCandidates)
 		},
-		InputPurged: func(verdict workflowInputVerdict) ([]string, error) {
-			return proveWorkflowInputPurged(frame, verdict)
-		},
+		InputPurged: inputPurged,
 		RetirePurgedWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
 			return retirePurgedWorkflow(store, rootID)
 		},
@@ -160,6 +168,19 @@ func assertRetiredAsInputPurged(t *testing.T, store beads.Store, ids ...string) 
 	}
 }
 
+func assertNotRetired(t *testing.T, store beads.Store, wantStatus map[string]string) {
+	t.Helper()
+	for id, want := range wantStatus {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != want || got.Metadata[beadmeta.FailureReasonMetadataKey] != "" {
+			t.Fatalf("%s = %s %v; want %s and untouched", id, got.Status, got.Metadata, want)
+		}
+	}
+}
+
 // TestDoHookClaimRetiresWorkflowWhoseInputConvoyWasPurged is #8729: a purged
 // input convoy reads as an empty membership, which the done-check fails open
 // on, so every seat was re-served the workflow's steps forever. Once the
@@ -184,7 +205,7 @@ func TestDoHookClaimRetiresWorkflowWhoseInputConvoyWasPurged(t *testing.T) {
 	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
 
 	claimed := ""
-	ops := purgeClaimOps(t, store, frame, []beads.Bead{open, other}, &claimed)
+	ops := purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open, other}, &claimed)
 	stderr := runPurgeClaim(t, ops, 0)
 
 	if claimed != other.ID {
@@ -212,7 +233,7 @@ func TestDoHookClaimRetiresWorkflowWhoseSyntheticInputTargetWasPurged(t *testing
 	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
 
 	claimed := ""
-	stderr := runPurgeClaim(t, purgeClaimOps(t, store, frame, []beads.Bead{open}, &claimed), 1)
+	stderr := runPurgeClaim(t, purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open}, &claimed), 1)
 
 	if claimed != "" {
 		t.Fatalf("claimed %s, a step of a workflow whose input is purged (stderr=%q)", claimed, stderr)
@@ -238,7 +259,7 @@ func TestDoHookClaimRetiresWorkflowWhoseRecordedInputTargetWasPurgedWithItsEdge(
 	frame := purgeFrameOverStores(t, purgeFixtureCityConfig(), store, nil)
 
 	claimed := ""
-	stderr := runPurgeClaim(t, purgeClaimOps(t, store, frame, []beads.Bead{open}, &claimed), 1)
+	stderr := runPurgeClaim(t, purgeClaimOps(t, store, proveOver(frame), []beads.Bead{open}, &claimed), 1)
 
 	if claimed != "" {
 		t.Fatalf("claimed %s, a step of a workflow whose input is purged (stderr=%q)", claimed, stderr)
@@ -246,5 +267,185 @@ func TestDoHookClaimRetiresWorkflowWhoseRecordedInputTargetWasPurgedWithItsEdge(
 	assertRetiredAsInputPurged(t, store, root.ID, open.ID)
 	if !strings.Contains(stderr, target.ID) {
 		t.Fatalf("stderr = %q; want the recorded target named as evidence", stderr)
+	}
+}
+
+// TestDoHookClaimServesWorkflowWhoseInputPurgeIsNotProved: an input the
+// done-check cannot judge is retired only on proof. Evidence that is
+// incomplete (the frame leaves part of the city out), erroneous (a read
+// failed) or contradictory (the convoy or its target still exists somewhere)
+// writes nothing, says why on stderr, and serves the candidate exactly as
+// before the probe existed.
+func TestDoHookClaimServesWorkflowWhoseInputPurgeIsNotProved(t *testing.T) {
+	rigCity := func(rigPrefix string) *config.City {
+		cfg := purgeFixtureCityConfig()
+		cfg.Rigs = []config.Rig{{Name: "rig1", Prefix: rigPrefix}}
+		return cfg
+	}
+	missingConvoy := func(t *testing.T, store *beads.MemStore) (root, open beads.Bead) {
+		t.Helper()
+		conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, open, _, _ = seedInputWorkflow(t, store, conv.ID)
+		if err := store.Delete(conv.ID); err != nil {
+			t.Fatal(err)
+		}
+		return root, open
+	}
+	frameOver := func(t *testing.T, topo storeref.Topology, narrowed bool) hookInputPurgedFunc {
+		t.Helper()
+		frame, err := workflowInputPurgeFrameOver(newWaitDependencyPlanReader(topo, narrowed))
+		if err != nil {
+			return func(workflowInputVerdict) ([]string, error) { return nil, err }
+		}
+		return proveOver(frame)
+	}
+	for _, tc := range []struct {
+		name string
+		// seed builds the workflow in the work store and returns the probe
+		// the claim runs.
+		seed     func(t *testing.T, store *beads.MemStore) (root, open beads.Bead, probe hookInputPurgedFunc)
+		wantDiag string
+	}{
+		{
+			name: "a suspended rig is out of frame",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				root, open := missingConvoy(t, store)
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), store, nil, nil, nil), true)
+			},
+			wantDiag: "a suspended rig is out of frame",
+		},
+		{
+			name: "a rig store declares a prefix the city did not configure",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				root, open := missingConvoy(t, store)
+				rig := waitPrefixedStore{Store: beads.NewMemStore(), prefix: "xx"}
+				return root, open, frameOver(t, assembleResidencyTopology(rigCity("rg"), store, map[string]beads.Store{"rig1": rig}, nil, nil), false)
+			},
+			wantDiag: "does not cover the city",
+		},
+		{
+			name: "the residency topology is refused",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				root, open := missingConvoy(t, store)
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), store, nil, nil, errors.New("binding route refused")), false)
+			},
+			wantDiag: "binding route refused",
+		},
+		{
+			name: "the input convoy id is in no namespace the frame holds",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				root, open, _, _ := seedInputWorkflow(t, store, "zz-404")
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), store, nil, nil, nil), false)
+			},
+			wantDiag: "zz-404 is in no namespace",
+		},
+		{
+			name: "reading the input convoy fails",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				root, open := missingConvoy(t, store)
+				failing := waitDependencyGetErrorStore{Store: store, prefix: "gc", err: errors.New("dolt server unavailable")}
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), failing, nil, nil, nil), false)
+			},
+			wantDiag: "dolt server unavailable",
+		},
+		{
+			name: "the input convoy still exists and is not synthetic",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				conv, err := store.Create(beads.Bead{Title: "operator convoy", Type: "convoy"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				root, open, _, _ := seedInputWorkflow(t, store, conv.ID)
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), store, nil, nil, nil), false)
+			},
+			wantDiag: "is not synthetic",
+		},
+		{
+			name: "a synthetic input convoy tracks and records nothing",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy", Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				root, open, _, _ := seedInputWorkflow(t, store, conv.ID)
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), store, nil, nil, nil), false)
+			},
+			wantDiag: "neither tracks nor records a target",
+		},
+		{
+			name: "the recorded target still exists after its edge went",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				target, conv, root, open := seedSyntheticInputWorkflow(t, store)
+				if err := store.DepRemove(conv.ID, target.ID); err != nil {
+					t.Fatal(err)
+				}
+				return root, open, frameOver(t, assembleResidencyTopology(purgeFixtureCityConfig(), store, nil, nil, nil), false)
+			},
+			wantDiag: "still exists",
+		},
+		{
+			name: "the tracked target lives in a rig the work store cannot see",
+			seed: func(t *testing.T, store *beads.MemStore) (beads.Bead, beads.Bead, hookInputPurgedFunc) {
+				rig := waitPrefixedStore{Store: &beads.MemStore{IDPrefix: "rg"}, prefix: "rg"}
+				target, err := rig.Create(beads.Bead{Title: "rig work", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				conv, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy", Metadata: map[string]string{
+					beadmeta.SyntheticMetadataKey:     "true",
+					beadmeta.InputTargetIDMetadataKey: target.ID,
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.DepAdd(conv.ID, target.ID, "tracks"); err != nil {
+					t.Fatal(err)
+				}
+				root, open, _, _ := seedInputWorkflow(t, store, conv.ID)
+				return root, open, frameOver(t, assembleResidencyTopology(rigCity("rg"), store, map[string]beads.Store{"rig1": rig}, nil, nil), false)
+			},
+			wantDiag: "still exists",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			root, open, probe := tc.seed(t, store)
+
+			claimed := ""
+			stderr := runPurgeClaim(t, purgeClaimOps(t, store, probe, []beads.Bead{open}, &claimed), 0)
+
+			if claimed != open.ID {
+				t.Fatalf("claimed = %q, want %s served (stderr=%q)", claimed, open.ID, stderr)
+			}
+			assertNotRetired(t, store, map[string]string{root.ID: "open", open.ID: "open"})
+			if !strings.Contains(stderr, "purge is not proved") || !strings.Contains(stderr, tc.wantDiag) {
+				t.Fatalf("stderr = %q; want the unproved purge diagnosed with %q", stderr, tc.wantDiag)
+			}
+		})
+	}
+}
+
+// TestHookCityInputPurgeFrameRefusesACityWithARigOutOfFrame: the claim's
+// frame is the whole city or nothing. A suspended rig and an unbound rig have
+// no store in the frame, so their namespaces cannot prove an absence, and the
+// frame is refused with both named rather than narrowed to the rest.
+func TestHookCityInputPurgeFrameRefusesACityWithARigOutOfFrame(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	old := hookCityStoreOpener
+	hookCityStoreOpener = func(string, *config.City) (beads.Store, error) { return work, nil }
+	t.Cleanup(func() { hookCityStoreOpener = old })
+
+	cfg := purgeFixtureCityConfig()
+	cfg.Rigs = []config.Rig{
+		{Name: "parked", Path: filepath.Join(cityPath, "parked"), Prefix: "pk", SuspendedOnStart: true},
+		{Name: "loose", Prefix: "lo"},
+	}
+	_, err := newHookCity(cityPath, cfg).inputPurgeFrame()
+	if !errors.Is(err, errWorkflowInputPurgeUnproven) || !strings.Contains(err.Error(), "parked, loose") {
+		t.Fatalf("inputPurgeFrame() err = %v; want the frame refused naming parked and loose", err)
 	}
 }
