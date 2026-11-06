@@ -14,7 +14,7 @@ runtime-selection setting that picks tmux, k8s, ssh, or exec.
 Install the `herdr` binary and make sure it is on `PATH`:
 
 ```bash
-herdr --version   # 0.7.1 is the recorded live validation; read the version note below
+herdr --version   # 0.9.5 is the recorded live validation; read the version note below
 ```
 
 The backend is registered as a builtin runtime name (`herdr`) — no pack or
@@ -42,8 +42,14 @@ the version, not the registry: a herdr whose version cannot be read or parsed
 runs the journey, and on 0.8 its registry assertions then fail. The other
 real-herdr journeys (provider lifecycle, pane binding, activity, and the runtime
 conformance suite) do run on 0.8; the kind-launch journey needs an installed
-`claude` binary as well and skips without one. 0.7.1 remains the version the
-recorded end-to-end validation ran against.
+`claude` binary as well and skips without one.
+
+The recorded live validation is herdr 0.9.5 against `main` at `0bd038188e`
+(2026-11-06): `make test-herdr-live` passes apart from the #5808 waiver. gc
+v1.5.1 fails the kind-launch journey on 0.9.5: herdr reports a freshly launched
+Claude as blocked on a startup dialog, and v1.5.1 returns `agent_not_ready`
+instead of answering it. Run 0.9.x with a gc that includes
+[#8478](https://github.com/gastownhall/gascity/pull/8478).
 
 That is the reason to pin. The tests that drive a real herdr binary are opt-in
 (`make test-herdr-live`); the default suite runs against a fake, so a change on
