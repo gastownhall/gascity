@@ -34,6 +34,29 @@ func TestSecretEnvValuesFollowsTheAllowList(t *testing.T) {
 	}
 }
 
+// TestSecretEnvValuesKeepsTheCityNameLegible pins GC_CITY_NAME as an identity.
+// Every session env carries it, and by default it is the basename of the city
+// root, so scrubbing it would cut the city out of every path a failing
+// pre_start or a crashed pane prints, and the <redacted> marker would tell the
+// operator a credential had been there.
+func TestSecretEnvValuesKeepsTheCityNameLegible(t *testing.T) {
+	env := map[string]string{
+		"GC_CITY_PATH":         "/srv/maintainer-city",
+		"GC_CITY_NAME":         "maintainer-city",
+		"ANTHROPIC_AUTH_TOKEN": sentinel,
+	}
+	const failure = "pre_start: cp: cannot stat '/srv/maintainer-city/.gc/scripts/x.sh'"
+	got := RedactSecrets(failure+"\nauth="+sentinel, SecretEnvValues(env))
+	if !strings.Contains(got, failure) {
+		t.Errorf("the city name was redacted out of the path: %s", got)
+	}
+	// The control: the credential in the same env is still scrubbed, so the
+	// assertion above is about GC_CITY_NAME and not about redaction being off.
+	if strings.Contains(got, sentinel) {
+		t.Errorf("the credential survived redaction: %s", got)
+	}
+}
+
 // TestProcessSecretEnvValuesSkipsPOSIXNames is the reason [envRedactionInert]
 // exists. This predicate runs over the controller's own environment, where every
 // one of these is set, and every one of their values is a substring of almost
