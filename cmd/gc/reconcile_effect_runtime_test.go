@@ -422,6 +422,7 @@ func TestReadRuntimeJudgesTheAgentByItsLaunchNames(t *testing.T) {
 		second    []string // the second read's process names
 	}{
 		{"the launch agent runs, the template's does not", template, launchedAs([]string{"agent"}, "agent"), false, nil, rtAlive, true, []string{"agent"}},
+		{"the launch agent exited, the template's runs", template, launchedAs([]string{"agent"}, "new-agent"), false, nil, rtZombie, false, []string{"agent"}},
 		{"launch and template names agree", []string{"agent"}, launchedAs([]string{"agent"}, "agent"), false, nil, rtAlive, true, []string{"agent"}},
 		{"dies between the reads, alive on a fall-through hop", template, launchedAs([]string{"agent"}, "agent"), true, func(sp *simProvider, n int) {
 			if n == 2 {
