@@ -2,7 +2,6 @@ package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -257,20 +256,29 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 // commit or merge with `git maintenance run --auto --detach`: a background
 // process that takes objects/maintenance.lock after the command exits, so a
 // test's t.TempDir cleanup can race it ("unlinkat .../.git: directory not
-// empty", TestRBEWorkerFetchCanary on the macOS runner's git 2.54).
+// empty", TestRBEWorkerFetchCanary on the macOS runner's git 2.54). The seed is
+// a literal heredoc, read here rather than run. Its name carries a version,
+// because a host keeps an older seed (created once, never rewritten) until the
+// name changes.
 func TestSeededGitConfigDisablesBackgroundMaintenance(t *testing.T) {
-	repoRoot := repoRoot(t)
-	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "test-gitconfig-path"))
-	cmd.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
-	out, err := cmd.Output()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "test-gitconfig-path"))
 	if err != nil {
-		t.Fatalf("test-gitconfig-path: %v", err)
+		t.Fatalf("read test-gitconfig-path: %v", err)
 	}
-	path := strings.TrimSpace(string(out))
-	for key, want := range map[string]string{"maintenance.auto": "false", "gc.auto": "0"} {
-		got, err := exec.Command("git", "config", "--file", path, "--get", key).Output()
-		if err != nil || strings.TrimSpace(string(got)) != want {
-			t.Errorf("seeded gitconfig %s = %q (%v), want %q", key, strings.TrimSpace(string(got)), err, want)
+	script := string(data)
+	_, seed, ok := strings.Cut(script, "cat > \"$tmp\" <<'EOF'\n")
+	if ok {
+		seed, _, ok = strings.Cut(seed, "\nEOF\n")
+	}
+	if !ok {
+		t.Fatal("test-gitconfig-path has no seed heredoc")
+	}
+	for _, want := range []string{"[maintenance]\n\tauto = false", "[gc]\n\tauto = 0"} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("seeded gitconfig lacks %q:\n%s", want, seed)
 		}
+	}
+	if !strings.Contains(script, "gc-test-gitconfig-v2-") {
+		t.Error("test-gitconfig-path's seed name no longer carries the version v2: a host with the older seed would keep it")
 	}
 }
