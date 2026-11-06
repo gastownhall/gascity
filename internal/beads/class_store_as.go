@@ -9,9 +9,10 @@ import (
 // design §3.3, phase T1): one way to reach an optional capability through a
 // handle, one way to ask whether two handles are one physical store, and the
 // seam a class guard (T8) uses to vet every capability that is not
-// class-neutral. It changes no existing lookup: the XFor helpers answer
-// through a handle exactly as they did (TestXForThroughAHandleToday pins
-// that), and As is new.
+// class-neutral. The XFor helpers answer through a handle as they did
+// (TestXForThroughAHandleToday pins that), except the two class-neutral reads
+// As itself calls, DepListBatchFor and ReadyBlockedByAbsentFor, which walk
+// the class layers since T6a.
 //
 // Outside internal/beads the storeclass lint (tools/nogo/analyzers/storeclass)
 // reports a type assertion on a store and an unwrap of a handle; As and the
@@ -179,6 +180,7 @@ func passesClassGate[T any]() bool {
 		*GraphOnlyReadyStore, *ContextReadyReader, *OrderedReadyReader, *CachePreferredReadyReader,
 		*ChildrenBatchLister, *ExactBatchGetter, *CachedReadExact, *ReadOnlyReporter,
 		*RowWitness, *ParentProjectionWaiter, *AbsentBlockedReader,
+		*CacheStatsReporter, *CacheLivenessReporter, *CachedLister,
 		*ConditionalAssignmentReleaser, *ConditionalAssigneeTransferer:
 		return true
 	}

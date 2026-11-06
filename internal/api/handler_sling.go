@@ -641,9 +641,11 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	// The core names the store that holds the bead. Honor it only when it is
 	// the relocated graph binding (a --formula wisp root minted there, #6054);
 	// on a city that relocates nothing the request keeps routing through the
-	// sling's own store, unchanged.
+	// sling's own store, unchanged. Identity is SameStore's: a class handle
+	// over the binding is the binding, where == between a handle and the raw
+	// store would be false.
 	store := r.store
-	if req.Store != nil && req.Store == relocatedGraphStore(r.server.state) {
+	if req.Store != nil && beads.SameStore(req.Store, relocatedGraphStore(r.server.state)) {
 		store = req.Store
 	}
 	if store == nil {

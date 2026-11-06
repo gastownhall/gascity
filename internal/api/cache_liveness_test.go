@@ -78,7 +78,7 @@ func TestCacheLiveOr503_NotLiveReturns503(t *testing.T) {
 	}
 }
 
-// stubLivenessReporter is a fully controllable livenessReporter for the
+// stubLivenessReporter is a fully controllable beads.CacheLivenessReporter for the
 // cache-freshness conformance lane. It embeds a beads.Store so it satisfies
 // the Store type cacheAgeSeconds/cacheLiveOr503 accept; only the two
 // liveness methods those helpers actually call are implemented.
