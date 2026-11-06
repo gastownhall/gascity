@@ -388,7 +388,7 @@ func TestBdByIDUpdateParentStaysInTheBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", child.ID, "--parent", work.ID}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"update", child.ID, "--parent", work.ID}, &stdout, &stderr)
 	if !handled || code == 0 || !strings.Contains(stderr.String(), "across stores is never written") {
 		t.Fatalf("a binding->work reparent = (%d, %t): %s", code, handled, stderr.String())
 	}
@@ -396,7 +396,7 @@ func TestBdByIDUpdateParentStaysInTheBinding(t *testing.T) {
 		t.Errorf("the refused reparent wrote parent %q", after.ParentID)
 	}
 	stderr.Reset()
-	code, handled = maybeRouteBdByID(cityPath, "", []string{"update", child.ID, "--parent", parent.ID}, &stdout, &stderr)
+	code, handled = maybeRouteBdByID(cityPath, cityPath, "", []string{"update", child.ID, "--parent", parent.ID}, &stdout, &stderr)
 	if !handled || code != 0 {
 		t.Fatalf("an in-binding reparent = (%d, %t): %s", code, handled, stderr.String())
 	}

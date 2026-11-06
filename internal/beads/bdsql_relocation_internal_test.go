@@ -51,19 +51,24 @@ func TestRelocatedClassRefusalNamesEverythingAnOperatorNeeds(t *testing.T) {
 // sent the operator to a command carrying the exact bug this refusal warns
 // about.
 //
-// The set of blind verbs shrank once. `gc bd show` and `gc bd dep list` acquired
-// in-process class routing (cmd/gc/cmd_bd_by_id.go) and are now the read this
-// message names first. `gc bd dep tree` did not acquire routing, but it is no
-// longer blind either: on a relocated id that surface refuses it. The pin moved
-// with the fact rather than being deleted, because a message that offered a
-// verb which cannot answer would be the original defect returning.
+// The set of blind verbs shrank twice. `gc bd show` and `gc bd dep list`
+// acquired in-process class routing (cmd/gc/cmd_bd_by_id.go) and are now the
+// read this message names first, and `gc bd dep tree` followed (ga-pxppl): it
+// walks a relocated molecule from the binding, so the message names it as the
+// way to read one rather than warning that it is refused. The pin moved with
+// the fact rather than being deleted, because a message that offered a verb
+// which cannot answer — or withheld the one that can — would be the original
+// defect returning.
 func TestRelocatedClassRefusalDoesNotRecommendABlindVerb(t *testing.T) {
 	msg := RelocatedClassRefusal("bd sql", []RelocatedClass{graphRelocated()}).Error()
 	if strings.Contains(msg, "Use the federated `gc bd") {
 		t.Errorf("refusal still recommends a raw bd passthrough as federated:\n%s", msg)
 	}
-	if !strings.Contains(msg, "`gc bd dep tree <id>` is not served in process") {
-		t.Errorf("refusal does not say dep tree is unavailable on a relocated id:\n%s", msg)
+	if !strings.Contains(msg, "`gc bd dep tree <root-id> --json` answers in process") {
+		t.Errorf("refusal does not name dep tree as the read that walks a relocated molecule:\n%s", msg)
+	}
+	if strings.Contains(msg, "dep tree <id>` is not served") {
+		t.Errorf("refusal still says dep tree is not served, which stopped being true with ga-pxppl:\n%s", msg)
 	}
 	if !strings.Contains(msg, "`gc bd show <id>`") {
 		t.Errorf("refusal does not name the by-ID read that IS class-routed:\n%s", msg)

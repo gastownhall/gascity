@@ -284,6 +284,42 @@ func TestGcBdSingleStoreForwardsFileOperandsUnchanged(t *testing.T) {
 	}
 }
 
+// TestGcBdSplitForwardsLinearStatusAndRefusesTheSync pins the one Linear path
+// a split city forwards. `linear status` reads the integration's config keys
+// and counts the work store's beads by external ref, and writes nothing, so it
+// is a read; every path that syncs writes the tracker's labels and types onto
+// work-store beads unjudged and stays refused.
+func TestGcBdSplitForwardsLinearStatusAndRefusesTheSync(t *testing.T) {
+	for _, inv := range bdflags.Inventories() {
+		t.Run(inv.Name, func(t *testing.T) {
+			if res := resolveBdSplitCommand(inv, []string{"linear", "status"}, "/scope"); res.refusal != "" || res.path != "linear status" {
+				t.Errorf("linear status resolved to %q, refusal %q; want it forwarded as a read", res.path, res.refusal)
+			}
+			for _, path := range []string{"linear sync", "linear pull", "linear push"} {
+				res := resolveBdSplitCommand(inv, strings.Fields(path), "/scope")
+				if !strings.Contains(res.refusal, "an external-tracker sync writes the tracker's labels and types onto work-store beads unjudged") {
+					t.Errorf("%s was not refused as a sync: path %q refusal %q", path, res.path, res.refusal)
+				}
+			}
+		})
+	}
+}
+
+// TestGcBdSplitRejectedShowCommentsNamesIncludeComments pins the hint on the
+// argv bd itself rejects: `show --comments` is not a bd flag, and the refusal
+// names the spelling bd does take. A flag gc knows no spelling for gets none.
+func TestGcBdSplitRejectedShowCommentsNamesIncludeComments(t *testing.T) {
+	inv := bdflags.InventoryByName("bd-1.3.2")
+	res := resolveBdSplitCommand(inv, []string{"show", "or-ixfw2s", "--comments"}, "/scope")
+	want := "gc bd: refused on this split city: bd would reject this argv (unknown flag: --comments), and gc forwards only vetted commands and flags here. bd's show has no --comments flag; ask for comments with `gc bd show or-ixfw2s --json --include-comments`. Nothing was written."
+	if res.refusal != want {
+		t.Errorf("refusal:\n got %q\nwant %q", res.refusal, want)
+	}
+	if res := resolveBdSplitCommand(inv, []string{"show", "or-ixfw2s", "--bogus"}, "/scope"); strings.Contains(res.refusal, "ask for") {
+		t.Errorf("an unknown flag with no known spelling got a hint: %q", res.refusal)
+	}
+}
+
 // TestGcBdSplitAllowlistIsDocumented keeps the "gc bd on split cities" docs
 // section in step with the allowlist.
 func TestGcBdSplitAllowlistIsDocumented(t *testing.T) {

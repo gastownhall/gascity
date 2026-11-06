@@ -148,7 +148,7 @@ func TestBdByIDRefusesAnExplicitRigScopeOnAClassOwnedBead(t *testing.T) {
 		{"release-if-current", bead.ID, "someone"},
 	} {
 		var stdout, stderr bytes.Buffer
-		code, handled := maybeRouteBdByID(cityPath, byIDRigName, args, &stdout, &stderr)
+		code, handled := maybeRouteBdByID(cityPath, cityPath, byIDRigName, args, &stdout, &stderr)
 		if !handled {
 			t.Fatalf("%v under --rig fell through to the bd subprocess, which would run it against the rig's work store", args)
 		}
@@ -170,7 +170,7 @@ func TestBdByIDRefusesAnExplicitRigScopeOnAClassOwnedBead(t *testing.T) {
 	// row ever fails alongside the rows above, the rule has become a blanket
 	// refusal rather than a scope-coherence rule.
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", bead.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
+	if code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"show", bead.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
 		t.Fatalf("show without --rig exited %d (handled=%v): %s", code, handled, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), bead.ID) {
@@ -194,7 +194,7 @@ func TestBdByIDReservedMissUnderExplicitRigFallsThrough(t *testing.T) {
 	missing := reservedClassID(t, "9999")
 
 	var stdout, stderr bytes.Buffer
-	code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", missing}, &stdout, &stderr)
+	code, handled := maybeRouteBdByID(cityPath, cityPath, byIDRigName, []string{"show", missing}, &stdout, &stderr)
 	if handled {
 		t.Fatalf("show %s under --rig was answered here (exit %d): %s%s — the binding does not hold it, so the rig's own store is what the flag pinned", missing, code, stdout.String(), stderr.String())
 	}
@@ -204,7 +204,7 @@ func TestBdByIDReservedMissUnderExplicitRigFallsThrough(t *testing.T) {
 	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "owned by the binding", Type: "task"})
 	stdout.Reset()
 	stderr.Reset()
-	if code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", bead.ID}, &stdout, &stderr); !handled || code != 1 {
+	if code, handled := maybeRouteBdByID(cityPath, cityPath, byIDRigName, []string{"show", bead.ID}, &stdout, &stderr); !handled || code != 1 {
 		t.Fatalf("show %s under --rig exited %d (handled=%v), want the refusal", bead.ID, code, handled)
 	}
 	if !strings.Contains(stderr.String(), "drop --rig") {
@@ -232,7 +232,7 @@ func TestBdByIDShadowPrefixRigCityIsRefused(t *testing.T) {
 			cityPath, rigPath, _ := riggedForeignProviderCity(t, rigPrefix)
 			resident := seedRigWorkBead(t, cityPath, rigPath, rigPrefix, "a rig work bead inside the reserved namespace")
 			var stdout, stderr bytes.Buffer
-			code, handled := maybeRouteBdByID(cityPath, "", []string{"show", resident.ID}, &stdout, &stderr)
+			code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"show", resident.ID}, &stdout, &stderr)
 			if !handled || code == 0 {
 				t.Fatalf("show %s = (%d, handled=%t): %s%s; want the door to refuse the city", resident.ID, code, handled, stdout.String(), stderr.String())
 			}
@@ -274,7 +274,7 @@ func TestBdByIDStrandedMintReachesThePassthrough(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", stranded.ID}, &stdout, &stderr); handled {
+	if code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"show", stranded.ID}, &stdout, &stderr); handled {
 		t.Fatalf("show %s was answered at this door (exit %d): %s%s — the only ledger holding it is the city work store, on the far side of the passthrough", stranded.ID, code, stdout.String(), stderr.String())
 	}
 
@@ -286,7 +286,7 @@ func TestBdByIDStrandedMintReachesThePassthrough(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code, handled := maybeRouteBdByID(cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
+	if code, handled := maybeRouteBdByID(cityPath, cityPath, "", []string{"show", held.ID, "--json"}, &stdout, &stderr); !handled || code != 0 {
 		t.Fatalf("show %s = (%d, %t): %s", held.ID, code, handled, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), held.ID) {
@@ -308,7 +308,7 @@ func TestBdByIDStrandedMintReachesThePassthrough(t *testing.T) {
 func TestBdByIDRigScopeLeavesWorkStoreIDsToThePassthrough(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	var stdout, stderr bytes.Buffer
-	if code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", "wf-abc123"}, &stdout, &stderr); handled {
+	if code, handled := maybeRouteBdByID(cityPath, cityPath, byIDRigName, []string{"show", "wf-abc123"}, &stdout, &stderr); handled {
 		t.Fatalf("a work-store id under --rig was handled in process (code %d): %s", code, stderr.String())
 	}
 }
@@ -329,7 +329,7 @@ func TestBdByIDRigScopeIsInertOnACityThatRelocatesNothing(t *testing.T) {
 
 	for _, id := range []string{"gc-abc123", reservedClassID(t, "anything")} {
 		var stdout, stderr bytes.Buffer
-		if code, handled := maybeRouteBdByID(cityPath, byIDRigName, []string{"show", id}, &stdout, &stderr); handled {
+		if code, handled := maybeRouteBdByID(cityPath, cityPath, byIDRigName, []string{"show", id}, &stdout, &stderr); handled {
 			t.Fatalf("show %s under --rig was handled on an unrelocated city (code %d): %s", id, code, stderr.String())
 		}
 	}
