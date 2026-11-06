@@ -18,7 +18,9 @@ package main
 // standard is stricter than "not done" in exactly the ways absence needs:
 //
 //   - Evidence is a non-empty set of ids — the convoy id itself when the
-//     convoy row is gone. Any id a leg still HOLDS blocks the proof.
+//     convoy row is gone, else the targets its membership names (dangling
+//     tracks edges) plus the ids its metadata records. Any id a leg still
+//     HOLDS blocks the proof.
 //   - The proof runs over a COMPLETE live frame (inputPurgeFrame): every leg
 //     the workflow's work could reside in. A frame that cannot be built
 //     certifies nothing, and an unreadable leg is a failed read, never
@@ -47,6 +49,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -142,13 +145,62 @@ func inputPurgeEvidenceForInput(work beads.StoreHandles, root beads.Bead, convoy
 		return nil, verdict, fmt.Errorf("reading input convoy %s: %w", convoyID, err)
 	}
 	// The row exists: a convoy the workflow root names as its input is the
-	// synthetic-input relation (#8729); its tracked targets are judged by the
-	// membership arm once that lands. A row that is not a convoy at all is a
+	// synthetic-input relation (#8729). A row that is not a convoy at all is a
 	// corrupt link, which proves nothing either way.
 	if convoyRow.Type != "convoy" {
 		return nil, hookInputPurgeVerdict{RootID: root.ID, Diagnosis: fmt.Sprintf("input %s is not a convoy", convoyID)}, nil
 	}
-	return nil, hookInputPurgeVerdict{RootID: root.ID, Diagnosis: "input convoy is present"}, nil
+	// Judge the convoy's membership, mirroring the done-check's read
+	// (convoy.Members over the one store): legacy children plus tracks edges,
+	// each target resolved live. The recorded target stamps join the evidence
+	// because a purge can cascade the tracking edge away with the bead — the
+	// stamps are then the only record of what the convoy tracked. A target any
+	// of these still resolves is work that exists (the done-check's
+	// territory, or mid-flight); only when every named id is gone is there
+	// evidence worth framing.
+	legacyChildren, err := work.Live.List(beads.ListQuery{
+		ParentID:      convoyID,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+	})
+	if err != nil {
+		return nil, verdict, fmt.Errorf("listing input convoy %s children: %w", convoyID, err)
+	}
+	if len(legacyChildren) > 0 {
+		return nil, hookInputPurgeVerdict{RootID: root.ID, Diagnosis: fmt.Sprintf("input convoy %s still has a legacy child", convoyID)}, nil
+	}
+	deps, err := work.Live.DepList(convoyID, "down")
+	if err != nil {
+		return nil, verdict, fmt.Errorf("listing input convoy %s tracks edges: %w", convoyID, err)
+	}
+	ids := make([]string, 0, 2)
+	seen := map[string]bool{}
+	addID := func(id string) {
+		if id = strings.TrimSpace(id); id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, dep := range deps {
+		if dep.Type != convoy.TrackingDepType {
+			continue
+		}
+		addID(dep.DependsOnID)
+	}
+	for _, id := range beadmeta.InputTargetIDs(convoyRow.Metadata) {
+		addID(id)
+	}
+	if len(ids) == 0 {
+		return nil, hookInputPurgeVerdict{RootID: root.ID, Diagnosis: "input convoy tracks nothing and records no target"}, nil
+	}
+	for _, id := range ids {
+		if _, err := work.Live.Get(id); err == nil {
+			return nil, hookInputPurgeVerdict{RootID: root.ID, Diagnosis: fmt.Sprintf("tracked item %s is still present", id)}, nil
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			return nil, verdict, fmt.Errorf("resolving tracked item %s: %w", id, err)
+		}
+	}
+	return &inputPurgeEvidence{ids: ids}, verdict, nil
 }
 
 // inputPurgeFrame is the complete live read set a purge proof runs over: the

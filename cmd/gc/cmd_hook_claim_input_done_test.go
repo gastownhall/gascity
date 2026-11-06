@@ -442,3 +442,74 @@ func TestDoHookClaimStillClaimsWhenInputNotDone(t *testing.T) {
 		t.Fatalf("claimed = %q, want root-1", claimedID)
 	}
 }
+
+// A workflow whose input convoy, or the single work bead it tracks, has been
+// purged must be retired at claim time instead of being served to a seat,
+// which can only burn its claim cycle discovering the spec is gone (#8729).
+func TestDoHookClaimRetiresWorkflowWhoseInputIsPurged(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		purge func(t *testing.T, store *beads.MemStore, root beads.Bead)
+	}{
+		{name: "convoy purged", purge: func(t *testing.T, store *beads.MemStore, root beads.Bead) {
+			if err := store.Delete(root.Metadata[beadmeta.InputConvoyIDMetadataKey]); err != nil {
+				t.Fatalf("purge convoy: %v", err)
+			}
+		}},
+		{name: "tracked member purged", purge: func(t *testing.T, store *beads.MemStore, root beads.Bead) {
+			members, err := convoy.Members(store, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+			if err != nil || len(members) != 1 {
+				t.Fatalf("members = %v, %v; want one", members, err)
+			}
+			if err := store.Delete(members[0].ID); err != nil {
+				t.Fatalf("purge member: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, root, step := seedDoneWorkflow(t, "open")
+			tc.purge(t, store, root)
+			output, err := json.Marshal([]beads.Bead{step})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			claimed := false
+			ops := hookClaimOps{
+				Runner: func(string, string) (string, error) { return string(output), nil },
+				Claim: func(_ context.Context, _ string, _ []string, _, _ string) (beads.Bead, bool, error) {
+					claimed = true
+					return beads.Bead{}, false, nil
+				},
+				InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
+					return workflowInputDone(store, candidate, ids)
+				},
+				SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
+					return skipDoneWorkflow(store, rootID)
+				},
+				WorkflowStore: func(_ context.Context, _ string, _ []string, _, _ string) beads.Store { return store },
+				DrainAck:      func(io.Writer) error { return nil },
+			}
+
+			var stdout, stderr bytes.Buffer
+			doHookClaim("query", "/rig", hookClaimOptions{
+				Assignee:     "worker-1",
+				RouteTargets: []string{"rig/worker"},
+				DrainAck:     true,
+				JSON:         true,
+			}, ops, &stdout, &stderr)
+
+			if claimed {
+				t.Errorf("claim attempted on step %s of a workflow whose input is purged (stdout=%q stderr=%q)", step.ID, stdout.String(), stderr.String())
+			}
+			for _, id := range []string{root.ID, step.ID} {
+				got, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("get %s: %v", id, err)
+				}
+				if got.Status != "closed" {
+					t.Errorf("%s status = %q, want closed: purged-input workflow left in the ready pool", id, got.Status)
+				}
+			}
+		})
+	}
+}

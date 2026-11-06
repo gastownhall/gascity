@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -367,4 +368,126 @@ func TestDoHookClaimRetiresPurgedWorkflowHeldAssignment(t *testing.T) {
 // key:value, tolerating the surrounding fields of the result envelope.
 func containsJSONField(out, key, value string) bool {
 	return bytes.Contains([]byte(out), []byte(`"`+key+`":"`+value+`"`))
+}
+
+// soleTrackedTarget purges seedDoneWorkflow's single tracked work bead and
+// returns its id: the convoy is left holding a dangling tracks edge.
+func soleTrackedTarget(t *testing.T, store *beads.MemStore, root beads.Bead) string {
+	t.Helper()
+	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	members, err := convoy.Members(store, convoyID, true)
+	if err != nil || len(members) != 1 {
+		t.Fatalf("members = %v, %v; want exactly one tracked item", members, err)
+	}
+	target := members[0].ID
+	if err := store.Delete(target); err != nil {
+		t.Fatalf("purge tracked target: %v", err)
+	}
+	return target
+}
+
+// A convoy whose every tracked target was purged is provable at claim time:
+// the dangling tracks edges are the evidence, and the workflow retires
+// instead of serving its steps (#8729).
+func TestWorkflowInputPurgedProvesAbsentTrackedTargets(t *testing.T) {
+	store, root, _ := seedDoneWorkflow(t, "open")
+	target := soleTrackedTarget(t, store, root)
+
+	verdict, err := workflowInputPurged(beads.HandlesFor(store), root)
+	if err != nil {
+		t.Fatalf("workflowInputPurged: %v", err)
+	}
+	if !verdict.Purged || verdict.RootID != root.ID {
+		t.Fatalf("verdict = %+v, want purged with root %s (the tracked target %s is gone)", verdict, root.ID, target)
+	}
+}
+
+// A purge can cascade the tracking edge away with the bead; the target stamps
+// on the convoy are then the only record of what it tracked. A memberless
+// convoy whose recorded targets are all absent still proves the purge.
+func TestWorkflowInputPurgedProvesRecordedMemberlessConvoy(t *testing.T) {
+	store, root, _ := seedDoneWorkflow(t, "open")
+	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	target := soleTrackedTarget(t, store, root)
+	if err := convoy.UntrackItem(store, convoyID, target); err != nil {
+		t.Fatalf("untrack purged target: %v", err)
+	}
+	if err := store.SetMetadata(convoyID, beadmeta.InputTargetIDMetadataKey, target); err != nil {
+		t.Fatalf("stamp recorded target: %v", err)
+	}
+
+	verdict, err := workflowInputPurged(beads.HandlesFor(store), root)
+	if err != nil {
+		t.Fatalf("workflowInputPurged: %v", err)
+	}
+	if !verdict.Purged {
+		t.Fatalf("purged = false (%s), want the recorded target to prove the purge", verdict.Diagnosis)
+	}
+}
+
+// One surviving member blocks the proof: a purge is all-or-nothing over the
+// tracked work, and a present member is the done-check's territory.
+func TestWorkflowInputPurgedUnprovedWhileAnyMemberPresent(t *testing.T) {
+	store, root, _ := seedDoneWorkflow(t, "open")
+	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	soleTrackedTarget(t, store, root) // purge the original member first
+	second, err := store.Create(beads.Bead{Title: "second work"})
+	if err != nil {
+		t.Fatalf("create second member: %v", err)
+	}
+	if err := convoy.TrackItem(store, convoyID, second.ID); err != nil {
+		t.Fatalf("track second member: %v", err)
+	}
+
+	verdict, err := workflowInputPurged(beads.HandlesFor(store), root)
+	if err != nil {
+		t.Fatalf("workflowInputPurged: %v", err)
+	}
+	if verdict.Purged {
+		t.Fatal("purged = true while a tracked member survives, want unproved")
+	}
+}
+
+// A convoy that tracks nothing and records no target has no evidence: no
+// proof, and the candidate serves on exactly as before.
+func TestWorkflowInputPurgedUnprovedWithoutTrackedWork(t *testing.T) {
+	store, root, _ := seedDoneWorkflow(t, "open")
+	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	target := soleTrackedTarget(t, store, root)
+	if err := convoy.UntrackItem(store, convoyID, target); err != nil {
+		t.Fatalf("untrack: %v", err)
+	}
+
+	verdict, err := workflowInputPurged(beads.HandlesFor(store), root)
+	if err != nil {
+		t.Fatalf("workflowInputPurged: %v", err)
+	}
+	if verdict.Purged {
+		t.Fatal("purged = true for a convoy with no tracked work, want unproved")
+	}
+}
+
+// A root whose input names a row that is not a convoy is a corrupt link: it
+// proves nothing either way.
+func TestWorkflowInputPurgedUnprovedWhenInputIsNotAConvoy(t *testing.T) {
+	store := beads.NewMemStore()
+	plain, err := store.Create(beads.Bead{Title: "not a convoy", Type: "task"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	root, err := store.Create(beads.Bead{Title: "mol", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:          beadmeta.KindWorkflow,
+		beadmeta.InputConvoyIDMetadataKey: plain.ID,
+	}})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	verdict, err := workflowInputPurged(beads.HandlesFor(store), root)
+	if err != nil {
+		t.Fatalf("workflowInputPurged: %v", err)
+	}
+	if verdict.Purged {
+		t.Fatal("purged = true for a non-convoy input row, want unproved")
+	}
 }
