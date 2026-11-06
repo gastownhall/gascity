@@ -584,3 +584,43 @@ func TestDoHookCurrentVerifiesARelocatedClaimByItsBinding(t *testing.T) {
 		})
 	}
 }
+
+// TestDoHookCurrentVerifiesAControlClaimByItsAssignee is AC-6: a control
+// delivery carries no gc.session_id, so it is the session's claim when it is
+// assigned to one of the session's release-scope identities, whatever actor
+// the calling shell names. A foreign gc.session_id, or an assignee outside
+// that scope, rejects it, and naming that assignee as the actor does not help.
+func TestDoHookCurrentVerifiesAControlClaimByItsAssignee(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		work     beads.Bead
+		actor    string
+		wantCode int
+		wantInEr string
+	}{
+		{name: "assigned to the session id", work: hookCurrentWork("gcg-ctl", "in_progress", hookCurrentSessionID), actor: "someone-else", wantCode: 0},
+		{name: "assigned to the session name", work: hookCurrentWork("gcg-ctl", "in_progress", "worker-1"), actor: "someone-else", wantCode: 0},
+		{name: "foreign session metadata", work: hookCurrentWork("gcg-ctl", "in_progress", hookCurrentSessionID, beadmeta.SessionIDMetadataKey, "mc-other"), actor: hookCurrentSessionID, wantCode: 1, wantInEr: string(claimStaleOtherSession)},
+		{name: "assigned outside the session", work: hookCurrentWork("gcg-ctl", "in_progress", "someone-else"), actor: "someone-else", wantCode: 1, wantInEr: string(claimStaleOtherAssignee)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_ACTOR", tc.actor)
+			t.Setenv("GC_AGENT", tc.actor)
+			f := newHookCurrentFixture(t, "gcg-ctl", hookCurrentStartedCell("gcg-ctl"), tc.work)
+			code, stdout, stderr := f.run(true)
+			wantStdout := ""
+			if tc.wantCode == 0 {
+				wantStdout = "gcg-ctl\n"
+			}
+			if code != tc.wantCode || stdout != wantStdout {
+				t.Fatalf("--id-only = (%d, %q), want (%d, %q); stderr=%s", code, stdout, tc.wantCode, wantStdout, stderr)
+			}
+			if tc.wantCode == 0 && stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+			if !strings.Contains(stderr, tc.wantInEr) {
+				t.Errorf("stderr = %q, want it to name %q", stderr, tc.wantInEr)
+			}
+		})
+	}
+}
