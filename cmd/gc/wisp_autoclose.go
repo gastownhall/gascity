@@ -299,7 +299,7 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 		}
 		// The members are read with the convoy's own store owning its edges
 		// and the just-closed bead's store as the member class.
-		classes := convoycore.MemberClasses{Convoy: workStore, Work: []beads.Store{workStore}}
+		classes := convoycore.MemberClasses{Convoy: workStore, Work: []beads.Store{workStore}} // residency:allow — constructor input to convoycore.MemberClasses
 		if convoy.onGraph {
 			classes.Convoy = graphStore
 		}

@@ -89,7 +89,7 @@ func workflowInputPurgeFrameOver(reader waitDependencyPlanReader) (workflowInput
 				return beads.Bead{}, err
 			}
 			for _, leg := range plan.Legs {
-				live, liveErr := beads.LiveFor(leg.Leg.Store).Get(id)
+				live, liveErr := beads.LiveFor(leg.Leg.Store).Get(id) // residency:allow — a purge proof reads every leg the by-id plan names live, and any read error fails it, stricter than the executor's per-leg policy
 				switch {
 				case liveErr == nil:
 					return live, nil
@@ -105,7 +105,7 @@ func workflowInputPurgeFrameOver(reader waitDependencyPlanReader) (workflowInput
 		},
 		represents: func(id string) bool {
 			return slices.ContainsFunc(prefixes, func(prefix string) bool {
-				return storeref.IDInNamespace(id, prefix)
+				return storeref.IDInNamespace(id, prefix) // residency:allow — decides only whether the frame's namespaces cover id; reads nothing
 			})
 		},
 	}, nil
