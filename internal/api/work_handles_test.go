@@ -2,15 +2,18 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -368,23 +371,39 @@ func TestRigCreateRecordsIdempotencyInTheWorkStore(t *testing.T) {
 	}
 }
 
-// workCachedReads are the work-store reads that report the bead cache's age,
-// each served with the X-GC-Cache-Refresh of the store its gate reads: the
+// workReadIDs are the rows the cached reads name: a convoy, a bead and a
+// message, and on a split city a graph workflow in the binding.
+type workReadIDs struct{ convoy, bead, message, workflow string }
+
+// workCachedReads are the work-store reads that report the bead cache's age
+// (a repeated all=true bead list is served from its response cache), each
+// served with the X-GC-Cache-Refresh of the store its gate reads: the
 // city's work store, even where E1 serves the rows from a binding (mail,
-// order history, bead get), as the typed-stores T6 plan's OD-4 preserves.
-func workCachedReads(convoy, bead string) []string {
-	return []string{
-		"/convoys", "/convoy/" + convoy, "/convoy/" + convoy + "/check",
-		"/status", "/status?fresh=true", "/beads", "/bead/" + bead,
-		"/mail", "/mail/count", "/orders/history?scoped_name=nightly",
+// order history, bead get, a graph convoy), as the typed-stores T6 plan's
+// OD-4 preserves.
+func workCachedReads(ids workReadIDs) []string {
+	reads := []string{
+		"/convoys", "/convoy/" + ids.convoy, "/convoy/" + ids.convoy + "/check",
+		"/status", "/status?fresh=true", "/beads", "/beads?all=true", "/beads?all=true", "/bead/" + ids.bead,
+		"/mail", "/mail/" + ids.message, "/mail/count", "/orders/history?scoped_name=nightly",
 	}
+	if ids.workflow != "" {
+		reads = append(reads, "/convoy/"+ids.workflow)
+	}
+	return reads
 }
 
 // newWorkReadsState is a fake state of shape with a convoy and a bead in its
-// work store and an order configured, for the cached reads.
-func newWorkReadsState(t *testing.T, shape workShape) (*fakeState, string, string) {
+// work store, a message in its mail, an order configured and, on a split
+// shape, a graph workflow in the binding, for the cached reads. A single
+// store's graph workflow is read through the work store's relic leg (T7), so
+// that shape leaves it out.
+func newWorkReadsState(t *testing.T, shape workShape) (*fakeState, workReadIDs) {
 	t.Helper()
-	fs, work, _ := newWorkShapeState(t, shape)
+	fs, work, binding := newWorkShapeState(t, shape)
+	// The mail provider writes into the default rig store, whose ids would
+	// shadow the work store's: this city has no rigs.
+	fs.stores = map[string]beads.Store{}
 	fs.allOrders = []orders.Order{{Name: "nightly", Exec: "scripts/nightly.sh", Trigger: "cooldown", Interval: "1h"}}
 	convoy, err := work.Create(beads.Bead{Title: "probe", Type: "convoy"})
 	if err != nil {
@@ -394,7 +413,16 @@ func newWorkReadsState(t *testing.T, shape workShape) (*fakeState, string, strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fs, convoy.ID, bead.ID
+	msg, err := fs.cityMailProv.Send("human", "myrig/worker", "Hi", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := workReadIDs{convoy: convoy.ID, bead: bead.ID, message: msg.ID}
+	if binding != nil {
+		root, _, _ := seedGraphWorkflowWithAFinishedStep(t, binding, "wf-probe")
+		ids.workflow = root.ID
+	}
+	return fs, ids
 }
 
 // TestWorkReadsReportTheWorkStoreCacheAge pins cacheAgeSeconds on every work
@@ -404,13 +432,13 @@ func newWorkReadsState(t *testing.T, shape workShape) (*fakeState, string, strin
 func TestWorkReadsReportTheWorkStoreCacheAge(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape.name, func(t *testing.T) {
-			fs, convoy, bead := newWorkReadsState(t, shape)
+			fs, ids := newWorkReadsState(t, shape)
 			h := newTestCityHandler(t, fs)
 			want := ""
 			if shape.cached {
 				want = string(CacheRefreshScheduled)
 			}
-			for _, path := range workCachedReads(convoy, bead) {
+			for _, path := range workCachedReads(ids) {
 				if got := cacheHeadersOf(t, h, fs, path).Get("X-GC-Cache-Refresh"); got != want {
 					t.Errorf("GET %s X-GC-Cache-Refresh = %q, want %q from the work store", path, got, want)
 				}
@@ -444,8 +472,9 @@ func TestWorkReadsGateOnTheWorkStoreCache(t *testing.T) {
 			}
 			fs.cityBeadStore = work
 			h := newTestCityHandler(t, fs)
-			for _, path := range append(workCachedReads("gc-none", "gc-none"), "/rigs") {
-				if strings.HasPrefix(path, "/convoy/") || strings.HasPrefix(path, "/bead/") {
+			absent := workReadIDs{convoy: "gc-none", bead: "gc-none", message: "gc-none"}
+			for _, path := range append(workCachedReads(absent), "/rigs") {
+				if strings.HasPrefix(path, "/convoy/") || strings.HasPrefix(path, "/bead/") || strings.HasPrefix(path, "/mail/gc-") {
 					if !primingWork {
 						continue // a live work store answers these 404 for the absent id
 					}
@@ -470,4 +499,62 @@ func mustCreateInProgress(t *testing.T, store beads.Store, title, assignee strin
 		t.Fatalf("Update(%s): %v", title, err)
 	}
 	return b
+}
+
+// TestStatusCachedBodiesReportTheWorkStoreCacheAge pins cacheAgeSeconds on
+// every /status path that answers with a body built earlier to the work
+// store: the time bucket, the TTL floor, the stale-while-revalidate serve and
+// a fresh read whose build overran. The city is split with a cached work store
+// beside the paused binding, and the work cache is older than the saved body,
+// so each serve reports the cache's own refresh state: "scheduled" from the
+// work store, never the binding's "paused".
+func TestStatusCachedBodiesReportTheWorkStoreCacheAge(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		bucket, floor time.Duration
+		fresh         bool
+	}{
+		{name: "time bucket", bucket: time.Hour},
+		{name: "ttl floor", bucket: time.Nanosecond, floor: time.Hour},
+		{name: "stale while revalidating", bucket: time.Nanosecond},
+		{name: "fresh read past its build", bucket: time.Nanosecond, fresh: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinStatusBucket(t)
+			timeBucketResponseCacheTTL, statusResponseTTLFloor = tc.bucket, tc.floor
+			fs, work, _ := newWorkShapeState(t, workShape{split: true, cached: true})
+			t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: work.(*beads.CachingStore).Stats().LastFreshAt.Add(45 * time.Second)}))
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+			cacheHeadersOf(t, h, fs, "/status") // builds and saves the body
+			srv.waitForBackground()
+
+			hdr := http.Header(nil)
+			if tc.fresh {
+				shortenStatusFreshBuildWait(t, 10*time.Millisecond)
+				release := make(chan struct{})
+				closeRelease := sync.OnceFunc(func() { close(release) })
+				t.Cleanup(func() {
+					closeRelease()
+					srv.waitForBackground()
+				})
+				fs.sessionProvider = newStalledRuntime(fs.sp, release)
+				rec, served := serveInBackground(h, freshStatusRequest(fs))
+				awaitSignal(t, served, "the fresh read was held by its stalled build")
+				if rec.Code != http.StatusOK {
+					t.Fatalf("fresh read = %d: %s", rec.Code, rec.Body.String())
+				}
+				hdr = rec.Header()
+			} else {
+				hdr = cacheHeadersOf(t, h, fs, "/status")
+				srv.waitForBackground()
+			}
+			if got := hdr.Get("X-GC-Cache-Refresh"); got != string(CacheRefreshScheduled) {
+				t.Errorf("X-GC-Cache-Refresh = %q, want %q from the work store's cache", got, CacheRefreshScheduled)
+			}
+			if age := cacheAgeIn(t, "/status", hdr); math.Floor(age) != 45 {
+				t.Errorf("X-GC-Cache-Age-S = %v, want 45, the work cache's age", age)
+			}
+		})
+	}
 }
