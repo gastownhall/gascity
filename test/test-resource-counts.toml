@@ -1317,6 +1317,23 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/storage_snapshot_hosted_bd_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/storage_snapshot_hosted_bd_integration_test.go"
+resource = "subprocess"
+calls = 5
+tagged = true
+
+[[count]]
+path = "cmd/gc/storage_snapshot_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/supervisor_log_rotation_test.go"
 resource = "fixed_sleep"
 calls = 1

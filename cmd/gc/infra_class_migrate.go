@@ -928,12 +928,8 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		// that never converged and the revert stays withheld by the marker the
 		// evidence probe can still see. Its claim about the present does not
 		// hold, and only the operator command may act on that.
-		remedy := storageClearInstruction()
-		if backedUp, err := infraPathExists(target.RetainedBackupPath()); err == nil && backedUp {
-			remedy = storageRecopyFromBackupInstruction()
-		}
-		return say(fmt.Errorf("%s claims convergence but %s; the binding cannot serve until it is re-copied with:  %s",
-			target.MarkerPath(), infraStaleCause(target), remedy))
+		return say(fmt.Errorf("%s claims convergence but %s; the binding cannot serve until it is repaired with:  %s",
+			target.MarkerPath(), infraStaleCause(target), infraStaleBindingRemedy(target)))
 	}
 
 	// No marker. Either this city has infrastructure beads in the work store —
@@ -1316,6 +1312,11 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 		if _, _, hold := markerWorkStoreIdentityHold(cityPath, target, logPrefix, stderr); hold != nil {
 			return *hold
 		}
+		// A restore under way owns the binding: a re-copy would race it, or
+		// copy over the database it is installing.
+		if err := infraRestoreRecopyRefusal(target); err != nil {
+			return say(infraMigrationUncheckable, err)
+		}
 		if backedUp && from == infraMigrationFromWork {
 			// The work store's copies were cleared into the backup, so a re-copy
 			// from it would rebuild a binding holding only what was written to
@@ -1635,7 +1636,8 @@ const (
 // marker sits over a database holding only what the re-copy wrote so far. The
 // re-copy record (infraRecopyRecordName) says so, and a marker with a record
 // beside it is stale whatever the database holds, so a re-copy that paused,
-// failed or was killed is resumed, never served or cleared against.
+// failed or was killed is resumed, never served or cleared against. A
+// snapshot restore's record (infra.restoring) holds it stale the same way.
 //
 // An error is never a state. Neither a marker that could not be read nor a
 // database that could not be stat'ed says the city failed to converge, and the
@@ -1659,6 +1661,16 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 	if recopying {
 		return infraConvergenceStale, nil
 	}
+	// A restore holds the binding stale the same way, from before it copies
+	// until its new database is in place: a gc that boots meanwhile must not
+	// write to a database about to be moved aside (storage_snapshot_restore.go).
+	restoring, err := infraPathExists(target.RestoreRecordPath())
+	if err != nil {
+		return infraConvergenceAbsent, fmt.Errorf("reading the restore record: %w", err)
+	}
+	if restoring {
+		return infraConvergenceStale, nil
+	}
 	present, err := infraPathExists(target.Database)
 	if err != nil {
 		return infraConvergenceAbsent, fmt.Errorf("reading the binding database %s: %w", target.Database, err)
@@ -1672,6 +1684,9 @@ func readInfraConvergenceState(target infraBindingTarget) (infraConvergenceState
 // infraStaleCause says what makes a marked binding stale, for a message: a
 // re-copy whose record is still present, or a database that is gone.
 func infraStaleCause(target infraBindingTarget) string {
+	if cause, restoring := infraRestoreStaleCause(target); restoring {
+		return cause
+	}
 	recopying, err := infraPathExists(target.RecopyRecordPath())
 	switch {
 	case err != nil:
