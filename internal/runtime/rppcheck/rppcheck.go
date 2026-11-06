@@ -200,11 +200,14 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 // RUNTIME-RPP-008). The conformance-only tokens (conformance-faults,
 // city-scoped) promise no op of their own, so they map to "": they are
 // listed only so the handshake check does not report them as unknown, and
-// `gc runtime conformance` checks the behavior they claim.
+// `gc runtime conformance` checks the behavior they claim. idle-boundary is
+// a claim about the box's tmux, read over exec, not an op of its own, so it
+// maps to "" too (RPP-CONN-002 checks it).
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
 	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
+	runtime.ProtocolCapabilityIdleBoundary:     "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }

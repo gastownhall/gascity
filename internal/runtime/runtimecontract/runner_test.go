@@ -279,6 +279,50 @@ func TestObserveGroupSkipsWhatIsNotDeclared(t *testing.T) {
 	}
 }
 
+// RPP-CONN-002 gates on the declaration: a script that does not declare
+// idle-boundary SKIPs even when its box has no tmux session, and one that
+// declares it without the capabilities it takes effect with still has its
+// box checked, and is told the declaration has no effect.
+// Kills: a probe gated on behavior (a failing box read as undeclared), and a
+// declared idle-boundary passed without reading the box.
+func TestIdleBoundaryGatesOnTheDeclaration(t *testing.T) {
+	noSession := func(bodies map[string]string) {
+		bodies["exec"] = strings.Replace(bodies["exec"], `has-session) [ -d "$box" ] ;;`, `has-session) return 1 ;;`, 1)
+	}
+
+	bodies := reference.Bodies()
+	noSession(bodies)
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped"]}'`
+	report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusSkip {
+		t.Errorf("undeclared idle-boundary over a box with no tmux session: %s (%s), want SKIP", res.Status, res.Detail)
+	}
+
+	bodies = reference.Bodies()
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resultFor(t, report, ReqConnectionIdleBoundary)
+	if res.Status != StatusPass || !strings.Contains(res.Detail, "takes effect only with proc.exec") {
+		t.Errorf("golden (idle-boundary without proc.exec): %s (%s), want PASS naming the missing proc.exec", res.Status, res.Detail)
+	}
+
+	bodies = reference.Bodies()
+	noSession(bodies)
+	bodies["protocol"] = `echo '{"version":0,"capabilities":["idle-boundary"]}'`
+	report, err = Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := resultFor(t, report, ReqConnectionIdleBoundary); res.Status != StatusFail {
+		t.Errorf("idle-boundary alone over a box with no tmux session: %s (%s), want FAIL", res.Status, res.Detail)
+	}
+}
+
 // Kills (SHOULD 3) a v2-ready verdict read from the handshake alone, or
 // gaps named wrongly: only the golden, which declares both capabilities
 // and fails nothing, reads v2-ready.

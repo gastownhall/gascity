@@ -121,7 +121,7 @@ The controller already has optional runtime extension points:
 These signals are uneven across providers. The design must tolerate:
 
 - full support (`tmux`, `exec` packs that declare `report-activity`,
-  `report-attachment` and `proc.exec`)
+  `report-attachment`, `proc.exec` and `idle-boundary`)
 - activity-only support (`k8s`, other `exec` packs)
 - no meaningful idle-boundary support (`subprocess`)
 - routed mixed capability (`auto`, `hybrid`)
