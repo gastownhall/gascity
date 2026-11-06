@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -288,4 +289,137 @@ func TestHookClaimLiveOwnershipScopeAndReads(t *testing.T) {
 			}
 		})
 	}
+}
+
+// liveOwnershipSplit is a split city: a work store and the relocated graph
+// binding, with a workflow root and a foreign-held member step minted in the
+// binding.
+type liveOwnershipSplit struct {
+	work    *liveOwnershipStore
+	binding beads.Store
+	route   *hookClaimClassRoute
+	root    beads.Bead
+	claims  []string
+	readErr error
+}
+
+func newLiveOwnershipSplit(t *testing.T) *liveOwnershipSplit {
+	t.Helper()
+	f := &liveOwnershipSplit{
+		work:    &liveOwnershipStore{MemStore: beads.NewMemStoreFrom(0, nil, nil)},
+		binding: newSplitEnvClassLeaf(t),
+	}
+	var err error
+	f.root, err = f.binding.Create(beads.Bead{Title: "workflow root", Type: "task", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:     beadmeta.KindWorkflow,
+		beadmeta.RoutedToMetadataKey: liveOwnershipRoute,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := f.binding.Create(beads.Bead{Title: "running step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: f.root.ID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, holder := "in_progress", "gk__polecat-2"
+	if err := f.binding.Update(step.ID, beads.UpdateOpts{Status: &status, Assignee: &holder}); err != nil {
+		t.Fatal(err)
+	}
+	f.route = newClaimRouteFor(t, f.binding)
+	return f
+}
+
+// baseOps are the work-scope seams over the work store, the way the default
+// seams run them over the agent's bd store. The work-scope claim records the
+// ids it is asked for and proves absence the way bd does.
+func (f *liveOwnershipSplit) baseOps() hookClaimOps {
+	return hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+			f.claims = append(f.claims, id)
+			if _, err := f.work.Get(id); err != nil {
+				return beads.Bead{}, false, err
+			}
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee}, true, nil
+		},
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+			if f.readErr != nil {
+				return beads.Bead{}, f.readErr
+			}
+			return f.work.Get(id)
+		},
+		WorkflowStore:   func(context.Context, string, []string, string, string) beads.Store { return f.work },
+		EmitClaimFailed: func(string, hookClaimOptions, error) {},
+	}
+}
+
+// TestClassRoutedWorkflowMembersFollowRootResidence pins the hold on a split
+// city. A graph.v2 root and its steps live in the relocated binding; before a
+// claim nothing is memoized resident, so the stop gate's memo-only workflow
+// store would list them from the work store and find none. The member
+// listing follows the root's residence instead, by the same read the
+// claim-time seams use: the work leg first, the binding on a proven absence.
+func TestClassRoutedWorkflowMembersFollowRootResidence(t *testing.T) {
+	t.Run("graph-resident root is withheld without a claim CAS", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		var stdout, stderr bytes.Buffer
+		res := claimFirstEligibleHookCandidate([]beads.Bead{f.root}, liveOwnershipOptions(), ops, "/work", &stdout, &stderr)
+		if res.terminal || res.claimsErrored {
+			t.Fatalf("eligible tier = %+v, want a non-terminal, error-free withhold\nstdout: %s\nstderr: %s", res, stdout.String(), stderr.String())
+		}
+		if len(f.claims) != 0 {
+			t.Fatalf("claim CAS attempted for %v; the root's steps are held in the binding", f.claims)
+		}
+		root, err := f.binding.Get(f.root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Status != "open" || root.Assignee != "" {
+			t.Fatalf("binding root status=%q assignee=%q, want it left open and unassigned", root.Status, root.Assignee)
+		}
+		if len(f.work.lists) != 0 {
+			t.Fatalf("members listed from the work store %v; the root resides in the binding", f.work.lists)
+		}
+	})
+
+	t.Run("graph-resident members are listed from the binding", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		members, err := ops.listWorkflowMembers(context.Background(), "/work", nil, f.root.ID)
+		if err != nil || len(members) != 1 || members[0].Assignee != "gk__polecat-2" {
+			t.Fatalf("listWorkflowMembers(%s) = %+v, %v; want the binding's held step", f.root.ID, members, err)
+		}
+	})
+
+	t.Run("work-resident root keeps the work listing", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		f.work.HonorExplicitIDs = true
+		for _, b := range []beads.Bead{liveOwnershipRootBead(), liveOwnershipMember("gk-step", "in_progress", "gk__polecat-2", nil)} {
+			if _, err := f.work.Create(b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		if _, err := ops.listWorkflowMembers(context.Background(), "/work", nil, liveOwnershipRoot); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.work.lists) != 1 || f.work.lists[0] != liveOwnershipRoot {
+			t.Fatalf("work listings = %v, want exactly one for %s", f.work.lists, liveOwnershipRoot)
+		}
+	})
+
+	t.Run("an operational work read error does not escalate", func(t *testing.T) {
+		f := newLiveOwnershipSplit(t)
+		f.readErr = errors.New("bd: connection refused")
+		ops := classRoutedHookClaimOps(f.baseOps(), f.route)
+		members, err := ops.listWorkflowMembers(context.Background(), "/work", nil, liveOwnershipRoot)
+		if err != nil || len(members) != 0 {
+			t.Fatalf("listWorkflowMembers = %+v, %v; want the work leg's (empty) answer", members, err)
+		}
+		if len(f.work.lists) != 1 {
+			t.Fatalf("work listings = %v; a failed residence read must leave the work leg in charge", f.work.lists)
+		}
+	})
 }

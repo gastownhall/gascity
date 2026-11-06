@@ -822,6 +822,23 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.WorkflowStore(ctx, dir, env, beadID, actor)
 	}
 
+	// The foreign workflow hold lists a root's member steps BEFORE the claim,
+	// so unlike the stop gate it cannot wait for the memo: a graph.v2 root and
+	// its steps live in the binding, and the work store's empty answer would
+	// hand the root out whole. Residence of the root is decided by the
+	// claim-time read rule, so a work-resident workflow keeps the unrouted
+	// listing and a failed read leaves the work leg in charge.
+	ops.ListWorkflowMembers = func(ctx context.Context, dir string, env []string, rootID string) ([]beads.Bead, error) {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return nil, err
+		}
+		if !resident {
+			return base.listWorkflowMembers(ctx, dir, env, rootID)
+		}
+		return listHookWorkflowMembers(route.graph.List, rootID)
+	}
+
 	// Done-workflow retirement (R6, the #6475 treadmill). A graph.v2 root and
 	// its steps live in the binding while the synthetic input convoy and the
 	// work it tracks stay in the work store, so the check reads ACROSS the
