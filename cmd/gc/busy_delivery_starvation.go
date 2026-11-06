@@ -119,7 +119,7 @@ func starvedBypassLook(target nudgeTarget, sp runtime.Provider, now time.Time) (
 
 // programHoldDeclared reports whether target's resolved provider declares
 // hold_mid_turn under the city switch on and its transport (the arm every
-// start derives, config.ProgramStatusArmFor).
+// heal converges to, config.ProgramStatusArmFor).
 func (t nudgeTarget) programHoldDeclared() bool {
 	if t.cfg == nil || t.resolved == nil || t.cfg.Session.ProgramStatusMode() != runtime.ProgramStatusOn {
 		return false

@@ -132,13 +132,15 @@ func configuredProgramStatusMode(cfg *config.City) runtime.ProgramStatusMode {
 }
 
 // sessionProgramStatus derives a session's program-status capture arm and its
-// provider-authored env layer: the resolved provider env followed, when armed,
-// by the binding's forced env. The city anchors cityAnchoredSessionEnv writes
+// provider-authored env layer. The arm is the provider's switch-independent
+// declaration, which the leaf arms only under its live switch; the env is the
+// resolved provider env followed, under switch mode shadow or on, by the
+// binding's forced env (config.ProgramStatusBinding.Launch). The city anchors cityAnchoredSessionEnv writes
 // after this layer cannot collide with it, because config rejects binding env
 // keys in gc's own namespaces (GC_*, BEADS_*, BD_*, GT_ROOT). The resolved
 // provider is never mutated.
 func sessionProgramStatus(mode runtime.ProgramStatusMode, resolved *config.ResolvedProvider, transport string) (runtime.ProgramStatusArm, map[string]string) {
-	arm, env := resolved.ProgramStatus.Arm(mode, transport == config.SessionTransportACP)
+	arm, env := resolved.ProgramStatus.Launch(mode, transport == config.SessionTransportACP)
 	if len(env) == 0 {
 		return arm, resolved.Env
 	}
