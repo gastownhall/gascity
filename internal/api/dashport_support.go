@@ -235,8 +235,13 @@ func (s *seededState) BeadStores() map[string]beads.Store {
 
 // WorkScopeStores returns named handles over the requested work scope.
 func (s *seededState) WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore) {
-	classes := s.classStores(rig)
-	return classes.Work(), classes.Graph()
+	classes := s.Stores()
+	if rig == "" {
+		return classes.Work(), classes.Graph()
+	}
+	work, _ := classes.Rig(rig)
+	graph, _ := classes.GraphFor(storeref.RigRef(rig))
+	return work, graph
 }
 
 func (s *seededState) MailProvider(_ string) mail.Provider { return s.mailProv }
@@ -268,14 +273,15 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 // classStores mints the seeded city's handles: a single-store topology, so
 // NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
 // wrap the city store, exactly as they do on a default (non-relocated)
-// controller city.
-func (s *seededState) classStores(rig ...string) storeref.Stores {
-	store := s.cityStore
-	if len(rig) > 0 && rig[0] != "" {
-		store = s.rigStores[rig[0]]
-	}
-	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: store}}, storeref.StoresOptions{})
+// controller city, and each seeded rig is a rig scope over its own store, by
+// name as the controller lists them.
+func (s *seededState) classStores() storeref.Stores {
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}, storeref.StoresOptions{})
 }
+
+// Stores is the seeded city's class handles (classStores). The seeded stores
+// never change, so every call mints the same handles.
+func (s *seededState) Stores() storeref.Stores { return s.classStores() }
 
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 	return s.classStores().Nudges()

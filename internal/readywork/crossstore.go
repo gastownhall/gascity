@@ -539,7 +539,7 @@ func legDeps(ctx context.Context, leg Leg, ids []string) (map[string][]beads.Dep
 			return nil, fmt.Errorf("%s store: listing dependencies: %w", leg.Label, err)
 		}
 	}
-	live := beads.HandlesFor(leg.Store).Live
+	live := beads.LiveFor(leg.Store)
 	lists := make([][]beads.Dep, len(ids))
 	errs := make([]error, len(ids))
 	fanout.Bounded(len(ids), LegFanOut, func(i int) {

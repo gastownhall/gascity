@@ -1,9 +1,11 @@
 package scripts_test
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1395,6 +1397,118 @@ func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
 			t.Errorf("%s job CI analytics summary: CHECK_RUN_ID %q, want %q", jobName, got, "${{ job.check_run_id }}")
 		}
 	}
+}
+
+// TestBazelProfileArtifactStepsAreSafeAndBounded: the flame-graph profile
+// artifact (bes-observability-design.md §7, TESTING.md "Flame graphs"), in
+// both the lane job and the coverage job, is reporting only and public: the
+// prepare step and its upload are continue-on-error, skipped on a canceled
+// run and time-bounded; the upload is a 7-day bazel-profile-* artifact
+// (never bazel-bep-*, which bep-summary downloads) of the gzipped copy
+// alone, never the raw profile, BEP or exec log. The prepare script itself uploads a
+// clean profile, refuses a secret-shaped one and tolerates a missing one.
+func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	for jobName, wantName := range map[string]string{
+		"lane":     "bazel-profile-${{ matrix.lane }}-${{ github.run_attempt }}",
+		"coverage": "bazel-profile-coverage-${{ github.run_attempt }}",
+	} {
+		job := wf.Jobs[jobName]
+		testIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.ID == "test" })
+		prepIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "Prepare Bazel profile artifact" })
+		upIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "Upload Bazel profile" })
+		if testIdx < 0 || prepIdx < testIdx || upIdx != prepIdx+1 {
+			t.Fatalf("%s job: want the test step, then \"Prepare Bazel profile artifact\" directly followed by \"Upload Bazel profile\" (test %d, prepare %d, upload %d)", jobName, testIdx, prepIdx, upIdx)
+		}
+		prep, up := job.Steps[prepIdx], job.Steps[upIdx]
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if prep.ID != "profile-artifact" || prep.If != "!cancelled() && steps.test.outcome != 'skipped'" ||
+			prep.ContinueOnError != "true" || prep.TimeoutMinutes <= 0 || prep.TimeoutMinutes > 2 {
+			t.Errorf("%s job %q: id %q if %q continue-on-error %q timeout-minutes %d; want id profile-artifact, !cancelled() after a test step that ran, continue-on-error, 1-2 minutes",
+				jobName, prep.Name, prep.ID, prep.If, prep.ContinueOnError, prep.TimeoutMinutes)
+		}
+		if ciAnalyticsRunTemplateRE.MatchString(prep.Run) {
+			t.Errorf("%s job %q: run: contains a ${{ }} expression; use env: instead", jobName, prep.Name)
+		}
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if up.If != "!cancelled() && steps.profile-artifact.outcome == 'success'" || up.ContinueOnError != "true" ||
+			up.TimeoutMinutes <= 0 || up.TimeoutMinutes > 2 || !strings.HasPrefix(up.Uses, "actions/upload-artifact@") {
+			t.Errorf("%s job %q: if %q continue-on-error %q timeout-minutes %d uses %q; want a continue-on-error, 1-2 minute upload-artifact after a successful prepare",
+				jobName, up.Name, up.If, up.ContinueOnError, up.TimeoutMinutes, up.Uses)
+		}
+		want := map[string]string{
+			"name":              wantName,
+			"path":              "${{ runner.temp }}/profile-upload/",
+			"retention-days":    "7",
+			"if-no-files-found": "ignore",
+			"compression-level": "0",
+			"overwrite":         "true",
+		}
+		if !reflect.DeepEqual(up.With, want) {
+			t.Errorf("%s job %q: with %v, want %v", jobName, up.Name, up.With, want)
+		}
+		if strings.HasPrefix(up.With["name"], "bazel-bep-") || ciAnalyticsUploadPathForbidden.MatchString(up.With["path"]) {
+			t.Errorf("%s job %q: name %q / path %q collides with the BEP artifacts or names a raw file", jobName, up.Name, up.With["name"], up.With["path"])
+		}
+
+		dir := t.TempDir()
+		env := map[string]string{"RUNNER_TEMP": dir, "LANE": jobName}
+		gz := filepath.Join(dir, "profile-upload", "bazel-profile-"+jobName+".json.gz")
+		if out, err := runWorkflowStepScript(t, dir, prep.Run, env); err != nil {
+			t.Fatalf("%s job %q without a profile: %v\n%s", jobName, prep.Name, err, out)
+		}
+		if _, err := os.Stat(gz); !os.IsNotExist(err) {
+			t.Errorf("%s job %q: wrote %s without a profile", jobName, prep.Name, gz)
+		}
+		profile := filepath.Join(dir, "bazel-profile.json")
+		clean := `{"otherData":{"bazel_version":"9.3.1"},"traceEvents":[` + "\n" + `{"name":"//cmd/gc:gc_test","cat":"action processing","ph":"X","ts":1,"dur":2}]}` + "\n"
+		if err := os.WriteFile(profile, []byte(clean), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runWorkflowStepScript(t, dir, prep.Run, env); err != nil {
+			t.Fatalf("%s job %q with a clean profile: %v\n%s", jobName, prep.Name, err, out)
+		}
+		if got, err := gunzipFile(gz); err != nil || got != clean {
+			t.Errorf("%s job %q: %s is not the gzipped profile (err %v)", jobName, prep.Name, gz, err)
+		}
+		for _, secret := range []string{
+			`"name":"fetching: https://user:pw@example.com/x"`,
+			`"args":{"x":"-----BEGIN PRIVATE KEY-----"}`,
+			`"args":{"x":"GITHUB_TOKEN=abc"}`,
+			`"name":"rbe-west.ops.gascity.com"`,
+			`"args":{"x":"https://example.com/x?token=abc"}`,
+			`"args":{"x":"ghs_0123456789abcdefghijABCDEFGHIJ"}`,
+		} {
+			if err := os.RemoveAll(filepath.Join(dir, "profile-upload")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(profile, []byte(clean+secret+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runWorkflowStepScript(t, dir, prep.Run, env)
+			if err != nil || !strings.Contains(out, "::warning title=bazel profile not uploaded::") {
+				t.Errorf("%s job %q with %s: err %v, want a warning and exit 0:\n%s", jobName, prep.Name, secret, err, out)
+			}
+			if _, err := os.Stat(gz); !os.IsNotExist(err) {
+				t.Errorf("%s job %q: uploaded a profile carrying %s", jobName, prep.Name, secret)
+			}
+		}
+	}
+}
+
+// gunzipFile returns the decompressed contents of a gzip file.
+func gunzipFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	b, err := io.ReadAll(zr)
+	return string(b), err
 }
 
 // TestBazelWorkerHostFetchAlwaysRuns: the worker-host job fetches the PR's

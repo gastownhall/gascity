@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -27,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -140,11 +142,16 @@ func (f *fakeState) SessionProvider() runtime.Provider {
 // each is the gate's work view of the physical store (split_strict_gate_test.go).
 func (f *fakeState) BeadStore(rig string) beads.Store { return splittest.GateWorkView(f.stores[rig]) }
 
+// BeadStores is shaped as controllerState.BeadStores is (typed-stores T6
+// plan, OD-5): a fresh map holding the city store under the city's name when
+// there is one, then every rig, so a rig named like the city replaces it.
+// Callers that need an order sort the names, so the city sits at its name's
+// sorted position, not first.
 func (f *fakeState) BeadStores() map[string]beads.Store {
-	if !splittest.GateEnabled() {
-		return f.stores
+	out := make(map[string]beads.Store, len(f.stores)+1)
+	if f.cityBeadStore != nil {
+		out[f.cityName] = splittest.GateWorkView(f.cityBeadStore)
 	}
-	out := make(map[string]beads.Store, len(f.stores))
 	for rig, store := range f.stores {
 		out[rig] = splittest.GateWorkView(store)
 	}
@@ -224,6 +231,98 @@ func (f *fakeState) classStore(relocated beads.Store) beads.Store {
 	}
 	return splittest.GateClassView(f.cityBeadStore)
 }
+
+// Stores mints the fake's class handles per call from its raw fields, through
+// the same router production uses (storeref.NewStores): the city store is the
+// work store, every rig in stores is a rig scope, and a class a test relocated
+// to a different store is a one-class binding. The split-strict gate's views
+// are the projection, so each handle wraps exactly the store its raw accessor
+// returns (TestFakeStateStoresWrapTheAccessorsStores).
+func (f *fakeState) Stores() storeref.Stores {
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), gateProjection{})
+}
+
+// relocatedClasses is every class a test relocated off the city store.
+func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
+	out := map[coordclass.Class]beads.Store{}
+	for class, relocated := range map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:    f.graphBeadStore,
+		coordclass.ClassSessions: f.sessionsBeadStore,
+		coordclass.ClassOrders:   f.ordersBeadStore,
+		coordclass.ClassNudges:   f.nudgesBeadStore,
+	} {
+		if relocated != nil && relocated != f.cityBeadStore {
+			out[class] = relocated
+		}
+	}
+	return out
+}
+
+// mintFakeStores mints a fake city's handles: city is the work store, rigs
+// the rig scopes, and each class in relocated a one-class binding over its
+// store; a nil store there is a binding that failed to open, whose handle is
+// zero. proj is the split-strict gate's projection, or nil for stores that
+// already carry it.
+func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, proj storeref.Projection) storeref.Stores {
+	var bindings []storeref.ClassBinding
+	for class, store := range relocated {
+		classes := []coordclass.Class{class}
+		bindings = append(bindings, storeref.ClassBinding{Classes: classes, Leg: storeref.Leg{Ref: storeref.ClassRef(classes), Store: store}})
+	}
+	return storeref.NewStores(storeref.Topology{
+		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: city},
+		Rigs:     storeref.RigLegs(rigs),
+		Bindings: bindings,
+	}, storeref.StoresOptions{Projection: proj})
+}
+
+// accessorState is the raw and per-class store accessors a State stands
+// beside Stores until T6c drops the per-class ones.
+type accessorState interface {
+	Stores() storeref.Stores
+	CityBeadStore() beads.Store
+	BeadStore(rig string) beads.Store
+	BeadStores() map[string]beads.Store
+	GraphBeadStore() beads.GraphStore
+	SessionsBeadStore() beads.SessionStore
+	OrdersBeadStore() beads.OrdersStore
+	NudgesBeadStore() beads.NudgesStore
+	CityName() string
+}
+
+// mirrorAccessorStores mints handles that wrap exactly what st's accessors
+// return, for a fake that overrides some of them: the work store is
+// CityBeadStore, each class whose accessor answers another store is a binding
+// over that store (a zero handle's, nil, is a binding that failed to open),
+// and the rigs are BeadStore's. It applies no projection: the accessors
+// already did. A rig's graph placement follows the same rule as Stores': the
+// graph binding when graph is relocated, else the rig's own store.
+func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
+	work := st.CityBeadStore()
+	relocated := map[coordclass.Class]beads.Store{}
+	for class, store := range map[coordclass.Class]beads.Store{
+		coordclass.ClassGraph:    st.GraphBeadStore().Store,
+		coordclass.ClassSessions: st.SessionsBeadStore().Store,
+		coordclass.ClassOrders:   st.OrdersBeadStore().Store,
+		coordclass.ClassNudges:   st.NudgesBeadStore().Store,
+	} {
+		if store != work {
+			relocated[class] = store
+		}
+	}
+	rigStores := make(map[string]beads.Store, len(rigs))
+	for _, rig := range rigs {
+		rigStores[rig] = st.BeadStore(rig)
+	}
+	return mintFakeStores(work, rigStores, relocated, nil)
+}
+
+// gateProjection is the split-strict gate's views as the router's projection:
+// identity unless the gate is on.
+type gateProjection struct{}
+
+func (gateProjection) WorkView(s beads.Store) beads.Store  { return splittest.GateWorkView(s) }
+func (gateProjection) ClassView(s beads.Store) beads.Store { return splittest.GateClassView(s) }
 
 // ClassBindingHasLegacyResidents replays whatever census a test recorded in
 // bindingRelics. A store with no entry — the default for every test that never

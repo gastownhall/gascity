@@ -912,6 +912,18 @@ resource = "environment"
 calls = 3
 
 [[count]]
+path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/infra_copy_manifest_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2908,6 +2920,11 @@ resource = "subprocess"
 calls = 5
 
 [[count]]
+path = "scripts/check_routed_test_rows_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "scripts/check_split_topology_rows_test.go"
 resource = "subprocess"
 calls = 1
@@ -2962,6 +2979,11 @@ calls = 11
 [[count]]
 path = "scripts/push_ownership_guard_test.go"
 resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "scripts/rbe_fork_pool_test.go"
+resource = "http_test_server"
 calls = 1
 
 [[count]]

@@ -473,7 +473,7 @@ func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, 
 // the store implements no Counter or cannot count this query shape exactly
 // (ErrCountUnsupported).
 func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
-	counter, ok := store.(beads.Counter)
+	counter, ok := beads.As[beads.Counter](store)
 	if !ok {
 		return 0, false
 	}
@@ -1057,7 +1057,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	// CachingStore, read bd only after the wait.
 	defer s.wakeAfterBeadWrite()
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
-		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
+		if waiter, ok := beads.As[beads.ParentProjectionWaiter](store); ok {
 			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
 				return nil, err
 			}

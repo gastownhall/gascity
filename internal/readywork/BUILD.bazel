@@ -27,6 +27,7 @@ go_test(
         "crossstore_test.go",
         "enrich_test.go",
         "federate_test.go",
+        "handle_legs_test.go",
         "input_admission_test.go",
         "pushdown_test.go",
         "query_test.go",
