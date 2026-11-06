@@ -60,6 +60,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -79,7 +80,11 @@ const storagePreflightLogPrefix = "gc storage " + storagePreflightVerb
 // newStoragePreflightCmd is the third read-only sibling: it reports what the
 // cutover would do without doing any of it.
 func newStoragePreflightCmd(surface storageCommandSurface, stdout, stderr io.Writer) *cobra.Command {
-	var forced []string
+	var (
+		forced     []string
+		split      bool
+		timeBudget time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:          storagePreflightVerb,
 		Short:        "Report what the migration would refuse, without migrating (read-only)",
@@ -111,9 +116,24 @@ which exits non-zero whenever the city is not yet serving from its binding — t
 ordinary state of every city with a cutover still ahead of it.
 
 One condition is never checked here, because no process can check it:
---` + storageFleetStoppedFlag + ` attests that ` + storageFleetStoppedAttestation + `.`,
-		RunE: func(*cobra.Command, []string) error {
+--` + storageFleetStoppedFlag + ` attests that ` + storageFleetStoppedAttestation + `.
+
+--` + storagePreflightSplitFlag + ` rehearses the split itself on a city with no [storage]: it
+evaluates the city as if the default split block were written (work on the
+work store; graph, sessions, messaging, orders and nudges on one sqlite-beads
+binding at .gc/store), writing nothing. It adds the session reconciler the
+city would resolve to, the source lane the migration's window would open,
+the id floor, and ESTIMATES of the time the copy and the clear take, the disk
+they need, and how many times --` + storageTimeBudgetFlag + ` would pause the run. The
+estimates come from the row and edge counts read here and from rates measured
+on a loaded host, both printed with them. It starts no bead-store provider: on
+a city whose provider is down it reports that and checks nothing that reads a
+store.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			force, err := parseStorageForce(forced)
+			if err == nil && cmd.Flags().Changed(storageTimeBudgetFlag) && !split {
+				err = fmt.Errorf("--%s estimates the split's pauses, so it needs --%s", storageTimeBudgetFlag, storagePreflightSplitFlag)
+			}
 			if err != nil {
 				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, storagePreflightVerb, err) //nolint:errcheck // best-effort stderr
 				return errExit
@@ -124,10 +144,19 @@ One condition is never checked here, because no process can check it:
 				return errExit
 			}
 			request.Force = force
+			if split {
+				request.TimeBudget = timeBudget
+				code, _ := doStorageSplitPreflight(request, stdout, stderr)
+				return exitForCode(code)
+			}
 			return exitForCode(doStoragePreflight(request, stdout, stderr))
 		},
 	}
 	addStorageForceFlag(cmd, &forced)
+	cmd.Flags().BoolVar(&split, storagePreflightSplitFlag, false,
+		"rehearse the split of a city with no [storage], as if the default split block were written (writes nothing)")
+	cmd.Flags().DurationVar(&timeBudget, storageTimeBudgetFlag, storageDefaultTimeBudget,
+		"with --"+storagePreflightSplitFlag+": the migration's --"+storageTimeBudgetFlag+", to estimate how many times it would pause")
 	return cmd
 }
 
@@ -144,7 +173,37 @@ One condition is never checked here, because no process can check it:
 // parameter.
 func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "city: %s\n", request.CityPath) //nolint:errcheck // best-effort stdout
+	var found preflightFindings
+	if code := runStoragePreflightChecks(request, &found, stdout, stderr); code != 0 || found.converged {
+		return code
+	}
+	command := append([]string{storageMigrationCommand, "--" + storageFleetStoppedFlag}, request.Force.flags()...)
+	fmt.Fprintf(stdout, "\nReady. When the fleet is stopped, run: %s\n", strings.Join(command, " ")) //nolint:errcheck // best-effort stdout
+	return 0
+}
 
+// preflightFindings is what the checks read on the way, for a caller that
+// reports more than the checks do (preflight --split's estimates).
+type preflightFindings struct {
+	// read reports that the work store was read: rows, all and plan hold
+	// what the copy would carry.
+	read bool
+	// rows are the infrastructure rows the copy would carry; all is every
+	// row the work store holds.
+	rows []beads.Bead
+	all  map[string]beads.Bead
+	// plan is the copy's plan over rows.
+	plan infraCopyPlan
+	// rigs is the per-rig census.
+	rigs []rigCensusRow
+	// converged reports a city the migration would not copy.
+	converged bool
+}
+
+// runStoragePreflightChecks runs the checks and the window report, and
+// records in found what they read. It prints no closing instruction: the
+// caller knows which command the checks cleared.
+func runStoragePreflightChecks(request storageOperatorRequest, found *preflightFindings, stdout, stderr io.Writer) int {
 	// 1. The destination, resolved the way the migration resolves it. A layout
 	// this build cannot serve is refused here for the same reason it is refused
 	// there: a plan boot would not serve must not be migrated toward.
@@ -189,7 +248,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	// gates only a copy. A city that already converged copies nothing, so the
 	// migration does not census it (doStorageMigrate), and what the census
 	// finds there is named without blocking.
-	if code := preflightRigScopes(request, target, stdout); code != 0 {
+	if code := preflightRigScopes(request, target, found, stdout); code != 0 {
 		return code
 	}
 
@@ -213,6 +272,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	if state == infraConvergenceMarked {
 		preflightPass(stdout, "cutover", "already converged — the marker is present, so the migration would not copy")
 		fmt.Fprintf(stdout, "\nNothing to migrate: this city is already converged. Run `%s` to see what it holds.\n", storageStatusInstruction()) //nolint:errcheck // best-effort stdout
+		found.converged = true
 		return 0
 	}
 	if state == infraConvergenceStale {
@@ -251,6 +311,10 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 		// The rehearsal opens no destination, so the carry half of the answer
 		// has nowhere to be checked here; only the read half is its business.
 		plan, edgeErr = infraSourceEdgePayloadRefusal(source, rows, allIDs)
+		// Inside a window (preflight --split's lane window) a payload the
+		// lane cannot read is refused by the gate that put the store there,
+		// as the migration refuses it.
+		edgeErr = migrationWindowPayloadRefusal(request.CityPath, edgeErr)
 		// The same plan the migration runs, so a hold it would refuse is named
 		// before the window rather than inside it: the cross-boundary plan's
 		// edge holds (D9) and the status holds.
@@ -290,6 +354,7 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	if listErr != nil {
 		return preflightBlock(stdout, "work store", listErr)
 	}
+	found.read, found.rows, found.all, found.plan = true, rows, all, plan
 	preflightPass(stdout, "work store", fmt.Sprintf("would copy %d infrastructure bead(s)", len(rows)))
 	if edgeErr != nil {
 		return preflightBlock(stdout, "edge payloads", edgeErr)
@@ -359,9 +424,6 @@ func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer
 	}
 	window.report(stdout)
 	fmt.Fprintf(stdout, "attestation: --%s is not checked here or anywhere. It asserts that %s.\n", storageFleetStoppedFlag, storageFleetStoppedAttestation) //nolint:errcheck // best-effort stdout
-
-	command := append([]string{storageMigrationCommand, "--" + storageFleetStoppedFlag}, request.Force.flags()...)
-	fmt.Fprintf(stdout, "\nReady. When the fleet is stopped, run: %s\n", strings.Join(command, " ")) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -511,13 +573,19 @@ func preflightNote(stdout io.Writer, check, detail string) {
 // since these messages come from the migration and are written to be read on
 // their own rather than inside a column.
 func preflightBlock(stdout io.Writer, check string, cause error) int {
+	preflightBlockRow(stdout, check, cause)
+	fmt.Fprintf(stdout, "\n%s: the migration would refuse. Fix the blocking check above and run this again.\n", storagePreflightLogPrefix) //nolint:errcheck // best-effort stdout
+	return 1
+}
+
+// preflightBlockRow prints the row of a check that would refuse, a cause
+// carrying newlines indented under the detail column.
+func preflightBlockRow(stdout io.Writer, check string, cause error) {
 	lines := strings.Split(strings.TrimRight(cause.Error(), "\n"), "\n")
 	fmt.Fprintf(stdout, preflightRowFormat, preflightBlockTag, check, lines[0]) //nolint:errcheck // best-effort stdout
 	for _, line := range lines[1:] {
 		fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
 	}
-	fmt.Fprintf(stdout, "\n%s: the migration would refuse. Fix the blocking check above and run this again.\n", storagePreflightLogPrefix) //nolint:errcheck // best-effort stdout
-	return 1
 }
 
 // preflightRigScopes is the per-rig importability census (S4b). Rig history,
@@ -526,8 +594,9 @@ func preflightBlock(stdout io.Writer, check string, cause error) int {
 // reported with what its import would do, and only a refusal — a shape the
 // import cannot move without a cross-store edge, or a rig it cannot read —
 // blocks.
-func preflightRigScopes(request storageOperatorRequest, target infraBindingTarget, stdout io.Writer) int {
+func preflightRigScopes(request storageOperatorRequest, target infraBindingTarget, found *preflightFindings, stdout io.Writer) int {
 	rows := censusRigs(request.CityPath, request.Cfg, target, true)
+	found.rigs = rows
 	if len(rows) == 0 {
 		preflightPass(stdout, "rig scopes", "this city declares no rig")
 		return 0

@@ -1,0 +1,588 @@
+package main
+
+// `gc storage preflight --split` (S5 §2.5): the split rehearsed on a city
+// that has not authored [storage].
+//
+// It builds the configuration the split would write (cfg' = cfg with the
+// born-split [storage] block, the one `gc init --storage split` writes) and
+// runs the preflight's checks against it, unchanged: every refusal the
+// migration makes there, the S5-D holds and the source-lane gates (S5-B)
+// included. To those it adds what only a split asks: the session reconciler
+// cfg' resolves to and, when that is v2, the boot census v2 refuses over; the
+// lane the migration's window would open the work store on; the id floor; and
+// estimates of the time the copy and the clear take, the disk the split
+// needs, and how many times --time-budget would pause the run.
+//
+// It is read-only in the preflight's sense, and starts nothing. The
+// migration's window starts the city's bead-store provider when it is down
+// (storage_maintenance.go); a rehearsal must not, so on a city whose provider
+// is down, or whose bd-owned proxy is stopped (any bd read restarts it), it
+// reports that and runs no check that reads a store. Where the provider is up
+// it registers a window that started nothing and holds no lock, only so the
+// work-store opens take the lanes the migration's window forces (the
+// proxied-native lane, O9's transport override) and the lane they land on is
+// recorded; closing it stops nothing, because it started nothing.
+//
+// Every estimate is labeled one. The counts are what this run read; the
+// rates are measurements, pinned below with their sources.
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+// storagePreflightSplitFlag selects the split rehearsal.
+const storagePreflightSplitFlag = "split"
+
+// The rates the time estimate multiplies the counts by. Each is a
+// measurement on a loaded host (load average about 110), and
+// TestSplitEstimateConstantsArePinned pins them: changing one changes every
+// estimate this command prints.
+const (
+	// The copy, from BenchmarkInfraMigrateMCShaped at 40,000 rows and 18,662
+	// edges (S5-C, #8799), a SQLite work store into the SQLite binding: plan
+	// 1.1 s, rows 6.2 s, edges 0.5 s, verify 2.0 s.
+	splitPlanPerRow   = 27500 * time.Nanosecond
+	splitCopyPerRow   = 155 * time.Microsecond
+	splitCopyPerEdge  = 27 * time.Microsecond
+	splitVerifyPerRow = 50 * time.Microsecond
+	// The clear of a SQLite work store, from the same run: 21.3 s for 40,000
+	// rows, their edges included.
+	splitSQLiteClearPerRow = 533 * time.Microsecond
+	// The clear on native Dolt, on a dolt sql-server (#8799, 300 rows and
+	// edges): DepRemoveBatch 62 ms an edge, DepRemove 129 ms an edge (one
+	// commit each), the remainder DepList 7.4 ms a row, DeleteBatch 4.6 ms a
+	// row.
+	splitDoltBatchedPerEdge = 62 * time.Millisecond
+	splitDoltPerEdge        = 129 * time.Millisecond
+	splitDoltClearPerRow    = 12 * time.Millisecond
+)
+
+// The sizes the disk estimate multiplies the rows' JSON by. Measured on the
+// MC-shaped fixture (1,000 and 4,000 rows) migrated into a real binding; pinned
+// by TestSplitEstimateConstantsArePinned and checked against a real binding by
+// TestSplitDiskEstimateCoversARealBinding.
+const (
+	// splitBindingPerJSONByte is the binding root a copy leaves (the database,
+	// the retained-source backup and the manifest) per byte of the moved rows'
+	// JSON: 4.9 measured (database 3.3 to 3.6, backup 1.3), with a margin.
+	splitBindingPerJSONByte = 6
+	// splitSnapshotPerJSONByte is the snapshot's JSONL per byte of the rows'
+	// JSON: each entry carries the row, its class and its edges (1.3 measured
+	// on the backup, which has the same shape), with a margin.
+	splitSnapshotPerJSONByte = 2
+)
+
+// splitClearLane is the clear's cost on one work-store lane.
+type splitClearLane struct {
+	name            string
+	perRow, perEdge time.Duration
+	// basis says where the rates come from.
+	basis string
+	// floor marks rates no run measured on this lane: the estimate is a
+	// lower bound.
+	floor bool
+}
+
+// splitClearLaneFor is the clear's lane for the work store an open reported,
+// known false when no open in the window reported one.
+func splitClearLaneFor(diag beads.BeadsDiagnostic, known bool) splitClearLane {
+	perEdge := splitClearLane{perRow: splitDoltClearPerRow, perEdge: splitDoltPerEdge, floor: true}
+	switch {
+	case !known:
+		perEdge.name = "unknown lane"
+		perEdge.basis = "no open reported its lane, so the slowest measured rate is the floor: 129 ms an edge, 12 ms a row"
+		return perEdge
+	case diag.Store == beads.BeadsStoreNameNativeDoltStore && diag.Proxied == nil:
+		return splitClearLane{
+			name: "native Dolt", perRow: splitDoltClearPerRow, perEdge: splitDoltBatchedPerEdge,
+			basis: "measured on native Dolt: 62 ms an edge in batches, 7.4 + 4.6 ms a row",
+		}
+	case diag.Store == beads.BeadsStoreNameNativeDoltStore:
+		return splitClearLane{
+			name: "proxied", perRow: splitDoltClearPerRow, perEdge: splitDoltPerEdge,
+			basis: "the proxied lane removes edges one at a time, one Dolt commit each: 129 ms an edge as measured on native Dolt, 7.4 + 4.6 ms a row",
+		}
+	case diag.Store == beads.BeadsStoreNameBdStore || diag.Store == beads.BeadsStoreNameExecStore:
+		perEdge.name = "per-edge " + diag.Store
+		perEdge.basis = "this lane (bd CLI, hosted bd, exec) removes an edge per process call, which no run measured; 129 ms an edge (native Dolt, one by one) and 12 ms a row are its floor"
+		return perEdge
+	}
+	return splitClearLane{
+		name: diag.Store + " (SQLite rates)", perRow: splitSQLiteClearPerRow,
+		basis: "measured on a SQLite work store: 21.3 s for 40,000 rows and their edges; this store's own rate is not measured",
+	}
+}
+
+// splitEstimateInput is what the time estimate counts.
+type splitEstimateInput struct {
+	// rows and gates are written into the binding; copyEdges are the edges
+	// written with them; clearRows and clearEdges are removed from the work
+	// store.
+	rows, gates, copyEdges, clearRows, clearEdges int
+	// The rig imports, which run after the city's (S5 §5.2 P8).
+	rigRows, rigCopyEdges, rigClearRows, rigClearEdges int
+	lane                                               splitClearLane
+}
+
+// splitTimeEstimate is the time estimate, by phase.
+type splitTimeEstimate struct {
+	copy, clear, rigs time.Duration
+}
+
+// estimateSplitTime multiplies the counts by the rates.
+func estimateSplitTime(in splitEstimateInput) splitTimeEstimate {
+	n := func(v int) time.Duration { return time.Duration(v) }
+	perCopiedRow := splitPlanPerRow + splitCopyPerRow + splitVerifyPerRow
+	return splitTimeEstimate{
+		copy:  n(in.rows+in.gates)*perCopiedRow + n(in.copyEdges)*splitCopyPerEdge,
+		clear: n(in.clearRows)*in.lane.perRow + n(in.clearEdges)*in.lane.perEdge,
+		rigs: n(in.rigRows)*perCopiedRow + n(in.rigCopyEdges)*splitCopyPerEdge +
+			n(in.rigClearRows)*in.lane.perRow + n(in.rigClearEdges)*in.lane.perEdge,
+	}
+}
+
+// splitBudgetResumes is how many times a run of work under budget pauses
+// (exit 75) before one finishes it: each run of the same command gets the
+// whole budget again. Zero budget is none.
+func splitBudgetResumes(work, budget time.Duration) int {
+	if budget <= 0 {
+		return 0
+	}
+	return int(max(work-1, 0) / budget)
+}
+
+// splitDiskEstimate is the disk estimate, in bytes.
+type splitDiskEstimate struct {
+	snapshot, binding, wal int64
+	// exact names the snapshot's exact copy (S5 §5.3).
+	exact string
+}
+
+func (d splitDiskEstimate) total() int64 { return d.snapshot + d.binding + d.wal }
+
+// estimateSplitDisk sizes the split: the mandatory snapshot of the work store
+// (its JSONL, plus the exact copy when that is a file), the binding root the
+// copy leaves, and the WAL growth S5-E's snapshot allows for.
+func estimateSplitDisk(allJSON, movedJSON int64, exact string) splitDiskEstimate {
+	jsonl := splitSnapshotPerJSONByte * allJSON
+	snapshot := jsonl
+	if exact == snapshotMethodBdExport || exact == snapshotMethodFileCopy {
+		snapshot += jsonl
+	}
+	return splitDiskEstimate{snapshot: snapshot, binding: splitBindingPerJSONByte * movedJSON, wal: storageSnapshotWALGrowthFloor, exact: exact}
+}
+
+// splitEstimate is everything the rehearsal estimated.
+type splitEstimate struct {
+	input   splitEstimateInput
+	time    splitTimeEstimate
+	resumes int
+	disk    splitDiskEstimate
+}
+
+// splitPreflightSummary is what one rehearsal concluded, for a caller that
+// words it its own way: the storage-split doctor check, and the guided
+// split's first phase (S5 §5.2 P0).
+type splitPreflightSummary struct {
+	// Blocks names each check that would refuse the split.
+	Blocks []string
+	// Unread says why no check that reads a store ran, or "".
+	Unread string
+	// Reconciler is the session reconciler the split city resolves to.
+	Reconciler string
+	// Estimate is nil when the work store was not read.
+	Estimate *splitEstimate
+	// RigImports reports a rig whose import moves rows after the city's.
+	RigImports bool
+}
+
+// ready reports a rehearsal that would clear the split.
+func (s splitPreflightSummary) ready() bool { return len(s.Blocks) == 0 && s.Unread == "" }
+
+// splitHypotheticalConfig is cfg as the split leaves it: the born-split
+// [storage] block, nothing else changed.
+func splitHypotheticalConfig(cfg *config.City) *config.City {
+	split := *cfg
+	split.Storage = bornSplitStorageConfig()
+	return &split
+}
+
+// doStorageSplitPreflight rehearses the split and reports it.
+func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.Writer) (int, splitPreflightSummary) {
+	var summary splitPreflightSummary
+	block := func(check string, cause error) {
+		preflightBlockRow(stdout, check, cause)
+		summary.Blocks = append(summary.Blocks, check)
+	}
+	fmt.Fprintf(stdout, "city: %s\n", request.CityPath) //nolint:errcheck // best-effort stdout
+
+	// The config the split writes. A city that already authored one has a
+	// split to rehearse with the plain preflight, and the guided split
+	// writes no second one.
+	if request.Cfg.Storage != nil {
+		block("config", fmt.Errorf("this city already authors [storage], so there is no split to rehearse: `gc storage %s` (without --%s) rehearses the migration it describes", storagePreflightVerb, storagePreflightSplitFlag))
+		return splitPreflightFooter(stdout, summary), summary
+	}
+	if blocked, held := revertHoldingNote(storageSplitNone, request.CityPath); held {
+		block("config", errors.New(preflightAdviceDetail(blocked)))
+		return splitPreflightFooter(stdout, summary), summary
+	}
+	split := splitHypotheticalConfig(request.Cfg)
+	storage := split.EffectiveStorage()
+	fmt.Fprintf(stdout, "split [storage] (hypothetical; nothing is written): work on %q; graph, sessions, messaging, orders and nudges on %q (%s at %s)\n", //nolint:errcheck // best-effort stdout
+		storage.Classes.Work, initSplitBindingName, storage.Bindings[initSplitBindingName].Provider, storage.Bindings[initSplitBindingName].Path)
+	preflightPass(stdout, "config", "city.toml authors no [storage]; the split writes the block above")
+
+	// The reconciler, before and after: an existing city moves its storage
+	// and its reconciler in one step.
+	_, today := doctorReconcilerMode(request.Cfg, request.CityPath, nil)
+	after, resolved := doctorReconcilerMode(split, request.CityPath, nil)
+	summary.Reconciler = strings.TrimPrefix(resolved, "session reconciler: ")
+	detail := fmt.Sprintf("after the split: %s; today: %s", summary.Reconciler, strings.TrimPrefix(today, "session reconciler: "))
+	if after == reconcilerV2 {
+		preflightPass(stdout, "reconciler", detail)
+	} else {
+		preflightNote(stdout, "reconciler", detail)
+	}
+
+	// Nothing below may start the provider.
+	if why := splitStoreReadGate(request.CityPath, request.Cfg); why != "" {
+		summary.Unread = why
+		preflightNote(stdout, "source lane", why+"; the split starts it in its maintenance window, and the lane is decided there")
+		return splitPreflightFooter(stdout, summary), summary
+	}
+	defer openPreflightLaneWindow(request.CityPath, split)()
+
+	if after == reconcilerV2 {
+		splitPreflightCensus(request, split, stdout, block)
+		preflightNote(stdout, "v2 demand", "the split runs legacy's demand-migration repairs in its window, before the copy; `gc doctor --check v2-demand-migrations` counts them")
+	}
+
+	// The migration's checks against cfg', unchanged.
+	rehearsal := request
+	rehearsal.Cfg = split
+	var found preflightFindings
+	if code := runStoragePreflightChecks(rehearsal, &found, stdout, stderr); code != 0 {
+		summary.Blocks = append(summary.Blocks, "migration")
+	}
+	diag, known := migrationWindowLane(request.CityPath)
+	lane := splitClearLaneFor(diag, known)
+	if known {
+		preflightPass(stdout, "source lane", fmt.Sprintf("the work store opens on %s in the window (%s)", diag.Store, lane.name))
+	}
+	if !found.read {
+		preflightNote(stdout, "estimate", "not computed: the checks above stopped before the work store was read")
+		return splitPreflightFooter(stdout, summary), summary
+	}
+	for _, r := range found.rigs {
+		summary.RigImports = summary.RigImports || (r.Plan != nil && len(r.Plan.Move)+len(r.Plan.Retained) > 0)
+	}
+	splitPreflightFloor(request.CityPath, found, stdout)
+	summary.Estimate = splitPreflightEstimate(request, found, lane, diag, known, stdout, block)
+	return splitPreflightFooter(stdout, summary), summary
+}
+
+// splitPreflightSessionLegs opens the census legs read-only; tests replace
+// it, having no real session stores.
+var splitPreflightSessionLegs = openV2SessionLegs
+
+// splitPreflightCensus runs v2's boot census over the city's session legs as
+// they are now, judged as the split city's v2 judges them: the split refuses
+// on it inside its window (S5 §5.2 P2).
+func splitPreflightCensus(request storageOperatorRequest, split *config.City, stdout io.Writer, block func(string, error)) {
+	check := newV2SessionMigrationCheck(split, request.CityPath)
+	check.openLegs = func() []v2SessionLeg { return splitPreflightSessionLegs(request.CityPath, request.Cfg) }
+	census := check.census()
+	switch refusal := census.m.refusal(); {
+	case refusal != nil:
+		block("v2 sessions", fmt.Errorf("v2's boot census refuses this city's session rows (%w); the split refuses on it. `gc doctor --check v2-session-migration` lists them", refusal))
+	case census.faulted > 0:
+		block("v2 sessions", fmt.Errorf("%d session leg(s) could not be read, so v2's boot census cannot be cleared; `gc doctor --check v2-session-migration` names them", census.faulted))
+	case census.notChecked > 0:
+		preflightNote(stdout, "v2 sessions", fmt.Sprintf("%d open session row(s), none refused; %d leg(s) have no read-only open and were not checked", len(census.rows), census.notChecked))
+	default:
+		preflightPass(stdout, "v2 sessions", fmt.Sprintf("%d open session row(s); v2's boot census refuses none", len(census.rows)))
+	}
+}
+
+// splitPreflightFloor reports the city work store's id floor the split sets
+// (S5 §8.2).
+func splitPreflightFloor(cityPath string, found preflightFindings, stdout io.Writer) {
+	ids := make([]string, 0, len(found.rows))
+	for _, b := range found.rows {
+		ids = append(ids, b.ID)
+	}
+	plan, err := planCityIDFloor(cityPath, ids)
+	switch {
+	case err != nil:
+		preflightNote(stdout, "id floor", "not read: "+err.Error())
+	case plan.Skipped != "":
+		preflightPass(stdout, "id floor", "n/a: "+plan.Skipped)
+	case plan.Need == 0:
+		preflightPass(stdout, "id floor", "no carried id of the work store's prefix needs one")
+	case !plan.below():
+		preflightPass(stdout, "id floor", fmt.Sprintf("%s is already %d, at or above the %d the carried ids need", bdMinHashLengthKey, plan.Current, plan.Need))
+	case plan.Hosted != "":
+		preflightNote(stdout, "id floor", fmt.Sprintf("the work store is hosted bd at %s: set %s=%d there out of band before the window (O10); the split cannot raise it from %d", plan.Hosted, bdMinHashLengthKey, plan.Need, plan.Current))
+	default:
+		preflightPass(stdout, "id floor", fmt.Sprintf("the split raises %s from %d to %d", bdMinHashLengthKey, plan.Current, plan.Need))
+	}
+}
+
+// splitPreflightEstimate prints the estimates and blocks on a disk the split
+// would not fit.
+func splitPreflightEstimate(request storageOperatorRequest, found preflightFindings, lane splitClearLane, diag beads.BeadsDiagnostic, known bool, stdout io.Writer, block func(string, error)) *splitEstimate {
+	est := &splitEstimate{input: splitEstimateInputFor(found, lane)}
+	est.time = estimateSplitTime(est.input)
+	city := est.time.copy + est.time.clear
+	est.resumes = splitBudgetResumes(city, request.TimeBudget)
+	in := est.input
+	floor := ""
+	if lane.floor {
+		floor = " at least"
+	}
+	preflightNote(stdout, "estimate", fmt.Sprintf("ESTIMATE, not a measurement: the city's copy about %s (%d row(s), %d gate(s), %d edge(s)) and clear%s %s (%d row(s), %d edge(s), %s lane)",
+		splitDuration(est.time.copy), in.rows, in.gates, in.copyEdges, floor, splitDuration(est.time.clear), in.clearRows, in.clearEdges, lane.name))
+	fmt.Fprintf(stdout, "%sbased on: the row and edge counts read above, read-only; copy rates %s a row and %s an edge, from BenchmarkInfraMigrateMCShaped (40,000 rows, a SQLite work store, a loaded host); clear: %s\n", //nolint:errcheck // best-effort stdout
+		preflightDetailIndent, splitPlanPerRow+splitCopyPerRow+splitVerifyPerRow, splitCopyPerEdge, lane.basis)
+	if in.rigRows+in.rigClearRows > 0 {
+		fmt.Fprintf(stdout, "%sthe rig imports: about%s %s more (%d row(s) to copy, %d to clear), outside --%s: the rig import takes none\n", //nolint:errcheck // best-effort stdout
+			preflightDetailIndent, floor, splitDuration(est.time.rigs), in.rigRows, in.rigClearRows, storageTimeBudgetFlag)
+	}
+	switch {
+	case request.TimeBudget <= 0:
+		preflightPass(stdout, "time budget", "no --"+storageTimeBudgetFlag+": the run does not pause")
+	case est.resumes == 0:
+		preflightPass(stdout, "time budget", fmt.Sprintf("ESTIMATE: the city's copy and clear (about %s) fit --%s %s; the run would not pause", splitDuration(city), storageTimeBudgetFlag, request.TimeBudget))
+	default:
+		preflightNote(stdout, "time budget", fmt.Sprintf("ESTIMATE: the city's copy and clear (about%s %s) exceed --%s %s: the run would pause (exit %d) %d time(s) and need %d resume(s) of the same command; raise the budget to run it in one",
+			floor, splitDuration(city), storageTimeBudgetFlag, request.TimeBudget, storagePausedExitCode, est.resumes, est.resumes))
+	}
+
+	exact := snapshotExactMethod(rawBeadsProviderForScope(request.CityPath, request.CityPath), known && diag.Store == beads.BeadsStoreNameNativeDoltStore && diag.Proxied == nil)
+	all := make([]beads.Bead, 0, len(found.all))
+	for _, b := range found.all {
+		all = append(all, b)
+	}
+	allJSON := splitJSONBytes(all)
+	moved := append([]beads.Bead(nil), found.rows...)
+	for _, r := range found.rigs {
+		if r.Plan != nil {
+			moved = append(moved, r.Plan.Move...)
+		}
+	}
+	est.disk = estimateSplitDisk(allJSON, splitJSONBytes(moved), exact)
+	dir := filepath.Join(request.CityPath, ".gc")
+	sizes := fmt.Sprintf("ESTIMATE: about %s: the snapshot %s (%s rows' JSONL, exact copy: %s), the binding %s (%d times the moved rows' %s of JSON, measured 4.9), WAL growth %s",
+		splitBytes(est.disk.total()), splitBytes(est.disk.snapshot), strconv.Itoa(len(found.all)), est.disk.exact, splitBytes(est.disk.binding), splitBindingPerJSONByte, splitBytes(splitJSONBytes(moved)), splitBytes(est.disk.wal))
+	free, err := doltContainerFreeBytesFunc(dir)
+	if err != nil {
+		preflightNote(stdout, "disk", sizes+"; free space on "+dir+" not measured: "+err.Error())
+		return est
+	}
+	critical, warn := doltDiskMinFreeBytes(), doltDiskWarnFreeBytes()
+	switch refuse, low := snapshotDiskVerdict(free, est.disk.total(), critical, warn); {
+	case refuse:
+		block("disk", fmt.Errorf("%s; %s has %s free and must keep %s free for a managed Dolt on the same filesystem. Free space before the window", sizes, dir, splitBytes(free), splitBytes(critical)))
+	case low:
+		preflightNote(stdout, "disk", fmt.Sprintf("%s; %s has %s free, which leaves less than the %s warning floor", sizes, dir, splitBytes(free), splitBytes(warn)))
+	default:
+		preflightPass(stdout, "disk", fmt.Sprintf("%s; %s has %s free", sizes, dir, splitBytes(free)))
+	}
+	return est
+}
+
+// splitEstimateInputFor counts what the copy, the clear and the rig imports
+// would move.
+func splitEstimateInputFor(found preflightFindings, lane splitClearLane) splitEstimateInput {
+	in := splitEstimateInput{
+		rows:       len(found.plan.rows),
+		gates:      len(found.plan.boundary.Gates),
+		copyEdges:  len(found.plan.boundary.Copy) + len(found.plan.boundary.Gates),
+		clearRows:  len(found.plan.rows),
+		clearEdges: splitClearEdgeCount(found.plan),
+		lane:       lane,
+	}
+	for _, r := range found.rigs {
+		if r.Plan == nil {
+			continue
+		}
+		p := r.Plan
+		in.rigRows += len(p.Move) + len(p.Gates)
+		in.rigCopyEdges += len(p.Copy) + len(p.Gates)
+		in.rigClearRows += len(p.Move) + len(p.Retained)
+		in.rigClearEdges += len(p.Copy)
+		for _, records := range p.Records {
+			in.rigClearEdges += len(records)
+		}
+	}
+	return in
+}
+
+// splitClearEdgeCount is the edges the clear removes: every edge touching a
+// moved row, each once (detachInfraClearedRow).
+func splitClearEdgeCount(plan infraCopyPlan) int {
+	seen := map[beads.DepPair]bool{}
+	for _, b := range plan.rows {
+		for _, d := range plan.down[b.ID] {
+			seen[beads.DepPair{IssueID: b.ID, DependsOnID: d.DependsOnID}] = true
+		}
+		for _, d := range plan.up[b.ID] {
+			seen[beads.DepPair{IssueID: d.IssueID, DependsOnID: b.ID}] = true
+		}
+	}
+	return len(seen)
+}
+
+// splitJSONBytes is the rows' JSON size, the unit the disk estimate scales.
+func splitJSONBytes(rows []beads.Bead) int64 {
+	var n int64
+	for _, b := range rows {
+		if data, err := json.Marshal(b); err == nil {
+			n += int64(len(data))
+		}
+	}
+	return n
+}
+
+// splitPreflightFooter closes the report and returns the exit code.
+func splitPreflightFooter(stdout io.Writer, summary splitPreflightSummary) int {
+	prefix := storagePreflightLogPrefix + " --" + storagePreflightSplitFlag
+	switch {
+	case len(summary.Blocks) > 0:
+		fmt.Fprintf(stdout, "\n%s: the split would refuse (%s). Fix the blocking checks above and run this again.\n", prefix, strings.Join(summary.Blocks, ", ")) //nolint:errcheck // best-effort stdout
+		return 1
+	case summary.Unread != "":
+		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. Run it again while the city is running.\n", prefix) //nolint:errcheck // best-effort stdout
+		return 1
+	}
+	then := ""
+	if summary.RigImports {
+		then = ", then " + rigImportAllInstruction()
+	}
+	fmt.Fprintf(stdout, "\nReady. The figures marked ESTIMATE are estimates. When the fleet is stopped, write the [storage] block above to city.toml and run %s%s.\n", storageClearInstruction(), then) //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+// splitStoreReadGate says why the rehearsal may not read the city's stores
+// without starting something, or "" when it may: the provider is up, or the
+// caller holds the migration's window, which owns it.
+func splitStoreReadGate(cityPath string, cfg *config.City) string {
+	if activeMigrationWindow(cityPath) != nil {
+		return ""
+	}
+	owned, err := cityScopeProviderOwned(cityPath)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("whether bd owns this city's proxied server cannot be told (%v)", err)
+	case owned && doctorProxiedStoreNotRunning(cityPath):
+		return "bd's proxied server for the city's work store is stopped, and any bd read would start it"
+	case !owned:
+		down, err := migrationWindowProviderDown(cityPath)
+		if err != nil {
+			return fmt.Sprintf("the bead-store provider could not be checked (%v)", err)
+		}
+		if down {
+			return fmt.Sprintf("the city's bead-store provider (%s) is down", beadsProvider(cityPath))
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		owned, err := scopeProviderOwned(cityPath, rig.Path)
+		switch {
+		case err != nil:
+			return fmt.Sprintf("whether bd owns rig %s's proxied server cannot be told (%v)", rig.Name, err)
+		case owned && doctorProxiedStoreNotRunning(rig.Path):
+			return fmt.Sprintf("bd's proxied server for rig %s is stopped, and any bd read would start it", rig.Name)
+		}
+	}
+	return ""
+}
+
+// openPreflightLaneWindow registers a window on cityPath that started nothing
+// and holds no lock, so the rehearsal's opens take the window's lanes and
+// record the one they land on. It returns the closer, which stops nothing.
+// Inside a window already open (the guided split's) it registers none.
+func openPreflightLaneWindow(cityPath string, cfg *config.City) func() {
+	w := &migrationSourceWindow{cityPath: cityPath, cfg: cfg}
+	migrationWindows.Lock()
+	defer migrationWindows.Unlock()
+	if migrationWindows.active != nil {
+		return func() {}
+	}
+	migrationWindows.active = w
+	return func() { _ = w.Close() }
+}
+
+// migrationWindowLane is the lane the window open on cityPath recorded.
+func migrationWindowLane(cityPath string) (beads.BeadsDiagnostic, bool) {
+	migrationWindows.Lock()
+	defer migrationWindows.Unlock()
+	if w := migrationWindows.active; w != nil && samePath(w.cityPath, cityPath) && w.laneKnown {
+		return w.lane, true
+	}
+	return beads.BeadsDiagnostic{}, false
+}
+
+// splitDuration renders an estimated duration to a precision it has.
+func splitDuration(d time.Duration) string {
+	switch {
+	case d >= time.Minute:
+		return d.Round(time.Second).String()
+	case d >= time.Second:
+		return d.Round(100 * time.Millisecond).String()
+	}
+	return d.Round(time.Millisecond).String()
+}
+
+// splitBytes renders a size in binary units.
+func splitBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// splitPreflightReadiness renders a rehearsal for the storage-split doctor
+// check: one line of verdict and the report's tagged rows.
+func splitPreflightReadiness(request storageOperatorRequest) (string, []string) {
+	var out bytes.Buffer
+	_, summary := doStorageSplitPreflight(request, &out, io.Discard)
+	var rows []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			rows = append(rows, trimmed)
+		}
+	}
+	verdict := "ready"
+	switch {
+	case len(summary.Blocks) > 0:
+		blocks := append([]string(nil), summary.Blocks...)
+		sort.Strings(blocks)
+		verdict = "it would refuse (" + strings.Join(blocks, ", ") + ")"
+	case summary.Unread != "":
+		verdict = "not checked: " + summary.Unread
+	}
+	return verdict, rows
+}

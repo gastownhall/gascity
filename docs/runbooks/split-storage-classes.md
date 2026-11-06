@@ -134,6 +134,23 @@ non-zero whenever the city is not yet serving from its binding — the ordinary
 state of every city with a cutover still ahead of it. A city that preflight
 clears will still fail a `status` gate until it has actually migrated.
 
+Before Step 1, on a city with no `[storage]` yet, `gc storage preflight
+--split` rehearses the whole split as if the default block (the one
+`gc init --storage split` writes) were already in `city.toml`, and writes
+nothing. On top of every check above it prints the session reconciler the
+split city would resolve to (and, under v2, the boot census v2 refuses over),
+the lane the migration's window would open the work store on, the id floor it
+would set, and **estimates**: how long the copy and the clear take, how much
+disk the snapshot, the binding and its WAL need, and how many times
+`--time-budget` (default 30m) would pause the run. Each estimate is labeled
+ESTIMATE and names its basis: the row and edge counts it read, and rates
+measured on a loaded host (the native-Dolt clear costs about 62 ms an edge in
+batches; the proxied, bd CLI and exec lanes remove an edge per call, and
+their figure is a floor). It starts nothing: on a city whose bead-store
+provider is down it says so and runs no check that reads a store, so rehearse
+on the running city. `gc doctor`'s `storage-split` check reports the same
+readiness on an unsplit city, and the binding's verdict on a split one.
+
 It reports rather than refuses what stopping the city ends: a **live
 controller**, named by PID; the city's registration with the supervisor; its
 running sessions; and, under `--force=shared-store:`, the other cities on the

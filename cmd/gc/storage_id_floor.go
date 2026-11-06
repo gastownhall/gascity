@@ -242,3 +242,40 @@ func reserveCityIDs(cityPath string, carried []string) (cityIDFloorResult, error
 	result.Floor, result.Changes = inForce, changes
 	return result, nil
 }
+
+// cityIDFloorPlan is the city work store's floor as it stands against the
+// carried ids, read without writing (preflight --split, doctor storage-split).
+type cityIDFloorPlan struct {
+	// Need is the min_hash_length the ids need, capped at bd's; 0 when none.
+	Need int
+	// Current is the min_hash_length in force (0 when unset).
+	Current int
+	// Skipped says why the store takes no floor; Hosted is a hosted bd's
+	// endpoint (O10).
+	Skipped, Hosted string
+}
+
+// below reports a floor under what the carried ids need.
+func (p cityIDFloorPlan) below() bool { return p.Need > 0 && p.Current < p.Need }
+
+// planCityIDFloor reads the city work store's floor against ids. It reads
+// min_hash_length only when the ids need a floor.
+func planCityIDFloor(cityPath string, ids []string) (cityIDFloorPlan, error) {
+	surface, err := cityHashConfigOpener(cityPath)
+	if err != nil {
+		return cityIDFloorPlan{}, err
+	}
+	if surface.Conf == nil {
+		return cityIDFloorPlan{Skipped: surface.Skipped}, nil
+	}
+	plan := cityIDFloorPlan{Need: min(cityIDFloor(ids, surface.Prefix), bdMaxMintedHashLength), Hosted: surface.Hosted}
+	if plan.Need == 0 {
+		return plan, nil
+	}
+	current, err := surface.Conf.ConfigGet(bdMinHashLengthKey)
+	if err != nil {
+		return plan, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
+	}
+	plan.Current, _ = strconv.Atoi(strings.TrimSpace(current))
+	return plan, nil
+}
