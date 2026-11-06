@@ -108,13 +108,12 @@ func (s *Store) GetPersistedResponse(id string) (Info, PersistedResponse, error)
 // bead"). Note the split: absence yields the wrapped store error, NOT
 // ErrSessionNotFound — that sentinel is reserved for a present non-session bead.
 func (s *Store) validatedBead(id string) (beads.Bead, error) {
-	// Nil-inner-store short-circuit, mirroring ListAll's listAllBeads guard
-	// (s == nil || s.store.Store == nil): a nil backing store cannot produce the
-	// bead, so treat it as absence — the wrapped store not-found error, matching
+	// Absent-store short-circuit, mirroring ListAll's listAllBeads guard (a nil
+	// door or a zero handle): an absent backing store cannot produce the bead, so treat it as absence — the wrapped store not-found error, matching
 	// the absent-id path below and NOT the ErrSessionNotFound sentinel (reserved
 	// for a present non-session bead). Without this a non-nil *Store wrapping a
 	// nil inner store would panic in s.store.Get.
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return beads.Bead{}, fmt.Errorf("loading session %q: %w", id, beads.ErrNotFound)
 	}
 	b, err := s.store.Get(id)
@@ -164,7 +163,7 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 // task's) is no sibling session (architecture B). limit is passed through to
 // the store; a zero limit is unbounded. No raw bead escapes.
 func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Info, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	found, err := s.store.ListByMetadata(filters, limit)
@@ -191,7 +190,7 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 // explicit closed skip keeps the closed-excluded contract byte-stable across store
 // backends. No raw bead escapes.
 func (s *Store) ListLabeledSessionInfosUnfiltered() ([]Info, error) {
-	if s == nil || s.store.Store == nil {
+	if s == nil || s.store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	labeled, err := s.store.ListByLabel(LabelSession, 0)

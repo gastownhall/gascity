@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestFanoutMembershipIsDirectRootIDNotDepReachability pins the membership the
@@ -96,7 +97,7 @@ func TestFanoutMembershipIsDirectRootIDNotDepReachability(t *testing.T) {
 			beadmeta.RootBeadIDMetadataKey: root.ID,
 		},
 	})
-	got, err := findSpecBead(store, control)
+	got, err := findSpecBead(beadstest.Graph(store), control)
 	if err != nil {
 		t.Fatalf("findSpecBead over the fan-out member set: %v", err)
 	}

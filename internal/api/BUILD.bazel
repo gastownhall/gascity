@@ -148,6 +148,7 @@ go_library(
         "readauth.go",
         "request_id.go",
         "request_outcome.go",
+        "request_session_listing.go",
         "residency_by_id.go",
         "residency_create.go",
         "residency_topology.go",
@@ -300,11 +301,13 @@ go_test(
         "branch_resolver_test.go",
         "cache_liveness_test.go",
         "cache_read_model_tier_test.go",
+        "capability_through_handles_test.go",
         "class_store_test.go",
         "client_extmsg_test.go",
         "client_remote_test.go",
         "client_session_peek_test.go",
         "client_sling_test.go",
+        "client_status_test.go",
         "client_test.go",
         "client_timeout_test.go",
         "client_waits_test.go",
@@ -389,6 +392,7 @@ go_test(
         "handler_provider_crud_test.go",
         "handler_provider_readiness_test.go",
         "handler_rig_crud_test.go",
+        "handler_rigs_latency_test.go",
         "handler_rigs_test.go",
         "handler_services_test.go",
         "handler_session_agents_test.go",
@@ -408,6 +412,7 @@ go_test(
         "handler_sling_test.go",
         "handler_status_bench_test.go",
         "handler_status_count_test.go",
+        "handler_status_fresh_test.go",
         "handler_status_pool_identity_test.go",
         "handler_status_scoped_store_test.go",
         "handler_status_session_class_test.go",
@@ -540,9 +545,13 @@ go_test(
         "split_strict_gate_test.go",
         "sse_cancel_test.go",
         "state_class_accessors_test.go",
+        "state_stores_test.go",
+        "status_build_cost_test.go",
         "status_graph_ready_test.go",
+        "status_scoped_store_raw_test.go",
         "store_health_rows_measured_test.go",
         "store_health_test.go",
+        "store_identity_guard_test.go",
         "structured_leakage_test.go",
         "supervisor_dashboard_test.go",
         "supervisor_health_packslock_test.go",
@@ -630,6 +639,7 @@ go_test(
         "//internal/session",
         "//internal/sessionlog",
         "//internal/shellquote",
+        "//internal/sling",
         "//internal/sourceworkflow",
         "//internal/ssrf",
         "//internal/storehealth",
@@ -657,12 +667,12 @@ go_test(
 # The split-strict projection gate (internal/beads/splittest/projection.go):
 # api_test with GC_TEST_SPLIT_STRICT=1, so every fakeState work accessor hands
 # out a view of the city store that hides infrastructure rows and every class
-# accessor one that hides work rows. Non-blocking for now: manual, so //...
-# skips it, and bazel.yml's evidence-only split-strict lane runs it. TestMain
-# fails the run on a violation site testdata/split_strict_baseline.tsv does not
-# list (the ratchet), and on a failing test testdata/split_strict_known_failures.list
-# does not list; it reports the two apart. It becomes required before new
-# cities default to split.
+# accessor one that hides work rows. Manual, so //... skips it; bazel.yml's
+# split-strict lane runs it and gates (nightly, dispatch, and PRs touching the
+# storage paths). TestMain fails the run on a violation site
+# testdata/split_strict_baseline.tsv does not list (the ratchet), and on a
+# failing test testdata/split_strict_known_failures.list does not list; it
+# reports the two apart.
 go_variant_test(
     name = "api_split_strict_test",
     size = "large",

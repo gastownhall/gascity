@@ -74,6 +74,7 @@ go_test(
         "factory_deferred_submits_test.go",
         "factory_resolved_test.go",
         "factory_test.go",
+        "factory_zero_handle_test.go",
         "handle_clone_test.go",
         "handle_dead_agent_test.go",
         "handle_fence_test.go",
@@ -135,6 +136,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/citylayout",
         "//internal/events",
         "//internal/nudgequeue",

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -47,7 +48,7 @@ type resolverCapture struct {
 
 func seedEquivSession(t *testing.T, store beads.Store, sp runtime.Provider) sessionpkg.Info {
 	t.Helper()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp)
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly:  true,
 		Template:  "worker",
@@ -137,7 +138,7 @@ func TestSessionByRecordMatchesSessionByHandle(t *testing.T) {
 		t.Fatalf("SessionByHandle: %v", err)
 	}
 
-	recInfo, pr, err := sessionpkg.ResolveSessionRecordByExactID(store, info.ID)
+	recInfo, pr, err := sessionpkg.ResolveSessionRecordByExactID(beadstest.Sessions(store), info.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
@@ -160,11 +161,11 @@ func TestResolveSessionRecordByExactIDMatchesBeadForm(t *testing.T) {
 	sp := runtime.NewFake()
 	info := seedEquivSession(t, store, sp)
 
-	bead, id, err := sessionpkg.ResolveSessionBeadByExactID(store, info.ID)
+	bead, id, err := sessionpkg.ResolveSessionBeadByExactID(beadstest.Sessions(store), info.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionBeadByExactID: %v", err)
 	}
-	recInfo, pr, err := sessionpkg.ResolveSessionRecordByExactID(store, info.ID)
+	recInfo, pr, err := sessionpkg.ResolveSessionRecordByExactID(beadstest.Sessions(store), info.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestResolveSessionRecordByExactIDMatchesBeadForm(t *testing.T) {
 		}
 	}
 
-	if _, _, err := sessionpkg.ResolveSessionRecordByExactID(store, "does-not-exist"); err == nil {
+	if _, _, err := sessionpkg.ResolveSessionRecordByExactID(beadstest.Sessions(store), "does-not-exist"); err == nil {
 		t.Fatal("ResolveSessionRecordByExactID(absent) = nil error, want not-found")
 	}
 }
@@ -219,7 +220,7 @@ func TestResolveSessionRecordByExactIDNormalizesRepairableType(t *testing.T) {
 		t.Fatalf("clear type on repairable bead: %v", err)
 	}
 
-	recInfo, _, err := sessionpkg.ResolveSessionRecordByExactID(store, created.ID)
+	recInfo, _, err := sessionpkg.ResolveSessionRecordByExactID(beadstest.Sessions(store), created.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestResolveSessionRecordByExactIDNormalizesRepairableType(t *testing.T) {
 func TestSessionRecordViaManagerBridgesErrorContract(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp)
 
 	// A present bead that is NOT a session bead (no session type, no gc:session
 	// label) — the resolve-then-Get race the factory lane can hit.

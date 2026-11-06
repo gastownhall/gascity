@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -78,8 +79,19 @@ type State interface {
 	// SessionProvider returns the current session provider.
 	SessionProvider() runtime.Provider
 
+	// Stores is the city's class handles for the current store epoch, minted
+	// by the controller's router (storeref.Stores): Work, Graph, Sessions,
+	// Mail, Orders, Nudges, Rig(name), Rigs and GraphFor(scope). Read it once
+	// per request and take every class from that value; a stream re-reads it
+	// per iteration. A held value keeps its epoch: the stores a reload
+	// replaces close within controllerStateStoreCloseDelay, so never cache it
+	// on the Server.
+	Stores() storeref.Stores
+
 	// BeadStore returns the bead store for a rig (by name).
-	// Returns nil if the rig doesn't exist.
+	// Returns nil if the rig doesn't exist. BeadStore, BeadStores,
+	// CityBeadStore, ScopedStoreLike and ClassBindingHasLegacyResidents stay
+	// raw until T7's federated readers: callers are the T7 residue.
 	BeadStore(rig string) beads.Store
 
 	// BeadStores returns all rig names and their stores.

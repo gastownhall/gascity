@@ -26,6 +26,7 @@ import (
 // controller's own store.
 type v2SessionMigrationCheck struct {
 	cfg       *config.City
+	cityPath  string
 	cityName  string
 	openLegs  func() []v2SessionLeg
 	lookupEnv func(string) (string, bool) // nil reads reconcilerModeLookupEnv
@@ -44,6 +45,7 @@ type v2SessionLeg struct {
 func newV2SessionMigrationCheck(cfg *config.City, cityPath string) *v2SessionMigrationCheck {
 	return &v2SessionMigrationCheck{
 		cfg:      cfg,
+		cityPath: cityPath,
 		cityName: loadedCityName(cfg, cityPath),
 		openLegs: func() []v2SessionLeg { return openV2SessionLegs(cityPath, cfg) },
 	}
@@ -106,7 +108,7 @@ func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	}
 	msg := fmt.Sprintf("%d open session row(s): %d in a state main does not know, %d shared pool-slot session name(s), %d named session(s) claimed by more than one row",
 		len(rows), flagged, len(m.SharedSlotNames), len(m.DuplicateNamed))
-	mode, resolved := doctorReconcilerMode(c.cfg, c.lookupEnv)
+	mode, resolved := doctorReconcilerMode(c.cfg, c.cityPath, c.lookupEnv)
 	details = append(details, resolved)
 	lowerBound := ""
 	if notChecked > 0 {

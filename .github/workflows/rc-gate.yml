@@ -8,7 +8,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.6.0"
-  BD_VERSION: "v1.3.2"
+  BD_VERSION: "v1.3.4"
   # Bypass the systemd gascity-test.slice re-exec on CI runners. The Blacksmith
   # runners' user systemd cannot reliably create a transient --scope for the
   # heavy acceptance workloads; gc_test_slice_reexec then exec's
@@ -46,9 +46,10 @@ jobs:
   # (the untagged suite with cmd/gc's fast tests, docsync, the generated
   # artifact and policy checks, nogo), acceptance (Tier A), integration-
   # packages (cmd/gc's process suite and every package's integration-tagged
-  # tests), integration-smoke and, as a dispatch, the full //test/integration
-  # suite (evidence-only until G3). It replaces the go-test fast-test shards
-  # and `make check-docs-go`; the darwin build of internal/fsys is
+  # tests), integration-smoke, split-strict (cmd/gc and internal/api under
+  # the split-strict projection gate; gating) and, as a dispatch, the full
+  # //test/integration suite (evidence-only until G3). It replaces the
+  # go-test fast-test shards and `make check-docs-go`; the darwin build of internal/fsys is
   # mac_regression's native one.
   bazel_parity:
     name: Bazel parity
@@ -57,10 +58,13 @@ jobs:
       actions: write # bazel.yml's rbe job pre-warms the worker pool
       pull-requests: read # bazel.yml's rbe job lists a PR's files (split-strict lane; pull_request only)
       # issues: write and id-token: write are requested by bazel.yml's
-      # rrc-verify and repo contents cache seed jobs; GitHub validates a called
-      # workflow's permissions at startup even for jobs that skip, so the
-      # caller must grant them (startup_failure otherwise). Neither job runs
-      # for RC Gate's events, and the mint refuses non-main-push tokens.
+      # rrc-verify, split-strict-alert and repo contents cache seed jobs;
+      # GitHub validates a called workflow's permissions at startup even for
+      # jobs that skip, so the caller must grant them (startup_failure
+      # otherwise). split-strict-alert (schedule only) and the seed job
+      # (main pushes only; the mint refuses other tokens) never run for RC
+      # Gate's events; rrc-verify runs on its dispatch when the repo contents
+      # cache is on.
       issues: write
       id-token: write
     uses: ./.github/workflows/bazel.yml

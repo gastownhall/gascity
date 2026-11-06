@@ -141,7 +141,7 @@ func Phase1Profiles() []Profile {
 			// no relay. Recorded under gc's tmux against a local mock API:
 			// ST-terminated reports.
 			ProgramStatus: ProgramStatusExpectation{
-				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "codex"},
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "codex", HoldMidTurn: true},
 				Verified:                 "codex-cli 0.165.0",
 				Emission: ProgramStatusEmission{
 					FirstReport: []string{"report state=idle:app=codex"},

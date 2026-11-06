@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -32,6 +34,8 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // The O0 shadow ops on /submit and /messages (DES-O0API §6, §15 OJ-2b).
@@ -177,6 +181,11 @@ func (r *rebuiltOverState) SessionsBeadStore() beads.SessionStore {
 	return beads.SessionStore{Store: r.store}
 }
 func (r *rebuiltOverState) CityBeadStore() beads.Store { return r.store }
+
+func (r *rebuiltOverState) Stores() storeref.Stores {
+	return mirrorAccessorStores(r, slices.Collect(maps.Keys(r.stores)))
+}
+
 func (r *rebuiltOverState) EventProvider() events.Provider {
 	if r.ev != nil {
 		return r.ev
@@ -363,7 +372,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 			setup: func(t *testing.T, e *opsEnv) session.Info {
 				e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 				e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-				info, err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
+				info, err := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
 					Template: "helper", Title: "Off interrupt", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"},
 				})
 				if err != nil {
@@ -566,7 +575,7 @@ func TestSessionContentOpsAutoOneKeyIsOneOpAcrossPathsAndSpellings(t *testing.T)
 func TestSessionContentOpsAutoReplayDoesNotApplyResume(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Resume")
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sp, session.WithCityPath(e.fs.cityPath))
 	if err := mgr.Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -779,7 +788,7 @@ func TestSessionContentOpsAutoMessagesInFlightReplay(t *testing.T) {
 		t.Fatalf("in-flight replay = %d %+v, want the first answer %+v", rec.Code, second, first)
 	}
 	release()
-	srv := httptest.NewServer(e.h)
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(e.h))
 	defer srv.Close()
 	c := NewCityScopedClient(srv.URL, e.fs.CityName())
 	ctx, cancel := context.WithTimeout(context.Background(), testEventTimeout)
@@ -1887,7 +1896,7 @@ func TestSessionSubmitInterruptNowReportsTheTurnFence(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Fenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -2848,7 +2857,7 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 			var gotKey atomic.Value
 			gotKey.Store("")
 			var streamed atomic.Bool
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ts := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodPost && r.URL.Path == "/v0/city/alpha/session/sess-1/submit":
 					gotKey.Store(r.Header.Get("Idempotency-Key"))
@@ -2863,7 +2872,7 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
 				}
-			}))
+			})))
 			defer ts.Close()
 			c := NewCityScopedClient(ts.URL, "alpha")
 			var (
@@ -2907,7 +2916,7 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Client")
-	srv := httptest.NewServer(e.h)
+	srv := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(e.h))
 	defer srv.Close()
 	c := NewCityScopedClient(srv.URL, e.fs.CityName())
 	first, err := c.SubmitSessionWithKey(info.ID, "via client", session.SubmitIntentFollowUp, "client-key")
@@ -2916,7 +2925,7 @@ func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	}
 
 	e.restart(t)
-	srv2 := httptest.NewServer(e.h)
+	srv2 := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(e.h))
 	defer srv2.Close()
 	c2 := NewCityScopedClient(srv2.URL, e.fs.CityName())
 	replayed, err := c2.SubmitSessionWithKey(info.ID, "via client", session.SubmitIntentFollowUp, "client-key")
@@ -3195,7 +3204,7 @@ func TestSessionContentOpsUnfencedInterruptReachesTheOp(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Unfenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -3234,7 +3243,7 @@ func TestSessionContentOpsMessagesOutcomes(t *testing.T) {
 	t.Run("queued", func(t *testing.T) {
 		e := newOpsEnv(t, "auto")
 		info := e.session(t, "Held")
-		if err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
 			t.Fatal(err)
 		}
 		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "", `{"message":"later"}`).Body)
@@ -3389,7 +3398,7 @@ func newT3OpsEnv(t *testing.T, mode string) (*opsEnv, session.Info) {
 	t.Helper()
 	e := newOpsEnv(t, mode)
 	e.fs.sessionProvider = runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: e.fs.sp})
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(e.fs.cityBeadStore), e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "T3", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -28,8 +29,8 @@ func TestSourceWorkflowStoresLeadsWithRelocatedGraphStore(t *testing.T) {
 	s := &Server{state: state}
 
 	stores := s.sourceWorkflowStores()
-	if len(stores) != 3 {
-		t.Fatalf("sourceWorkflowStores() returned %d entries, want graph + city + rig", len(stores))
+	if len(stores) != 4 {
+		t.Fatalf("sourceWorkflowStores() returned %d entries, want graph + city + the BeadStores legs (the city's E4 duplicate and the rig)", len(stores))
 	}
 	if stores[0].Store != graph {
 		t.Fatalf("stores[0].Store = %p, want the relocated graph store %p (graph-first)", stores[0].Store, graph)
@@ -40,9 +41,10 @@ func TestSourceWorkflowStoresLeadsWithRelocatedGraphStore(t *testing.T) {
 	if !stores[0].Strict {
 		t.Fatal("the graph leg is not strict; a fault on the store that holds the answer would degrade to a warning")
 	}
-	if stores[1].StoreRef != "city:bright-lights" || stores[2].StoreRef != "rig:alpha" {
-		t.Fatalf("work legs = %q, %q; want city:bright-lights then rig:alpha", stores[1].StoreRef, stores[2].StoreRef)
+	if stores[1].StoreRef != "city:bright-lights" {
+		t.Fatalf("stores[1].StoreRef = %q, want city:bright-lights", stores[1].StoreRef)
 	}
+	assertSourceWorkflowBeadStoresLegs(t, state, stores[2:])
 	for _, info := range stores[1:] {
 		if info.Strict {
 			t.Fatalf("work leg %q is strict; only the selected source store and the graph binding are", info.StoreRef)
@@ -65,9 +67,13 @@ func TestSourceWorkflowStoresOmitsGraphLegOnSingleStoreCity(t *testing.T) {
 		t.Fatal("fixture is not a single-store city")
 	}
 	stores := s.sourceWorkflowStores()
-	if len(stores) != 2 {
-		t.Fatalf("sourceWorkflowStores() returned %d entries, want exactly the city and rig work legs", len(stores))
+	if len(stores) != 3 {
+		t.Fatalf("sourceWorkflowStores() returned %d entries, want exactly the city leg and the BeadStores legs (the city's E4 duplicate and the rig)", len(stores))
 	}
+	if stores[0].StoreRef != "city:bright-lights" {
+		t.Fatalf("stores[0].StoreRef = %q, want city:bright-lights", stores[0].StoreRef)
+	}
+	assertSourceWorkflowBeadStoresLegs(t, state, stores[1:])
 	for _, info := range stores {
 		if strings.HasPrefix(info.StoreRef, sourceworkflow.GraphStoreRefPrefix+":") {
 			t.Fatalf("single-store city enumerated a graph leg %q; the work store would be scanned twice", info.StoreRef)
@@ -183,5 +189,29 @@ title = "Work"
 	}
 	if len(leaked) != 0 {
 		t.Fatalf("city store holds %d beads, want none (no root minted outside the routing store): %+v", len(leaked), leaked)
+	}
+}
+
+// assertSourceWorkflowBeadStoresLegs checks the legs sourceWorkflowStores takes
+// from BeadStores, in any order (it ranges over the map): one per entry, so
+// the city appears again as rig:<city>. That is E4 in the typed-stores T6
+// plan: production's BeadStores carries the city under its name, so the city
+// store is scanned twice, once as city:<name> and once as rig:<name>. T7
+// rewrites these legs and drops the duplicate; this pin flips then.
+func assertSourceWorkflowBeadStoresLegs(t *testing.T, state *fakeState, legs []sling.SourceWorkflowStore) {
+	t.Helper()
+	want := map[string]beads.Store{
+		"rig:" + state.cityName: state.CityBeadStore(),
+		"rig:alpha":             state.BeadStore("alpha"),
+	}
+	if len(legs) != len(want) {
+		t.Fatalf("BeadStores legs = %d, want %d", len(legs), len(want))
+	}
+	for _, leg := range legs {
+		store, ok := want[leg.StoreRef]
+		if !ok || leg.Store != store {
+			t.Fatalf("BeadStores leg %q over %p, want one of %v", leg.StoreRef, leg.Store, want)
+		}
+		delete(want, leg.StoreRef)
 	}
 }

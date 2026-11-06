@@ -267,7 +267,8 @@ func (a *convergenceStoreAdapter) CloseBead(id, reason string) error {
 // are walked, controller-owned rows are skipped, and each closed bead is
 // stamped gc.outcome=skipped with reason as its close_reason.
 func (a *convergenceStoreAdapter) CloseOpenDescendants(id, reason string) error {
-	_, err := molecule.CloseSubtreeWithMetadataExcept(a.store, id, map[string]string{
+	// a.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	_, err := molecule.CloseSubtreeWithMetadataExcept(beads.GraphMolecule(beads.GraphStore{Store: a.store}), id, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              reason,
 	}, func(b beads.Bead) bool { return b.ID == id })
@@ -396,7 +397,7 @@ func (a *convergenceStoreAdapter) pourWisp(parentID, formulaName, idempotencyKey
 			}
 		}
 	}
-	result, err := molecule.Instantiate(context.Background(), target, recipe, opts)
+	result, err := molecule.Instantiate(context.Background(), moleculeClassTarget(recipe, target, target), recipe, opts)
 	if err != nil {
 		return "", err
 	}

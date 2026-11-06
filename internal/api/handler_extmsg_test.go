@@ -88,7 +88,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	}); err != nil {
 		t.Fatalf("EnsureMembership(peer): %v", err)
 	}
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named peer should not be materialized before outbound publish")
 	}
 
@@ -121,7 +121,7 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	}
 	srv.waitForBackground()
 
-	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	peerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -180,13 +180,13 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("EnsureMembership(sender): %v", err)
 	}
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("named sender should not be materialized before notify")
 	}
 
 	srv.extmsgNotifyMembers(context.Background(), ref, "worker", "agent", "self update", "myrig/worker", "")
 
-	if _, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil {
+	if _, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker"); err == nil {
 		t.Fatal("excluded named sender was materialized")
 	}
 	for _, call := range fs.sp.Calls {
@@ -336,7 +336,7 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	}
 	srv.waitForBackground()
 
-	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
+	peerID, err := session.ResolveSessionID(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}

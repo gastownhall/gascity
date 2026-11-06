@@ -142,8 +142,8 @@ func TestCityStoresAgreeWithTheLegacyResolver(t *testing.T) {
 }
 
 // TestControllerStoresFollowTheSwappedStores pins the epoch: a reload that
-// swaps the city store is visible to the next accessor read, and an unchanged
-// state hands back the same minted Stores. The expected stores go through the
+// swaps the city store, or only the rig stores, is visible to the next
+// accessor read, and an unchanged state hands back the same minted Stores. The expected stores go through the
 // split-strict views, which are identity outside the gate.
 func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	first := beads.NewMemStore()
@@ -163,6 +163,29 @@ func TestControllerStoresFollowTheSwappedStores(t *testing.T) {
 	cs.mu.Unlock()
 	if got := cs.GraphBeadStore().Store; got != splitStrictClassView(second) {
 		t.Errorf("graph after the swap = %p, want the new city store %p", got, second)
+	}
+
+	// A reload that swaps only the rig stores is visible too: the epoch keys
+	// on the rig set's generation, not just the city store.
+	rig := beads.NewMemStore()
+	cs.mu.Lock()
+	cs.beadStores = map[string]beads.Store{"r": rig}
+	cs.rigStoresGen++
+	cs.mu.Unlock()
+	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(rig) {
+		t.Errorf("rig r after the rig swap = %v, %v; want the new rig store %p", got.Store, ok, rig)
+	}
+	epoch = cs.stores.current.Load()
+	_ = cs.Stores()
+	if cs.stores.current.Load() != epoch {
+		t.Error("an unchanged rig set re-minted its Stores")
+	}
+	cs.mu.Lock()
+	cs.beadStores = map[string]beads.Store{}
+	cs.rigStoresGen++
+	cs.mu.Unlock()
+	if _, ok := cs.Stores().Rig("r"); ok {
+		t.Error("a rig the reload dropped is still served")
 	}
 }
 
@@ -238,8 +261,8 @@ func TestStoresEpochRemintsAfterTheRealControllerCache(t *testing.T) {
 }
 
 // TestStoresReadersSeeTheFinalEpoch (review probe P1): readers race reload
-// swaps under -race; once the swaps stop, every accessor answers the final
-// stores.
+// swaps of the city and rig stores under -race; once the swaps stop, every
+// accessor answers the final stores.
 func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 	binding := beads.NewMemStore()
 	graphOnly := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: binding}, binding: "infra"}
@@ -262,19 +285,28 @@ func TestStoresReadersSeeTheFinalEpoch(t *testing.T) {
 				_ = cs.SessionsBeadStore()
 				_ = cs.GraphBeadStore()
 				_ = cs.cityWorkStore()
+				_, _ = cs.Stores().Rig("r")
 			}
 		}()
 	}
-	var last beads.Store
-	for range 3000 {
+	var last, lastRig beads.Store
+	for i := range 3000 {
 		city := beads.NewMemStore()
 		cs.mu.Lock()
 		cs.cityBeadStore = city
+		if i%3 == 0 {
+			lastRig = beads.NewMemStore()
+			cs.beadStores = map[string]beads.Store{"r": lastRig}
+			cs.rigStoresGen++
+		}
 		cs.mu.Unlock()
 		last = city
 	}
 	close(stop)
 	wg.Wait()
+	if got, ok := cs.Stores().Rig("r"); !ok || got.Store != splitStrictWorkView(lastRig) {
+		t.Errorf("rig after the swaps = %v, %v; want the final rig store %p", got.Store, ok, lastRig)
+	}
 	if got := cs.SessionsBeadStore().Store; got != splitStrictClassView(last) {
 		t.Errorf("sessions after the swaps = %p, want the final city store %p", got, last)
 	}
@@ -429,7 +461,10 @@ func TestCLIMailStoreIsTheResolvedMessagingStore(t *testing.T) {
 			if got := cliMailStore(work, nil, cityPath).Store; resolvedKey(got) != resolvedKey(want) {
 				t.Errorf("cliMailStore wraps %v, resolveMailMessagesStore %v", resolvedKey(got), resolvedKey(want))
 			}
-			wantStore := work
+			// Unsplit, the messaging class falls to the scope store: the
+			// store itself in production, its class view under the
+			// split-strict gate (identity when the gate is off).
+			wantStore := splitStrictClassView(work)
 			if name == "split" {
 				wantStore = binding
 			}

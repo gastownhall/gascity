@@ -428,7 +428,7 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			}
-			if cached, ok := stores[rn].(cachedListStore); ok {
+			if cached, ok := beads.As[beads.CachedLister](stores[rn]); ok {
 				matches, cacheOK := cached.CachedList(query)
 				if cacheOK {
 					if len(matches) > 0 {

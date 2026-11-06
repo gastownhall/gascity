@@ -47,6 +47,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementProgramStatusReadiness              RequirementCode = "WC-PSTAT-006"
 	RequirementProgramStatusShadowIdentical        RequirementCode = "WC-PSTAT-007"
 	RequirementProgramStatusTranscriptTurn         RequirementCode = "WC-PSTAT-008"
+	RequirementProgramStatusHoldMidTurn            RequirementCode = "WC-PSTAT-009"
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
 	RequirementInferenceTemplateStartup            RequirementCode = "WI-START-002"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
@@ -184,6 +185,11 @@ func ProgramStatusCatalog() []Requirement {
 			Code:        RequirementProgramStatusTranscriptTurn,
 			Group:       "program_status",
 			Description: "A record never ends a transcript turn whose start is newer than the record's edge.",
+		},
+		{
+			Code:        RequirementProgramStatusHoldMidTurn,
+			Group:       "program_status",
+			Description: "A profile declaring the mid-turn hold takes every wait-idle, default and immediate nudge exactly as the switch off does, whatever its record says, under shadow and on alike; under on, a fresh read of its record reports a live working record as a typing hold (the one a starved queue's bypass is vetoed on), and a blocked or boundary record as none.",
 		},
 	}
 }
