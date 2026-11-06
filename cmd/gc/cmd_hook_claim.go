@@ -267,8 +267,10 @@ type hookClaimOps struct {
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
 	// EmitClaimFailed publishes a bead.claim_failed event when a served
-	// candidate is skipped because its claim write failed: the controller's
-	// claim-loop guard counts these (claim_loop_guard.go). Best-effort.
+	// candidate is skipped because its claim write failed, or because it is a
+	// workflow root whose steps other sessions hold
+	// (hookClaimForeignWorkflowHold): the controller's claim-loop guard counts
+	// these (claim_loop_guard.go). Best-effort.
 	EmitClaimFailed func(beadID string, opts hookClaimOptions, err error)
 	// ResolveWorkBranch returns the git branch of the worker's worktree, stamped
 	// onto the bead as gc.work_branch at claim time. It is handed a tree that
@@ -1406,6 +1408,11 @@ func hookClaimForeignWorkflowHold(ctx context.Context, candidate beads.Bead, opt
 	}
 	slices.Sort(held)
 	fmt.Fprintf(stderr, "gc hook --claim: withholding workflow root %s: member steps %s are in_progress under other sessions\n", candidate.ID, strings.Join(held, ", ")) //nolint:errcheck
+	// The controller keeps counting the root as routed demand while its steps
+	// run, so each seat it spawns for the root would drain here. Reporting the
+	// withhold lets the claim-loop guard stop that: the text names no member
+	// and no count, so seats that saw different members repeat one error.
+	ops.emitClaimFailed(candidate.ID, opts, fmt.Errorf("workflow root %s withheld: member steps in_progress under other sessions", candidate.ID))
 	return true
 }
 
