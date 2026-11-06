@@ -40,6 +40,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/bdflags:bdflags_test":                            1,
 	"//internal/beads/exec:exec_test":                            1,
 	"//internal/beads:beads_test":                                11,
+	"//internal/bootstrap/packs/core:core_test":                  1,
 	"//internal/credentialprovider:credentialprovider_test":      1,
 	"//internal/orders:orders_test":                              1,
 	"//internal/processgroup:processgroup_test":                  1,
@@ -245,7 +246,11 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // Raised to 86 on 2026-10-31 for //cmd/gc-osc7501:gc-osc7501_test (the
 // OSC 7501 companion against a scratch tmux, about 4 s), which runs inside
 // the second wave without lengthening its tail.
-const integrationPackagesTwoWaveExceptionPinned = 86
+// Raised to 87 on 2026-11-02 for //internal/bootstrap/packs/core:core_test,
+// which joined the suite with the core pack's first integration-tagged file
+// (the nudge-on-route order proof). It is one unsharded action that runs
+// inside the second wave without lengthening its tail.
+const integrationPackagesTwoWaveExceptionPinned = 87
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may

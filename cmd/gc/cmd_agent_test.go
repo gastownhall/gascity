@@ -20,6 +20,45 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
+func TestAgentListRouteOwnership(t *testing.T) {
+	zero, one, three := 0, 1, 3
+	for _, tc := range []struct {
+		name  string
+		agent config.Agent
+		named bool
+		want  bool
+	}{
+		{"named singleton", config.Agent{Name: "worker", MaxActiveSessions: &one}, true, false},
+		{"named unlimited", config.Agent{Name: "worker"}, true, false},
+		{"singleton", config.Agent{Name: "worker", MaxActiveSessions: &one}, false, false},
+		{"bounded pool", config.Agent{Name: "worker", MaxActiveSessions: &three}, false, true},
+		{"unlimited pool", config.Agent{Name: "worker"}, false, true},
+		{"disabled", config.Agent{Name: "worker", MaxActiveSessions: &zero}, false, false},
+		{"singleton pool", config.Agent{Name: "worker", MinActiveSessions: &zero, MaxActiveSessions: &one}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{tc.agent}}
+			if tc.named {
+				cfg.NamedSessions = []config.NamedSession{{Template: "worker"}}
+			}
+			items := agentListItems(cfg, config.QueryTopology{}, "/city", suspensionstate.State{})
+			data, err := json.Marshal(items)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rows []struct {
+				RoutesToPool *bool `json:"routes_to_pool"`
+			}
+			if err := json.Unmarshal(data, &rows); err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].RoutesToPool == nil || *rows[0].RoutesToPool != tc.want {
+				t.Fatalf("agent output %s, want routes_to_pool=%v", data, tc.want)
+			}
+		})
+	}
+}
+
 func TestDoAgentListJSON(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
