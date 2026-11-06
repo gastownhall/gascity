@@ -99,6 +99,37 @@ func (s hookCurrentFailingGetStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// hookCurrentSplitContext is the verified read context over a splitEnv city:
+// the session front door over the city's real sessions-class front door, and
+// the work legs a controller of that city would mint (the fixture registers
+// its routes, so testWorkLegs resolves the same residency production does).
+func hookCurrentSplitContext(t *testing.T, e splitEnv) hookCurrentContext {
+	t.Helper()
+	return hookCurrentContext{
+		sessFront: session.NewStore(beads.SessionStore{Store: e.sessionsStore()}),
+		cfg:       e.cfg,
+		legs:      testWorkLegs(e.cityPath, e.cfg, e.store, nil),
+	}
+}
+
+// hookCurrentSeedFrozenLedgerCopy plants a pre-migration copy of id under the
+// work ledger's policy fence, the way `gc storage migrate` leaves one behind:
+// a forced foreign-id create the ledger's own policy would refuse.
+func hookCurrentSeedFrozenLedgerCopy(t *testing.T, e splitEnv, row beads.Bead) {
+	t.Helper()
+	ledger := e.work
+	if policy, wrapped := ledger.(*beadPolicyStore); wrapped {
+		ledger = policy.Store // the forced create sits below the policy fence, as gc storage migrate's does
+	}
+	forcer, ok := ledger.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("the work store %T cannot model a retained pre-migration copy", e.work)
+	}
+	if _, err := forcer.CreateWithForeignID(row); err != nil {
+		t.Fatalf("seeding the stale ledger copy: %v", err)
+	}
+}
+
 // TestDoHookCurrentPrintsTheStampedClaim is the primary read-back test: a
 // stamp the live ledger still backs — the row is in progress, held by this
 // session, and assigned to it — prints exactly, and --id-only prints the bare
@@ -448,6 +479,117 @@ func TestDoHookCurrentAbortsTheScanWhenALaterEntryFailsToRead(t *testing.T) {
 	if !strings.Contains(stderr.String(), "gcg-bad") {
 		t.Errorf("stderr = %q, want the unreadable entry named", stderr.String())
 	}
+}
+
+// TestDoHookCurrentPrintsARelocatedClaimThroughItsBinding runs the verified
+// print over both topologies (AC-5): the claimed step is graph class, so a
+// split city keeps it in the class binding, and the binding's answer decides.
+// On the split city the work ledger still holds the frozen pre-migration copy
+// `gc storage migrate` left behind, marked closed — it must not be consulted,
+// and the binding's live in_progress row prints through.
+func TestDoHookCurrentPrintsARelocatedClaimThroughItsBinding(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		sess, err := e.sessionsStore().Create(beads.Bead{
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"state":        string(session.StateActive),
+				"session_name": "hc-worker-1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("creating the session bead: %v", err)
+		}
+		step := mintDurableGraphBead(t, e, "routed step", "")
+		if err := e.graphStore().Update(step.ID, beads.UpdateOpts{
+			Status:   ptrString("in_progress"),
+			Assignee: ptrString(sess.ID),
+			Metadata: map[string]string{beadmeta.SessionIDMetadataKey: sess.ID},
+		}); err != nil {
+			t.Fatalf("claiming the step: %v", err)
+		}
+		// The stamp alone drives both directions here: AC-5's lens is which
+		// store answers for the claim row, not the cell (whose recovery is
+		// covered in the single-store suite above). SetCurrentClaim is the
+		// claim path's own marker write and needs no conditional writer.
+		front := session.NewStore(beads.SessionStore{Store: e.sessionsStore()})
+		if ok, err := front.SetCurrentClaim(sess.ID, step.ID); err != nil || !ok {
+			t.Fatalf("stamping the claim: ok=%v err=%v", ok, err)
+		}
+		if e.split {
+			hookCurrentSeedFrozenLedgerCopy(t, e, beads.Bead{ID: step.ID, Title: "frozen copy", Type: "task", Status: "closed"})
+		}
+
+		ctx := hookCurrentSplitContext(t, e)
+		var stdout, stderr bytes.Buffer
+		if code := doHookCurrent(ctx, sess.ID, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("split=%v: doHookCurrent = %d, want 0; stderr=%s", e.split, code, stderr.String())
+		}
+		if got := stdout.String(); got != step.ID+"\n" {
+			t.Fatalf("split=%v: stdout = %q, want the binding's live claim %s", e.split, got, step.ID)
+		}
+	})
+}
+
+// TestDoHookCurrentLetsAFrozenCopyEstablishNothing is AC-5's other direction:
+// the binding's copy has moved on (closed), while the work ledger's frozen
+// pre-migration copy still carries the claimed shape. A copy the migration
+// left behind cannot establish ownership, so the command refuses on the
+// binding's verdict — the frozen row is never an answer.
+func TestDoHookCurrentLetsAFrozenCopyEstablishNothing(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		sess, err := e.sessionsStore().Create(beads.Bead{
+			Type:   session.BeadType,
+			Title:  "worker",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"state":        string(session.StateActive),
+				"session_name": "hc-worker-1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("creating the session bead: %v", err)
+		}
+		step := mintDurableGraphBead(t, e, "routed step", "")
+		if err := e.graphStore().Update(step.ID, beads.UpdateOpts{
+			Status:   ptrString("closed"),
+			Assignee: ptrString(sess.ID),
+			Metadata: map[string]string{beadmeta.SessionIDMetadataKey: sess.ID},
+		}); err != nil {
+			t.Fatalf("closing the step in its owner: %v", err)
+		}
+		// The stamp alone drives both directions here: AC-5's lens is which
+		// store answers for the claim row, not the cell (whose recovery is
+		// covered in the single-store suite above). SetCurrentClaim is the
+		// claim path's own marker write and needs no conditional writer.
+		front := session.NewStore(beads.SessionStore{Store: e.sessionsStore()})
+		if ok, err := front.SetCurrentClaim(sess.ID, step.ID); err != nil || !ok {
+			t.Fatalf("stamping the claim: ok=%v err=%v", ok, err)
+		}
+		if e.split {
+			// The frozen copy still carries the claimed shape; only its owner
+			// has moved on.
+			hookCurrentSeedFrozenLedgerCopy(t, e, beads.Bead{
+				ID: step.ID, Title: "frozen copy", Type: "task", Status: "in_progress",
+				Assignee:  sess.ID,
+				Metadata:  map[string]string{beadmeta.SessionIDMetadataKey: sess.ID},
+				Ephemeral: false,
+			})
+		}
+
+		ctx := hookCurrentSplitContext(t, e)
+		var stdout, stderr bytes.Buffer
+		if code := doHookCurrent(ctx, sess.ID, true, &stdout, &stderr); code != 1 {
+			t.Fatalf("split=%v: doHookCurrent = %d, want 1: the binding closed the claim", e.split, code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("split=%v: stdout = %q, want nothing printed from a frozen copy's shape", e.split, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "closed") {
+			t.Errorf("split=%v: stderr = %q, want the owner's closed verdict named", e.split, stderr.String())
+		}
+	})
 }
 
 // TestDoHookCurrentExitsOneOnAnUnreadableSession covers the store arm: an id the
