@@ -857,6 +857,31 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
 
+	// A workflow root's member steps live where the root lives, so the
+	// foreign-workflow hold fence's member listing follows the root's
+	// residence by the same claim-time read rule as every other read above:
+	// the work leg first, the binding only on its proven absence (and by
+	// reserved id, without the work read at all). Read against the work leg
+	// on a split city, a binding-resident root's members answer an empty
+	// success and the held root sails through the fence (ga-35b8a4).
+	ops.ListWorkflowMembers = func(ctx context.Context, dir string, env []string, rootID string) ([]beads.Bead, error) {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return nil, err
+		}
+		if resident {
+			members, err := route.class.List(beads.ListQuery{
+				Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+				TierMode: beads.TierBoth,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("listing members of workflow root %s: %w", rootID, err)
+			}
+			return members, nil
+		}
+		return base.ListWorkflowMembers(ctx, dir, env, rootID)
+	}
+
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
 	// Beads, not gc, is the authority on staleness (ga-7rj87d NFR3), so a
 	// binding whose engine exposes no stale-lease reclaim reclaims nothing:

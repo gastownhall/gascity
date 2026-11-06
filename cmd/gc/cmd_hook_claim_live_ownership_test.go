@@ -18,12 +18,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // hookClaimFailureNote is one bead.claim_failed emission a fixture captured:
@@ -575,6 +579,392 @@ func TestHookClaimLiveOwnershipScopeAndReads(t *testing.T) {
 		}
 		if f.lists != 0 {
 			t.Fatalf("member listings = %d, want 0: the existing-assignment tier resumes this session's own work", f.lists)
+		}
+	})
+}
+
+// workflowMembersCountedBinding counts the Lists and probes the routed member
+// listing makes against the binding, and can fault either, while forwarding
+// the compare-and-swap claim newHookClaimClassRoute requires (embedding the
+// Store interface alone hides it — the same trap claimCapableCountedStore
+// exists for).
+type workflowMembersCountedBinding struct {
+	beads.Store
+	lists   *int
+	claim   func(id, assignee string) (beads.Bead, bool, error)
+	getErr  func(id string) error
+	listErr error
+}
+
+func (s *workflowMembersCountedBinding) List(q beads.ListQuery) ([]beads.Bead, error) {
+	*s.lists++
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.Store.List(q)
+}
+
+func (s *workflowMembersCountedBinding) Get(id string) (beads.Bead, error) {
+	if s.getErr != nil {
+		if err := s.getErr(id); err != nil {
+			return beads.Bead{}, err
+		}
+	}
+	return s.Store.Get(id)
+}
+
+func (s *workflowMembersCountedBinding) Claim(id, assignee string) (beads.Bead, bool, error) {
+	return s.claim(id, assignee)
+}
+
+// workflowMembersSplitFixture is the split-city shape of the fence's member
+// read: a graph.v2 workflow root and its steps live in the relocated class
+// binding (a real SQLite leaf), while the ordinary work stays in a real
+// FileStore. The unrouted member listing reads the work leg, which answers an
+// empty success, and a root held through binding-resident steps sails through
+// the fence — the wrong-store empty the routed seam exists to close.
+type workflowMembersSplitFixture struct {
+	t        *testing.T
+	work     beads.Store
+	leaf     beads.Store
+	binding  *workflowMembersCountedBinding
+	route    *hookClaimClassRoute
+	claims   []string
+	failures []hookClaimFailureNote
+	lists    struct {
+		work    int
+		binding int
+	}
+	reads       int
+	workReadErr error
+}
+
+func newWorkflowMembersSplitFixture(t *testing.T) *workflowMembersSplitFixture {
+	t.Helper()
+	work, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), ".gc", "beads.json"), beads.WithFileStoreIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("opening the file work store: %v", err)
+	}
+	leaf := newSplitEnvClassLeaf(t)
+	f := &workflowMembersSplitFixture{t: t, work: work, leaf: leaf}
+	f.binding = &workflowMembersCountedBinding{
+		Store: leaf,
+		lists: &f.lists.binding,
+		claim: func(id, assignee string) (beads.Bead, bool, error) {
+			claimer, ok := leaf.(interface {
+				Claim(id, assignee string) (beads.Bead, bool, error)
+			})
+			if !ok {
+				return beads.Bead{}, false, fmt.Errorf("the split leaf %T has no compare-and-swap claim", leaf)
+			}
+			return claimer.Claim(id, assignee)
+		},
+	}
+	f.route = newClaimRouteFor(t, f.binding)
+	return f
+}
+
+func (f *workflowMembersSplitFixture) bindingRoot(title string) beads.Bead {
+	f.t.Helper()
+	root, err := f.leaf.Create(beads.Bead{Title: title, Type: "molecule", Metadata: map[string]string{
+		beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+		beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+		beadmeta.RoutedToMetadataKey:        "worker",
+	}})
+	if err != nil {
+		f.t.Fatalf("creating the binding root %q: %v", title, err)
+	}
+	return root
+}
+
+// bindingStep creates a member step of rootID that is in_progress under
+// assignee — the shape that holds its root.
+func (f *workflowMembersSplitFixture) bindingStep(rootID, assignee string) beads.Bead {
+	f.t.Helper()
+	step, err := f.leaf.Create(beads.Bead{Title: "member step", Type: "task", Assignee: assignee, Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: rootID,
+	}})
+	if err != nil {
+		f.t.Fatalf("creating the binding member of %s: %v", rootID, err)
+	}
+	inProgress := "in_progress"
+	if err := f.leaf.Update(step.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		f.t.Fatalf("binding step %s to in_progress: %v", step.ID, err)
+	}
+	return step
+}
+
+func (f *workflowMembersSplitFixture) workTask(title string) beads.Bead {
+	f.t.Helper()
+	task, err := f.work.Create(beads.Bead{Title: title, Type: "task", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey: "worker",
+	}})
+	if err != nil {
+		f.t.Fatalf("creating the work task %q: %v", title, err)
+	}
+	return task
+}
+
+// baseOps are the work-scope seams: the FileStore, the way the default seams
+// run against the agent's bd store.
+func (f *workflowMembersSplitFixture) baseOps() hookClaimOps {
+	return hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
+			f.claims = append(f.claims, id)
+			current, err := f.work.Get(id)
+			if err != nil {
+				return beads.Bead{}, false, err
+			}
+			if current.Status == "closed" || (current.Assignee != "" && current.Assignee != assignee) {
+				return current, false, nil
+			}
+			status := "in_progress"
+			if err := f.work.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+				return beads.Bead{}, false, err
+			}
+			claimed, err := f.work.Get(id)
+			return claimed, true, err
+		},
+		Release: func(_ context.Context, _ string, _ []string, id, assignee string) (bool, error) {
+			current, err := f.work.Get(id)
+			if err != nil || current.Status != "in_progress" || current.Assignee != assignee {
+				return false, err
+			}
+			status, none := "open", ""
+			return true, f.work.Update(id, beads.UpdateOpts{Status: &status, Assignee: &none})
+		},
+		ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+			f.reads++
+			if f.workReadErr != nil {
+				return beads.Bead{}, f.workReadErr
+			}
+			return f.work.Get(id)
+		},
+		WorkflowStore: func(context.Context, string, []string, string, string) beads.Store {
+			return f.work
+		},
+		ListWorkflowMembers: func(_ context.Context, _ string, _ []string, rootID string) ([]beads.Bead, error) {
+			f.lists.work++
+			return f.work.List(beads.ListQuery{
+				Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+				TierMode: beads.TierBoth,
+			})
+		},
+		EmitClaimFailed: func(beadID string, _ hookClaimOptions, err error) {
+			f.failures = append(f.failures, hookClaimFailureNote{beadID: beadID, err: err})
+		},
+		StoreRef:                 func(string) string { return "" }, // the tier driven directly skips applyDefaults
+		StampWorkMeta:            func(context.Context, string, []string, string, string, map[string]string) error { return nil },
+		StampSessionClaim:        func(string, string) error { return nil },
+		PublishRunMap:            func(string, string, ...string) error { return nil },
+		EmitExecutionStepStarted: func(beads.Bead, string, []string, string) {},
+		EmitClaimRejected:        func(string, string, string) {},
+		EnqueueContinuationNudge: func(string, string, io.Writer) {},
+		ResolveWorkBranch:        func(hookClaimWorkTree) string { return "" },
+		ResolveSessionWorkDir:    func(string) string { return "" },
+		DrainAck:                 func(io.Writer) error { return nil },
+	}
+}
+
+func (f *workflowMembersSplitFixture) routedOps() hookClaimOps {
+	return classRoutedHookClaimOps(f.baseOps(), f.route)
+}
+
+// TestClassRoutedWorkflowMembersFollowRootResidence pins the member listing on
+// a split city: a graph.v2 root and its steps live in the relocated binding,
+// so the listing must follow the root's residence by the claim-time read rule
+// — the work leg first, the binding only on its proven absence — and a
+// binding-held root must be withheld before any claim CAS runs.
+func TestClassRoutedWorkflowMembersFollowRootResidence(t *testing.T) {
+	listIDs := func(rows []beads.Bead) []string {
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+		}
+		return ids
+	}
+
+	t.Run("a binding-resident root lists its binding members", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		root := f.bindingRoot("run")
+		held := f.bindingStep(root.ID, "seat-x")
+		ops := f.routedOps()
+
+		members, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, root.ID)
+		if err != nil {
+			t.Fatalf("routed member listing of %s: %v", root.ID, err)
+		}
+		if got := strings.Join(listIDs(members), ","); !strings.Contains(","+got+",", ","+held.ID+",") {
+			t.Fatalf("members = %v, want the binding member %s", listIDs(members), held.ID)
+		}
+		if f.lists.binding != 1 || f.lists.work != 0 {
+			t.Fatalf("listings: binding=%d work=%d, want the binding's members read from the binding (1/0)", f.lists.binding, f.lists.work)
+		}
+		if f.reads != 0 {
+			t.Fatalf("work reads = %d, want 0: the binding-minted id is reserved, so no work read can answer it", f.reads)
+		}
+	})
+
+	t.Run("a work-resident root keeps the work leg", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		root := f.workTask("run")
+		if err := f.work.SetMetadata(root.ID, beadmeta.KindMetadataKey, beadmeta.KindWorkflow); err != nil {
+			t.Fatal(err)
+		}
+		held := f.workTask("member step")
+		if err := f.work.SetMetadata(held.ID, beadmeta.RootBeadIDMetadataKey, root.ID); err != nil {
+			t.Fatal(err)
+		}
+		status, holder := "in_progress", "seat-x"
+		if err := f.work.Update(held.ID, beads.UpdateOpts{Status: &status, Assignee: &holder}); err != nil {
+			t.Fatal(err)
+		}
+		ops := f.routedOps()
+
+		members, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, root.ID)
+		if err != nil {
+			t.Fatalf("routed member listing of %s: %v", root.ID, err)
+		}
+		if got := strings.Join(listIDs(members), ","); !strings.Contains(","+got+",", ","+held.ID+",") {
+			t.Fatalf("members = %v, want the work member %s", listIDs(members), held.ID)
+		}
+		if f.lists.work != 1 || f.lists.binding != 0 {
+			t.Fatalf("listings: work=%d binding=%d, want the work root's members read from the work leg (1/0)", f.lists.work, f.lists.binding)
+		}
+		if f.reads != 1 {
+			t.Fatalf("work reads = %d, want 1: the work leg decides before any binding probe", f.reads)
+		}
+	})
+
+	t.Run("co-residence keeps the work answer", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		root := f.workTask("run")
+		if err := f.work.SetMetadata(root.ID, beadmeta.KindMetadataKey, beadmeta.KindWorkflow); err != nil {
+			t.Fatal(err)
+		}
+		own := f.workTask("own member")
+		if err := f.work.SetMetadata(own.ID, beadmeta.RootBeadIDMetadataKey, root.ID); err != nil {
+			t.Fatal(err)
+		}
+		// The migration's copy of the root, and a foreign holder, live only
+		// in the binding.
+		foreigner, err := f.leaf.Create(beads.Bead{Title: "binding member", Type: "task", Assignee: "seat-x", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inProgress := "in_progress"
+		if err := f.leaf.Update(foreigner.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+			t.Fatal(err)
+		}
+		ops := f.routedOps()
+
+		members, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, root.ID)
+		if err != nil {
+			t.Fatalf("routed member listing of %s: %v", root.ID, err)
+		}
+		for _, row := range members {
+			if row.ID == foreigner.ID {
+				t.Fatalf("members = %v: the work store holds the root, so its answer is the answer; the binding's copy is not", listIDs(members))
+			}
+		}
+		if f.lists.work != 1 || f.lists.binding != 0 {
+			t.Fatalf("listings: work=%d binding=%d, want the work leg alone (1/0)", f.lists.work, f.lists.binding)
+		}
+	})
+
+	t.Run("an unknown root keeps the work leg without an error", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		ops := f.routedOps()
+
+		members, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, "gcg--9223372036855500000")
+		if err != nil {
+			t.Fatalf("routed member listing of an unknown root: %v", err)
+		}
+		if len(members) != 0 {
+			t.Fatalf("members = %v, want none", listIDs(members))
+		}
+		if f.lists.work != 1 {
+			t.Fatalf("work listings = %d, want 1: the base seam keeps the leg after the probes proved absence", f.lists.work)
+		}
+	})
+
+	t.Run("an operational work read keeps the work leg", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		f.workReadErr = errors.New("work leg unreadable")
+		ops := f.routedOps()
+
+		if _, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, "gc-work-9"); err != nil {
+			t.Fatalf("routed member listing: %v; an operational error is not proven absence and must not escalate", err)
+		}
+		if f.lists.work != 1 || f.lists.binding != 0 {
+			t.Fatalf("listings: work=%d binding=%d, want the work leg retained (1/0)", f.lists.work, f.lists.binding)
+		}
+	})
+
+	t.Run("a binding probe failure surfaces", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		f.binding.getErr = func(string) error { return errors.New("binding unreadable") }
+		ops := f.routedOps()
+
+		if _, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, "gcg--9223372036855500001"); err == nil {
+			t.Fatal("routed member listing of a reserved id succeeded; the binding probe's failure must surface, not read as absence")
+		}
+	})
+
+	t.Run("a binding listing failure surfaces", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		root := f.bindingRoot("run")
+		f.bindingStep(root.ID, "seat-x")
+		f.binding.listErr = errors.New("binding list failed")
+		ops := f.routedOps()
+
+		if _, err := ops.ListWorkflowMembers(context.Background(), "/work", nil, root.ID); err == nil {
+			t.Fatal("routed member listing succeeded; the binding listing's failure must surface")
+		}
+	})
+
+	// End to end: the whole eligible tier on a split city, candidates served
+	// in order — the binding-held root first, live work behind it. The root
+	// must be withheld WITHOUT a claim CAS, and the live work claimed.
+	t.Run("the claim flow withholds a binding-held root without a CAS", func(t *testing.T) {
+		f := newWorkflowMembersSplitFixture(t)
+		root := f.bindingRoot("do-work run")
+		f.bindingStep(root.ID, "seat-x")
+		f.bindingStep(root.ID, "seat-y")
+		live := f.workTask("live work")
+		rootRow, err := f.leaf.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ops := f.routedOps()
+
+		var stdout, stderr bytes.Buffer
+		res := claimFirstEligibleHookCandidate([]beads.Bead{rootRow, live}, hookClaimOptions{
+			Assignee:           "worker-1",
+			IdentityCandidates: []string{"worker-1"},
+			RouteTargets:       []string{"worker"},
+		}, ops, "/work", &stdout, &stderr)
+
+		if !res.terminal || res.code != 0 {
+			t.Fatalf("tier result = terminal:%v code:%d, want the live claim delivered; stderr=%s", res.terminal, res.code, stderr.String())
+		}
+		if len(f.claims) != 1 || f.claims[0] != live.ID {
+			t.Fatalf("claim CAS ran on %v, want only the live task %s; the held root must be withheld before any CAS", f.claims, live.ID)
+		}
+		got, err := f.leaf.Get(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "open" || got.Assignee != "" {
+			t.Fatalf("root = status %q assignee %q, want the served row untouched in the binding", got.Status, got.Assignee)
+		}
+		if !strings.Contains(stderr.String(), "withholding workflow root "+root.ID) {
+			t.Fatalf("stderr=%q, want the withhold named for %s", stderr.String(), root.ID)
+		}
+		if len(f.failures) != 1 || f.failures[0].beadID != root.ID {
+			t.Fatalf("claim failures = %+v, want one for the withheld root %s", f.failures, root.ID)
 		}
 	})
 }
