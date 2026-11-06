@@ -297,3 +297,170 @@ func TestHookClaimLiveOwnershipWithholdsAndMovesOn(t *testing.T) {
 		t.Fatalf("claim failures = %+v, want exactly one for the withheld root %s", f.failures, root.ID)
 	}
 }
+
+// TestHookClaimLiveOwnershipIdentityAndRecovery pins the holder rule — which
+// in_progress member counts as another session's, and which exemptions keep a
+// root claimable — and that the fence lifts the moment the member's state
+// changes.
+func TestHookClaimLiveOwnershipIdentityAndRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		assignee     string
+		provenance   map[string]string
+		wantWithhold bool
+	}{
+		// An assignee is the authoritative holder; provenance does not
+		// overrule it.
+		{name: "foreign assignee", assignee: "seat-x", wantWithhold: true},
+		{name: "foreign assignee beats own provenance", assignee: "seat-x", provenance: map[string]string{beadmeta.SessionNameMetadataKey: "worker-1"}, wantWithhold: true},
+		{name: "own assignee"},
+		// Provenance is a set: any alias resolving to this session exempts,
+		// the way a renamed session's stale name sits beside its durable id.
+		{name: "own provenance name", provenance: map[string]string{beadmeta.SessionNameMetadataKey: "worker-1"}},
+		{name: "own provenance id", provenance: map[string]string{beadmeta.SessionIDMetadataKey: "worker-1"}},
+		{name: "own id exempts a mixed set", provenance: map[string]string{
+			beadmeta.SessionNameMetadataKey: "seat-x",
+			beadmeta.SessionIDMetadataKey:   "worker-1",
+		}},
+		// Nonempty provenance matching nobody withholds: the seat that died
+		// mid-step left its stamps behind, and the row is its work to finish
+		// or release, not a fresh root for another seat to run whole.
+		{name: "dead-seat provenance", provenance: map[string]string{beadmeta.SessionNameMetadataKey: "seat-dead"}, wantWithhold: true},
+		{name: "foreign provenance id", provenance: map[string]string{beadmeta.SessionIDMetadataKey: "seat-x"}, wantWithhold: true},
+		// Nothing evidences foreign ownership: witholding here would strand
+		// every memberless root the fallback exists to serve.
+		{name: "no holder fields"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookLiveOwnershipFixture(t)
+			root := f.root("run", nil)
+			f.step(root.ID, "in_progress", tc.assignee, tc.provenance)
+			live := f.task("live work")
+			f.served = []string{root.ID, live.ID}
+
+			got := f.run()
+
+			if tc.wantWithhold {
+				if got.action != "work" || got.beadID != live.ID {
+					t.Fatalf("handed out action=%q bead %q, want the live task %s behind the held root; stderr=%s", got.action, got.beadID, live.ID, got.stderr)
+				}
+				f.wantNeverClaimed(root.ID)
+				f.wantUnchanged(root.ID)
+				return
+			}
+			if got.action != "work" || got.beadID != root.ID {
+				t.Fatalf("handed out action=%q bead %q, want the root %s itself; stderr=%s", got.action, got.beadID, root.ID, got.stderr)
+			}
+		})
+	}
+
+	t.Run("open and closed siblings never withhold", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", map[string]string{"gc.note": "siblings"})
+		f.step(root.ID, "open", "", nil)
+		done := f.step(root.ID, "", "seat-x", nil)
+		if err := f.store.Close(done.ID); err != nil {
+			t.Fatal(err)
+		}
+		f.served = []string{root.ID}
+
+		if got := f.run(); got.action != "work" || got.beadID != root.ID {
+			t.Fatalf("handed out action=%q bead %q, want the root %s; only in_progress members hold; stderr=%s", got.action, got.beadID, root.ID, got.stderr)
+		}
+	})
+
+	t.Run("mixed holders withhold", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		f.step(root.ID, "in_progress", "worker-1", nil)
+		f.step(root.ID, "in_progress", "seat-x", nil)
+		live := f.task("standby work")
+		f.served = []string{root.ID, live.ID}
+
+		if got := f.run(); got.beadID != live.ID {
+			t.Fatalf("handed out %q, want %s; one foreign in_progress member holds the whole root; stderr=%s", got.beadID, live.ID, got.stderr)
+		}
+		f.wantNeverClaimed(root.ID)
+	})
+
+	t.Run("a memberless root stays claimable", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		f.served = []string{root.ID}
+
+		if got := f.run(); got.action != "work" || got.beadID != root.ID {
+			t.Fatalf("handed out action=%q bead %q, want the memberless root %s; stderr=%s", got.action, got.beadID, root.ID, got.stderr)
+		}
+	})
+
+	// A root naming ITSELF as its root (the self-link some tools stamp) is
+	// not "linked" for the stop gate and must not be its own holder either.
+	t.Run("a self-link does not wedge or hold the root", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		if err := f.store.SetMetadata(root.ID, beadmeta.RootBeadIDMetadataKey, root.ID); err != nil {
+			t.Fatal(err)
+		}
+		f.served = []string{root.ID}
+
+		if got := f.run(); got.action != "work" || got.beadID != root.ID {
+			t.Fatalf("handed out action=%q bead %q, want the self-linked root %s; stderr=%s", got.action, got.beadID, root.ID, got.stderr)
+		}
+	})
+
+	t.Run("member status folds case and space", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		f.step(root.ID, " In_Progress ", "seat-x", nil)
+		live := f.task("live work")
+		f.served = []string{root.ID, live.ID}
+
+		if got := f.run(); got.beadID != live.ID {
+			t.Fatalf("handed out %q, want %s; a padded status is still in_progress; stderr=%s", got.beadID, live.ID, got.stderr)
+		}
+		f.wantNeverClaimed(root.ID)
+	})
+
+	t.Run("the fence lifts when the holder closes", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		holder := f.step(root.ID, "in_progress", "seat-x", nil)
+		live := f.task("live work")
+		f.served = []string{root.ID, live.ID}
+
+		if first := f.run(); first.beadID != live.ID {
+			t.Fatalf("first poll handed out %q, want %s; stderr=%s", first.beadID, live.ID, first.stderr)
+		}
+		if err := f.store.Close(holder.ID); err != nil {
+			t.Fatal(err)
+		}
+		// A fresh seat: the first one still holds the live task it was given,
+		// and its own adoption tier would hand that back before the root.
+		second := f.runAs("worker-2")
+		if second.action != "work" || second.beadID != root.ID {
+			t.Fatalf("second poll handed out action=%q bead %q, want the root %s once every holder settled; stderr=%s", second.action, second.beadID, root.ID, second.stderr)
+		}
+	})
+
+	t.Run("the fence lifts when the holder releases", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		holder := f.step(root.ID, "in_progress", "seat-x", nil)
+		live := f.task("live work")
+		f.served = []string{root.ID, live.ID}
+
+		if first := f.run(); first.beadID != live.ID {
+			t.Fatalf("first poll handed out %q, want %s; stderr=%s", first.beadID, live.ID, first.stderr)
+		}
+		status, none := "open", ""
+		if err := f.store.Update(holder.ID, beads.UpdateOpts{Status: &status, Assignee: &none}); err != nil {
+			t.Fatal(err)
+		}
+		// A fresh seat: the first one still holds the live task it was given,
+		// and its own adoption tier would hand that back before the root.
+		second := f.runAs("worker-2")
+		if second.action != "work" || second.beadID != root.ID {
+			t.Fatalf("second poll handed out action=%q bead %q, want the root %s once the holder released; stderr=%s", second.action, second.beadID, root.ID, second.stderr)
+		}
+	})
+}
