@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -180,4 +181,92 @@ func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ctxBoundActiveWorkClone is the context-bound clone ScopedStoreLike hands out
+// for a bd-CLI-backed store: an active-work read waits for its context to end,
+// as a killed bd child would, and reports when it started and when its
+// context ended.
+type ctxBoundActiveWorkClone struct {
+	beads.Store
+	ctx      context.Context
+	entered  chan struct{}
+	canceled chan struct{}
+	once     *atomic.Bool
+}
+
+func (c ctxBoundActiveWorkClone) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !isActiveWorkLookupQuery(query) {
+		return c.Store.List(query)
+	}
+	first := c.once.CompareAndSwap(false, true)
+	if first {
+		close(c.entered)
+	}
+	<-c.ctx.Done()
+	if first {
+		close(c.canceled)
+	}
+	return nil, c.ctx.Err()
+}
+
+// scopeActiveWorkReads makes fs hand out a ctxBoundActiveWorkClone for every
+// store and returns the channels closed when the first clone read starts and
+// when its context ends.
+func scopeActiveWorkReads(fs *fakeState) (entered, canceled <-chan struct{}) {
+	enteredCh, canceledCh := make(chan struct{}), make(chan struct{})
+	once := &atomic.Bool{}
+	fs.scopedStoreFn = func(ctx context.Context, existing beads.Store) (beads.Store, error) {
+		return ctxBoundActiveWorkClone{Store: existing, ctx: ctx, entered: enteredCh, canceled: canceledCh, once: once}, nil
+	}
+	return enteredCh, canceledCh
+}
+
+// TestActiveWorkLookupCancelsScopedStore: an uncached active-work read goes
+// through the context-bound clone ScopedStoreLike supplies, never the shared
+// store, and the clone's context ends when the lookup's window does or the
+// client goes away, which kills a bd child instead of abandoning it.
+func TestActiveWorkLookupCancelsScopedStore(t *testing.T) {
+	for _, route := range activeWorkListRoutes {
+		t.Run("deadline/"+route.name, func(t *testing.T) {
+			pinStatusStoreReadTimeout(t, 200*time.Millisecond)
+			shared := &faultyActiveWorkStore{Store: beads.NewMemStore()}
+			fs := newActiveWorkListState(t, shared)
+			_, canceled := scopeActiveWorkReads(fs)
+			srv := New(fs)
+
+			body, _ := getActiveWorkList(t, route.handler(t, fs, srv), httptest.NewRequest("GET", route.path(fs), nil))
+
+			awaitSignal(t, canceled, "canceling the scoped clone's read at the deadline")
+			if n := shared.reads.Load(); n != 0 {
+				t.Errorf("shared store active-work reads = %d, want 0", n)
+			}
+			if !body.Partial || !body.hasActiveWorkError("myrig") {
+				t.Errorf("partial = %v, partial_errors = %q; want partial naming the active-work read of myrig", body.Partial, body.PartialErrors)
+			}
+		})
+	}
+	t.Run("client cancel", func(t *testing.T) {
+		pinStatusStoreReadTimeout(t, time.Minute)
+		shared := &faultyActiveWorkStore{Store: beads.NewMemStore()}
+		fs := newActiveWorkListState(t, shared)
+		entered, canceled := scopeActiveWorkReads(fs)
+		srv := New(fs)
+		h := newTestCityHandlerWith(t, fs, srv)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil).WithContext(ctx))
+		}()
+
+		awaitSignal(t, entered, "an active-work read of the scoped clone")
+		cancel()
+		awaitSignal(t, canceled, "canceling the scoped clone's read with the request")
+		awaitSignal(t, done, "the handler returning after the client went away")
+		if n := shared.reads.Load(); n != 0 {
+			t.Errorf("shared store active-work reads = %d, want 0", n)
+		}
+	})
 }
