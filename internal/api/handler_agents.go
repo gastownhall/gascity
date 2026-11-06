@@ -431,32 +431,16 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *act
 					continue
 				}
 			}
-			// Check the shared deadline before initiating the read, so a
-			// later row cannot start a fresh uncached read once the budget
-			// is spent.
-			if err := lookup.ctx.Err(); err != nil {
+			// The shared deadline bounds the read, and the scoped-store
+			// bridge (statusListStoreWithTimeout) resolves a context-bound
+			// clone so cancellation reaches the backend where it can.
+			matches, err := statusListStoreWithTimeout(lookup.ctx, s.state, stores[rn], query)
+			if err != nil {
 				lookup.fail(err)
 				return ""
 			}
-			done := make(chan struct{})
-			var rows []beads.Bead
-			var listErr error
-			go func() {
-				rows, listErr = stores[rn].List(query)
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-lookup.ctx.Done():
-				lookup.fail(lookup.ctx.Err())
-				return ""
-			}
-			if listErr != nil {
-				lookup.fail(listErr)
-				return ""
-			}
-			if len(rows) > 0 {
-				return rows[0].ID
+			if len(matches) > 0 {
+				return matches[0].ID
 			}
 		}
 	}

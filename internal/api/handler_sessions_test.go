@@ -9274,3 +9274,170 @@ func TestListActiveWorkLookupHonorsRequestDeadline(t *testing.T) {
 		}
 	})
 }
+
+// ctxWaitingScopedStore is the context-bound clone ScopedStoreLike hands the
+// bounded active-work read: its List waits for the clone's context instead of
+// answering, and reports the cancellation it saw.
+type ctxWaitingScopedStore struct {
+	beads.Store
+	ctx      context.Context
+	canceled chan error
+}
+
+func (s ctxWaitingScopedStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
+	<-s.ctx.Done()
+	err := s.ctx.Err()
+	select {
+	case s.canceled <- err:
+	default:
+	}
+	return nil, err
+}
+
+// twoRigActiveWorkState builds a city with rigs a and z (a sorts first, so a
+// is the higher-priority store) whose stores the caller supplies.
+func twoRigActiveWorkState(t *testing.T, a, z beads.Store) *fakeState {
+	t.Helper()
+	fs := newFakeState(t)
+	fs.cfg.Rigs = []config.Rig{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "z", Path: "/tmp/z"},
+	}
+	fs.stores = map[string]beads.Store{"a": a, "z": z}
+	return fs
+}
+
+// TestActiveWorkLookupCancelsScopedStoreAndPreservesPriority: the bounded
+// active-work read goes through the context-bound clone ScopedStoreLike
+// supplies — never the shared store — and the clone's context is canceled at
+// the deadline or on client cancellation. A failed higher-priority store is
+// never treated as a miss: no later store's or identity's bead may win.
+func TestActiveWorkLookupCancelsScopedStoreAndPreservesPriority(t *testing.T) {
+	t.Run("scoped clone is canceled at the deadline, shared store is not read", func(t *testing.T) {
+		oldTimeout := statusStoreReadTimeout
+		statusStoreReadTimeout = 100 * time.Millisecond
+		t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+		fs := newFakeState(t)
+		shared := &listCountingStore{Store: beads.NewMemStore()}
+		fs.stores["myrig"] = shared
+		cloneCancelled := make(chan error, 1)
+		fs.scopedStoreFn = func(ctx context.Context, existing beads.Store) (beads.Store, error) {
+			return ctxWaitingScopedStore{Store: existing, ctx: ctx, canceled: cloneCancelled}, nil
+		}
+		srv := New(fs)
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		got := srv.findActiveBeadForAssigneesWithFreshness("myrig", lookup, "session-id")
+		if got != "" {
+			t.Fatalf("active bead = %q, want empty for a stalled work-store read", got)
+		}
+		if shared.listCalls != 0 {
+			t.Fatalf("shared store List calls = %d, want 0: the read must go through the scoped clone", shared.listCalls)
+		}
+		select {
+		case err := <-cloneCancelled:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("clone canceled with %v, want %v", err, context.DeadlineExceeded)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the scoped clone's context was never canceled")
+		}
+	})
+
+	t.Run("client cancellation cancels the scoped clone", func(t *testing.T) {
+		oldTimeout := statusStoreReadTimeout
+		statusStoreReadTimeout = time.Second
+		t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+		fs := newFakeState(t)
+		shared := &listCountingStore{Store: beads.NewMemStore()}
+		fs.stores["myrig"] = shared
+		cloneCancelled := make(chan error, 1)
+		fs.scopedStoreFn = func(ctx context.Context, existing beads.Store) (beads.Store, error) {
+			return ctxWaitingScopedStore{Store: existing, ctx: ctx, canceled: cloneCancelled}, nil
+		}
+		srv := New(fs)
+		parent, cancelParent := context.WithCancel(context.Background())
+		defer cancelParent()
+		lookup := newActiveWorkLookup(parent)
+		defer lookup.cancel()
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancelParent()
+		}()
+
+		done := make(chan string, 1)
+		go func() { done <- srv.findActiveBeadForAssigneesWithFreshness("myrig", lookup, "session-id") }()
+		select {
+		case got := <-done:
+			if got != "" {
+				t.Fatalf("active bead = %q, want empty for a canceled work-store read", got)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("the lookup did not return after the client canceled")
+		}
+		if shared.listCalls != 0 {
+			t.Fatalf("shared store List calls = %d, want 0: the read must go through the scoped clone", shared.listCalls)
+		}
+		select {
+		case err := <-cloneCancelled:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("clone canceled with %v, want %v", err, context.Canceled)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the scoped clone's context was never canceled")
+		}
+	})
+
+	t.Run("failed higher-priority store is not a miss", func(t *testing.T) {
+		fs := twoRigActiveWorkState(t,
+			activeBeadErrStore{Store: beads.NewMemStore(), err: errors.New("store a is down")},
+			&listCountingStore{Store: beads.NewMemStore()})
+		later := addActiveWork(t, fs.stores["z"], "session-id")
+		srv := New(fs)
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		got := srv.findActiveBeadForAssigneesWithFreshness("", lookup, "session-id")
+		if got != "" {
+			t.Fatalf("active bead = %q, want empty: the unread store a outranks z's %q", got, later)
+		}
+		if z, ok := fs.stores["z"].(*listCountingStore); !ok || z.listCalls != 0 {
+			t.Fatalf("store z was read after store a failed")
+		}
+	})
+
+	t.Run("lower-identity match does not win after a failed store", func(t *testing.T) {
+		fs := twoRigActiveWorkState(t,
+			activeBeadErrStore{Store: beads.NewMemStore(), err: errors.New("store a is down")},
+			&listCountingStore{Store: beads.NewMemStore()})
+		later := addActiveWork(t, fs.stores["z"], "template-identity")
+		srv := New(fs)
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		got := srv.findActiveBeadForAssigneesWithFreshness("", lookup, "session-id", "template-identity")
+		if got != "" {
+			t.Fatalf("active bead = %q, want empty: the unread store a outranks z's %q for every identity", got, later)
+		}
+	})
+
+	t.Run("partial rows are not promoted to a match", func(t *testing.T) {
+		backing := beads.NewMemStore()
+		row := addActiveWork(t, backing, "session-id")
+		fs := twoRigActiveWorkState(t,
+			activeBeadErrStore{Store: backing, err: &beads.PartialResultError{Op: "bd list", Err: errors.New("row 2 undecodable")}},
+			&listCountingStore{Store: beads.NewMemStore()})
+		later := addActiveWork(t, fs.stores["z"], "session-id")
+		srv := New(fs)
+		lookup := newActiveWorkLookup(context.Background())
+		defer lookup.cancel()
+
+		got := srv.findActiveBeadForAssigneesWithFreshness("", lookup, "session-id")
+		if got != "" {
+			t.Fatalf("active bead = %q, want empty: a partial result (%s in a, %s in z) cannot prove the newest match", got, row, later)
+		}
+	})
+}
