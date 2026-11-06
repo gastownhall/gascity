@@ -857,6 +857,46 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
 	}
 
+	// Purged-input retirement (#8729), the same two seams on the same
+	// residence rule as the done arm above: the probe reads the root from the
+	// store that holds it and the input convoy from the work leg, and the
+	// retirement lands in the binding a binding-resident workflow lives in.
+	// Unrouted, the probe opened the work-scope WorkflowStore, so a
+	// binding-resident step's root read as missing there and the probe
+	// errored into serving (the split-city shape of the treadmill) — or, for
+	// a root candidate that carries its convoy id, probed on and "retired"
+	// into a store holding none of the workflow, vacuously. The proof frame
+	// spans exactly the two halves the probe reads — the binding and the work
+	// leg — which for this workflow is the complete split.
+	ops.InputPurged = func(ctx context.Context, dir string, env []string, candidate beads.Bead) (hookInputPurgeVerdict, error) {
+		rootID := workflowRootIDForInputCheck(candidate)
+		if rootID == "" {
+			return base.InputPurged(ctx, dir, env, candidate)
+		}
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return hookInputPurgeVerdict{RootID: rootID}, err
+		}
+		if !resident {
+			return base.InputPurged(ctx, dir, env, candidate)
+		}
+		work := base.WorkflowStore(ctx, dir, env, rootID, "")
+		return workflowInputPurgedAcross(beads.HandlesFor(route.class), beads.HandlesFor(work), candidate, func() (inputPurgeFrame, error) {
+			return inputPurgeFrameForReaders(beads.HandlesFor(route.class).Live, beads.HandlesFor(work).Live), nil
+		})
+	}
+
+	ops.RetirePurgedWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+		if err != nil {
+			return err
+		}
+		if resident {
+			return retirePurgedWorkflow(beads.HandlesFor(route.class), rootID)
+		}
+		return base.RetirePurgedWorkflow(ctx, dir, env, rootID)
+	}
+
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.
 	// Beads, not gc, is the authority on staleness (ga-7rj87d NFR3), so a
 	// binding whose engine exposes no stale-lease reclaim reclaims nothing:
