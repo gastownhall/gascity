@@ -280,23 +280,6 @@ type ProgramStatusShadowProvider interface {
 	// unless the switch is shadow, and takes the decision's reading before it
 	// returns, so the caller's act on the decision cannot reach it.
 	ProgramStatusShadowIdleWait(name string, started, decidedAt time.Time, scrape ProgramVerdict)
-	// ProgramStatusShadowGo runs fn, a comparison that feeds no decision
-	// (observation, [ShadowObserveIdle]), off the caller's path where the
-	// leaf can, one at a time per session name and point: a call that
-	// finds one running for them, or no free slot, does not run fn.
-	ProgramStatusShadowGo(name string, point ProgramStatusPoint, fn func())
-	// ProgramStatusShadowIdleWaitAtNudge defers session name's idle wait
-	// decided outside the leaf (wait_for_idle: begun at started, decided at
-	// decidedAt with scrape) to the decision reading the session's next
-	// nudge takes before it types ([ShadowWaitForIdleAtNudge]). It reports
-	// false, deferring nothing, unless the leaf is shadowing and judges
-	// waits on its nudges' decision readings.
-	ProgramStatusShadowIdleWaitAtNudge(name string, started, decidedAt time.Time, scrape ProgramVerdict) bool
-	// ProgramStatusShadowSettleNudge judges every idle wait still deferred
-	// for session name on a reading taken now: the delivery that decided it
-	// never reached the leaf's typing, so nothing it typed can reach that
-	// reading. With none deferred it reads nothing.
-	ProgramStatusShadowSettleNudge(name string)
 }
 
 // ProgramStatusShadowFor reads session name's program status on the leaf
@@ -462,6 +445,42 @@ func ShadowCompareIdle(p Provider, name, sessionID, family string, point Program
 	NewShadowReading(p, name).Compare(sessionID, family, point, scrape, time.Now(), ProgramIdleVerdict)
 }
 
+// ShadowObserveIdle records the observation point (observation) for session
+// name under the shadow switch: scrape, the idle reading a session view
+// reports from its transcript, beside the record's idle verdict
+// ([ProgramIdleVerdict]) on s, the reading of the record the view took
+// itself. Under the on switch the view decides from that reading (the API's
+// activity, the worker's phase), so the record is judged on it, never on a
+// read of its own: the shadow measures what on would serve, including the
+// lag of the snapshot the reading may come from. The rule judges with the
+// runtime's last activity for the hold bound, at the clock read after it.
+// It records nothing unless the leaf serving the session is shadowing and s
+// was taken under the shadow switch, and never feeds the view.
+func ShadowObserveIdle(p Provider, name, sessionID, family string, scrape ProgramVerdict, s ProgramStatus) {
+	if p == nil || name == "" || s.Mode != ProgramStatusShadow {
+		return
+	}
+	leaf, _, _ := ResolveBackend(p, name)
+	sh, ok := leaf.(ProgramStatusShadowProvider)
+	if !ok {
+		return
+	}
+	sink := sh.ProgramStatusShadowSink()
+	if sink == nil {
+		return
+	}
+	last, err := p.GetLastActivity(name)
+	if err != nil {
+		last = time.Time{}
+	}
+	judged := time.Now()
+	sink(ProgramStatusComparison{
+		Session: name, SessionID: sessionID, Family: family, Point: ProgramPointObservation,
+		Scrape: scrape, Program: ProgramIdleVerdict(s, last, judged), Status: s,
+		HoldActivity: last, JudgedAt: judged,
+	})
+}
+
 // ShadowCompare records one comparison for session name at a decision
 // point outside the leaf, when the leaf serving it is shadowing: scrape is
 // the verdict today's code decided with, and rule maps the leaf's reading to
@@ -483,10 +502,10 @@ func ShadowCompare(p Provider, name, sessionID, family string, point ProgramStat
 }
 
 // ShadowCompareHold is [ShadowCompare] for a hold rule judged with the
-// runtime's last activity (claim and backstop holds, the ladder, queued
-// delivery, the drain reminder). The activity is read only while the leaf is
-// shadowing, and the comparison carries it with the time the rule judged at,
-// so the hold liveness recorded beside the verdict is the one the rule used.
+// runtime's last activity (claim and backstop holds, the ladder, the drain
+// reminder). The activity is read only while the leaf is shadowing, and the
+// comparison carries it with the time the rule judged at, so the hold
+// liveness recorded beside the verdict is the one the rule used.
 // An unreadable activity clock judges on the record's own age, which is what
 // a zero activity means to [ProgramStatus.HoldLive].
 //

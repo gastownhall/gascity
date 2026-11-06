@@ -6,15 +6,22 @@ import (
 	"time"
 )
 
-// Fresh decision readings under the shadow switch. A decision point judges
-// the record read fresh from the runtime with the decision it compares,
-// never the snapshot [ProgramStatusProvider] answers from: that snapshot
+// Fresh decision readings under the shadow switch. The points outside the
+// leaf whose decision the snapshot [ProgramStatusProvider] answers from can
+// lag (wait_idle_preread, queued_delivery, starved_bypass) judge the record
+// read fresh from the runtime with the decision they compare: that snapshot
 // lags the record by up to its TTL, and a reading that old judges a record
 // the program has already left (a turn ended, a dialog answered) as the
 // program's verdict. A decision's points share its one reading
 // ([ShadowReading]); the rule judges it with the runtime's last activity for
 // the hold bound, at the clock read after the reads, so no state the reading
-// shows can have been entered after the time it is judged at.
+// shows can have been entered after the time it is judged at. The other hold
+// points (execution_backstop, claim_nudge_hold, work_ladder, drain_reminder)
+// still judge the snapshot ([ShadowCompareHold]): the shadow traced no
+// misjudged reading to them. Observation judges the reading its view took
+// ([ShadowObserveIdle]): under the on switch the view decides from that
+// reading, lag included, so judging a fresh read would measure a view the on
+// switch never serves.
 
 // ShadowReading is one decision's record reading under the shadow switch:
 // the session's record read fresh from the runtime
@@ -116,48 +123,4 @@ func idleSnapshotVerdict(idle bool, err error) (ProgramVerdict, bool) {
 	default:
 		return ProgramVerdictBusy, true
 	}
-}
-
-// ShadowObserveIdle records the observation point (observation) for session
-// name under the shadow switch: scrape, the idle reading a session view
-// reports from its transcript, beside the record's idle verdict on a reading
-// taken fresh ([ShadowReading]). An observation decides nothing gc acts on,
-// and a view reads every running session, so the leaf takes the reading off
-// the caller's path, at once and one at a time per session
-// ([ProgramStatusShadowProvider.ProgramStatusShadowGo]). It reads nothing
-// unless the leaf is shadowing.
-func ShadowObserveIdle(p Provider, name, sessionID, family string, scrape ProgramVerdict) {
-	if p == nil || name == "" {
-		return
-	}
-	leaf, _, _ := ResolveBackend(p, name)
-	sh, ok := leaf.(ProgramStatusShadowProvider)
-	if !ok || sh.ProgramStatusShadowSink() == nil {
-		return
-	}
-	sh.ProgramStatusShadowGo(name, ProgramPointObservation, func() {
-		NewShadowReading(p, name).Compare(sessionID, family, ProgramPointObservation, scrape, time.Now(), ProgramIdleVerdict)
-	})
-}
-
-// ShadowWaitForIdleAtNudge records an idle wait for session name decided
-// outside the leaf (wait_for_idle) whose delivery goes through the leaf's
-// nudge next: begun at started, decided at decidedAt with scrape. A leaf
-// that judges such a wait on its nudge's decision reading takes it
-// ([ProgramStatusShadowProvider.ProgramStatusShadowIdleWaitAtNudge]), and
-// settle, called once the delivery returned, judges it on a reading taken
-// then if the delivery never reached the leaf's typing. A leaf that does not
-// has it recorded now ([ShadowWaitForIdle]), and settle does nothing. It
-// records nothing unless the leaf is shadowing, and never feeds the
-// decision.
-func ShadowWaitForIdleAtNudge(p Provider, name string, started, decidedAt time.Time, scrape ProgramVerdict) (settle func()) {
-	if p == nil || name == "" {
-		return func() {}
-	}
-	leaf, _, _ := ResolveBackend(p, name)
-	if sh, ok := leaf.(ProgramStatusShadowProvider); ok && sh.ProgramStatusShadowIdleWaitAtNudge(name, started, decidedAt, scrape) {
-		return func() { sh.ProgramStatusShadowSettleNudge(name) }
-	}
-	ShadowWaitForIdle(p, name, started, decidedAt, scrape)
-	return func() {}
 }

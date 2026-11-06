@@ -51,7 +51,10 @@ func TestQueuedDeliveryJudgesTheFreshRecord(t *testing.T) {
 
 // Kills an op-lane look whose idle gate (queued_delivery) and screen
 // pre-read (wait_idle_preread) judge the state cache's snapshot, or take a
-// fresh read each: they are one decision, judged on one fresh read.
+// fresh read each: they are one decision, judged on one fresh read. A host
+// re-probing a busy runtime on its backoff reuses the pass's executor, and
+// each re-probe is a look of its own: a reading kept from an earlier look
+// would judge its points on a record the program has since left.
 func TestLaneLookSharesOneFreshRead(t *testing.T) {
 	f, deps, _ := newScreenTurnFixture(t, "claude")
 	got := shadowWorking(f.sp, f.name, true)
@@ -81,5 +84,55 @@ func TestLaneLookSharesOneFreshRead(t *testing.T) {
 	if gate[0].Program != runtime.ProgramVerdictNoHold || pre[0].Program != runtime.ProgramVerdictIdle ||
 		gate[0].Status != pre[0].Status || !gate[0].HoldActivity.Equal(pre[0].HoldActivity) {
 		t.Fatalf("idle gate %+v and pre-read %+v, want no_hold and idle on one fresh idle reading", gate[0], pre[0])
+	}
+
+	pane, _ := f.sp.ProgramPane(f.name)
+	pane.Record.State, pane.Record.Seq, pane.Record.TurnStarts, pane.Record.Since = runtime.ProgramWorking, 4, 2, time.Now()
+	f.sp.SetProgramPane(f.name, pane)
+	before = freshReads(f.sp)
+	if _, err := e.Reprobe(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	if reads := freshReads(f.sp) - before; reads != 1 {
+		t.Fatalf("the re-probe's look took %d fresh reads, want one of its own", reads)
+	}
+	again := got()[len(all):]
+	gate, pre = atPoint(again, runtime.ProgramPointQueuedDelivery), atPoint(again, runtime.ProgramPointWaitIdlePreread)
+	if len(gate) != 1 || len(pre) != 1 || gate[0].Status.State != runtime.ProgramWorking || gate[0].Status.Seq != 4 ||
+		gate[0].Program != runtime.ProgramVerdictHold || pre[0].Status != gate[0].Status || pre[0].Program != runtime.ProgramVerdictBusy {
+		t.Fatalf("re-probe recorded %+v, want its idle gate (hold) and pre-read (busy) on its own fresh reading of the next turn's working record", again)
+	}
+}
+
+// Kills an op-lane delivery whose idle wait (wait_for_idle) is judged after
+// the delivery reached the runtime (review of ga-f4ovjm.77: the wait was
+// deferred to the leaf nudge's read before its paste, which comes after the
+// nudge lock and gc's own keystrokes): a reading that late judges what came
+// between, the turn the delivery starts included. The wait is recorded at
+// its decision, before the nudge.
+func TestLaneRecordsItsIdleWaitBeforeItDelivers(t *testing.T) {
+	f, deps, st := newScreenTurnFixture(t, "claude")
+	shadowWorking(f.sp, f.name, true)
+	nudgesAtWait := []int{}
+	f.sp.ProgramShadowSink = func(c runtime.ProgramStatusComparison) {
+		if c.Point == runtime.ProgramPointWaitForIdle {
+			nudgesAtWait = append(nudgesAtWait, f.sp.CountCalls("Nudge", f.name))
+		}
+	}
+	f.showTurn(false)
+	f.sp.SetActivity(f.name, f.clk.Now().Add(-3400*time.Millisecond))
+	l := f.lane(t, st)
+	f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "please run the tests"))
+	v, row := f.view(t)
+	e := newConversationLaneExec(deps, row)
+	quiescenceOnFixtureClock(f, e)
+	if _, err := l.Pass(context.Background(), v, e); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if n := len(f.nudges()); n != 1 {
+		t.Fatalf("delivered %d nudges, want the boundary delivery's one", n)
+	}
+	if len(nudgesAtWait) != 1 || nudgesAtWait[0] != 0 {
+		t.Fatalf("idle waits recorded with %v nudges already delivered, want one recorded before the delivery", nudgesAtWait)
 	}
 }

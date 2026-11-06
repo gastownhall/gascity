@@ -2750,9 +2750,6 @@ func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) 
 	if err := look(target); err != nil {
 		return true, err
 	}
-	// Under the shadow switch, an idle wait deferred to this nudge's
-	// decision reading is judged before the first write.
-	t.settleNudge(target)
 	// A hidden attach client injects gc's own keystrokes just like NudgeSession,
 	// so record a poke here too (the residual NudgeNow gap): capture the
 	// pre-nudge activity before the first write and stamp it only after the
@@ -3702,15 +3699,12 @@ func (t *Tmux) nudgeSession(
 	//
 	// Under the shadow switch, the program's record is read once, just
 	// before that last look so the read never widens the gap between the
-	// look and the paste: it is the nudge's decision reading (nudgeDecide),
-	// the typing gate's comparison, the baseline the delivery is confirmed
-	// against, and the reading the idle waits that let this delivery go are
-	// judged on.
+	// look and the paste: it is the typing gate's comparison and the
+	// baseline the delivery is confirmed against.
 	var shadowReading runtime.ProgramStatus
 	shadowReadOK := false
 	if t.shadowing() {
-		d, ok := t.nudgeDecide(session)
-		shadowReading, shadowReadOK = d.status, ok
+		shadowReading, shadowReadOK = t.shadowRead(session)
 	}
 	lookAt := time.Now()
 	lookErr := prompt.check()

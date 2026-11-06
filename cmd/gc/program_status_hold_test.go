@@ -37,18 +37,6 @@ func (p heldTurnProvider) ProgramStatusShadowIdleWait(name string, started, deci
 	p.full().ProgramStatusShadowIdleWait(name, started, decidedAt, scrape)
 }
 
-func (p heldTurnProvider) ProgramStatusShadowGo(name string, point runtime.ProgramStatusPoint, fn func()) {
-	p.full().ProgramStatusShadowGo(name, point, fn)
-}
-
-func (p heldTurnProvider) ProgramStatusShadowIdleWaitAtNudge(name string, started, decidedAt time.Time, scrape runtime.ProgramVerdict) bool {
-	return p.full().ProgramStatusShadowIdleWaitAtNudge(name, started, decidedAt, scrape)
-}
-
-func (p heldTurnProvider) ProgramStatusShadowSettleNudge(name string) {
-	p.full().ProgramStatusShadowSettleNudge(name)
-}
-
 func (p heldTurnProvider) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReading, bool) {
 	return p.full().ProgramStatusHoldRead(name)
 }

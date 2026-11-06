@@ -27,7 +27,6 @@ go_library(
         "program_status_pending.go",
         "program_status_read.go",
         "program_status_shadow.go",
-        "program_status_shadow_nudge.go",
         "seams.go",
         "server_socket_probe.go",
         "server_socket_probe_darwin.go",

@@ -27,12 +27,10 @@ func staleShadowFake(t *testing.T) (*runtime.Fake, *[]runtime.ProgramStatusCompa
 	return f, got
 }
 
-// Kills an idle comparison outside the leaf (observation, the pre-reads)
-// judged on the state cache's snapshot (ga-f4ovjm.77: 41 observation
-// scrape-right disagreements and the overlay's "working record with no open
-// turn means starting" clause wrong 36 of 54 times, all on readings up to the
-// cache's 2 s TTL old): the record is read fresh, past the snapshot, and
-// judged at the clock read after it.
+// Kills an idle comparison outside the leaf (the op lane's and the CLI's
+// pre-reads, wait_idle_preread) judged on the state cache's snapshot, which
+// lags the record by up to its 2 s TTL (ga-f4ovjm.77): the record is read
+// fresh, past the snapshot, and judged at the clock read after it.
 func TestShadowCompareIdleJudgesTheFreshRecord(t *testing.T) {
 	f, got := staleShadowFake(t)
 	before := time.Now()
@@ -163,87 +161,55 @@ func TestShadowIdleBoundaryNowJudgesTheFreshRecordWithTheSnapshot(t *testing.T) 
 	}
 }
 
-// backgroundLeaf is a shadowing FullFake that holds the comparisons it is
-// asked to run off the caller's path, as a leaf with background work does.
-type backgroundLeaf struct {
-	runtime.FullFake
-	held []func()
-}
-
-func (l *backgroundLeaf) ProgramStatusShadowGo(_ string, point runtime.ProgramStatusPoint, fn func()) {
-	if point != runtime.ProgramPointObservation {
-		panic("unexpected point " + string(point))
-	}
-	l.held = append(l.held, fn)
-}
-
-// Kills an observation (observation) judged on the cached record, or read
-// on the caller's path where the leaf runs it off that path: a session view
-// reads every running session, and a fresh read each on the response's path
-// would slow it.
+// Kills an observation (observation) judged on a reading the session view
+// did not decide with (review of ga-f4ovjm.77: a fresh read, past the state
+// cache's snapshot): under the on switch the view's activity and phase come
+// from the reading it took, so a turn that ended inside the cache's TTL is
+// served in-turn there, and judging the fresh idle record counted that as
+// agreement. The record is judged on the view's own reading, the snapshot's
+// working record, with the runtime's last activity for the hold bound, and
+// no read of its own. A reading not taken under the shadow switch, or a
+// leaf that is not shadowing, records nothing.
 func TestShadowObserveIdle(t *testing.T) {
 	f, got := staleShadowFake(t)
-	runtime.ShadowObserveIdle(runtime.FullFake{Fake: f}, "s", "gc-1", "claude", runtime.ProgramVerdictIdle)
-	if len(*got) != 1 || (*got)[0].Point != runtime.ProgramPointObservation || (*got)[0].Program != runtime.ProgramVerdictIdle {
-		t.Fatalf("recorded %+v, want observation idle/idle on the fresh record", *got)
+	stale := armedRow()
+	stale.Mode = runtime.ProgramStatusShadow
+	stale.Record.Since = time.Now().Add(-runtime.ProgramStatusHoldLimit - time.Minute)
+	f.SetProgramCachedPane("s", stale)
+	activity := time.Now().Add(-time.Second)
+	f.SetActivity("s", activity)
+	p := auto.New(runtime.FullFake{Fake: f}, runtime.NewFake())
+	view, err := runtime.ReadProgramStatus(p, "s")
+	if err != nil || view.State != runtime.ProgramWorking {
+		t.Fatalf("the view read %+v, %v; want the snapshot's working record", view, err)
+	}
+	before := time.Now()
+	runtime.ShadowObserveIdle(p, "s", "gc-1", "claude", runtime.ProgramVerdictIdle, view)
+	if len(*got) != 1 {
+		t.Fatalf("recorded %+v, want one comparison", *got)
+	}
+	c := (*got)[0]
+	if c.Point != runtime.ProgramPointObservation || c.Scrape != runtime.ProgramVerdictIdle || c.Program != runtime.ProgramVerdictBusy ||
+		c.Status != view || c.SessionID != "gc-1" || c.Family != "claude" || c.Session != "s" {
+		t.Fatalf("recorded %+v, want observation idle/busy on the view's working reading for gc-1 (claude)", c)
+	}
+	if !c.HoldActivity.Equal(activity) || c.JudgedAt.Before(before) {
+		t.Fatalf("judged with activity %v at %v, want %v at the clock read after it (call at %v)", c.HoldActivity, c.JudgedAt, activity, before)
+	}
+	if fresh, reads := methodCalls(f, "ProgramStatusShadowRead"), methodCalls(f, "ProgramStatus"); fresh != 0 || reads != 1 {
+		t.Fatalf("%d fresh and %d cached reads, want the view's one cached read alone", fresh, reads)
 	}
 
-	bf, bgGot := staleShadowFake(t)
-	leaf := &backgroundLeaf{FullFake: runtime.FullFake{Fake: bf}}
-	runtime.ShadowObserveIdle(leaf, "s", "gc-1", "claude", runtime.ProgramVerdictIdle)
-	if len(*bgGot) != 0 || methodCalls(bf, "ProgramStatusShadowRead") != 0 || len(leaf.held) != 1 {
-		t.Fatalf("read on the caller's path: recorded %+v, %d background runs", *bgGot, len(leaf.held))
+	on := view
+	on.Mode = runtime.ProgramStatusOn
+	runtime.ShadowObserveIdle(p, "s", "gc-1", "claude", runtime.ProgramVerdictIdle, on)
+	if len(*got) != 1 {
+		t.Fatalf("an on reading recorded %+v", (*got)[1:])
 	}
-	leaf.held[0]()
-	if len(*bgGot) != 1 || (*bgGot)[0].Program != runtime.ProgramVerdictIdle {
-		t.Fatalf("background run recorded %+v, want observation idle/idle", *bgGot)
-	}
-
 	off, offGot := shadowFake(t, false)
-	offLeaf := &backgroundLeaf{FullFake: runtime.FullFake{Fake: off}}
-	runtime.ShadowObserveIdle(offLeaf, "s", "gc-1", "claude", runtime.ProgramVerdictIdle)
-	if len(*offGot) != 0 || len(offLeaf.held) != 0 {
-		t.Fatalf("not shadowing recorded %+v, ran %d", *offGot, len(offLeaf.held))
-	}
-}
-
-// nudgeWaitLeaf is a shadowing FullFake that judges idle waits on its next
-// nudge's decision reading.
-type nudgeWaitLeaf struct {
-	runtime.FullFake
-	deferred []runtime.ProgramVerdict
-	settled  int
-	accept   bool
-}
-
-func (l *nudgeWaitLeaf) ProgramStatusShadowIdleWaitAtNudge(_ string, _, _ time.Time, scrape runtime.ProgramVerdict) bool {
-	if !l.accept {
-		return false
-	}
-	l.deferred = append(l.deferred, scrape)
-	return true
-}
-
-func (l *nudgeWaitLeaf) ProgramStatusShadowSettleNudge(string) { l.settled++ }
-
-// Kills an idle wait decided outside the leaf whose delivery goes through
-// the leaf's nudge that takes a read of its own instead of the nudge's
-// decision reading, or that a leaf which defers nothing leaves unrecorded.
-func TestShadowWaitForIdleAtNudge(t *testing.T) {
-	f, got := shadowFake(t, true)
-	leaf := &nudgeWaitLeaf{FullFake: runtime.FullFake{Fake: f}, accept: true}
-	settle := runtime.ShadowWaitForIdleAtNudge(leaf, "s", time.Now(), time.Now(), runtime.ProgramVerdictIdle)
-	if len(leaf.deferred) != 1 || len(*got) != 0 || methodCalls(f, "ProgramStatusShadowRead") != 0 {
-		t.Fatalf("deferred %v, recorded %+v: want the wait deferred, nothing read", leaf.deferred, *got)
-	}
-	settle()
-	if leaf.settled != 1 {
-		t.Fatalf("settled %d times, want once", leaf.settled)
-	}
-
-	declining := &nudgeWaitLeaf{FullFake: runtime.FullFake{Fake: f}}
-	runtime.ShadowWaitForIdleAtNudge(declining, "s", time.Now(), time.Now(), runtime.ProgramVerdictIdle)()
-	if len(*got) != 1 || (*got)[0].Point != runtime.ProgramPointWaitForIdle || declining.settled != 0 {
-		t.Fatalf("a leaf that deferred nothing: recorded %+v, settled %d; want the wait recorded now", *got, declining.settled)
+	calls := len(off.SnapshotCalls())
+	runtime.ShadowObserveIdle(runtime.FullFake{Fake: off}, "s", "gc-1", "claude", runtime.ProgramVerdictIdle, view)
+	if len(*offGot) != 0 || len(off.SnapshotCalls()) != calls {
+		t.Fatalf("a leaf that is not shadowing recorded %+v after calls %+v", *offGot, off.SnapshotCalls()[calls:])
 	}
 }

@@ -2654,6 +2654,11 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "internal/runtime/tmux/program_status_shadow_nudge_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "internal/runtime/tmux/server_probe_test.go"
 resource = "fixed_sleep"
 calls = 1

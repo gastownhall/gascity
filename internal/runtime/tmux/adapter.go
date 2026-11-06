@@ -862,15 +862,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.nudge(context.Background(), name, content)
 }
 
-// nudge is Nudge under ctx, which bounds its idle wait. Under the shadow
-// switch its idle wait is judged on the nudge's decision reading, the one
-// read it takes before it types (withShadowNudge), and a nudge that ends
-// before taking it judges the wait as it ends (settleNudge).
+// nudge is Nudge under ctx, which bounds its idle wait.
 func (p *Provider) nudge(ctx context.Context, name string, content []runtime.ContentBlock) error {
-	if p.tm.shadowing() {
-		ctx = withShadowNudge(ctx, name)
-		defer p.tm.settleNudge(name)
-	}
 	// Wait for the agent to be idle before sending, unless disabled.
 	// This prevents interrupting active tool calls — the prompt is visible
 	// in scrollback during inter-tool-call gaps, so immediate send-keys

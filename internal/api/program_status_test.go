@@ -441,18 +441,19 @@ func TestObservationShadowRecordedOnSessionReads(t *testing.T) {
 	}
 }
 
-// Kills an observation (observation) judged on the state cache's snapshot
-// of the record (ga-f4ovjm.77: 41 scrape-right disagreements, and the turn
-// overlay's "working record with no open turn means starting" clause wrong
-// 36 of 54 times, all on readings up to the cache's TTL old): a turn that
-// ended inside the TTL still read working there beside the transcript's
-// idle. The record is read fresh, so its idle stands beside the
-// transcript's; the response still shows the reading it showed, the
-// snapshot's.
-func TestObservationShadowJudgesTheFreshRecord(t *testing.T) {
+// Kills an observation (observation) judged on a reading the session view
+// does not decide with (review of ga-f4ovjm.77: the record read fresh, past
+// the state cache's snapshot the response shows). Under on the response's
+// activity comes from that snapshot, so a turn that ended inside the
+// cache's TTL is served in-turn there, and a shadow that judged the fresh
+// idle record counted it as agreement. The record is judged on the reading
+// the response shows, with no read of its own, and its busy is the in-turn
+// on serves from the same reading.
+func TestObservationShadowJudgesTheReadingTheViewDecidesWith(t *testing.T) {
 	c := newObservationShadowCity(t, "worker")
 	id := c.start(t, "myrig--worker", "myrig/worker", c.rigDir, runtime.ProgramIdle, endedTurnTranscript...)
-	c.fs.sp.SetProgramCachedPane("myrig--worker", programRowAt(runtime.ProgramStatusShadow, runtime.ProgramWorking, "", time.Now().Add(-time.Second)))
+	snapshot := programRowAt(runtime.ProgramStatusShadow, runtime.ProgramWorking, "", time.Now().Add(-time.Second))
+	c.fs.sp.SetProgramCachedPane("myrig--worker", snapshot)
 	var got []runtime.ProgramStatusComparison
 	c.fs.sp.ProgramShadowSink = func(cmp runtime.ProgramStatusComparison) {
 		if cmp.Point == runtime.ProgramPointObservation {
@@ -461,11 +462,27 @@ func TestObservationShadowJudgesTheFreshRecord(t *testing.T) {
 	}
 	var resp sessionResponse
 	getProgramStatusJSON(t, c.h, cityURL(c.fs, "/session/")+id, &resp)
-	if len(got) != 1 || got[0].Scrape != runtime.ProgramVerdictIdle || got[0].Program != runtime.ProgramVerdictIdle || got[0].Status.State != runtime.ProgramIdle {
-		t.Fatalf("recorded %+v, want observation idle/idle on the pane's own idle record", got)
+	if resp.ProgramStatus == nil || resp.ProgramStatus.State != string(runtime.ProgramWorking) || resp.Activity != activityIdle {
+		t.Fatalf("shadow response program_status %+v, activity %q; want the snapshot's working reading beside the transcript's idle", resp.ProgramStatus, resp.Activity)
 	}
-	if resp.ProgramStatus == nil || resp.ProgramStatus.State != string(runtime.ProgramWorking) {
-		t.Fatalf("response program_status %+v, want the snapshot's working reading it showed before", resp.ProgramStatus)
+	if len(got) != 1 || got[0].Scrape != runtime.ProgramVerdictIdle || got[0].Program != runtime.ProgramVerdictBusy || got[0].Status.State != runtime.ProgramWorking {
+		t.Fatalf("recorded %+v, want observation idle/busy on the snapshot's working reading the response shows", got)
+	}
+	if fresh := c.fs.sp.CountCalls("ProgramStatusShadowRead", "myrig--worker"); fresh != 0 {
+		t.Fatalf("the observation took %d fresh reads, want none", fresh)
+	}
+
+	snapshot.Mode = runtime.ProgramStatusOn
+	c.fs.sp.SetProgramCachedPane("myrig--worker", snapshot)
+	publishProgramStatusSwitch(c.fs, runtime.ProgramStatusOn)
+	got = nil
+	var on sessionResponse
+	getProgramStatusJSON(t, c.h, cityURL(c.fs, "/session/")+id, &on)
+	if on.Activity != activityInTurn || on.ActivitySource != activitySourceProgram {
+		t.Fatalf("on: activity %q from %q, want in-turn from the program's snapshot reading, as the shadow judged it", on.Activity, on.ActivitySource)
+	}
+	if len(got) != 0 {
+		t.Fatalf("on recorded %+v, want nothing", got)
 	}
 }
 

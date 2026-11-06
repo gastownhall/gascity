@@ -817,20 +817,16 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		delivery = worker.NudgeDeliveryImmediate
 	}
 	at := e.deps.clk.Now()
-	settleShadow := func() {}
 	if delivery == worker.NudgeDeliveryDefault && !d.Replacement {
 		// A delivery at the boundary the probe read. At the quiescence
 		// rule's it is the op lane's idle wait returning: under the shadow
-		// switch it is recorded beside the record (wait_for_idle), on the
-		// reading the leaf's nudge takes before it types, the nudge's one
-		// decision reading (runtime.ShadowWaitForIdleAtNudge), or, for a
-		// delivery that never reached the leaf's typing, on one taken as it
-		// returns. A delivery at the starved boundary waited out no idle, so
-		// it is not: the look that let it go is recorded at starved_bypass
-		// (starvedBypassLook), and is taken again before it types
-		// (starvedSendLook).
+		// switch it is recorded beside the record (wait_for_idle), on a
+		// reading taken before it types. A delivery at the starved boundary
+		// waited out no idle, so it is not: the look that let it go is
+		// recorded at starved_bypass (starvedBypassLook), and is taken again
+		// before it types (starvedSendLook).
 		if !e.lastStarved {
-			settleShadow = runtime.ShadowWaitForIdleAtNudge(e.deps.sp, e.target.sessionName, laneWaitStarted(d.Ops, at), at, runtime.ProgramVerdictIdle)
+			runtime.ShadowWaitForIdle(e.deps.sp, e.target.sessionName, laneWaitStarted(d.Ops, at), at, runtime.ProgramVerdictIdle)
 		} else if err := e.starvedSendLook(at); err != nil {
 			return opjournal.NotDelivered{Transient: true, Cause: err}
 		}
@@ -844,7 +840,6 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		AllowUnfenced: true,
 		Redelivery:    d.Redelivery,
 	})
-	settleShadow()
 	out := laneDeliveryResult(res, err, at, fence.IsZero(), d.Steer)
 	if dv, ok := out.(opjournal.Delivered); ok {
 		rec := dv.Record

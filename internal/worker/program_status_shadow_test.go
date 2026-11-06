@@ -77,3 +77,43 @@ func TestRuntimeHandleWaitIdlePrereadJudgesTheFreshRecord(t *testing.T) {
 		}
 	}
 }
+
+// Kills an observation (observation) judged on a reading the worker's view
+// does not decide with (review of ga-f4ovjm.77: the record read fresh, past
+// the state cache's snapshot): under on, SessionHandle.State takes its phase
+// from the reading it carries (ProgramPhase), so a turn that ended inside
+// the cache's TTL is busy there. The record is judged on that reading, with
+// no read of its own, and its busy is the phase on settles on.
+func TestSessionHandleStateObservesTheReadingItsPhaseDecidesWith(t *testing.T) {
+	handle, fake, name := startedProgramStatusHandle(t)
+	ctx := context.Background()
+	snapshot := shadowRow(runtime.ProgramWorking, time.Now())
+	fake.SetProgramCachedPane(name, snapshot)
+	fake.SetProgramPane(name, shadowRow(runtime.ProgramIdle, time.Now()))
+	var got []runtime.ProgramStatusComparison
+	fake.ProgramShadowSink = func(c runtime.ProgramStatusComparison) {
+		if c.Point == runtime.ProgramPointObservation {
+			got = append(got, c)
+		}
+	}
+	state, err := handle.State(ctx)
+	if err != nil || state.Phase != PhaseReady || state.Program.State != runtime.ProgramWorking {
+		t.Fatalf("shadow: %+v, %v; want ready carrying the snapshot's working reading", state, err)
+	}
+	if len(got) != 1 || got[0].Scrape != runtime.ProgramVerdictIdle || got[0].Program != runtime.ProgramVerdictBusy || got[0].Status != state.Program {
+		t.Fatalf("recorded %+v, want observation idle/busy on the reading State carries", got)
+	}
+	if fresh := fake.CountCalls("ProgramStatusShadowRead", name); fresh != 0 {
+		t.Fatalf("the observation took %d fresh reads, want none", fresh)
+	}
+
+	snapshot.Mode = runtime.ProgramStatusOn
+	fake.SetProgramCachedPane(name, snapshot)
+	got = nil
+	if state, err := handle.State(ctx); err != nil || state.Phase != PhaseBusy {
+		t.Fatalf("on: %+v, %v; want busy from the snapshot's working reading, as the shadow judged it", state, err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("on recorded %+v, want nothing", got)
+	}
+}
