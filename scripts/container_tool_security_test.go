@@ -102,6 +102,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
 		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.20.2"},
 	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
@@ -119,6 +120,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
 		`go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
+		`go get "github.com/klauspost/compress@v${COMPRESS_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -629,7 +632,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
-		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.20.2"},
 		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 
@@ -642,7 +645,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/net":  "XNET_VERSION",
 		"golang.org/x/mod":  "XMOD_VERSION",
 		// Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6,
-		// Dolt v1.18.0), which CVE-2026-63209 affects.
+		// Dolt v1.18.0), which CVE-2026-63209 affects; GO-2026-6865 affects every
+		// version below 1.20.2.
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	doltModules := map[string]string{
