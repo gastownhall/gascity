@@ -1124,9 +1124,10 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 }
 
 // SleepCapability reports the idle-sleep capability the pack's handshake
-// supports. A pack that declares report-activity, report-attachment and
-// proc.exec gets full idle sleep: it has an activity clock, an attachment
-// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// supports. A pack that declares report-activity, report-attachment, proc.exec
+// and idle-boundary gets full idle sleep: it has an activity clock, an
+// attachment probe, and an idle boundary read from its in-box tmux pane
+// (WaitForIdle).
 // Every other pack keeps the timed-only floor. The floor is never disabled:
 // non-interactive sleep and the queued-nudge poller rely on timed-only for
 // exec runtimes that report no activity.

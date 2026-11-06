@@ -39,7 +39,8 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		t.Errorf("not v2-ready: missing %v", report.V2Missing)
 	}
 	skip := map[runtimecontract.Code]bool{
-		runtimecontract.ReqConnectionExec: true, runtimecontract.ReqProvisionBoxWithoutAgent: true,
+		runtimecontract.ReqConnectionExec: true, runtimecontract.ReqConnectionIdleBoundary: true,
+		runtimecontract.ReqProvisionBoxWithoutAgent: true,
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity: true,
 	}

@@ -119,6 +119,9 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqLifecycleStopIdempotent, set("stop", `if [ -d "$box" ]; then rm -rf "$box"; else exit 1; fi`), "stop errors on a missing session"},
 		{ReqLifecycleUnknownNotRunning, set("is-running", `echo true`), "unknown session reports running"},
 		{ReqConnectionExec, set("exec", `cat >/dev/null; echo wrong`), "exec ignores the command and emits fixed output"},
+		{ReqConnectionIdleBoundary, edit("exec", `has-session) [ -d "$box" ] ;;`, `has-session) return 1 ;;`), "idle-boundary declared but the box has no tmux session main"},
+		{ReqConnectionIdleBoundary, edit("exec", `capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;;`, `capture-pane) return 1 ;;`), "idle-boundary declared but the pane cannot be captured"},
+		{ReqConnectionIdleBoundary, set("exec", `exit 2`), "idle-boundary declared but exec is unimplemented"},
 		{ReqProvisionBoxWithoutAgent, set("provision", `cat >/dev/null; mkdir -p "$box"`), "provision launches the agent (is-running true) instead of just the box"},
 
 		{ReqObserveDeclaredOpsRespond, set("observe", `exit 2`), "observe exits 2"},
