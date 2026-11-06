@@ -808,7 +808,6 @@ cmd/gc/conversation_lane_turns.go	laneTurnRows	raw-field	1
 cmd/gc/cross_store_gate_lane.go	CityRuntime.releaseCrossStoreGates	mint	1
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerLeg	raw-field	1
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerResolver	raw-param	3
-cmd/gc/cross_store_gate_lane.go	crossStoreBlockerResolverOver	raw-param	1
 cmd/gc/demand_cross_store_gate.go	crossStoreGateLeg	raw-param	1
 cmd/gc/demand_cross_store_gate.go	crossStoreGateLegs	raw-param	2
 cmd/gc/demand_serve_predicate.go	beadHasUnmetPlainBlocksDep	raw-param	1

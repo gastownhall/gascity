@@ -57,35 +57,44 @@ func cityIDFloor(ids []string, prefix string) int {
 // max_hash_length with it when the floor is above it (bd sizes ids between
 // the two). Neither is raised past bdMaxMintedHashLength, and either already
 // past it is brought down to it: the floor's one documented lowering (file
-// comment). It returns the floor in force, 0 when floor is 0.
-func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
+// comment). It returns the floor in force, 0 when floor is 0, and each
+// setting it wrote, in the order written.
+func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, []bdHashSettingChange, error) {
 	if floor == 0 || conf == nil {
-		return 0, nil
+		return 0, nil, nil
 	}
 	floor = min(floor, bdMaxMintedHashLength)
+	var wrote []bdHashSettingChange
+	set := func(key string, from, to int) error {
+		if err := conf.ConfigSet(key, strconv.Itoa(to)); err != nil {
+			return fmt.Errorf("setting %s=%d: %w", key, to, err)
+		}
+		wrote = append(wrote, bdHashSettingChange{Key: key, From: from, To: to})
+		return nil
+	}
 	current, err := conf.ConfigGet(bdMinHashLengthKey)
 	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
+		return 0, nil, fmt.Errorf("reading %s: %w", bdMinHashLengthKey, err)
 	}
 	n, perr := strconv.Atoi(strings.TrimSpace(current))
 	switch {
 	case perr == nil && n > bdMaxMintedHashLength:
 		// The documented exception (file comment): above bd's cap the min
 		// protects nothing, so it comes down to the cap.
-		if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(bdMaxMintedHashLength)); err != nil {
-			return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, bdMaxMintedHashLength, err)
+		if err := set(bdMinHashLengthKey, n, bdMaxMintedHashLength); err != nil {
+			return 0, nil, err
 		}
 		floor = bdMaxMintedHashLength
 	case perr == nil && n >= floor:
 		floor = n
 	default:
-		if err := conf.ConfigSet(bdMinHashLengthKey, strconv.Itoa(floor)); err != nil {
-			return 0, fmt.Errorf("setting %s=%d: %w", bdMinHashLengthKey, floor, err)
+		if err := set(bdMinHashLengthKey, n, floor); err != nil {
+			return 0, nil, err
 		}
 	}
 	maxText, err := conf.ConfigGet(bdMaxHashLengthKey)
 	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", bdMaxHashLengthKey, err)
+		return 0, nil, fmt.Errorf("reading %s: %w", bdMaxHashLengthKey, err)
 	}
 	maxLen := bdDefaultMaxHashLength
 	if n, perr := strconv.Atoi(strings.TrimSpace(maxText)); perr == nil && n > 0 {
@@ -93,17 +102,33 @@ func raiseBdHashFloor(conf rigHashLengthConfig, floor int) (int, error) {
 	}
 	switch {
 	case maxLen < floor:
-		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(floor)); err != nil {
-			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, floor, err)
+		if err := set(bdMaxHashLengthKey, maxLen, floor); err != nil {
+			return 0, nil, err
 		}
 	case maxLen > bdMaxMintedHashLength:
 		// The same exception for the max (file comment); the min is at most
 		// the cap by now, so the max never falls below it.
-		if err := conf.ConfigSet(bdMaxHashLengthKey, strconv.Itoa(bdMaxMintedHashLength)); err != nil {
-			return 0, fmt.Errorf("setting %s=%d: %w", bdMaxHashLengthKey, bdMaxMintedHashLength, err)
+		if err := set(bdMaxHashLengthKey, maxLen, bdMaxMintedHashLength); err != nil {
+			return 0, nil, err
 		}
 	}
-	return floor, nil
+	return floor, wrote, nil
+}
+
+// bdHashSettingChange is one bd id-length setting raiseBdHashFloor wrote:
+// the value it read (0 when unset) and the value it set.
+type bdHashSettingChange struct {
+	Key      string
+	From, To int
+}
+
+// String says what changed; a lowering is the floor's one documented
+// exception (file comment), and says so.
+func (c bdHashSettingChange) String() string {
+	if c.To < c.From {
+		return fmt.Sprintf("%s %d -> %d (capped at bd's maximum)", c.Key, c.From, c.To)
+	}
+	return fmt.Sprintf("%s %d -> %d", c.Key, c.From, c.To)
 }
 
 // cityHashConfig is the city work store's id-minting surface: the bd config
@@ -169,8 +194,9 @@ func hostedStorageEndpoint(root string) string {
 type cityIDFloorResult struct {
 	// Floor is min_hash_length in force; 0 when no carried id needs one.
 	Floor int
-	// Before is what min_hash_length read before (0 when unset).
-	Before int
+	// Changes are the settings the reservation wrote, in the order written;
+	// none when the floor was already in force.
+	Changes []bdHashSettingChange
 	// Skipped says why the store took no floor.
 	Skipped string
 }
@@ -181,11 +207,15 @@ func (r cityIDFloorResult) String() string {
 		return "city id floor skipped: " + r.Skipped
 	case r.Floor == 0:
 		return "city id floor: no carried id of the work store's prefix needs one"
-	case r.Before >= r.Floor:
-		return fmt.Sprintf("city work store %s already %d", bdMinHashLengthKey, r.Floor)
-	default:
-		return fmt.Sprintf("city work store %s %d -> %d", bdMinHashLengthKey, r.Before, r.Floor)
 	}
+	var parts []string
+	if len(r.Changes) == 0 || r.Changes[0].Key != bdMinHashLengthKey {
+		parts = append(parts, fmt.Sprintf("%s already %d", bdMinHashLengthKey, r.Floor))
+	}
+	for _, c := range r.Changes {
+		parts = append(parts, c.String())
+	}
+	return "city work store " + strings.Join(parts, ", ")
 }
 
 // reserveCityIDs raises the city work store's floor past every id the
@@ -201,10 +231,7 @@ func reserveCityIDs(cityPath string, carried []string) (cityIDFloorResult, error
 	}
 	floor := cityIDFloor(carried, surface.Prefix)
 	result := cityIDFloorResult{Floor: floor}
-	if current, err := surface.Conf.ConfigGet(bdMinHashLengthKey); err == nil {
-		result.Before, _ = strconv.Atoi(strings.TrimSpace(current))
-	}
-	inForce, err := raiseBdHashFloor(surface.Conf, floor)
+	inForce, changes, err := raiseBdHashFloor(surface.Conf, floor)
 	if err != nil {
 		if surface.Hosted != "" {
 			return result, fmt.Errorf("the city work store is hosted bd at %s, and raising its minimum id length failed (%w). Set %s=%d (and %s at least %d) on the hosted project through the bd serve admin path, out of band (owner decision O10), then run this again; nothing was removed",
@@ -212,6 +239,6 @@ func reserveCityIDs(cityPath string, carried []string) (cityIDFloorResult, error
 		}
 		return result, fmt.Errorf("raising the city work store's minimum id length to %d: %w; nothing was removed", floor, err)
 	}
-	result.Floor = inForce
+	result.Floor, result.Changes = inForce, changes
 	return result, nil
 }

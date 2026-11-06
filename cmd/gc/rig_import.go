@@ -1029,7 +1029,8 @@ func rigImportWriteManifest(loc rigImportLocation, target infraBindingTarget, ma
 // sequence). conf was opened, and its provider checked, before anything was
 // written.
 func rigImportReserveIDs(conf rigHashLengthConfig, manifest *infraCopyManifest) (int, error) {
-	return raiseBdHashFloor(conf, rigImportHashFloor(sortedMapKeys(manifest.IDs)))
+	floor, _, err := raiseBdHashFloor(conf, rigImportHashFloor(sortedMapKeys(manifest.IDs)))
+	return floor, err
 }
 
 // rigImportClear is phase 7: back up, prove, mark pending, delete in

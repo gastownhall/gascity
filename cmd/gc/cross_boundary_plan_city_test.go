@@ -457,6 +457,81 @@ func TestTheCityCopyRemintsAGateClosedBetweenRuns(t *testing.T) {
 	}
 }
 
+// TestTheCityCopyRewritesAGateEdgeChangedBetweenRuns: a copy killed after it
+// minted a gate, whose owner -> gate edge is then changed in the binding
+// while the gate stays open, resumes: prepare keeps the gate and its owner,
+// and the import writes the edge back as planned, blocks with no payload.
+// Kept as it was, the equality stage would refuse it on every run.
+func TestTheCityCopyRewritesAGateEdgeChangedBetweenRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(binding beads.Store, gateID string) error
+	}{
+		{name: "to a nonblocking type", change: func(binding beads.Store, gateID string) error {
+			return binding.DepAdd("mc-d1", gateID, "related")
+		}},
+		{name: "to carry a payload", change: func(binding beads.Store, gateID string) error {
+			writer, ok := beads.As[beads.DepMetadataWriter](binding)
+			if !ok {
+				return errors.New("the binding writes no edge payload")
+			}
+			return writer.DepAddWithMetadata("mc-d1", gateID, "blocks", `{"gate":"any-children"}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubInfraControllerPing(t, 0)
+			d9Rig(t, nil, false)
+			source := d9SQLiteSource(t,
+				[]beads.Bead{d9Row("mc-d1", true, ""), d9Row("mc-w1", false, "")},
+				[]beads.Dep{{IssueID: "mc-d1", DependsOnID: "mc-w1", Type: "blocks"}})
+			prev := openInfraMigrationSource
+			openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+			t.Cleanup(func() { openInfraMigrationSource = prev })
+			cityPath := t.TempDir()
+			cfg := infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+			target := mustResolveInfraTarget(t, cityPath, cfg)
+			prevPoint := infraEngineCrashPoint
+			t.Cleanup(func() { infraEngineCrashPoint = prevPoint })
+			infraEngineCrashPoint = func(p string) error {
+				if p == "verify" {
+					return errors.New("killed after the gate")
+				}
+				return nil
+			}
+			var log bytes.Buffer
+			if first := migrateInfraClasses(t, cityPath, cfg, &log); first.Outcome == infraMigrationConverged {
+				t.Fatalf("the kill did not stop the run: %s", log.String())
+			}
+			infraEngineCrashPoint = prevPoint
+			binding := openMigratedDestination(t, target)
+			gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+			if err != nil || len(gates) != 1 {
+				t.Fatalf("gates after the kill = %+v (%v)", gates, err)
+			}
+			gateID := gates[0].ID
+			if err := tc.change(binding, gateID); err != nil {
+				t.Fatal(err)
+			}
+			_ = closeBeadStoreHandle(binding)
+
+			log.Reset()
+			if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("resume = %s: %s", got.Outcome, log.String())
+			}
+			if !strings.Contains(log.String(), "kept 1 of 1 stamped row(s)") {
+				t.Fatalf("the resume did not keep the row and its gate: %s", log.String())
+			}
+			reopened := openMigratedDestination(t, target)
+			if deps, _ := reopened.DepList("mc-d1", "down"); len(deps) != 1 || deps[0].DependsOnID != gateID || deps[0].Type != "blocks" {
+				t.Fatalf("mc-d1's binding edges = %+v, want blocks onto its gate %s", deps, gateID)
+			}
+			if payload, err := infraReadEdgePayload(reopened, "mc-d1", gateID); err != nil || payload.Carried {
+				t.Fatalf("mc-d1's edge onto its gate carries %+v (%v), want no payload", payload, err)
+			}
+		})
+	}
+}
+
 // TestEveryHoldIsNamedInOneRefusal: a city with an edge hold the plan refuses
 // and a status hold the binding cannot record is refused once, naming both,
 // by migrate and by preflight alike, so the operator fixes them in one pass.

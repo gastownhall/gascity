@@ -2784,7 +2784,9 @@ func importInfraSnapshot(destination beads.Store, plan infraCopyPlan, prepared i
 	// S3b gate in the binding and a same-store edge owner -> gate. A gate's
 	// id is a function of its owner and blocker. Prepare kept each open one
 	// an earlier run minted (prepared.gates), which is not minted again; any
-	// other it deleted, and that one is minted again under the same id.
+	// other it deleted, and that one is minted again under the same id. A kept
+	// owner -> gate edge is kept only as planned, blocks with no payload, as a
+	// copied edge is: DepAdd rewrites any other in place, type and payload.
 	gates := plan.boundary.Gates
 	err = runInfraBatches(clock, "minting gates", len(gates), infraCopyEdgeBatch, func(start, end int) error {
 		for _, g := range gates[start:end] {
@@ -2797,7 +2799,7 @@ func importInfraSnapshot(destination beads.Store, plan infraCopyPlan, prepared i
 				}
 				gateID = gate.ID
 			}
-			if _, held := prepared.edges[beads.DepPair{IssueID: g.Owner.ID, DependsOnID: gateID}]; held {
+			if held, ok := prepared.edges[beads.DepPair{IssueID: g.Owner.ID, DependsOnID: gateID}]; ok && held.Type == "blocks" && held.Payload == "" {
 				continue
 			}
 			if err := destination.DepAdd(g.Owner.ID, gateID, "blocks"); err != nil {

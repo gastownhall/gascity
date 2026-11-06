@@ -608,8 +608,10 @@ func OpenCrossStoreGatesNaming(store beads.GraphStore, blockerID string) ([]bead
 	})
 }
 
-// CrossStoreBlockerResolver reads every blocker in ids from the stores other
-// than the gates' own, in ONE batched read per store, and returns what it read.
+// CrossStoreBlockerResolver reads every blocker in ids from every store that
+// may hold it, in ONE batched read per store, and returns what it read. The
+// gates' own store is one of them: a migration can move a gate's blocker into
+// it after the gate was minted.
 //
 // A store it cannot read does not fail the pass: the resolver marks every id
 // that store may hold undecided and names the store in Unreadable, so the pass

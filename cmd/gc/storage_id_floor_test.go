@@ -144,12 +144,12 @@ func TestReserveCityIDsRaisesNeverLowersAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Floor != 8 || got.Before != 0 || strings.Join(conf.sets, ",") != "min_hash_length=8,max_hash_length=8" {
-		t.Fatalf("first run = %+v, writes %v; want min and max raised to 8", got, conf.sets)
+	if got.Floor != 8 || strings.Join(conf.sets, ",") != "min_hash_length=8,max_hash_length=8" || got.String() != "city work store min_hash_length 0 -> 8, max_hash_length 7 -> 8" {
+		t.Fatalf("first run = %+v (%q), writes %v; want min and max raised to 8, both reported", got, got, conf.sets)
 	}
 	conf.sets = nil
 	got, err = reserveCityIDs("/city", carried)
-	if err != nil || len(conf.sets) != 0 || got.Floor != 8 || got.Before != 8 {
+	if err != nil || len(conf.sets) != 0 || got.Floor != 8 || len(got.Changes) != 0 {
 		t.Fatalf("second run = %+v (%v), writes %v; want none", got, err, conf.sets)
 	}
 	if !strings.Contains(got.String(), "already 8") {
@@ -179,7 +179,7 @@ func TestTheFloorNeverPassesBdsCap(t *testing.T) {
 		t.Fatalf("the rig floor = %d, want bd's cap of 8", rig)
 	}
 	capped := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "4"}}
-	if floor, err := raiseBdHashFloor(capped, 13); err != nil || floor != 8 || strings.Join(capped.sets, ",") != "min_hash_length=8,max_hash_length=8" {
+	if floor, _, err := raiseBdHashFloor(capped, 13); err != nil || floor != 8 || strings.Join(capped.sets, ",") != "min_hash_length=8,max_hash_length=8" {
 		t.Fatalf("raise to 13 = %d (%v), writes %v; want both capped at 8", floor, err, capped.sets)
 	}
 }
@@ -494,18 +494,69 @@ func TestAMaxAboveBdsCapIsBroughtDownTo8(t *testing.T) {
 		t.Fatalf("a second run writes %v (%v), want nothing", conf.sets, err)
 	}
 	at := &fakeHashConfig{values: map[string]string{bdMaxHashLengthKey: "8"}}
-	if _, err := raiseBdHashFloor(at, 6); err != nil || strings.Join(at.sets, ",") != "min_hash_length=6" {
+	if _, _, err := raiseBdHashFloor(at, 6); err != nil || strings.Join(at.sets, ",") != "min_hash_length=6" {
 		t.Fatalf("a max of exactly 8 writes %v (%v), want it left alone", at.sets, err)
 	}
 	// A min above the cap as well (an earlier import's 13/13) comes down to
 	// 8 with the max: the floor's one documented lowering. A second run
 	// writes nothing.
 	both := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "13", bdMaxHashLengthKey: "13"}}
-	if floor, err := raiseBdHashFloor(both, 6); err != nil || floor != 8 || strings.Join(both.sets, ",") != "min_hash_length=8,max_hash_length=8" {
+	if floor, _, err := raiseBdHashFloor(both, 6); err != nil || floor != 8 || strings.Join(both.sets, ",") != "min_hash_length=8,max_hash_length=8" {
 		t.Fatalf("min and max 13 = floor %d (%v), writes %v; want both brought down to 8", floor, err, both.sets)
 	}
 	both.sets = nil
-	if floor, err := raiseBdHashFloor(both, 6); err != nil || floor != 8 || len(both.sets) != 0 {
+	if floor, _, err := raiseBdHashFloor(both, 6); err != nil || floor != 8 || len(both.sets) != 0 {
 		t.Fatalf("a second run = floor %d (%v), writes %v; want nothing", floor, err, both.sets)
+	}
+}
+
+// TestTheCityFloorReportSaysWhatItWrote: the report names every setting the
+// reservation wrote, from what to what, and a lowering says it was capped at
+// bd's maximum; only a run that wrote nothing reports the floor already in
+// force. A lowering from 13 read as "already 8" would tell `repair-sequence
+// --id-floor` and the migrate output that nothing changed after a write to the
+// store's bd config.
+func TestTheCityFloorReportSaysWhatItWrote(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		min, max string
+		writes   string
+		report   string
+	}{
+		{
+			name: "both above the cap", min: "13", max: "13",
+			writes: "min_hash_length=8,max_hash_length=8",
+			report: "city work store min_hash_length 13 -> 8 (capped at bd's maximum), max_hash_length 13 -> 8 (capped at bd's maximum)",
+		},
+		{
+			name: "only the max above the cap", min: "6", max: "13",
+			writes: "max_hash_length=8",
+			report: "city work store min_hash_length already 6, max_hash_length 13 -> 8 (capped at bd's maximum)",
+		},
+		{
+			name: "the min raised under a max above the cap", max: "13",
+			writes: "min_hash_length=6,max_hash_length=8",
+			report: "city work store min_hash_length 0 -> 6, max_hash_length 13 -> 8 (capped at bd's maximum)",
+		},
+		{
+			name: "the floor in force", min: "6", max: "8",
+			report: "city work store min_hash_length already 6",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			values := map[string]string{}
+			if tc.min != "" {
+				values[bdMinHashLengthKey] = tc.min
+			}
+			if tc.max != "" {
+				values[bdMaxHashLengthKey] = tc.max
+			}
+			conf := &fakeHashConfig{values: values}
+			stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
+			got, err := reserveCityIDs("/city", []string{"mc-k0nvi"})
+			if err != nil || strings.Join(conf.sets, ",") != tc.writes || got.String() != tc.report {
+				t.Fatalf("reserve = %q (%v), writes %v; want %q writing %q", got, err, conf.sets, tc.report, tc.writes)
+			}
+		})
 	}
 }
