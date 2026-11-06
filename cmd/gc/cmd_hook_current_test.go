@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -507,4 +508,79 @@ func TestDoHookCurrentRefusesWhatItCannotRead(t *testing.T) {
 			t.Fatalf("--id-only = (%d, %q, %q), want the found claim verified", code, stdout, stderr)
 		}
 	})
+}
+
+// TestDoHookCurrentVerifiesARelocatedClaimByItsBinding is AC-5: on a split
+// city a graph step lives in the class binding, and `gc storage migrate` can
+// leave a frozen pre-migration copy of it in the work ledger. The claim is
+// read from the store that owns it by residency, so the binding's row decides
+// and the ledger's frozen copy can neither establish ownership of a step the
+// binding closed nor deny ownership of one the binding holds.
+func TestDoHookCurrentVerifiesARelocatedClaimByItsBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		bindingStatus        string
+		frozenStatus         string
+		wantCode             int
+		wantStdout, wantInEr string
+	}{
+		{name: "binding closed, frozen copy held", bindingStatus: "closed", frozenStatus: "in_progress", wantCode: 1, wantInEr: string(claimStaleClosed)},
+		{name: "binding held, frozen copy closed", bindingStatus: "in_progress", frozenStatus: "closed", wantCode: 0, wantStdout: "%s\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachTopology(t, func(t *testing.T, e splitEnv) {
+				sessions := e.sessionsStore()
+				sess, err := sessions.Create(beads.Bead{
+					Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession},
+					Metadata: map[string]string{"state": string(session.StateActive), "session_name": "worker-1"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				step := mintDurableGraphBead(t, e, "routed step", "executor")
+				if err := e.graphStore().Update(step.ID, beads.UpdateOpts{Status: ptrString(tc.bindingStatus), Assignee: ptrString(sess.ID)}); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.graphStore().SetMetadata(step.ID, beadmeta.SessionIDMetadataKey, sess.ID); err != nil {
+					t.Fatal(err)
+				}
+				if e.split {
+					ledger := e.work
+					if policy, wrapped := ledger.(*beadPolicyStore); wrapped {
+						ledger = policy.Store // the forced create sits below the policy fence, as gc storage migrate's does
+					}
+					forcer, ok := ledger.(beads.ForeignIDCreator)
+					if !ok {
+						t.Fatalf("the work store %T cannot model a frozen pre-migration copy", e.work)
+					}
+					if _, err := forcer.CreateWithForeignID(beads.Bead{
+						ID: step.ID, Title: "frozen copy", Type: "task", Status: tc.frozenStatus, Assignee: sess.ID,
+						Metadata: map[string]string{beadmeta.SessionIDMetadataKey: sess.ID},
+					}); err != nil {
+						t.Fatalf("seeding the frozen ledger copy: %v", err)
+					}
+				}
+				if err := sessions.SetMetadata(sess.ID, beadmeta.CurrentClaimBeadIDMetadataKey, step.ID); err != nil {
+					t.Fatal(err)
+				}
+				ctx := hookCurrentContext{
+					sessFront: session.NewStore(beads.SessionStore{Store: sessions}),
+					cfg:       e.cfg,
+					legs:      testWorkLegs(e.cityPath, e.cfg, e.work, nil),
+				}
+				var stdout, stderr bytes.Buffer
+				code := doHookCurrent(ctx, sess.ID, true, &stdout, &stderr)
+				wantStdout := ""
+				if tc.wantStdout != "" {
+					wantStdout = fmt.Sprintf(tc.wantStdout, step.ID)
+				}
+				if code != tc.wantCode || stdout.String() != wantStdout {
+					t.Fatalf("split=%v: --id-only = (%d, %q), want (%d, %q); stderr=%s", e.split, code, stdout.String(), tc.wantCode, wantStdout, stderr.String())
+				}
+				if !strings.Contains(stderr.String(), tc.wantInEr) {
+					t.Errorf("split=%v: stderr = %q, want %q", e.split, stderr.String(), tc.wantInEr)
+				}
+			})
+		})
+	}
 }
