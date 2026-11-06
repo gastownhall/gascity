@@ -30,12 +30,13 @@ stable release.
 
 Recommended path:
 
-1. Run the RC gate on the intended release branch or commit.
-2. Open **Actions → RC Release → Run workflow**.
-3. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
-4. Set `target_ref` to the exact RC-gate-passing commit SHA.
+1. On the release branch, [re-pin the bundled packs](#re-pin-the-bundled-packs).
+2. Run the RC gate on the intended release branch or commit.
+3. Open **Actions → RC Release → Run workflow**.
+4. Set `tag_name` to an RC tag such as `v1.2.0-rc1`.
+5. Set `target_ref` to the exact RC-gate-passing commit SHA.
 
-Nothing enforces step 1: the **RC Gate** workflow (`rc-gate.yml`) runs only
+Nothing enforces step 2: the **RC Gate** workflow (`rc-gate.yml`) runs only
 when someone dispatches it, and neither `rc-release.yml` nor `release.yml`
 checks for a passing run. It is also the only workflow that checks the bundled
 pack pin (`BundledPackImportVersion`) against the content the release embeds.
@@ -75,6 +76,56 @@ git push origin vX.Y.Z-rcN
 Pushing an RC tag triggers `rc-release.yml`. The stable `release.yml` jobs
 skip tags containing a prerelease suffix, so RC tags do not run the Homebrew
 or stable publishing path.
+
+### Re-pin the bundled packs
+
+`BundledPackImportVersion` (`internal/config/public_packs.go`) names the
+gascity.git commit whose bundled packs (`internal/bootstrap/packs/core` and
+`examples/bd`) match what the release embeds. The RC Gate's `embedded pins`
+job fails if those packs changed after that commit. On `main` they move past
+the pin between releases, so re-pin on the release branch, after its last
+change to the bundled packs:
+
+```bash
+old=$(sed -n 's/.*BundledPackImportVersion = "sha:\([0-9a-f]\{40\}\)".*/\1/p' internal/config/public_packs.go)
+new=$(git rev-parse HEAD)
+test -n "$old" && git grep -l "$old" -- internal/config/public_packs.go examples docs | xargs perl -pi -e "s/$old/$new/g"
+```
+
+That moves the pin, and the examples that import the bundled packs, to the
+branch tip. `SupersededBundledPackImportVersions` must then list every pin an
+earlier gc wrote as canonical. The release serves its embedded packs for a
+listed pin, and `gc doctor --fix` moves the city to the new pin. Any other pin
+counts as deliberate: a city an earlier release created at such a pin stops
+loading, and `gc import install` then fetches that commit's older packs in
+place of the release's. Append `"sha:<old>",`, then every pin the previous
+release shipped that the list lacks, each with a comment naming where it came
+from. This prints those pins:
+
+```bash
+prev=vX.Y.Z   # the previous release's tag
+git show "$prev:internal/config/public_packs.go" |
+  sed -n -e 's/.*BundledPackImportVersion = "\(sha:[0-9a-f]*\)".*/\1/p' \
+    -e '/^var SupersededBundledPackImportVersions/,/^}/s/^[[:space:]]*"\(sha:[0-9a-f]*\)",.*/\1/p' |
+  while read -r pin; do grep -q "\"$pin\"" internal/config/public_packs.go || echo "$pin"; done
+```
+
+A branch cut from the previous release's tag lists them already.
+`[release-only]` commits never reach `main`, so a branch cut from `main` lacks
+the pins of a release shipped from a hotfix branch until they are added to
+`main` (below).
+
+Commit the re-pin as
+`[release-only] chore(pins): re-pin the bundled packs to <new>` and push.
+`scripts/check-embedded-pins --bd-advisory` runs the RC Gate's check locally.
+Re-pin again if a later backport changes the bundled packs.
+
+After the release, add its pins to `main` too, or `main` builds treat the
+cities the release created as deliberately pinned to an old commit. On a
+branch from `main`, run the command above with `prev` set to the new release's
+tag, append what it prints to `SupersededBundledPackImportVersions`, and open
+a pull request. The command skips `main`'s own pin, which stays canonical
+there.
 
 ### Manual
 
@@ -147,6 +198,7 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 | Git tag `vX.Y.Z` | Created and pushed | `scripts/bump-version.sh` |
 | GitHub Release page | Created with binaries + grouped changelog | GoReleaser in `release.yml` |
 | Release SBOM + attestations | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml` |
+| `internal/config/public_packs.go` and the example cities | `BundledPackImportVersion` re-pinned on the release branch; after the release, its pins added to `main`'s `SupersededBundledPackImportVersions` | [Re-pin the bundled packs](#re-pin-the-bundled-packs) |
 | `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated | `update-homebrew-formula` in `release.yml` |
 | `Homebrew/homebrew-core` `Formula/g/gascity.rb` | source `url` + `sha256` bumped | BrewTestBot's autobump PR |
 
