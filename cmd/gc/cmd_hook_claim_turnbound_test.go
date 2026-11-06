@@ -897,3 +897,36 @@ func TestHookClaimWindowCountsTimeBeforeTheWorkQuery(t *testing.T) {
 		t.Fatalf("claim_window_expired invocation_age_ms = %d, want >= 2500: the 2.5s preamble counts against the window", got)
 	}
 }
+
+// TestHookClaimWindowStillClaimsAfterAQuickPreamble is the control for
+// TestHookClaimWindowCountsTimeBeforeTheWorkQuery: the same invocation with a
+// preamble inside the window must still reach its claim mutation. Only this
+// direction catches a fence that refuses everything — and a start clock that
+// disagrees with the clock the age is measured on, which would pass the delayed
+// test above while refusing honest claims.
+//
+// The probe does not implement a successful canonical readback, so the command's
+// exit code and JSON result are not asserted here; the presence of the claim
+// mutation in the probe's argv log is the assertion surface.
+func TestHookClaimWindowStillClaimsAfterAQuickPreamble(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	argvLog := installNonTurnDemandProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "live-token")
+	t.Setenv("GC_HOOK_CLAIM_WINDOW", "2s")
+	opts := hookClaimWindowClockOpts(t, 1500*time.Millisecond)
+
+	var stdout, stderr bytes.Buffer
+	cmdHookWithOptions(nil, opts, &stdout, &stderr)
+
+	if !nonTurnProbeClaimed(t, argvLog) {
+		t.Fatalf("a preamble inside the window must still reach the claim mutation; stdout=%q stderr=%s\nbd argv log:\n%s",
+			stdout.String(), stderr.String(), readFileForTest(t, argvLog))
+	}
+	if expiries := readClaimWindowExpiries(t, cityDir); len(expiries) != 0 {
+		t.Fatalf("claim_window_expired fired for a preamble inside the window: %+v", expiries)
+	}
+}
