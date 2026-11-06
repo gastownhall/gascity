@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTutorial06Beads(t *testing.T) {
@@ -167,17 +168,16 @@ func TestTutorial06Beads(t *testing.T) {
 		}
 	})
 
-	t.Run("bd list --status in_progress --flat", func(t *testing.T) {
-		ws.noteWarning("tutorial 06 coverage workaround: the page expects live in-progress work, so the page driver marks the refactor bead in_progress before running the filtered status query")
-		if out, err := ws.runShell(fmt.Sprintf("bd update %s --status in_progress", refactorID), ""); err != nil {
-			t.Fatalf("seed refactor in_progress state: %v\n%s", err, out)
-		}
-		out, err := ws.runShell("bd list --status in_progress --flat", "")
-		if err != nil {
-			t.Fatalf("bd list --status in_progress --flat: %v\n%s", err, out)
-		}
-		if !strings.Contains(out, "Refactor auth module") {
-			t.Fatalf("in-progress list should expose live runtime work:\n%s", out)
+	t.Run("bd list --type session --flat --include-infra", func(t *testing.T) {
+		// The mayor's session bead appears once the supervisor materializes
+		// the always-on named session, so wait for it rather than assert once.
+		var out string
+		if !waitForCondition(t, 90*time.Second, 3*time.Second, func() bool {
+			var err error
+			out, err = ws.runShell("bd list --type session --flat --include-infra", "")
+			return err == nil && strings.Contains(out, "[session]") && strings.Contains(out, "mayor")
+		}) {
+			t.Fatalf("session listing should show the mayor's session bead:\n%s", out)
 		}
 	})
 

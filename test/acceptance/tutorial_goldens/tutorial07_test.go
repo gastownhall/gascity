@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTutorial07Orders(t *testing.T) {
@@ -204,39 +205,88 @@ pool = "worker"
 		}
 	})
 
-	t.Run("gc start", func(t *testing.T) {
-		ws.noteWarning("tutorial 07 workaround: gc init currently leaves a standalone controller running, so the page driver stops that controller immediately before the visible gc start step")
-		if statusOut, statusErr := ws.runShell("gc status", ""); statusErr == nil && !strings.Contains(statusOut, "Controller: stopped") {
-			if stopOut, stopErr := ws.runShell("gc stop", ""); stopErr != nil {
-				t.Fatalf("hidden gc stop before visible gc start: %v\n%s", stopErr, stopOut)
-			}
-		}
-		out, err := ws.runShell("gc start", "")
+	t.Run("mkdir -p scripts", func(t *testing.T) {
+		out, err := ws.runShell("mkdir -p scripts", "")
 		if err != nil {
-			t.Fatalf("gc start: %v\n%s", err, out)
-		}
-		if strings.TrimSpace(out) == "" {
-			t.Fatal("gc start output is empty")
+			t.Fatalf("mkdir -p scripts: %v\n%s", err, out)
 		}
 	})
 
-	t.Run("gc order list (after start)", func(t *testing.T) {
+	t.Run("cat > scripts/lint-changed.sh << 'EOF'", func(t *testing.T) {
+		out, err := ws.runShell(tutorialLintScriptShellCommand(t), "")
+		if err != nil {
+			t.Fatalf("write scripts/lint-changed.sh: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("chmod +x scripts/lint-changed.sh", func(t *testing.T) {
+		out, err := ws.runShell("chmod +x scripts/lint-changed.sh", "")
+		if err != nil {
+			t.Fatalf("chmod +x scripts/lint-changed.sh: %v\n%s", err, out)
+		}
+	})
+
+	// The page has readers create these files at the paths their first lines
+	// name; the release-notes order replaces the seeded cooldown version.
+	writeFile(t, filepath.Join(myCity, "orders", "lint-check.toml"),
+		tutorialFileSnippet(t, "docs/tutorials/07-orders.md", "toml", "# orders/lint-check.toml"), 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "release-notes.toml"),
+		tutorialFileSnippet(t, "docs/tutorials/07-orders.md", "toml", "# orders/release-notes.toml"), 0o644)
+
+	t.Run("gc reload", func(t *testing.T) {
+		out, err := ws.runShell("gc reload", "")
+		if err != nil {
+			t.Fatalf("gc reload: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("gc order list (after reload)", func(t *testing.T) {
 		out, err := ws.runShell("gc order list", "")
 		if err != nil {
-			t.Fatalf("gc order list after start: %v\n%s", err, out)
+			t.Fatalf("gc order list after reload: %v\n%s", err, out)
 		}
-		if !strings.Contains(out, "review-check") {
-			t.Fatalf("order list after start missing review-check:\n%s", out)
+		for _, want := range []string{"lint-check", "review-check", "release-notes", "0 9 * * 1"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("order list after reload missing %q:\n%s", want, out)
+			}
 		}
 	})
 
-	t.Run("gc order check (after start)", func(t *testing.T) {
+	t.Run("gc order check (after reload)", func(t *testing.T) {
 		out, err := ws.runShell("gc order check", "")
 		if err != nil && !strings.Contains(out, "NAME") {
-			t.Fatalf("gc order check after start: %v\n%s", err, out)
+			t.Fatalf("gc order check after reload: %v\n%s", err, out)
 		}
-		if !strings.Contains(out, "review-check") {
-			t.Fatalf("order check after start should mention review-check:\n%s", out)
+		for _, want := range []string{"lint-check", "release-notes"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("order check after reload missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("gc order history lint-check", func(t *testing.T) {
+		// The exec order fires on the next tick after the reload, then every
+		// 30 seconds, so wait for its first run rather than assert once.
+		var out string
+		if !waitForCondition(t, 3*time.Minute, 5*time.Second, func() bool {
+			var err error
+			out, err = ws.runShell("gc order history lint-check", "")
+			// Before the first run this prints `No order history for "lint-check".`
+			return err == nil && !strings.Contains(out, "No order history") && strings.Contains(out, "lint-check")
+		}) {
+			t.Fatalf("lint-check never ran within 3m of gc reload:\n%s", out)
+		}
+	})
+
+	t.Run("gc events --type order.failed --since 5m", func(t *testing.T) {
+		out, err := ws.runShell("gc events --type order.failed --since 5m", "")
+		if err != nil {
+			t.Fatalf("gc events --type order.failed --since 5m: %v\n%s", err, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "lint-check") {
+				t.Fatalf("the stand-in lint script should never fail its order:\n%s", out)
+			}
 		}
 	})
 }
