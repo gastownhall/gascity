@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -221,5 +222,44 @@ func TestReadRuntimeJudgesByLaunchNamesOnRealTmux(t *testing.T) {
 				t.Fatalf("read %+v cause %q, want class %d on one object with its identity", rt, cause, c.class)
 			}
 		})
+	}
+}
+
+// TestStartSparesAnAgentRelaunchedUnderNewNamesOnRealTmux (the #8923
+// review). Kills a warm relaunch that leaves the identity naming the box's
+// first launch, by which the fresh read judges the agent: a session
+// launched running sleep under [sleep], then relaunched in its warm box (A14's
+// launch-only drift) running tail under [tail], reads alive under the names
+// its identity then records, and a start over it settles the already-running
+// no-op, its session and pane untouched.
+func TestStartSparesAnAgentRelaunchedUnderNewNamesOnRealTmux(t *testing.T) {
+	sp, tm := realTmux(t, "rln")
+	env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
+	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env, ProcessNames: []string{"sleep"}, AcceptStartupDialogs: new(bool)}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	relaunch := runtime.Config{Command: "sh -c 'echo relaunched; exec tail -f /dev/null'", ProcessNames: []string{"tail"}, AcceptStartupDialogs: new(bool)}
+	if err := sp.(runtime.RelaunchProvider).Relaunch(context.Background(), "s-gc-1", relaunch); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	waitTmux(t, "the relaunched agent", func() bool {
+		l, ok := freshRead(context.Background(), sp, "s-gc-1", []string{"tail"}, time.Now())
+		return ok && l.Alive
+	})
+	rt, cause := readRuntime(context.Background(), sp, []string{"tail"}, "s-gc-1", time.Now(), time.Now)
+	if cause != "" || rt.Class != rtAlive || !rt.Same || rt.Identity.Token != "tok" || !slices.Equal(rt.Identity.ProcessNames, []string{"tail"}) {
+		t.Fatalf("read %+v cause %q, want the relaunched agent alive under the names its identity records", rt, cause)
+	}
+	panes := func() string {
+		return tm("list-panes", "-s", "-t", "=s-gc-1:", "-F", "#{session_id}/#{session_created} #{pane_id} pid=#{pane_pid} dead=#{pane_dead}")
+	}
+	before := panes()
+	k := startKit(t, intentStart, "awake", "last_woke_at", gatherNow.Add(-2*time.Minute).Format(time.RFC3339))
+	k.it.Deadline = time.Now().Add(70 * time.Second)
+	k.resolvesProcessNames("tail")
+	k.p.Runtime = sp
+	s := k.runKind()
+	if after := panes(); s.Outcome != settledNoop || s.Cause != causeAlreadyRunning || after != before || len(k.starts()) != 0 {
+		t.Fatalf("settlement %+v, starts %d; panes %q, was %q; want the already-running no-op, the relaunched agent untouched", s, len(k.starts()), after, before)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -116,13 +117,14 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 	return nil
 }
 
-func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[string]string, processNames []string) error {
 	f.calls = append(f.calls, startCall{
-		method:  "respawnAgent",
-		name:    name,
-		workDir: workDir,
-		command: command,
-		env:     env,
+		method:       "respawnAgent",
+		name:         name,
+		workDir:      workDir,
+		command:      command,
+		env:          env,
+		processNames: processNames,
 	})
 	if f.respawnHook != nil {
 		f.respawnHook()
@@ -2590,6 +2592,11 @@ func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
 	}
 	if respawn.command != "env -u CI -u NO_COLOR claude" {
 		t.Errorf("respawnAgent command = %q, want %q", respawn.command, "env -u CI -u NO_COLOR claude")
+	}
+	// The identity records the relaunched config's process names
+	// (respawnAgent), not the box's first launch's.
+	if !slices.Equal(respawn.processNames, cfg.ProcessNames) {
+		t.Errorf("respawnAgent process names = %q, want the relaunched config's %q", respawn.processNames, cfg.ProcessNames)
 	}
 }
 

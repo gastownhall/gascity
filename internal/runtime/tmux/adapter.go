@@ -228,10 +228,31 @@ func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map
 	// can distinguish a live pane shell from a live agent process. Sessions
 	// without ProcessNames keep pane-only liveness for conformance tests and
 	// ad-hoc invocations.
-	if names := joinNonEmpty(cfg.ProcessNames, ","); names != "" && strings.TrimSpace(cloned[gtProcessNamesEnvKey]) == "" {
+	if names := launchProcessNames(cloned, cfg.ProcessNames); names != "" {
 		cloned[gtProcessNamesEnvKey] = names
 	}
 	return cloned
+}
+
+// launchProcessNames is the GT_PROCESS_NAMES a launch with env and
+// processNames records: env's own, else processNames joined; "" when
+// neither names any.
+func launchProcessNames(env map[string]string, processNames []string) string {
+	if names := env[gtProcessNamesEnvKey]; strings.TrimSpace(names) != "" {
+		return names
+	}
+	return joinNonEmpty(processNames, ",")
+}
+
+// processNamesRecord is the tmux command that sets session's
+// GT_PROCESS_NAMES to names, or removes the session's entry when names is
+// empty. GT_PROCESS_NAMES is argv-safe ([runtime.ArgvSafeEnvKey]), so the
+// value travels as an argument, as SetEnvironment sends it.
+func processNamesRecord(session, names string) []string {
+	if names == "" {
+		return []string{"set-environment", "-t", sessionTarget(session), "-u", gtProcessNamesEnvKey}
+	}
+	return []string{"set-environment", "-t", sessionTarget(session), gtProcessNamesEnvKey, names}
 }
 
 // joinNonEmpty joins trimmed non-empty entries with sep; returns "" if none.
@@ -292,9 +313,12 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // (respawn-pane -k) and the post-launch orchestration re-run. This is the
 // agent-half of the runtime/transport un-weld (B1) — it lets the reconciler apply
 // a launch-only config change without the full reprovision a Stop+Start forces.
-// Unlike Start it does NOT regenerate the instance token, re-inject env hints, or
-// re-stage files (those are provision-half and unchanged on a launch-only change),
-// and on failure it leaves the warm box in place rather than tearing it down.
+// Unlike Start it does NOT regenerate the instance token, re-inject the other
+// env hints, or re-stage files (those are provision-half and unchanged on a
+// launch-only change), and on failure it leaves the warm box in place rather
+// than tearing it down. The one env hint it records again is GT_PROCESS_NAMES
+// (respawnAgent): no fingerprint hashes ProcessNames, so a launch-only change
+// can move the box to a program its first launch's names do not match.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	// The runtime dir is what makes the startup-nudge and start-crash
 	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
@@ -1501,7 +1525,7 @@ func (p *Provider) TeardownServer() error {
 // This enables unit testing without a real tmux server.
 type startOps interface {
 	createSession(name, workDir, command string, env map[string]string) error
-	respawnAgent(name, workDir, command string, env map[string]string) error
+	respawnAgent(name, workDir, command string, env map[string]string, processNames []string) error
 	isSessionRunning(name string) bool
 	isRuntimeRunning(name string, processNames []string) (bool, error)
 	killSession(name string) error
@@ -1621,14 +1645,28 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // value for the rest of the box's life. Re-marking a key already marked is a
 // no-op, and only the keys durableWithholdKeys names are marked, so a relaunch
 // that withholds none of them costs no extra tmux call at all.
-func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+//
+// The session environment's GT_PROCESS_NAMES is the identity's record of the
+// agent's process names, by which liveness and the reconciler's fresh read
+// judge the agent, so the respawn sets it to the names a start of env and
+// processNames records (launchProcessNames), or removes it when there are
+// none, as a start with none leaves it unset. No fingerprint hashes
+// ProcessNames, so a launch-only change can move the box to a program its
+// first launch's names do not match: kept, they would read the relaunched
+// agent dead. The record leads the respawn's own command list
+// (processNamesRecord), so it is sent only once the agent pane resolved, the
+// respawn runs right behind it, and a record that fails respawns nothing.
+// Sent apart, a relaunch that failed between the two would leave the first
+// launch's agent, still running, judged dead by names it does not run under.
+func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string, processNames []string) error {
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	if err := o.tm.respawnPaneWithWorkDir(name, workDir, command, o.programStatus); err != nil {
+	record := processNamesRecord(name, launchProcessNames(env, processNames))
+	if err := o.tm.respawnPaneWithWorkDir(name, workDir, command, o.programStatus, record); err != nil {
 		return err
 	}
 	// The respawned process inherits the session environment's identity;
@@ -2202,7 +2240,7 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	if err != nil {
 		return err
 	}
-	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
+	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env, cfg.ProcessNames); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
 	}
 	if err := ctx.Err(); err != nil {

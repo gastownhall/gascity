@@ -344,17 +344,73 @@ func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Con
 	return err
 }
 
+// processNamesEnvKey is the identity env key that records the agent's
+// process names.
+const processNamesEnvKey = "GT_PROCESS_NAMES"
+
+// launchProcessNames is the GT_PROCESS_NAMES a fresh start of cfg records:
+// the caller's own, else the agent's process names joined; "" when neither
+// names any.
+func launchProcessNames(cfg runtime.Config) string {
+	if names := cfg.Env[processNamesEnvKey]; strings.TrimSpace(names) != "" {
+		return names
+	}
+	return strings.Join(agentNames(cfg.ProcessNames), ",")
+}
+
+// recordLaunchProcessNames points a v2-ready box's identity at the agent a
+// warm relaunch is about to run: GT_PROCESS_NAMES set to the names a fresh
+// start of cfg records, or removed when it records none. observe, inventory
+// and kill-object judge the agent by those names, and no fingerprint hashes
+// ProcessNames, so a launch-only change can move the box to a program its
+// first launch's names do not match. It returns restore, which puts back the
+// names the identity held. An identity that already names them is left as
+// it is, and a pack that is not v2-ready keeps the identity its start gave
+// it; restore is then a no-op.
+func (p *Provider) recordLaunchProcessNames(name string, cfg runtime.Config) (func() error, error) {
+	kept := func() error { return nil }
+	if !p.v2Ready() {
+		return kept, nil
+	}
+	prev, err := p.GetMeta(name, processNamesEnvKey)
+	if err != nil {
+		return nil, fmt.Errorf("exec provider: reading the agent's process names on %q: %w", name, err)
+	}
+	names := launchProcessNames(cfg)
+	if names == prev {
+		return kept, nil
+	}
+	if err := p.writeProcessNames(name, names); err != nil {
+		return nil, fmt.Errorf("exec provider: recording the relaunched agent's process names on %q: %w", name, err)
+	}
+	return func() error {
+		if err := p.writeProcessNames(name, prev); err != nil {
+			return fmt.Errorf("exec provider: restoring the agent's process names on %q: %w", name, err)
+		}
+		return nil
+	}, nil
+}
+
+// writeProcessNames sets name's GT_PROCESS_NAMES to names, or removes it
+// when names is empty, as get-meta answers a key that is not set.
+func (p *Provider) writeProcessNames(name, names string) error {
+	if names == "" {
+		return p.RemoveMeta(name, processNamesEnvKey)
+	}
+	return p.SetMeta(name, processNamesEnvKey, names)
+}
+
 // freshStartConfig is cfg as a fresh start sends it: fresh_only set, and
-// the identity the box must carry complete. GT_PROCESS_NAMES is added from
-// ProcessNames when unset, and a GC_INSTANCE_TOKEN is minted when unset (as
+// the identity the box must carry complete. GT_PROCESS_NAMES is
+// launchProcessNames's, and a GC_INSTANCE_TOKEN is minted when unset (as
 // tmux does), so the failed-start cleanup can tell this attempt's box.
 func freshStartConfig(cfg runtime.Config) (runtime.Config, error) {
 	env := make(map[string]string, len(cfg.Env)+3)
 	for k, v := range cfg.Env {
 		env[k] = v
 	}
-	if names := strings.Join(agentNames(cfg.ProcessNames), ","); names != "" && strings.TrimSpace(env["GT_PROCESS_NAMES"]) == "" {
-		env["GT_PROCESS_NAMES"] = names
+	if names := launchProcessNames(cfg); names != "" {
+		env[processNamesEnvKey] = names
 	}
 	if strings.TrimSpace(env["GC_INSTANCE_TOKEN"]) == "" {
 		b := make([]byte, 16)

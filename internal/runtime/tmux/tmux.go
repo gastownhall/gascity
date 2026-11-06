@@ -6341,13 +6341,17 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 // armed is left as it was, a pipe of its own included, and a capture armed
 // before the switch went off is not read valid for the new program once the
 // switch is back on.
-func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm) error {
+//
+// lead runs in the same list, ahead of respawn-pane (respawnPaneList), and
+// the list is sent only once the pane resolved: a failed lookup runs none
+// of it.
+func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime.ProgramStatusArm, lead ...[]string) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
 		return err
 	}
 	if plan := t.planCapture(arm); plan != nil {
-		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.execPaneRoot(plan.wrapRelay(command))), plan.armCommands(target, true))
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.execPaneRoot(plan.wrapRelay(command))), lead, plan.armCommands(target, true))
 		t.programArms.noteArmed(plan)
 		if err != nil {
 			return err
@@ -6361,7 +6365,7 @@ func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime
 	if t.programStatusMode() != runtime.ProgramStatusOff {
 		disarm = disarmCommands(target)
 	}
-	followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), disarm)
+	followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(command), lead, disarm)
 	if err != nil {
 		return err
 	}

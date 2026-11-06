@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -724,6 +725,189 @@ func TestReadyWeldedRelaunchStartsFresh(t *testing.T) {
 	if slices.Contains(opsRan(t, stuckDir), "start") {
 		t.Error("relaunch started over a box that never went")
 	}
+}
+
+// separableReady declares a v2-ready pack that launches its agent apart from
+// provisioning its box.
+const separableReady = `{"version":0,"capabilities":["proc.exec","proc.provision","observe.v1","report-attachment"]}`
+
+// namesOps are the ops of a separable pack whose meta store keeps each key
+// in dir/meta-<key>, and which logs every identity write and every exec
+// op's command, in order, to dir/log. A write runs gate once it is logged
+// and before it stores anything: a gate that exits 1 fails the write,
+// unstored. Every exec op exits 0, so has-session finds the warm box's agent
+// session.
+func namesOps(gate string) map[string]string {
+	return map[string]string{
+		"get-meta":    `cat "$dir/meta-$3" 2>/dev/null; exit 0`,
+		"set-meta":    `v="$(cat)"; echo "set $3=$v" >> "$dir/log"; ` + gate + `; printf '%s' "$v" > "$dir/meta-$3"`,
+		"remove-meta": `echo "remove $3" >> "$dir/log"; ` + gate + `; rm -f "$dir/meta-$3"`,
+		"exec":        `echo "exec $(cat)" >> "$dir/log"`,
+	}
+}
+
+// namesLog reads a namesOps pack's log: its identity writes in order, and
+// whether the agent was respawned and, if so, after every write.
+func namesLog(t *testing.T, dir string) (writes []string, respawned, recordedFirst bool) {
+	t.Helper()
+	recordedFirst = true
+	for _, line := range strings.Split(strings.TrimSuffix(readLog(t, filepath.Join(dir, "log")), "\n"), "\n") {
+		switch {
+		case strings.Contains(line, "respawn-pane"):
+			respawned = true
+		case strings.HasPrefix(line, "set "), strings.HasPrefix(line, "remove "):
+			writes = append(writes, line)
+			recordedFirst = recordedFirst && !respawned
+		}
+	}
+	return writes, respawned, recordedFirst
+}
+
+// Kills a separable relaunch that leaves a v2-ready box's identity naming
+// its first launch (the #8923 review): no fingerprint hashes ProcessNames,
+// so a launch-only change can move the warm box to a program its first
+// launch's GT_PROCESS_NAMES do not match, and observe, inventory and
+// kill-object judge the agent by them. Before the agent is respawned the
+// identity records the names a fresh start records (the caller's own, else
+// the trimmed process names), or loses them when there are none; an
+// identity that already names them is not written; a failed record
+// respawns nothing; a pack that is not v2-ready keeps the identity its
+// start gave it.
+func TestSeparableRelaunchRecordsTheAgentsProcessNames(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		handshake string
+		cfg       runtime.Config
+		prev      string   // the identity's names before the relaunch
+		gate      string   // namesOps' write gate
+		writes    []string // the identity writes, in order
+		names     string   // the identity's names after it
+		respawned bool
+	}{
+		{"the relaunched agent's names", separableReady, runtime.Config{ProcessNames: []string{"tail", " ", "node"}}, "sleep", ":", []string{"set GT_PROCESS_NAMES=tail,node"}, "tail,node", true},
+		{"the caller's own", separableReady, runtime.Config{ProcessNames: []string{"tail"}, Env: map[string]string{"GT_PROCESS_NAMES": "wrapper"}}, "sleep", ":", []string{"set GT_PROCESS_NAMES=wrapper"}, "wrapper", true},
+		{"none", separableReady, runtime.Config{}, "sleep", ":", []string{"remove GT_PROCESS_NAMES"}, "", true},
+		{"already named", separableReady, runtime.Config{ProcessNames: []string{"tail"}}, "tail", ":", nil, "tail", true},
+		{"a failed record", separableReady, runtime.Config{ProcessNames: []string{"tail"}}, "sleep", "exit 1", []string{"set GT_PROCESS_NAMES=tail"}, "sleep", false},
+		{"not v2-ready", `{"version":0,"capabilities":["proc.exec","proc.provision"]}`, runtime.Config{ProcessNames: []string{"tail"}}, "sleep", ":", nil, "sleep", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			script, dir := observePack(t, c.handshake, namesOps(c.gate))
+			writeFile(t, filepath.Join(dir, "meta-GT_PROCESS_NAMES"), c.prev)
+			cfg := c.cfg
+			cfg.Command, cfg.AcceptStartupDialogs = "tail -f /dev/null", new(bool)
+			err := NewSeamBacked(script).(runtime.RelaunchProvider).Relaunch(t.Context(), "s", cfg)
+			if (err == nil) != c.respawned {
+				t.Fatalf("Relaunch = %v, want success %v", err, c.respawned)
+			}
+			writes, respawned, recordedFirst := namesLog(t, dir)
+			if !slices.Equal(writes, c.writes) {
+				t.Errorf("identity writes %q, want %q", writes, c.writes)
+			}
+			if respawned != c.respawned {
+				t.Errorf("respawned %v, want %v", respawned, c.respawned)
+			}
+			if !recordedFirst {
+				t.Error("the agent was respawned before its names were recorded")
+			}
+			if got := readLog(t, filepath.Join(dir, "meta-GT_PROCESS_NAMES")); got != c.names {
+				t.Errorf("identity names %q, want %q", got, c.names)
+			}
+		})
+	}
+}
+
+// Kills a separable relaunch that leaves the identity naming an agent that
+// never launched (the #8923 iteration-2 review): the box's first-launch
+// agent runs on, and judged by the relaunched agent's names it would read
+// dead, so a start's recycle would kill it as a zombie. A relaunch canceled
+// before it records writes nothing, and one canceled while it records puts
+// the names it replaced back (or removes the ones it added) without
+// launching. A launch whose exec fails may have respawned the agent, so the
+// names it recorded stay.
+func TestSeparableRelaunchStoppedBeforeItsLaunchKeepsTheNames(t *testing.T) {
+	// recording gates a write until the test, seeing it begin, has
+	// canceled the relaunch.
+	const recording = `: > "$dir/recording"; until [ -e "$dir/release" ]; do sleep 0.01; done`
+	for _, c := range []struct {
+		name       string
+		prev       string // the identity's names before the relaunch
+		cancel     string // "before" the relaunch, while "recording", or "" for never
+		failLaunch bool
+		writes     []string // the identity writes, in order
+		names      string   // the identity's names after it
+	}{
+		{"canceled before the record", "sleep", "before", false, nil, "sleep"},
+		{"canceled while recording", "sleep", "recording", false, []string{"set GT_PROCESS_NAMES=tail", "set GT_PROCESS_NAMES=sleep"}, "sleep"},
+		{"canceled while recording names the identity had none of", "", "recording", false, []string{"set GT_PROCESS_NAMES=tail", "remove GT_PROCESS_NAMES"}, ""},
+		{"a failed launch", "sleep", "", true, []string{"set GT_PROCESS_NAMES=tail"}, "tail"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gate := ":"
+			if c.cancel == "recording" {
+				gate = recording
+			}
+			ops := namesOps(gate)
+			if c.failLaunch {
+				ops["exec"] = `cmd="$(cat)"; echo "exec $cmd" >> "$dir/log"; case "$cmd" in *respawn-pane*) exit 1 ;; esac`
+			}
+			script, dir := observePack(t, separableReady, ops)
+			if c.prev != "" {
+				writeFile(t, filepath.Join(dir, "meta-GT_PROCESS_NAMES"), c.prev)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			released := make(chan error, 1)
+			switch c.cancel {
+			case "before":
+				cancel()
+			case "recording":
+				go func() { released <- cancelOnceRecording(ctx, cancel, dir) }()
+			}
+			cfg := runtime.Config{Command: "tail -f /dev/null", ProcessNames: []string{"tail"}, AcceptStartupDialogs: new(bool)}
+			err := NewSeamBacked(script).(runtime.RelaunchProvider).Relaunch(ctx, "s", cfg)
+			cancel()
+			if c.cancel == "recording" {
+				if rerr := <-released; rerr != nil {
+					t.Fatal(rerr)
+				}
+			}
+			if err == nil {
+				t.Fatal("Relaunch = nil, want its failure")
+			}
+			if c.cancel != "" && !errors.Is(err, context.Canceled) {
+				t.Errorf("Relaunch = %v, want the cancellation", err)
+			}
+			writes, respawned, _ := namesLog(t, dir)
+			if !slices.Equal(writes, c.writes) {
+				t.Errorf("identity writes %q, want %q", writes, c.writes)
+			}
+			if respawned != c.failLaunch {
+				t.Errorf("respawn attempted %v, want %v", respawned, c.failLaunch)
+			}
+			if got := readLog(t, filepath.Join(dir, "meta-GT_PROCESS_NAMES")); got != c.names {
+				t.Errorf("identity names %q, want %q", got, c.names)
+			}
+		})
+	}
+}
+
+// cancelOnceRecording cancels a namesOps relaunch once its gated write has
+// begun (dir/recording), then lets the write finish (dir/release). It
+// cancels nothing if ctx ends first.
+func cancelOnceRecording(ctx context.Context, cancel context.CancelFunc, dir string) error {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "recording")); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	return os.WriteFile(filepath.Join(dir, "release"), nil, 0o644)
 }
 
 // Kills (§13.5 13): an op run without the city it serves.

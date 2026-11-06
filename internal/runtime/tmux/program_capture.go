@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -527,25 +528,28 @@ func outputBeforeError(err error) string {
 // respawn-pane has run: the respawned pane's id.
 const respawnMarkerFormat = "#{pane_id}"
 
-// respawnPaneList is the one respawn command list: respawn-pane -k on target,
-// a display-message marker proving it ran, then follow. Every command that
-// must reach the new process before tmux reads its output goes in follow
+// respawnPaneList is the one respawn command list: lead, respawn-pane -k on
+// target, a display-message marker proving it ran, then follow. Every command
+// that must reach the new process before tmux reads its output goes in follow
 // (capture's re-arm or removal today; an identity-changing relaunch's input
-// fence).
-func respawnPaneList(target, workDir, command string, follow [][]string) [][]string {
+// fence). Every command that must land only with the respawn goes in lead (a
+// relaunch's record of its agent's process names): tmux runs the list in
+// order and stops at the first command that fails, so a lead command that
+// fails respawns nothing, and a lead that lands has the respawn run right
+// behind it.
+func respawnPaneList(target, workDir, command string, lead, follow [][]string) [][]string {
 	respawn := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {
 		respawn = append(respawn, "-c", workDir)
 	}
 	respawn = append(respawn, command)
-	cmds := [][]string{respawn, {"display-message", "-p", "-t", target, respawnMarkerFormat}}
-	return append(cmds, follow...)
+	return slices.Concat(lead, [][]string{respawn, {"display-message", "-p", "-t", target, respawnMarkerFormat}}, follow)
 }
 
 // runRespawnList runs respawnPaneList. err is non-nil when the pane was not
 // respawned; followErr is non-nil when it was, but a follow command failed.
-func (t *Tmux) runRespawnList(target, workDir, command string, follow [][]string) (followErr, err error) {
-	_, err = t.run(tmuxArgvList(respawnPaneList(target, workDir, command, follow))...)
+func (t *Tmux) runRespawnList(target, workDir, command string, lead, follow [][]string) (followErr, err error) {
+	_, err = t.run(tmuxArgvList(respawnPaneList(target, workDir, command, lead, follow))...)
 	if err == nil {
 		return nil, nil
 	}
