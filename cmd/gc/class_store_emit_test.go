@@ -1536,7 +1536,11 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		}
 	})
 
-	t.Run("the controller's routes resolve the bare engine", func(t *testing.T) {
+	// The controller's graph store is the route-clearing gate over the stamped
+	// engine: no emitter (the controller side must not announce what the CLI
+	// announces), placement on the engine, and a gc.routed_to swap through the
+	// resolved writer clears the previous executor's stamps.
+	t.Run("the controller's graph store resolves the route-clearing gate over the stamped engine", func(t *testing.T) {
 		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
 		captureCLIStorageStderr(t)
 		plan, err := resolveCityStoragePlan(cityPath, cfg)
@@ -1549,10 +1553,41 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		}
 		defer routes.close() //nolint:errcheck // the test asserts on the routes, not on the close
 
-		writer, _, err := beads.ResolveConditionalWriter(resolveGraphStore(routes, beads.NewMemStore(), cfg, cityPath, nil))
-		if _, engine := writer.(*beads.SQLiteStore); err != nil || !engine {
-			t.Fatalf("ResolveConditionalWriter(controller graph store) = (%T, %v), want the stamped engine itself", writer, err)
+		decoy := beads.NewMemStore()
+		graph := resolveGraphStore(routes, decoy, cfg, cityPath, nil)
+
+		// G1: the writer resolves.
+		writer, _, err := beads.ResolveConditionalWriter(graph)
+		if err != nil || writer == nil {
+			t.Fatalf("ResolveConditionalWriter(controller graph store) = (%T, %v), want a writer", writer, err)
 		}
+		// G3: the graph store sits over the stamped engine, not the work store.
+		engine, ok := bindingEngine(graph).(*beads.SQLiteStore)
+		if !ok {
+			t.Fatalf("bindingEngine(controller graph store) = %T, want the stamped *beads.SQLiteStore", bindingEngine(graph))
+		}
+		// G2: the controller side carries no emitter.
+		if _, emits := writer.(*emittingClassStore); emits {
+			t.Fatalf("the controller's resolved writer is %T, want no emitter on the controller side", writer)
+		}
+
+		bead := seedCarrierBead(t, engine)
+		if got := updatedRowCount(t, cityPath, bead.ID); got != 0 {
+			t.Fatalf("seeding appended %d bead.updated row(s), want 0 before the swap", got)
+		}
+		swapped, err := writer.CompareAndSetMetadataKey(bead.ID, beadmeta.RoutedToMetadataKey, carrierOldExecutor, carrierNewExecutor)
+		if err != nil || !swapped {
+			t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want a landed swap", swapped, err)
+		}
+		if got := updatedRowCount(t, cityPath, bead.ID); got != 0 {
+			t.Errorf("the controller-side swap appended %d bead.updated row(s), want 0", got)
+		}
+		// G3: the write landed on the engine, and the work store stayed empty.
+		if listed, err := decoy.List(beads.ListQuery{AllowScan: true}); err != nil || len(listed) != 0 {
+			t.Errorf("the work store holds %d bead(s) (err %v), want it untouched", len(listed), err)
+		}
+		// G4: the swap went through the gate, so the old executor's stamps are gone.
+		requireCarrierStampsCleared(t, engine, bead.ID)
 	})
 }
 
