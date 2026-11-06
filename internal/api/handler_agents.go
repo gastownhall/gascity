@@ -384,11 +384,12 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities for a list row, reading the cache first
-// and, on a miss, the store within lookup's shared window (activeWorkLookup).
-// If rig is non-empty, only that rig's store is searched; otherwise all
-// stores are searched. A store only rigs suspended by effective state reach
-// is never searched (activeBeadSearchScope). Returns "" if no match, and
-// once lookup has failed.
+// and, when the cache cannot answer, the store within lookup's shared window
+// (activeWorkLookup). If rig is non-empty, only that rig's store is searched;
+// otherwise all stores are searched. A store only rigs suspended by effective
+// state reach is never searched (activeBeadSearchScope). Returns "" if no
+// match, and when the search reaches a store its cache cannot answer once
+// lookup has failed.
 func (s *Server) findActiveBeadForAssignees(lookup *activeWorkLookup, rig string, assignees ...string) string {
 	return s.findActiveBeadForAssigneesWithFreshness(rig, lookup, assignees...)
 }
@@ -406,14 +407,13 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // newest first within a store. A nil lookup reads live through
 // findLiveActiveBeadInStores. Otherwise each identity and store is read with a
 // targeted ListQuery with Limit=1, stopping at the first match: from the
-// cache when it answers, else through statusListStoreWithTimeout under
-// lookup's window. A failed read fails lookup and ends the search with no
-// match, so a lower-priority bead never stands in for the unread one. Both
-// read only the stores activeBeadSearchScope picks.
+// cache when it answers, hit or authoritative miss, even after lookup's
+// window closed, else through statusListStoreWithTimeout under that window.
+// A failed read fails lookup and ends the search with no match. Once lookup
+// has failed, a store the cache cannot answer is not read and ends the search
+// the same way, so a lower-priority bead never stands in for the unread one.
+// Both read only the stores activeBeadSearchScope picks.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *activeWorkLookup, assignees ...string) string {
-	if lookup != nil && lookup.failed() {
-		return ""
-	}
 	stores, rigNames := activeBeadSearchScope(workStoresByName(s.state.Stores(), s.state.CityName()), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
@@ -444,6 +444,9 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *act
 					}
 					continue
 				}
+			}
+			if lookup.failed() {
+				return ""
 			}
 			matches, err := statusListStoreWithTimeout(lookup.ctx, s.state, stores[rn], query)
 			if err != nil {

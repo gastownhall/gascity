@@ -4037,6 +4037,9 @@ type ListBodySessionBindingRecord struct {
 
 // ListBodySessionResponse defines model for ListBodySessionResponse.
 type ListBodySessionResponse struct {
+	// ActiveWorkErrors Errors from the active-work lookup that fills each session's active_bead: the read that failed (timed out, canceled, errored or returned a partial result), naming its rig. Every session is still listed; partial and partial_errors report gaps in the list itself. A session whose active bead needed a store read at or after the failure carries none, since that store went unread.
+	ActiveWorkErrors *[]string `json:"active_work_errors,omitempty"`
+
 	// Items The list of items.
 	Items *[]SessionResponse `json:"items"`
 

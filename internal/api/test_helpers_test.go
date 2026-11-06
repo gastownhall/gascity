@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// listResponse decodes the envelope of a list response body (ListBody's
+// JSON fields) for a test that reads its items generically.
+type listResponse struct {
+	Items         any      `json:"items"`
+	Total         int      `json:"total"`
+	NextCursor    string   `json:"next_cursor,omitempty"`
+	Partial       bool     `json:"partial,omitempty"`
+	PartialErrors []string `json:"partial_errors,omitempty"`
+}
+
 // newTestActiveWorkLookup is a list response's active-work lookup for a test
 // that resolves rows directly; it closes when the test ends.
 func newTestActiveWorkLookup(t testing.TB) *activeWorkLookup {

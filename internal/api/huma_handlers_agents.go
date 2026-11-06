@@ -324,7 +324,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	partialErrors = append(partialErrors, runtimeSessions.partialErrors()...)
-	partialErrors = append(partialErrors, activeWork.partialErrors()...)
+	partialErrors = append(partialErrors, activeWork.failures()...)
 
 	if agents == nil {
 		agents = []agentResponse{}

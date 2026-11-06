@@ -3765,6 +3765,7 @@ export const zSessionResponse = z.object({
 });
 
 export const zListBodySessionResponse = z.object({
+    active_work_errors: z.array(z.string()).nullish(),
     items: z.array(zSessionResponse).nullable(),
     next_cursor: z.string().optional(),
     partial: z.boolean().optional(),

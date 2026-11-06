@@ -360,23 +360,17 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeWork, false, 0, keyedTranscriptPaths)
 	}
-	partialErrors = append(partialErrors, activeWork.partialErrors()...)
 
-	if !pp.IsPaging {
-		writeJSON(w, http.StatusOK, listResponse{
+	// nextCursor stays empty unless the request pages.
+	writeJSON(w, http.StatusOK, ListBodySessionResponse{
+		ListBody: ListBody[sessionResponse]{
 			Items:         items,
 			Total:         total,
+			NextCursor:    nextCursor,
 			Partial:       len(partialErrors) > 0,
 			PartialErrors: partialErrors,
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, listResponse{
-		Items:         items,
-		Total:         total,
-		NextCursor:    nextCursor,
-		Partial:       len(partialErrors) > 0,
-		PartialErrors: partialErrors,
+		},
+		ActiveWorkErrors: activeWork.failures(),
 	})
 }
 

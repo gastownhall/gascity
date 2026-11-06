@@ -103,14 +103,21 @@ store, or nothing, and never falls back to the other rigs' stores
 The list responses (`GET /sessions`, legacy `/v0/sessions`, `GET /agents`)
 resolve their rows' active beads through one `activeWorkLookup` per request:
 a single `statusStoreReadTimeout` window from the request context, shared by
-every row. A clean cache answer is used even after the window closes; an
-uncached read goes through `statusListStoreWithTimeout`, on the
-context-bound store `ScopedStoreLike` hands out. The first failed read
-(timeout, cancellation, error, or a partial result) ends the lookup: no later
-store, identity or row is read, those rows report no work-store bead (an
-unread higher-priority store may hold the winner), and the response is 200
-with the failure in `partial_errors`. A partial agent list is never cached.
-Detail, create and rename views read live, outside any list window.
+every row. A clean cache answer, hit or authoritative miss, is used even
+after the window closes. Any other read goes through
+`statusListStoreWithTimeout`: a bd-backed store is read through the
+context-bound clone `ScopedStoreLike` hands out, which bypasses its cache,
+and any other store is read as it is, in a goroutine the window abandons
+when it closes first. The first failed read (timeout, cancellation, error,
+or a partial result) fails the lookup, and no store is read after it: a row
+whose search reaches a store its cache cannot answer reports no work-store
+bead (that unread store may hold the winner), while a row the caches answer
+still resolves. The response is 200. The session lists report the failure
+in `active_work_errors` and keep `partial` for gaps in the list itself,
+which `gc session list` and the dashboard refuse to read as whole. The
+agent list reports it in `partial_errors`, since each row's state follows
+its active bead, and a partial agent list is never cached. Detail, create
+and rename views read live, outside any list window.
 
 ## Deferred creation baseline
 

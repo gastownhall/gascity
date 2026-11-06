@@ -10,11 +10,13 @@ import (
 // (GET /sessions, GET /agents). Every row's uncached work-store read shares
 // one statusStoreReadTimeout window derived from the request, so a stalled
 // store costs the response that window at most, not the backend's own
-// timeout once per row. The first failed read ends the lookup: later rows
-// read nothing and resolve no work-store bead, since an unread
-// higher-priority store may hold the winning one, and the response reports
-// the failure as partial. Cache answers stay usable after the window closes
-// until a read has failed. One request's row loop uses it sequentially.
+// timeout once per row. Clean cache answers need no window. The first failed
+// read fails the lookup, and no store is read after it: a row whose search
+// reaches a store its cache cannot answer resolves no work-store bead, since
+// that unread store may hold the winning one, while a row the caches answer
+// still resolves. The response reports the failure: the session lists in
+// active_work_errors, the agent list as partial. One request's row loop uses
+// it sequentially.
 type activeWorkLookup struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -33,19 +35,20 @@ func (l *activeWorkLookup) close() {
 	l.cancel()
 }
 
-// failed reports whether a read has failed, ending the lookup.
+// failed reports whether a read has failed, after which no store is read.
 func (l *activeWorkLookup) failed() bool {
 	return l.err != nil
 }
 
-// fail records and logs the read failure that ends the lookup.
+// fail records and logs the read failure that fails the lookup.
 func (l *activeWorkLookup) fail(rig string, err error) {
 	l.err = fmt.Errorf("looking up active work in rig %q: %w", rig, err)
 	log.Printf("api: %v", l.err)
 }
 
-// partialErrors is the failure a list response reports as partial_errors.
-func (l *activeWorkLookup) partialErrors() []string {
+// failures is the failure a list response reports: the session lists'
+// active_work_errors, the agent list's partial_errors.
+func (l *activeWorkLookup) failures() []string {
 	if l.err == nil {
 		return nil
 	}

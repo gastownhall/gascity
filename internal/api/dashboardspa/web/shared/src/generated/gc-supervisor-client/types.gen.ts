@@ -2233,6 +2233,10 @@ export type ListBodySessionBindingRecord = {
 
 export type ListBodySessionResponse = {
     /**
+     * Errors from the active-work lookup that fills each session's active_bead: the read that failed (timed out, canceled, errored or returned a partial result), naming its rig. Every session is still listed; partial and partial_errors report gaps in the list itself. A session whose active bead needed a store read at or after the failure carries none, since that store went unread.
+     */
+    active_work_errors?: Array<string> | null;
+    /**
      * The list of items.
      */
     items: Array<SessionResponse> | null;

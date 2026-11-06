@@ -20,7 +20,7 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
-func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListInput) (*SessionListOutput, error) {
 	index := s.latestIndex()
 	store := s.state.Stores().Sessions()
 	if store == (beads.SessionStore{}) {
@@ -88,21 +88,23 @@ func (s *Server) humaHandleSessionList(ctx context.Context, input *SessionListIn
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
 		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeWork, false, 0, keyedTranscriptPaths)
 	}
-	partialErrors = append(partialErrors, activeWork.partialErrors()...)
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
 	}
 	freshness := cacheAgeSeconds(store)
-	return &ListOutput[sessionResponse]{
+	return &SessionListOutput{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
 		CacheRefresh: freshness.refresh,
-		Body: ListBody[sessionResponse]{
-			Items:         page,
-			Total:         total,
-			NextCursor:    nextCursor,
-			Partial:       len(partialErrors) > 0,
-			PartialErrors: partialErrors,
+		Body: ListBodySessionResponse{
+			ListBody: ListBody[sessionResponse]{
+				Items:         page,
+				Total:         total,
+				NextCursor:    nextCursor,
+				Partial:       len(partialErrors) > 0,
+				PartialErrors: partialErrors,
+			},
+			ActiveWorkErrors: activeWork.failures(),
 		},
 	}, nil
 }
