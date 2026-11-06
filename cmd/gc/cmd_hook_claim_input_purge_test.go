@@ -491,3 +491,158 @@ func TestWorkflowInputPurgedUnprovedWhenInputIsNotAConvoy(t *testing.T) {
 		t.Fatal("purged = true for a non-convoy input row, want unproved")
 	}
 }
+
+// An evidence read that fails is a failed proof, never absence: the probe
+// errors rather than guessing, and the caller fails open (#8729).
+func TestWorkflowInputPurgedErrorsOnFailingEvidenceRead(t *testing.T) {
+	store, root, _ := seedDoneWorkflow(t, "open")
+	probe := newPurgeProbeStore(store)
+	probe.failGetIDs[root.Metadata[beadmeta.InputConvoyIDMetadataKey]] = true
+
+	if _, err := workflowInputPurged(beads.HandlesFor(probe), root); err == nil {
+		t.Fatal("workflowInputPurged err = nil on a failing evidence read, want the read error")
+	}
+}
+
+// A probe that cannot run is a diagnosed failed proof, not a purge: the
+// candidate is served untouched, the retirement never fires, and the failure
+// lands on stderr for the operator.
+func TestDoHookClaimServesWhenPurgeProbeErrors(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "open")
+	if err := store.Delete(root.Metadata[beadmeta.InputConvoyIDMetadataKey]); err != nil {
+		t.Fatalf("purge convoy: %v", err)
+	}
+	output, err := json.Marshal([]beads.Bead{step})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	claimedID := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return string(output), nil },
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID}, true, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
+			return workflowInputDone(store, candidate, ids)
+		},
+		InputPurged: func(_ context.Context, _ string, _ []string, _ beads.Bead) (hookInputPurgeVerdict, error) {
+			return hookInputPurgeVerdict{}, errors.New("frame unavailable")
+		},
+		RetirePurgedWorkflow: func(_ context.Context, _ string, _ []string, _ string) error {
+			t.Fatal("RetirePurgedWorkflow called after the probe errored")
+			return nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"rig/worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if claimedID != step.ID {
+		t.Errorf("claimed = %q, want %q: a failed proof must serve the candidate (stdout=%q)", claimedID, step.ID, stdout.String())
+	}
+	if !contains(stderr.String(), "probing whether") {
+		t.Errorf("stderr = %q, want the failed proof diagnosed", stderr.String())
+	}
+	for _, id := range []string{root.ID, step.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Errorf("%s status = %q, want open: a failed proof writes nothing", id, got.Status)
+		}
+	}
+}
+
+// A retirement that does not land leaves the workflow untouched and the
+// candidate served: the close is the proof's consequence, never a leap.
+func TestDoHookClaimServesWhenPurgeRetirementFails(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "open")
+	if err := store.Delete(root.Metadata[beadmeta.InputConvoyIDMetadataKey]); err != nil {
+		t.Fatalf("purge convoy: %v", err)
+	}
+	output, err := json.Marshal([]beads.Bead{step})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	claimedID := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return string(output), nil },
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID}, true, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
+			return workflowInputDone(store, candidate, ids)
+		},
+		InputPurged: func(_ context.Context, _ string, _ []string, candidate beads.Bead) (hookInputPurgeVerdict, error) {
+			return workflowInputPurged(beads.HandlesFor(store), candidate)
+		},
+		RetirePurgedWorkflow: func(_ context.Context, _ string, _ []string, _ string) error {
+			return errors.New("store unavailable for close")
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"rig/worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if claimedID != step.ID {
+		t.Errorf("claimed = %q, want %q: a failed retirement must serve the candidate (stdout=%q)", claimedID, step.ID, stdout.String())
+	}
+	got, err := store.Get(step.ID)
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("step status = %q, want open: a failed retirement writes nothing", got.Status)
+	}
+	if !contains(stderr.String(), "retiring workflow") {
+		t.Errorf("stderr = %q, want the failed retirement diagnosed", stderr.String())
+	}
+}
+
+// An unproved shape rides the default probe wiring end to end: a workflow
+// whose input still resolves is not the purge probe's business, and its step
+// claims normally.
+func TestDoHookClaimServesWhenPurgeUnproved(t *testing.T) {
+	store, _, step := seedDoneWorkflow(t, "open") // member present: unproved
+	output, err := json.Marshal([]beads.Bead{step})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	claimedID := ""
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return string(output), nil },
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID}, true, nil
+		},
+		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
+			return workflowInputDone(store, candidate, ids)
+		},
+		WorkflowStore: func(_ context.Context, _ string, _ []string, _, _ string) beads.Store { return store },
+		DrainAck:      func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"rig/worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if claimedID != step.ID {
+		t.Errorf("claimed = %q, want %q: an unproved purge must serve the candidate (stdout=%q stderr=%q)", claimedID, step.ID, stdout.String(), stderr.String())
+	}
+}
