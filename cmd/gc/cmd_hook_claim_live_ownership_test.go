@@ -101,7 +101,7 @@ func (o liveOwnershipOutcome) claimed(id string) bool {
 
 // liveOwnershipRun is one `gc hook --claim` over the work query rows, with
 // the workflow store holding members.
-func liveOwnershipRun(t *testing.T, rows []beads.Bead, members []beads.Bead, opts hookClaimOptions) liveOwnershipOutcome {
+func liveOwnershipRun(t *testing.T, rows []beads.Bead, members []beads.Bead, opts hookClaimOptions, ops hookClaimOps) liveOwnershipOutcome {
 	t.Helper()
 	raw, err := json.Marshal(rows)
 	if err != nil {
@@ -109,14 +109,17 @@ func liveOwnershipRun(t *testing.T, rows []beads.Bead, members []beads.Bead, opt
 	}
 	workflow := &liveOwnershipStore{MemStore: beads.NewMemStoreFrom(0, members, nil)}
 	var claims []string
-	var ops hookClaimOps
 	ops.Runner = func(string, string) (string, error) { return string(raw), nil }
 	ops.Claim = func(_ context.Context, _ string, _ []string, id, assignee string) (beads.Bead, bool, error) {
 		claims = append(claims, id)
 		return beads.Bead{ID: id, Status: "in_progress", Assignee: assignee, Type: "task"}, true, nil
 	}
-	ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store { return workflow }
-	ops.EmitClaimFailed = func(string, hookClaimOptions, error) {}
+	if ops.WorkflowStore == nil {
+		ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store { return workflow }
+	}
+	if ops.EmitClaimFailed == nil {
+		ops.EmitClaimFailed = func(string, hookClaimOptions, error) {}
+	}
 	var stdout, stderr bytes.Buffer
 	doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
 	var result hookClaimJSONResult
@@ -138,7 +141,7 @@ func TestHookClaimLiveOwnershipWithholdsAndMovesOn(t *testing.T) {
 	}
 	out := liveOwnershipRun(t,
 		[]beads.Bead{liveOwnershipRootBead(), liveOwnershipTaskBead()},
-		members, liveOwnershipOptions())
+		members, liveOwnershipOptions(), hookClaimOps{})
 
 	if out.claimed(liveOwnershipRoot) {
 		t.Fatalf("claim CAS ran for root %s while its steps are held by other sessions; claims=%v", liveOwnershipRoot, out.claims)
@@ -201,7 +204,7 @@ func TestHookClaimLiveOwnershipIdentityAndRecovery(t *testing.T) {
 		t.Run(tc.label, func(t *testing.T) {
 			out := liveOwnershipRun(t,
 				[]beads.Bead{liveOwnershipRootBead(), liveOwnershipTaskBead()},
-				tc.members, liveOwnershipOptions())
+				tc.members, liveOwnershipOptions(), hookClaimOps{})
 			want := liveOwnershipRoot
 			if tc.withheld {
 				want = liveOwnershipTask
@@ -222,14 +225,14 @@ func TestHookClaimLiveOwnershipIdentityAndRecovery(t *testing.T) {
 		t.Run("member "+settle, func(t *testing.T) {
 			members := []beads.Bead{liveOwnershipMember("s1", "in_progress", "gk__polecat-2", nil)}
 			rows := []beads.Bead{liveOwnershipRootBead(), liveOwnershipTaskBead()}
-			if out := liveOwnershipRun(t, rows, members, liveOwnershipOptions()); out.claimed(liveOwnershipRoot) {
+			if out := liveOwnershipRun(t, rows, members, liveOwnershipOptions(), hookClaimOps{}); out.claimed(liveOwnershipRoot) {
 				t.Fatalf("root claimed while its member is held: claims=%v", out.claims)
 			}
 			members[0].Status = settle
 			if settle == "open" {
 				members[0].Assignee = ""
 			}
-			if out := liveOwnershipRun(t, rows, members, liveOwnershipOptions()); out.result.BeadID != liveOwnershipRoot {
+			if out := liveOwnershipRun(t, rows, members, liveOwnershipOptions(), hookClaimOps{}); out.result.BeadID != liveOwnershipRoot {
 				t.Fatalf("want the root served once its member is %s, got bead=%q claims=%v\nstderr: %s",
 					settle, out.result.BeadID, out.claims, out.stderr)
 			}
@@ -276,7 +279,7 @@ func TestHookClaimLiveOwnershipScopeAndReads(t *testing.T) {
 				{ID: parent, Status: "open", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
 				{ID: "gk-step", Status: "in_progress", Type: "task", Assignee: "gk__polecat-2", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: tc.candidate.ID}},
 			}
-			out := liveOwnershipRun(t, []beads.Bead{tc.candidate}, members, liveOwnershipOptions())
+			out := liveOwnershipRun(t, []beads.Bead{tc.candidate}, members, liveOwnershipOptions(), hookClaimOps{})
 			if got := len(out.workflow.lists); got != tc.lists {
 				t.Fatalf("member Lists = %d %v, want %d", got, out.workflow.lists, tc.lists)
 			}
@@ -420,6 +423,60 @@ func TestClassRoutedWorkflowMembersFollowRootResidence(t *testing.T) {
 		}
 		if len(f.work.lists) != 1 {
 			t.Fatalf("work listings = %v; a failed residence read must leave the work leg in charge", f.work.lists)
+		}
+	})
+}
+
+// TestHookClaimLiveOwnershipUnavailable pins the hold's availability trade,
+// the stop gate's: a member listing that cannot be made is evidence of
+// nothing, so the hook says so on stderr and proceeds to the claim it would
+// have attempted without the hold, rather than idling every seat behind one
+// store fault.
+func TestHookClaimLiveOwnershipUnavailable(t *testing.T) {
+	held := []beads.Bead{liveOwnershipMember("gk-step", "in_progress", "gk__polecat-2", nil)}
+	rows := []beads.Bead{liveOwnershipRootBead(), liveOwnershipTaskBead()}
+	const disclosure = "foreign workflow hold check unavailable for " + liveOwnershipRoot + ": "
+
+	t.Run("member listing fails", func(t *testing.T) {
+		fault := errors.New("bd: database is locked")
+		out := liveOwnershipRun(t, rows, held, liveOwnershipOptions(), hookClaimOps{
+			ListWorkflowMembers: func(context.Context, string, []string, string) ([]beads.Bead, error) {
+				return nil, fault
+			},
+		})
+		if out.result.BeadID != liveOwnershipRoot || !out.claimed(liveOwnershipRoot) {
+			t.Fatalf("want the root claimed as without the hold, got bead=%q claims=%v", out.result.BeadID, out.claims)
+		}
+		if !strings.Contains(out.stderr, disclosure) || !strings.Contains(out.stderr, fault.Error()) || !strings.Contains(out.stderr, "; proceeding") {
+			t.Fatalf("stderr does not disclose the unavailable check:\n%s", out.stderr)
+		}
+	})
+
+	t.Run("workflow store opens nothing", func(t *testing.T) {
+		out := liveOwnershipRun(t, rows, held, liveOwnershipOptions(), hookClaimOps{
+			WorkflowStore: func(context.Context, string, []string, string, string) beads.Store { return nil },
+		})
+		if out.result.BeadID != liveOwnershipRoot || !strings.Contains(out.stderr, disclosure) {
+			t.Fatalf("want the root claimed with the disclosure, got bead=%q\nstderr: %s", out.result.BeadID, out.stderr)
+		}
+	})
+
+	t.Run("no listing seam and no workflow store", func(t *testing.T) {
+		var claims []string
+		ops := hookClaimOps{
+			Claim: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, bool, error) {
+				claims = append(claims, id)
+				return beads.Bead{}, false, errors.New("store refused the write")
+			},
+			EmitClaimFailed: func(string, hookClaimOptions, error) {},
+		}
+		var stdout, stderr bytes.Buffer
+		res := claimFirstEligibleHookCandidate([]beads.Bead{liveOwnershipRootBead()}, liveOwnershipOptions(), ops, "/work", &stdout, &stderr)
+		if len(claims) != 1 || claims[0] != liveOwnershipRoot || !res.claimsErrored {
+			t.Fatalf("want the root's claim attempted as without the hold, got claims=%v result=%+v", claims, res)
+		}
+		if !strings.Contains(stderr.String(), disclosure) {
+			t.Fatalf("stderr does not disclose the unavailable check:\n%s", stderr.String())
 		}
 	})
 }
