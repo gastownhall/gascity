@@ -464,3 +464,117 @@ func TestHookClaimLiveOwnershipIdentityAndRecovery(t *testing.T) {
 		}
 	})
 }
+
+// TestHookClaimLiveOwnershipScopeAndReads pins the fence's scope and cost:
+// only a standalone, not-yet-expanded workflow root pays the member listing —
+// exactly one — and every other candidate shape, including the tiers that
+// resume a session's own work, pays nothing.
+func TestHookClaimLiveOwnershipScopeAndReads(t *testing.T) {
+	t.Run("a plain task performs no member read", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		live := f.task("plain work")
+		f.served = []string{live.ID}
+
+		if got := f.run(); got.beadID != live.ID {
+			t.Fatalf("handed out %q, want %s; stderr=%s", got.beadID, live.ID, got.stderr)
+		}
+		if f.lists != 0 {
+			t.Fatalf("member listings = %d, want 0 for a plain task", f.lists)
+		}
+	})
+
+	t.Run("a linked step performs no member read", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		step := f.step(root.ID, "open", "", nil)
+		f.served = []string{step.ID}
+
+		if got := f.run(); got.beadID != step.ID {
+			t.Fatalf("handed out %q, want the step %s; stderr=%s", got.beadID, step.ID, got.stderr)
+		}
+		if f.lists != 0 {
+			t.Fatalf("member listings = %d, want 0 for a step: its ancestry gates walk up, not down", f.lists)
+		}
+	})
+
+	t.Run("a drain-control link performs no member read", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		run := f.root("implement", nil)
+		drain := f.create(beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: run.ID,
+			beadmeta.KindMetadataKey:       "drain",
+		}})
+		item := f.root("do-work", map[string]string{beadmeta.DrainControlIDMetadataKey: drain.ID})
+		f.served = []string{item.ID}
+
+		if got := f.run(); got.beadID != item.ID {
+			t.Fatalf("handed out %q, want the drain-linked root %s; stderr=%s", got.beadID, item.ID, got.stderr)
+		}
+		if f.lists != 0 {
+			t.Fatalf("member listings = %d, want 0 for a drain-linked root: the stop gate already reads its ancestry", f.lists)
+		}
+	})
+
+	t.Run("an expanded root performs no member read", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		expanded := f.root("run", map[string]string{beadmeta.WorkflowExpandedMetadataKey: "true"})
+		f.served = []string{expanded.ID}
+
+		got := f.run()
+
+		if got.action != "drain" {
+			t.Fatalf("action=%q bead %q, want a drain; an expanded root is not claimable at all; stderr=%s", got.action, got.beadID, got.stderr)
+		}
+		if f.lists != 0 {
+			t.Fatalf("member listings = %d, want 0 for an expanded root: it is out of scope before any read", f.lists)
+		}
+	})
+
+	t.Run("a standalone root performs exactly one member listing", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		root := f.root("run", nil)
+		f.step(root.ID, "in_progress", "worker-1", nil)
+		f.served = []string{root.ID}
+
+		if got := f.run(); got.action != "work" || got.beadID != root.ID {
+			t.Fatalf("handed out action=%q bead %q, want the root %s (its only holder is this session); stderr=%s", got.action, got.beadID, root.ID, got.stderr)
+		}
+		if f.lists != 1 {
+			t.Fatalf("member listings = %d, want exactly 1 for a standalone root", f.lists)
+		}
+	})
+
+	t.Run("a ready assignment is untouched by the fence", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		assigned := f.task("assigned work")
+		assignee := "worker-1"
+		if err := f.store.Update(assigned.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+		f.served = []string{assigned.ID}
+
+		if got := f.run(); got.beadID != assigned.ID {
+			t.Fatalf("handed out %q, want the assignment %s; stderr=%s", got.beadID, assigned.ID, got.stderr)
+		}
+		if f.lists != 0 {
+			t.Fatalf("member listings = %d, want 0: the ready tier resumes a session's own assignment and pays no fence read", f.lists)
+		}
+	})
+
+	t.Run("an existing assignment is untouched by the fence", func(t *testing.T) {
+		f := newHookLiveOwnershipFixture(t)
+		adopted := f.task("work in flight")
+		status, assignee := "in_progress", "worker-1"
+		if err := f.store.Update(adopted.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+		f.served = []string{adopted.ID}
+
+		if got := f.run(); got.beadID != adopted.ID {
+			t.Fatalf("handed out %q, want the in-flight assignment %s; stderr=%s", got.beadID, adopted.ID, got.stderr)
+		}
+		if f.lists != 0 {
+			t.Fatalf("member listings = %d, want 0: the existing-assignment tier resumes this session's own work", f.lists)
+		}
+	})
+}
