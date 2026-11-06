@@ -44,7 +44,7 @@ func claimedGather(t *testing.T, reads func(*beads.CachingStore) demandReads, no
 func recordedOpen(open ...beads.Bead) func(*beads.CachingStore) demandReads {
 	return func(cache *beads.CachingStore) demandReads {
 		rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
-			keyOf(sourceDemand, cache): {EndedAt: allocNow.Add(-5 * time.Second), sourcePayload: sourcePayload{Leg: legRecording{RawOpen: open, ReadyAll: open}}},
+			keyOf(sourceDemand, cache): {EndedAt: allocNow.Add(-5 * time.Second), sourcePayload: sourcePayload{Leg: legRecording{ReadyGated: true, RawOpen: open, ReadyAll: open}}},
 		}}
 		return newV2DemandReads(allocNow, rec)
 	}
@@ -183,7 +183,7 @@ func newClaimedSplitCity(t *testing.T, ledger, binding []beads.Bead) claimedSpli
 func (c claimedSplitCity) gather(t *testing.T, now time.Time, ledgerOpen, bindingOpen []beads.Bead) demandView {
 	t.Helper()
 	leg := func(open []beads.Bead) sourceResult {
-		return sourceResult{EndedAt: now.Add(-5 * time.Second), sourcePayload: sourcePayload{Leg: legRecording{RawOpen: open, ReadyAll: open, ReadyGated: true}}}
+		return sourceResult{EndedAt: now.Add(-5 * time.Second), sourcePayload: sourcePayload{Leg: legRecording{ReadyGated: true, RawOpen: open, ReadyAll: open}}}
 	}
 	rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
 		keyOf(sourceDemand, c.ledger):  leg(ledgerOpen),
@@ -317,7 +317,7 @@ func TestPassRecordCountsALaggingClaimOnce(t *testing.T) {
 	rig, _ := newDemandCache(t, false, claimed)
 	f.env.RigStores = func() map[string]beads.Store { return map[string]beads.Store{"alpha": rig} }
 	f.rec.Store(&externalReadsRecording{Seq: 1, FreshFor: time.Hour, Sources: map[sourceKey]sourceResult{
-		keyOf(sourceDemand, rig): {EndedAt: gatherNow, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{routed("w-1")}, ReadyAll: []beads.Bead{routed("w-1")}}}},
+		keyOf(sourceDemand, rig): {EndedAt: gatherNow, sourcePayload: sourcePayload{Leg: legRecording{ReadyGated: true, RawOpen: []beads.Bead{routed("w-1")}, ReadyAll: []beads.Bead{routed("w-1")}}}},
 	}})
 
 	f.runPass(0)

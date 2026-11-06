@@ -20,6 +20,10 @@ import (
 // has nowhere to say "this is short". Carrying it keeps that escalation visible
 // at the point it happens.
 type Leg struct {
+	// Work and Graph are the serving leg's class handles, supplied by the
+	// residency composition edge. A relocated leg has no Work handle.
+	Work    beads.WorkStore
+	Graph   beads.GraphStore
 	Label   string
 	Store   beads.Store
 	OnError storeref.ErrPolicy
@@ -139,6 +143,7 @@ func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
 // readCompiled answers the compiled query c over legs, ending an in_progress
 // answer at its first unblocked row when untilUnblocked is set.
 func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bool) ([]ReadyBead, error) {
+	c.inputs = &inputAdmissionGate{legs: legs}
 	cs := newCrossStore(legs)
 	items, owners, err := readCandidates(ctx, legs, c, cs)
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -198,6 +203,17 @@ func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.
 		return nil, err
 	}
 	items = c.filter(items)
+	var admitted []beads.Bead
+	for _, item := range items {
+		admission, err := c.inputs.check(ctx, owners[item.ID], item)
+		if err != nil {
+			return nil, err
+		}
+		if admission.Ready {
+			admitted = append(admitted, item)
+		}
+	}
+	items = admitted
 	c.order(items)
 	return cs.gate(ctx, owners, items, c.query.Limit)
 }
@@ -477,6 +493,20 @@ func resolveBlockers(ctx context.Context, cs *crossStore, items []beads.Bead, le
 			if len(blockers) > 0 {
 				out[id] = blockers
 			}
+		}
+	}
+	gate := &inputAdmissionGate{legs: legs}
+	for _, item := range items {
+		if _, bad := failed[item.ID]; bad {
+			continue
+		}
+		admission, err := gate.check(ctx, owners[item.ID], item)
+		if err != nil {
+			failed[item.ID] = err
+			continue
+		}
+		if !admission.Ready {
+			out[item.ID] = append(out[item.ID], ReadyBeadBlocker{ID: admission.BlockerID, Status: StatusBlocked, Reason: admission.Reason})
 		}
 	}
 	return out, failed

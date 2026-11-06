@@ -143,8 +143,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -830,6 +832,31 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// decided by the same read the claim-time seams use — the work leg first,
 	// the binding only on a proven absence — so a work-resident workflow
 	// keeps the exact unrouted call.
+	if base.InputAdmission != nil {
+		ops.InputAdmission = func(ctx context.Context, dir string, env []string, candidate beads.Bead) (sourceworkflow.InputAdmission, error) {
+			rootID := workflowRootIDForInputCheck(candidate)
+			if rootID == "" {
+				return base.InputAdmission(ctx, dir, env, candidate)
+			}
+			resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+			if err != nil {
+				return sourceworkflow.InputAdmission{}, err
+			}
+			if !resident {
+				return base.InputAdmission(ctx, dir, env, candidate)
+			}
+			work := base.WorkflowStore(ctx, dir, env, rootID, "")
+			routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{coordclass.ClassGraph: route.class}}
+			classes := scopeStores("", routes, work)
+			inputs := sourceworkflow.InputStores{Graph: classes.Graph(), Work: []beads.WorkStore{classes.Work()}}
+			if base.InputWorkStores != nil {
+				inputs.OpenWork = func(ctx context.Context) ([]beads.WorkStore, error) {
+					return base.InputWorkStores(ctx, dir, env, classes.Work())
+				}
+			}
+			return inputs.Admission(ctx, candidate)
+		}
+	}
 	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {

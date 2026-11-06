@@ -244,8 +244,20 @@ func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
 			if err != nil {
 				return recorded, nil
 			}
+			// A graph-only cache verdict cannot replace input admission.
+			// Keep native rows on the lane's gated recording, including a
+			// root that carries its input convoy directly.
+			native := make(map[string]bool)
+			for _, rows := range [][]beads.Bead{recorded, judged.Rows} {
+				for _, b := range rows {
+					if strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]) != "" ||
+						strings.TrimSpace(b.Metadata[beadmeta.InputConvoyIDMetadataKey]) != "" {
+						native[b.ID] = true
+					}
+				}
+			}
 			return withOwnVerdictRows(recorded, judged, func(id string, deps []beads.Dep) bool {
-				return readywork.OwnVerdictStands(leg, id, deps, judged.Holds)
+				return !native[id] && readywork.OwnVerdictStands(leg, id, deps, judged.Holds)
 			}), nil
 		})
 	}

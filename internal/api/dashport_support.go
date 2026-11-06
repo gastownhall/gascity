@@ -233,6 +233,17 @@ func (s *seededState) BeadStores() map[string]beads.Store {
 	return m
 }
 
+// WorkScopeStores returns named handles over the requested work scope.
+func (s *seededState) WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore) {
+	classes := s.Stores()
+	if rig == "" {
+		return classes.Work(), classes.Graph()
+	}
+	work, _ := classes.Rig(rig)
+	graph, _ := classes.GraphFor(storeref.RigRef(rig))
+	return work, graph
+}
+
 func (s *seededState) MailProvider(_ string) mail.Provider { return s.mailProv }
 
 func (s *seededState) MailProviders() map[string]mail.Provider {

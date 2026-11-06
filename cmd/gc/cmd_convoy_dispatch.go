@@ -270,6 +270,17 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 
 	graph, work := beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}
 	opts := controlDispatchOptions(cityPath, storePath, graph, work, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
+	inputClasses := cliStores(cityPath, store)
+	if relicGraphLeg {
+		inputClasses = scopeStores(cityPath, nil, store)
+	}
+	inputStores := sourceworkflow.InputStores{
+		Graph: inputClasses.Graph(),
+		OpenWork: func(ctx context.Context) ([]beads.WorkStore, error) {
+			return inputWorkStoresForScope(ctx, cityPath, storePath, cfg, scopeStores(cityPath, nil, store).Work())
+		},
+	}
+	opts.InputStores = &inputStores
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city

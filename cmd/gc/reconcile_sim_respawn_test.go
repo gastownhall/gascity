@@ -194,7 +194,7 @@ func TestSimIdleRespawnLifecycle(t *testing.T) {
 				s.tick()
 			}
 			if m := s.gc1(); s.workerObject() != first || m[idleRespawnAttemptsMetadataKey] != "1" || m[session.DrainIntentReasonKey] != "" {
-				t.Fatalf("object %d (was %d), row %v: want the respawn voided, its attempt kept, the seat running", s.workerObject(), first, m)
+				t.Fatalf("object %d (was %d), row %v: want the respawn voided, its attempt kept, the seat running\nschedule:\n%s", s.workerObject(), first, m, strings.Join(s.schedule, "\n"))
 			}
 			s.noViolations(t)
 		})

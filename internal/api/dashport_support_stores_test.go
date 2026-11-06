@@ -48,3 +48,25 @@ func TestSeededStateClassStoresAreTheCityStore(t *testing.T) {
 		t.Errorf("the city store does not hold group %q: %v", group.ID, err)
 	}
 }
+
+func TestSeededStateWorkScopeStores(t *testing.T) {
+	city, rig := beads.NewMemStore(), beads.NewMemStore()
+	s := newSeededState(SeededCityDeps{CityName: "seeded", Config: &config.City{}, CityBeadStore: city, RigStores: map[string]beads.Store{"rig": rig}})
+	for _, tc := range []struct {
+		name string
+		want beads.Store
+	}{{"", city}, {"rig", rig}, {"missing", nil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			work, graph := s.WorkScopeStores(tc.name)
+			if tc.want == nil {
+				if !beads.IsNilStore(work) || !beads.IsNilStore(graph) {
+					t.Fatal("unknown rig returned a store")
+				}
+				return
+			}
+			if !beads.SameStore(work, tc.want) || !beads.SameStore(graph, tc.want) {
+				t.Fatal("work and graph handles do not point to the requested scope")
+			}
+		})
+	}
+}

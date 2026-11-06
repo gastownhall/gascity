@@ -158,6 +158,16 @@ func (f *fakeState) BeadStores() map[string]beads.Store {
 	}
 	return out
 }
+
+// WorkScopeStores returns named handles over the requested work scope.
+func (f *fakeState) WorkScopeStores(rig string) (beads.WorkStore, beads.GraphStore) {
+	store := f.cityBeadStore
+	if rig != "" {
+		store = f.stores[rig]
+	}
+	return beadstest.Work(splittest.GateWorkView(store)), beadstest.Graph(splittest.GateClassView(store))
+}
+
 func (f *fakeState) MailProvider(_ string) mail.Provider { return f.cityMailProv }
 func (f *fakeState) MailProviders() map[string]mail.Provider {
 	if f.cityMailProv == nil {

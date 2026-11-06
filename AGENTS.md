@@ -8,14 +8,12 @@ provides only infrastructure. The core principle: **ZERO hardcoded roles.**
 The SDK has no built-in Mayor, Deacon, Polecat, or any other role. If a
 line of Go references a specific role name, it's a bug.
 
-You can build Gas Town in Gas City, or Ralph, or Claude Code Agent Teams,
-or any other orchestration pack — via specific configurations.
+Gas City can build Gas Town, Ralph, Claude Code Agent Teams, or other
+orchestration packs through configuration.
 
 **Why Gas City exists:** Gas Town proved multi-agent orchestration works,
-but all its roles are hardwired in Go code. Steve realized the way work is
-expressed — as beads composed into formulas — was powerful enough to abstract
-roles into configuration. Gas City extracts that insight into an SDK where Gas
-Town becomes one configuration among many.
+but hardwired its roles in Go. Beads composed into formulas let Gas City
+abstract roles into configuration, making Gas Town one configuration among many.
 
 This file holds only what applies everywhere. Rules for a specific area live
 next to that code; read the matching file before changing it.
@@ -27,6 +25,7 @@ next to that code; read the matching file before changing it.
 | Asked to run or try Gas City, not change it | README "Get it running" (no build) |
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
+| Native input admission (ready/demand, hook claims, controls) | `internal/sourceworkflow/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |

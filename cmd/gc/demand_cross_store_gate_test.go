@@ -238,6 +238,55 @@ func TestSplitCityV2DemandIsGatedOffThePass(t *testing.T) {
 	}
 }
 
+// A unified exact leg keeps Ready and the claim census on their existing
+// cached read tier, while input admission still sees live parks. Otherwise a
+// claim's disappearance from live Ready can precede its cached in_progress
+// row and turn an idle-respawn cancellation into an ordinary idle stop.
+func TestUnifiedExactDemandKeepsClaimSnapshotAndLiveInputAdmission(t *testing.T) {
+	plain := routedDemandBead("gc-plain")
+	plain.Assignee = "session-1"
+	step := routedDemandBead("gc-step")
+	step.Metadata["gc.root_bead_id"] = "gc-root"
+	cache, backing := newDemandCache(t, true, plain, step,
+		beads.Bead{ID: "gc-root", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "gc-inputs"}},
+		beads.Bead{ID: "gc-inputs", Type: "convoy", Status: "open"},
+		beads.Bead{ID: "gc-input", Type: "task", Status: "open"})
+	if err := cache.DepAdd("gc-inputs", "gc-input", "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	env := externalReadsEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: cache}
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	ready := func() []string {
+		t.Helper()
+		rec := fixtureDemandRecording(now, env)
+		leg, ok := recordedLeg(rec, cache)
+		rows, err := leg.gatedReady()
+		if !ok || err != nil {
+			t.Fatalf("recorded=%t, ready error=%v", ok, err)
+		}
+		return beadIDsOf(rows)
+	}
+	if got := ready(); !slices.Contains(got, plain.ID) || !slices.Contains(got, step.ID) {
+		t.Fatalf("initial ready = %v, want both candidates", got)
+	}
+	claimed := "in_progress"
+	if err := backing.Update(plain.ID, beads.UpdateOpts{Status: &claimed}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Update("gc-input", beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ready(); !slices.Contains(got, plain.ID) || slices.Contains(got, step.ID) {
+		t.Fatalf("before cache delivery, ready = %v: retain the cached claim candidate, withhold the live-held native step", got)
+	}
+	if err := cache.Update(plain.ID, beads.UpdateOpts{Status: &claimed}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ready(); slices.Contains(got, plain.ID) || slices.Contains(got, step.ID) {
+		t.Fatalf("after cache delivery, ready = %v: neither candidate is ready", got)
+	}
+}
+
 // gateLegCity is a split city's ready legs over real stores: the class
 // binding's SQLite engine under the controller's exact cache, and a work
 // ledger that strands an absent target, as the in-memory store does.
@@ -721,4 +770,54 @@ func sortedIDs(rows []beads.Bead) []string {
 	ids := beadIDsOf(rows)
 	slices.Sort(ids)
 	return ids
+}
+
+// A class binding's cached blocker verdict does not include native input
+// admission. Keep native rows on the off-pass gated recording even when all
+// their graph dependencies are local, without reading the engine in the pass.
+func TestV2GateLegRetainsNativeInputAdmission(t *testing.T) {
+	c := newGateLegCity(t)
+	for i := range c.legs {
+		c.legs[i].Graph = beads.GraphStore{Store: c.binding}
+	}
+	c.legs[0].Work = beads.WorkStore{Store: c.work}
+	create := func(store beads.Store, b beads.Bead) beads.Bead {
+		t.Helper()
+		row, err := store.Create(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	input := create(c.work, beads.Bead{Title: "held input", Type: "task", Labels: []string{"hold:external"}})
+	convoy := create(c.work, beads.Bead{Title: "inputs", Type: "convoy"})
+	if err := c.work.DepAdd(convoy.ID, input.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	root := create(c.engine, beads.Bead{Title: "native root", Type: "molecule", Metadata: map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID}})
+	step := create(c.engine, beads.Bead{Title: "native step", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+	plain := create(c.engine, beads.Bead{Title: "plain sibling", Type: "task"})
+	c.prime()
+	check := func(wantStep bool) {
+		t.Helper()
+		recorded := c.gated()
+		if slices.Contains(beadIDsOf(recorded), step.ID) != wantStep {
+			t.Fatalf("fixture: gated rows = %v, want step admitted=%t", beadIDsOf(recorded), wantStep)
+		}
+		rows, reads := c.served(c.recording(recorded))
+		if got, want := sortedIDs(rows), sortedIDs(recorded); !slices.Equal(got, want) {
+			t.Errorf("cached verdict bypassed native input admission: got %v, gated recording %v", got, want)
+		}
+		if !slices.Contains(beadIDsOf(rows), plain.ID) {
+			t.Errorf("plain sibling %s was withheld", plain.ID)
+		}
+		if reads != 0 {
+			t.Errorf("v2 pass read binding engine %d times", reads)
+		}
+	}
+	check(false)
+	if err := c.work.Update(input.ID, beads.UpdateOpts{RemoveLabels: []string{"hold:external"}}); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
 }

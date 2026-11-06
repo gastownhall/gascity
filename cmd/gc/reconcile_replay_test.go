@@ -262,10 +262,12 @@ func replayPass(t *testing.T, x replayExport, rows []beads.Bead, at time.Time) *
 	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.tracePass(gatherEnv{
 		CityPath: t.TempDir(), CityName: x.City,
-		Env:          func() *reconcileEnv { return env },
-		Sessions:     func() beads.Store { return cache },
-		RigStores:    func() map[string]beads.Store { return nil },
-		Recording:    func() *externalReadsRecording { return nil },
+		Env:       func() *reconcileEnv { return env },
+		Sessions:  func() beads.Store { return cache },
+		RigStores: func() map[string]beads.Store { return nil },
+		Recording: func() *externalReadsRecording {
+			return fixtureDemandRecording(at, externalReadsEnv{CityName: x.City, Cfg: env.Cfg, CityStore: cache})
+		},
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(cache) },
 		Templates: func(*reconcileEnv, time.Time) templateResolver {

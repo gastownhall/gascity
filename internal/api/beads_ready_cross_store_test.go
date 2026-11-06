@@ -124,3 +124,96 @@ func TestBeadsReadyDropsALegItCannotGate(t *testing.T) {
 		t.Fatalf("/beads/ready = %v partial=%v; want the graph leg served and the response partial", ids, body.Partial)
 	}
 }
+
+// Ready must apply native input admission in both storage layouts, without
+// losing unrelated rows from the serving leg when an input is held.
+func TestBeadsReadyNativeInputAdmission(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unified", true: "split"}[split], func(t *testing.T) {
+			work := beads.NewMemStoreFrom(0, []beads.Bead{
+				{ID: "input", Status: "open"},
+				{ID: "convoy", Type: "convoy", Status: "open"},
+			}, []beads.Dep{{IssueID: "convoy", DependsOnID: "input", Type: "tracks"}})
+			graph := work
+			if split {
+				graph = beads.NewMemStoreFrom(100, nil, nil)
+			}
+			create := func(b beads.Bead) beads.Bead {
+				t.Helper()
+				got, err := graph.Create(b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			root := create(beads.Bead{Title: "native root", Type: "molecule", Metadata: map[string]string{"gc.input_convoy_id": "convoy"}})
+			step := create(beads.Bead{Title: "native step", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+			plain := create(beads.Bead{Title: "plain sibling"})
+			fs := newFakeState(t)
+			fs.cityBeadStore, fs.graphBeadStore = work, graph
+			fs.stores = map[string]beads.Store{}
+			h := newTestCityHandler(t, fs)
+			for _, held := range []bool{false, true} {
+				if held {
+					if err := work.Update("input", beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(fs, "/beads/ready"), nil))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("ready = %d: %s", rec.Code, rec.Body.String())
+				}
+				var body ListBody[beads.Bead]
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Partial || len(body.PartialErrors) != 0 {
+					t.Fatalf("partial ready: %+v", body)
+				}
+				has := func(id string) bool {
+					return slices.ContainsFunc(body.Items, func(b beads.Bead) bool { return b.ID == id })
+				}
+				if has(step.ID) == held || !has(plain.ID) {
+					t.Fatalf("held=%v items=%+v", held, body.Items)
+				}
+			}
+		})
+	}
+}
+
+// A failed Ready reader still participates in the named input frame: dropping
+// it would incorrectly prove unique input residence from only the healthy leg.
+func TestBeadsReadyRetainsFailedInputScope(t *testing.T) {
+	work := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "input", Status: "open"},
+		{ID: "convoy", Type: "convoy", Status: "open"},
+		{ID: "root", Type: "molecule", Status: "open", Metadata: map[string]string{"gc.input_convoy_id": "convoy"}},
+		{ID: "step", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "root"}},
+	}, []beads.Dep{{IssueID: "convoy", DependsOnID: "input", Type: "tracks"}})
+	fs := newFakeState(t)
+	fs.cityBeadStore = work
+	fs.stores = map[string]beads.Store{"unavailable": failedInputScope{Store: beads.NewMemStore()}}
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, fs).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(fs, "/beads/ready"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ready = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body ListBody[beads.Bead]
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Partial || slices.ContainsFunc(body.Items, func(b beads.Bead) bool { return b.ID == "step" }) {
+		t.Fatalf("unknown input scope advertised native work: %+v", body)
+	}
+}
+
+type failedInputScope struct{ beads.Store }
+
+func (failedInputScope) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, errors.New("input scope unavailable")
+}
+
+func (failedInputScope) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("input scope unavailable")
+}
