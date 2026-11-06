@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
 
 // snapshotCity is a converged split city whose binding holds a small graph:
@@ -315,38 +317,71 @@ func TestStorageSnapshotKeepRetainsTheNewest(t *testing.T) {
 }
 
 func TestApplySnapshotRetentionTable(t *testing.T) {
+	owner := snapshotOwner{City: "/cities/a", Identity: workStoreIdentity{ProjectID: "proj-a", Path: "/cities/a"}}
+	other := snapshotOwner{City: "/cities/b", Identity: workStoreIdentity{ProjectID: "proj-b", Path: "/cities/b"}}
+	// A city recreated at the same path over a new work store is not the
+	// city these snapshots were taken of.
+	reused := snapshotOwner{City: "/cities/a", Identity: workStoreIdentity{ProjectID: "proj-new", Path: "/cities/a"}}
 	for _, tc := range []struct {
-		name     string
-		complete []string
-		pinned   []string
-		own      string
-		keep     int
-		want     []string
+		name       string
+		complete   []string
+		pinned     []string
+		others     []string
+		reusedPath []string
+		unreadable []string
+		own        string
+		keep       int
+		want       []string
 	}{
-		{"keeps all within N", []string{"20260101T000000Z", "20260102T000000Z"}, nil, "20260102T000000Z", 2, []string{"20260101T000000Z", "20260102T000000Z"}},
-		{"drops the oldest", []string{"20260101T000000Z", "20260102T000000Z", "20260103T000000Z"}, nil, "20260103T000000Z", 2, []string{"20260102T000000Z", "20260103T000000Z"}},
-		{"suffix orders after its second", []string{"20260101T000000Z", "20260101T000000Z-2", "20260101T000000Z-10", "20260101T000000Z-11"}, nil, "20260101T000000Z-11", 2, []string{"20260101T000000Z-10", "20260101T000000Z-11"}},
+		{name: "keeps all within N", complete: []string{"20260101T000000Z", "20260102T000000Z"}, own: "20260102T000000Z", keep: 2, want: []string{"20260101T000000Z", "20260102T000000Z"}},
+		{name: "drops the oldest", complete: []string{"20260101T000000Z", "20260102T000000Z", "20260103T000000Z"}, own: "20260103T000000Z", keep: 2, want: []string{"20260102T000000Z", "20260103T000000Z"}},
+		{name: "suffix orders after its second", complete: []string{"20260101T000000Z", "20260101T000000Z-2", "20260101T000000Z-10", "20260101T000000Z-11"}, own: "20260101T000000Z-11", keep: 2, want: []string{"20260101T000000Z-10", "20260101T000000Z-11"}},
 		// R09: a snapshot dated after this run's (a skewed clock, another
 		// host) never pushes this run's own snapshot out.
-		{"own kept though not newest", []string{"20260101T000000Z", "20991231T000000Z"}, nil, "20260101T000000Z", 1, []string{"20260101T000000Z"}},
-		{"pinned neither counted nor removed", []string{"20260101T000000Z", "20260102T000000Z", "20260103T000000Z"}, []string{"20260101T000000Z"}, "20260103T000000Z", 1, []string{"20260101T000000Z", "20260103T000000Z"}},
+		{name: "own kept though not newest", complete: []string{"20260101T000000Z", "20991231T000000Z"}, own: "20260101T000000Z", keep: 1, want: []string{"20260101T000000Z"}},
+		{name: "pinned neither counted nor removed", complete: []string{"20260101T000000Z", "20260102T000000Z", "20260103T000000Z"}, pinned: []string{"20260101T000000Z"}, own: "20260103T000000Z", keep: 1, want: []string{"20260101T000000Z", "20260103T000000Z"}},
+		// A --to several cities share: another city's snapshots, and a
+		// complete directory whose manifest does not read, are not this
+		// city's to count or remove.
+		{name: "another city's left alone", complete: []string{"20260101T000000Z", "20260103T000000Z"}, others: []string{"20260102T000000Z"}, own: "20260103T000000Z", keep: 1, want: []string{"20260102T000000Z", "20260103T000000Z"}},
+		{name: "same path, another work store, left alone", complete: []string{"20260101T000000Z", "20260103T000000Z"}, reusedPath: []string{"20260102T000000Z"}, own: "20260103T000000Z", keep: 1, want: []string{"20260102T000000Z", "20260103T000000Z"}},
+		{name: "unreadable manifest left alone", complete: []string{"20260101T000000Z", "20260103T000000Z"}, unreadable: []string{"20260102T000000Z"}, own: "20260103T000000Z", keep: 1, want: []string{"20260102T000000Z", "20260103T000000Z"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			to := t.TempDir()
-			for _, id := range tc.complete {
+			write := func(id string, data []byte) {
 				if err := os.MkdirAll(filepath.Join(to, id), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(to, id, storageSnapshotManifestName), []byte("{}"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(to, id, storageSnapshotManifestName), data, 0o644); err != nil {
 					t.Fatal(err)
 				}
+			}
+			manifest := func(id string, o snapshotOwner) []byte {
+				data, err := json.Marshal(snapshotManifest{Format: storageSnapshotManifestFormat, ID: id, City: o.City, Identity: o.Identity.String()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			}
+			for _, id := range tc.complete {
+				write(id, manifest(id, owner))
+			}
+			for _, id := range tc.others {
+				write(id, manifest(id, other))
+			}
+			for _, id := range tc.reusedPath {
+				write(id, manifest(id, reused))
+			}
+			for _, id := range tc.unreadable {
+				write(id, []byte("{"))
 			}
 			for _, id := range tc.pinned {
 				if err := os.WriteFile(filepath.Join(to, id, storageSnapshotPinName), []byte("split\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if _, err := applySnapshotRetention(to, tc.keep, tc.own); err != nil {
+			if _, err := applySnapshotRetention(to, tc.keep, tc.own, owner); err != nil {
 				t.Fatal(err)
 			}
 			if got := snapshotDirs(t, to); strings.Join(got, ",") != strings.Join(tc.want, ",") {
@@ -354,8 +389,36 @@ func TestApplySnapshotRetentionTable(t *testing.T) {
 			}
 		})
 	}
-	if _, err := applySnapshotRetention(t.TempDir(), 0, ""); err == nil {
+	if _, err := applySnapshotRetention(t.TempDir(), 0, "", owner); err == nil {
 		t.Fatal("retention accepted --keep 0, which would remove the snapshot just written")
+	}
+}
+
+// TestStorageSnapshotRetentionLeavesAnotherCitysSnapshots: two cities
+// snapshot into one --to. B snapshots once, then A twice with --keep 2: A
+// keeps its two, and B's only snapshot is still there.
+func TestStorageSnapshotRetentionLeavesAnotherCitysSnapshots(t *testing.T) {
+	a, b := newSnapshotCity(t), newSnapshotCity(t)
+	shared := filepath.Join(t.TempDir(), "shared")
+	a.to, b.to = shared, shared
+	if code, _, stderr := b.snapshot(t, snapshotOptions{Binding: true, Keep: 2}); code != 0 {
+		t.Fatal(stderr)
+	}
+	bOnly := snapshotDirs(t, shared)
+	if len(bOnly) != 1 {
+		t.Fatalf("after B's snapshot: %v", bOnly)
+	}
+	for range 2 {
+		if code, _, stderr := a.snapshot(t, snapshotOptions{Binding: true, Keep: 2}); code != 0 {
+			t.Fatal(stderr)
+		}
+	}
+	all := snapshotDirs(t, shared)
+	if !slices.Contains(all, bOnly[0]) {
+		t.Fatalf("A's retention removed B's only snapshot %s: %v", bOnly[0], all)
+	}
+	if len(all) != 3 {
+		t.Fatalf("snapshots = %v, want B's one and A's two", all)
 	}
 }
 
@@ -2135,5 +2198,110 @@ func TestStorageSnapshotRestoreStaleMessagesTellTheTruth(t *testing.T) {
 	}
 	if cause := infraStaleCause(city.target); !strings.Contains(cause, "the snapshot's database is installed") || strings.Contains(cause, "nothing has moved") {
 		t.Fatalf("message after the install = %q", cause)
+	}
+}
+
+// TestStorageSnapshotRestoreAcceptsARetryOfAnImportedWorkflow: a rig import
+// carries the rig's workflows in flight into the binding, and the controller
+// runs them from there. After the snapshot, a transient failure of an imported
+// run makes the dispatcher (the real dispatch.ProcessControl) mint the next
+// attempt in the binding, cloned from the imported rows. The clones are the
+// binding's own rows, which the import did not write, so they are born without
+// its stamp (clearRetryEphemera) and the restore drops them with the binding's
+// other writes since the snapshot, instead of refusing them as rows the rig
+// import left behind.
+func TestStorageSnapshotRestoreAcceptsARetryOfAnImportedWorkflow(t *testing.T) {
+	city := newSnapshotCity(t)
+	city.request.Cfg.Rigs = []config.Rig{{Name: "gp", Path: t.TempDir()}}
+	binding, err := openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator, ok := beads.As[beads.ForeignIDCreator](binding)
+	if !ok {
+		t.Fatal("the binding cannot pin an id")
+	}
+	stamp := func(meta map[string]string) map[string]string {
+		meta[infraMigrationStampKey] = rigImportStamp("gp")
+		return meta
+	}
+	for _, b := range []beads.Bead{
+		{ID: "gp-root", Title: "workflow", Type: "task", Metadata: stamp(map[string]string{
+			"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+		})},
+		{ID: "gp-logical", Title: "build", Type: "task", Metadata: stamp(map[string]string{
+			"gc.kind": "retry", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build",
+			"gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
+		})},
+		{ID: "gp-run1", Title: "build attempt 1", Type: "task", Status: "closed", Assignee: "worker-2", Labels: []string{"pool:worker"}, Metadata: stamp(map[string]string{
+			"gc.kind": "retry-run", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build.run.1",
+			"gc.logical_bead_id": "gp-logical", "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
+			"gc.outcome": "fail", "gc.failure_class": "transient", "gc.failure_reason": "rate_limited",
+		})},
+		{ID: "gp-eval1", Title: "build eval 1", Type: "task", Metadata: stamp(map[string]string{
+			"gc.kind": "retry-eval", "gc.root_bead_id": "gp-root", "gc.step_ref": "demo.build.eval.1",
+			"gc.logical_bead_id": "gp-logical", "gc.attempt": "1", "gc.max_attempts": "3", "gc.on_exhausted": "hard_fail",
+		})},
+	} {
+		if _, err := creator.CreateWithForeignID(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]string{{"gp-logical", "gp-eval1"}, {"gp-eval1", "gp-run1"}} {
+		if err := binding.DepAdd(edge[0], edge[1], "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := city.snapshot(t, snapshotOptions{Binding: true}); code != 0 {
+		t.Fatal(stderr)
+	}
+	id, _ := onlySnapshot(t, city.to)
+	city.request.FleetStopped = true
+	snapshotted := bindingFingerprint(t, city.target)
+
+	binding, err = openInfraDestination(city.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eval1, err := binding.Get("gp-eval1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := dispatch.ProcessControl(beadstest.Graph(binding), eval1, dispatch.ProcessOptions{
+		Work:           beadstest.Work(binding),
+		RecycleSession: func(beads.Bead) error { return nil },
+	})
+	if err != nil || !result.Processed || result.Action != "retry" {
+		t.Fatalf("ProcessControl(transient retry-eval) = %+v, %v; want a processed retry", result, err)
+	}
+	minted, err := binding.List(beads.ListQuery{Metadata: map[string]string{"gc.logical_bead_id": "gp-logical"}, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clones []string
+	for _, b := range minted {
+		switch b.Metadata["gc.step_ref"] {
+		case "demo.build.run.2", "demo.build.eval.2":
+			clones = append(clones, b.ID)
+			if stamp := b.Metadata[infraMigrationStampKey]; stamp != "" {
+				t.Errorf("retry clone %s carries the import stamp %q of the row it was cloned from", b.ID, stamp)
+			}
+		}
+	}
+	if len(clones) != 2 {
+		t.Fatalf("attempt 2 rows minted: %v, want the retry's run and eval", clones)
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, stderr := city.restore(t, id); code != 0 {
+		t.Fatalf("restore after a retry of a workflow imported from gp minted %v: exit %d: %s", clones, code, stderr)
+	}
+	if got := bindingFingerprint(t, city.target); strings.Join(got, ",") != strings.Join(snapshotted, ",") {
+		t.Fatalf("restored %v, want %v", got, snapshotted)
 	}
 }

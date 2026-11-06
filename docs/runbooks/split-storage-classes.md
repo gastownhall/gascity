@@ -1308,8 +1308,10 @@ Know what each one can bring back:
 A snapshot directory holds `manifest.json` only once every file in it has
 been re-read and proven, so a directory without one is an interrupted
 snapshot: `--verify` refuses it, and the next snapshot into the same
-directory removes it. `--keep N` (default 2) keeps the newest N. A snapshot
-with a `pinned` file in its directory is never counted or removed.
+directory removes it. `--keep N` (default 2) keeps the newest N of this
+city's snapshots; snapshots of another city or work store in a shared `--to`
+are left alone. A snapshot with a `pinned` file in its directory is never
+counted or removed.
 
 On a split city the core `binding-snapshot` order snapshots the binding every
 6 hours into the pack's state directory (`binding-archive/`, `--keep 4`). On

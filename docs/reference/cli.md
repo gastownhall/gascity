@@ -5599,10 +5599,13 @@ directory without one is an interrupted snapshot, never a complete one.
 
 --binding alone runs against a live city: it only reads. --work and --rigs
 need the city stopped and --fleet-stopped, and run in the maintenance window.
-Every snapshot refuses while a migration, a re-copy or a rig import holds the
-city. --keep N keeps the newest N snapshots in &lt;to&gt; (this one always among
-them, and a pinned one never counted or removed) and removes the rest.
---verify ID re-reads a snapshot and proves it against its manifest.
+Every snapshot refuses while a migration, a re-copy, a rig import or a restore
+holds the city.
+
+--keep N keeps the newest N of this city's snapshots in &lt;to&gt; (this one always
+among them, and a pinned one never counted or removed) and removes the rest of
+this city's. Snapshots of another city or work store sharing &lt;to&gt; are left
+alone. --verify ID re-reads a snapshot and proves it against its manifest.
 
 ```
 gc storage snapshot [flags]
@@ -5614,7 +5617,7 @@ gc storage snapshot [flags]
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |
 | `--if-bound` | bool |  | with --binding alone: on a city with no binding, do nothing and exit 0 (the binding-snapshot order) |
-| `--keep` | int | `2` | keep the newest N snapshots in --to, this one included, and remove the rest (at least 1) |
+| `--keep` | int | `2` | keep the newest N of this city's snapshots in --to, this one included, and remove the rest of this city's (at least 1); other cities' snapshots there are left alone |
 | `--rigs` | bool |  | snapshot every rig's store (needs --fleet-stopped) |
 | `--to` | string |  | directory to write snapshots into (default &lt;city&gt;/.gc/snapshots) |
 | `--verify` | string |  | re-read snapshot ID in --to and prove it against its manifest, writing nothing |

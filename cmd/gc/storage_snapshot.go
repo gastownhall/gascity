@@ -165,10 +165,13 @@ directory without one is an interrupted snapshot, never a complete one.
 
 --binding alone runs against a live city: it only reads. --work and --rigs
 need the city stopped and --fleet-stopped, and run in the maintenance window.
-Every snapshot refuses while a migration, a re-copy or a rig import holds the
-city. --keep N keeps the newest N snapshots in <to> (this one always among
-them, and a pinned one never counted or removed) and removes the rest.
---verify ID re-reads a snapshot and proves it against its manifest.`,
+Every snapshot refuses while a migration, a re-copy, a rig import or a restore
+holds the city.
+
+--keep N keeps the newest N of this city's snapshots in <to> (this one always
+among them, and a pinned one never counted or removed) and removes the rest of
+this city's. Snapshots of another city or work store sharing <to> are left
+alone. --verify ID re-reads a snapshot and proves it against its manifest.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if verifyID != "" {
 				for _, flag := range []string{"binding", "work", "rigs", "keep", "if-bound", storageFleetStoppedFlag, storageForceFlag} {
@@ -202,7 +205,7 @@ them, and a pinned one never counted or removed) and removes the rest.
 	cmd.Flags().BoolVar(&opts.Work, "work", false, "snapshot the city's work store (needs --"+storageFleetStoppedFlag+")")
 	cmd.Flags().BoolVar(&opts.Rigs, "rigs", false, "snapshot every rig's store (needs --"+storageFleetStoppedFlag+")")
 	cmd.Flags().StringVar(&opts.To, "to", "", "directory to write snapshots into (default <city>/.gc/snapshots)")
-	cmd.Flags().IntVar(&opts.Keep, "keep", storageSnapshotDefaultKeep, "keep the newest N snapshots in --to, this one included, and remove the rest (at least 1)")
+	cmd.Flags().IntVar(&opts.Keep, "keep", storageSnapshotDefaultKeep, "keep the newest N of this city's snapshots in --to, this one included, and remove the rest of this city's (at least 1); other cities' snapshots there are left alone")
 	cmd.Flags().StringVar(&verifyID, "verify", "", "re-read snapshot ID in --to and prove it against its manifest, writing nothing")
 	cmd.Flags().BoolVar(&opts.IfBound, "if-bound", false, "with --binding alone: on a city with no binding, do nothing and exit 0 (the binding-snapshot order)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false, "attest that "+storageFleetStoppedAttestation)
@@ -370,7 +373,7 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 		return fail(err)
 	}
 	published = true
-	removed, err := applySnapshotRetention(to, opts.Keep, id)
+	removed, err := applySnapshotRetention(to, opts.Keep, id, snapshotOwner{City: request.CityPath, Identity: identity})
 	for _, name := range removed {
 		fmt.Fprintf(stdout, "removed %s\n", filepath.Join(to, name)) //nolint:errcheck // best-effort stdout
 	}

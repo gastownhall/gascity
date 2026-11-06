@@ -508,11 +508,36 @@ func sweepInterruptedSnapshots(to string) ([]string, error) {
 	return removed, errors.Join(errs...)
 }
 
+// snapshotOwner is the city a snapshot belongs to: its path and its work
+// store's identity, as the manifest records them.
+type snapshotOwner struct {
+	City     string
+	Identity workStoreIdentity
+}
+
+// owns reports whether m is a snapshot of this owner's city: the same city
+// path and the same work store, compared as boot compares a marker
+// (workStoreIdentityMismatch).
+func (o snapshotOwner) owns(m snapshotManifest) bool {
+	if !samePath(m.City, o.City) {
+		return false
+	}
+	recorded, err := parseWorkStoreIdentity(m.Identity)
+	if err != nil {
+		return false
+	}
+	return workStoreIdentityMismatch(recorded, o.Identity) == ""
+}
+
 // applySnapshotRetention keeps own (the snapshot this run wrote) and the
-// newest keep-1 other complete, unpinned snapshots in to, and removes the
-// other unpinned ones. A pinned snapshot is never counted or removed. Only
-// directories named as snapshot ids are touched, under the directory's lock.
-func applySnapshotRetention(to string, keep int, own string) ([]string, error) {
+// newest keep-1 of owner's other complete, unpinned snapshots in to, and
+// removes owner's other unpinned ones. Snapshots of another city or another
+// work store (a --to several cities share), and complete directories whose
+// manifest does not read, are neither counted nor removed: retention removes
+// only what it can prove is this city's. A pinned snapshot is never counted
+// or removed. Only directories named as snapshot ids are touched, under the
+// directory's lock.
+func applySnapshotRetention(to string, keep int, own string, owner snapshotOwner) ([]string, error) {
 	if keep < 1 {
 		return nil, fmt.Errorf("retention keeps at least the snapshot just written; --keep %d", keep)
 	}
@@ -526,6 +551,9 @@ func applySnapshotRetention(to string, keep int, own string) ([]string, error) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(to, name, storageSnapshotPinName)); err == nil {
+			continue
+		}
+		if m, err := readSnapshotManifest(filepath.Join(to, name)); err != nil || !owner.owns(m) {
 			continue
 		}
 		candidates = append(candidates, name)
