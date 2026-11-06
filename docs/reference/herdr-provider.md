@@ -49,7 +49,11 @@ The recorded live validation is herdr 0.9.5 against `main` at `0bd038188e`
 v1.5.1 fails the kind-launch journey on 0.9.5: herdr reports a freshly launched
 Claude as blocked on a startup dialog, and v1.5.1 returns `agent_not_ready`
 instead of answering it. Run 0.9.x with a gc that includes
-[#8478](https://github.com/gastownhall/gascity/pull/8478).
+[#8478](https://github.com/gastownhall/gascity/pull/8478). A live city on that
+build still crosses session identities when two sessions start in the same rig
+workspace at once
+([#8934](https://github.com/gastownhall/gascity/issues/8934)), so treat rig
+dispatch on herdr as unvalidated.
 
 That is the reason to pin. The tests that drive a real herdr binary are opt-in
 (`make test-herdr-live`); the default suite runs against a fake, so a change on
