@@ -4,7 +4,7 @@ description: How docs/ is structured, named, registered, generated, and gated �
 ---
 
 `docs/` is the source tree for the published Mintlify site
-(docs.gascityhall.com). `engdocs/` is GitHub-only contributor material —
+(docs.gascity.com). `engdocs/` is GitHub-only contributor material —
 architecture, design, and contributor guides — and is never published.
 Normative **user-facing** specifications (pack and formula specs) live under
 `docs/reference/specs/` and ship to readers; **internal** architecture

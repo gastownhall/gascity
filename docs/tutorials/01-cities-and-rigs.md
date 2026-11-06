@@ -12,7 +12,8 @@ Codex (`codex`), Gemini (`gemini`), Grok Build (`grok`), OpenCode (`opencode`),
 Groq (`groq`), and Cerebras (`cerebras`). Configure each with its token or API
 key so it can run — the more the merrier.
 
-Then install the Gas City CLI and put it on the PATH:
+Then install the Gas City CLI from Homebrew, which brings everything it needs
+with it:
 
 ```shell
 ~
@@ -21,15 +22,28 @@ $ brew install gascity
 
 ~
 $ gc version
-1.1.1
 ```
 
-> NOTE: the gascity installation is a great way to get the right dependencies in
-> place, but may not be enough to keep up with the changes we're making on the
-> way to 1.0. Best practice right now is to build your own `gc` binary from HEAD
-> on the `main` branch of [the gascity
-> repo](https://github.com/gastownhall/gascity) to get the latest and greatest
-> bits before running these tutorials.
+Gas City stores work in Dolt, which needs an author identity before a city can
+start. Git needs an identity first: the commands below copy it, and you commit
+with git when you add a rig. If `git config --global user.name` or
+`git config --global user.email` prints nothing, set it with
+`git config --global user.name "Your Name"` or
+`git config --global user.email "you@example.com"`, using your own name and
+email. Then copy your git identity into Dolt wherever Dolt's name or email is
+missing or empty:
+
+```shell
+~
+$ [ -n "$(dolt config --global --get user.name)" ]  || dolt config --global --add user.name  "$(git config --global user.name)"
+$ [ -n "$(dolt config --global --get user.email)" ] || dolt config --global --add user.email "$(git config --global user.email)"
+```
+
+<Tip>
+If you followed the [Quickstart](/getting-started/quickstart), you have done
+all of this and already have `~/my-city`. Skip the `gc init` command below and
+continue from [Looking inside](#looking-inside).
+</Tip>
 
 New to the vocabulary? Read [How Gas City Works](/getting-started/how-gas-city-works) first — the
 canonical model for the six primitives (Agent, Bead, Formula, Rig, Pack, Event)
@@ -43,27 +57,12 @@ local settings the orchestrator needs to run multi-agent workflows on this
 machine. Inside it, a **pack** is the portable part — the definitions worth
 sharing with other cities. A city is a pack plus deployment details.
 
-Create one with `gc init`:
+Create one with `gc init`, naming the default `gascity` template and your
+coding agent:
 
 ```shell
-
 ~
-$ gc init ~/my-city
-Welcome to Gas City SDK!
-
-Choose a config template:
-  1. gascity   — planning & implementation skills pack (default)
-  2. minimal   — default coding agent
-  3. gastown   — multi-agent orchestration pack
-  4. custom    — empty workspace, configure it yourself
-Template [1]:
-
-Choose your coding agent:
-  1. Claude Code
-  2. Codex
-  3. Gemini CLI
-If you don't see your coding agent, configure it and restart the wizard.
-Agent: 1
+$ gc init ~/my-city --template gascity --default-provider claude
 [1/8] Creating runtime scaffold
 [2/8] Installing hooks (Claude Code)
 [3/8] Writing default prompts
@@ -72,30 +71,28 @@ Agent: 1
 Created gascity config (Level 1) in "my-city".
 [6/8] Checking provider readiness
 [7/8] Registering city with supervisor
-Registered city 'my-city' (/Users/csells/my-city)
-Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.supervisor.plist
+Registered city 'my-city' (/Users/you/my-city)
+Installed launchd service: /Users/you/Library/LaunchAgents/com.gascity.supervisor.plist
 [8/8] Waiting for supervisor to start city
 
 ~
 $ gc cities
 NAME     PATH
-my-city  /Users/csells/my-city
+my-city  /Users/you/my-city
 ```
 
-The agent menu lists only the coding agents the wizard finds configured on
-your machine — today it can probe Claude Code, Codex, Gemini CLI, and
-Antigravity. If exactly one is configured, the wizard selects it without
-asking.
+Use `--default-provider codex` (or `gemini`) for a different coding agent. Run
+in a terminal without flags, `gc init ~/my-city` instead asks you for the
+template and the agent.
 
-To skip the prompts, supply the provider explicitly:
+Gas City created the city directory, registered it, and started it. A new city
+takes a few minutes to finish setting up, and on a busy machine `gc status` can
+stay partial for longer, showing agents as `unknown (partial status)`. That is
+normal, and work you send still gets dispatched.
 
-```shell
-~
-$ gc init ~/my-city --default-provider claude
-```
+## Looking inside
 
-Gas City created the city directory, registered it, and started it. Look
-inside:
+Look inside the city:
 
 ```shell
 ~
@@ -198,9 +195,8 @@ To check on the status of your city, use `gc status`:
 ```shell
 ~/my-city
 $ gc status
-my-city  /Users/csells/my-city
+my-city  /Users/you/my-city
   Controller: supervisor-managed (PID 83621)
-  API:        http://127.0.0.1:8372
   Authority: supervisor process PID 83621
   Suspended:  no
 
@@ -208,22 +204,32 @@ Agents:
   bd.dog                  scaled (min=0, max=2)
     bd.dog-1              stopped
     bd.dog-2              stopped
-  control-dispatcher      stopped
+  core.control-dispatcher  stopped
 
 0/3 agents running
 
 Named sessions:
   mayor                   reserved-unmaterialized (always)
+
+Store health:
+  Path:        /Users/you/my-city/.beads/dolt
+  Size:        9.0 MB
+  Live rows:   10
+  Ratio:       0.9 MB/row  (threshold 1.0 MB/row)
 ```
+
+Once the city has rigs, `gc status` also lists them under `Rigs:`, and each
+rig gets its own `<rig>/core.control-dispatcher`. While status is partial,
+agents read `unknown (partial status)` and a line under the count gives the
+reason, such as `(sessions: loading session snapshot timed out after 1s)`.
 
 A named session shows `reserved-unmaterialized` until the orchestrator
 materializes it; once the mayor session is up, its state reads `awake` (or
 `active` — the two are equivalent).
 
-The `dolt.dog` pool is a background utility agent from the bundled `dolt` pack
-(pulled in transitively through the explicit `bd` import you saw in
-`pack.toml` — the `dolt.` prefix is the import binding it arrived through).
-It handles Dolt database housekeeping for the beads backend. `control-dispatcher` is platform
+The `bd.dog` pool is a background utility agent from the bundled `bd` pack you
+saw imported in `pack.toml` (the `bd.` prefix is the import binding it arrived
+through). It handles Dolt database housekeeping for the beads backend. `core.control-dispatcher` is platform
 infrastructure: the orchestrator uses it to advance formula workflows. You don't
 need to interact with either — ignore them for now.
 
@@ -237,9 +243,15 @@ registered city.
 </Note>
 
 In Gas City, a project directory registered with a city is called a "rig."
-Rigging a project's directory lets agents work in it.
+Rigging a project's directory lets agents work in it. A rig is a git
+repository; make a small one to work with:
 
 ```shell
+~
+$ mkdir -p ~/my-project && cd ~/my-project
+$ git init && git commit --allow-empty -m "initial commit"
+$ cd ~/my-city
+
 ~/my-city
 $ gc rig add ~/my-project
 Adding rig 'my-project'...
@@ -269,7 +281,7 @@ name = "my-project"
 # .gc/site.toml — machine-local
 [[rig]]
 name = "my-project"
-path = "/Users/csells/my-project"
+path = "/Users/you/my-project"
 ```
 
 You can also see your city's rigs with `gc rig list`:
@@ -278,14 +290,14 @@ You can also see your city's rigs with `gc rig list`:
 ~/my-project
 $ gc rig list
 
-Rigs in /Users/csells/my-city:
+Rigs in /Users/you/my-city:
 
   my-city (HQ):
     Prefix: mc
     Beads:  initialized
 
   my-project:
-    Path:   /Users/csells/my-project
+    Path:   /Users/you/my-project
     Prefix: mp
     Beads:  initialized
 ```
@@ -293,8 +305,9 @@ Rigs in /Users/csells/my-city:
 ## Slinging your first work
 
 You assign work to agents by "slinging" it. Target the rig-scoped agent
-explicitly to keep the work on this rig; hop into the rig directory to inspect
-the results:
+explicitly to keep the work on this rig: `my-project/claude` here, or
+`my-project/codex` or `my-project/gemini` if you chose that provider. Hop into
+the rig directory to inspect the results:
 
 ```shell
 ~/my-city
