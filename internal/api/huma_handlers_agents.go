@@ -151,6 +151,8 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
 
 	pools := newRequestSessionListing(sp)
+	activeWork := newActiveWorkLookup(ctx)
+	defer activeWork.close()
 	var agents []agentResponse
 	var partialErrors []string
 	for _, a := range cfg.Agents {
@@ -285,7 +287,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			resp.ActiveBead = s.findActiveBeadForAssignees(ea.rig, sessionID, sessionName, ea.qualifiedName)
+			resp.ActiveBead = s.findActiveBeadForAssignees(activeWork, ea.rig, sessionID, sessionName, ea.qualifiedName)
 			// A relocated-graph wisp names its assignee after the session, not
 			// the work store, so the work-store lookup above misses it. Fall
 			// back to the graph bead and use its timestamp as the activity
@@ -322,6 +324,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		}
 	}
 	partialErrors = append(partialErrors, runtimeSessions.partialErrors()...)
+	partialErrors = append(partialErrors, activeWork.partialErrors()...)
 
 	if agents == nil {
 		agents = []agentResponse{}

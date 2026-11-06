@@ -100,6 +100,18 @@ through that rig. A lookup scoped to a suspended rig reads only that shared
 store, or nothing, and never falls back to the other rigs' stores
 (`activeBeadSearchScope`).
 
+The list responses (`GET /sessions`, legacy `/v0/sessions`, `GET /agents`)
+resolve their rows' active beads through one `activeWorkLookup` per request:
+a single `statusStoreReadTimeout` window from the request context, shared by
+every row. A clean cache answer is used even after the window closes; an
+uncached read goes through `statusListStoreWithTimeout`, on the
+context-bound store `ScopedStoreLike` hands out. The first failed read
+(timeout, cancellation, error, or a partial result) ends the lookup: no later
+store, identity or row is read, those rows report no work-store bead (an
+unread higher-priority store may hold the winner), and the response is 200
+with the failure in `partial_errors`. A partial agent list is never cached.
+Detail, create and rename views read live, outside any list window.
+
 ## Deferred creation baseline
 
 Before scheduling an agent session, persist the command the controller resolves

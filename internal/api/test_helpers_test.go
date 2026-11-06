@@ -1,10 +1,20 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
 )
+
+// newTestActiveWorkLookup is a list response's active-work lookup for a test
+// that resolves rows directly; it closes when the test ends.
+func newTestActiveWorkLookup(t testing.TB) *activeWorkLookup {
+	t.Helper()
+	lookup := newActiveWorkLookup(context.Background())
+	t.Cleanup(lookup.close)
+	return lookup
+}
 
 // newTestCityHandler returns an http.Handler that wraps a single State
 // in a SupervisorMux, using the State's CityName() as the registered

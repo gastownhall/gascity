@@ -521,7 +521,7 @@ func TestProgramStatusReadAddsNoLivenessProbe(t *testing.T) {
 	fs.sp.Calls = nil
 	for _, info := range infos {
 		var resp sessionResponse
-		srv.enrichSessionResponse(&resp, info, fs.cfg, fs.sp, false, false, false, 0)
+		srv.enrichSessionResponse(&resp, info, fs.cfg, fs.sp, false, newTestActiveWorkLookup(t), false, 0)
 		if !resp.Running {
 			t.Fatalf("%s reads stopped", info.SessionName)
 		}
@@ -566,7 +566,7 @@ func TestProgramStatusReadAddsNoLivenessProbe(t *testing.T) {
 	publishProgramStatusSwitch(fs, runtime.ProgramStatusOff)
 	fs.sp.Calls = nil
 	var resp sessionResponse
-	srv.enrichSessionResponse(&resp, infos[0], fs.cfg, fs.sp, false, false, false, 0)
+	srv.enrichSessionResponse(&resp, infos[0], fs.cfg, fs.sp, false, newTestActiveWorkLookup(t), false, 0)
 	if _, changed := srv.newProgramStatusFrames(infos[0]).next(); changed {
 		t.Fatal("the stream sent a frame with the switch off")
 	}

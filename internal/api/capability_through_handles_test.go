@@ -109,7 +109,7 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 			state.stores = map[string]beads.Store{"myrig": wrap(store)}
 			routed := asHandedState{state}
 			store.cachedLists.Store(0)
-			New(routed).findActiveBeadForAssigneesWithFreshness("myrig", false, "worker")
+			New(routed).findActiveBeadForAssignees(newTestActiveWorkLookup(t), "myrig", "worker")
 			if store.cachedLists.Load() != 1 {
 				t.Errorf("the active-bead lookup made %d cache-only lists, want 1", store.cachedLists.Load())
 			}
