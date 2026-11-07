@@ -758,6 +758,8 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 //   - TIER, because the plane knobs only ADMIT. There is no member that
 //     excludes the ephemeral rows a TierIssues read must drop, so that filter
 //     is ApplyListQuery's, as the wisp-tier filter already was.
+//
+// Hydration is narrowed as well as filtering: the counts are never hydrated.
 func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bool) issueops.ListRequest {
 	req := nativeListReadRequest()
 	limit := nativeListLimitPushdown(query)
@@ -789,6 +791,17 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	if pushableTypes[query.Type] {
 		req.IssueType = query.Type
 	}
+	// HYDRATION. Bead carries no dependency, dependent or comment count, and
+	// beadFromNativeIssueRow reads none, so the three cardinality aggregates are
+	// paid for and discarded on every listing. Each is its own aggregate join,
+	// and the reverse-blocker one joins on an expression the server cannot
+	// index. SkipCounts chooses what is hydrated, never which rows match, so the
+	// page is otherwise unchanged.
+	req.SkipCounts = true
+	// Labels stay hydrated whatever query.SkipLabels says. The CachingStore's
+	// full scan (cacheFullScanQuery) sets SkipLabels and installs the rows it
+	// gets back wholesale, so a native store that honoured it would empty every
+	// cached bead's labels and every cached label read after the first Prime.
 	return req
 }
 

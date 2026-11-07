@@ -1076,3 +1076,65 @@ func sortedBeadIDs(items []Bead) []string {
 	sort.Strings(ids)
 	return ids
 }
+
+// No listing hydrates the cardinality aggregates: Bead carries no count, so
+// every request in every plan asks the server to skip them.
+func TestNativeListPlanNeverHydratesCounts(t *testing.T) {
+	for _, query := range []ListQuery{
+		{AllowScan: true},
+		{AllowScan: true, TierMode: TierBoth, Live: true},
+		{AllowScan: true, IncludeClosed: true, TierMode: TierBoth},
+		{Label: "gc:session"},
+		{Status: "in_progress", Assignees: []string{"worker", "gc-1"}},
+		{Type: "message", Assignee: "worker", Status: "open", Live: true},
+	} {
+		for i, req := range NativeListPlan(query) {
+			if !req.SkipCounts {
+				t.Errorf("NativeListPlan(%+v) request %d hydrates counts", query, i)
+			}
+		}
+	}
+}
+
+// Labels are never skipped at the server, even when the query says SkipLabels:
+// the CachingStore's full scan says it and installs the rows it gets back, so a
+// skipped hydration would empty the cache's labels.
+func TestNativeListPlanNeverSkipsLabels(t *testing.T) {
+	for _, query := range []ListQuery{
+		cacheFullScanQuery(),
+		{AllowScan: true, SkipLabels: true, TierMode: TierBoth},
+		{Label: "gc:session", SkipLabels: true},
+	} {
+		for i, req := range NativeListPlan(query) {
+			if req.SkipLabels {
+				t.Errorf("NativeListPlan(%+v) request %d skips labels", query, i)
+			}
+		}
+	}
+}
+
+// A CachingStore over a native store keeps its labels: the cache's full scan
+// asks for SkipLabels, and a server that honoured a pushed skip would hand back
+// label-less rows the cache installs wholesale, emptying every cached label read.
+func TestCachingStoreOverNativeKeepsLabelsAfterPrime(t *testing.T) {
+	storage := &nativeDoltReaderSpy{
+		list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+			issue := &beadslib.Issue{ID: "gc-1", Title: "one", Status: beadslib.StatusOpen, IssueType: "task", Labels: []string{"gc:session"}}
+			if req.SkipLabels {
+				issue.Labels = nil // what a server honouring the skip returns
+			}
+			return issueops.IssuePage{Items: []*issueops.IssueWithCounts{{Issue: issue}}}, nil
+		},
+	}
+	cache := NewCachingStoreForTest(newNativeDoltStoreForTest(storage), nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	got, err := cache.ListByLabel("gc:session", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-1" {
+		t.Fatalf("ListByLabel after Prime = %+v, want the one labeled row", got)
+	}
+}
