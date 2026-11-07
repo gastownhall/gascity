@@ -63,15 +63,82 @@ if [ -n "$timing_file" ]; then
   fi
 fi
 
+# Wrapper-owned logs live in a private per-user directory under the scratch
+# root and are pruned once older than this many minutes (72h). Every step here
+# is advisory: housekeeping never changes the product test's exit status.
+log_retention_minutes=4320
+scratch_root="${TMPDIR:-/var/tmp}"
+log_dir="$scratch_root/gascity-observable-logs-$(id -u)"
+
+# log_dir_usable succeeds when log_dir is a real directory (never a symlink)
+# owned by the current user.
+log_dir_usable() {
+  [ -d "$log_dir" ] && [ ! -L "$log_dir" ] && [ -O "$log_dir" ]
+}
+
+# establish_log_dir creates log_dir 0700 when absent and tightens an owned one.
+establish_log_dir() {
+  if [ ! -e "$log_dir" ] && [ ! -L "$log_dir" ]; then
+    mkdir -m 0700 "$log_dir" 2>/dev/null || true
+  fi
+  log_dir_usable && chmod 0700 "$log_dir"
+}
+
+# prune_expired_logs removes direct regular files older than the retention
+# window from log_dir and reports how many it removed on stdout.
+prune_expired_logs() {
+  local expired removed=0 path
+  expired="$(find "$log_dir" -maxdepth 1 -type f -mmin +"$log_retention_minutes")" || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if rm -f "$path"; then
+      removed=$((removed + 1))
+    fi
+  done <<EOF_EXPIRED
+$expired
+EOF_EXPIRED
+  printf '%s\n' "$removed"
+}
+
+# housekeep_log_dir prunes expired logs and prints the prune line when any
+# were removed. A failure is a warning, never an error.
+housekeep_log_dir() {
+  local removed
+  if removed="$(prune_expired_logs)"; then
+    if [ "$removed" -gt 0 ]; then
+      echo "observable go test: pruned $removed expired log(s) older than 72h from $log_dir" >&2
+    fi
+  else
+    echo "observable go test: warning: log housekeeping failed for $log_dir; expired logs may remain" >&2
+  fi
+}
+
+log_retention_note=""
 if [ -n "${OBSERVABLE_TEST_LOG:-}" ]; then
+  # A caller-owned log never creates log_dir, but a log_dir that already
+  # exists is still kept within the retention window.
+  if log_dir_usable; then
+    housekeep_log_dir
+  fi
   log="$OBSERVABLE_TEST_LOG"
   rm -f "$log"
+  log_retention_note="observable go test: log-retention: caller-owned, never removed by the wrapper"
 else
   safe_name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
-  log="$(mktemp "${TMPDIR:-/var/tmp}/gascity-${safe_name}.jsonl.XXXXXX")"
+  if establish_log_dir; then
+    housekeep_log_dir
+    log="$(mktemp "$log_dir/gascity-${safe_name}.jsonl.XXXXXX")"
+    log_retention_note="observable go test: log-retention: wrapper-owned, pruned after 72h (set OBSERVABLE_TEST_LOG to keep a log)"
+  else
+    echo "observable go test: warning: cannot establish log directory $log_dir; logging to $scratch_root without pruning" >&2
+    log="$(mktemp "$scratch_root/gascity-${safe_name}.jsonl.XXXXXX")"
+  fi
 fi
 
 echo "observable go test: log=$log" >&2
+if [ -n "$log_retention_note" ]; then
+  echo "$log_retention_note" >&2
+fi
 echo "observable go test: command=go test -json $*" >&2
 
 print_failure_details() {
