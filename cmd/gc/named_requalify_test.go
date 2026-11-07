@@ -184,7 +184,7 @@ func TestLegacyAmbiguousLeafKeepsTheBareRow(t *testing.T) {
 	if w.Status != "in_progress" || w.Assignee != requalifyBare {
 		t.Errorf("work = %s/%q, want in_progress assigned %q", w.Status, w.Assignee, requalifyBare)
 	}
-	if !liveOpenSessionAssignmentExists(store, requalifyBare) {
+	if !liveOpenSessionAssignmentExists(store, nil, requalifyBare) {
 		t.Error("liveOpenSessionAssignmentExists(golden-hon) = false, want the bare row to still own its work")
 	}
 	if !sp.IsRunning(requalifyBare) {
@@ -290,7 +290,7 @@ func TestLegacyTickRenamesRequalifiedNamedSessionInPlace(t *testing.T) {
 	if w.Status != "in_progress" || w.Assignee != requalifyBare {
 		t.Errorf("work = %s/%q, want in_progress assigned %q", w.Status, w.Assignee, requalifyBare)
 	}
-	if !liveOpenSessionAssignmentExists(store, requalifyBare) {
+	if !liveOpenSessionAssignmentExists(store, nil, requalifyBare) {
 		t.Error("liveOpenSessionAssignmentExists(golden-hon) = false, want the renamed row to still own the bare-assigned work")
 	}
 	if s := stderr.String(); strings.Contains(s, "retiring") || strings.Contains(s, "closing") {
@@ -327,7 +327,8 @@ func TestBornQualifiedRowDoesNotMatchTheBareAssignee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the born-qualified row: %v", err)
 	}
-	if liveOpenSessionAssignmentExists(store, requalifyBare) {
+	// The sweep probes under the city's config: the post-adopt one here.
+	if liveOpenSessionAssignmentExists(store, requalifyCity("on_demand"), requalifyBare) {
 		t.Errorf("liveOpenSessionAssignmentExists(%q) = true, want the bare assignee to match no live row", requalifyBare)
 	}
 	for _, id := range session.AssigneeIdentities(sessionInfoFromBead(row)) {
@@ -414,7 +415,7 @@ func requalifyAssertRenamedRowHoldsWork(t *testing.T, store beads.Store, row, wo
 	if w.Status != "in_progress" || w.Assignee != requalifyBare {
 		t.Errorf("tick %d: work = %s/%q, want in_progress assigned %q", tick, w.Status, w.Assignee, requalifyBare)
 	}
-	if !liveOpenSessionAssignmentExists(store, requalifyBare) {
+	if !liveOpenSessionAssignmentExists(store, nil, requalifyBare) {
 		t.Errorf("tick %d: liveOpenSessionAssignmentExists(%q) = false, want the renamed row to own the bare-claimed work", tick, requalifyBare)
 	}
 	for _, b := range requalifyOpenRows(t, store) {
@@ -659,7 +660,7 @@ func TestLegacyRequalifiedRowKeepsItsBareFormAfterASecondBinding(t *testing.T) {
 					if w.Status != "in_progress" || w.Assignee != requalifyBare {
 						t.Errorf("tick %d: work = %s/%q, want in_progress assigned %q", tick, w.Status, w.Assignee, requalifyBare)
 					}
-					if !liveOpenSessionAssignmentExists(store, requalifyBare) {
+					if !liveOpenSessionAssignmentExists(store, nil, requalifyBare) {
 						t.Errorf("tick %d: liveOpenSessionAssignmentExists(%q) = false, want the renamed row to own the bare-claimed work", tick, requalifyBare)
 					}
 				}

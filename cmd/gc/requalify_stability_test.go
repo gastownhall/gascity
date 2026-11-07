@@ -132,7 +132,7 @@ func TestLegacyRequalificationIsStableAcrossThreeTicks(t *testing.T) {
 				if w.Status != "in_progress" || w.Assignee != stabilityBare {
 					t.Errorf("tick %d: work = %s/%q, want in_progress assigned %q", tick, w.Status, w.Assignee, stabilityBare)
 				}
-				if !liveOpenSessionAssignmentExists(store, stabilityBare) {
+				if !liveOpenSessionAssignmentExists(store, nil, stabilityBare) {
 					t.Errorf("tick %d: liveOpenSessionAssignmentExists(%q) = false", tick, stabilityBare)
 				}
 				rows := stabilityOpenRows(t, store)
@@ -195,7 +195,7 @@ func stabilityStableBeads(t *testing.T, s *sim, pass int) {
 	if open != 1 {
 		t.Errorf("pass %d: %d open rows exist for the named session, want exactly one", pass, open)
 	}
-	if !liveOpenSessionAssignmentExists(s.legs[0].backing, stabilityBare) {
+	if !liveOpenSessionAssignmentExists(s.legs[0].backing, nil, stabilityBare) {
 		t.Errorf("pass %d: liveOpenSessionAssignmentExists(%q) = false", pass, stabilityBare)
 	}
 }
