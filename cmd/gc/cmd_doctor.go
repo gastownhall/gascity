@@ -496,6 +496,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newStorageRigsCheck(cfg, cityPath))
+			registerCityStoreCheck(newStorageSplitCheck(cfg, cityPath))
 			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
