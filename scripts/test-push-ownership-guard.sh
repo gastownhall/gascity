@@ -116,6 +116,7 @@ set -euo pipefail
 state="$(dirname "$0")/fake-bd-state"
 case "$1" in
   show)
+    printf '%s\n' "$2" >> "$state/show-ids"
     if [ -f "$state/show-sleep" ]; then
       sleep "$(cat "$state/show-sleep")"
     fi
@@ -177,7 +178,7 @@ write_show_json() {
         "$id" "$status" "$assignee" "$routed_to" "$labels" > "$fbd/fake-bd-state/show-json"
 }
 
-# run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name]
+# run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name] [gc-bead-id]
 #
 # Runs assert_bead_still_claimed with cwd=<repo>, PATH prefixed with
 # <fake-bd-dir>, and the given env. GC_SESSION_ID/GC_SESSION_NAME are
@@ -193,11 +194,11 @@ write_show_json() {
 # `POG_READ_ATTEMPTS=3 run_guard ...`.
 run_guard() {
     local repo="$1" fbd="$2" agent="$3" template="$4" pog_timeout="${5:-5}"
-    local session_id="${6:-}" session_name="${7:-}"
+    local session_id="${6:-}" session_name="${7:-}" bead_id="${8:-}"
     local read_attempts="${POG_READ_ATTEMPTS:-1}"
     (
         cd "$repo" || exit 1
-        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" GC_BEAD_ID="$bead_id" \
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" POG_READ_ATTEMPTS="$read_attempts" LIB="$LIB" \
             bash -c '. "$LIB"; assert_bead_still_claimed'
@@ -544,6 +545,78 @@ test_bead_id_branch_wins_and_warns_on_disagreement() {
         record_pass "resolve/branch-wins-warns-on-disagreement (rc=0, warning names both ids)"
     else
         record_fail "resolve/branch-wins-warns-on-disagreement" "expected rc=0 with both ids mentioned, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_bead_id_branch_resolves_five_character_id() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "fix/ga-c1v9u-guard-short-ids")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    # The branch itself is authoritative even when two in-progress beads make
+    # the assignee fallback ambiguous.
+    printf '[{"id":"ga-other01"},{"id":"ga-other02"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-c1v9u" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/fake-bd-state/show-ids" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-c1v9u" <<<"$show_ids"; then
+        record_pass "resolve/branch-resolves-five-character-id (rc=0, checked ga-c1v9u despite ambiguous fallback)"
+    else
+        record_fail "resolve/branch-resolves-five-character-id" "expected rc=0 with bd show checking ga-c1v9u, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_bead_id_explicit_gc_bead_id_wins() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "fix/guard-short-ids")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-c1v9u" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 5 "" "" "ga-c1v9u" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/fake-bd-state/show-ids" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-c1v9u" <<<"$show_ids" && ! grep -qx "ga-other01" <<<"$show_ids"; then
+        record_pass "resolve/explicit-gc-bead-id-wins (rc=0, checked explicit ga-c1v9u)"
+    else
+        record_fail "resolve/explicit-gc-bead-id-wins" "expected bd show to check only explicit ga-c1v9u, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_bead_id_branch_ignores_ga_inside_a_word() {
+    local repo fbd out rc show_ids
+    # "omega-check" contains "ga-check" but names no bead: only a "ga-" at
+    # the start or after a separator is an id.
+    repo="$(new_repo_with_branch "fix/omega-check")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-other01" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/fake-bd-state/show-ids" 2>/dev/null || true)"
+    if [[ $rc -eq 0 ]] && grep -qx "ga-other01" <<<"$show_ids" && ! grep -qx "ga-check" <<<"$show_ids"; then
+        record_pass "resolve/branch-ignores-ga-inside-a-word (rc=0, fell back to ga-other01)"
+    else
+        record_fail "resolve/branch-ignores-ga-inside-a-word" "expected the assignee fallback ga-other01 and no ga-check lookup, got rc=$rc show_ids=[$show_ids], output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_bead_scoped_branch_blocks_when_id_and_fallback_do_not_resolve() {
+    local repo fbd out rc show_ids
+    repo="$(new_repo_with_branch "fix/ga-c1v9-short-id")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-held01"},{"id":"ga-other02"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-held01" "in_progress" "agent-x" "tmpl-x" '["hold:mayor"]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    show_ids="$(cat "$fbd/fake-bd-state/show-ids" 2>/dev/null || true)"
+    if [[ $rc -ne 0 ]] && grep -qi "could not resolve a bead id" <<<"$out" && [[ -z "$show_ids" ]]; then
+        record_pass "resolve/bead-scoped-branch-blocks-on-unresolved-ambiguous-fallback (rc=$rc, no candidate guessed)"
+    else
+        record_fail "resolve/bead-scoped-branch-blocks-on-unresolved-ambiguous-fallback" "expected fail-closed resolution without querying a guessed bead, got rc=$rc show_ids=[$show_ids], output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -1321,6 +1394,10 @@ run_all() {
     test_retry_unreachable_message_mentions_retry_before_no_verify
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
+    test_bead_id_branch_resolves_five_character_id
+    test_bead_id_explicit_gc_bead_id_wins
+    test_bead_id_branch_ignores_ga_inside_a_word
+    test_bead_scoped_branch_blocks_when_id_and_fallback_do_not_resolve
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_branch_resolves_seven_char_id
     test_bead_id_branch_resolves_seven_char_subbead_id

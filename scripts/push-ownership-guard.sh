@@ -73,6 +73,11 @@ POG_READ_ATTEMPTS="${POG_READ_ATTEMPTS:-3}"
 # "no such assignment". Not a valid bead id by construction.
 POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
 
+# Sentinel for a bead-scoped push whose id could not be resolved. This is
+# separate from POG_AMBIGUOUS_SENTINEL because unrelated branches may
+# legitimately have no bead assignment to check.
+POG_BEAD_SCOPED_UNRESOLVED_SENTINEL="__pog_bead_scoped_unresolved__"
+
 # _pog_timeout <seconds> <cmd...>: run <cmd...> bounded by <seconds>,
 # mirroring the timeout/gtimeout fallback shim in
 # test/agents/graph-dispatch.sh (the only bounded-exec precedent in this
@@ -198,9 +203,10 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6,}(\.[0-9]+)* —
-#      the bead's own id format (six characters for legacy ids, seven for
-#      current ones; {6,} takes the whole run, `-` and `/` end it),
+#   1. An explicit GC_BEAD_ID, when set; otherwise the current branch name,
+#      matched against ga-[0-9a-z]{5,}(\.[0-9]+)* — the bead store's id format
+#      (five or more characters after ga-; {5,} takes the whole run, and
+#      separators such as `-` or `/` end it),
 #      extended with zero or more repeated
 #      sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
@@ -209,9 +215,8 @@ _pog_ownership_violation() {
 #      not just appear once (`?`) — a single optional group truncates a
 #      grandchild id after its first dotted segment, misresolving to the
 #      wrong (and possibly closed) parent/child bead instead of the actual
-#      grandchild bead the branch is for. The literal 6-char-only pattern
-#      would misresolve to the root bead on any sub-bead's own branch, and
-#      truncate a seven-character id to a nonexistent six-character one.
+#      grandchild bead the branch is for. The parser consumes the complete
+#      base id and every repeated dotted suffix.
 #   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
 #      the branch name doesn't match. Only resolves when that query returns
@@ -271,16 +276,34 @@ _pog_ownership_violation() {
 # already produce — more than one bead simultaneously in_progress under the
 # same assignee — is handled: see the single-match requirement on path 2
 # above, ga-1qepfl.)
-# Prints nothing (not an error) when neither resolves — the caller treats
-# that as "nothing to check," which is what lets Layer A wire this in
-# unconditionally without blocking every push in the repo.
+# On an unrelated branch, prints nothing when neither the branch nor a
+# unique assignee resolves; this lets Layer A run for every push without
+# blocking work that has no bead. A branch naming a bead fails closed if
+# neither its id nor a unique assignee resolves.
 _pog_resolve_bead_id() {
+    local explicit_id="${GC_BEAD_ID:-}"
+    if [[ -n "$explicit_id" ]]; then
+        if [[ "$explicit_id" =~ ^ga-[0-9a-z]{5,}(\.[0-9]+)*$ ]]; then
+            printf '%s' "$explicit_id"
+        else
+            printf '%s' "$POG_BEAD_SCOPED_UNRESOLVED_SENTINEL"
+        fi
+        return
+    fi
+
     local branch=""
     branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
 
     local branch_id=""
+    local branch_scoped=0
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        # deploy/*-gate names the gated bead rather than the bead for this
+        # push, so its established assignee-only resolution remains intact.
+        if [[ "$branch" != deploy/*-gate && "$branch" =~ (^|[^[:alnum:]])ga- ]]; then
+            branch_scoped=1
+        fi
+        # Same boundary as branch_scoped: "omega-check" names no bead.
+        branch_id="$(grep -oE '(^|[^[:alnum:]])ga-[0-9a-z]{5,}(\.[0-9]+)*' <<<"$branch" | head -1 | sed -E 's/^[^[:alnum:]]//' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
@@ -404,6 +427,11 @@ _pog_resolve_bead_id() {
         echo "push-ownership-guard: WARNING branch name resolves to $branch_id but this session's in-progress assignment is $assignee_id; using $branch_id (branch name wins)" >&2
     fi
 
+    if [[ -z "$branch_id" && -z "$assignee_id" && $branch_scoped -eq 1 ]]; then
+        printf '%s' "$POG_BEAD_SCOPED_UNRESOLVED_SENTINEL"
+        return
+    fi
+
     if [[ -n "$branch_id" ]]; then
         printf '%s' "$branch_id"
     else
@@ -420,6 +448,10 @@ assert_bead_still_claimed() {
 
     local id
     id="$(_pog_resolve_bead_id)"
+    if [[ "$id" == "$POG_BEAD_SCOPED_UNRESOLVED_SENTINEL" ]]; then
+        echo "push-ownership-guard: BLOCKED — this push names a bead but could not resolve a bead id from GC_BEAD_ID, the branch, or a unique in-progress assignment. Last resort: git push --no-verify" >&2
+        return 1
+    fi
     if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
         echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
