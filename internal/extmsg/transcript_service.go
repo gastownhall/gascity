@@ -3,6 +3,7 @@ package extmsg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -54,6 +55,52 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 	createdAt := zeroNow(input.CreatedAt)
 	providerMessageID := strings.TrimSpace(input.ProviderMessageID)
 	text := strings.TrimSpace(input.Text)
+	actorJSON, err := marshalOptionalJSON(input.Actor)
+	if err != nil {
+		return ConversationTranscriptRecord{}, err
+	}
+	attachmentsJSON, err := marshalOptionalJSON(input.Attachments)
+	if err != nil {
+		return ConversationTranscriptRecord{}, err
+	}
+	entryAt := func(stateID string, sequence int64) beads.Bead {
+		fields := encodeMetadataFields(input.Metadata, map[string]string{
+			"schema_version":         strconv.Itoa(schemaVersion),
+			"scope_id":               ref.ScopeID,
+			"provider":               ref.Provider,
+			"account_id":             ref.AccountID,
+			"conversation_id":        ref.ConversationID,
+			"parent_conversation_id": ref.ParentConversationID,
+			"conversation_kind":      string(ref.Kind),
+			"sequence":               strconv.FormatInt(sequence, 10),
+			"kind":                   string(kind),
+			"provenance":             string(provenance),
+			"provider_message_id":    providerMessageID,
+			"explicit_target":        normalizeHandle(input.ExplicitTarget),
+			"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
+			"source_session_id":      strings.TrimSpace(input.SourceSessionID),
+			"created_at":             formatTime(createdAt),
+			"actor_json":             actorJSON,
+			"attachments_json":       attachmentsJSON,
+		})
+		labels := []string{
+			"gc:extmsg-transcript",
+			labelTranscriptBase,
+			transcriptConversationLabel(ref),
+			transcriptBucketLabel(ref, transcriptBucket(sequence)),
+		}
+		if providerMessageID != "" {
+			labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
+		}
+		return beads.Bead{
+			ID:          transcriptEntryID(stateID, sequence),
+			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
+			Type:        "task",
+			Description: text,
+			Labels:      labels,
+			Metadata:    fields,
+		}
+	}
 	var out ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.ensureStateLocked(ref)
@@ -77,64 +124,46 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				return nil
 			}
 		}
-		actorJSON, err := marshalOptionalJSON(input.Actor)
-		if err != nil {
-			return err
+		// Each attempt creates the entry at the pinned ID of the live
+		// frontier. A store that refuses the ID holds another entry there:
+		// cover it and try the next sequence.
+		for range transcriptAppendAttempts {
+			if err := checkContext(ctx); err != nil {
+				return err
+			}
+			_, live, err := s.readTranscriptStateLive(state.ID)
+			if err != nil {
+				return err
+			}
+			sequence := live.NextSequence
+			pin := transcriptEntryID(state.ID, sequence)
+			created, createErr := s.store.Create(entryAt(state.ID, sequence))
+			if createErr == nil {
+				record, err := decodeTranscriptBead(created)
+				if err != nil {
+					return err
+				}
+				if err := s.coverSequenceLocked(state.ID, sequence); err != nil {
+					return err
+				}
+				out = record
+				return nil
+			}
+			occupant, getErr := beads.LiveFor(s.store).Get(pin)
+			switch {
+			case errors.Is(getErr, beads.ErrNotFound):
+				return fmt.Errorf("create transcript entry %s: %w", pin, createErr)
+			case getErr != nil:
+				return fmt.Errorf("create transcript entry %s: %w (verify pinned entry: %w)", pin, createErr, getErr)
+			}
+			if _, err := decodeTranscriptOccupant(occupant, ref, sequence); err != nil {
+				return err
+			}
+			if err := s.coverSequenceLocked(state.ID, sequence); err != nil {
+				return err
+			}
 		}
-		attachmentsJSON, err := marshalOptionalJSON(input.Attachments)
-		if err != nil {
-			return err
-		}
-		sequence := state.NextSequence
-		fields := encodeMetadataFields(input.Metadata, map[string]string{
-			"schema_version":         strconv.Itoa(schemaVersion),
-			"scope_id":               ref.ScopeID,
-			"provider":               ref.Provider,
-			"account_id":             ref.AccountID,
-			"conversation_id":        ref.ConversationID,
-			"parent_conversation_id": ref.ParentConversationID,
-			"conversation_kind":      string(ref.Kind),
-			"sequence":               strconv.FormatInt(sequence, 10),
-			"kind":                   string(kind),
-			"provenance":             string(provenance),
-			"provider_message_id":    providerMessageID,
-			"explicit_target":        normalizeHandle(input.ExplicitTarget),
-			"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
-			"source_session_id":      strings.TrimSpace(input.SourceSessionID),
-			"created_at":             formatTime(createdAt),
-			"actor_json":             actorJSON,
-			"attachments_json":       attachmentsJSON,
-		})
-		labels := []string{
-			labelTranscriptBase,
-			transcriptConversationLabel(ref),
-			transcriptBucketLabel(ref, transcriptBucket(sequence)),
-		}
-		if providerMessageID != "" {
-			labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
-		}
-		created, err := s.store.Create(beads.Bead{
-			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
-			Type:        "task",
-			Description: text,
-			Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
-			Metadata:    fields,
-		})
-		if err != nil {
-			return fmt.Errorf("create transcript entry: %w", err)
-		}
-		next := sequence + 1
-		updates := map[string]string{
-			"next_sequence": strconv.FormatInt(next, 10),
-		}
-		if state.EarliestAvailableSequence <= 0 {
-			updates["earliest_available_sequence"] = "1"
-		}
-		if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
-			return fmt.Errorf("update transcript state: %w", err)
-		}
-		out, err = decodeTranscriptBead(created)
-		return err
+		return fmt.Errorf("append transcript entry to %s after %d attempts: %w", state.ID, transcriptAppendAttempts, errTranscriptContended)
 	})
 	return out, err
 }
