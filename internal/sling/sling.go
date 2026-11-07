@@ -1309,12 +1309,7 @@ func ResolveSlingEnvForBead(a config.Agent, deps SlingDeps, bead beads.Bead) map
 		if deps.Cfg != nil {
 			sessionTemplate = deps.Cfg.Workspace.SessionTemplate
 		}
-		// The zero work store reads no store, as a nil one read none.
-		var store beads.Store
-		if deps.Store != (beads.WorkStore{}) {
-			store = deps.Store
-		}
-		sn := agentutil.LookupSessionName(store, deps.CityName, a.QualifiedName(), sessionTemplate)
+		sn := agentutil.LookupSessionName(deps.Sessions, deps.CityName, a.QualifiedName(), sessionTemplate)
 		env["GC_SLING_TARGET"] = sn
 	}
 

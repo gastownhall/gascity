@@ -1725,8 +1725,6 @@ cmd/gc/worker_handle.go	workerSessionTargetPeekWithConfig	raw-param	1
 cmd/gc/worker_handle.go	workerSessionTargetPendingWithConfig	raw-param	1
 cmd/gc/worker_handle.go	workerSessionTargetRunningWithConfig	raw-param	1
 cmd/gc/worker_handle.go	workerStopSessionTargetForShutdownWithConfig	raw-param	1
-internal/agentutil/pool.go	LookupSessionName	raw-param	1
-internal/agentutil/pool.go	findSessionNameByTemplate	raw-param	1
 internal/api/beads_graph_federation.go	Server.bindingReservedPrefixes	raw-param	1
 internal/api/beads_graph_federation.go	relocatedGraphStore	raw-result	1
 internal/api/beads_graph_federation.go	relocatedGraphStore	unwrap	1
