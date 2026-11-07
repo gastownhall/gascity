@@ -169,6 +169,17 @@ record cannot report idle, since it may be the next turn's start, but an open
 turn still reports in-turn. A turn start more than 16 MiB before the end of the
 rollout reports unknown instead of rescanning the whole rollout on every poll.
 
+## Fresh-cycle teardown
+
+Before cycling an alive `wake_mode=fresh` session onto a new bead, read the
+routed runtime's `IdleSnapshotProvider` when available. Only an idle answer
+permits the cycle; busy, indeterminate, failed, or timed-out reads defer it.
+Keep the previous anchor and conversation metadata while deferred so the next
+idle tick retries the cycle. This applies to pinned named sessions too: a nudge
+can start another turn after the old anchor closes. Runtimes without this
+optional observation retain the existing reassignment behavior. Both the
+legacy reconciler and allocator stop effect must enforce this boundary.
+
 ## History identity
 
 `HistorySnapshot.GCSessionID` is the durable Gas City session bead ID. Unless

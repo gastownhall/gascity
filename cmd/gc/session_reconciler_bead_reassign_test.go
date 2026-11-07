@@ -657,7 +657,11 @@ func TestReconcileSessionBeads_FreshCycleGuard_UsesCurrentClaimNotCurrentlyProce
 // ComputeAwakeSet sees the work demand. Tests for assigned-work-driven
 // behavior need this hook; the existing helper in
 // session_reconciler_restart_request_test.go intentionally passes nil.
-func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions []beads.Bead, assignedWork []beads.Bead) {
+func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions []beads.Bead, assignedWork []beads.Bead, providers ...runtime.Provider) {
+	var sp runtime.Provider = env.sp
+	if len(providers) != 0 {
+		sp = providers[0]
+	}
 	poolDesired := make(map[string]int)
 	for _, tp := range env.desiredState {
 		if tp.TemplateName != "" {
@@ -672,7 +676,7 @@ func reconcileSessionBeadsWithAssignedWork(env *restartRequestTestEnv, sessions 
 		env.desiredState,
 		cfgNames,
 		env.cfg,
-		env.sp,
+		sp,
 		env.store,
 		nil,
 		assignedWork,
@@ -854,5 +858,51 @@ func TestReconcileSessionBeads_FreshCycleWakesReliablyNextTick(t *testing.T) {
 	// minted key survives intact up to the point the session goes asleep).
 	if woke.Metadata["session_key"] != "" {
 		t.Fatalf("session_key after wake = %q, want empty (preWakeCommit's fresh-wake reset fires unconditionally for wake_mode=fresh, independent of this fix)", woke.Metadata["session_key"])
+	}
+}
+
+// A nudge can start a turn after the old anchor closed. That turn must finish
+// before the pending fresh cycle changes the conversation or its anchor.
+func TestReconcileSessionBeads_FreshCycleWaitsForNudgedTurn(t *testing.T) {
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	name := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[name] = TemplateParams{Command: "true", SessionName: name, TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
+	closedAt := env.clk.Now().Add(-time.Minute)
+	createPrevBead(t, env, &closedAt)
+	seat := env.createSessionBead(name)
+	env.setSessionMetadata(&seat, map[string]string{
+		namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "worker", namedSessionModeMetadata: "on_demand",
+		"template": "worker", "state": "active", "wake_mode": "fresh", "pin_awake": "true",
+		"session_key": "conversation-A", sessionpkg.CurrentBeadIDKey: "wb-prev",
+		"awake_started_at": env.clk.Now().Add(-time.Hour).Format(time.RFC3339),
+	})
+	startRuntime(t, env.sp, name, map[string]string{"GC_SESSION_ID": seat.ID, "GC_INSTANCE_TOKEN": "test-token"})
+	if err := env.sp.Nudge(name, runtime.TextContent("process the next assignment")); err != nil {
+		t.Fatal(err)
+	}
+	leaf := &freshCycleIdleLeaf{FullFake: runtime.FullFake{Fake: env.sp}}
+	sp := runtime.NewFakeProfile(runtime.ProfileTmux, leaf)
+	next := beads.Bead{ID: "wb-new", Title: "next work", Type: "task", Status: "in_progress", Assignee: "worker"}
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{seat}, []beads.Bead{next}, sp)
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !env.sp.IsRunning(name) || got.Metadata[sessionpkg.CurrentBeadIDKey] != "wb-prev" || got.Metadata["session_key"] != "conversation-A" || got.Metadata["continuation_reset_pending"] == "true" {
+		t.Fatalf("busy turn was cycled or its pending anchor lost: running=%t metadata=%v", env.sp.IsRunning(name), got.Metadata)
+	}
+	leaf.idle = true
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{got}, []beads.Bead{next}, sp)
+	got, err = env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.sp.IsRunning(name) || got.Metadata[sessionpkg.CurrentBeadIDKey] != "wb-new" || got.Metadata["continuation_reset_pending"] != "true" || got.Metadata["session_key"] == "conversation-A" {
+		t.Fatalf("idle turn did not complete its fresh cycle: running=%t metadata=%v", env.sp.IsRunning(name), got.Metadata)
 	}
 }

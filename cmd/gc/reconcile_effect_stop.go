@@ -67,6 +67,9 @@ func stopNeeds(w *World, it intent) needs {
 		n.Activity = !n.Content
 		n.IdleShadow = true
 	}
+	if it.Reason == decideFreshCycle {
+		n.Content = true
+	}
 	return n
 }
 
