@@ -93,13 +93,6 @@ var Default = Config{
 		beads + "/beadstest",
 		beads + "/splittest",
 	},
-	// OD-T7-14: the cache a store value is peeled to by assertion, which a
-	// typed handle answers false to (cache-peel).
-	CacheTypes: []string{beads + ".CachingStore"},
-	// The cache's own lifecycle and observability methods: an interface
-	// asking for one peels a store to its cache as surely as the concrete
-	// assertion does (cache-peel).
-	CacheProbeMethods: []string{"IsLive", "Stats", "Backing", "Prime", "PrimeActive", "RefreshRow", "RequestReconcile"},
 	// The read side the beads read helpers take: an assertion on one is an
 	// assertion on the store it holds.
 	StoreReaders: []string{beads + ".StoreReader"},
@@ -130,9 +123,8 @@ var Default = Config{
 		{Package: "internal/storebinding/beadsworkspace", Reason: storeBindings},
 		{Package: "internal/storebinding/sqlite", Reason: storeBindings},
 		{Package: "internal/storebinding/storebindingtest", Reason: storeBindings},
-		{Package: "internal/storeref", Rules: AllRulesBut(CapAssert, CachePeel), Reason: "the residency resolver: the mint (T2) and the plan executors that run legs over physical stores. A capability assertion or a cache peel here still goes through beads.As"},
+		{Package: "internal/storeref", Rules: AllRulesBut(CapAssert), Reason: "the residency resolver: the mint (T2) and the plan executors that run legs over physical stores. A capability assertion here still goes through beads.As"},
 		{Package: "cmd/gc", File: "city_stores.go", Rules: append([]Rule{Mint}, rawRules...), Reason: "the router's cmd/gc plane: builds each holder's topology from the opened routes and mints its storeref.Stores (T2); counted in allowed.txt"},
-		{Package: "cmd/gc", File: "class_store_cache.go", Rules: []Rule{CachePeel}, Reason: "the controller's cache construction: decides whether a store already is, or wraps, the CachingStore it installs, before any handle exists; counted in allowed.txt"},
 		{Package: "cmd/gc", File: "storage_boot.go", Reason: "storage-class routing at boot: opens and holds the physical engines the router later wraps"},
 		{Package: "cmd/gc", File: "infra_class_migrate.go", Rules: rawRules, Reason: "the storage-class migration: copies a class's rows between physical stores, raw by nature (S5)"},
 		{Package: "cmd/gc", File: "infra_class_holds.go", Rules: rawRules, Reason: "the migration's holds: reads a carried row's blockers in the work store and mints its cross-store gates in the binding, both physical stores"},
