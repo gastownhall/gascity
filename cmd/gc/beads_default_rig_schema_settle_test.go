@@ -99,17 +99,8 @@ esac
 	t.Setenv("GC_BIN", "/tmp/stale-gc")
 	t.Setenv("BD_BIN", fakeBd)
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-	unsetEnvForTest(t, "BD_ALLOW_REMOTE_MIGRATE")
+	unsetTestEnv(t, "BD_ALLOW_REMOTE_MIGRATE")
 	return behindSchemaRig{cityPath: cityPath, rigPath: rigPath, logPath: logPath, fakeBd: fakeBd, gcBin: gcBin}
-}
-
-// unsetEnvForTest removes key for the rest of the test and restores it after.
-func unsetEnvForTest(t *testing.T, key string) {
-	t.Helper()
-	t.Setenv(key, "")
-	if err := os.Unsetenv(key); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func (r behindSchemaRig) invocations(t *testing.T) []schemaRigBdCall {
@@ -410,5 +401,81 @@ func TestInitAndHookDirDefaultRigSchemaMigrationFailureStopsBeforeReadiness(t *t
 				t.Fatalf("readiness ran after a failed schema migration; bd calls:\n%s", describeSchemaRigCalls(calls))
 			}
 		})
+	}
+}
+
+// writeAdoptionGuardBd installs a BD_BIN fake that logs every invocation and
+// answers bd init with initExit and its message, bd version with a release
+// that supports `bd migrate schema`, and bd list with an empty result.
+func writeAdoptionGuardBd(t *testing.T, initExit int, initMessage string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "bd-args")
+	fakeBd := filepath.Join(dir, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  init) echo %q >&2; exit %d ;;
+  version) echo 'bd version 1.3.1-rc.1 (fixture)' ;;
+  list) echo '[]' ;;
+esac
+`, logPath, initMessage, initExit)
+	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+	return logPath
+}
+
+func assertNoSchemaMigration(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	if strings.Contains(string(data), "migrate") {
+		t.Fatalf("the adoption schema migration ran outside a direct-server adoption; bd invocations:\n%s", data)
+	}
+	return string(data)
+}
+
+func TestDefaultRigBdStoreFreshInitDoesNotMigrateSchema(t *testing.T) {
+	clearGCEnv(t)
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "api")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := writeAdoptionGuardBd(t, 0, "Created the api workspace")
+
+	if err := initDefaultRigBdStore(city, rig, "api", "api"); err != nil {
+		t.Fatalf("initDefaultRigBdStore: %v", err)
+	}
+	invocations := assertNoSchemaMigration(t, logPath)
+	if !strings.Contains(invocations, "init --server") {
+		t.Fatalf("want a fresh direct-server bd init; bd invocations:\n%s", invocations)
+	}
+}
+
+func TestDefaultRigBdStoreProxiedAdoptionDoesNotMigrateSchema(t *testing.T) {
+	clearGCEnv(t)
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := writeAdoptionGuardBd(t, 1, "Found existing Dolt database 'r1' for this workspace. This workspace is already initialized; just run bd commands normally. Aborting.")
+	writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"r1"}`)
+
+	// The proxied finalization does more than call bd; only the invocations
+	// matter here.
+	_ = initDefaultRigBdStore(city, rig, "r1", "r1")
+
+	invocations := assertNoSchemaMigration(t, logPath)
+	if !strings.Contains(invocations, "init --proxied-server") {
+		t.Fatalf("want a proxied bd init; bd invocations:\n%s", invocations)
 	}
 }
