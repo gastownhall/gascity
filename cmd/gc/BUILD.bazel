@@ -2392,6 +2392,7 @@ go_test(
         "usage_compute_class_routing_test.go",
         "usage_compute_test.go",
         "usage_sink_test.go",
+        "user_service_orphan_sweep_test.go",
         "v2_bench_city_test.go",
         "v2_bench_test.go",
         "v2_g1_test.go",

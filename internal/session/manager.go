@@ -779,7 +779,7 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // FindRuntimesBySessionID): the orphans the scan did surface are still
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
-// yet.
+// yet. A detached user-manager service in a different unit is left alone.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
@@ -791,6 +791,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	ownUnit := proctable.SessionOwnUserService(found, sessionID)
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
@@ -808,6 +809,11 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
+		unit, foreign := proctable.ForeignUserService(live.PID, ownUnit)
+		if foreign {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: user service %s (not the session's unit)", sessionID, live.PID, unit)
+			continue
+		}
 		// The provider claims this root as a live runtime of its own that it
 		// does not list: a pane of its socket that it cannot reach or that a
 		// failed listing missed. It is not an orphan, and a replacement would
@@ -822,6 +828,9 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	}
 	var termErrs []error
 	for _, live := range orphans {
+		if unit, _ := proctable.ForeignUserService(live.PID, ownUnit); unit != "" {
+			log.Printf("session: reaping orphaned runtime for %s pid=%d unit=%s", sessionID, live.PID, unit)
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))

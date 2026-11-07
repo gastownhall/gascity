@@ -3,7 +3,9 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -151,5 +153,89 @@ func TestSameSessionRestartTerminatesTmuxParentedRootItsProviderDoesNotClaim(t *
 	}
 	if len(sp.started) != 1 || sp.started[0] != info.ID {
 		t.Fatalf("started %v, want the resumed session %s", sp.started, info.ID)
+	}
+}
+
+// TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild is
+// the systemd-run --user case: a transient user service that inherited the
+// session id survives the session's restart, and an in-session child that
+// stayed in the session's scope is still reaped. A leftover in the session's
+// own unit (the reaper's service, planted at this process's pid) is reaped
+// and named. The service's child is not promoted to a root in its place.
+func TestSameSessionRestartLeavesDetachedUserServiceAndReapsInSessionChild(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
+	city := t.TempDir()
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	sp.terminated = nil
+	sp.started = nil
+
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper", "GC_CITY_PATH=" + city}
+	root := t.TempDir()
+	const (
+		servicePID = 5100
+		childPID   = 5101
+		scopePID   = 5200
+		ownPID     = 5300
+		systemPID  = 5400
+	)
+	writeFakeProcess(t, root, servicePID, 1, []string{"sleep", "900"}, env)
+	writeFakeCgroup(t, root, servicePID, "/user.slice/user-1000.slice/user@1000.service/app.slice/detached-worker.service")
+	writeFakeProcess(t, root, childPID, servicePID, []string{"sleep", "1"}, env)
+	writeFakeCgroup(t, root, childPID, "/user.slice/user-1000.slice/user@1000.service/app.slice/detached-worker.service")
+	writeFakeProcess(t, root, scopePID, 1, []string{"sleep", "900"}, env)
+	writeFakeCgroup(t, root, scopePID, "/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-abc.scope")
+	writeFakeProcess(t, root, ownPID, 1, []string{"claude", "--resume"}, env)
+	writeFakeCgroup(t, root, ownPID, "/user.slice/user-1000.slice/user@1000.service/app.slice/agent.service")
+	writeFakeProcess(t, root, systemPID, 1, []string{"rogue"}, env)
+	writeFakeCgroup(t, root, systemPID, "/system.slice/rogue.service")
+	// The reaper's own unit. No session id, so the scan does not reap it.
+	self := os.Getpid()
+	writeFakeProcess(t, root, self, 1, []string{"gc", "test"}, []string{"PATH=/usr/bin"})
+	writeFakeCgroup(t, root, self, "/user.slice/user-1000.slice/user@1000.service/app.slice/agent.service")
+	proctable.SetScanRootForTesting(t, root)
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := map[int]bool{}
+	for _, pid := range sp.terminated {
+		got[pid] = true
+	}
+	if got[servicePID] || got[childPID] {
+		t.Fatalf("restart terminated %v, want the detached service %d and its child %d left alone", sp.terminated, servicePID, childPID)
+	}
+	for _, pid := range []int{scopePID, ownPID, systemPID} {
+		if !got[pid] {
+			t.Fatalf("restart terminated %v, want in-session scope %d, own-unit leftover %d, and system service %d", sp.terminated, scopePID, ownPID, systemPID)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("restart terminated %v, want exactly the scope, own-unit, and system leftovers", sp.terminated)
+	}
+	text := logs.String()
+	if !strings.Contains(text, "user service detached-worker.service") {
+		t.Errorf("log %q does not name the skipped unit", text)
+	}
+	if !strings.Contains(text, "unit=agent.service") {
+		t.Errorf("log %q does not name the reaped session unit", text)
+	}
+}
+
+func writeFakeCgroup(t *testing.T, root string, pid int, path string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(pid), "cgroup"), []byte("0::"+path+"\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup: %v", err)
 	}
 }

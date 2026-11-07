@@ -32,6 +32,9 @@ go_library(
         "scan_darwin_records.go",
         "scan_linux.go",
         "scan_stub.go",
+        "user_service.go",
+        "user_service_linux.go",
+        "user_service_stub.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],
@@ -73,6 +76,8 @@ go_test(
         "supervisor_fork_orphan_repro_test.go",
         "sweep_guards_test.go",
         "testenv_import_test.go",
+        "user_service_linux_test.go",
+        "user_service_test.go",
     ],
     embed = [":proctable"],
     deps = [
