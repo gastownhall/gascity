@@ -89,8 +89,9 @@ func TestBoolFlagsIncorporatesDiscovered(t *testing.T) {
 func TestSubcommandsListsAllKnownKeys(t *testing.T) {
 	want := []string{
 		"close", "create", "delete", "dep add", "dep list", "dep remove",
-		"gate check", "gate list", "list", "mol burn", "mol current",
-		"mol pour", "mol wisp", "ready", "reopen", "show", "update",
+		"gate check", "gate list", "heartbeat", "list", "mol burn",
+		"mol current", "mol pour", "mol wisp", "ready", "reopen", "show",
+		"update",
 	}
 	got := Subcommands()
 	sort.Strings(got)

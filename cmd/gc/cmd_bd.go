@@ -309,29 +309,53 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
 }
 
-// rewriteBdHeartbeatArgs validates the `heartbeat <issue-id>` subcommand and
-// forwards it to bd's NATIVE heartbeat, which pushes the claim's
-// lease_expires_at forward and fails loudly when the caller no longer owns
-// the claim (reclaimed lease, closed issue). gc used to rewrite this into
-// `update <issue-id> --set-metadata gc.last_heartbeat_at=<now>` — a write
-// nothing reads — which reported success while leaving the lease untouched,
-// so a worker's claim could go stale mid-task under a green heartbeat
-// (dip-wdt5aq). The id is validated here so a malformed id never reaches
-// bd's prefix-based rig auto-detection. Args that do not begin with
-// "heartbeat" pass through unchanged.
+// rewriteBdHeartbeatArgs validates the `heartbeat <issue-id> [flags]`
+// subcommand and forwards it to bd's NATIVE heartbeat, which pushes the
+// claim's lease_expires_at forward and fails loudly when the caller no
+// longer owns the claim (reclaimed lease, closed issue). gc used to rewrite
+// this into `update <issue-id> --set-metadata gc.last_heartbeat_at=<now>` —
+// a write nothing reads — which reported success while leaving the lease
+// untouched, so a worker's claim could go stale mid-task under a green
+// heartbeat (dip-wdt5aq). The id is validated here so a malformed id never
+// reaches bd's prefix-based rig auto-detection.
+//
+// The verb is located with bdflags.SplitGlobalFlags, the same lookup every
+// other verb-keyed guard in this file uses, so a leading global flag (`gc bd
+// --json heartbeat <id>`) does not skip this check the way a literal
+// bdArgs[0] match would. Both bd's native verb and its "hb" alias
+// (allowlisted to heartbeat on a split city, bd_split_allowlist.go) are
+// recognized. Args whose verb is neither pass through unchanged.
+//
+// -h/--help is passed through unchanged wherever it appears after the verb,
+// so bd shows its own help instead of this usage error. Otherwise the first
+// argument after the verb that does not start with "-" is taken as the id
+// and validated as before; bd's own flags (--json, --actor, -q, ...),
+// before or after the id, are forwarded unchanged. A missing id (no
+// non-flag argument at all — e.g. a bare flag standing in for it) or a
+// malformed one (empty, or containing whitespace) is still refused, as is
+// more than one bare positional (e.g. a stray extra argument), which is not
+// a flag bd's own heartbeat usage accepts.
 func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
-	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
+	verb, rest := bdflags.SplitGlobalFlags(bdArgs)
+	if verb != "heartbeat" && verb != "hb" {
 		return bdArgs, nil
 	}
-	rest := bdArgs[1:]
+	for _, arg := range rest {
+		if arg == "-h" || arg == "--help" {
+			return bdArgs, nil
+		}
+	}
+	positionals := bdflags.Positionals("heartbeat", rest)
 	// A bead id never contains whitespace; reject any (leading, trailing, or
 	// internal) rather than forwarding a malformed id that would break bd's
-	// prefix-based rig auto-detection. Also reject empty and flag-shaped args.
-	if len(rest) != 1 || rest[0] == "" || strings.HasPrefix(rest[0], "-") ||
-		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
+	// prefix-based rig auto-detection. Also reject a missing id (no
+	// positional, or more than one — heartbeat takes exactly one) and
+	// flag-shaped args standing in for it.
+	if len(positionals) != 1 || positionals[0] == "" ||
+		strings.IndexFunc(positionals[0], unicode.IsSpace) >= 0 {
 		return nil, fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
-	return []string{"heartbeat", rest[0]}, nil
+	return bdArgs, nil
 }
 
 // bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
@@ -898,9 +922,11 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // "-" and do not contain "=" are treated as potentially value-consuming, which
 // triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
 // The "--" terminator is respected: everything after it is positional.
-// heartbeat is positional-only — rewriteBdHeartbeatArgs has already reduced its
-// argv to a single pre-validated id with no flags, so its flag sets are empty
-// by design and the lone id is scanned as positional.
+// heartbeat's argv has already been validated by rewriteBdHeartbeatArgs to
+// carry exactly one positional (the id) alongside only bd's own flags for
+// the verb (internal/bdflags' "heartbeat" manifest, global flags only), so
+// the lone id is scanned as positional here the same way update/close/
+// reopen/delete's ids are.
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
