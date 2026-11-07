@@ -532,6 +532,110 @@ func TestSessionListAPIRouteRefusesAPartialAnswer(t *testing.T) {
 	}
 }
 
+// sessionListActiveWorkDownStore fails every active-work read, the
+// in_progress-by-assignee read GET /sessions makes to fill a row's
+// active_bead, as a rig store whose backend is down does.
+type sessionListActiveWorkDownStore struct{ beads.Store }
+
+func (s sessionListActiveWorkDownStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Status == "in_progress" && query.Assignee != "" {
+		return nil, errors.New("bd list: connection refused")
+	}
+	return s.Store.List(query)
+}
+
+// sessionListRowIDs returns the sorted ids of a session list document's rows.
+func sessionListRowIDs(t *testing.T, doc map[string]any) []string {
+	t.Helper()
+	var ids []string
+	for _, row := range sessionListRows(t, doc) {
+		id, _ := row["id"].(string)
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestSessionListAPIRouteListsPastAnActiveWorkFailure pins that a failed
+// active-work read on the server, which GET /sessions reports in
+// active_work_errors rather than as partial, leaves gc session list whole:
+// exit 0 with the local read's sessions, on the supervisor-hosted and remote
+// routes alike. The seed's active session runs, so its row is the one the
+// server looks up active work for.
+func TestSessionListAPIRouteListsPastAnActiveWorkFailure(t *testing.T) {
+	clearInheritedCityRoutingEnv(t)
+	h := newCharCity(t, charCityBasic+"\n[session]\nprovider = \"fake\"\n", func(t *testing.T, store beads.Store) {
+		seedSessionListEquivalence(t, store)
+	})
+	fake, ok := h.cs.SessionProvider().(*runtime.Fake)
+	if !ok {
+		t.Fatalf("harness session provider is %T, want *runtime.Fake", h.cs.SessionProvider())
+	}
+	origBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = origBuild })
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fake, nil
+	}
+	if err := fake.Start(context.Background(), "eq-active", runtime.Config{}); err != nil {
+		t.Fatalf("fake.Start: %v", err)
+	}
+	h.cs.mu.Lock()
+	h.cs.beadStores["broken"] = sessionListActiveWorkDownStore{Store: beads.NewMemStore()}
+	h.cs.rigStoresGen++ // Stores() mints a new epoch with rig broken in it
+	h.cs.mu.Unlock()
+	var (
+		mu       sync.Mutex
+		reported []string
+	)
+	hosted, remote := sessionListLanesOver(t, h, func(base http.Handler) http.Handler {
+		return sessionListRewriteListBodies(base, func(body map[string]any) {
+			errs, _ := body["active_work_errors"].([]any)
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range errs {
+				msg, _ := e.(string)
+				reported = append(reported, msg)
+			}
+		})
+	})
+	sessionListHostedBy(t, hosted)
+
+	localOut, _ := runSessionListCLI(t, h.cityPath, true, "--json")
+	want := sessionListRowIDs(t, decodeSessionListDoc(t, localOut))
+	if len(want) == 0 {
+		t.Fatal("the local read lists no sessions")
+	}
+	for _, lane := range []string{"supervisor-hosted", "remote"} {
+		t.Run(lane, func(t *testing.T) {
+			mu.Lock()
+			reported = nil
+			mu.Unlock()
+			var stdout, stderr string
+			if lane == "remote" {
+				var out, errOut bytes.Buffer
+				if code := routeSessionList("", "", "", remote, "", true, &out, &errOut); code != 0 {
+					t.Fatalf("exit = %d, want 0; stdout %q stderr %q", code, out.String(), errOut.String())
+				}
+				stdout, stderr = out.String(), errOut.String()
+			} else {
+				stdout, stderr = runSessionListCLI(t, h.cityPath, false, "--json")
+			}
+			if !strings.Contains(stderr, "route=api") {
+				t.Errorf("stderr = %q, want route=api", stderr)
+			}
+			mu.Lock()
+			got := slices.Clone(reported)
+			mu.Unlock()
+			if !slices.ContainsFunc(got, func(e string) bool { return strings.Contains(e, `active work in rig "broken"`) }) {
+				t.Fatalf("server's active_work_errors = %q, want the failed read of rig broken", got)
+			}
+			if ids := sessionListRowIDs(t, decodeSessionListDoc(t, stdout)); !slices.Equal(ids, want) {
+				t.Errorf("sessions = %v, want the local read's %v", ids, want)
+			}
+		})
+	}
+}
+
 // TestSessionListClosedHistoryReadFailureFailsTheList pins the local read's
 // closed-history failure on the route a supervisor-hosted city's --state all
 // takes: a partial or failed listing exits 1 with the session_list_failed

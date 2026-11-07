@@ -2003,11 +2003,12 @@ func suspendAlphaAtRuntime(t *testing.T, state *fakeState) {
 }
 
 // lookupActiveBead runs the cached or live active-bead lookup.
-func lookupActiveBead(srv *Server, live bool, rig string, assignees ...string) string {
+func lookupActiveBead(t testing.TB, srv *Server, live bool, rig string, assignees ...string) string {
+	t.Helper()
 	if live {
 		return srv.findLiveActiveBeadForAssignees(rig, assignees...)
 	}
-	return srv.findActiveBeadForAssignees(rig, assignees...)
+	return srv.findActiveBeadForAssignees(newTestActiveWorkLookup(t), rig, assignees...)
 }
 
 // TestActiveBeadLookupSkipsSuspendedRig: a rig suspended by effective state
@@ -2022,7 +2023,7 @@ func TestActiveBeadLookupSkipsSuspendedRig(t *testing.T) {
 			l := newSuspendedRigLookup(t)
 			suspendAlphaAtRuntime(t, l.state)
 
-			got := lookupActiveBead(New(l.state), tc.live, "", "session-id")
+			got := lookupActiveBead(t, New(l.state), tc.live, "", "session-id")
 
 			if l.alpha.listCalls != 0 {
 				t.Errorf("suspended rig alpha List calls = %d, want 0", l.alpha.listCalls)
@@ -2052,7 +2053,7 @@ func TestActiveBeadLookupForSuspendedRigReadsNoStore(t *testing.T) {
 					l.state.stores["gamma"] = l.alpha
 				}
 
-				got := lookupActiveBead(New(l.state), live, "alpha", "session-id")
+				got := lookupActiveBead(t, New(l.state), live, "alpha", "session-id")
 
 				if got != "" {
 					t.Errorf("active bead = %q, want none", got)
@@ -2106,7 +2107,7 @@ func TestActiveBeadLookupUsesEffectiveRigSuspension(t *testing.T) {
 					}
 				}
 
-				got := lookupActiveBead(New(l.state), live, "", "session-id")
+				got := lookupActiveBead(t, New(l.state), live, "", "session-id")
 
 				want := l.betaWork
 				if tt.wantAlpha {
@@ -2137,7 +2138,7 @@ func TestActiveBeadLookupReadsRigInferredSuspended(t *testing.T) {
 			}
 			l.state.cfg.NamedSessions = nil
 
-			got := lookupActiveBead(New(l.state), live, "", "session-id")
+			got := lookupActiveBead(t, New(l.state), live, "", "session-id")
 
 			if l.beta.listCalls == 0 {
 				t.Error("beta was not read")
@@ -2160,7 +2161,7 @@ func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
 			suspendAlphaAtRuntime(t, l.state)
 			l.state.stores["alpha"] = l.beta
 
-			got := lookupActiveBead(New(l.state), live, "", "session-id")
+			got := lookupActiveBead(t, New(l.state), live, "", "session-id")
 
 			if l.beta.listCalls == 0 {
 				t.Error("shared store was not read through beta")
@@ -2181,7 +2182,7 @@ func TestActiveBeadLookupReadsSharedStoreThroughUnsuspendedAlias(t *testing.T) {
 			l.state.cfg.Rigs = append(l.state.cfg.Rigs, config.Rig{Name: "able", Path: "/tmp/able"})
 			l.state.stores["able"] = able
 
-			got := lookupActiveBead(New(l.state), live, "alpha", "session-id")
+			got := lookupActiveBead(t, New(l.state), live, "alpha", "session-id")
 
 			if able.listCalls != 0 {
 				t.Errorf("rig able List calls = %d, want 0", able.listCalls)
@@ -2208,7 +2209,7 @@ func TestActiveBeadLookupSuspensionStateEdges(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := New(l.state).findActiveBeadForAssignees("", "session-id")
+		got := New(l.state).findActiveBeadForAssignees(newTestActiveWorkLookup(t), "", "session-id")
 
 		if l.alpha.listCalls != 0 {
 			t.Errorf("suspended_on_start rig alpha List calls = %d, want 0", l.alpha.listCalls)
@@ -2261,7 +2262,7 @@ func TestActiveBeadLookupLogsUnreadableSuspensionStateOnce(t *testing.T) {
 	srv := New(l.state)
 	lookupRows := func() {
 		for range 3 {
-			srv.findActiveBeadForAssignees("", "session-id")
+			srv.findActiveBeadForAssignees(newTestActiveWorkLookup(t), "", "session-id")
 		}
 	}
 	var logs bytes.Buffer

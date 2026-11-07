@@ -180,7 +180,7 @@ func passesClassGate[T any]() bool {
 		*GraphOnlyReadyStore, *ContextReadyReader, *OrderedReadyReader, *CachePreferredReadyReader,
 		*ChildrenBatchLister, *ExactBatchGetter, *CachedReadExact, *ReadOnlyReporter,
 		*RowWitness, *ParentProjectionWaiter, *AbsentBlockedReader,
-		*CacheStatsReporter, *CacheLivenessReporter, *CachedLister,
+		*CacheStatsReporter, *CacheLivenessReporter, *CachedLister, *RefreshingCachedLister,
 		*ConditionalAssignmentReleaser, *ConditionalAssigneeTransferer:
 		return true
 	}

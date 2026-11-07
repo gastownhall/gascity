@@ -383,12 +383,15 @@ func rigTemplateInstance(cfg *config.City, name string) (template, rig string, o
 }
 
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
-// assigned to the given identities using the cached active snapshot. If rig is
-// non-empty, only that rig's store is searched; otherwise all stores are
-// searched. A store only rigs suspended by effective state reach is never
-// searched (activeBeadSearchScope). Returns "" if no match.
-func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, false, assignees...)
+// assigned to the given identities for a list row, reading each store's cache
+// first and, when the cache cannot answer, the store, under lookup's shared
+// budget (activeWorkLookup). If rig is non-empty, only that rig's store is
+// searched; otherwise all stores are searched. A store only rigs suspended by
+// effective state reach is never searched (activeBeadSearchScope). Returns ""
+// if no match, and when the search reaches a store its cache cannot answer
+// once lookup has failed.
+func (s *Server) findActiveBeadForAssignees(lookup *activeWorkLookup, rig string, assignees ...string) string {
+	return s.findActiveBeadForAssigneesWithFreshness(rig, lookup, assignees...)
 }
 
 // findLiveActiveBeadForAssignees returns the ID of the first in_progress bead
@@ -396,16 +399,21 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 // lower-frequency detail views where external reassignment freshness matters.
 // A store only rigs suspended by effective state reach is never searched.
 func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string) string {
-	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
+	return s.findActiveBeadForAssigneesWithFreshness(rig, nil, assignees...)
 }
 
 // findActiveBeadForAssigneesWithFreshness returns the in_progress bead of the
 // highest-priority identity: identity order first, then store order, then
-// newest first within a store. Cached reads use a targeted ListQuery with
-// Limit=1 per identity and store, stopping at the first match; live reads go
-// through findLiveActiveBeadInStores. Both read only the stores
-// activeBeadSearchScope picks.
-func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
+// newest first within a store. A nil lookup reads live through
+// findLiveActiveBeadInStores. Otherwise each identity and store is read
+// through lookup.list with a targeted ListQuery with Limit=1, stopping at the
+// first match: from the store's cache when it answers, hit or authoritative
+// miss, a clean cache even once lookup's budget is spent, else from the store
+// under that budget. A failed read fails lookup and ends the search with no
+// match. Once lookup has failed, a store its cache cannot answer is not read
+// and ends the search the same way, so a lower-priority bead never stands in
+// for the unread one. Both read only the stores activeBeadSearchScope picks.
+func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, lookup *activeWorkLookup, assignees ...string) string {
 	stores, rigNames := activeBeadSearchScope(workStoresByName(s.state.Stores(), s.state.CityName()), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
@@ -417,7 +425,7 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		seen[assignee] = true
 		unique = append(unique, assignee)
 	}
-	if live {
+	if lookup == nil {
 		return findLiveActiveBeadInStores(stores, rigNames, unique)
 	}
 	for _, assignee := range unique {
@@ -428,18 +436,9 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			}
-			if cached, ok := beads.As[beads.CachedLister](stores[rn]); ok {
-				matches, cacheOK := cached.CachedList(query)
-				if cacheOK {
-					if len(matches) > 0 {
-						return matches[0].ID
-					}
-					continue
-				}
-			}
-			matches, err := stores[rn].List(query)
-			if err != nil {
-				continue
+			matches, ok := lookup.list(s.state, rn, stores[rn], query)
+			if !ok {
+				return ""
 			}
 			if len(matches) > 0 {
 				return matches[0].ID

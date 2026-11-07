@@ -23,6 +23,28 @@ type SessionListInput struct {
 	WakeReasons bool `query:"wake_reasons" required:"false" doc:"Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session."`
 }
 
+// ListBodySessionResponse is the body of the session lists, GET /sessions and
+// the legacy /v0/sessions: the ListBody envelope plus ActiveWorkErrors.
+// Partial and PartialErrors report gaps in the session list itself, which gc
+// session list and the dashboard refuse to read as whole; a failed
+// active-work lookup leaves every session listed and is reported in
+// ActiveWorkErrors instead. The Go name is the schema name
+// ListBody[sessionResponse] had, so the spec and the clients generated from
+// it keep that name.
+type ListBodySessionResponse struct {
+	ListBody[sessionResponse]
+	ActiveWorkErrors []string `json:"active_work_errors,omitempty" doc:"Errors from the active-work lookup that fills each session's active_bead, each naming its rig: the read that failed (timed out, canceled, errored or returned a partial result), the store whose cache was still refreshing its dirty rows when the lookup's time budget ran out, or the store left unread because earlier reads had spent that budget. Every session is still listed; partial and partial_errors report gaps in the list itself. A session whose active bead needed a store read at or after the failure carries none, since that store went unread."`
+}
+
+// SessionListOutput is the response envelope for GET /sessions. Its headers
+// are ListOutput's.
+type SessionListOutput struct {
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
+	CacheRefresh
+	Body ListBodySessionResponse
+}
+
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
 type CityPendingInput struct {
 	CityScope

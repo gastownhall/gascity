@@ -171,7 +171,7 @@ func TestActiveBeadLookupServesTheWorkStore(t *testing.T) {
 			fs, work, _ := newWorkShapeState(t, shape)
 			task := mustCreateInProgress(t, work, "task", "worker")
 			srv := New(fs)
-			if got := srv.findActiveBeadForAssignees("", "worker"); got != task.ID {
+			if got := srv.findActiveBeadForAssignees(newTestActiveWorkLookup(t), "", "worker"); got != task.ID {
 				t.Errorf("cached lookup = %q, want %s from the work store", got, task.ID)
 			}
 			if got := srv.findLiveActiveBeadForAssignees("", "worker"); got != task.ID {
@@ -203,7 +203,7 @@ func TestLiveActiveBeadLookupReadsPastTheCache(t *testing.T) {
 			if got := srv.findLiveActiveBeadForAssignees("", "worker"); got != "" {
 				t.Errorf("live lookup = %q, want none: the backing store reassigned it", got)
 			}
-			if got := srv.findActiveBeadForAssignees("", "worker"); got != task.ID {
+			if got := srv.findActiveBeadForAssignees(newTestActiveWorkLookup(t), "", "worker"); got != task.ID {
 				t.Errorf("cached lookup = %q, want %s as the cache still shows it", got, task.ID)
 			}
 		})
@@ -223,7 +223,7 @@ func TestActiveBeadLookupKeepsBeadStoresPrecedence(t *testing.T) {
 	mustCreateInProgress(t, city, "city task", "worker")
 	rigTask := mustCreateInProgress(t, early, "rig task", "worker")
 	srv := New(fs)
-	if got := srv.findActiveBeadForAssignees("", "worker"); got != rigTask.ID {
+	if got := srv.findActiveBeadForAssignees(newTestActiveWorkLookup(t), "", "worker"); got != rigTask.ID {
 		t.Errorf("cached lookup = %q, want the rig's %s: aaa-rig sorts before test-city", got, rigTask.ID)
 	}
 	if got := srv.findLiveActiveBeadForAssignees("", "worker"); got != rigTask.ID {
@@ -234,7 +234,7 @@ func TestActiveBeadLookupKeepsBeadStoresPrecedence(t *testing.T) {
 	shadowTask := mustCreateInProgress(t, shadow, "shadow task", "other")
 	mustCreateInProgress(t, city, "hidden city task", "other")
 	fs.stores = map[string]beads.Store{fs.cityName: shadow}
-	if got := srv.findActiveBeadForAssignees("", "other"); got != shadowTask.ID {
+	if got := srv.findActiveBeadForAssignees(newTestActiveWorkLookup(t), "", "other"); got != shadowTask.ID {
 		t.Errorf("cached lookup = %q, want %s: a rig named like the city replaces the city store", got, shadowTask.ID)
 	}
 }

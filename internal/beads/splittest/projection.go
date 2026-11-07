@@ -388,6 +388,7 @@ var (
 	_ beads.ChildrenBatchLister                   = (*view)(nil)
 	_ beads.DependencyBatchLister                 = (*view)(nil)
 	_ cachedLister                                = (*view)(nil)
+	_ beads.RefreshingCachedLister                = (*view)(nil)
 	_ cacheProbes                                 = (*cacheView)(nil)
 	_ cacheProbes                                 = (*storageCacheView)(nil)
 	_ handlesProvider                             = (*handlesView)(nil)
@@ -550,6 +551,24 @@ func (v *view) CachedList(q beads.ListQuery) ([]beads.Bead, bool) {
 	limit := q.Limit
 	q.Limit = 0
 	rows, hit := cached.CachedList(q)
+	if !hit {
+		return nil, false
+	}
+	rows, _ = v.filter("list", listSelects(q), rows, nil)
+	return limitRows(rows, limit), true
+}
+
+// CachedListRefreshing is internal/api's cache-first list that waits for the
+// cache to refresh its dirty rows, filtered like CachedList; a front without
+// one answers "not cached" so the caller lists.
+func (v *view) CachedListRefreshing(ctx context.Context, q beads.ListQuery) ([]beads.Bead, bool) {
+	cached, ok := v.Store.(beads.RefreshingCachedLister)
+	if !ok {
+		return nil, false
+	}
+	limit := q.Limit
+	q.Limit = 0
+	rows, hit := cached.CachedListRefreshing(ctx, q)
 	if !hit {
 		return nil, false
 	}

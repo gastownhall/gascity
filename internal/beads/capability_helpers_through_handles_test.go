@@ -61,7 +61,7 @@ func (r countingLiveReader) List(query ListQuery) ([]Bead, error) {
 
 // policyOverCache stands in for cmd/gc's bead-policy layer over a city or rig
 // cache: a wrapper with its own handles, which forwards the cache's ready
-// preference, stats and batch read but not IsLive.
+// preference, stats, batch read and refreshing list but not IsLive.
 type policyOverCache struct {
 	Store
 	cache *CachingStore
@@ -76,6 +76,10 @@ func (p policyOverCache) ReadyPreferCache(q ReadyQuery) ([]Bead, error) {
 func (p policyOverCache) Stats() CacheStats { return p.cache.Stats() }
 
 func (p policyOverCache) CachedList(q ListQuery) ([]Bead, bool) { return p.cache.CachedList(q) }
+
+func (p policyOverCache) CachedListRefreshing(ctx context.Context, q ListQuery) ([]Bead, bool) {
+	return p.cache.CachedListRefreshing(ctx, q)
+}
 
 // handleWraps are the shapes a typed caller hands a capability helper: the
 // store itself, and a class handle over it of each kind T6 passes.
@@ -231,8 +235,14 @@ func TestCacheCapabilitiesSeeThroughClassHandles(t *testing.T) {
 		if _, ok := As[CachedLister](wrap(cache)); !ok {
 			t.Errorf("%s over a cache: no CachedLister", name)
 		}
+		if _, ok := As[RefreshingCachedLister](wrap(cache)); !ok {
+			t.Errorf("%s over a cache: no RefreshingCachedLister", name)
+		}
 		if _, ok := As[CacheStatsReporter](wrap(policy)); !ok {
 			t.Errorf("%s over a policy layer: no CacheStatsReporter", name)
+		}
+		if _, ok := As[RefreshingCachedLister](wrap(policy)); !ok {
+			t.Errorf("%s over a policy layer: no RefreshingCachedLister", name)
 		}
 		if _, ok := As[CacheLivenessReporter](wrap(policy)); ok {
 			t.Errorf("%s over a policy layer: a CacheLivenessReporter the layer does not forward", name)
@@ -240,9 +250,13 @@ func TestCacheCapabilitiesSeeThroughClassHandles(t *testing.T) {
 		if _, ok := As[CacheStatsReporter](wrap(NewMemStore())); ok {
 			t.Errorf("%s over a plain store: a CacheStatsReporter", name)
 		}
+		if _, ok := As[RefreshingCachedLister](wrap(NewMemStore())); ok {
+			t.Errorf("%s over a plain store: a RefreshingCachedLister", name)
+		}
 	}
 	for _, class := range []func() bool{
 		passesClassGate[CacheStatsReporter], passesClassGate[CacheLivenessReporter], passesClassGate[CachedLister],
+		passesClassGate[RefreshingCachedLister],
 	} {
 		if !class() {
 			t.Error("a cache read is vetted by the class gate; it is class-neutral")

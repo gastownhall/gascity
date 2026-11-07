@@ -354,26 +354,22 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	items := make([]sessionResponse, len(pageSessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	activeWork := newActiveWorkLookup(r.Context())
 	for i, sess := range pageSessions {
 		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeWork, false, 0, keyedTranscriptPaths)
 	}
 
-	if !pp.IsPaging {
-		writeJSON(w, http.StatusOK, listResponse{
+	// nextCursor stays empty unless the request pages.
+	writeJSON(w, http.StatusOK, ListBodySessionResponse{
+		ListBody: ListBody[sessionResponse]{
 			Items:         items,
 			Total:         total,
+			NextCursor:    nextCursor,
 			Partial:       len(partialErrors) > 0,
 			PartialErrors: partialErrors,
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, listResponse{
-		Items:         items,
-		Total:         total,
-		NextCursor:    nextCursor,
-		Partial:       len(partialErrors) > 0,
-		PartialErrors: partialErrors,
+		},
+		ActiveWorkErrors: activeWork.failures(),
 	})
 }
 
@@ -416,7 +412,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
-		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, nil, true, 0)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -657,16 +653,17 @@ const defaultSessionPeekLines = 5
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
 //
-// peekLines controls the line count for the preview when wantPeek is true.
+// activeWork is the list response's bounded active-work lookup; nil reads the
+// active bead live, for single-session views. peekLines controls the line count for the preview when wantPeek is true.
 // Zero means "use default" (defaultSessionPeekLines).
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int) {
-	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery, peekLines, nil)
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek bool, activeWork *activeWorkLookup, allowWorkdirTranscriptDiscovery bool, peekLines int) {
+	s.enrichSessionResponseWithKeyedPaths(resp, info, cfg, runtimeHandle, wantPeek, activeWork, allowWorkdirTranscriptDiscovery, peekLines, nil)
 }
 
 // enrichSessionResponseWithKeyedPaths accepts an optional page-level map of
 // exact transcript paths. A non-nil map is authoritative, including misses,
 // so list callers can batch Codex discovery once instead of scanning per row.
-func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek, liveActiveBead, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
+func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info session.Info, cfg *config.City, runtimeHandle any, wantPeek bool, activeWork *activeWorkLookup, allowWorkdirTranscriptDiscovery bool, peekLines int, keyedTranscriptPaths map[string]string) {
 	if info.Closed || runtimeHandle == nil {
 		return
 	}
@@ -694,10 +691,10 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 	// A previous fix accidentally passed info.Alias as the first positional
 	// (rig) argument, which silently narrowed the search to a rig named after
 	// the alias — so alias-assigned work still disappeared from ActiveBead.
-	if liveActiveBead {
+	if activeWork == nil {
 		resp.ActiveBead = s.findLiveActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 	} else {
-		resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
+		resp.ActiveBead = s.findActiveBeadForAssignees(activeWork, "", info.ID, info.SessionName, info.Alias, info.Template)
 	}
 
 	// Peek preview (opt-in, only when running). peekLines=0 means "use

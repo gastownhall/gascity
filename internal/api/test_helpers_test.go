@@ -1,10 +1,28 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
 )
+
+// listResponse decodes the envelope of a list response body (ListBody's
+// JSON fields) for a test that reads its items generically.
+type listResponse struct {
+	Items         any      `json:"items"`
+	Total         int      `json:"total"`
+	NextCursor    string   `json:"next_cursor,omitempty"`
+	Partial       bool     `json:"partial,omitempty"`
+	PartialErrors []string `json:"partial_errors,omitempty"`
+}
+
+// newTestActiveWorkLookup is a list response's active-work lookup for a test
+// that resolves rows directly.
+func newTestActiveWorkLookup(t testing.TB) *activeWorkLookup {
+	t.Helper()
+	return newActiveWorkLookup(context.Background())
+}
 
 // newTestCityHandler returns an http.Handler that wraps a single State
 // in a SupervisorMux, using the State's CityName() as the registered

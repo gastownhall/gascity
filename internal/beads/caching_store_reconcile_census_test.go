@@ -134,6 +134,11 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"eventCheckAfter":               true, // a test-only deadline timer, fixed per instance
 		"eventCheckDeadline":            true, // event-check config, fixed at construction
 		"eventCheckBusy":                true, // the in-flight event check slot, not cache state
+		// dirtyRefreshRun is the latest refresh of the dirty rows that
+		// CachedListRefreshing starts: a run slot, not cache state. The merge
+		// neither reads nor writes it, and a merge since a run ended voids
+		// what the run found (refreshCoversLocked checks scanGen).
+		"dirtyRefreshRun": true,
 		// readyProjectionDegraded is a one-way capability latch about the
 		// BACKING STORE, set by applyReadyProjection before the seam runs and
 		// never touched by mergeSnapshotLocked. It routes readiness reads to the
