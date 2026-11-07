@@ -39,6 +39,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
 	RequirementInputInProgressResumeRestart        RequirementCode = "WC-INPUT-004"
 	RequirementInputPreClaimResumeRestart          RequirementCode = "WC-INPUT-005"
+	RequirementInputHookPrimedResumeRoleOmitted    RequirementCode = "WC-INPUT-006"
 	RequirementProgramStatusSurfaces               RequirementCode = "WC-PSTAT-001"
 	RequirementProgramStatusPhase                  RequirementCode = "WC-PSTAT-002"
 	RequirementProgramStatusPendingKindOnly        RequirementCode = "WC-PSTAT-003"

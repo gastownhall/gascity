@@ -60,6 +60,28 @@ session = "tmux"
 prompt_template = "prompts/worker.md"
 `
 
+func TestPrimePromptBudgetHookCarrier(t *testing.T) {
+	const toml = `[workspace]
+name = "test-city"
+provider = "opencode"
+[providers.opencode]
+base = "builtin:opencode"
+[[agent]]
+name = "worker"
+session = "tmux"
+prompt_template = "prompts/worker.md"
+`
+	writePromptBudgetCity(t, toml, strings.Repeat("role ", maxPromptSuffixRawBytes))
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+	if code != 0 || !strings.Contains(stderr.String(), "effective_mode=hook") || strings.Contains(stderr.String(), "oversized_fallback=true") {
+		t.Fatalf("hook-carried prompt incorrectly classified: code=%d stderr=%s", code, stderr.String())
+	}
+	if stdout.Len() == 0 {
+		t.Fatal("explicit prime must still render the role")
+	}
+}
+
 // 1. below-threshold argv delivery.
 func TestPrimePromptBudgetBelowThresholdArgvDelivery(t *testing.T) {
 	const prompt = "small prompt content for scenario one"

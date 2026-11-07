@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **`gc prime --strict --json` and `gc doctor --json` report a role the
+  provider hook carries.** For an agent on builtin OpenCode or MiMo Code, or
+  a provider wrapped over one, on the CLI transport in a city whose
+  `[session] provider` is `tmux`, `herdr` or unset,
+  `prompt_budget.effective_mode` is now `hook`, with `oversized_fallback`
+  false, instead of the launch carrier (`flag`, `argv`, `nudge` or
+  `nudge-fallback`). The `prompt-delivery-budget` check no longer warns that
+  such a role's oversized prompt falls back to a nudge. An agent with
+  `hooks_installed = false` reports as before. (#6982)
 - **Read commands print one JSON document whichever route serves them
   (#8453).** In 1.5.1 a supervisor-hosted city (the default shape, with no
   `[api]` port) read these commands locally, except `gc status`, which has

@@ -60,6 +60,18 @@ type TemplateParams struct {
 	Command string
 	// Prompt is the fully rendered prompt (with beacon).
 	Prompt string
+	// Beacon is the bare identity line the rendered Prompt starts with
+	// (`[city] alias • ts`, no prime instruction). Carried separately so the
+	// resume path can submit a restart turn that identifies the wake without
+	// replaying the template when the provider hook already supplies it
+	// (startupPromptSource.resumeNudge).
+	Beacon string
+	// RoleRendered reports whether the agent's prompt template rendered text
+	// that Prompt carries under the beacon. It is false for an agent with no
+	// or an empty template, a suppressed startup prompt, and a client's
+	// provider chat. A hook-primed fresh start sends its role kickoff only
+	// when there is a rendered role (hookFreshActivation).
+	RoleRendered bool
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
 	// OperatorEnv carries only the operator-authored environment layers —
@@ -116,6 +128,11 @@ type TemplateParams struct {
 	// EffectiveSessionProvider is the actual session provider after applying
 	// city-level defaults.
 	EffectiveSessionProvider string
+	// CitySessionProvider is the city's session provider (cfg.Session.Provider).
+	// Every non-ACP session runs on it whatever the agent's session override
+	// says, because the override selects only the transport
+	// (resolveSessionTransportProvider). Hook-role eligibility reads it.
+	CitySessionProvider string
 	// CityRuntimes is the city's pack-declared runtime registry
 	// (config.City.Runtimes), keyed by selection name. Consulted by
 	// promptDelivery's oversized-prompt guard so a pack-declared runtime
@@ -135,6 +152,10 @@ type TemplateParams struct {
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
 	ManualSession bool
+	// ClientProviderChat marks a client's provider chat
+	// (isClientProviderChat). applyClientProviderChatStartupPrompt sets it
+	// along with the beacon-only Prompt: the chat's hook supplies no role.
+	ClientProviderChat bool
 	// PoolSlot is the 1-based slot number within the pool. Set during
 	// buildDesiredState for pool instances so syncSessionBeads can stamp
 	// pool_slot metadata without reverse-engineering the slot from the name
@@ -481,55 +502,24 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// below): when the rendered prompt is inlined under the beacon, the agent
 	// already holds the exact bytes `gc prime` would hand back, so the
 	// instruction costs a turn and duplicates the context it just received.
-	includePrimeInstruction := !hasHooks && prompt == ""
+	// Hook status is transport-aware: an ACP session never loads the CLI
+	// plugin overlay (promptDelivery just forwards the beacon), so even a
+	// hook-enabled provider (opencode/mimocode are hook-enabled by default)
+	// needs the instruction there or a promptless ACP agent lands unprimed.
+	isACP := sessionTransport == config.SessionTransportACP
+	includePrimeInstruction := prompt == "" && (!hasHooks || isACP)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
+	roleRendered := prompt != "" && !suppressStartupPrompt
 	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
-	// Step 9b: Append the assigned-skills appendix when the agent
-	// has a vendor sink, hasn't opted out, AND the runtime actually
-	// delivers the skills to the session workdir. The appendix claims
-	// "these skills are materialized in your provider's skill
-	// directory and load automatically" — that claim has to match
-	// reality, so we gate on the same availability conditions as
-	// materialization itself:
-	//
-	//   - Stage-1-eligible runtime + workdir == scope root: stage 1
-	//     wrote the sink into the scope root the agent sees.
-	//   - Stage-2-eligible runtime (regardless of workdir): the
-	//     session PreStart invokes `gc internal materialize-skills`
-	//     into the session workdir before the agent starts.
-	//
-	// Agents for which neither path delivers (ACP, k8s, hybrid,
-	// subprocess with WorkDir ≠ scope root — because subprocess
-	// doesn't execute PreStart) get no appendix; we'd be lying to
-	// them. Discovered via the pass-1 Codex review.
-	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
-		wsProvider := ""
-		if p.workspace != nil {
-			wsProvider = p.workspace.Provider
-		}
-		provider := effectiveAgentProviderFamily(cfgAgent, wsProvider, p.providers)
-		if _, ok := materialize.VendorSink(provider); ok {
-			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
-			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
-			if stage1Delivers || stage2Delivers {
-				var agentCat materialize.AgentCatalog
-				if cfgAgent.SkillsDir != "" {
-					// Best-effort: a transient I/O failure loading the
-					// agent catalog shouldn't break the prompt render.
-					// The error is already surfaced via
-					// effectiveSkillsForAgent's stderr path earlier in
-					// the call graph.
-					if c, err := materialize.LoadAgentCatalog(cfgAgent.SkillsDir); err == nil {
-						agentCat = c
-					}
-				}
-				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.sharedSkillCatalogForAgent(cfgAgent), agentCat); frag != "" {
-					prompt = prompt + "\n\n" + frag
-				}
-			}
+	// Step 9b: Append the assigned-skills appendix when the runtime actually
+	// delivers the skills to the session workdir (see
+	// assignedSkillsPromptAppendix for the gate). The hook copy of the role
+	// (`gc prime --hook`) appends the same fragment under that same
+	// skills-materialization gate.
+	if !suppressStartupPrompt {
+		if frag := assignedSkillsPromptAppendix(p, cfgAgent, workDir); frag != "" {
+			prompt = prompt + "\n\n" + frag
 		}
 	}
 
@@ -832,6 +822,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
+		Beacon:           runtime.FormatBeaconAt(p.cityName, qualifiedName, false, p.beaconTime),
+		RoleRendered:     roleRendered,
 		Env:              env,
 		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,
@@ -846,7 +838,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == config.SessionTransportACP,
+		IsACP:            isACP,
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 		ACPLaunch:        acpLaunch,
@@ -855,6 +847,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	params.CitySessionProvider = p.sessionProvider
 	if p.city != nil {
 		params.CityRuntimes = p.city.Runtimes
 	}
@@ -973,9 +966,8 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
-// needed by Provider.Start. When it materializes the rendered prompt into the
-// launch or nudge path, it marks the runtime env so SessionStart hooks can add
-// context without repeating the full startup prompt.
+// needed by Provider.Start. It selects the role carrier independently of the
+// activation nudge and records that selection in the runtime environment.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	cfg, _, _ := templateParamsToConfigWithDelivery(tp)
 	return cfg
@@ -996,10 +988,9 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // caller must not construct a runtime.Config or call Provider.Start in that
 // case (gastownhall/gascity ga-q8wgom.1.1).
 func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult, error) {
-	// SessionStart hooks can enrich context, but the startup prompt still needs
-	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
-	// spawned workers sit idle at the provider prompt. The routing policy lives
-	// in the shared startup prompt plan.
+	// The routing policy lives in the shared startup prompt plan, which also
+	// selects the per-generation hook as the role carrier where it supplies the
+	// role (startupPromptSource.delivery).
 	plan, err := planStartupPrompt(tp.startupPromptSource(), startupPromptFreshLaunch)
 	if err != nil {
 		return runtime.Config{}, promptDeliveryResult{}, err

@@ -19,7 +19,8 @@ import (
 // clears promptDelivery's size budget for its resolved provider/runtime
 // (ga-q8wgom.1.1/.2), so a fleet-wide oversized-prompt hard-fail is caught
 // by `gc doctor` instead of surfacing only at session start for whichever
-// agent happens to prime first. It reuses promptDelivery directly rather
+// agent happens to prime first. It reuses the launch's delivery decision
+// (startupPromptSource.delivery, which falls through to promptDelivery) rather
 // than re-deriving thresholds, byte-accounting, or delivery-mode selection.
 type promptDeliveryBudgetDoctorCheck struct {
 	cityPath string
@@ -149,11 +150,12 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 			prompt = composeStartupPrompt(beacon, prompt, false)
 		}
 
-		effProvider := effectiveSessionProvider(a.Session, c.cfg.Session.Provider)
-		sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
-		isACP := sessionTransport == config.SessionTransportACP
-
-		delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, c.cfg.Runtimes)
+		// The same decision a launch makes: a role the provider hook carries
+		// never meets the argv budget (startupPromptSource.delivery).
+		src := agentStartupPromptSource(c.cfg, &a, resolved, prompt)
+		effProvider := src.RuntimeName
+		isACP := src.IsACP
+		delivery, dErr := src.delivery()
 		// Report the configured mode in the same vocabulary as
 		// reportPromptDeliveryBudget (gc prime --strict).
 		configuredMode := delivery.ConfiguredMode
