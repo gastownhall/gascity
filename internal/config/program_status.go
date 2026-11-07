@@ -36,15 +36,19 @@ type ProgramStatusBinding struct {
 	// only report after their support probe is answered. Unset inherits.
 	Relay *bool `toml:"relay,omitempty"`
 	// HoldMidTurn declares that the program aborts its running turn when
-	// input is typed into it mid-turn. It governs only the bypass of the
-	// quiescence gate that a delivery starved on a never-quiet session takes.
-	// The conversation lane takes that bypass only under the [session]
-	// program_status switch on, on a fresh read of the program's own record
-	// that decides and shows no live working record. Legacy delivery defers
-	// it under on while such a read shows a live working record, and
-	// otherwise takes it as without the declaration. Every other delivery is
-	// unchanged. It reaches a pane when its capture is armed (create,
-	// respawn, heal), and heal keeps it current. Unset inherits.
+	// input is typed into it mid-turn. It governs the conversation lane's
+	// keystroke boundary and the bypass of the quiescence gate that a
+	// delivery starved on a never-quiet session takes. Under the [session]
+	// program_status switch on, the lane's quiescence boundary stays closed,
+	// and a delivery at it is held right before it is typed, while a fresh
+	// read of the program's own record shows a live working record; the lane
+	// takes the starved bypass only on such a read that decides and shows no
+	// live working record. Under off and shadow the lane never takes the
+	// starved bypass. Legacy delivery defers the bypass under on while such a
+	// read shows a live working record, and otherwise takes it as without
+	// the declaration. Every other delivery is unchanged. It reaches a pane
+	// when its capture is armed (create, respawn, heal), and heal keeps it
+	// current. Unset inherits.
 	HoldMidTurn *bool `toml:"hold_mid_turn,omitempty"`
 	// Env is forced into the session environment when capture is armed (for
 	// example PI_PROGRAM_STATUS = "1"). It is not part of the launch
@@ -59,24 +63,43 @@ func (b ProgramStatusBinding) Declared() bool {
 	return b.Protocol == ProgramStatusProtocolOSC7501
 }
 
-// Arm derives a session's capture arm and the env to merge into its session
-// environment. Both are empty unless the switch is shadow or on, the transport
-// is not ACP, and the binding declares the protocol. The returned env is a copy
-// the caller may mutate.
-func (b ProgramStatusBinding) Arm(mode runtime.ProgramStatusMode, acp bool) (runtime.ProgramStatusArm, map[string]string) {
+// Declaration is the session's capture declaration, independent of the city
+// switch: empty when the transport is ACP or the binding does not declare the
+// protocol. It is what a start carries to the leaf, whose live switch decides
+// whether the declaration arms the pane, so a start resolved before the switch
+// moved still follows it in either direction.
+func (b ProgramStatusBinding) Declaration(acp bool) runtime.ProgramStatusArm {
 	if acp || !b.Declared() {
-		return runtime.ProgramStatusArm{}, nil
+		return runtime.ProgramStatusArm{}
 	}
-	if mode != runtime.ProgramStatusShadow && mode != runtime.ProgramStatusOn {
-		return runtime.ProgramStatusArm{}, nil
-	}
-	arm := runtime.ProgramStatusArm{
+	return runtime.ProgramStatusArm{
 		Capture:     true,
 		App:         b.App,
 		Relay:       b.Relay != nil && *b.Relay,
 		HoldMidTurn: b.HoldMidTurn != nil && *b.HoldMidTurn,
 	}
+}
+
+// Arm derives a session's capture arm and the env to merge into its session
+// environment under switch mode. Both are empty unless the switch is shadow or
+// on, the transport is not ACP, and the binding declares the protocol. The
+// returned env is a copy the caller may mutate.
+func (b ProgramStatusBinding) Arm(mode runtime.ProgramStatusMode, acp bool) (runtime.ProgramStatusArm, map[string]string) {
+	arm := b.Declaration(acp)
+	if !arm.Capture || (mode != runtime.ProgramStatusShadow && mode != runtime.ProgramStatusOn) {
+		return runtime.ProgramStatusArm{}, nil
+	}
 	return arm, maps.Clone(b.Env)
+}
+
+// Launch derives what a start carries: the switch-independent capture
+// declaration (Declaration), which the leaf arms only under its live switch,
+// and the forced env, which follows switch mode at resolution time. The env is
+// never part of the launch fingerprint, and neither is the declaration. The
+// returned env is a copy the caller may mutate.
+func (b ProgramStatusBinding) Launch(mode runtime.ProgramStatusMode, acp bool) (runtime.ProgramStatusArm, map[string]string) {
+	_, env := b.Arm(mode, acp)
+	return b.Declaration(acp), env
 }
 
 // clone returns a deep copy of the binding.
@@ -126,14 +149,27 @@ func (s SessionConfig) ProgramStatusMode() runtime.ProgramStatusMode {
 	}
 }
 
-// ProgramStatusArmFor is the one derivation every runtime.Config construction
-// site uses: the resolved provider's binding under the city switch and the
-// session transport. A nil city or provider yields a disarmed result.
+// ProgramStatusArmFor is the capture arm a session wants under the city
+// switch and its transport: what heal converges a running pane to and what a
+// decision under the switch reads. A nil city or provider yields a disarmed
+// result. Starts use ProgramStatusLaunchFor.
 func ProgramStatusArmFor(cfg *City, resolved *ResolvedProvider, transport string) (runtime.ProgramStatusArm, map[string]string) {
 	if cfg == nil || resolved == nil {
 		return runtime.ProgramStatusArm{}, nil
 	}
 	return resolved.ProgramStatus.Arm(cfg.Session.ProgramStatusMode(), transport == SessionTransportACP)
+}
+
+// ProgramStatusLaunchFor is the one derivation every runtime.Config
+// construction site uses for a start: the resolved provider's
+// switch-independent capture declaration, which the leaf arms only while its
+// live switch is shadow or on, and the forced env under the city switch
+// (ProgramStatusBinding.Launch). A nil city or provider yields neither.
+func ProgramStatusLaunchFor(cfg *City, resolved *ResolvedProvider, transport string) (runtime.ProgramStatusArm, map[string]string) {
+	if cfg == nil || resolved == nil {
+		return runtime.ProgramStatusArm{}, nil
+	}
+	return resolved.ProgramStatus.Launch(cfg.Session.ProgramStatusMode(), transport == SessionTransportACP)
 }
 
 var (

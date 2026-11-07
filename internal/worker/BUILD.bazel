@@ -100,6 +100,7 @@ go_test(
         "operation_events_1a_test.go",
         "operation_events_test.go",
         "operator_kill_test.go",
+        "program_status_shadow_test.go",
         "program_status_test.go",
         "provider_resume_test.go",
         "respond_fence_test.go",

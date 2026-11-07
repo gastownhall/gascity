@@ -369,6 +369,16 @@ used: the test binary panics at init, naming the directory to remove.
   it, or the repos that child creates lose the guard, and a child that is a
   test binary installs a template of its own in its temp dir.
   `internal/git`'s `SanitizedEnv` and `HermeticEnv` keep it.
+- Go-native runs (the Makefile's `TEST_ENV` and the shard runners) also
+  point `GIT_CONFIG_GLOBAL` at a seed that sets `maintenance.auto = false`
+  and `gc.auto = 0` (`scripts/test-gitconfig-path`), which every git process
+  that keeps the variable reads, whatever repo it works in. Bazel runs have
+  no seed and rely on the template alone.
+- A script that rebuilds git's environment, pinning `GIT_CONFIG_GLOBAL` and
+  unsetting the other `GIT_*` variables, gets neither guard. It must pass
+  `-c maintenance.auto=false -c gc.auto=0` on its own git calls, as
+  `.github/actions/rbe-worker/fetch.sh` does through its `git()` wrapper
+  (`TestRBEWorkerFetchScriptInvariants`).
 - A testscript subcommand (the test binary re-invoked as `gc` or `bd`) is not
   seeded; the testscript owns that env.
 - To check that a test path spawns no auto-maintenance (for humans working
@@ -484,6 +494,35 @@ as `bazel-yml-bep-summary-<attempt>`, so hit rates can be compared across
 pre-push, PR, and main runs. `scripts/bazel_bep_summary_workflow_test.go`
 fails if a `bazel test` runs outside the lanes or a lane stops writing a
 BEP file the report reads.
+
+### Flame graphs (Bazel profiles)
+
+Every `bazel.yml` lane and the nightly `bazel / coverage` job upload their
+Bazel JSON trace profile (`--profile`), gzipped, as the artifact
+`bazel-profile-<lane>-<attempt>` (one `bazel-profile-<lane>.json.gz`
+inside), kept 7 days. To see where a slow lane spent its time:
+
+```bash
+gh run download <run-id> -R gastownhall/gascity -p 'bazel-profile-*' -D /tmp/prof
+```
+
+Open the `.json.gz` in <https://ui.perfetto.dev> ("Open trace file"; it
+reads gzip directly and parses in the browser, nothing is uploaded) or in
+`chrome://tracing` ("Load"). For text, run
+`python3 tools/bazel/critpath.py <(zcat /tmp/prof/*/bazel-profile-unit.json.gz)`
+or `bazel analyze-profile`. Locally, Bazel already keeps the last five
+profiles of each output base as `$(bazel info output_base)/command-<id>.profile.gz`.
+
+These artifacts are public, like every artifact of this repo. A profile
+holds timings, mnemonics, target labels and the runner's output base path;
+it carries no command line, environment value or endpoint. The prepare step
+still refuses a profile with anything secret-shaped (credentials in a URL, a
+PEM block, `token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+(`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host) or over 20 MB
+gzipped, with a warning. The upload never fails or holds up a lane
+(`continue-on-error`, 2-minute bounds);
+`TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
 
 ### Bazel cache tiers
 
@@ -2714,19 +2753,19 @@ This table is rendered from `internal/testutil/providerledger` and checked by `b
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|
-| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-17: TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two concurrent OS-process runs against the shared default euid-scoped directory). The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, failing mac-quality and skipping every downstream job including the packages-core shard this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately. |
+| `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBacked` | runtime.builtin/exact:acp | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-21: TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two concurrent OS-process runs against the shared default euid-scoped directory). The one remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, failing mac-quality and skipping every downstream job including the packages-core shard this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.acp` | production_provider | — | `runtime.Provider` | `internal/runtime/acp.NewSeamBackedWithDir` | runtime.builtin/exact:acp | `runtime.Provider` | proved by internal/runtime/acp/conformance_test.go#TestACPConformance |
 | `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/exec.NewSeamBackedForCity` | runtime.builtin/prefix:exec: | `runtime.Provider` | proved by internal/runtime/exec/exec_test.go#TestExecConformance |
-| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract |
+| `runtime.builtin.exec` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/prefix:exec: | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-31: the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-22: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately. |
-| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-12: no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-26: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
+| `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-16: no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | proved by internal/runtime/ssh/conformance_integration_test.go#TestSSHConformance (hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered) |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
-| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the production T3 bridge composition has focused tests but no full shared runtime contract |
+| `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the production T3 bridge composition has focused tests but no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/adapter_test.go#TestTmuxConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 | `runtime.worker-site.guard` | production_provider | — | `runtime.Provider` | `internal/runtime/guard.New` | source: cmd/gc/providers.go#resolveWorkerSpec — a worker site's control-plane descriptor selects the guard, outside the runtime registry | `runtime.Provider` | not applicable: worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable |

@@ -12,7 +12,7 @@ import (
 )
 
 // ProgramStatusFixtures supplies the sessions the RUNTIME-CONTRACT-017 cases
-// (PS-001…PS-015) read, for a provider implementing
+// (PS-001…PS-016) read, for a provider implementing
 // [runtime.ProgramStatusProvider]. Each fixture starts a session whose agent
 // pane runs the scripted OSC 7501 emitter (package
 // runtimetest/osc7501emitter/emit) under the given city switch mode,
@@ -35,6 +35,11 @@ type ProgramStatusFixtures struct {
 	// Held starts a session as Armed does, its capture armed declaring the
 	// mid-turn hold (runtime.ProgramStatusArm.HoldMidTurn).
 	Held func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession
+	// Nudged starts a session as Armed does, with startup nudge nudge
+	// (runtime.Config.Nudge): its program reports script, and the capture
+	// has published it, before the start's startup ladder begins. Typed
+	// into the program, nudge runs as its next step.
+	Nudged func(t *testing.T, mode runtime.ProgramStatusMode, nudge string, script ...string) ProgramStatusSession
 }
 
 // ProgramStatusSession is one session a [ProgramStatusFixtures] fixture
@@ -94,7 +99,7 @@ func skipUnchecked(unchecked []string) error {
 	return skip("unchecked: " + strings.Join(unchecked, "; "))
 }
 
-// programStatusCases are PS-001…PS-015 in order.
+// programStatusCases are PS-001…PS-016 in order.
 var programStatusCases = []programStatusCase{
 	{"PS-001_SwitchOffReadsUnread", checkPS001},
 	{"PS-002_FirstReportIsValid", checkPS002},
@@ -111,9 +116,10 @@ var programStatusCases = []programStatusCase{
 	{"PS-013_ForeignPipeIsNeverTakenOver", checkPS013},
 	{"PS-014_HealRearmsAndDisarms", checkPS014},
 	{"PS-015_HoldReadIsDeclaredOnAndBounded", checkPS015},
+	{"PS-016_StartupNudgeBehindADialogIsHandedBack", checkPS016},
 }
 
-// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-015:
+// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-016:
 // a program-status reading is the pane program's own bounded claim, valid
 // only from the pane's own armed incarnation with its reader attached,
 // Unread under the switch off, and never revalidated after a respawn. Heal
@@ -770,6 +776,54 @@ func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 		}
 	}
 	return nil
+}
+
+// startupNudgeStep is the startup nudge PS-016 starts with: typed into the
+// program, it reports a turn start, so the record shows whether it was typed.
+const startupNudgeStep = "report state=working"
+
+// startupNudgeWait bounds how long PS-016 waits for a typed nudge's report.
+const startupNudgeWait = 10 * time.Second
+
+// PS-016: under the switch on, a start whose program reports a dialog
+// (a live blocked root) through its whole startup ladder types no nudge,
+// succeeds, and hands the nudge back once ([runtime.TakeStartupNudgeHandback])
+// for its caller to queue (design §10.2 row A20); a start whose program is at
+// an input boundary types its nudge, which the program's turn start
+// confirms, and hands nothing back.
+func checkPS016(t *testing.T, f ProgramStatusFixtures) error {
+	if f.Nudged == nil {
+		return skip("needs a nudged-start fixture")
+	}
+	s := f.Nudged(t, runtime.ProgramStatusOn, startupNudgeStep, "report state=blocked:kind=permission")
+	nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name)
+	if !ok || nudge != startupNudgeStep {
+		return fmt.Errorf("blocked start: handback %q (%v), want the startup nudge %q", nudge, ok, startupNudgeStep)
+	}
+	if again, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("blocked start: handback %q taken twice", again)
+	}
+	if _, err := readValid(s, "blocked start, after the ladder", runtime.ProgramBlocked); err != nil {
+		return fmt.Errorf("%w: the nudge was typed into the dialog", err)
+	}
+	s = f.Nudged(t, runtime.ProgramStatusOn, startupNudgeStep, "report state=idle")
+	if nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("idle start: handback %q, want none", nudge)
+	}
+	deadline := time.Now().Add(startupNudgeWait)
+	for {
+		r, err := read(s)
+		if err != nil {
+			return fmt.Errorf("idle start: %w", err)
+		}
+		if r.Running() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("idle start: reading %+v after %s, want the typed nudge's turn start", r, startupNudgeWait)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // checkHoldDeclarationHeal is PS-014's hold half: a healthy capture armed

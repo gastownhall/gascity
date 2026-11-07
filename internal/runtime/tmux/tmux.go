@@ -197,6 +197,12 @@ type Config struct {
 	// (ProgramStatus, or the one SetProgramStatusMode published) is shadow;
 	// nil records nothing. It must not block.
 	ComparisonSink runtime.ProgramStatusComparisonSink
+	// ComparisonEnabled, when set, reports whether the process records
+	// comparisons at all right now. While it reports false the leaf shadows
+	// nothing (no comparison and no read taken for one), as under off: a
+	// short-lived process that only observes sessions decides nothing a
+	// comparison could measure. Nil records whenever the switch is shadow.
+	ComparisonEnabled func() bool
 	// ComparisonFollowUps reports whether the process lives long enough to
 	// follow a timed point's comparison past its decision. Nil, or false,
 	// records each decision-time verdict untimed with no follow-up: a
@@ -499,6 +505,10 @@ type Tmux struct {
 	// shadow is the program-status shadow mode's soft state (see
 	// program_status_shadow.go).
 	shadow programShadow
+	// handbacks are the startup nudges Starts left undelivered behind a
+	// program-reported dialog, for their callers to take (see
+	// program_status_decide.go).
+	handbacks startupHandbacks
 	// dialogs is each session's dialog watch, kept from parser captures
 	// while the program-status switch is not off (see
 	// program_status_pending.go).
@@ -992,6 +1002,7 @@ func (t *Tmux) newSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err != nil {
 		return err
 	}
+	command = plan.execPaneRoot(command)
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
 	cmds := [][]string{args}
@@ -1163,6 +1174,13 @@ func normalizeProcessStartTime(startTime string) string {
 // soon as every target is observed dead. KILL is reserved for the targets still
 // alive when the grace period expires. Injected side effects keep the timing and
 // escalation policy deterministic in unit tests.
+//
+// A target this process may not signal (isProcessSignalDeniedError: a
+// root-owned sudo wrapper an agent runs under) is left to the session's own
+// teardown, the hangup tmux's kill-session delivers to its terminal: it is
+// watched for the same grace period, and only one still alive at its end is
+// an error, carrying the refusal. It is never sent KILL, which would be
+// refused the same way.
 func terminateProcessSet(
 	targets []processTarget,
 	gracePeriod time.Duration,
@@ -1176,8 +1194,14 @@ func terminateProcessSet(
 	}
 	var result error
 	remaining := make([]processTarget, 0, len(targets))
+	denied := make(map[processTarget]error)
 	for _, target := range targets {
 		signaled, err := signalProcess(target, processSignalTerm)
+		if err != nil && isProcessSignalDeniedError(err) {
+			denied[target] = err
+			remaining = append(remaining, target)
+			continue
+		}
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -1205,6 +1229,10 @@ func terminateProcessSet(
 		result = errors.Join(result, probeErr)
 	}
 	for _, target := range remaining {
+		if deniedErr, ok := denied[target]; ok {
+			result = errors.Join(result, fmt.Errorf("PID %d outlived its session's teardown and refuses signals from this process: %w", target.PID, deniedErr))
+			continue
+		}
 		_, err := signalProcess(target, processSignalKill)
 		result = errors.Join(result, err)
 	}
@@ -5708,8 +5736,16 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // beside the program's own record (shadowIdleWait), on a reading taken after
 // it is decided and before it returns, unless ctx carries
 // [runtime.WithShadowCallerRecords]; the outcome returned is the scan's
-// alone.
+// alone. With the switch on, a wait that follows an interrupt the leaf sent,
+// or one its caller noted before sending its keys (Provider.NoteInterrupt),
+// is also the interrupt's settle (programSettle): each poll reads the
+// program's record fresh first, and the wait returns at the first root
+// boundary past the pre-interrupt baseline, or at once with an error
+// wrapping [runtime.ErrPendingInteraction] on a live blocked root past it.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	if settle, ok := t.programSettle(session, time.Now()); ok {
+		return t.waitForIdleSettling(ctx, session, timeout, settle)
+	}
 	if !t.shadowing() {
 		return t.waitForIdle(ctx, session, timeout)
 	}
@@ -5721,6 +5757,14 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 
 // waitForIdle is WaitForIdle's scan.
 func (t *Tmux) waitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	return t.waitForIdleSettling(ctx, session, timeout, nil)
+}
+
+// waitForIdleSettling is WaitForIdle's scan with settle, when set, asked on
+// every poll before the scan's look (programSettle): settled ends the wait
+// at once, and an error ends it with that error. A settle that decides
+// nothing leaves the poll to the scan.
+func (t *Tmux) waitForIdleSettling(ctx context.Context, session string, timeout time.Duration, settle func() (bool, error)) error {
 	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
 	// and re-reading it per tick would add a tmux show-environment exec to
 	// every 200ms poll.
@@ -5740,6 +5784,15 @@ func (t *Tmux) waitForIdle(ctx context.Context, session string, timeout time.Dur
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if settle != nil {
+			settled, err := settle()
+			if err != nil {
+				return err
+			}
+			if settled {
+				return nil
+			}
 		}
 		idle, err := t.snapshotPaneIdleWithPrefix(target, promptPrefix)
 		if err != nil {
@@ -6323,7 +6376,7 @@ func (t *Tmux) respawnPaneWithWorkDir(pane, workDir, command string, arm runtime
 		return err
 	}
 	if plan := t.planCapture(arm); plan != nil {
-		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.wrapRelay(command)), plan.armCommands(target, true))
+		followErr, err := t.runRespawnList(target, workDir, t.wrapPaneCommand(plan.execPaneRoot(plan.wrapRelay(command))), plan.armCommands(target, true))
 		t.programArms.noteArmed(plan)
 		if err != nil {
 			return err

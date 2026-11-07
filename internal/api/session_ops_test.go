@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -177,13 +176,17 @@ type rebuiltOverState struct {
 	ev    events.Provider
 }
 
-func (r *rebuiltOverState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: r.store}
-}
 func (r *rebuiltOverState) CityBeadStore() beads.Store { return r.store }
 
+// Stores is a single-store city over the reopened store, which serves every
+// class as CityBeadStore does: raw, with no gate view. Its rigs are the stores
+// BeadStore returns.
 func (r *rebuiltOverState) Stores() storeref.Stores {
-	return mirrorAccessorStores(r, slices.Collect(maps.Keys(r.stores)))
+	rigs := make(map[string]beads.Store, len(r.stores))
+	for rig := range r.stores {
+		rigs[rig] = r.BeadStore(rig)
+	}
+	return mintFakeStores(r.store, rigs, nil, nil)
 }
 
 func (r *rebuiltOverState) EventProvider() events.Provider {

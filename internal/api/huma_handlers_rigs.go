@@ -62,8 +62,7 @@ func (s *Server) humaHandleRigList(ctx context.Context, input *RigListInput) (*L
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
-	store := s.state.CityBeadStore()
-	if err := cacheLiveOr503(store); err != nil {
+	if err := cacheLiveOr503(s.state.Stores().Work()); err != nil {
 		return nil, err
 	}
 	wantGit := input.Git
@@ -185,8 +184,8 @@ func (s *Server) rigCreateAsync(ctx context.Context, sm StateMutator, body RigCr
 		return nil, huma.Error400BadRequest("invalid rig name")
 	}
 
-	store := s.state.CityBeadStore()
-	if store == nil {
+	store := s.state.Stores().Work()
+	if store == (beads.WorkStore{}) {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
 	city := s.rigIdemCity()
@@ -303,7 +302,7 @@ func (s *Server) mapRigAdmitError(err error) error {
 // G14 atomic rollback (drop-then-mark), the re-clone poison pre-drop, its
 // terminal drop + durable mark + terminal event.
 func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProvision, body RigCreateBody, gitURL string, recloneManifest RigProvisionManifest) {
-	store := s.state.CityBeadStore()
+	store := s.state.Stores().Work()
 	reqID := entry.requestID
 	name := body.Name
 
@@ -409,7 +408,7 @@ func (s *Server) spawnRigProvision(sm StateMutator, city string, entry *liveProv
 // but the live entry is dropped so the retry routes to re-clone (which pre-drops)
 // rather than hanging on a dead replay. Either way the terminal request.failed
 // carries the classified error_code.
-func (s *Server) rollbackFailedProvision(sm StateMutator, store beads.Store, city string, entry *liveProvision, manifest RigProvisionManifest, cause error) {
+func (s *Server) rollbackFailedProvision(sm StateMutator, store beads.WorkStore, city string, entry *liveProvision, manifest RigProvisionManifest, cause error) {
 	reqID := entry.requestID
 	// Teardown runs under a FRESH bounded context: the provisioning context may
 	// already be canceled (a provision-timeout is exactly what routes here), and

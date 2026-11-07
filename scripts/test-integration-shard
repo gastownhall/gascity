@@ -163,6 +163,9 @@ cmd_gc_integration_tests=(
   TestStorageMigrateDoesNotCountItsOwnPooledSessions
   TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
   TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
+  TestStorageSnapshotHostedBdWorkStore
+  TestTheCityFloorHoldsOnARealBdStore
+  TestTheDefaultFloorOpenerReachesARealBdCity
 )
 
 join_regex() {

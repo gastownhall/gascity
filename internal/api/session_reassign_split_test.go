@@ -22,8 +22,9 @@ import (
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
-// splitReassignFixture is a split city whose sessions and graph classes share
-// one binding, with a city work store and the rig work store a test passes in.
+// splitReassignFixture is a split city whose sessions, messaging and graph
+// classes share one binding, as every class does on the split city the routes
+// serve, with a city work store and the rig work store a test passes in.
 // It holds the configured named session "worker", whose only row has lost
 // continuity, so the next materializing resolve of "worker" replaces it.
 type splitReassignFixture struct {
@@ -53,11 +54,11 @@ func newSplitReassignFixture(t *testing.T, rig beads.Store) splitReassignFixture
 
 	fs.cfg.Agents[0].Dir = ""
 	fs.cfg.NamedSessions[0].Dir = ""
-	spec, ok, err := srv.findNamedSessionSpecForTarget(binding, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil || !ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = %v, %v", ok, err)
 	}
-	historicalID, err := srv.materializeNamedSession(binding, spec)
+	historicalID, err := srv.materializeNamedSession(beadstest.Sessions(binding), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession(worker): %v", err)
 	}

@@ -102,6 +102,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
 		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.20.2"},
 	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
@@ -119,6 +120,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
 		`go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
+		`go get "github.com/klauspost/compress@v${COMPRESS_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -581,9 +584,34 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		// gzip CVE-2026-41992; libpcre2-8-0 CVE-2026-86145 and CVE-2026-89161;
 		// libsqlite3-0 CVE-2026-11822 and CVE-2026-11824.
 		"gzip", "libpcre2-8-0", "libsqlite3-0",
+		// apt set, CVE-2026-109518, fixed in 3.0.4.
+		"apt", "libapt-pkg7.0",
 	} {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
+		}
+	}
+}
+
+// TestAgentBaseImageUpgradesPatchedOSPackages guards the --only-upgrade list in
+// Dockerfile.base, which every Ubuntu image (gc-agent-base, gc-agent,
+// gc-controller) inherits. As in Dockerfile.mail, the base image is pinned by
+// digest, so a CVE in a package the base already ships is only cleared by naming
+// the package: the plain install leaves an installed package where it is.
+func TestAgentBaseImageUpgradesPatchedOSPackages(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.base")
+
+	_, upgrade, ok := strings.Cut(dockerfile, "&& apt-get install -y --no-install-recommends --only-upgrade \\")
+	if !ok {
+		t.Fatal("contrib/k8s/Dockerfile.base no longer upgrades any pinned-base OS package")
+	}
+	upgrade, _, _ = strings.Cut(upgrade, "&& rm -rf /var/lib/apt/lists/*")
+	for _, pkg := range []string{
+		// apt set, CVE-2026-109518, fixed in 2.8.4ubuntu0.1.
+		"apt", "libapt-pkg6.0t64",
+	} {
+		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
+			t.Errorf("contrib/k8s/Dockerfile.base --only-upgrade list missing %q", pkg)
 		}
 	}
 }
@@ -629,7 +657,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
-		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.20.2"},
 		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 
@@ -642,7 +670,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/net":  "XNET_VERSION",
 		"golang.org/x/mod":  "XMOD_VERSION",
 		// Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6,
-		// Dolt v1.18.0), which CVE-2026-63209 affects.
+		// Dolt v1.18.0), which CVE-2026-63209 affects; GO-2026-6865 affects every
+		// version below 1.20.2.
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	doltModules := map[string]string{
@@ -845,11 +874,12 @@ func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
-// two kubectl entries the v1.36.6 pin does not clear (CVE-2026-78669 and the
-// owner-approved CVE-2026-56851); kubectl is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies, and a kubectl
-// waiver outside that reviewed set fails here too. gc's module waivers
-// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// three kubectl entries the v1.36.6 pin does not clear (CVE-2026-78669, the
+// owner-approved CVE-2026-56851 and CVE-2026-78661); kubectl is an upstream-signed
+// prebuilt this repo installs rather than builds, so nothing here can move its
+// dependencies, and a kubectl waiver outside that reviewed set fails here too.
+// gc's module waivers are enforced separately by
+// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -896,6 +926,10 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		// ships x/text >= 0.41.0 yet. The statement in .trivyignore.yaml carries the
 		// reasoning.
 		"CVE-2026-56851": {"usr/local/bin/kubectl": true},
+		// Owner-approved 2026-11-06: no kubectl release ships x/net >= 0.62.0 yet,
+		// and the x/net/html parser it fixes is not compiled into kubectl. The
+		// statement in .trivyignore.yaml carries the reasoning.
+		"CVE-2026-78661": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
 

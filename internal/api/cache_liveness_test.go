@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -28,16 +29,16 @@ func TestCacheLiveOr503_NonCachingStorePasses(t *testing.T) {
 	// MemStore in tests, or a BdStore without caching wrapping), there's
 	// no liveness concept to gate on — the gate is a no-op.
 	mem := beads.NewMemStore()
-	if err := cacheLiveOr503(fakeLivenessStore{Store: mem}); err != nil {
+	if err := cacheLiveOr503(beadstest.Work(fakeLivenessStore{Store: mem})); err != nil {
 		t.Fatalf("cacheLiveOr503(non-caching) = %v, want nil", err)
 	}
 }
 
 func TestCacheLiveOr503_NilStorePasses(t *testing.T) {
-	// A nil store is treated as "no cache to gate" — the handler's own
+	// A zero handle is treated as "no cache to gate" — the handler's own
 	// nil-store guard (if any) is responsible for 503-on-no-store.
-	if err := cacheLiveOr503(nil); err != nil {
-		t.Fatalf("cacheLiveOr503(nil) = %v, want nil", err)
+	if err := cacheLiveOr503(beads.WorkStore{}); err != nil {
+		t.Fatalf("cacheLiveOr503(zero handle) = %v, want nil", err)
 	}
 }
 
@@ -50,7 +51,7 @@ func TestCacheLiveOr503_LiveCachePasses(t *testing.T) {
 	if !cache.IsLive() {
 		t.Fatalf("expected IsLive true after Prime")
 	}
-	if err := cacheLiveOr503(cache); err != nil {
+	if err := cacheLiveOr503(beadstest.Work(cache)); err != nil {
 		t.Errorf("cacheLiveOr503(live) = %v, want nil", err)
 	}
 }
@@ -62,7 +63,7 @@ func TestCacheLiveOr503_NotLiveReturns503(t *testing.T) {
 	if cache.IsLive() {
 		t.Fatalf("expected IsLive false before Prime")
 	}
-	err := cacheLiveOr503(cache)
+	err := cacheLiveOr503(beadstest.Work(cache))
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -79,9 +80,9 @@ func TestCacheLiveOr503_NotLiveReturns503(t *testing.T) {
 }
 
 // stubLivenessReporter is a fully controllable beads.CacheLivenessReporter for the
-// cache-freshness conformance lane. It embeds a beads.Store so it satisfies
-// the Store type cacheAgeSeconds/cacheLiveOr503 accept; only the two
-// liveness methods those helpers actually call are implemented.
+// cache-freshness conformance lane. It embeds a beads.Store so a class handle
+// can wrap it for cacheAgeSeconds/cacheLiveOr503; only the two liveness
+// methods those helpers actually call are implemented.
 type stubLivenessReporter struct {
 	beads.Store
 	live      bool
@@ -159,7 +160,7 @@ func TestCacheAgeSeconds(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cacheAgeSeconds(tc.store); got != tc.want {
+			if got := cacheAgeSeconds(beadstest.Work(tc.store)); got != tc.want {
 				t.Errorf("cacheAgeSeconds(%s) = %+v, want %+v", tc.name, got, tc.want)
 			}
 		})
@@ -181,16 +182,16 @@ func TestCacheAgeSecondsOfAGatedCachingStore(t *testing.T) {
 	restore := SetLivenessClockForTest(&clock.Fake{Time: lastFresh.Add(12 * time.Second)})
 	defer restore()
 	want := cacheFreshness{ageS: 12, refresh: CacheRefresh{IntervalS: 30, State: CacheRefreshPaused}}
-	if got := cacheAgeSeconds(cache); got != want {
+	if got := cacheAgeSeconds(beadstest.Work(cache)); got != want {
 		t.Errorf("cacheAgeSeconds(gated primed cache) = %+v, want %+v", got, want)
 	}
 }
 
 func TestCacheLiveOr503_StubStates(t *testing.T) {
-	if err := cacheLiveOr503(stubLivenessReporter{live: true}); err != nil {
+	if err := cacheLiveOr503(beadstest.Work(stubLivenessReporter{live: true})); err != nil {
 		t.Errorf("live stub = %v, want nil", err)
 	}
-	err := cacheLiveOr503(stubLivenessReporter{live: false})
+	err := cacheLiveOr503(beadstest.Work(stubLivenessReporter{live: false}))
 	if err == nil || !strings.Contains(err.Error(), "cache_not_live") {
 		t.Errorf("not-live stub = %v, want cache_not_live 503", err)
 	}
@@ -225,10 +226,10 @@ func TestCacheAgeSecondsReadsAStoreThatReportsStatsWithoutLiveness(t *testing.T)
 	defer restore()
 
 	store := statsOnlyStore{lastFresh: base.Add(-45 * time.Second)}
-	if got := cacheAgeSeconds(store).ageS; got != 45 {
+	if got := cacheAgeSeconds(beadstest.Work(store)).ageS; got != 45 {
 		t.Errorf("cacheAgeSeconds(stats-only store).ageS = %v, want 45: the age must not depend on the store also reporting liveness", got)
 	}
-	if err := cacheLiveOr503(store); err != nil {
+	if err := cacheLiveOr503(beadstest.Work(store)); err != nil {
 		t.Errorf("cacheLiveOr503(stats-only store) = %v, want nil: a store without IsLive is never gated", err)
 	}
 }
