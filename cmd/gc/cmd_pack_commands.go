@@ -247,14 +247,23 @@ func failClosedPackCommandTree(root *cobra.Command, binding string, stderr io.Wr
 
 func applyResolvedPackCommandArgs(root *cobra.Command, args []string, blindRequest, resolvedRequest packCommandTreePreparation) {
 	prepared := preparePackCommandArgs(args, resolvedRequest)
-	if blindRequest.scopeCount > resolvedRequest.scopeCount &&
-		(resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpNone || resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpTrue) {
-		// Compatibility: established eager/lazy dispatch passes an ordinary
-		// pre-leaf scope through to DisableFlagParsing children. When a blind
-		// missing-tree scan over-counted later child-owned scopes, remove only
-		// the proven root-owned prefix so the later tokens reach the child
-		// exactly once without changing the established single-scope path.
-		prepared = packCommandArgsWithoutLeadingScopes(prepared, resolvedRequest.scopeCount)
+	if resolvedRequest.preLeafHelpKind == packCommandPreLeafHelpTrue {
+		if blindRequest.scopeCount > resolvedRequest.scopeCount {
+			prepared = packCommandArgsWithoutLeadingScopes(prepared, resolvedRequest.scopeCount)
+		}
+	} else if resolvedRequest.preLeafCommandIndex > 0 && resolvedRequest.preLeafHelpKind != packCommandPreLeafHelpInvalid {
+		// Cobra leaves inherited flags in a DisableFlagParsing leaf's argv.
+		// Apply the already-resolved root scope before removing those tokens;
+		// tokens at and after the leaf belong exclusively to the child.
+		if resolvedRequest.citySet {
+			_ = root.PersistentFlags().Set("city", resolvedRequest.city)
+		}
+		if resolvedRequest.rigSet {
+			_ = root.PersistentFlags().Set("rig", resolvedRequest.rig)
+		}
+		if resolvedRequest.preLeafHelpKind != packCommandPreLeafHelpFalse {
+			prepared = packCommandArgsWithoutLeadingScopes(prepared, resolvedRequest.scopeCount)
+		}
 	}
 	root.SetArgs(prepared)
 }
