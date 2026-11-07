@@ -77,6 +77,12 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 				return err
 			}
 			if existing != nil {
+				// The entry is already stored; publish it. A redelivery after
+				// a failed advance must advance the frontier past the stored
+				// entry, or the entry stays invisible to readers forever.
+				if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, existing.Sequence); err != nil {
+					return err
+				}
 				out = *existing
 				return nil
 			}

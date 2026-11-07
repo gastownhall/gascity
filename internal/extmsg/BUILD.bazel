@@ -53,6 +53,7 @@ go_test(
         "testenv_import_test.go",
         "transcript_ambiguous_create_test.go",
         "transcript_lockpool_test.go",
+        "transcript_replay_cover_test.go",
         "transcript_sequence_repro_test.go",
         "types_wire_test.go",
     ],
