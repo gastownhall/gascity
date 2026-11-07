@@ -161,7 +161,26 @@ func (s *Server) extmsgNotifyMembers(
 		}
 	}
 
+	// One session can hold several memberships: ensureReplayMemberships grants
+	// a room-bound seat its selector, its session name and its live bead, and
+	// they all resolve to the same session. Notify each resolved session once,
+	// whichever of its memberships resolves first.
+	var notifiedMu sync.Mutex
+	notified := make(map[string]struct{}, len(members))
+	firstNotify := func(resolvedID string) bool {
+		notifiedMu.Lock()
+		defer notifiedMu.Unlock()
+		if _, ok := notified[resolvedID]; ok {
+			return false
+		}
+		notified[resolvedID] = struct{}{}
+		return true
+	}
+
 	notifyResolved := func(sessionSelector, resolvedID string) {
+		if !firstNotify(resolvedID) {
+			return
+		}
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
 		nudge := s.extmsgNotice(extmsgNotifyReminder{
 			Provider:                conv.Provider,
