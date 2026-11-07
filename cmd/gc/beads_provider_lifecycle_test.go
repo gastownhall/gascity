@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1324,6 +1325,332 @@ printf 'status=%s\n' "$status"
 	}
 	if strings.Contains(invocation, "REPLACE INTO "+bt+"beads"+bt+"."+bt+"dolt_ignore"+bt) {
 		t.Fatalf("check_read_only must INSERT IGNORE the rule so an operator ignored=0 override survives:\n%s", invocation)
+	}
+}
+
+// gcBeadsBdDoltClientCall is one dolt client invocation the fake dolt binary
+// recorded: its argv, the dolt variables in its environment ("<unset>" when
+// unset), and its DOLT_ROOT_PATH directory as the mode `ls -ld` prints and the
+// number of entries it held when dolt ran.
+type gcBeadsBdDoltClientCall struct {
+	argv    []string
+	env     map[string]string
+	rootDir string
+}
+
+// gcBeadsBdDoltClientCallsAnswered is the status block the client-calls
+// harness prints when every dolt SQL client call got its answer from a
+// writable server (check_read_only returns 1 for writable).
+const gcBeadsBdDoltClientCallsAnswered = "do_query_probe=0\n" +
+	"server_sql=0\n" +
+	"bd_runtime_bd_table_count=0\n" +
+	"bd_runtime_schema_cursor=0\n" +
+	"bd_runtime_schema_migration_count=0\n" +
+	"get_connection_count=0\n" +
+	"check_read_only=1\n"
+
+// gcBeadsBdDoltClientCallsHarness writes a harness that runs every dolt SQL
+// client call in the bundled gc-beads-bd.sh prelude against the server on
+// port, without a gc helper so each one takes the dolt CLI. It prints each
+// call's exit status, the connection count, and then the script's own
+// DOLT_CLI_PASSWORD, and returns the harness path.
+func gcBeadsBdDoltClientCallsHarness(t *testing.T, port string) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	materializeBuiltinPacksForTest(t, cityPath)
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	harness := filepath.Join(t.TempDir(), "dolt-client-calls.sh")
+	body := prelude + `
+GC_BIN=""
+GC_DOLT_HOST=""
+DOLT_PORT=` + port + `
+DOLT_USER=root
+set +e
+do_query_probe
+printf 'do_query_probe=%s\n' "$?"
+server_sql "SELECT 1" >/dev/null
+printf 'server_sql=%s\n' "$?"
+bd_runtime_bd_table_count beads >/dev/null
+printf 'bd_runtime_bd_table_count=%s\n' "$?"
+bd_runtime_schema_cursor beads >/dev/null
+printf 'bd_runtime_schema_cursor=%s\n' "$?"
+bd_runtime_schema_migration_count beads >/dev/null
+printf 'bd_runtime_schema_migration_count=%s\n' "$?"
+harness_connections=$(get_connection_count)
+printf 'get_connection_count=%s\n' "$?"
+check_read_only
+printf 'check_read_only=%s\n' "$?"
+printf 'connections=%s\n' "$harness_connections"
+set -e
+if [ "${DOLT_CLI_PASSWORD+set}" = set ]; then
+  printf 'shell=set:%s\n' "$DOLT_CLI_PASSWORD"
+else
+  printf 'shell=unset:\n'
+fi
+`
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return harness
+}
+
+// gcBeadsBdDoltClientCallsEnv returns the client-calls harness environment.
+// Each case decides whether the caller inherits DOLT_CLI_PASSWORD, so an
+// inherited one is dropped.
+func gcBeadsBdDoltClientCallsEnv(extra ...string) []string {
+	env := append(removeEnvKey(sanitizedBaseEnv(), "DOLT_CLI_PASSWORD"), "GC_BIN=")
+	return append(env, extra...)
+}
+
+// assertNoGcBeadsBdLeftovers fails the test when the client-calls harness left
+// anything in tmpDir, the TMPDIR it ran with: the private DOLT_ROOT_PATH a
+// configured password runs dolt with must be removed once dolt exits.
+func assertNoGcBeadsBdLeftovers(t *testing.T, tmpDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", tmpDir, err)
+	}
+	for _, entry := range entries {
+		t.Errorf("client calls left %s in TMPDIR", entry.Name())
+	}
+}
+
+// runGcBeadsBdDoltClientCalls runs every dolt SQL client call in the bundled
+// gc-beads-bd.sh prelude against a fake dolt that records each invocation, and
+// returns the recorded calls plus the harness output. The fake dolt reports
+// DOLT_DISABLE_EVENT_FLUSH, so the one the go test environment sets is dropped.
+func runGcBeadsBdDoltClientCalls(t *testing.T, extraEnv ...string) ([]gcBeadsBdDoltClientCall, string) {
+	t.Helper()
+	binDir := t.TempDir()
+	callsFile := filepath.Join(t.TempDir(), "dolt-calls")
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+set -eu
+{
+  printf 'call\0'
+  printf '%s\0' "$@"
+  printf 'env:DOLT_CLI_PASSWORD=%s\0' "${DOLT_CLI_PASSWORD-<unset>}"
+  printf 'env:DOLT_ROOT_PATH=%s\0' "${DOLT_ROOT_PATH-<unset>}"
+  printf 'env:DOLT_DISABLE_EVENT_FLUSH=%s\0' "${DOLT_DISABLE_EVENT_FLUSH-<unset>}"
+  if [ -n "${DOLT_ROOT_PATH:-}" ]; then
+    printf 'rootdir:%s %s\0' "$(ls -ld "$DOLT_ROOT_PATH" | cut -c1-10)" "$(ls -A "$DOLT_ROOT_PATH" | wc -l | tr -d ' ')"
+  fi
+} >> "$CALLS_FILE"
+case "$*" in
+  *"SHOW DATABASES"*) printf 'Database\nbeads\n' ;;
+  *) printf 'cnt\n1\n' ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(dolt): %v", err)
+	}
+
+	env := removeEnvKey(gcBeadsBdDoltClientCallsEnv(
+		"CALLS_FILE="+callsFile,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	), "DOLT_DISABLE_EVENT_FLUSH")
+	out := runShHarness(t, gcBeadsBdDoltClientCallsHarness(t, "3311"), "dolt client calls", append(env, extraEnv...))
+
+	data, err := os.ReadFile(callsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(calls): %v", err)
+	}
+	var calls []gcBeadsBdDoltClientCall
+	for _, field := range strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00") {
+		if field == "call" {
+			calls = append(calls, gcBeadsBdDoltClientCall{env: map[string]string{}})
+			continue
+		}
+		if len(calls) == 0 {
+			t.Fatalf("dolt calls file does not start with a call marker: %q", data)
+		}
+		call := &calls[len(calls)-1]
+		if kv, ok := strings.CutPrefix(field, "env:"); ok {
+			name, value, _ := strings.Cut(kv, "=")
+			call.env[name] = value
+		} else if dir, ok := strings.CutPrefix(field, "rootdir:"); ok {
+			call.rootDir = dir
+		} else {
+			call.argv = append(call.argv, field)
+		}
+	}
+	return calls, string(out)
+}
+
+// TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv pins issue #8376: every
+// dolt SQL client call in gc-beads-bd.sh hands the password to dolt through a
+// per-call DOLT_CLI_PASSWORD, never in argv where any local user can read it
+// through ps. The script's own DOLT_CLI_PASSWORD must stay as inherited: dolt
+// sql-server also reads it and refuses to start with a password but no user.
+//
+// dolt reads DOLT_CLI_PASSWORD only when argv has no --password, and a
+// `default` dolt CLI profile that stores a password injects its own first. As
+// with runManagedDoltSQL, an empty password must pass exactly an empty
+// --password, which masks the profile
+// (TestGcBeadsBdEmptyPasswordMasksDefaultProfileAgainstRealServer), with
+// DOLT_ROOT_PATH as inherited. A configured password must leave the flag out
+// and run dolt with DOLT_ROOT_PATH at a private, empty directory of its own,
+// where no profile exists
+// (TestGcBeadsBdConfiguredPasswordIgnoresDefaultProfileAgainstRealServer),
+// with event flushing off and the directory removed once dolt exits.
+func TestGcBeadsBdDoltClientCallsKeepPasswordOutOfArgv(t *testing.T) {
+	const secret = "s3cr3t-dolt-pw"
+	const wantCalls = 10
+	for _, tc := range []struct {
+		name       string
+		env        []string
+		configured bool
+		wantShell  string
+	}{
+		{name: "configured", env: []string{"DOLT_CLI_PASSWORD=other-pw", "GC_DOLT_PASSWORD=" + secret}, configured: true, wantShell: "set:other-pw"},
+		// An empty password also travels as a set, empty DOLT_CLI_PASSWORD, as
+		// runManagedDoltSQL exports it: the inherited one never reaches dolt.
+		{name: "empty", env: []string{"DOLT_CLI_PASSWORD=other-pw", "GC_DOLT_PASSWORD="}, wantShell: "set:other-pw"},
+		{name: "unset", env: []string{"DOLT_CLI_PASSWORD=other-pw"}, wantShell: "set:other-pw"},
+		{name: "configured_not_inherited", env: []string{"GC_DOLT_PASSWORD=" + secret}, configured: true, wantShell: "unset:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doltRoot, tmpDir := t.TempDir(), t.TempDir()
+			calls, out := runGcBeadsBdDoltClientCalls(t, append(tc.env, "DOLT_ROOT_PATH="+doltRoot, "TMPDIR="+tmpDir)...)
+			if len(calls) != wantCalls {
+				t.Fatalf("recorded %d dolt client calls, want %d:\n%+v\noutput:\n%s", len(calls), wantCalls, calls, out)
+			}
+			if !strings.Contains(out, gcBeadsBdDoltClientCallsAnswered) || !strings.Contains(out, "connections=1\n") {
+				t.Errorf("client call output not parsed through the password handling, want every call answered and connections=1:\n%s", out)
+			}
+			wantPassword, wantFlush := "", "<unset>"
+			if tc.configured {
+				wantPassword, wantFlush = secret, "1"
+			}
+			for i, call := range calls {
+				gotEmptyFlag := false
+				for j, arg := range call.argv {
+					if strings.HasPrefix(arg, "--password=") {
+						t.Errorf("call %d passes an inline --password value: %q", i, call.argv)
+					}
+					if arg == "--password" {
+						if j+1 >= len(call.argv) || call.argv[j+1] != "" {
+							t.Errorf("call %d passes --password with a non-empty value: %q", i, call.argv)
+						}
+						gotEmptyFlag = true
+					}
+					if strings.Contains(arg, secret) {
+						t.Errorf("call %d carries the password in argv: %q", i, call.argv)
+					}
+				}
+				if gotEmptyFlag == tc.configured {
+					t.Errorf("call %d has an empty --password = %v, want %v: %q", i, gotEmptyFlag, !tc.configured, call.argv)
+				}
+				if got := call.env["DOLT_CLI_PASSWORD"]; got != wantPassword {
+					t.Errorf("call %d DOLT_CLI_PASSWORD = %q, want %q (argv %q)", i, got, wantPassword, call.argv)
+				}
+				if got := call.env["DOLT_DISABLE_EVENT_FLUSH"]; got != wantFlush {
+					t.Errorf("call %d DOLT_DISABLE_EVENT_FLUSH = %q, want %q", i, got, wantFlush)
+				}
+				root := call.env["DOLT_ROOT_PATH"]
+				if !tc.configured {
+					if root != doltRoot {
+						t.Errorf("call %d DOLT_ROOT_PATH = %q, want the inherited %q", i, root, doltRoot)
+					}
+					continue
+				}
+				if filepath.Dir(root) != tmpDir || !strings.HasPrefix(filepath.Base(root), "gc-dolt-client.") {
+					t.Errorf("call %d DOLT_ROOT_PATH = %q, want a gc-dolt-client.* directory of its own in TMPDIR %q", i, root, tmpDir)
+				}
+				if call.rootDir != "drwx------ 0" {
+					t.Errorf("call %d DOLT_ROOT_PATH %q was %q when dolt ran, want a private, empty directory (drwx------ 0)", i, root, call.rootDir)
+				}
+			}
+			if want := "shell=" + tc.wantShell + "\n"; !strings.Contains(out, want) {
+				t.Errorf("script DOLT_CLI_PASSWORD after the client calls changed, want %q:\n%s", want, out)
+			}
+			assertNoGcBeadsBdLeftovers(t, tmpDir)
+		})
+	}
+}
+
+// runGcBeadsBdDoltClientCallsUnderDefaultProfile runs every dolt SQL client call
+// in gc-beads-bd.sh against a real dolt server whose root logs in with password
+// (no password when empty), from a host whose `default` dolt CLI profile
+// stores a different password, and returns the harness output. It first proves
+// the profile is live: a dolt call that leaves the password to
+// DOLT_CLI_PASSWORD, as dolt does when argv has no --password, is refused.
+func runGcBeadsBdDoltClientCallsUnderDefaultProfile(t *testing.T, password string) string {
+	t.Helper()
+	_, port, _, cleanup := startRealDoltServer(t, filepath.Join(t.TempDir(), "hq"), password)
+	t.Cleanup(cleanup)
+	portText := strconv.Itoa(port)
+
+	// startRealDoltServer points DOLT_ROOT_PATH at a per-test home, so the
+	// profile lands in this test's global dolt config only.
+	runExternal(t, "", "dolt", "profile", "add", "--password", "not-the-managed-password", "default")
+	controlEnv := withEnvValue(os.Environ(), "DOLT_CLI_PASSWORD", password)
+	stdout, stderr, err := runGCBeadsBdCommand(t, controlEnv, "dolt", "--host", "127.0.0.1", "--port", portText, "--user", "root", "--no-tls", "sql", "-q", "SELECT 1")
+	if err == nil || !strings.Contains(stdout+stderr, "Access denied") {
+		t.Fatalf("control: dolt without --password = %v, want the default profile's password refused, or this test proves nothing:\n%s%s", err, stdout, stderr)
+	}
+
+	tmpDir := t.TempDir()
+	out := string(runShHarness(t, gcBeadsBdDoltClientCallsHarness(t, portText), "dolt client calls",
+		gcBeadsBdDoltClientCallsEnv("GC_DOLT_PASSWORD="+password, "TMPDIR="+tmpDir)))
+	if !regexp.MustCompile(`(?m)^connections=[1-9][0-9]*$`).MatchString(out) {
+		t.Errorf("get_connection_count printed no connection count:\n%s", out)
+	}
+	assertNoGcBeadsBdLeftovers(t, tmpDir)
+	return out
+}
+
+// TestGcBeadsBdEmptyPasswordMasksDefaultProfileAgainstRealServer pins, against
+// a real dolt, why gc-beads-bd.sh's client calls still pass an explicit empty
+// --password when the managed password is empty: without one, dolt injects
+// the password of a `default` CLI profile, and the passwordless managed server
+// then refuses every call. It is the script's counterpart of
+// TestRunManagedDoltSQLEmptyPasswordMasksDefaultProfileAgainstRealServer.
+func TestGcBeadsBdEmptyPasswordMasksDefaultProfileAgainstRealServer(t *testing.T) {
+	if out := runGcBeadsBdDoltClientCallsUnderDefaultProfile(t, ""); !strings.Contains(out, gcBeadsBdDoltClientCallsAnswered) {
+		t.Fatalf("gc-beads-bd.sh client calls with an empty managed password did not all answer, want the default profile's password masked:\n%s", out)
+	}
+}
+
+// TestGcBeadsBdConfiguredPasswordIgnoresDefaultProfileAgainstRealServer pins,
+// against a real dolt, why gc-beads-bd.sh's client calls run dolt with a
+// private DOLT_ROOT_PATH when the managed password is configured: the password
+// stays out of argv, so dolt would otherwise take the password of a `default`
+// CLI profile over DOLT_CLI_PASSWORD, and the managed server would refuse every
+// call.
+func TestGcBeadsBdConfiguredPasswordIgnoresDefaultProfileAgainstRealServer(t *testing.T) {
+	if out := runGcBeadsBdDoltClientCallsUnderDefaultProfile(t, "managed-pw"); !strings.Contains(out, gcBeadsBdDoltClientCallsAnswered) {
+		t.Fatalf("gc-beads-bd.sh client calls with a configured managed password did not all answer, want the default profile kept out of them:\n%s", out)
+	}
+}
+
+// TestGcBeadsBdScriptNeverPassesPasswordInArgv guards issue #8376 against
+// re-introduction: the shipped gc-beads-bd.sh never puts a password value on a
+// command line, where any local user can read it through ps. A --password flag
+// may appear only with an explicit empty value, which discloses nothing and
+// masks a `default` dolt CLI profile. Comment lines are prose, not commands.
+func TestGcBeadsBdScriptNeverPassesPasswordInArgv(t *testing.T) {
+	embedded, err := bdpack.PackFS.ReadFile("assets/scripts/gc-beads-bd.sh")
+	if err != nil {
+		t.Fatalf("read embedded gc-beads-bd.sh: %v", err)
+	}
+	passwordFlag := regexp.MustCompile(`--password(\S*)\s*(\S*)`)
+	for i, line := range strings.Split(string(embedded), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		for _, m := range passwordFlag.FindAllStringSubmatch(line, -1) {
+			if m[1] != "" || (m[2] != `""` && m[2] != `''`) {
+				t.Errorf("gc-beads-bd.sh:%d passes a Dolt password value in argv; set DOLT_CLI_PASSWORD on the dolt call and pass at most an empty --password \"\": %s", i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }
 

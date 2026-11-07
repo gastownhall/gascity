@@ -418,6 +418,38 @@ path_under_data_dir() {
     return 1
 }
 
+# dolt_client runs one dolt command, the arguments after $1, as a client of the
+# dolt server on $1:$DOLT_PORT logged in as $DOLT_USER, and returns dolt's exit
+# status, or 1 when it cannot create the private directory described below.
+# Every dolt SQL client call in this script goes through it.
+#
+# The password never goes in argv (world-readable /proc/<pid>/cmdline): it
+# travels only in a DOLT_CLI_PASSWORD set for this one call (owner-only
+# /proc/<pid>/environ), so the script's own DOLT_CLI_PASSWORD, which dolt
+# sql-server also reads, stays as inherited. dolt reads that variable only when
+# argv has no --password, and a `default` dolt CLI profile that stores a
+# password injects its own --password first. So an empty password is passed as
+# an explicit empty --password, which discloses nothing and masks the profile,
+# as cmd/gc/dolt_sql_health.go runManagedDoltSQLContext does. A configured
+# password runs dolt with DOLT_ROOT_PATH at a new private directory instead:
+# dolt keeps its CLI profiles in the global config under DOLT_ROOT_PATH, so no
+# profile applies there. DOLT_DISABLE_EVENT_FLUSH keeps dolt from forking a
+# detached `dolt send-metrics` that would still use the directory after it is
+# removed.
+dolt_client() {
+    local host="$1" root status=0
+    shift
+    if [ -z "${DOLT_PASSWORD:-}" ]; then
+        DOLT_CLI_PASSWORD="" dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "" --no-tls "$@"
+        return
+    fi
+    root=$(mktemp -d "${TMPDIR:-/tmp}/gc-dolt-client.XXXXXX") || return 1
+    DOLT_ROOT_PATH="$root" DOLT_DISABLE_EVENT_FLUSH=1 DOLT_CLI_PASSWORD="$DOLT_PASSWORD" \
+        dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --no-tls "$@" || status=$?
+    rm -rf "$root"
+    return "$status"
+}
+
 # do_query_probe runs a read-only information_schema query against the dolt server.
 do_query_probe() {
     local host gc_bin
@@ -427,7 +459,7 @@ do_query_probe() {
         "$gc_bin" dolt-state query-probe --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
         return $?
     fi
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
+    dolt_client "$host" sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
 }
 
 # server_sql runs a SQL query against the running dolt server.
@@ -436,7 +468,7 @@ do_query_probe() {
 server_sql() {
     local host
     host=$(connect_host)
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    dolt_client "$host" \
         sql -q "$1"
 }
 
@@ -1443,7 +1475,7 @@ bd_runtime_bd_table_count() {
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
     host=$(connect_host)
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name IN ('issues', 'comments', 'events', 'dependencies')" 2>/dev/null) || return 1
     # Parse CSV: "cnt\n3\n" — take the last non-empty line, as get_connection_count does.
     echo "$output" | tail -1 | tr -d '[:space:]'
@@ -1465,7 +1497,7 @@ bd_runtime_schema_cursor() {
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
     host=$(connect_host)
-    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    exists_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
     exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
     case "$exists" in
@@ -1475,7 +1507,7 @@ bd_runtime_schema_cursor() {
         echo 0
         return 0
     fi
-    cursor_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    cursor_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COALESCE(MAX(version), 0) AS cur FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
     cursor=$(echo "$cursor_output" | tail -1 | tr -d '[:space:]')
     case "$cursor" in
@@ -1499,7 +1531,7 @@ bd_runtime_schema_migration_count() {
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
     host=$(connect_host)
-    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    exists_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
     exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
     case "$exists" in
@@ -1509,7 +1541,7 @@ bd_runtime_schema_migration_count() {
         echo 0
         return 0
     fi
-    count_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    count_output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
     count=$(echo "$count_output" | tail -1 | tr -d '[:space:]')
     case "$count" in
@@ -2259,7 +2291,7 @@ YAML
 get_connection_count() {
     local host output
     host=$(connect_host)
-    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    output=$(dolt_client "$host" \
         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST" 2>/dev/null) || return 1
     # Parse CSV: "cnt\n5\n" — take last non-empty line.
     echo "$output" | tail -1 | tr -d '[:space:]'
@@ -2303,7 +2335,7 @@ check_read_only() {
         return 1
     fi
     err_file=$(mktemp "${TMPDIR:-/tmp}/gc-dolt-show-databases.XXXXXX") || return 2
-    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    if output=$(dolt_client "$host" \
         sql -r csv -q "SHOW DATABASES" 2>"$err_file"); then
         status=0
     else
@@ -2341,7 +2373,7 @@ check_read_only() {
     # the classification below keys on. Mirrors cmd/gc/dolt_sql_health.go
     # managedDoltReadOnlyProbeStatementsFor.
     sql="USE ${quoted_db}; CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1); INSERT IGNORE INTO ${quoted_db}.${ignore_table} (pattern, ignored) VALUES ('__gc_read_only_probe', 1);"
-    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+    if output=$(dolt_client "$host" \
         sql -q "$sql" 2>&1); then
         return 1
     fi
