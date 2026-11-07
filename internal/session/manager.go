@@ -804,7 +804,9 @@ type orphanScan struct {
 // has not returned, terminates nothing and returns an error wrapping
 // runtime.ErrRuntimeUnavailable: an unfinished scan says nothing about what is
 // running, so the start defers. An abandoned scan's late answer reaches no
-// one; the next start scans afresh once it returns.
+// one; the next start scans afresh once it returns. ctx is checked before each
+// termination, so a start whose context ends stops terminating, returning the
+// context's error with any termination errors before it.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
@@ -859,6 +861,9 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	}
 	var termErrs []error
 	for _, live := range orphans {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("pre-start orphan cleanup for %s stopped before terminating pid=%d: %w", sessionID, live.PID, errors.Join(append(termErrs, err)...))
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))

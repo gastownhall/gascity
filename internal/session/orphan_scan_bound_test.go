@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -385,4 +387,103 @@ func TestKillExistingOrphansFreesTheKeyWhenTheScanReturns(t *testing.T) {
 			t.Fatalf("%d scans for 3 sequential starts, want 3", got)
 		}
 	})
+}
+
+// AC-4: a completed scan keeps the existing fences and fail-closed handling:
+// only the untracked roots of this session in this city that are not city
+// infrastructure are terminated, a scan error still lets the roots it
+// returned be terminated (it is a completed scan, not an unanswered one, even
+// when it wraps runtime.ErrRuntimeUnavailable), a LiveUnlisted claim refuses
+// with nothing terminated, and failed terminations are reported together.
+func TestKillExistingOrphansCompletedScanKeepsFencesAndFailClosed(t *testing.T) {
+	otherCity := t.TempDir()
+	roots := []runtime.LiveRuntime{
+		{PID: 100},                         // an orphan
+		{PID: 101, IsTracked: true},        // the provider's own runtime
+		{PID: 102, SessionID: "sid-other"}, // another session
+		{PID: 103, City: otherCity},        // another city
+		{PID: 104},                         // a second orphan
+	}
+	for _, tc := range []struct {
+		name           string
+		scanErr        error
+		extra          []runtime.LiveRuntime
+		terminateErr   error
+		wantTerminated []int
+		wantErr        func(error) bool
+	}{
+		{name: "clean scan", wantTerminated: []int{100, 104}, wantErr: func(err error) bool { return err == nil }},
+		{name: "scan error", scanErr: errors.New("partial scan failed"), wantTerminated: []int{100, 104}, wantErr: func(err error) bool { return err == nil }},
+		{name: "scan error wrapping unavailable", scanErr: errors.Join(errors.New("tmux list running"), runtime.ErrRuntimeUnavailable), wantTerminated: []int{100, 104}, wantErr: func(err error) bool { return err == nil }},
+		{
+			name: "live unlisted root", extra: []runtime.LiveRuntime{{PID: 105, LiveUnlisted: true}},
+			wantErr: func(err error) bool {
+				return errors.Is(err, runtime.ErrRuntimeUnavailable) && strings.Contains(err.Error(), "pid=105")
+			},
+		},
+		{
+			name: "terminations fail", terminateErr: errors.New("operation not permitted"), wantTerminated: []int{100, 104},
+			wantErr: func(err error) bool {
+				return err != nil && strings.Contains(err.Error(), "2 orphaned runtime(s) not confirmed dead") && !errors.Is(err, runtime.ErrRuntimeUnavailable)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			sp := newGatedScanProvider(city, neverWedged)
+			sp.scanErr = tc.scanErr
+			sp.answer = func(int64) []runtime.LiveRuntime {
+				return append(append([]runtime.LiveRuntime(nil), roots...), tc.extra...)
+			}
+			if tc.terminateErr != nil {
+				sp.terminate = func(runtime.LiveRuntime) error { return tc.terminateErr }
+			}
+			mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city))
+
+			err := mgr.killExistingOrphans(context.Background(), "sid-done")
+
+			if !tc.wantErr(err) {
+				t.Fatalf("killExistingOrphans = %v, not the error this case expects", err)
+			}
+			if got := sp.terminatedPIDs(); intsString(got) != intsString(tc.wantTerminated) {
+				t.Fatalf("terminated %v, want %v", got, tc.wantTerminated)
+			}
+		})
+	}
+}
+
+// AC-4: a start whose context ends during cleanup starts no further
+// termination, and reports the cancellation with the termination failures
+// that came before it.
+func TestKillExistingOrphansStopsBetweenTerminationsWhenContextDone(t *testing.T) {
+	city := t.TempDir()
+	sp := newGatedScanProvider(city, neverWedged)
+	sp.answer = func(int64) []runtime.LiveRuntime {
+		return []runtime.LiveRuntime{{PID: 100}, {PID: 101}, {PID: 102}}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	termErr := errors.New("operation not permitted")
+	sp.terminate = func(runtime.LiveRuntime) error {
+		cancel()
+		return termErr
+	}
+	mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city))
+
+	err := mgr.killExistingOrphans(ctx, "sid-cancel")
+
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, termErr) {
+		t.Fatalf("killExistingOrphans = %v, want the cancellation and the earlier termination failure", err)
+	}
+	if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 100 {
+		t.Fatalf("terminated %v, want only the termination begun before the cancellation (100)", got)
+	}
+}
+
+func intsString(xs []int) string {
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
+	}
+	return strings.Join(parts, ",")
 }
