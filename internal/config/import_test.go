@@ -43,6 +43,9 @@ func stubCleanRepoCacheGit(t *testing.T) string {
 		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
 			return commit, nil
 		}
+		if len(args) >= 2 && args[0] == "update-index" && args[1] == "--refresh" {
+			return "", nil
+		}
 		if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
 			return "", nil
 		}
