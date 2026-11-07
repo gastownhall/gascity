@@ -106,25 +106,19 @@ const (
 	ReqLifecycleStopIdempotent    Code = "RPP-LIFECYCLE-004"
 	ReqLifecycleUnknownNotRunning Code = "RPP-LIFECYCLE-005"
 
-	// ReqConnectionExec is the slim connection primitive: a carrier drives the
-	// box THROUGH exec instead of via dedicated driving ops. The six legacy
-	// driving ops (nudge / send-keys / interrupt / clear-scrollback / peek /
-	// watch-startup) are deliberately NOT catalog requirements — they are
-	// reproducible carrier-side over exec, so a runtime author is never
-	// contractually forced to implement them. It is Optional for now (absent =
-	// SKIP): gc still delivers input/observation via the driving-op methods, so
-	// requiring exec before that carrier rewrite would let an exec-only runtime
-	// pass conformance while gc silently no-ops its nudge/peek calls. It flips
-	// to required in the slice that moves gc's own driving over exec. See
-	// REQUIREMENTS.md (RUNTIME-RPP-013).
+	// ReqConnectionExec checks the optional generic exec connection. The
+	// default carrier drives tmux over it, with dedicated-op fallback on
+	// ErrExecUnsupported. carrier.ops instead requires five driving ops,
+	// checked by rppcheck; this catalog checks only its idle-boundary peek.
+	// See REQUIREMENTS.md (RUNTIME-RPP-013).
 	ReqConnectionExec Code = "RPP-CONN-001"
 
 	// ReqConnectionIdleBoundary is the idle-boundary capability's fidelity
-	// check: a script that declares idle-boundary says its agent runs in the
-	// in-box tmux session `main`, which gc reads over exec for the idle
-	// boundary and full idle sleep. The declaration must hold: `tmux
-	// has-session -t main` and the idle capture succeed over exec in a started
-	// box. Optional (undeclared = SKIP). See REQUIREMENTS.md (RUNTIME-RPP-016).
+	// check for the selected carrier. The default tmux branch checks session
+	// main and capture over exec. carrier.ops checks is-running and peek 120
+	// showing the started agent's command line or output. Neither branch
+	// classifies an idle prompt. Optional when undeclared, otherwise required.
+	// See REQUIREMENTS.md (RUNTIME-RPP-016).
 	ReqConnectionIdleBoundary Code = "RPP-CONN-002"
 
 	// ReqProvisionBoxWithoutAgent is the runtime/transport un-weld's RPP wire
@@ -244,7 +238,7 @@ var catalog = []Requirement{
 	{ReqLifecycleUnknownNotRunning, GroupLifecycle, "is-running on a never-started session reports false", false},
 
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
-	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, a started box's tmux session main answers has-session and the idle capture over exec, so gc can read the agent's idle boundary (undeclared = SKIP)", true},
+	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true and peek 120 shows the started agent's command line or output (undeclared = SKIP)", true},
 
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
 

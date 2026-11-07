@@ -36,6 +36,7 @@ go_test(
     srcs = [
         "capacity_test.go",
         "carrier_fence_integration_test.go",
+        "carrier_ops_conformance_test.go",
         "carrier_ops_test.go",
         "cutover_test.go",
         "deadline_env_test.go",

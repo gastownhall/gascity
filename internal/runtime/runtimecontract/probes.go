@@ -208,9 +208,6 @@ func probeExec(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, 
 // runs over exec, quoted as gc quotes every exec command (each argument
 // single-quoted): the session the agent runs in, then the capture gc's idle
 // wait takes through the tmux carrier.
-//
-// TODO(gh#8903 PR 2): once the carrier is selectable per pack, check the
-// declared carrier's idle read instead of assuming tmux.
 var idleBoundaryCommands = []string{
 	quoteArgv("tmux", "has-session", "-t", "main"),
 	quoteArgv("tmux", "capture-pane", "-t", "main", "-p", "-S", "-"+strconv.Itoa(tmux.PromptObservationLines)),
@@ -236,10 +233,9 @@ var idleBoundaryPeers = []string{
 	runtime.ProtocolCapabilityReportAttachment,
 }
 
-// probeIdleBoundary verifies that a declared idle-boundary holds: the script
-// says its agent runs in the in-box tmux session `main`, so in a started box
-// that session must exist and its pane must be readable over exec, which is
-// how gc reads the idle boundary. It gates on the declaration, not on
+// probeIdleBoundary verifies the selected carrier's declared idle read. The
+// undeclared default checks in-box tmux main over exec; carrier.ops checks
+// is-running and peek, without a tmux command. It gates on the declaration, not on
 // behavior: a script that does not declare idle-boundary gets no idle wait
 // from gc whatever its box runs, so it SKIPs. Whether the pane shows a ready
 // prompt depends on the agent, not the pack, so the probe reads the pane
@@ -247,6 +243,9 @@ var idleBoundaryPeers = []string{
 func probeIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if !hs.Has(runtime.ProtocolCapabilityIdleBoundary) {
 		return StatusSkip, "idle-boundary not declared — gc reads no idle boundary from the box"
+	}
+	if hs.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return probeOpsIdleBoundary(ctx, r, hs)
 	}
 	var missing []string
 	for _, c := range idleBoundaryPeers {
@@ -273,6 +272,41 @@ func probeIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) 
 		return StatusPass, fmt.Sprintf("the box's tmux session main answers has-session and the idle capture over exec; idle-boundary takes effect only with %s, which the handshake does not declare", strings.Join(missing, ", "))
 	}
 	return StatusPass, "the box's tmux session main answers has-session and the idle capture over exec"
+}
+
+// probeOpsIdleBoundary proves the selected wire's liveness and read. The
+// sentinel may appear as command text or output; this is not an idle classifier.
+func probeOpsIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	name := r.nextName()
+	sentinel := "GC_RPP_IDLE_READ_" + name
+	started := r.startCommand(ctx, name, "echo "+quoteArgv(sentinel)+"; exec "+r.opts.Command)
+	if !started.ok() {
+		return StatusFail, "start for carrier.ops idle read failed"
+	}
+	defer r.stop(ctx, name)
+	if status, detail := expectRunning(ctx, r, name, true, "for carrier.ops idle read"); status != StatusPass {
+		return status, detail
+	}
+	out := r.peek(ctx, name, tmux.PromptObservationLines)
+	switch {
+	case out.unsupported:
+		return StatusFail, "declares carrier.ops and idle-boundary but peek is unimplemented (exit 2)"
+	case out.err != nil:
+		return StatusFail, "carrier.ops peek failed: " + out.err.Error()
+	case !strings.Contains(out.stdout, sentinel):
+		return StatusFail, "peek does not show the started agent's command line or output"
+	}
+	detail := "carrier.ops is-running is true and peek 120 shows the started agent's command line or output"
+	var missing []string
+	for _, c := range []string{runtime.ProtocolCapabilityReportActivity, runtime.ProtocolCapabilityReportAttachment} {
+		if !hs.Has(c) {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) > 0 {
+		detail += "; idle-boundary takes effect only with " + strings.Join(missing, ", ") + ", which the handshake does not declare"
+	}
+	return StatusPass, detail
 }
 
 // probeProvision verifies the runtime/transport un-weld's box-without-agent op:

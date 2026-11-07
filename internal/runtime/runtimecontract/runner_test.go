@@ -83,18 +83,26 @@ func TestRunCoversEveryCatalogRequirementInOrder(t *testing.T) {
 }
 
 func TestGoldenReferenceIsFullyConformant(t *testing.T) {
-	report := runGolden(t, writeGolden(t))
-	if report.Failed() {
-		for _, res := range report.Results {
-			if res.Status == StatusFail {
-				t.Errorf("golden failed %s: %s", res.Code, res.Detail)
+	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
+		t.Run(name, func(t *testing.T) {
+			state := t.TempDir()
+			report := runGolden(t, writeScript(t, state, bodies))
+			if report.Failed() {
+				for _, res := range report.Results {
+					if res.Status == StatusFail {
+						t.Errorf("golden failed %s: %s", res.Code, res.Detail)
+					}
+				}
+				t.Fatalf("golden reference must pass every requirement; summary=%+v", report.Summary)
 			}
-		}
-		t.Fatalf("golden reference must pass every requirement; summary=%+v", report.Summary)
-	}
-	if report.Summary.Passed != len(catalog) {
-		t.Errorf("golden passed %d/%d (skipped %d) — the golden must exercise every required behavior",
-			report.Summary.Passed, len(catalog), report.Summary.Skipped)
+			if report.Summary.Passed != len(catalog) {
+				t.Errorf("golden passed %d/%d (skipped %d) — the golden must exercise every required behavior",
+					report.Summary.Passed, len(catalog), report.Summary.Skipped)
+			}
+			if _, err := os.Stat(filepath.Join(state, "tmux-rejected")); !os.IsNotExist(err) {
+				t.Error("ops golden received tmux")
+			}
+		})
 	}
 }
 
