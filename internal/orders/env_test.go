@@ -44,3 +44,22 @@ func TestValidateExecEnvOverridesRejectsBdContributorRouting(t *testing.T) {
 		t.Fatal("ValidateExecEnvOverrides() = nil, want error for reserved BD_ROUTING_MODE override")
 	}
 }
+
+// TestReservedExecEnvKeysIncludeCityName guards the city identity projection:
+// exec orders stamp GC_CITY_NAME from the city's own resolved identity, so an
+// order's [order.env] must not be able to repoint a child at another city's
+// name. The same guard rejects GC_CITY_NAME as a webhook rule arg name.
+func TestReservedExecEnvKeysIncludeCityName(t *testing.T) {
+	if !IsReservedExecEnvKey("GC_CITY_NAME") {
+		t.Error("IsReservedExecEnvKey(\"GC_CITY_NAME\") = false, want true")
+	}
+}
+
+// TestValidateExecEnvOverridesRejectsCityName confirms the reservation is
+// enforced end-to-end through the order validation path.
+func TestValidateExecEnvOverridesRejectsCityName(t *testing.T) {
+	order := Order{Name: "o", Env: map[string]string{"GC_CITY_NAME": "other-city"}}
+	if err := ValidateExecEnvOverrides(order); err == nil {
+		t.Fatal("ValidateExecEnvOverrides() = nil, want error for reserved GC_CITY_NAME override")
+	}
+}

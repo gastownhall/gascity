@@ -9816,6 +9816,7 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 		"BD_EXPORT_AUTO",
 		"GC_BEADS",
 		"GC_BEADS_SCOPE_ROOT",
+		"GC_CITY_NAME",
 	} {
 		t.Run(key, func(t *testing.T) {
 			a := orders.Order{
@@ -9828,9 +9829,12 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 				},
 			}
 
-			_, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
+			envSlice, err := orderExecEnvWithError(cityDir, nil, target, a, nil)
 			if err == nil {
 				t.Fatal("orderExecEnvWithError() succeeded; want reserved env key error")
+			}
+			if len(envSlice) != 0 {
+				t.Fatalf("orderExecEnvWithError() returned env alongside rejection; want none, got %v", envSlice)
 			}
 			if !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "controller-owned") {
 				t.Fatalf("error = %q, want controller-owned %s diagnostic", err, key)
