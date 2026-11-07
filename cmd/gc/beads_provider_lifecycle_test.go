@@ -6698,6 +6698,23 @@ func TestSettleAdoptedDefaultRigBdSchemaForwardsNonemptySuccessOutput(t *testing
 	}
 }
 
+// Any other migration failure fails settlement with the scope and bd's
+// diagnostic, before readiness can read a half-settled store.
+func TestSettleAdoptedDefaultRigBdSchemaFailsOtherMigrationErrorsWithScopeContext(t *testing.T) {
+	run, _ := settleRecordingRunner("bd version 1.3.1-rc.1", nil,
+		errors.New("exit status 1: Error: cannot complete schema migrations: table 'issues' has uncommitted changes in the working set"))
+	err := settleAdoptedDefaultRigBdSchema("/rigs/api", run, io.Discard)
+	if err == nil {
+		t.Fatal("expected the migration failure to fail settlement")
+	}
+	if !strings.Contains(err.Error(), "/rigs/api") {
+		t.Fatalf("err = %v, want the scope identified", err)
+	}
+	if !strings.Contains(err.Error(), "uncommitted changes in the working set") {
+		t.Fatalf("err = %v, want bd's diagnostic carried", err)
+	}
+}
+
 // behindSchemaAdoptionFixture builds a doltlite city with an already
 // initialized direct-server rig store and one fake bd that serves the init
 // (already-initialized refusal), the version probe (1.3.1-rc.1) and the
@@ -6791,6 +6808,32 @@ func TestSettleAdoptedDefaultRigBdSchemaRemoteBackedRefusalLeavesReadinessAuthor
 				}
 			}
 		})
+	}
+}
+
+// Issue #8106, the fatal arm: a migration failure other than the
+// remote-backed refusal fails rig initialization with the scope and bd's own
+// diagnostic, before readiness reads a half-settled store.
+func TestInitAndHookDirDefaultRigSchemaMigrationFailureBlocksReadiness(t *testing.T) {
+	cityPath, rigPath, seqPath := behindSchemaAdoptionFixture(t,
+		"echo \"Error: cannot complete schema migrations: table 'issues' has uncommitted changes in the working set\" >&2\nexit 1\n",
+		"printf '[]\\n'\n")
+	err := initAndHookDir(cityPath, rigPath, "tc")
+	if err == nil {
+		t.Fatal("a real migration failure must fail rig initialization")
+	}
+	if !strings.Contains(err.Error(), rigPath) {
+		t.Fatalf("err = %v, want the scope identified", err)
+	}
+	if !strings.Contains(err.Error(), "uncommitted changes in the working set") {
+		t.Fatalf("err = %v, want bd's diagnostic carried", err)
+	}
+	data, err := os.ReadFile(seqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains("\n"+string(data)+"\n", "\nlist\n") {
+		t.Fatalf("readiness must not run after a failed migration; bd commands:\n%s", data)
 	}
 }
 
