@@ -34,8 +34,10 @@ go_test(
     ],
     data = [
         "opencode_plugin.test.mjs",
+        "pi_hook.test.mjs",
         "//internal/bootstrap/packs/core:overlay/per-provider/mimocode/.mimocode/plugin/gascity.js",
         "//internal/bootstrap/packs/core:overlay/per-provider/opencode/.opencode/plugins/gascity.js",
+        "//internal/bootstrap/packs/core:overlay/per-provider/pi/.pi/extensions/gc-hooks.js",
     ],
     embed = [":hooks"],
     deps = [
