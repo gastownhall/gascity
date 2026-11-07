@@ -23,6 +23,7 @@ func defaultFlags() Flags {
 		opsContent:               resolved[Mode]{value: Auto, origin: OriginBuiltin},
 		opsControl:               resolved[Mode]{value: Auto, origin: OriginBuiltin},
 		opsLifecycle:             resolved[Mode]{value: Auto, origin: OriginBuiltin},
+		strandedRoutedDemand:     resolved[Mode]{value: Off, origin: OriginBuiltin},
 	}
 }
 

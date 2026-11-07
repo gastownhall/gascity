@@ -281,20 +281,25 @@ const (
 	PackRootMetadataKey                 = "gc.pack_root"
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey              = "gc.ralph_step_id"
-	ReasoningMetadataKey                = "gc.reasoning"
-	RequiredArtifactMetadataKey         = "gc.required_artifact"
-	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
-	ReviewGateMetadataKey               = "gc.review_gate"
-	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
-	RetryCountMetadataKey               = "gc.retry_count"
-	RetryFromMetadataKey                = "gc.retry_from"
-	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
-	RetryStateMetadataKey               = "gc.retry_state"
-	RigRootMetadataKey                  = "gc.rig_root"
-	RootBeadIDMetadataKey               = "gc.root_bead_id"
-	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
-	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
+	// PoolDemandWispMetadataKey marks a molecule/wisp bead as carrying
+	// order-dispatch pool demand, the one narrow additive exception to
+	// readyExcludeTypes for stranded-routed-demand detection purposes. See
+	// cmd/gc's stranded_routed_demand.go.
+	PoolDemandWispMetadataKey       = "gc.pool_demand_wisp"
+	RalphStepIDMetadataKey          = "gc.ralph_step_id"
+	ReasoningMetadataKey            = "gc.reasoning"
+	RequiredArtifactMetadataKey     = "gc.required_artifact"
+	RequiredArtifactsMetadataKey    = "gc.required_artifacts"
+	ReviewGateMetadataKey           = "gc.review_gate"
+	RetryAttemptMetadataKey         = "gc.retry_attempt" // see attempt.go
+	RetryCountMetadataKey           = "gc.retry_count"
+	RetryFromMetadataKey            = "gc.retry_from"
+	RetrySessionRecycledMetadataKey = "gc.retry_session_recycled"
+	RetryStateMetadataKey           = "gc.retry_state"
+	RigRootMetadataKey              = "gc.rig_root"
+	RootBeadIDMetadataKey           = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey   = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey     = "gc.root_settle_failed"
 	// RootStoreRefMetadataKey records the SCOPE a graph tree runs in:
 	// city:<name> or rig:<name>. It is never a location. On a split city every
 	// graph bead lives in the city binding whatever its scope (the S4
@@ -303,15 +308,26 @@ const (
 	RootStoreRefMetadataKey          = "gc.root_store_ref"
 	RouteQuarantineMetadataKey       = "gc.route_recovery_quarantined"
 	RouteQuarantineReasonMetadataKey = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey              = "gc.routed_to"
-	RunTargetMetadataKey             = "gc.run_target"
-	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey             = "gc.scope_kind"
-	ScopeNameMetadataKey             = "gc.scope_name"
-	ScopeRefMetadataKey              = "gc.scope_ref"
-	ScopeRoleMetadataKey             = "gc.scope_role"
-	SessionAffinityMetadataKey       = "gc.session_affinity"
-	SessionIDMetadataKey             = "gc.session_id"
+	// RoutedDemandStrandedEscalatedAtMetadataKey stamps the RFC3339 timestamp
+	// a stranded routed-demand template's escalation emission fired, so later
+	// ticks know the escalation has already happened once. See
+	// cmd/gc's stranded_routed_demand.go.
+	RoutedDemandStrandedEscalatedAtMetadataKey = "gc.routed_demand_stranded_escalated_at"
+	// RoutedDemandStrandedFirstSeenMetadataKey stamps the RFC3339 timestamp a
+	// bead was first observed as stranded routed demand, so the reconciler
+	// emits routed_demand.stranded once at first detection and once more at
+	// the escalation threshold instead of every reconcile tick. See
+	// cmd/gc's stranded_routed_demand.go.
+	RoutedDemandStrandedFirstSeenMetadataKey = "gc.routed_demand_stranded_first_seen"
+	RoutedToMetadataKey                      = "gc.routed_to"
+	RunTargetMetadataKey                     = "gc.run_target"
+	RuntimeVarsMetadataKey                   = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey                     = "gc.scope_kind"
+	ScopeNameMetadataKey                     = "gc.scope_name"
+	ScopeRefMetadataKey                      = "gc.scope_ref"
+	ScopeRoleMetadataKey                     = "gc.scope_role"
+	SessionAffinityMetadataKey               = "gc.session_affinity"
+	SessionIDMetadataKey                     = "gc.session_id"
 	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
 	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
 	// when it was kept) mark a claim a close kept because no lane serves it
@@ -723,6 +739,7 @@ var KnownMetadataKeys = []string{
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
+	PoolDemandWispMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
@@ -740,6 +757,8 @@ var KnownMetadataKeys = []string{
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,
+	RoutedDemandStrandedEscalatedAtMetadataKey,
+	RoutedDemandStrandedFirstSeenMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,

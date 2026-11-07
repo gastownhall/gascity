@@ -30,6 +30,7 @@ rollout:beads.allow_schema_behind_migrate
 rollout:ops.content
 rollout:ops.control
 rollout:ops.lifecycle
+rollout:demand.stranded_route_policy
 ops-recording
 conversation-lanes
 legacy-delivery

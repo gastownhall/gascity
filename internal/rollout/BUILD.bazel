@@ -9,6 +9,7 @@ go_library(
         "flag_beads_conditional_writes.go",
         "flag_beads_guarded_release.go",
         "flag_daemon_formula_v2.go",
+        "flag_demand_stranded_route.go",
         "flag_ops_content.go",
         "flag_ops_control.go",
         "flag_ops_lifecycle.go",

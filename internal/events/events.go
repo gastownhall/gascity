@@ -613,6 +613,17 @@ const (
 	// and from gc's ready projection; the payload counts the rows corrected.
 	BeadsBlockedRecomputed = "beads.blocked.recomputed"
 
+	// RoutedDemandStranded fires when a gc.routed_to demand target (a ready
+	// work bead or an order-dispatch pool-demand wisp) resolves to a template
+	// no session can ever wake for — the template resolves to no configured
+	// agent (dead/misspelled route), the agent is suspended, or the agent
+	// cannot support a generic ephemeral session — and no session is
+	// presently open for it. Gated by the demand.stranded_route_policy
+	// rollout gate: Auto emits with severity=warning and never blocks;
+	// Require emits with severity=failure and also fails the owning order
+	// run.
+	RoutedDemandStranded = "routed_demand.stranded"
+
 	// Storage-class binding outcomes. Emitted once per controller boot by the
 	// storage gate, and once per run by `gc storage migrate`, for a city whose
 	// [storage.classes] relocate the infrastructure classes to a binding.
@@ -726,6 +737,7 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
 	OpsRecordingDegraded,
 	OpChanged, FactRecorded,
+	RoutedDemandStranded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,

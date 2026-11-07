@@ -3392,6 +3392,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// only the marker-gated terminal lane and leaves the fleet-proportional live
 	// lane to the first steady-state tick.
 	cr.emitDueComputeFacts(ctx, sessionBeads.OpenInfos(), bootReconcile)
+	if err := detectStrandedRoutedDemand(cr.cityWorkStore(), cr.ordersBeadStore(""), cr.cfg, sessionBeads, cr.rec, cr.stderr, time.Now()); err != nil {
+		logDispatchError(cr.stderr, "gc: stranded routed demand detection: %v", err)
+	}
 	// Historical sidecar reconciliation is supervisor-owned and asynchronous.
 	// Keep it off the synchronous boot/readiness pass; the first steady-state
 	// patrol starts one bounded-batch background pass without delaying city

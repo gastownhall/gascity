@@ -490,6 +490,7 @@ go_test(
         "rigidem_hardening_test.go",
         "rigidem_test.go",
         "root_store_ref_residence_guard_test.go",
+        "routed_demand_event_payload_test.go",
         "run_cancel_gate_test.go",
         "run_cancel_read_your_writes_test.go",
         "run_detail_retired_sessions_test.go",

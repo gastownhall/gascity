@@ -182,6 +182,12 @@ var typedClassCodecCensus = map[string]map[string]int{
 	// the last interior caller is gone. The needle stays policed as a tripwire until
 	// the WI-7 unexport (pollerKeyFromBead) lands.
 	"RunFromTrackingBead(": {
+		// failStrandedOrderRuns classifies already-in-hand throttled-signal beads
+		// (routedDemandStrandedSignal.beads), the same "project a bead I already
+		// hold" shape as the huma_handlers_orders.go entry below — not a
+		// fetch-by-handle/scoped-name, so the orders.Store.Get/RecentRuns front
+		// door doesn't fit either call site. Sanctioned edge fold-in.
+		"cmd/gc/stranded_routed_demand.go":     1,
 		"internal/api/huma_handlers_orders.go": 1,
 	},
 	"MaxSeqFromLabels(": {

@@ -218,7 +218,10 @@ var builtinAuthorship = map[string]Authorship{
 	// controller process; the CLI warns on stderr instead (DES-O0API D13).
 	OpsRecordingDegraded:   AuthorController,
 	ExecutionStepCompleted: AuthorController,
-	ExecutionStepStalled:   AuthorController,
+	// The reconciler's stranded routed-demand detector, the only emitter,
+	// runs in the controller's bead reconcile tick (rule 4).
+	RoutedDemandStranded: AuthorController,
+	ExecutionStepStalled: AuthorController,
 	// The work ladder's facts: the v2 lane step records them (rule 4).
 	WorkNudged:            AuthorController,
 	WorkNudgeFailed:       AuthorController,

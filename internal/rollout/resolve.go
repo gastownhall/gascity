@@ -79,6 +79,13 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		return Flags{}, err
 	}
 
+	// demand.stranded_route_policy — Mode gate, EnvOverrides semantics.
+	if err := resolveModeGate(cfg, lookup, &f, demandStrandedRoutePolicySpec(),
+		readDemandStrandedRoutePolicy,
+		func(f *Flags, r resolved[Mode]) { f.strandedRoutedDemand = r }); err != nil {
+		return Flags{}, err
+	}
+
 	return f, nil
 }
 

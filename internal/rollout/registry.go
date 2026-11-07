@@ -129,6 +129,23 @@ var specs = []Spec{
 			"every request gets one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-22 " +
 			"with the legacy lifecycle executors, deleting internal/opjournal/legacyop.",
 	},
+	{
+		Key:            keyDemandStrandedRoutePolicy,
+		Category:       InfraRollout,
+		ConfigPath:     "demand.stranded_route_policy",
+		EnvOverride:    envDemandStrandedRoutePolicy,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-o3ko1j", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-01-15",
+		VersionAnchor:  "GC_DEMAND_STRANDED_ROUTE_MIN_VERSION",
+		SelectsBetween: [2]string{"silently strand routed-but-unwakeable demand", "surface it via a warning or failure event"},
+		Justification: "Adopt fail-loud detection for gc.routed_to demand that no session can " +
+			"ever satisfy (a dead or misspelled route target, or an agent that is suspended or " +
+			"cannot support a generic ephemeral session), so an operator sees a warning event " +
+			"by default and can flip to a hard failure once the detector has proven itself " +
+			"across the fleet.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers
@@ -171,3 +188,7 @@ func beadsGuardedReleaseSpec() Spec { return specByKey(keyBeadsGuardedRelease) }
 // beadsAllowSchemaBehindMigrateSpec returns the canonical Spec for the beads
 // allow-schema-behind-migrate gate.
 func beadsAllowSchemaBehindMigrateSpec() Spec { return specByKey(keyBeadsAllowSchemaBehindMigrate) }
+
+// demandStrandedRoutePolicySpec returns the canonical Spec for the stranded
+// routed-demand policy gate.
+func demandStrandedRoutePolicySpec() Spec { return specByKey(keyDemandStrandedRoutePolicy) }

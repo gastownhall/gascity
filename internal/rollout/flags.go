@@ -26,6 +26,7 @@ type Flags struct {
 	opsContent               resolved[Mode]
 	opsControl               resolved[Mode]
 	opsLifecycle             resolved[Mode]
+	strandedRoutedDemand     resolved[Mode]
 	notices                  []Notice
 }
 
@@ -48,6 +49,8 @@ func (f Flags) OriginOf(key string) Origin {
 		return f.opsControl.origin
 	case keyOpsLifecycle:
 		return f.opsLifecycle.origin
+	case keyDemandStrandedRoutePolicy:
+		return f.strandedRoutedDemand.origin
 	default:
 		return ""
 	}
@@ -81,6 +84,8 @@ func (f Flags) ValueOf(key string) string {
 		return string(f.opsControl.value)
 	case keyOpsLifecycle:
 		return string(f.opsLifecycle.value)
+	case keyDemandStrandedRoutePolicy:
+		return string(f.strandedRoutedDemand.value)
 	default:
 		return ""
 	}
