@@ -138,6 +138,7 @@ go_test(
         "process_env_setup_test.go",
         "process_group_unix_test.go",
         "process_table_unread_test.go",
+        "proctable_no_roots_test.go",
         "proctable_tracking_test.go",
         "program_capture_cached_launch_test.go",
         "program_capture_heal_test.go",

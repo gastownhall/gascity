@@ -473,6 +473,12 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner].
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	found, scanErr := proctable.ScanBySessionID(id)
+	if len(found) == 0 {
+		// No roots: nothing to track, claim, or terminate, so tmux is asked
+		// nothing — a wedged tmux server cannot hold the pre-start scan that
+		// has no roots to find.
+		return found, scanErr
+	}
 	running, listErr := p.ListRunning("")
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
