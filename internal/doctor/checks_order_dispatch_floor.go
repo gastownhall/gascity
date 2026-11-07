@@ -32,7 +32,8 @@ func WithOrderDispatchFloorInapplicableFunc(fn OrderDispatchFloorInapplicableFun
 // when every counted order is due together.
 //
 // The dispatcher starts at most orders.max_dispatches_per_tick orders per pass
-// and passes run one per patrol interval, so a ring of N cooldown, cron and
+// and passes are paced by the patrol interval (measured from the end of the
+// previous pass, so slow passes stretch it), so a ring of N cooldown, cron and
 // event orders takes ceil(N/budget) passes to come all the way round. When
 // every counted order is due together, an order can fire no more often than
 // that: a 30s cooldown beside eight other due orders fires about every 90s,
@@ -171,7 +172,7 @@ func (c *OrderDispatchFloorCheck) Run(ctx *CheckContext) *CheckResult {
 // itself, and the ring.
 func orderDispatchFloorHint(ringSize int, patrol, tightest, floor time.Duration) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Worst case, with every counted order due together, the minimum interval is %s. ", formatDispatchFloorDuration(floor))
+	fmt.Fprintf(&b, "Worst case for the dispatch budget alone, with every counted order due together, the minimum interval it supports is %s (slow passes stretch this further). ", formatDispatchFloorDuration(floor))
 	if allowed := int(tightest / patrol); allowed >= 1 {
 		fmt.Fprintf(&b, "Raise orders.max_dispatches_per_tick to %d to fit the tightest order, ", (ringSize+allowed-1)/allowed)
 	} else {
