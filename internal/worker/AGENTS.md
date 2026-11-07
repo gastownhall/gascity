@@ -35,7 +35,13 @@ direct `session.Manager.CreateSession` call sites outside the worker boundary.
 a runtime probe, a metadata read) without waiting forever. The call under the
 wait can hang on a wedged tmux subprocess or a stalled store, and nothing
 cancels it, so the wait is raced against the caller's context and abandoned
-when the context ends. Take the bound from the caller's own context.
+when the context ends. Take the bound from the caller's own context. The
+implementation — the latch tables, the abandonment, the shared flights —
+lives in `internal/runtime` (`runtime.CallBounded`/`runtime.CallShared`,
+`bounded_call.go`), so one process holds one latch per key across every
+surface that bounds a call; `worker.ObserveBounded`/`ObserveShared` are the
+worker surface of it, and `ErrObservationOutstanding` is that same sentinel,
+`runtime.ErrBoundedCallOutstanding`.
 
 - An abandoned wait is an error wrapping both `runtime.ErrRuntimeUnavailable`
   and the context error. It is never a confirmed absence: callers must treat it
