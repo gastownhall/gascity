@@ -1743,10 +1743,10 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource",
-			// The batch create and edge write report beads.ErrBatchCopyUnsupported
-			// over native Dolt, and the copy then refuses the binding: the
-			// answer it gives when the wrapper lacks them.
-			"CreateWithForeignIDBatch", "CreateWithStorage", "DepAddBatch", "DepAddWithMetadata",
+			// The batch edge write reports beads.ErrBatchCopyUnsupported over
+			// native Dolt, and the copy then refuses the binding: the answer it
+			// gives when the wrapper lacks it.
+			"CreateWithStorage", "DepAddBatch", "DepAddWithMetadata",
 			// DepMetadataAbsentByProtocol forwards the engine's declaration, and
 			// neither engine declares one: ("", false), as its absence answers.
 			"DepMetadataAbsentByProtocol",
@@ -1761,6 +1761,9 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ConditionalWritesModeSource", "Count",
+			// CreatedForm over a SQLite binding returns the bead as it is: the
+			// store round-trips every field, as its absence says.
+			"CreatedForm",
 			"DepMetadataAbsentByProtocol",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
 			// GetExactBatch over a SQLite binding reports
