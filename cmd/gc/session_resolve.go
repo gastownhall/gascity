@@ -156,7 +156,8 @@ func resolveSessionIDWithOptions(
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
-	if id, err := session.ResolveSessionID(sessions, identifier); err == nil {
+	// The exact ID lookup was already made above or by the caller.
+	if id, err := session.ResolveSessionIDByLiveIdentifier(sessions, identifier); err == nil {
 		if cfg != nil {
 			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
 				if isNamedSessionInfo(info) {
