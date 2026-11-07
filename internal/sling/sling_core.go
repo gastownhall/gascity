@@ -2371,6 +2371,13 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	batchResult.IdempotentCt = skips.idempotent
 	batchResult.NotOpenCt = skips.notOpen
 
+	// One poke for the whole batch, as a single-bead sling pokes after its
+	// route: without it the routed children wait for the next patrol tick.
+	// Dry-run returned above, so only a real batch reaches here.
+	if routed > 0 && !opts.SkipPoke && deps.Notify != nil {
+		deps.Notify.PokeController(deps.CityPath)
+	}
+
 	if opts.Nudge && routed > 0 {
 		batchResult.NudgeAgent = &a
 	}
