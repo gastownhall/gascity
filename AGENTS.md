@@ -37,7 +37,7 @@ next to that code; read the matching file before changing it.
 | Anything under `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
 | New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
 | A controller or session reconciler incident | `engdocs/contributors/reconciler-debugging.md` (use `gc trace`) |
-| Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` (lifecycle analysis and cleanup-bug lessons) |
+| Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` |
 | A `release-gates/*.md` deploy gate | `engdocs/contributors/release-gate-criteria-conventions.md` |
 | Bazel builds | `engdocs/bazel-quickstart.md` |
 | Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
@@ -53,15 +53,14 @@ next to that code; read the matching file before changing it.
   self-explanatory fix (a typo, a flake, a refactor, a CI or docs tweak) can
   go straight to a pull request whose description covers the why. Every pull
   request shows end-to-end evidence that the change works; when an issue
-  exists, the pull request says `Closes #<issue>`. See `CONTRIBUTING.md`.
-- **Agents:** when you do file an issue, use the bug or feature form fields,
-  fill each from evidence, and answer `NOT_ENOUGH_INFO` where the evidence
-  runs out.
+  exists, it says `Closes #<issue>`. See `CONTRIBUTING.md`.
+- **Agents:** when you file an issue, use the bug or feature form fields,
+  fill each from evidence, and answer `NOT_ENOUGH_INFO` where it runs out.
 - Branch from `main` (`fix/*`, `feat/*`, `refactor/*`, `docs/*`), use
   Conventional Commits, and push to your branch — never to `main`.
 - A fix that changes an invariant or boundary updates the owning `AGENTS.md`
   in the same pull request.
-- Maintainers also keep an internal bd ledger; it is optional and never
+- Maintainers also keep an internal bd ledger, optional and never
   required for contributions. See
   `engdocs/contributors/maintainer-environment.md`.
 
@@ -139,6 +138,8 @@ Violating any fails the build. Details live in the linked files.
   types; the OpenAPI spec is generated (`TestOpenAPISpecInSync`); every
   event type has a registered payload
   (`TestEveryKnownEventTypeHasRegisteredPayload`).
+- **CLI JSON baseline.** Breaking `schemas/**` changes bump `schema_version`
+  (`internal/schemacontract/AGENTS.md`).
 - **Vendor-neutral hosted-service wire.** Commercial policy is never a wire
   field (`internal/cliauth/AGENTS.md`, `scripts/check-core-boundary.sh`).
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
