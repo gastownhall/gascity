@@ -342,7 +342,7 @@ func TestPoolTerminalCreateCooldownLogsSuppression(t *testing.T) {
 	var stderr bytes.Buffer
 	terminalCooldownBuild(t, cityPath, now, terminalCooldownCity(terminalCooldownAgent("worker", workDir)), store, &stderr)
 
-	if !strings.Contains(stderr.String(), errPoolSessionCreateTerminalCooldown.Error()) ||
+	if !strings.Contains(stderr.String(), "terminal cooldown active") ||
 		!strings.Contains(stderr.String(), "fresh create blocked") {
 		t.Fatalf("stderr %q does not record the terminal-cooldown suppression", stderr.String())
 	}
