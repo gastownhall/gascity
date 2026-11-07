@@ -814,3 +814,44 @@ func TestBurnGuardNeverBurnsAnUnreadableSubtree(t *testing.T) {
 		})
 	}
 }
+
+// TestAttachmentScopeListsTheGraphStoreFirstAndOneStoreOnce pins
+// attachmentScope.stores: the graph store first, then the work store, and one
+// store listed once. Handles of two classes over one store are that store
+// (beads.SameStore), so a single-store city probes it once.
+func TestAttachmentScopeListsTheGraphStoreFirstAndOneStoreOnce(t *testing.T) {
+	one := beads.NewMemStore()
+	if got := withStore(SlingDeps{}, one).attachmentScope().stores(); len(got) != 1 || !beads.SameStore(got[0], one) {
+		t.Errorf("single-store scope lists %v, want the one store once", got)
+	}
+	work, graph := beads.NewMemStore(), beads.NewMemStore()
+	got := attachmentScope{work: beadstest.Work(work), graph: beadstest.Graph(graph)}.stores()
+	if len(got) != 2 || !beads.SameStore(got[0], graph) || !beads.SameStore(got[1], work) {
+		t.Errorf("split scope lists %v, want the graph store, then the work store", got)
+	}
+}
+
+// getOnly is a querier that can read a bead but cannot list children.
+type getOnly struct{ store beads.Store }
+
+func (g getOnly) Get(id string) (beads.Bead, error) { return g.store.Get(id) }
+
+// TestAttachmentProbeListsChildrenThroughTheWorkStore pins
+// attachmentChildQuerier: a caller's querier that cannot list children leaves
+// the parent's DB children to the scope's work store, so a molecule child
+// attached only by its parent id still blocks.
+func TestAttachmentProbeListsChildrenThroughTheWorkStore(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "source", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{Title: "molecule", Type: "molecule", ParentID: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	att, err := findBlockingAttachment(getOnly{store}, parent.ID, withStore(SlingDeps{}, store).attachmentScope())
+	if err != nil || att == nil || att.Bead.ID != child.ID {
+		t.Fatalf("findBlockingAttachment = %+v, %v; want the molecule child %s listed through the work store", att, err, child.ID)
+	}
+}

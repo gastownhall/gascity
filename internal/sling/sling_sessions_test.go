@@ -272,3 +272,22 @@ func TestRigScopeGraphSlingBindsSessionsInTheCitySessionsStore(t *testing.T) {
 		}
 	})
 }
+
+// TestUndeliverableHandoffWarningReadsTheClaimantInTheSessionsStore is E3's
+// rule in the undeliverable-hand-off warning: on a split city a bead one of
+// the target pool's own sessions holds under its session bead id is not
+// stranded, because the claimant is read in the sessions store.
+func TestUndeliverableHandoffWarningReadsTheClaimantInTheSessionsStore(t *testing.T) {
+	pool := config.Agent{Name: "smiths", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(4)}
+	work, sessions := beads.NewMemStore(), beads.NewMemStoreFrom(100, nil, nil)
+	own := createPoolSessionBead(t, sessions, agentutil.RoutedToIdentity(&pool), "open")
+	held, err := work.Create(beads.Bead{Title: "held", Type: "task", Status: "in_progress", Assignee: own.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps, _ := splitSessionsDeps(t, work, sessions)
+	molErr := &MoleculeAttachedError{Label: "molecule", AttachmentID: "mol-1"}
+	if msg, warn := undeliverableHandoffWarning(work, deps, held.ID, pool, molErr); warn {
+		t.Fatalf("a claim by the pool's own session %s, in the sessions store, reported undeliverable: %s", own.ID, msg)
+	}
+}

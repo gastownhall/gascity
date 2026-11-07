@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -77,5 +80,51 @@ func TestAPIBeadRouterWithNoStoreRefuses(t *testing.T) {
 	err := r.Route(t.Context(), sling.RouteRequest{BeadID: "gc-1", Target: "myrig/worker"})
 	if err == nil || !strings.Contains(err.Error(), "requires a store") {
 		t.Fatalf("Route with no store = %v, want the requires-a-store refusal", err)
+	}
+}
+
+// TestSlingReslingOfPoolClaimedWorkIsIdempotent pins POST /sling's sessions
+// store (OD-3c): the deps carry Stores().Sessions(), so a re-sling of work
+// one of the pool's own sessions claimed under its session bead id, which
+// lives in the sessions store, is an idempotent no-op on a split city and
+// routes nothing again.
+func TestSlingReslingOfPoolClaimedWorkIsIdempotent(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Agents = append(state.cfg.Agents, config.Agent{Name: "smiths", Dir: "myrig", MaxActiveSessions: intPtr(4)})
+	sessions := beads.NewMemStoreFrom(500, nil, nil)
+	state.sessionsBeadStore = sessions
+	own, err := sessions.Create(beads.Bead{
+		Title:    "pool session",
+		Type:     "session",
+		Labels:   []string{"gc:session"},
+		Metadata: map[string]string{"template": "myrig/smiths", "pool_managed": "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := state.stores["myrig"]
+	held, err := work.Create(beads.Bead{Title: "held", Type: "task", Status: "in_progress", Assignee: own.ID, Metadata: map[string]string{"gc.routed_to": "myrig/smiths"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convoy, err := work.Create(beads.Bead{Title: sling.AutoConvoyRootTitle(held.ID), Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := work.DepAdd(convoy.ID, held.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(`{"target":"myrig/smiths","bead":"`+held.ID+`"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp["convoy_id"]; got != nil && got != "" {
+		t.Errorf("re-sling of work pool session %s holds finalized again (convoy_id %v), want an idempotent no-op", own.ID, got)
 	}
 }

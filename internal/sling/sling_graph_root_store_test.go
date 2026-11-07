@@ -1,6 +1,7 @@
 package sling
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -336,5 +337,28 @@ func TestForcedGraphV2ReplacementRollbackRestoresInTheGraphStore(t *testing.T) {
 	}
 	if restored.Status == "closed" {
 		t.Errorf("displaced root %s is still closed after the failed replacement rolled back; the restore ran against a store that does not hold it, so the city lost both workflows", first.WorkflowID)
+	}
+}
+
+// TestFinalizeWithNoStoreHoldingTheBeadRefuses pins finalizeInStore's absent
+// molecule target: it is not boxed into the bead's writer, so a sling that
+// must stamp its initiator refuses rather than writing through a zero target.
+func TestFinalizeWithNoStoreHoldingTheBeadRefuses(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+	opts := SlingOpts{Target: config.Agent{Name: "mayor"}, BeadOrFormula: "gc-1", Initiator: "alice"}
+	_, err := finalizeInStore(opts, deps, beads.MoleculeTarget{}, "gc-1", "bead", SlingResult{})
+	if err == nil || !strings.Contains(err.Error(), "no store holds the bead") {
+		t.Fatalf("finalizeInStore over an absent target = %v, want the no-store refusal", err)
+	}
+}
+
+// TestValidateExistingBeadWithNoStoreSaysSo pins validateExistingBead's zero
+// work store: with no validation querier it reports that no store is
+// configured, rather than probing a zero handle.
+func TestValidateExistingBeadWithNoStoreSaysSo(t *testing.T) {
+	err := validateExistingBead("gc-1", SlingDeps{})
+	var lookupErr *BeadLookupError
+	if !errors.As(err, &lookupErr) || !strings.Contains(lookupErr.Err.Error(), "store not configured") {
+		t.Fatalf("validateExistingBead with no store = %v, want the store-not-configured lookup error", err)
 	}
 }
