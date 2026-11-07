@@ -190,6 +190,7 @@ func normalizeWarmupOpts(opts WarmupOpts) WarmupOpts {
 	if opts.MailFrom == "" {
 		opts.MailFrom = defaultWarmupMailFrom
 	}
+	opts.MailTo = strings.TrimSpace(opts.MailTo)
 	if opts.MailTo == "" {
 		opts.MailTo = defaultWarmupMailTo
 	}

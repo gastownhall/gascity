@@ -33,6 +33,33 @@ name = "mayor"
 	}
 }
 
+func TestParseDoctorWarmupMailTo(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test-city"
+
+[doctor]
+warmup_mail_to = "ops.lead"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Doctor.WarmupMailTo != "ops.lead" {
+		t.Errorf("WarmupMailTo = %q, want %q", cfg.Doctor.WarmupMailTo, "ops.lead")
+	}
+
+	cfg, err = Parse([]byte(`
+[workspace]
+name = "test-city"
+`))
+	if err != nil {
+		t.Fatalf("Parse without [doctor]: %v", err)
+	}
+	if cfg.Doctor.WarmupMailTo != "" {
+		t.Errorf("WarmupMailTo = %q, want empty so gc start keeps its default recipient", cfg.Doctor.WarmupMailTo)
+	}
+}
+
 func TestParseDoctorLocalChecks(t *testing.T) {
 	data := []byte(`
 [workspace]
