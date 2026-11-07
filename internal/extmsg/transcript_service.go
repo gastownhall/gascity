@@ -68,7 +68,7 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 			return ErrHydrationPending
 		}
 		if providerMessageID != "" {
-			existing, err := s.findTranscriptByProviderMessageLocked(ref, providerMessageID)
+			existing, err := s.findTranscriptByProviderMessageLive(ref, providerMessageID)
 			if err != nil {
 				return err
 			}
@@ -85,56 +85,90 @@ func (s *transcriptService) Append(ctx context.Context, input AppendTranscriptIn
 		if err != nil {
 			return err
 		}
-		sequence := state.NextSequence
-		fields := encodeMetadataFields(input.Metadata, map[string]string{
-			"schema_version":         strconv.Itoa(schemaVersion),
-			"scope_id":               ref.ScopeID,
-			"provider":               ref.Provider,
-			"account_id":             ref.AccountID,
-			"conversation_id":        ref.ConversationID,
-			"parent_conversation_id": ref.ParentConversationID,
-			"conversation_kind":      string(ref.Kind),
-			"sequence":               strconv.FormatInt(sequence, 10),
-			"kind":                   string(kind),
-			"provenance":             string(provenance),
-			"provider_message_id":    providerMessageID,
-			"explicit_target":        normalizeHandle(input.ExplicitTarget),
-			"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
-			"source_session_id":      strings.TrimSpace(input.SourceSessionID),
-			"created_at":             formatTime(createdAt),
-			"actor_json":             actorJSON,
-			"attachments_json":       attachmentsJSON,
-		})
-		labels := []string{
-			labelTranscriptBase,
-			transcriptConversationLabel(ref),
-			transcriptBucketLabel(ref, transcriptBucket(sequence)),
+		for range transcriptAppendMaxAttempts {
+			if err := checkContext(ctx); err != nil {
+				return err
+			}
+			// Live allocation state: another pool or process may have moved
+			// the frontier or stored entries this logical view cannot see.
+			liveState, err := s.findStateLiveLocked(ref)
+			if err != nil {
+				return err
+			}
+			if liveState == nil || liveState.ID != state.ID {
+				return fmt.Errorf("%w: transcript state for %s changed during append", ErrInvariantViolation, conversationLockKey(ref))
+			}
+			sequence, err := s.nextAllocatableSequenceLive(ref, liveState.NextSequence)
+			if err != nil {
+				return err
+			}
+			fields := encodeMetadataFields(input.Metadata, map[string]string{
+				"schema_version":         strconv.Itoa(schemaVersion),
+				"scope_id":               ref.ScopeID,
+				"provider":               ref.Provider,
+				"account_id":             ref.AccountID,
+				"conversation_id":        ref.ConversationID,
+				"parent_conversation_id": ref.ParentConversationID,
+				"conversation_kind":      string(ref.Kind),
+				"sequence":               strconv.FormatInt(sequence, 10),
+				"kind":                   string(kind),
+				"provenance":             string(provenance),
+				"provider_message_id":    providerMessageID,
+				"explicit_target":        normalizeHandle(input.ExplicitTarget),
+				"reply_to_message_id":    strings.TrimSpace(input.ReplyToMessageID),
+				"source_session_id":      strings.TrimSpace(input.SourceSessionID),
+				"created_at":             formatTime(createdAt),
+				"actor_json":             actorJSON,
+				"attachments_json":       attachmentsJSON,
+			})
+			labels := []string{
+				labelTranscriptBase,
+				transcriptConversationLabel(ref),
+				transcriptBucketLabel(ref, transcriptBucket(sequence)),
+			}
+			if providerMessageID != "" {
+				labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
+			}
+			pin := transcriptPinnedEntryID(state.ID, sequence)
+			created, createErr := s.store.Create(beads.Bead{
+				ID:          pin,
+				Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
+				Type:        "task",
+				Description: text,
+				Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
+				Metadata:    fields,
+			})
+			if createErr != nil {
+				pinState, entry, verifyErr := s.classifyPinnedCreateLocked(ref, state.ID, sequence, providerMessageID)
+				switch pinState {
+				case transcriptPinAbsent:
+					return fmt.Errorf("create transcript entry: %w", createErr)
+				case transcriptPinVerifyFailed:
+					return fmt.Errorf("create transcript entry: %w; verifying the pinned entry: %w", createErr, verifyErr)
+				case transcriptPinUnidentifiable:
+					return fmt.Errorf("create transcript entry: %w (the pinned entry %s cannot be identified as this message)", createErr, pin)
+				case transcriptPinForeign:
+					return verifyErr
+				case transcriptPinOurs:
+					if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence); err != nil {
+						return err
+					}
+					out = *entry
+					return nil
+				case transcriptPinAnother:
+					if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			if err := s.coverTranscriptFrontierLocked(ctx, ref, state.ID, sequence); err != nil {
+				return err
+			}
+			out, err = decodeTranscriptBead(created)
+			return err
 		}
-		if providerMessageID != "" {
-			labels = append(labels, transcriptProviderMessageLabel(ref, providerMessageID))
-		}
-		created, err := s.store.Create(beads.Bead{
-			Title:       fmt.Sprintf("%s#%d", conversationTitle(ref), sequence),
-			Type:        "task",
-			Description: text,
-			Labels:      append([]string{"gc:extmsg-transcript"}, labels...),
-			Metadata:    fields,
-		})
-		if err != nil {
-			return fmt.Errorf("create transcript entry: %w", err)
-		}
-		next := sequence + 1
-		updates := map[string]string{
-			"next_sequence": strconv.FormatInt(next, 10),
-		}
-		if state.EarliestAvailableSequence <= 0 {
-			updates["earliest_available_sequence"] = "1"
-		}
-		if err := s.store.SetMetadataBatch(state.ID, updates); err != nil {
-			return fmt.Errorf("update transcript state: %w", err)
-		}
-		out, err = decodeTranscriptBead(created)
-		return err
+		return fmt.Errorf("append transcript entry for %s: too many occupied sequences", conversationLockKey(ref))
 	})
 	return out, err
 }
@@ -787,32 +821,6 @@ func (s *transcriptService) findStateLocked(ref ConversationRef) (*ConversationT
 		}
 		if out != nil {
 			return nil, fmt.Errorf("%w: multiple transcript states for %s", ErrInvariantViolation, conversationLockKey(ref))
-		}
-		rec := record
-		out = &rec
-	}
-	return out, nil
-}
-
-func (s *transcriptService) findTranscriptByProviderMessageLocked(ref ConversationRef, providerMessageID string) (*ConversationTranscriptRecord, error) {
-	items, err := s.store.List(beads.ListQuery{Label: transcriptProviderMessageLabel(ref, providerMessageID)})
-	if err != nil {
-		return nil, fmt.Errorf("list transcript by provider message label: %w", err)
-	}
-	var out *ConversationTranscriptRecord
-	for _, item := range items {
-		if !hasLabel(item, "gc:extmsg-transcript") || item.Status == "closed" {
-			continue
-		}
-		record, err := decodeTranscriptBead(item)
-		if err != nil {
-			return nil, err
-		}
-		if !sameConversationRef(record.Conversation, ref) || record.ProviderMessageID != providerMessageID {
-			continue
-		}
-		if out != nil {
-			return nil, fmt.Errorf("%w: duplicate transcript provider message %q", ErrInvariantViolation, providerMessageID)
 		}
 		rec := record
 		out = &rec
