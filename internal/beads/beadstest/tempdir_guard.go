@@ -191,6 +191,10 @@ func markGitRoot(t testing.TB, dir string) {
 // the bait is a failure of that isolation, so it fails the caller in every run
 // and not only on a polluted host. The bait is checked when the test ends,
 // and a bd that wrote into it is reported with what it left there.
+//
+// GIT_DIR and GIT_WORK_TREE are unset for the rest of the test: either one
+// makes git ignore the dir's own .git, which would unbound the walk. Callers
+// therefore cannot be parallel tests.
 func GuardedBdWorkspaceDir(t testing.TB) string {
 	t.Helper()
 	return guardedBdWorkspaceDirWith(t, t.Errorf)
@@ -202,6 +206,12 @@ func GuardedBdWorkspaceDir(t testing.TB) string {
 // all. Ordinary callers want GuardedBdWorkspaceDir.
 func guardedBdWorkspaceDirWith(t testing.TB, errorf func(format string, args ...any)) string {
 	t.Helper()
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE"} {
+		t.Setenv(key, "") // registers the restore of any inherited value
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
 	root := GuardedTempDir(t)
 	baitDir := plantBait(t, root)
 	dir := filepath.Join(root, "workspace")
