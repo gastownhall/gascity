@@ -218,7 +218,9 @@ func TestReconcileSessionBeads_ProgressStallRecyclesIdleOnDemandSeatWithRoutedDe
 	if !strings.Contains(env.stderr.String(), "progress-stalled") {
 		t.Fatalf("stderr = %q, want a progress-stalled recycle for an idle on_demand seat with routed demand", env.stderr.String())
 	}
-	if env.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q still running; want it recycled when namedRoutedDemand is set for its identity", sessionName)
+	// The routed demand wakes the fresh conversation on the recycle pass once
+	// the stop is confirmed, so the Stop call is the recycle's proof.
+	if got := restartRequestFakeCallCount(env.sp, "Stop", sessionName); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1: session %q should be recycled when namedRoutedDemand is set for its identity", got, sessionName)
 	}
 }
