@@ -28,15 +28,70 @@ const (
 // deliver. TemplateParams projects onto it for the reconciler; the worker
 // resolvers build it from the session and its agent.
 type startupPromptSource struct {
-	TemplateName     string
-	SessionName      string
-	InstanceName     string
-	Prompt           string
-	IsACP            bool
-	ResolvedProvider *config.ResolvedProvider
-	HintNudge        string
-	RuntimeName      string
-	CityRuntimes     map[string]config.DiscoveredRuntime
+	TemplateName string
+	SessionName  string
+	InstanceName string
+	Prompt       string
+	// Beacon is the bare identity line (`[city] agent • ts`, no prime
+	// instruction) that opens a resume turn when the provider hook supplies
+	// the role (roleSuppliedByHook). The worker resolvers leave it empty: they
+	// carry no configured nudge, so that resume sends no turn at all. Were
+	// they to carry one, it would go out without a beacon.
+	Beacon string
+	IsACP  bool
+	// HookEnabled is config.AgentHasHooks for the launching agent: its
+	// provider hooks are installed.
+	HookEnabled bool
+	// ClientProviderChat marks a client's provider chat (isClientProviderChat),
+	// whose hook emits no persona.
+	ClientProviderChat bool
+	ResolvedProvider   *config.ResolvedProvider
+	HintNudge          string
+	RuntimeName        string
+	CityRuntimes       map[string]config.DiscoveredRuntime
+}
+
+// roleSuppliedByHook reports whether the provider hook supplies the rendered
+// role prompt to every model generation of this launch, so a resume does not
+// replay it as a user turn. The hook decorates generations but never starts
+// one; resumeNudge decides what, if anything, starts the turn.
+//
+// Every condition must hold. The resolved provider's builtin family stages a
+// per-turn role hook (config.ResolvedProvider.HookSuppliesRolePerTurn);
+// providers whose hooks prime once at SessionStart (pi, codex, antigravity,
+// claude via settings) are excluded by that family fact, not by
+// SupportsHooks, which is true for them as well. The hook is installed for
+// this agent (HookEnabled: true by default for opencode/mimocode, whose
+// overlay is staged for every launch; an explicit hooks_installed = false
+// means no plugin, so the nudge stays the only carrier). The session is not
+// ACP, whose transport never loads the CLI plugin. And the session is not a
+// client's provider chat: its hook writes no persona (primeHookClientChat),
+// so it keeps its beacon-only turns.
+func (s startupPromptSource) roleSuppliedByHook() bool {
+	return s.HookEnabled && !s.IsACP && !s.ClientProviderChat && s.ResolvedProvider.HookSuppliesRolePerTurn()
+}
+
+// resumeNudge is the restart turn delivered to a resumed provider
+// conversation. The rendered prompt rides along so a restarted session does
+// not land idle, unless the provider hook re-supplies it to every generation:
+// replaying it there would persist another copy of the role as a user message
+// on every wake.
+//
+// On that hook-primed branch the turn is the beacon followed by the configured
+// nudge: the nudge is the reason for the turn, and the beacon identifies the
+// wake. With no configured nudge there is no restart turn. The role is already
+// in the system prompt through the plugin, so a content-free wake turn only
+// buys a generation that acknowledges and waits; the next human message, queued
+// nudge or claim backstop (nudgeStalledPoolClaims) starts a real turn. tmux and
+// herdr skip an empty nudge, so "" delivers nothing.
+func (s startupPromptSource) resumeNudge() string {
+	if s.roleSuppliedByHook() {
+		if strings.TrimSpace(s.HintNudge) == "" {
+			return ""
+		}
+		return restartPromptNudge(s.Beacon, s.HintNudge)
+	}
+	return restartPromptNudge(s.Prompt, s.HintNudge)
 }
 
 // configuredMode names the prompt-delivery mode the source's provider is
@@ -90,7 +145,7 @@ func planStartupPrompt(src startupPromptSource, launch startupPromptLaunch) (sta
 			src, "nudge-fallback")
 	}
 	if launch == startupPromptResumeLaunch {
-		plan := resumeStartupPromptPlan(src.Prompt, src.HintNudge)
+		plan := resumeStartupPromptPlan(src)
 		plan.Delivery = delivery
 		return plan, nil
 	}
@@ -105,11 +160,14 @@ func planStartupPrompt(src startupPromptSource, launch startupPromptLaunch) (sta
 }
 
 // resumeStartupPromptPlan is the plan for a launch that continues a conversation:
-// the prompt rides the nudge and the marker is set whenever there is a prompt.
-func resumeStartupPromptPlan(prompt, hintNudge string) startupPromptPlan {
+// the restart turn (src.resumeNudge) rides the nudge and the marker is set
+// whenever there is a prompt. A session whose hook supplies the role is still
+// primed, through the hook rather than the nudge, so the marker is set for it
+// too.
+func resumeStartupPromptPlan(src startupPromptSource) startupPromptPlan {
 	return startupPromptPlan{
-		Nudge:         restartPromptNudge(prompt, hintNudge),
-		MarkDelivered: strings.TrimSpace(prompt) != "",
+		Nudge:         src.resumeNudge(),
+		MarkDelivered: strings.TrimSpace(src.Prompt) != "",
 		launch:        startupPromptResumeLaunch,
 	}
 }
@@ -137,14 +195,17 @@ func (p startupPromptPlan) applyTo(cfg *runtime.Config) {
 // inputs of the shared delivery decision.
 func (tp TemplateParams) startupPromptSource() startupPromptSource {
 	return startupPromptSource{
-		TemplateName:     tp.TemplateName,
-		SessionName:      tp.SessionName,
-		InstanceName:     tp.InstanceName,
-		Prompt:           tp.Prompt,
-		IsACP:            tp.IsACP,
-		ResolvedProvider: tp.ResolvedProvider,
-		HintNudge:        tp.Hints.Nudge,
-		RuntimeName:      tp.EffectiveSessionProvider,
-		CityRuntimes:     tp.CityRuntimes,
+		TemplateName:       tp.TemplateName,
+		SessionName:        tp.SessionName,
+		InstanceName:       tp.InstanceName,
+		Prompt:             tp.Prompt,
+		Beacon:             tp.Beacon,
+		IsACP:              tp.IsACP,
+		HookEnabled:        tp.HookEnabled,
+		ClientProviderChat: tp.ClientProviderChat,
+		ResolvedProvider:   tp.ResolvedProvider,
+		HintNudge:          tp.Hints.Nudge,
+		RuntimeName:        tp.EffectiveSessionProvider,
+		CityRuntimes:       tp.CityRuntimes,
 	}
 }
