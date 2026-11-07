@@ -14,9 +14,11 @@ import (
 // storageSplitCheck is the city's split verdict (S5 §7.1): one line per
 // city, with storage-rigs as the per-rig detail. It is read-only. The city
 // binding's verdict is `gc storage status`'s own (doStorageStatusCity), so
-// the two cannot disagree; on a city with no [storage] it reports the
-// readiness `gc storage preflight --split` finds, and stays OK until the
-// default flips (O11).
+// the two cannot disagree. On a city with no [storage] it stays OK until the
+// default flips (O11) and reports only what is cheap and opens nothing: the
+// reconciler the split city resolves to and whether the provider is up. The
+// full rehearsal is `gc storage preflight --split`; doctor runs it nowhere,
+// so a check that times out leaves no window or store open behind it.
 type storageSplitCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -104,9 +106,15 @@ func (c *storageSplitCheck) unsplit(f *storageSplitFindings) string {
 	if c.cfg == nil {
 		return "all on work"
 	}
-	verdict, rows := splitPreflightReadiness(storageOperatorRequest{CityPath: c.cityPath, Cfg: c.cfg, TimeBudget: storageDefaultTimeBudget})
-	f.details = append(f.details, rows...)
-	return fmt.Sprintf("all on work; `%s --%s` rehearses the split: %s", "gc storage "+storagePreflightVerb, storagePreflightSplitFlag, verdict)
+	split := splitHypotheticalConfig(c.cfg)
+	_, resolved := doctorReconcilerMode(split, c.cityPath, nil)
+	f.details = append(f.details, "after the split, "+resolved)
+	provider := "up"
+	if why := splitStoreReadGate(c.cityPath, c.cfg); why != "" {
+		provider = why
+	}
+	f.details = append(f.details, "provider: "+provider)
+	return fmt.Sprintf("all on work; `gc storage %s --%s` rehearses the split", storagePreflightVerb, storagePreflightSplitFlag)
 }
 
 // split is the verdict of a city that authors [storage].
@@ -138,7 +146,7 @@ func (c *storageSplitCheck) split(f *storageSplitFindings) string {
 			ids = append(ids, id)
 		}
 		if plan, err := planCityIDFloor(c.cityPath, ids); err == nil && plan.below() {
-			f.warns = append(f.warns, fmt.Sprintf("the city work store's %s is %d, below the %d the carried ids need: run `%s`", bdMinHashLengthKey, plan.Current, plan.Need, storageClearInstruction()))
+			f.warns = append(f.warns, cityIDFloorBelowWarning(plan))
 		}
 	}
 	awaiting := 0
@@ -192,4 +200,15 @@ func storageSplitLines(stdout, stderr string) []string {
 		}
 	}
 	return out
+}
+
+// cityIDFloorBelowWarning is the finding for a city work store whose floor is
+// under what its carried ids need, with the command that raises it, or for
+// hosted bd the out-of-band setting (O10).
+func cityIDFloorBelowWarning(plan cityIDFloorPlan) string {
+	below := fmt.Sprintf("the city work store's %s is %d, below the %d the carried ids need", bdMinHashLengthKey, plan.Current, plan.Need)
+	if plan.Hosted != "" {
+		return fmt.Sprintf("%s: it is hosted bd at %s, so set %s=%d (and %s at least %d) on the hosted project through the bd serve admin path, out of band (owner decision O10)", below, plan.Hosted, bdMinHashLengthKey, plan.Need, bdMaxHashLengthKey, plan.Need)
+	}
+	return fmt.Sprintf("%s: run `gc storage %s --%s` with the city stopped", below, storageRepairSequenceVerb, storageIDFloorFlag)
 }

@@ -198,6 +198,22 @@ type preflightFindings struct {
 	rigs []rigCensusRow
 	// converged reports a city the migration would not copy.
 	converged bool
+	// quiet leaves the closing line to the caller (preflight --split), which
+	// words its own; blocked names the check that blocked.
+	quiet   bool
+	blocked string
+}
+
+// block records the check that would refuse the migration and returns the
+// exit code: preflightBlock's row and closing line, or the row alone when
+// the caller closes the report.
+func (f *preflightFindings) block(stdout io.Writer, check string, cause error) int {
+	f.blocked = check
+	if f.quiet {
+		preflightBlockRow(stdout, check, cause)
+		return 1
+	}
+	return preflightBlock(stdout, check, cause)
 }
 
 // runStoragePreflightChecks runs the checks and the window report, and
@@ -209,14 +225,14 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 	// there: a plan boot would not serve must not be migrated toward.
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
 	if err != nil {
-		return preflightBlock(stdout, "topology", err)
+		return found.block(stdout, "topology", err)
 	}
 	if !ok {
 		// Named explicitly because this is the one block an operator can reach
 		// by running the rehearsal too early — before the config swap the
 		// runbook opens with — where "nothing to migrate" would otherwise read
 		// as a fault rather than as a step not yet taken.
-		return preflightBlock(stdout, "topology", fmt.Errorf(
+		return found.block(stdout, "topology", fmt.Errorf(
 			"this city's [storage.classes] do not assign %s to one shared non-work binding, so there is nothing to migrate yet. %s. Author the split in city.toml first; there is nothing to rehearse until the classes name a binding",
 			infraMigrationClassList(), storageSupportedTopologyStatement))
 	}
@@ -226,16 +242,16 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 	// 2. The same plan resolution boot performs, after the reserved-prefix
 	// refusal boot and the migration make before it (R10).
 	if err := config.ReservedPrefixSplitRefusal(request.Cfg); err != nil {
-		return preflightBlock(stdout, "plan", err)
+		return found.block(stdout, "plan", err)
 	}
 	if _, err := resolveCityStoragePlan(request.CityPath, request.Cfg); err != nil {
-		return preflightBlock(stdout, "plan", err)
+		return found.block(stdout, "plan", err)
 	}
 	preflightPass(stdout, "plan", "the binding resolves to an engine this build opens")
 
 	// The migration's exclusion, without its locks: what it refuses before it
 	// copies, under the attestations this run passes.
-	window, code := preflightExclusion(request, stdout)
+	window, code := preflightExclusion(request, found, stdout)
 	if code != 0 {
 		return code
 	}
@@ -254,7 +270,7 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 
 	state, stateErr := readInfraConvergenceState(target)
 	if blocked, held := servedBindingNoteHold(request.CityPath, target.Binding, config.StorageProviderSQLiteBeads, target.Database); held {
-		return preflightBlock(stdout, "served binding", errors.New(preflightAdviceDetail(blocked)))
+		return found.block(stdout, "served binding", errors.New(preflightAdviceDetail(blocked)))
 	}
 	preflightPass(stdout, "served binding", "no earlier binding holds this city's infrastructure classes")
 
@@ -267,11 +283,13 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 	// rehearsal will not open, which is why the report hands off to
 	// `gc storage status` rather than answering it.
 	if stateErr != nil {
-		return preflightBlock(stdout, "binding root", stateErr)
+		return found.block(stdout, "binding root", stateErr)
 	}
 	if state == infraConvergenceMarked {
 		preflightPass(stdout, "cutover", "already converged — the marker is present, so the migration would not copy")
-		fmt.Fprintf(stdout, "\nNothing to migrate: this city is already converged. Run `%s` to see what it holds.\n", storageStatusInstruction()) //nolint:errcheck // best-effort stdout
+		if !found.quiet {
+			fmt.Fprintf(stdout, "\nNothing to migrate: this city is already converged. Run `%s` to see what it holds.\n", storageStatusInstruction()) //nolint:errcheck // best-effort stdout
+		}
 		found.converged = true
 		return 0
 	}
@@ -279,7 +297,7 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 		// A restore under way is the one stale binding the migration does not
 		// re-copy: it refuses and names the restore.
 		if err := infraRestoreRecopyRefusal(target); err != nil {
-			return preflightBlock(stdout, "cutover", err)
+			return found.block(stdout, "cutover", err)
 		}
 		preflightPass(stdout, "cutover", fmt.Sprintf("a convergence marker exists and %s, so the copy would run again and re-converge", infraStaleCause(target)))
 	} else {
@@ -298,7 +316,7 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 	// and opening the destination is the one thing this rehearsal will not do.
 	source, err := openInfraMigrationSource(request.CityPath)
 	if err != nil {
-		return preflightBlock(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
+		return found.block(stdout, "work store", fmt.Errorf("opening the work store: %w", err))
 	}
 	rows, all, listErr := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
 	var edgeErr, holdsErr, literalErr error
@@ -352,16 +370,16 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 		fmt.Fprintf(stderr, "%s: closing the work store: %v\n", storagePreflightLogPrefix, closeErr) //nolint:errcheck // best-effort stderr
 	}
 	if listErr != nil {
-		return preflightBlock(stdout, "work store", listErr)
+		return found.block(stdout, "work store", listErr)
 	}
 	found.read, found.rows, found.all, found.plan = true, rows, all, plan
 	preflightPass(stdout, "work store", fmt.Sprintf("would copy %d infrastructure bead(s)", len(rows)))
 	if edgeErr != nil {
-		return preflightBlock(stdout, "edge payloads", edgeErr)
+		return found.block(stdout, "edge payloads", edgeErr)
 	}
 	preflightPass(stdout, "edge payloads", "the work store can report the payload on every edge the copy would re-add")
 	if holdsErr != nil {
-		return preflightBlock(stdout, "holds", holdsErr)
+		return found.block(stdout, "holds", holdsErr)
 	}
 	preflightPass(stdout, "holds", fmt.Sprintf("every hold on a bead the copy carries crosses; %d bead(s) blocked on open work would wait on a cross-store gate", len(plan.boundary.Gates)))
 	// Informational: an external: reference is carried as it is, and a split
@@ -400,7 +418,7 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 	// 7. What the destination already holds. Read-only: the database is opened
 	// only if it is already there, because opening creates it.
 	if err := infraDestinationPreflightRefusal(target); err != nil {
-		return preflightBlock(stdout, "destination", err)
+		return found.block(stdout, "destination", err)
 	}
 	preflightPass(stdout, "destination", "nothing in the binding is in the way of the copy")
 
@@ -457,22 +475,22 @@ func (w preflightWindow) report(stdout io.Writer) {
 // stopping the city does not lift. It takes no lock: a rehearsal holding this
 // city's controller lock, or a co-tenant's, would keep that city from
 // starting. What taking the window ends is returned for the report.
-func preflightExclusion(request storageOperatorRequest, stdout io.Writer) (preflightWindow, int) {
+func preflightExclusion(request storageOperatorRequest, found *preflightFindings, stdout io.Writer) (preflightWindow, int) {
 	var window preflightWindow
 	if err := storageVerbRemoteStageRefusal(request.CityPath); err != nil {
-		return window, preflightBlock(stdout, "remote stage", err)
+		return window, found.block(stdout, "remote stage", err)
 	}
 	preflightPass(stdout, "remote stage", "this directory is not a remote stage of another city")
 
 	registered, err := storageVerbCityRegistered(request.CityPath)
 	if err != nil {
-		return window, preflightBlock(stdout, "supervisor", err)
+		return window, found.block(stdout, "supervisor", err)
 	}
 	window.registered = registered
 
 	running, err := storageVerbSessionRefusal(request, storageVerbScope{Splits: true})
 	if err != nil {
-		return window, preflightBlock(stdout, "runtime", err)
+		return window, found.block(stdout, "runtime", err)
 	}
 	window.running = running
 	if request.Force.RemoteRuntime {
@@ -492,11 +510,11 @@ func preflightExclusion(request storageOperatorRequest, stdout io.Writer) (prefl
 	}
 	switch {
 	case err != nil && rowsErr != nil:
-		return window, preflightBlock(stdout, "shared store", fmt.Errorf("%w\nattested, the migration would still refuse: %w", err, rowsErr))
+		return window, found.block(stdout, "shared store", fmt.Errorf("%w\nattested, the migration would still refuse: %w", err, rowsErr))
 	case err != nil:
-		return window, preflightBlock(stdout, "shared store", err)
+		return window, found.block(stdout, "shared store", err)
 	case rowsErr != nil:
-		return window, preflightBlock(stdout, "shared store", rowsErr)
+		return window, found.block(stdout, "shared store", rowsErr)
 	case len(finding.Sharers) > 0:
 		window.coTenants = finding.coTenants()
 		preflightPass(stdout, "shared store", fmt.Sprintf("attested --%s=%s:%s, and no infrastructure row in it names another city's scope", storageForceFlag, storageHazardSharedStore, finding.Token))
@@ -628,7 +646,10 @@ func preflightRigScopes(request storageOperatorRequest, target infraBindingTarge
 		for _, line := range lines[1:] {
 			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
 		}
-		fmt.Fprintf(stdout, "\n%s: `%s` would refuse the rig(s) named above until each fix is made; each other rig imports on its own. Fix them and run this again.\n", storagePreflightLogPrefix, rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+		found.blocked = "rig scopes"
+		if !found.quiet {
+			fmt.Fprintf(stdout, "\n%s: `%s` would refuse the rig(s) named above until each fix is made; each other rig imports on its own. Fix them and run this again.\n", storagePreflightLogPrefix, rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+		}
 		return 1
 	}
 	return 0

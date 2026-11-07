@@ -17,11 +17,19 @@ package main
 // migration's window starts the city's bead-store provider when it is down
 // (storage_maintenance.go); a rehearsal must not, so on a city whose provider
 // is down, or whose bd-owned proxy is stopped (any bd read restarts it), it
-// reports that and runs no check that reads a store. Where the provider is up
-// it registers a window that started nothing and holds no lock, only so the
-// work-store opens take the lanes the migration's window forces (the
-// proxied-native lane, O9's transport override) and the lane they land on is
-// recorded; closing it stops nothing, because it started nothing.
+// reports that and runs no check that reads a store. Any proxied scope whose
+// proxy is not running counts, bd-owned or not. Where the provider is up it
+// registers, for the reads alone, a window that started nothing, holds no
+// lock and carries the city's own configuration, only so the work-store opens
+// take the lanes the migration's window forces (the proxied-native lane, O9's
+// transport override) and the lane they land on is recorded; closing it stops
+// nothing, because it started nothing. It never replaces a window already
+// open in the process (the guided split's), and the doctor never opens one.
+//
+// One race is left, and named here rather than closed: a proxy that
+// idle-retires between the gate and a read is restarted by that read, as any
+// bd read restarts it. The gate is a check, not a lock; the restarted proxy
+// retires again on its own idle timeout.
 //
 // Every estimate is labeled one. The counts are what this run read; the
 // rates are measurements, pinned below with their sources.
@@ -33,11 +41,13 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -101,7 +111,7 @@ func splitClearLaneFor(diag beads.BeadsDiagnostic, known bool) splitClearLane {
 	perEdge := splitClearLane{perRow: splitDoltClearPerRow, perEdge: splitDoltPerEdge, floor: true}
 	switch {
 	case !known:
-		perEdge.name = "unknown lane"
+		perEdge.name = "unknown"
 		perEdge.basis = "no open reported its lane, so the slowest measured rate is the floor: 129 ms an edge, 12 ms a row"
 		return perEdge
 	case diag.Store == beads.BeadsStoreNameNativeDoltStore && diag.Proxied == nil:
@@ -111,8 +121,8 @@ func splitClearLaneFor(diag beads.BeadsDiagnostic, known bool) splitClearLane {
 		}
 	case diag.Store == beads.BeadsStoreNameNativeDoltStore:
 		return splitClearLane{
-			name: "proxied", perRow: splitDoltClearPerRow, perEdge: splitDoltPerEdge,
-			basis: "the proxied lane removes edges one at a time, one Dolt commit each: 129 ms an edge as measured on native Dolt, 7.4 + 4.6 ms a row",
+			name: "proxied", perRow: splitDoltClearPerRow, perEdge: splitDoltPerEdge, floor: true,
+			basis: "the proxied lane removes edges one at a time, one Dolt commit each, through the proxy, which no run measured; 129 ms an edge (native Dolt, one by one) and 7.4 + 4.6 ms a row are its floor",
 		}
 	case diag.Store == beads.BeadsStoreNameBdStore || diag.Store == beads.BeadsStoreNameExecStore:
 		perEdge.name = "per-edge " + diag.Store
@@ -163,6 +173,39 @@ func splitBudgetResumes(work, budget time.Duration) int {
 	return int(max(work-1, 0) / budget)
 }
 
+// splitBudgetAdvice is the --time-budget row: whether it is a note, and its
+// text. city is the city's copy and clear estimate; floor marks a lane whose
+// rates are a lower bound, so neither "would not pause" nor the pause count
+// can be promised there.
+func splitBudgetAdvice(city, budget time.Duration, floor bool) (note bool, text string) {
+	about, atLeast := "about "+splitDuration(city), ""
+	if floor {
+		about, atLeast = "at least "+splitDuration(city), "at least "
+	}
+	fits := splitBudgetFitting(city)
+	switch resumes := splitBudgetResumes(city, budget); {
+	case budget <= 0:
+		return false, fmt.Sprintf("no --%s: the run does not pause, and the city stays stopped for all of it (%s)", storageTimeBudgetFlag, about)
+	case resumes == 0 && !floor:
+		return false, fmt.Sprintf("ESTIMATE: the city's copy and clear (%s) fit --%s %s; the run would not pause", about, storageTimeBudgetFlag, budget)
+	case resumes == 0:
+		return true, fmt.Sprintf("ESTIMATE: the city's copy and clear take %s against --%s %s; this lane's rate is not measured, so whether the run pauses is not known. --%s %s or more runs the estimate in one", about, storageTimeBudgetFlag, budget, storageTimeBudgetFlag, fits)
+	default:
+		return true, fmt.Sprintf("ESTIMATE: the city's copy and clear take %s, over --%s %s: the run would pause (exit %d) %s%d time(s) and need %s%d resume(s) of the same command, and the city stays stopped until the last run finishes. --%s %s runs it in one",
+			about, storageTimeBudgetFlag, budget, storagePausedExitCode, atLeast, resumes, atLeast, resumes, storageTimeBudgetFlag, fits)
+	}
+}
+
+// splitBudgetFitting is a --time-budget the estimate fits in one run: a
+// quarter over it, rounded up to the minute.
+func splitBudgetFitting(city time.Duration) time.Duration {
+	d := city + city/4
+	if rem := d % time.Minute; rem != 0 || d == 0 {
+		d += time.Minute - rem
+	}
+	return d
+}
+
 // splitDiskEstimate is the disk estimate, in bytes.
 type splitDiskEstimate struct {
 	snapshot, binding, wal int64
@@ -193,8 +236,7 @@ type splitEstimate struct {
 }
 
 // splitPreflightSummary is what one rehearsal concluded, for a caller that
-// words it its own way: the storage-split doctor check, and the guided
-// split's first phase (S5 §5.2 P0).
+// words it its own way: the guided split's first phase (S5 §5.2 P0).
 type splitPreflightSummary struct {
 	// Blocks names each check that would refuse the split.
 	Blocks []string
@@ -233,65 +275,168 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	// writes no second one.
 	if request.Cfg.Storage != nil {
 		block("config", fmt.Errorf("this city already authors [storage], so there is no split to rehearse: `gc storage %s` (without --%s) rehearses the migration it describes", storagePreflightVerb, storagePreflightSplitFlag))
-		return splitPreflightFooter(stdout, summary), summary
+		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	if blocked, held := revertHoldingNote(storageSplitNone, request.CityPath); held {
 		block("config", errors.New(preflightAdviceDetail(blocked)))
-		return splitPreflightFooter(stdout, summary), summary
+		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	split := splitHypotheticalConfig(request.Cfg)
-	storage := split.EffectiveStorage()
-	fmt.Fprintf(stdout, "split [storage] (hypothetical; nothing is written): work on %q; graph, sessions, messaging, orders and nudges on %q (%s at %s)\n", //nolint:errcheck // best-effort stdout
-		storage.Classes.Work, initSplitBindingName, storage.Bindings[initSplitBindingName].Provider, storage.Bindings[initSplitBindingName].Path)
+	fmt.Fprintf(stdout, "the [storage] block the split writes (hypothetical; nothing is written):\n\n%s\n", splitStorageTOML(split)) //nolint:errcheck // best-effort stdout
 	preflightPass(stdout, "config", "city.toml authors no [storage]; the split writes the block above")
 
 	// The reconciler, before and after: an existing city moves its storage
-	// and its reconciler in one step.
+	// and its reconciler in one step. A mode the split city would refuse to
+	// start in is a refusal here.
 	_, today := doctorReconcilerMode(request.Cfg, request.CityPath, nil)
 	after, resolved := doctorReconcilerMode(split, request.CityPath, nil)
 	summary.Reconciler = strings.TrimPrefix(resolved, "session reconciler: ")
 	detail := fmt.Sprintf("after the split: %s; today: %s", summary.Reconciler, strings.TrimPrefix(today, "session reconciler: "))
-	if after == reconcilerV2 {
+	switch _, err := resolveReconcilerMode(split, request.CityPath, reconcilerModeLookupEnv); {
+	case err != nil:
+		block("reconciler", fmt.Errorf("the split city would not start: %s", detail))
+	case after == reconcilerV2:
 		preflightPass(stdout, "reconciler", detail)
-	} else {
+	default:
 		preflightNote(stdout, "reconciler", detail)
 	}
+	splitPreflightVouch(request.CityPath, stdout)
 
 	// Nothing below may start the provider.
 	if why := splitStoreReadGate(request.CityPath, request.Cfg); why != "" {
 		summary.Unread = why
 		preflightNote(stdout, "source lane", why+"; the split starts it in its maintenance window, and the lane is decided there")
-		return splitPreflightFooter(stdout, summary), summary
+		return splitPreflightFooter(stdout, request, summary), summary
 	}
-	defer openPreflightLaneWindow(request.CityPath, split)()
-
 	if after == reconcilerV2 {
 		splitPreflightCensus(request, split, stdout, block)
 		preflightNote(stdout, "v2 demand", "the split runs legacy's demand-migration repairs in its window, before the copy; `gc doctor --check v2-demand-migrations` counts them")
 	}
 
-	// The migration's checks against cfg', unchanged.
+	// The migration's checks against cfg', unchanged, and the reads that
+	// follow them, inside the lane window and only there.
 	rehearsal := request
 	rehearsal.Cfg = split
-	var found preflightFindings
-	if code := runStoragePreflightChecks(rehearsal, &found, stdout, stderr); code != 0 {
-		summary.Blocks = append(summary.Blocks, "migration")
-	}
+	found := preflightFindings{quiet: true}
+	closeWindow := openPreflightLaneWindow(request.CityPath, request.Cfg)
+	code := runStoragePreflightChecks(rehearsal, &found, stdout, stderr)
 	diag, known := migrationWindowLane(request.CityPath)
+	if code == 0 && found.read && !found.converged {
+		splitPreflightFloor(request.CityPath, found, stdout)
+	}
+	if found.converged {
+		block("cutover", splitConvergedRefusal(request.CityPath, split))
+	}
+	closeWindow()
+	if code != 0 {
+		summary.Blocks = append(summary.Blocks, found.blocked)
+	}
 	lane := splitClearLaneFor(diag, known)
 	if known {
-		preflightPass(stdout, "source lane", fmt.Sprintf("the work store opens on %s in the window (%s)", diag.Store, lane.name))
+		preflightPass(stdout, "source lane", fmt.Sprintf("the work store opens on %s in the window (%s lane)", diag.Store, lane.name))
 	}
-	if !found.read {
+	switch {
+	case !found.read:
 		preflightNote(stdout, "estimate", "not computed: the checks above stopped before the work store was read")
-		return splitPreflightFooter(stdout, summary), summary
+		return splitPreflightFooter(stdout, request, summary), summary
+	case code != 0 || found.converged:
+		preflightNote(stdout, "estimate", "not computed: a check above blocked, so the copy's plan is partial")
+		return splitPreflightFooter(stdout, request, summary), summary
 	}
 	for _, r := range found.rigs {
 		summary.RigImports = summary.RigImports || (r.Plan != nil && len(r.Plan.Move)+len(r.Plan.Retained) > 0)
 	}
-	splitPreflightFloor(request.CityPath, found, stdout)
 	summary.Estimate = splitPreflightEstimate(request, found, lane, diag, known, stdout, block)
-	return splitPreflightFooter(stdout, summary), summary
+	return splitPreflightFooter(stdout, request, summary), summary
+}
+
+// splitConvergedRefusal is the refusal for an unsplit city whose split
+// binding already carries a convergence marker: a city migrated and then
+// backed out by removing [storage] before any split boot. Its infrastructure
+// state may live in the binding, so migrating again would copy the work
+// store's slice over it. It reports what boot's own check (identity, then
+// containment, confirmInfraConvergence's halves) finds there, read-only: the
+// marker's identity is not back-filled, as boot's check would.
+func splitConvergedRefusal(cityPath string, split *config.City) error {
+	target, ok, err := resolveInfraBindingTarget(cityPath, split)
+	if err != nil {
+		return fmt.Errorf("a convergence marker for the split binding exists, and the binding cannot be resolved to check it (%w)", err)
+	}
+	if !ok {
+		return errors.New("a convergence marker for the split binding exists, and the split config resolves no binding to check it against")
+	}
+	const prefix = "gc storage preflight --split"
+	_, _, hold := markerWorkStoreIdentityHold(cityPath, target, prefix, io.Discard)
+	var report infraMigrationReport
+	if hold != nil {
+		report = *hold
+	} else {
+		report = confirmInfraContainment(cityPath, target, prefix, io.Discard)
+	}
+	report.Target = target
+	if report.Outcome == infraMigrationConverged {
+		return fmt.Errorf("%s records that this city already moved its infrastructure classes into binding %s, and boot's check confirms the binding holds them: city.toml lost its [storage] block, not its split. Restore the block above and run `%s`; migrating again would copy the work store's slice over the binding", target.MarkerPath(), target.Binding, storageStatusInstruction())
+	}
+	return fmt.Errorf("%s records an earlier split into binding %s, and boot's check of it reports %s: %s", target.MarkerPath(), target.Binding, report.Outcome, strings.TrimPrefix(infraMigrationOperatorAdvice(report, prefix), prefix+": "))
+}
+
+// splitStorageTOML renders cfg's [storage] as city.toml spells it.
+func splitStorageTOML(cfg *config.City) string {
+	var out bytes.Buffer
+	enc := toml.NewEncoder(&out)
+	enc.Indent = ""
+	if err := enc.Encode(struct {
+		Storage *config.StorageConfig `toml:"storage"`
+	}{cfg.Storage}); err != nil {
+		return fmt.Sprintf("(the block could not be rendered: %v)", err)
+	}
+	return strings.TrimSpace(out.String()) + "\n"
+}
+
+// splitPreflightVouch reports the city scope's bd trust verdict (S5 §2.5): a
+// split city's gc bd runs only a bd whose command tree matched a pinned
+// inventory or that the city vouched for. It reads the verdict cache and the
+// vouch file only: no walk, no lock, no event, so an unjudged binary is
+// reported as not checked, never as OK.
+func splitPreflightVouch(cityPath string, stdout io.Writer) {
+	verdict, ok := splitBdVouchStatus(cityPath)
+	if ok {
+		preflightPass(stdout, "bd vouch", verdict)
+		return
+	}
+	preflightNote(stdout, "bd vouch", verdict)
+}
+
+// splitBdVouchStatus is the city scope's bd verdict as the cache and the
+// vouch file record it, and whether it admits the binary.
+func splitBdVouchStatus(cityPath string) (string, bool) {
+	if !cityUsesBdStoreContract(cityPath) {
+		return "n/a: the city's work store is not served through bd", true
+	}
+	bdPath, err := resolveBdBinaryForScope(cityPath, cityPath)
+	if err != nil {
+		return "not checked: " + err.Error(), false
+	}
+	id, err := statBdBinary(bdPath)
+	if err != nil {
+		return "not checked: " + err.Error(), false
+	}
+	set := bdflags.InventorySetFingerprint()
+	for _, e := range loadBdTrustCache(cityPath).Entries {
+		if e.bdBinaryID != id || e.InventorySet != set || e.WalkError != "" {
+			continue
+		}
+		if e.Inventory != "" && bdflags.InventoryByName(e.Inventory) != nil {
+			return fmt.Sprintf("%s matched inventory %s (cached verdict)", id.Path, e.Inventory), true
+		}
+		return fmt.Sprintf("%s matches no pinned inventory (cached verdict), so the split city's gc bd refuses it: %s", id.Path, strings.Join(e.Diffs, "; ")), false
+	}
+	if sum, err := fileSHA256(id.Path); err == nil {
+		if v, ok := findBdVouch(cityPath, id.Path, sum, set); ok {
+			return fmt.Sprintf("%s is vouched as inventory %s", id.Path, v.Inventory), true
+		}
+	}
+	return fmt.Sprintf("not checked: no cached verdict or vouch for %s; `gc storage vouch-bd` walks it", id.Path), false
 }
 
 // splitPreflightSessionLegs opens the census legs read-only; tests replace
@@ -335,7 +480,7 @@ func splitPreflightFloor(cityPath string, found preflightFindings, stdout io.Wri
 	case !plan.below():
 		preflightPass(stdout, "id floor", fmt.Sprintf("%s is already %d, at or above the %d the carried ids need", bdMinHashLengthKey, plan.Current, plan.Need))
 	case plan.Hosted != "":
-		preflightNote(stdout, "id floor", fmt.Sprintf("the work store is hosted bd at %s: set %s=%d there out of band before the window (O10); the split cannot raise it from %d", plan.Hosted, bdMinHashLengthKey, plan.Need, plan.Current))
+		preflightNote(stdout, "id floor", fmt.Sprintf("the work store is hosted bd at %s, at %s=%d: set %s=%d (and %s at least %d) on the hosted project through the bd serve admin path, out of band (owner decision O10), before the window", plan.Hosted, bdMinHashLengthKey, plan.Current, bdMinHashLengthKey, plan.Need, bdMaxHashLengthKey, plan.Need))
 	default:
 		preflightPass(stdout, "id floor", fmt.Sprintf("the split raises %s from %d to %d", bdMinHashLengthKey, plan.Current, plan.Need))
 	}
@@ -349,26 +494,22 @@ func splitPreflightEstimate(request storageOperatorRequest, found preflightFindi
 	city := est.time.copy + est.time.clear
 	est.resumes = splitBudgetResumes(city, request.TimeBudget)
 	in := est.input
-	floor := ""
+	about := "about"
 	if lane.floor {
-		floor = " at least"
+		about = "at least"
 	}
-	preflightNote(stdout, "estimate", fmt.Sprintf("ESTIMATE, not a measurement: the city's copy about %s (%d row(s), %d gate(s), %d edge(s)) and clear%s %s (%d row(s), %d edge(s), %s lane)",
-		splitDuration(est.time.copy), in.rows, in.gates, in.copyEdges, floor, splitDuration(est.time.clear), in.clearRows, in.clearEdges, lane.name))
+	preflightNote(stdout, "estimate", fmt.Sprintf("ESTIMATE, not a measurement: the city's copy about %s (%d row(s), %d gate(s), %d edge(s)) and clear %s %s (%d row(s), %d edge(s), %s lane)",
+		splitDuration(est.time.copy), in.rows, in.gates, in.copyEdges, about, splitDuration(est.time.clear), in.clearRows, in.clearEdges, lane.name))
 	fmt.Fprintf(stdout, "%sbased on: the row and edge counts read above, read-only; copy rates %s a row and %s an edge, from BenchmarkInfraMigrateMCShaped (40,000 rows, a SQLite work store, a loaded host); clear: %s\n", //nolint:errcheck // best-effort stdout
 		preflightDetailIndent, splitPlanPerRow+splitCopyPerRow+splitVerifyPerRow, splitCopyPerEdge, lane.basis)
 	if in.rigRows+in.rigClearRows > 0 {
-		fmt.Fprintf(stdout, "%sthe rig imports: about%s %s more (%d row(s) to copy, %d to clear), outside --%s: the rig import takes none\n", //nolint:errcheck // best-effort stdout
-			preflightDetailIndent, floor, splitDuration(est.time.rigs), in.rigRows, in.rigClearRows, storageTimeBudgetFlag)
+		fmt.Fprintf(stdout, "%sthe rig imports: %s %s more (%d row(s) to copy, %d to clear), outside --%s: the rig import takes none\n", //nolint:errcheck // best-effort stdout
+			preflightDetailIndent, about, splitDuration(est.time.rigs), in.rigRows, in.rigClearRows, storageTimeBudgetFlag)
 	}
-	switch {
-	case request.TimeBudget <= 0:
-		preflightPass(stdout, "time budget", "no --"+storageTimeBudgetFlag+": the run does not pause")
-	case est.resumes == 0:
-		preflightPass(stdout, "time budget", fmt.Sprintf("ESTIMATE: the city's copy and clear (about %s) fit --%s %s; the run would not pause", splitDuration(city), storageTimeBudgetFlag, request.TimeBudget))
-	default:
-		preflightNote(stdout, "time budget", fmt.Sprintf("ESTIMATE: the city's copy and clear (about%s %s) exceed --%s %s: the run would pause (exit %d) %d time(s) and need %d resume(s) of the same command; raise the budget to run it in one",
-			floor, splitDuration(city), storageTimeBudgetFlag, request.TimeBudget, storagePausedExitCode, est.resumes, est.resumes))
+	if note, text := splitBudgetAdvice(city, request.TimeBudget, lane.floor); note {
+		preflightNote(stdout, "time budget", text)
+	} else {
+		preflightPass(stdout, "time budget", text)
 	}
 
 	exact := snapshotExactMethod(rawBeadsProviderForScope(request.CityPath, request.CityPath), known && diag.Store == beads.BeadsStoreNameNativeDoltStore && diag.Proxied == nil)
@@ -457,8 +598,12 @@ func splitJSONBytes(rows []beads.Bead) int64 {
 	return n
 }
 
-// splitPreflightFooter closes the report and returns the exit code.
-func splitPreflightFooter(stdout io.Writer, summary splitPreflightSummary) int {
+// splitPreflightFooter closes the report and returns the exit code. Ready
+// names the window's commands in order, each migration carrying the
+// rehearsal's --force attestations: the snapshot the disk estimate counts
+// (migrate takes none), the [storage] block printed above, then the
+// migrations.
+func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summary splitPreflightSummary) int {
 	prefix := storagePreflightLogPrefix + " --" + storagePreflightSplitFlag
 	switch {
 	case len(summary.Blocks) > 0:
@@ -468,28 +613,44 @@ func splitPreflightFooter(stdout io.Writer, summary splitPreflightSummary) int {
 		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. Run it again while the city is running.\n", prefix) //nolint:errcheck // best-effort stdout
 		return 1
 	}
-	then := ""
-	if summary.RigImports {
-		then = ", then " + rigImportAllInstruction()
+	force := request.Force.flags()
+	snapshot := []string{"gc storage " + storageSnapshotVerb, "--work"}
+	if len(request.Cfg.Rigs) > 0 {
+		snapshot = append(snapshot, "--rigs")
 	}
-	fmt.Fprintf(stdout, "\nReady. The figures marked ESTIMATE are estimates. When the fleet is stopped, write the [storage] block above to city.toml and run %s%s.\n", storageClearInstruction(), then) //nolint:errcheck // best-effort stdout
+	steps := []string{
+		strings.Join(append(snapshot, "--"+storageFleetStoppedFlag), " ") + "  (the disk estimate counts this snapshot; migrate takes none)",
+		"add the [storage] block printed above to city.toml",
+		strings.Join(append([]string{storageClearInstruction()}, force...), " "),
+	}
+	if summary.RigImports {
+		steps = append(steps, strings.Join(append([]string{rigImportAllInstruction()}, force...), " "))
+	}
+	fmt.Fprintf(stdout, "\nReady. The figures marked ESTIMATE are estimates. Stop the fleet, then, in order (the city stays stopped until the last finishes):\n") //nolint:errcheck // best-effort stdout
+	for i, step := range steps {
+		fmt.Fprintf(stdout, "  %d. %s\n", i+1, step) //nolint:errcheck // best-effort stdout
+	}
 	return 0
 }
 
 // splitStoreReadGate says why the rehearsal may not read the city's stores
-// without starting something, or "" when it may: the provider is up, or the
-// caller holds the migration's window, which owns it.
+// without starting something, or "" when it may: every scope's server is up,
+// or the caller holds the migration's window, which owns them. A proxied
+// scope, bd-owned or not, is read only while its proxy runs (any bd read
+// starts a stopped one); the city's other providers, by the window's own
+// down-probe.
 func splitStoreReadGate(cityPath string, cfg *config.City) string {
 	if activeMigrationWindow(cityPath) != nil {
 		return ""
 	}
+	if doctorProxiedStoreNotRunning(cityPath) {
+		return "the proxied server for the city's work store is not running, and any bd read would start it"
+	}
 	owned, err := cityScopeProviderOwned(cityPath)
-	switch {
-	case err != nil:
+	if err != nil {
 		return fmt.Sprintf("whether bd owns this city's proxied server cannot be told (%v)", err)
-	case owned && doctorProxiedStoreNotRunning(cityPath):
-		return "bd's proxied server for the city's work store is stopped, and any bd read would start it"
-	case !owned:
+	}
+	if !owned {
 		down, err := migrationWindowProviderDown(cityPath)
 		if err != nil {
 			return fmt.Sprintf("the bead-store provider could not be checked (%v)", err)
@@ -499,24 +660,19 @@ func splitStoreReadGate(cityPath string, cfg *config.City) string {
 		}
 	}
 	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) == "" {
-			continue
-		}
-		owned, err := scopeProviderOwned(cityPath, rig.Path)
-		switch {
-		case err != nil:
-			return fmt.Sprintf("whether bd owns rig %s's proxied server cannot be told (%v)", rig.Name, err)
-		case owned && doctorProxiedStoreNotRunning(rig.Path):
-			return fmt.Sprintf("bd's proxied server for rig %s is stopped, and any bd read would start it", rig.Name)
+		if strings.TrimSpace(rig.Path) != "" && doctorProxiedStoreNotRunning(rig.Path) {
+			return fmt.Sprintf("the proxied server for rig %s is not running, and any bd read would start it", rig.Name)
 		}
 	}
 	return ""
 }
 
-// openPreflightLaneWindow registers a window on cityPath that started nothing
-// and holds no lock, so the rehearsal's opens take the window's lanes and
-// record the one they land on. It returns the closer, which stops nothing.
-// Inside a window already open (the guided split's) it registers none.
+// openPreflightLaneWindow registers a window on cityPath that started nothing,
+// holds no lock and carries cfg, the city's own configuration, so the
+// rehearsal's opens take the window's lanes and record the one they land on.
+// It returns the closer, which stops nothing. Inside any window already open
+// in the process (the guided split's) it registers none and its closer
+// touches nothing.
 func openPreflightLaneWindow(cityPath string, cfg *config.City) func() {
 	w := &migrationSourceWindow{cityPath: cityPath, cfg: cfg}
 	migrationWindows.Lock()
@@ -561,28 +717,4 @@ func splitBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
-// splitPreflightReadiness renders a rehearsal for the storage-split doctor
-// check: one line of verdict and the report's tagged rows.
-func splitPreflightReadiness(request storageOperatorRequest) (string, []string) {
-	var out bytes.Buffer
-	_, summary := doStorageSplitPreflight(request, &out, io.Discard)
-	var rows []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
-			rows = append(rows, trimmed)
-		}
-	}
-	verdict := "ready"
-	switch {
-	case len(summary.Blocks) > 0:
-		blocks := append([]string(nil), summary.Blocks...)
-		sort.Strings(blocks)
-		verdict = "it would refuse (" + strings.Join(blocks, ", ") + ")"
-	case summary.Unread != "":
-		verdict = "not checked: " + summary.Unread
-	}
-	return verdict, rows
 }

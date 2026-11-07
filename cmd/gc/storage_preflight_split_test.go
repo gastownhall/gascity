@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -110,7 +114,7 @@ func TestSplitClearLaneFor(t *testing.T) {
 	}{
 		{"unknown", beads.BeadsDiagnostic{}, false, splitDoltClearPerRow, splitDoltPerEdge, true},
 		{"native Dolt", nativeDoltLane, true, splitDoltClearPerRow, splitDoltBatchedPerEdge, false},
-		{"proxied", proxied, true, splitDoltClearPerRow, splitDoltPerEdge, false},
+		{"proxied", proxied, true, splitDoltClearPerRow, splitDoltPerEdge, true},
 		{"bd CLI", beads.BeadsDiagnostic{Store: beads.BeadsStoreNameBdStore}, true, splitDoltClearPerRow, splitDoltPerEdge, true},
 		{"exec", beads.BeadsDiagnostic{Store: beads.BeadsStoreNameExecStore}, true, splitDoltClearPerRow, splitDoltPerEdge, true},
 		{"file", beads.BeadsDiagnostic{Store: beads.BeadsStoreNameFileStore}, true, splitSQLiteClearPerRow, 0, false},
@@ -260,20 +264,26 @@ func TestSplitPreflightRehearsesARealSQLiteCity(t *testing.T) {
 		t.Fatalf("exit %d, summary %+v:\n%s", code, summary, out)
 	}
 	for _, want := range []string{
-		"split [storage] (hypothetical; nothing is written)",
+		"the [storage] block the split writes (hypothetical; nothing is written)",
+		"[storage.classes]",
+		`graph = "infra"`,
+		"[storage.bindings.infra]",
+		`provider = "sqlite-beads"`,
 		"[ok]    config",
 		"[ok]    reconciler     after the split: v2",
 		"[ok]    v2 sessions",
 		"would copy 300 infrastructure bead(s)",
 		"[ok]    holds",
-		"the work store opens on NativeDoltStore in the window (native Dolt)",
+		"the work store opens on NativeDoltStore in the window (native Dolt lane)",
 		"ESTIMATE, not a measurement",
 		"based on: the row and edge counts read above, read-only",
 		"62 ms an edge",
 		"[ok]    time budget    ESTIMATE",
 		"[ok]    disk           ESTIMATE",
 		"Ready. The figures marked ESTIMATE are estimates",
-		storageClearInstruction(),
+		"1. gc storage snapshot --work --fleet-stopped  (the disk estimate counts this snapshot; migrate takes none)",
+		"2. add the [storage] block printed above to city.toml",
+		"3. " + storageClearInstruction(),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the report lacks %q:\n%s", want, out)
@@ -318,7 +328,7 @@ func TestSplitPreflightRehearsesARealSQLiteCity(t *testing.T) {
 	if est.input.rows != len(rows) || est.input.clearRows != len(rows) || est.input.clearEdges != len(touching) {
 		t.Errorf("counted %d rows, %d cleared, %d clear edges; the store holds %d infrastructure rows and %d edges touching them", est.input.rows, est.input.clearRows, est.input.clearEdges, len(rows), len(touching))
 	}
-	if want := estimateSplitTime(est.input); est.time != want || !strings.Contains(out, "clear "+splitDuration(want.clear)) {
+	if want := estimateSplitTime(est.input); est.time != want || !strings.Contains(out, "clear about "+splitDuration(want.clear)) {
 		t.Errorf("printed estimate is not the arithmetic over the counts: %+v, want %+v:\n%s", est.time, want, out)
 	}
 	if provider.starts != 0 || provider.stops != 0 {
@@ -456,7 +466,7 @@ func TestSplitPreflightRefusals(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			block: "migration", want: "[BLOCK] holds",
+			block: "holds", want: "[BLOCK] holds",
 		},
 		{
 			name: "the bd CLI lane under hooks (S5-B gate)",
@@ -470,7 +480,15 @@ func TestSplitPreflightRefusals(t *testing.T) {
 				}
 				t.Cleanup(func() { openInfraMigrationSource = prev })
 			},
-			block: "migration", want: "Executable bd hooks",
+			block: "edge payloads", want: "Executable bd hooks",
+		},
+		{
+			name: "an explicit v2 the split city would refuse",
+			setup: func(_ *testing.T, request *storageOperatorRequest, _ beads.Store) {
+				request.Cfg.Daemon.SessionReconciler = "v2"
+				request.Cfg.Agents = []config.Agent{{Name: "a", DependsOn: []string{"b"}}, {Name: "b"}}
+			},
+			block: "reconciler", want: "the split city would not start",
 		},
 		{
 			name: "a disk the split would not fit",
@@ -489,7 +507,10 @@ func TestSplitPreflightRefusals(t *testing.T) {
 			if code != 1 || !slices.Contains(summary.Blocks, tc.block) {
 				t.Fatalf("exit %d, blocks %v, want %q:\n%s", code, summary.Blocks, tc.block, out)
 			}
-			if !strings.Contains(out, tc.want) || !strings.Contains(out, "the split would refuse") {
+			if (tc.block == "holds" || tc.block == "edge payloads") && summary.Estimate != nil {
+				t.Errorf("an estimate was computed over the partial plan a %s block leaves", tc.block)
+			}
+			if !strings.Contains(out, tc.want) || !strings.Contains(out, "the split would refuse") || strings.Contains(out, "the migration would refuse") || strings.Contains(out, "Nothing to migrate") {
 				t.Errorf("the report lacks %q:\n%s", tc.want, out)
 			}
 		})
@@ -511,7 +532,7 @@ func TestSplitPreflightCountsTheResumesABudgetCosts(t *testing.T) {
 	if want == 0 || est.resumes != want {
 		t.Fatalf("resumes = %d, want %d (a non-zero count, or the fixture proves nothing)", est.resumes, want)
 	}
-	if !strings.Contains(out, "[note]  time budget") || !strings.Contains(out, "need "+strconv.Itoa(want)+" resume(s)") {
+	if !strings.Contains(out, "[note]  time budget") || !strings.Contains(out, "need "+strconv.Itoa(want)+" resume(s)") || !strings.Contains(out, "the city stays stopped until the last run finishes") {
 		t.Errorf("the report does not name the resumes:\n%s", out)
 	}
 }
@@ -571,4 +592,322 @@ func TestStoragePreflightSplitFlags(t *testing.T) {
 // as the bd CLI lane cannot.
 type payloadUnanswerableStore struct {
 	beads.Store
+}
+
+// storeFingerprint hashes every row a store holds, closed and wisp-tier
+// included, with each row's down edges: two equal fingerprints are one
+// store's content.
+func storeFingerprint(t *testing.T, store beads.Store) string {
+	t.Helper()
+	rows, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.SortFunc(rows, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	h := sha256.New()
+	for _, b := range rows {
+		deps, err := store.DepList(b.ID, "down")
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(struct {
+			Row  beads.Bead
+			Deps []beads.Dep
+		}{b, deps})
+		h.Write(data)
+	}
+	return fmt.Sprintf("%d rows %x", len(rows), h.Sum(nil))
+}
+
+// TestSplitPreflightLeavesTheWorkStoreAsItFoundIt fingerprints the work store
+// itself, which lives outside the city tree: a rehearsal that wrote a row or
+// an edge into it would change the fingerprint, as the control shows.
+func TestSplitPreflightLeavesTheWorkStoreAsItFoundIt(t *testing.T) {
+	request, source, _ := splitReadyCity(t, 120, nativeDoltLane)
+	before := storeFingerprint(t, source)
+	if code, _, out := runSplitPreflight(t, request); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	newStorageSplitCheck(request.Cfg, request.CityPath).Run(nil)
+	if after := storeFingerprint(t, source); after != before {
+		t.Fatalf("the rehearsal changed the work store: %s, then %s", before, after)
+	}
+	mustCreateInfraBead(t, source, beads.Bead{Title: "the control", Type: "session"})
+	if storeFingerprint(t, source) == before {
+		t.Fatal("a row created in the work store left the fingerprint unchanged, so it proves nothing")
+	}
+}
+
+// TestSplitPreflightWritesNothingThroughTheRealOpener runs the rehearsal on a
+// file-provider city through the production work-store opener, whose ledger
+// lives in the city tree: the tree is byte-identical afterwards.
+func TestSplitPreflightWritesNothingThroughTheRealOpener(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	request := storageTestRequest(t, &config.City{})
+	request.TimeBudget = storageDefaultTimeBudget
+	if err := os.WriteFile(filepath.Join(request.CityPath, ".gc", "beads.json"), []byte(`{"beads":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openInfraMigrationSource(request.CityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		mustCreateInfraBead(t, store, beads.Bead{Title: "a session", Type: "session"})
+	}
+	if err := closeBeadStoreHandle(store); err != nil {
+		t.Fatal(err)
+	}
+	stubSplitPreflightLegs(t, nil)
+	stubInfraControllerPing(t, 0)
+	before := treeFingerprint(t, request.CityPath)
+	code, summary, out := runSplitPreflight(t, request)
+	if code != 0 || summary.Estimate == nil || !strings.Contains(out, "would copy 3 infrastructure bead(s)") || !strings.Contains(out, "FileStore") {
+		t.Fatalf("exit %d, %+v:\n%s", code, summary, out)
+	}
+	if after := treeFingerprint(t, request.CityPath); !equalStrings(before, after) {
+		t.Errorf("the rehearsal wrote into the city through the real opener:\n before %v\n after  %v", before, after)
+	}
+}
+
+// TestSplitPreflightRefusesACityWithAConvergenceMarker is the differential
+// for a city migrated and then backed out by removing [storage] before any
+// split boot, which leaves the marker and no note: the plain preflight on the
+// split config sees a converged city with nothing to copy, and the split
+// rehearsal must not call it Ready, since the migration it would name copies
+// the work store over the binding.
+func TestSplitPreflightRefusesACityWithAConvergenceMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		migrate func(testing.TB, string, *config.City, io.Writer) infraMigrationReport
+		want    string
+	}{
+		{"cleared", migrateInfraClasses, "boot's check confirms the binding holds them"},
+		{"copies retained", func(tb testing.TB, city string, cfg *config.City, log io.Writer) infraMigrationReport {
+			return migrateInfraClassesRetainingSource(tb.(*testing.T), city, cfg, log)
+		}, "records an earlier split"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, _, _ := splitReadyCity(t, 30, nativeDoltLane)
+			split := splitHypotheticalConfig(request.Cfg)
+			var log bytes.Buffer
+			if got := tc.migrate(t, request.CityPath, split, &log); got.Outcome != infraMigrationConverged {
+				t.Fatalf("migrating: %s: %s", got.Outcome, log.String())
+			}
+			for _, note := range []string{infraClearedNotePath(request.CityPath), bornSplitServedNotePath(request.CityPath)} {
+				if err := os.Remove(note); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+			}
+			// The plain preflight's short-circuit (M24): converged, nothing to
+			// copy, and no command named.
+			plain := request
+			plain.Cfg = split
+			var stdout bytes.Buffer
+			if code := doStoragePreflight(plain, &stdout, io.Discard); code != 0 || !strings.Contains(stdout.String(), "Nothing to migrate") || strings.Contains(stdout.String(), "Ready.") {
+				t.Fatalf("plain preflight on the converged split config: exit %d:\n%s", code, stdout.String())
+			}
+			code, summary, out := runSplitPreflight(t, request)
+			if code != 1 || !slices.Contains(summary.Blocks, "cutover") || summary.Estimate != nil {
+				t.Fatalf("exit %d, blocks %v, estimate %v:\n%s", code, summary.Blocks, summary.Estimate, out)
+			}
+			if !strings.Contains(out, tc.want) || strings.Contains(out, "Ready.") || strings.Contains(out, "Nothing to migrate") {
+				t.Errorf("the report lacks %q or names a migration:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+// TestSplitPreflightNeverReplacesAnOpenWindow: the guided split rehearses
+// inside its own window (S5-H). The rehearsal reads through that window, and
+// leaves it registered, open and its provider running; another city's window
+// is not touched either.
+func TestSplitPreflightNeverReplacesAnOpenWindow(t *testing.T) {
+	for _, own := range []bool{true, false} {
+		request, _, provider := splitReadyCity(t, 20, nativeDoltLane)
+		owner := request.CityPath
+		if !own {
+			owner = t.TempDir()
+		}
+		w := &migrationSourceWindow{cityPath: owner, cfg: request.Cfg, started: true, startedHere: true}
+		migrationWindows.Lock()
+		migrationWindows.active = w
+		migrationWindows.Unlock()
+		code, _, out := runSplitPreflight(t, request)
+		migrationWindows.Lock()
+		active := migrationWindows.active
+		migrationWindows.active = nil
+		migrationWindows.Unlock()
+		if code != 0 || active != w || w.closed || provider.stops != 0 {
+			t.Fatalf("own window %t: exit %d; the window is active %t, closed %t, provider stops %d:\n%s", own, code, active == w, w.closed, provider.stops, out)
+		}
+	}
+}
+
+// TestSplitPreflightGatesAStoppedProxy: a proxied scope whose proxy is not
+// running, the city's (M2) or a rig's (M3), bd-owned or not, stops every read.
+func TestSplitPreflightGatesAStoppedProxy(t *testing.T) {
+	for _, rig := range []bool{false, true} {
+		request, _, provider := splitReadyCity(t, 10, nativeDoltLane)
+		stopped := request.CityPath
+		if rig {
+			stopped = t.TempDir()
+			request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: stopped}}
+		}
+		prev := doctorProxiedStoreNotRunning
+		doctorProxiedStoreNotRunning = func(root string) bool { return root == stopped }
+		refuseInfraMigrationSource(t)
+		code, summary, out := runSplitPreflight(t, request)
+		doctorProxiedStoreNotRunning = prev
+		if code != 1 || !strings.Contains(summary.Unread, "proxied server") || provider.starts != 0 {
+			t.Fatalf("rig %t: exit %d, unread %q, starts %d:\n%s", rig, code, summary.Unread, provider.starts, out)
+		}
+	}
+}
+
+// TestSplitPreflightProviderCountersCanFail is the control for every
+// "starts nothing" assertion: the counters the rehearsal tests read do count
+// a start and a stop when the migration's real window takes one.
+func TestSplitPreflightProviderCountersCanFail(t *testing.T) {
+	request, _, provider := splitReadyCity(t, 5, nativeDoltLane)
+	stubMigrationProviderDown(t, true)
+	lock, err := os.CreateTemp(t.TempDir(), "lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close() //nolint:errcheck
+	w, err := openMigrationSource(lock, request.CityPath, request.Cfg, "test", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if provider.starts != 1 || provider.stops != 1 {
+		t.Fatalf("starts %d, stops %d: the counters do not see the window's provider", provider.starts, provider.stops)
+	}
+}
+
+// TestSplitBudgetAdvice pins the --time-budget row on measured and floor
+// lanes: a floor never promises "would not pause", counts pauses as a
+// minimum, says the city stays stopped and suggests a budget that fits.
+func TestSplitBudgetAdvice(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		city, budget time.Duration
+		floor, note  bool
+		want, absent []string
+	}{
+		{"no budget", 90 * time.Second, 0, false, false, []string{"no --time-budget", "stays stopped", "about 1m30s"}, nil},
+		{"fits", 30 * time.Second, time.Minute, false, false, []string{"would not pause", "about 30s"}, []string{"at least"}},
+		{"fits a floor", 30 * time.Second, time.Minute, true, true, []string{"at least 30s", "not known", "--time-budget 1m0s or more"}, []string{"would not pause", "about at least"}},
+		{"over", 90 * time.Second, time.Minute, false, true, []string{"about 1m30s", "pause (exit 75) 1 time(s)", "need 1 resume(s)", "stays stopped until the last run finishes", "--time-budget 2m0s runs it in one"}, []string{"at least"}},
+		{"over a floor", 150 * time.Second, time.Minute, true, true, []string{"at least 2m30s", "at least 2 time(s)", "need at least 2 resume(s)", "--time-budget 4m0s"}, []string{"about at least", "about"}},
+	} {
+		note, text := splitBudgetAdvice(tc.city, tc.budget, tc.floor)
+		if note != tc.note {
+			t.Errorf("%s: note = %t, want %t: %s", tc.name, note, tc.note, text)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(text, w) {
+				t.Errorf("%s: %q lacks %q", tc.name, text, w)
+			}
+		}
+		for _, a := range tc.absent {
+			if strings.Contains(text, a) {
+				t.Errorf("%s: %q says %q", tc.name, text, a)
+			}
+		}
+	}
+	for _, tc := range []struct{ city, want time.Duration }{
+		{0, time.Minute}, {48 * time.Second, time.Minute}, {50 * time.Second, 2 * time.Minute}, {4 * time.Minute, 5 * time.Minute}, {time.Hour, 75 * time.Minute},
+	} {
+		if got := splitBudgetFitting(tc.city); got != tc.want {
+			t.Errorf("splitBudgetFitting(%v) = %v, want %v", tc.city, got, tc.want)
+		}
+	}
+}
+
+// TestSplitPreflightFooterCarriesTheAttestations: the commands Ready names
+// carry the --force attestations the rehearsal was given.
+func TestSplitPreflightFooterCarriesTheAttestations(t *testing.T) {
+	request, _, _ := splitReadyCity(t, 10, nativeDoltLane)
+	request.Force = storageForce{RemoteRuntime: true}
+	code, _, out := runSplitPreflight(t, request)
+	if code != 0 || !strings.Contains(out, "3. "+storageClearInstruction()+" --force=remote-runtime") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+}
+
+// TestSplitBdVouchStatus judges the city's bd from the verdict cache and the
+// vouch file alone: an unjudged binary is "not checked", never OK.
+func TestSplitBdVouchStatus(t *testing.T) {
+	city := storageTestRequest(t, &config.City{}).CityPath
+	bin := t.TempDir()
+	bd := filepath.Join(bin, "bd")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if got, ok := splitBdVouchStatus(city); ok || !strings.HasPrefix(got, "not checked") {
+		t.Fatalf("no verdict: %q, %t", got, ok)
+	}
+	sum, err := fileSHA256(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := bdflags.Inventories()[0].Name
+	set := bdflags.InventorySetFingerprint()
+	vouch, _ := json.Marshal(bdVouchFile{Vouches: []bdVouch{{BinaryPath: bd, SHA256: sum, Inventory: inv, InventorySet: set}}})
+	if err := os.WriteFile(bdVouchPath(city), vouch, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := splitBdVouchStatus(city); !ok || !strings.Contains(got, "vouched as inventory "+inv) {
+		t.Fatalf("vouched: %q, %t", got, ok)
+	}
+	if err := os.Remove(bdVouchPath(city)); err != nil {
+		t.Fatal(err)
+	}
+	id, err := statBdBinary(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		inventory string
+		ok        bool
+		want      string
+	}{{inv, true, "matched inventory " + inv}, {"", false, "matches no pinned inventory"}} {
+		saveBdTrustCache(city, bdTrustCache{Entries: []bdTrustCacheEntry{{bdBinaryID: id, InventorySet: set, CheckedAt: time.Now(), bdTrustVerdict: bdTrustVerdict{Inventory: tc.inventory, Diffs: []string{"a diff"}}}}})
+		if got, ok := splitBdVouchStatus(city); ok != tc.ok || !strings.Contains(got, tc.want) {
+			t.Errorf("cached %q: %q, %t", tc.inventory, got, ok)
+		}
+	}
+	t.Setenv("GC_BEADS", "file")
+	if got, ok := splitBdVouchStatus(city); !ok || !strings.HasPrefix(got, "n/a") {
+		t.Errorf("file store: %q, %t", got, ok)
+	}
+}
+
+// TestSplitPreflightLaneWindowCarriesTheCitysConfig: the reads open the work
+// store as it is configured now, not under the hypothetical [storage], and
+// the window is gone once they are done.
+func TestSplitPreflightLaneWindowCarriesTheCitysConfig(t *testing.T) {
+	request, source, _ := splitReadyCity(t, 5, nativeDoltLane)
+	var seen *config.City
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
+		seen, _ = migrationWindowOpen(cityPath)
+		recordMigrationLane(cityPath, nativeDoltLane)
+		return source, nil
+	}
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	if code, _, out := runSplitPreflight(t, request); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	if seen != request.Cfg {
+		t.Errorf("the work store opened under %p, not the city's configuration %p", seen, request.Cfg)
+	}
+	if activeMigrationWindow(request.CityPath) != nil {
+		t.Error("the lane window outlived the reads")
+	}
 }

@@ -12,7 +12,8 @@ package main
 // routes a class pass through, refuses first. Binaries older than the file
 // cannot be stopped; that is the documented floor (v1.5.1).
 //
-// The file holds one version, MAJOR.MINOR.PATCH. A gc whose own version does
+// The file holds one version, MAJOR.MINOR.PATCH, with or without a leading
+// "v"; an empty file records no floor. A gc whose own version does
 // not parse as one (a "dev" build) cannot be compared and is not refused: it
 // is a local build, and the storage-split doctor check says it could not
 // compare. A file that exists and does not parse refuses, as an unreadable
@@ -26,12 +27,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/searchpath"
 )
 
 // minGCVersionFileName is the floor's file under the city's .gc.
@@ -58,7 +61,10 @@ func readMinGCVersion(cityPath string) (floor string, present bool, err error) {
 	if err != nil {
 		return "", true, fmt.Errorf("reading %s: %w", minGCVersionPath(cityPath), err)
 	}
-	floor = strings.TrimSpace(string(data))
+	floor = strings.TrimPrefix(strings.TrimSpace(string(data)), "v")
+	if floor == "" {
+		return "", false, nil
+	}
 	if !minGCVersionPattern.MatchString(floor) {
 		return "", true, fmt.Errorf("%s does not hold one MAJOR.MINOR.PATCH version", minGCVersionPath(cityPath))
 	}
@@ -114,10 +120,13 @@ var minGCVersionPathProbe = probeSessionPathGCVersion
 const minGCVersionProbeTimeout = 5 * time.Second
 
 // probeSessionPathGCVersion finds the gc on the PATH an agent session
-// inherits: workspace.env's PATH when the city sets one, else this process's.
-// path is "" when no gc is on it.
+// inherits: workspace.env's PATH when the city sets one, else the one the
+// supervisor gives its sessions (searchpath.ExpandPath over this process's,
+// which adds the user-managed install directories such as ~/.local/bin and
+// ~/go/bin). path is "" when no gc is on it.
 func probeSessionPathGCVersion(cfg *config.City) (path, version string, err error) {
-	pathList := os.Getenv("PATH")
+	home, _ := os.UserHomeDir()
+	pathList := searchpath.ExpandPath(home, goruntime.GOOS, os.Getenv("PATH"))
 	if cfg != nil {
 		if configured, ok := expandEnvMap(cfg.Workspace.Env)["PATH"]; ok {
 			pathList = configured

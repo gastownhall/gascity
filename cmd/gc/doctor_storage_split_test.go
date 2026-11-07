@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
@@ -54,6 +56,7 @@ func TestStorageSplitDoctorAgreesWithStatus(t *testing.T) {
 		setup  func(t *testing.T) storageOperatorRequest
 		status doctor.CheckStatus
 		want   string
+		detail string
 	}{
 		{
 			name: "configured and not converged",
@@ -145,21 +148,23 @@ func TestStorageSplitDoctorAgreesWithStatus(t *testing.T) {
 			status: doctor.StatusWarning, want: "under the recorded --force=remote-runtime",
 		},
 		{
-			name: "unsplit and ready",
+			name: "unsplit, provider up",
 			setup: func(t *testing.T) storageOperatorRequest {
 				request, _, _ := splitReadyCity(t, 20, nativeDoltLane)
+				refuseInfraMigrationSource(t)
 				return request
 			},
-			status: doctor.StatusOK, want: "rehearses the split: ready",
+			status: doctor.StatusOK, want: "rehearses the split", detail: "provider: up",
 		},
 		{
-			name: "unsplit and refused, still OK until the default flips (O11)",
+			name: "unsplit, provider down, still OK until the default flips (O11)",
 			setup: func(t *testing.T) storageOperatorRequest {
 				request, _, _ := splitReadyCity(t, 20, nativeDoltLane)
-				stubSplitPreflightLegs(t, []v2SessionLeg{{ref: "city", notChecked: "open failed"}})
+				refuseInfraMigrationSource(t)
+				stubMigrationProviderDown(t, true)
 				return request
 			},
-			status: doctor.StatusOK, want: "it would refuse (v2 sessions)",
+			status: doctor.StatusOK, want: "rehearses the split", detail: "is down",
 		},
 		{
 			name: "unsplit with a cleared work store's note",
@@ -176,11 +181,8 @@ func TestStorageSplitDoctorAgreesWithStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			request := tc.setup(t)
 			got := newStorageSplitCheck(request.Cfg, request.CityPath).Run(nil)
-			if got.Status != tc.status || !strings.Contains(got.Message, tc.want) {
-				t.Fatalf("storage-split = %v %q, want %v containing %q; details %v", got.Status, got.Message, tc.status, tc.want, got.Details)
-			}
-			if request.Cfg.Storage == nil {
-				return
+			if got.Status != tc.status || !strings.Contains(got.Message, tc.want) || !strings.Contains(strings.Join(got.Details, "\n"), tc.detail) {
+				t.Fatalf("storage-split = %v %q, want %v containing %q; details %v, want %q", got.Status, got.Message, tc.status, tc.want, got.Details, tc.detail)
 			}
 			code := doStorageStatusCity(request, io.Discard, io.Discard)
 			_, remote := cityRunsRemoteSessions(request.Cfg, request.CityPath)
@@ -290,5 +292,121 @@ func TestStorageBootGateRefusesAGCBelowTheCityFloor(t *testing.T) {
 	stubGCVersion(t, "1.5.1")
 	if _, err := storageBootGate(city, &config.City{}, "test", nil, io.Discard); err != nil {
 		t.Errorf("a gc at the floor refused: %v", err)
+	}
+}
+
+// TestStatusAndBootAgreeOnAStaleMarker (M50): a marker whose binding database
+// is gone refuses at boot, and status and doctor say so too.
+func TestStatusAndBootAgreeOnAStaleMarker(t *testing.T) {
+	request, target := convergedSplitCity(t)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(target.Database + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceStale {
+		t.Fatalf("state = %v, %v: the fixture is not stale", state, err)
+	}
+	_, bootErr := storageBootGate(request.CityPath, request.Cfg, "test", nil, io.Discard)
+	code := doStorageStatusCity(request, io.Discard, io.Discard)
+	got := newStorageSplitCheck(request.Cfg, request.CityPath).Run(nil)
+	if bootErr == nil || code == 0 || got.Status != doctor.StatusError {
+		t.Fatalf("boot %v, status exit %d, doctor %v: a stale marker must refuse in all three", bootErr, code, got.Status)
+	}
+}
+
+// TestStorageSplitDoctorOpensNoWindow (S1): the unsplit verdict opens no
+// store and registers no migration window, so a check doctor abandons on its
+// timeout leaves nothing behind for the checks after it.
+func TestStorageSplitDoctorOpensNoWindow(t *testing.T) {
+	request, _, _ := splitReadyCity(t, 5, nativeDoltLane)
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		t.Error("the doctor check opened the work store")
+		return nil, errors.New("refused")
+	}
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	if got := newStorageSplitCheck(request.Cfg, request.CityPath).Run(nil); got.Status != doctor.StatusOK {
+		t.Fatalf("storage-split = %v %q", got.Status, got.Message)
+	}
+	migrationWindows.Lock()
+	active := migrationWindows.active
+	migrationWindows.Unlock()
+	if active != nil {
+		t.Fatalf("the doctor check left a migration window registered on %s", active.cityPath)
+	}
+}
+
+// writeFakeGC puts a gc reporting v in dir.
+func writeFakeGC(t *testing.T, dir, v string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "gc")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho "+v+"\necho second line\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestProbeSessionPathGCVersion runs the real probe: the supervisor's
+// expanded PATH (here ~/.local/bin, ahead of the process PATH), workspace.env's
+// PATH over it, relative entries skipped, and the first line of the output.
+func TestProbeSessionPathGCVersion(t *testing.T) {
+	home, procPath, wsPath := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", procPath)
+	if path, _, err := probeSessionPathGCVersion(&config.City{}); err != nil || path != "" {
+		t.Fatalf("no gc anywhere: %q, %v", path, err)
+	}
+	writeFakeGC(t, procPath, "1.4.2")
+	if path, v, err := probeSessionPathGCVersion(&config.City{}); err != nil || path != filepath.Join(procPath, "gc") || v != "1.4.2" {
+		t.Fatalf("process PATH: %q %q %v", path, v, err)
+	}
+	local := writeFakeGC(t, filepath.Join(home, ".local", "bin"), "1.5.0")
+	if path, v, err := probeSessionPathGCVersion(nil); err != nil || path != local || v != "1.5.0" {
+		t.Fatalf("the supervisor's expanded PATH puts ~/.local/bin first: %q %q %v", path, v, err)
+	}
+	ws := writeFakeGC(t, wsPath, "1.6.0")
+	cfg := &config.City{Workspace: config.Workspace{Env: map[string]string{"PATH": "relative/bin" + string(os.PathListSeparator) + wsPath}}}
+	if path, v, err := probeSessionPathGCVersion(cfg); err != nil || path != ws || v != "1.6.0" {
+		t.Fatalf("workspace.env PATH: %q %q %v", path, v, err)
+	}
+	cfg.Workspace.Env["PATH"] = "relative/bin"
+	if path, _, err := probeSessionPathGCVersion(cfg); err != nil || path != "" {
+		t.Fatalf("a workspace PATH of relative entries alone found %q (%v)", path, err)
+	}
+}
+
+// TestReadMinGCVersionShapes: a leading v is accepted, and an empty file
+// records no floor.
+func TestReadMinGCVersionShapes(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		body, floor string
+		present     bool
+	}{{"v1.5.1\n", "1.5.1", true}, {"1.5.1", "1.5.1", true}, {"", "", false}, {"\n  \n", "", false}} {
+		if err := os.WriteFile(minGCVersionPath(city), []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		floor, present, err := readMinGCVersion(city)
+		if err != nil || floor != tc.floor || present != tc.present {
+			t.Errorf("%q: %q %t %v, want %q %t", tc.body, floor, present, err, tc.floor, tc.present)
+		}
+	}
+}
+
+// TestCityIDFloorBelowWarning names repair-sequence --id-floor, or for hosted
+// bd the out-of-band setting (O10).
+func TestCityIDFloorBelowWarning(t *testing.T) {
+	if got := cityIDFloorBelowWarning(cityIDFloorPlan{Need: 7, Current: 5}); !strings.Contains(got, "gc storage repair-sequence --id-floor") {
+		t.Errorf("local: %q", got)
+	}
+	if got := cityIDFloorBelowWarning(cityIDFloorPlan{Need: 7, Current: 5, Hosted: "https://h"}); !strings.Contains(got, "out of band (owner decision O10)") || !strings.Contains(got, "max_hash_length at least 7") {
+		t.Errorf("hosted: %q", got)
 	}
 }

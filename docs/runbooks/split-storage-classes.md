@@ -148,8 +148,15 @@ measured on a loaded host (the native-Dolt clear costs about 62 ms an edge in
 batches; the proxied, bd CLI and exec lanes remove an edge per call, and
 their figure is a floor). It starts nothing: on a city whose bead-store
 provider is down it says so and runs no check that reads a store, so rehearse
-on the running city. `gc doctor`'s `storage-split` check reports the same
-readiness on an unsplit city, and the binding's verdict on a split one.
+on the running city. `gc doctor`'s `storage-split` check reports the
+binding's verdict on a split city; on an unsplit one it stays cheap (the
+reconciler the split city would resolve to, and whether the provider is up)
+and leaves the rehearsal to this command. A city that already carries a
+convergence marker for the split binding (a migration backed out by removing
+`[storage]`) is refused here: restore the block instead of migrating again.
+Ready names the window's commands in order, starting with
+`gc storage snapshot --work --fleet-stopped`, which the disk estimate counts
+and the migration does not take.
 
 It reports rather than refuses what stopping the city ends: a **live
 controller**, named by PID; the city's registration with the supervisor; its
