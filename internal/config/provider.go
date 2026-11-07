@@ -542,8 +542,8 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 }
 
 // programStatusBindingFromWorker lifts a built-in profile's flat
-// program-status fields into the config binding. An unset relay stays nil so a
-// city layer can still inherit or override it.
+// program-status fields into the config binding. An unset relay or
+// hold_mid_turn stays nil so a city layer can still inherit or override it.
 func programStatusBindingFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProgramStatusBinding {
 	b := ProgramStatusBinding{
 		Protocol: spec.ProgramStatusProtocol,
@@ -552,6 +552,9 @@ func programStatusBindingFromWorker(spec workerbuiltin.BuiltinProviderSpec) Prog
 	}
 	if spec.ProgramStatusRelay {
 		b.Relay = boolPtr(true)
+	}
+	if spec.ProgramStatusHoldMidTurn {
+		b.HoldMidTurn = boolPtr(true)
 	}
 	return b
 }

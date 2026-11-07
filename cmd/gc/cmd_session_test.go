@@ -3117,11 +3117,7 @@ func asleepNamedSessionForTest(t *testing.T, cityDir string) string {
 		t.Fatalf("cmdSessionNew(--no-attach) = %d, want 0", code)
 	}
 	b := onlySessionBead(t, cityDir)
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	if err := store.Update(b.ID, beads.UpdateOpts{Metadata: map[string]string{
+	if err := openCitySessionStoreForTest(t, cityDir).Update(b.ID, beads.UpdateOpts{Metadata: map[string]string{
 		"state":                     string(session.StateAsleep),
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
@@ -3349,12 +3345,39 @@ max_active_sessions = 4
 	}
 }
 
-func sessionBeads(t *testing.T, cityDir string) []beads.Bead {
+// openCityWorkStoreForTest opens cityDir's work store, failing the test on
+// error.
+func openCityWorkStoreForTest(t *testing.T, cityDir string) beads.Store {
 	t.Helper()
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
 	}
+	return store
+}
+
+// openCitySessionStoreForTest opens cityDir's store routed to the
+// session-class store, as the CLI's session commands do (cliSessionStore).
+// On a single-store city that is the city store; under the split-strict gate
+// it is the class view that holds session rows, which the work view
+// openCityStoreAt returns hides. A fixture that seeds, reads or stamps a
+// session row goes through it, so it reads the row where production put it.
+func openCitySessionStoreForTest(t *testing.T, cityDir string) beads.Store {
+	t.Helper()
+	return cliSessionStore(openCityWorkStoreForTest(t, cityDir), nil, cityDir)
+}
+
+// openCityMailStoreForTest is openCitySessionStoreForTest for the messaging
+// class (cliMailStore): the store the CLI's mail and handoff commands write
+// mail beads to.
+func openCityMailStoreForTest(t *testing.T, cityDir string) beads.Store {
+	t.Helper()
+	return cliMailStore(openCityWorkStoreForTest(t, cityDir), nil, cityDir).Store
+}
+
+func sessionBeads(t *testing.T, cityDir string) []beads.Bead {
+	t.Helper()
+	store := openCitySessionStoreForTest(t, cityDir)
 	all, err := store.ListByLabel(session.LabelSession, 0)
 	if err != nil {
 		t.Fatalf("ListByLabel(session): %v", err)
@@ -4019,12 +4042,12 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 }
 
-func TestRouteSessionList_StaleBannerOver30s(t *testing.T) {
+func TestRouteSessionList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeSessionListTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{
@@ -4051,9 +4074,7 @@ func TestRouteSessionList_StaleBannerOver30s(t *testing.T) {
 	if code := routeSessionList(cityPath, "", "", c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 // okSessionPeekHandler serves a single-session GET response with a last-

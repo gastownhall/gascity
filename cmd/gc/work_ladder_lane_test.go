@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1523,14 +1525,18 @@ func TestWorkLadderPausedRefusalRecordsNothing(t *testing.T) {
 // Rule 2 (audit 4, lever 2; user-approved 2026-10-19). A claimed step whose
 // seat asked a person and waits for the answer says so: gc.awaiting_human
 // names the seat (the adopt-pr human-approval step, once its approval mail
-// is out). While the key names the seat, the ladder only nudges the step, an
-// hour after the ask and hourly after that, however long the person takes:
-// no recycle, no release, no alert. Once the seat clears it (the answer
-// came, and it works the step again), the ladder takes the step up on a
-// fresh grace. Without the rule, the step is nudged at +90s, +3 ... +48
-// minutes, recycled at about 154 minutes, then nudged hourly for as long as
-// the person takes.
-func TestWorkLadderNudgesAHumanWaitOnlyHourly(t *testing.T) {
+// is out). While the key names the seat, the ladder never recycles or
+// releases the step and raises no alert about it. It nudges the step hourly
+// unless the seat's own turns show the newest turn completed, and then
+// daily (ga-ylpbsy.65): here the seat's turns cannot be read (no turn
+// source, as for a family that records no turn outcomes), so it cannot
+// tell, and nudges an hour after the ask and hourly after that, however
+// long the person takes. Once the seat clears the key (the answer came, and
+// it works the step again), the ladder takes the step up on a fresh grace.
+// Without the rule, the step is nudged at +90s, +3 ... +48 minutes,
+// recycled at about 154 minutes, then nudged hourly for as long as the
+// person takes.
+func TestWorkLadderNudgesAHumanWaitHourlyWhenItsTurnsCannotBeRead(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("Human review before merge")
 	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
@@ -1575,9 +1581,12 @@ func TestWorkLadderNudgesAHumanWaitOnlyHourly(t *testing.T) {
 // The wait ends in a turn of the seat: the one the person's answer starts,
 // which clears gc.awaiting_human (or closes the step). If that turn dies
 // first (a provider error, a usage limit), nothing outside the seat ends
-// the wait, so the ladder's hourly nudge is what takes the answered step up
-// again: within an hour of the ladder's last nudge, whatever the dead turn
-// did, with no recycle, release or alert meanwhile.
+// the wait. The seat's turns say so (its newest turn failed), and that is
+// what takes the answered step up again: at once when the wait began a Cap
+// or more ago, then a Cap apart while the turns still show the failure, with
+// no recycle, release or alert meanwhile. Before the answer, while the
+// seat's newest turn is the one that asked, completed, the wait gets no
+// nudge for a day (WaitCap).
 func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("Human review before merge")
@@ -1585,15 +1594,25 @@ func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: c.now.Add(-2 * time.Hour), EndedAt: c.now.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	hist := runtime.TurnHistory{ObservedAt: c.now, Recent: []runtime.EndedTurn{asked}}
+	c.turnsRead(func() runtime.TurnHistory { return hist })
 	c.awaitHuman(id, c.seat) // the step ran and asked
 	c.run(90*time.Minute, 30*time.Second, nil)
-	if want := []time.Duration{workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
-		t.Fatalf("nudges %v, want %v: one a cap after the ask", c.nudgedAt, want)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat's newest turn, the ask, completed: want none", c.nudgedAt)
 	}
-	c.sp.SetActivity(ladderSeatName, c.now) // the answer came, and its turn died leaving the key set
-	c.run(time.Hour, 30*time.Second, nil)
-	if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
-		t.Fatalf("nudges %v, want %v: the answered step taken up again within an hour of the last nudge", c.nudgedAt, want)
+	// The answer came, and its turn died on a provider error leaving the key set.
+	died := c.now
+	hist = runtime.TurnHistory{ObservedAt: died, Recent: []runtime.EndedTurn{
+		{TurnID: "answer", StartedAt: died.Add(-time.Minute), EndedAt: died, Status: runtime.TurnStatusFailed, Failure: runtime.TurnFailure{Code: "server_error", HTTPStatus: 529, Message: "API Error: overloaded"}},
+		asked,
+	}}
+	c.sp.SetActivity(ladderSeatName, died)
+	c.run(2*time.Hour+2*time.Minute, 30*time.Second, nil)
+	answered := died.Sub(c.start) + idleClaimNudgeGrace // the first pass that finds the seat quiet again
+	if want := []time.Duration{answered, answered + workladder.DefaultCap, answered + 2*workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: the answered step taken up once the seat is quiet, then a cap apart", c.nudgedAt, want)
 	}
 	var last runtime.Call
 	for _, call := range c.sp.Calls {
@@ -1606,6 +1625,161 @@ func TestWorkLadderRedrivesAnAnswerWhoseTurnDied(t *testing.T) {
 	}
 	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
 		t.Fatalf("an answered wait: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+}
+
+// A seat that waits on a person, whose turn source reports its newest turn
+// completed (the turn that asked), is nudged a day after the ask and a day
+// apart after that, however long the person takes: no recycle, release or
+// alert, and the claim stays with its seat, which is never restarted. The
+// wait costs a turn a day, not one an hour. That nudge is what takes up an
+// answer that started no turn of the seat (a mail reply that asks for no
+// turn, as the dashboard's Reply does, or one whose wake failed): the ask
+// stays the newest turn, completed, so no reading can show the answer came.
+// When the seat clears the key, the ladder takes the step up on a fresh
+// grace.
+func TestWorkLadderNudgesAHumanWaitDailyWhileItsNewestTurnCompleted(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	reads := 0
+	c.turnsRead(func() runtime.TurnHistory {
+		reads++
+		return runtime.TurnHistory{ObservedAt: c.now, Recent: []runtime.EndedTurn{
+			{TurnID: "asked", StartedAt: c.start.Add(-2 * time.Hour), EndedAt: c.start.Add(-time.Hour), Status: runtime.TurnStatusCompleted},
+		}}
+	})
+	c.run(time.Minute, 30*time.Second, nil) // the step runs, then asks
+	c.awaitHuman(id, c.seat)
+	asked := c.now.Sub(c.start)
+	c.run(3*24*time.Hour, 5*time.Minute, nil)
+	if reads == 0 {
+		t.Fatal("the lane never read the waiting seat's turns")
+	}
+	if want := []time.Duration{asked + workladder.DefaultWaitCap, asked + 2*workladder.DefaultWaitCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: a day after the ask and a day apart while the seat's newest turn completed", c.nudgedAt, want)
+	}
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("three days waiting on a person: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("the waiting step is %q %q, want it left with its agent", b.Status, b.Assignee)
+	}
+	if v := c.row().Metadata["restart_requested"]; v != "" {
+		t.Fatalf("restart_requested %q on a seat waiting on a person", v)
+	}
+	c.awaitHuman(id, "")
+	answered, waited := c.now, len(c.nudgedAt)
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) == waited || c.nudgedAt[waited] != answered.Add(workladder.DefaultGrace).Sub(c.start) {
+		t.Fatalf("after the answer at %v: nudges %v, want the next a grace later", answered.Sub(c.start), c.nudgedAt[waited:])
+	}
+}
+
+// A wait is left alone past the hourly nudge (to a daily one) only on
+// positive evidence that its seat is fine: its newest ended turn completed.
+// Any other reading keeps the hourly nudge, since the answer's turn may have
+// died and a resumed seat's startup nudge is best effort: the newest turn
+// canceled, or ended with no status as the idle overlay infers the end of a
+// turn whose CLI died; no turn at all; and a turn open. The ladder reads
+// only a quiet seat's turns, so a turn open there is one no read saw end: a
+// turn whose CLI died before its rollout recorded the end (a family that
+// records its ends gets no idle overlay), or a Claude turn stopped at a
+// dialog the idle scan cannot read, which the overlay leaves open.
+func TestWorkLadderNudgesAHumanWaitHourlyUnlessItsNewestTurnCompleted(t *testing.T) {
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: stepsTestNow.Add(-2 * time.Hour), EndedAt: stepsTestNow.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	answer := runtime.EndedTurn{TurnID: "answer", StartedAt: stepsTestNow.Add(-10 * time.Minute), EndedAt: stepsTestNow.Add(-5 * time.Minute)}
+	canceled, inferred := answer, answer
+	canceled.Status = runtime.TurnStatusCancelled
+	inferred.Inferred = true
+	for name, hist := range map[string]runtime.TurnHistory{
+		"the answer's turn canceled":             {Recent: []runtime.EndedTurn{canceled, asked}},
+		"the answer's turn ended with no status": {Recent: []runtime.EndedTurn{inferred, asked}},
+		"the answer's turn open":                 {Current: runtime.TurnState{TurnID: answer.TurnID}, CurrentStart: answer.StartedAt, Recent: []runtime.EndedTurn{asked}},
+		"no turn":                                {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("Human review before merge")
+			if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+				t.Fatal(err)
+			}
+			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+			reads := 0
+			c.turnsRead(func() runtime.TurnHistory { reads++; h := hist; h.ObservedAt = c.now; return h })
+			c.awaitHuman(id, c.seat)
+			c.run(3*time.Hour+time.Minute, 30*time.Second, nil)
+			if reads == 0 {
+				t.Fatal("the lane never read the waiting seat's turns")
+			}
+			if want := []time.Duration{workladder.DefaultCap, 2 * workladder.DefaultCap, 3 * workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+				t.Fatalf("nudges %v, want %v: hourly from the ask", c.nudgedAt, want)
+			}
+			if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+				t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+			}
+		})
+	}
+}
+
+// A family that records its turns' ends (Codex) gets no idle overlay, so a
+// rollout whose newest record is a turn's start reads as that turn open
+// however long it has been quiet. Here the answer's turn dies with its CLI
+// before the rollout records its end, and the seat is resumed in place: a
+// new generation in the same conversation, whose rollout the resumed CLI
+// appends to. Its startup nudge is best effort and never lands, so the
+// seat's turns show the answer's turn open for good. Once the resumed seat
+// is quiet, the ladder takes the step up at once (the wait began more than a
+// Cap ago), then a Cap apart, with no recycle, release or alert.
+func TestWorkLadderRedrivesAWaitWhoseAnswerTurnStaysOpenAcrossAResumedRestart(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("Human review before merge")
+	if err := c.work.Update(id, beads.UpdateOpts{Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id, "provider": "codex"})
+	asked := runtime.EndedTurn{TurnID: "asked", StartedAt: c.now.Add(-2 * time.Hour), EndedAt: c.now.Add(-time.Hour), Status: runtime.TurnStatusCompleted}
+	hist := runtime.TurnHistory{Recent: []runtime.EndedTurn{asked}}
+	c.turnsRead(func() runtime.TurnHistory { h := hist; h.ObservedAt = c.now; return h })
+	c.awaitHuman(id, c.seat) // the step ran and asked
+	c.run(3*time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat's newest turn, the ask, completed: want none", c.nudgedAt)
+	}
+	// The answer came: its turn runs for ten minutes, the seat at work, then
+	// dies with its CLI.
+	hist = runtime.TurnHistory{Current: runtime.TurnState{TurnID: "answer"}, CurrentStart: c.now, Recent: []runtime.EndedTurn{asked}}
+	c.sp.SetActivity(ladderSeatName, c.now)
+	c.run(10*time.Minute, 30*time.Second, func() { c.sp.SetActivity(ladderSeatName, c.now) })
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the seat works the answer: want none", c.nudgedAt)
+	}
+	c.setRow(map[string]string{"generation": "8", "instance_token": "tok-8"})
+	resumed := c.now
+	c.sp.SetActivity(ladderSeatName, resumed) // its startup output
+	c.run(2*time.Hour+2*time.Minute, 30*time.Second, nil)
+	quiet := resumed.Sub(c.start) + idleClaimNudgeGrace // the first pass that finds the resumed seat quiet
+	if want := []time.Duration{quiet, quiet + workladder.DefaultCap, quiet + 2*workladder.DefaultCap}; fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges %v, want %v: the step taken up once the resumed seat is quiet, then a cap apart", c.nudgedAt, want)
+	}
+	if e := c.entry(id); !e.AwaitsHuman || e.Rung != workladder.RungStarted {
+		t.Fatalf("entry %+v, want the started claim kept, waiting on a person", e)
+	}
+	if len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("a waiting step: recycles %+v, releases %d, escalations %v", c.posted, len(c.events(events.WorkReleased)), escalations(c))
+	}
+}
+
+// turnsRead makes the lane's turn source report hist() for the seat.
+func (c *ladderCity) turnsRead(hist func() runtime.TurnHistory) {
+	c.lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {
+		return func(context.Context, beads.Bead) (runtime.TurnHistory, error) { return hist(), nil }
 	}
 }
 
@@ -1754,5 +1928,154 @@ func (c *ladderCity) namesake(id string, meta map[string]string) {
 		s := snapshot()
 		s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs = append(s.AssignedWork, b), append(s.AssignedStores, other), append(s.AssignedStoreRefs, "other")
 		return s
+	}
+}
+
+// collapsedSingletonCfg is a canonical-singleton pool agent (max one session,
+// no namepool) that is also declared as an on_demand named session.
+func collapsedSingletonCfg() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "poller", StartCommand: "true", MaxActiveSessions: intPtr(1), ScaleCheck: "printf 1",
+			Nudge: "configured claim nudge",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "poller", Mode: "on_demand"}},
+	}
+}
+
+// collapsedSingletonRow drives a pool-born seat of collapsedSingletonCfg's
+// agent through the real reconcile path until the configured named session
+// takes it over: buildDesiredState collapses its phantom pool identity and
+// the metadata sync clears pool_managed and stamps session_origin "named",
+// while the row keeps the bead-ID-scoped runtime name the pool path minted
+// for it. It returns the row in that final shape.
+func collapsedSingletonRow(t *testing.T, cfg *config.City, store *beads.MemStore) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title: "poller", Type: sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:poller", "template:poller"},
+		Metadata: map[string]string{
+			"template": "poller", "agent_name": "poller", "state": "awake",
+			poolManagedMetadataKey: boolMetadata(true), "session_origin": "ephemeral",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(b.ID, "session_name", PoolSessionName("poller", b.ID)); err != nil {
+		t.Fatal(err)
+	}
+	cityPath := t.TempDir()
+	for range 3 {
+		ds := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+		syncSessionBeads(cityPath, store, ds.State, runtime.NewFake(), allConfiguredDS(ds.State), cfg, &clock.Fake{Time: time.Now()}, io.Discard, true)
+	}
+	row, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := row.Metadata
+	if m["pool_managed"] != "" || m["session_origin"] != "named" || m["session_name"] != PoolSessionName("poller", b.ID) {
+		t.Fatalf("precondition: row %s did not collapse onto the named session: session_name=%q pool_managed=%q session_origin=%q",
+			row.ID, m["session_name"], m["pool_managed"], m["session_origin"])
+	}
+	return row
+}
+
+// A canonical-singleton pool seat that the configured named session took
+// over is still the pool's seat (it wears the runtime name the pool minted
+// from its own bead ID), so the ladder must keep pacing it. Gating on the raw
+// pool_managed value, which the takeover clears, leaves such a seat with no
+// claim retry at all.
+func TestLadderGovernsACollapsedSingletonPoolSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	row := collapsedSingletonRow(t, cfg, beads.NewMemStore())
+	if !ladderGoverns(cfg, row) {
+		t.Fatalf("ladderGoverns(collapsed singleton seat %v) = false, want true", row.Metadata)
+	}
+	// A row minted before v1.5.0 wears poolRuntimeSessionName's "-pool"
+	// step-aside instead of the bead-ID-scoped name.
+	legacy := poolRuntimeSessionName(cfg, "poller", "poller", false)
+	if legacy != "poller-pool" {
+		t.Fatalf("precondition: step-aside name = %q, want poller-pool", legacy)
+	}
+	row.ID, row.Metadata["session_name"] = "gc-legacy", legacy
+	if !ladderGoverns(cfg, row) {
+		t.Fatalf("ladderGoverns(legacy collapsed seat %v) = false, want true", row.Metadata)
+	}
+}
+
+// The carve-out stays narrow: a named session that was never a pool seat,
+// a row wearing another row's pool name, and any seat when the config is
+// unknown are not governed.
+func TestLadderLeavesNonPoolNamedSessionsAlone(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	named := func(id, sessionName string) beads.Bead {
+		return beads.Bead{ID: id, Status: "open", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": sessionName, "session_origin": "named", namedSessionMetadataKey: "true", "template": "poller",
+		}}
+	}
+	for name, tc := range map[string]struct {
+		cfg *config.City
+		row beads.Bead
+	}{
+		"reserved named name": {cfg, named("gc-9", config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "poller"))},
+		"another row's name":  {cfg, named("gc-9", PoolSessionName("poller", "gc-8"))},
+		"no config":           {nil, named("gc-9", PoolSessionName("poller", "gc-9"))},
+		"multi-session pool": {&config.City{
+			Workspace: cfg.Workspace, Agents: []config.Agent{{Name: "poller", MaxActiveSessions: intPtr(3)}},
+			NamedSessions: cfg.NamedSessions,
+		}, named("gc-9", PoolSessionName("poller", "gc-9"))},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ladderGoverns(tc.cfg, tc.row) {
+				t.Fatalf("ladderGoverns(%v) = true, want false", tc.row.Metadata)
+			}
+		})
+	}
+}
+
+// End to end: the ladder nudges a collapsed singleton seat's unclaimed
+// trigger with the agent's claim nudge.
+func TestWorkLadderNudgesACollapsedSingletonSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	sessions := beads.NewMemStore()
+	row := collapsedSingletonRow(t, cfg, sessions)
+	stampedMemStore(t, sessions)
+	name := row.Metadata["session_name"]
+	work := beads.NewMemStore()
+	trigger, err := work.Create(beads.Bead{Title: "trigger", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	casSetRow(t, sessions, row.ID, map[string]string{
+		"state": "active", "generation": "7", "instance_token": "tok-7", "provider": "claude",
+		beadmeta.TriggerBeadIDMetadataKey: trigger.ID,
+	})
+	sp := runningIdleClaimFake(t, name)
+	sp.SetActivity(name, stepsTestNow.Add(-time.Hour))
+	cityPath := t.TempDir()
+	env := externalReadsEnv{
+		CityPath: cityPath, CityName: "test-city", Cfg: cfg, CityStore: blindWriteRefusingStore{inner: sessions}, SP: sp,
+		WorkLegs: testWorkLegs(cityPath, cfg, work, nil),
+	}
+	now := stepsTestNow
+	summary := func() *allocSummary {
+		return &allocSummary{At: now, ReadyRouted: []beads.Bead{{ID: trigger.ID, Status: "open"}}, ReadyRoutedRefs: []string{""}}
+	}
+	lane, _ := newPoolStepsTestLane(env, summary, func(executionStalledRequest) {})
+	lane.now = func() time.Time { return now }
+	lane.events = events.NewFake()
+	for end := now.Add(15 * time.Minute); now.Before(end); now = now.Add(30 * time.Second) {
+		lane.workLadder(context.Background(), env)
+	}
+	if got := sp.CountCalls("Nudge", name); got == 0 {
+		t.Fatalf("Nudge calls on collapsed seat %q = 0, want the ladder to nudge its unclaimed trigger", name)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
+			t.Fatalf("nudge %q, want the configured claim nudge", call.Message)
+		}
 	}
 }

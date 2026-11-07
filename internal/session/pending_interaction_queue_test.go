@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -67,7 +68,7 @@ func newPendingQueueSession(t *testing.T, sp runtime.Provider, provider string) 
 	t.Helper()
 	stubSubmitPoller(t)
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(beads.NewMemStore(), sp, WithCityPath(cityPath))
+	mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

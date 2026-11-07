@@ -409,7 +409,31 @@ type cachedLister interface {
 }
 
 func (v *view) projection() *Projection { return v.p }
-func (v *view) viewFront() beads.Store  { return v.Store }
+
+// rebind returns a view of rebuilt on v's side of v's own projection, so a
+// store rebuilt from v's front keeps v's misplaced-row pins. Not memoized: a
+// rebuilt store is a throwaway.
+func (v *view) rebind(rebuilt beads.Store) beads.Store {
+	return newProjectionView(v.p, rebuilt, v.side)
+}
+
+func (v *view) viewFront() beads.Store { return v.Store }
+
+// ViewFront reports whether store is a projection view (any variant). If so it
+// returns the front the view polices and a function that puts a store rebuilt
+// from that front behind the same side of the same projection. A caller that
+// rebuilds rather than reads (cmd/gc's ctx-bound bd clone) uses it, so the
+// rebuilt store's reads stay policed against the same pins.
+func ViewFront(store beads.Store) (front beads.Store, rebind func(beads.Store) beads.Store, ok bool) {
+	v, isView := store.(interface {
+		projectionView
+		rebind(beads.Store) beads.Store
+	})
+	if !isView {
+		return store, nil, false
+	}
+	return v.viewFront(), v.rebind, true
+}
 
 func (v *view) visible(b beads.Bead) bool { return v.p.sideOf(b) == v.side }
 

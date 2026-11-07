@@ -82,7 +82,13 @@ func newSessionSubmitCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Submit a user message to a session without choosing provider transport details.
 
 The runtime decides whether to wake, inject immediately, or queue the message
-according to the selected semantic intent.`,
+according to the selected semantic intent.
+
+When the conversation lane delivers messages (message listed in [ops]
+authoritative), default already waits for the session's boundary, after the
+running turn, which is what follow_up asks for, so the lane records follow_up
+as the default request. interrupt_now interrupts the running turn and then
+delivers the message.`,
 		Example: `  gc session submit mayor "status update"
   gc session submit mayor "after this run, handle docs" --intent follow_up
   gc session submit mayor "stop and do this instead" --intent interrupt_now`,
@@ -236,6 +242,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// and the start-wait front door), so route the whole flow through the session
 	// coordination-class store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessions := beads.SessionStore{Store: sessStore}
 
 	sp, err := newSessionProvider()
 	if err != nil {
@@ -357,15 +364,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		}
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, alias, "", configuredOwner); err != nil {
 				return err
 			}
 			if reserveConcreteIdentity && sessionQualifiedName != alias {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 					return err
 				}
 			}
-			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, explicitName, "", configuredOwner); err != nil {
 				return err
 			}
 			var createErr error
@@ -491,15 +498,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, alias, "", configuredOwner); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, alias, "", configuredOwner); err != nil {
 			return err
 		}
 		if reserveConcreteIdentity && sessionQualifiedName != alias {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(sessStore, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, explicitName, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -887,7 +894,7 @@ func routeSessionList(_ string, stateFilter, templateFilter string, c *api.Clien
 			if cr.Body.AgentNameMissing {
 				fmt.Fprintln(stderr, sessionListPredatesAgentNameNotice) //nolint:errcheck // best-effort stderr
 			}
-			return renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: cr.Body.Sessions, AgeSeconds: cr.AgeSeconds}, stateFilter, templateFilter, jsonOutput, stdout, stderr)
+			return renderSessionListFromAPI(api.CachedRead[[]api.SessionListView]{Body: cr.Body.Sessions, AgeSeconds: cr.AgeSeconds, Refresh: cr.Refresh}, stateFilter, templateFilter, jsonOutput, stdout, stderr)
 		},
 		func() int { return doSessionListFallback(stateFilter, templateFilter, jsonOutput, stdout, stderr) },
 	)
@@ -926,8 +933,9 @@ func writeSessionListReadFailure(message string, jsonOutput bool, stdout, stderr
 // renderSessionListFromAPI formats the API-sourced session list. On --json it
 // prints the same document as the local read (writeSessionListJSON) plus the
 // API-only _cache_age_s and per-row fields; human output mirrors the local
-// table and appends a staleness banner when the supervisor cache age crosses
-// the threshold.
+// table and is followed by the cache-age footer on stderr when the server's
+// cache is behind (writeCacheAgeFooter). The cache's age is one whole-read
+// value, not a measure of how far a row's STATE lags the runtime.
 func renderSessionListFromAPI(cr api.CachedRead[[]api.SessionListView], stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		age := cr.AgeSeconds
@@ -970,9 +978,7 @@ func renderSessionListFromAPI(cr api.CachedRead[[]api.SessionListView], stateFil
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 
-	if cr.AgeSeconds > sessionStateCacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, sessionCacheAgeBanner(cr.AgeSeconds)) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
@@ -992,30 +998,6 @@ func sessionListAgo(at, now time.Time) string {
 		return "-"
 	}
 	return formatDuration(now.Sub(at)) + " ago"
-}
-
-// sessionStateCacheAgeBannerThresholdSeconds is the cache-age cutoff for the
-// session list cache-age banner. It is session-scoped (NOT the shared
-// cacheAgeBannerThresholdSeconds) and intentionally lower — 15s vs 30s —
-// because the value it flags (the STATE column) most often lags inside the
-// post-wake reconciler poll window (#3755). Scoping the lower cutoff to this
-// view keeps the generic
-// "reconciler may be lagging" footer on every other command at 30s.
-const sessionStateCacheAgeBannerThresholdSeconds = 15.0
-
-// sessionCacheAgeBanner is the human-output footer for the session list view
-// when the supervisor read-cache age exceeds
-// sessionStateCacheAgeBannerThresholdSeconds. Unlike the generic cache-age
-// banner, it names the STATE column, the cached value most likely to lag a
-// just-woken session within the reconciler poll window, and points operators
-// at out-of-band ground truth. cr.AgeSeconds is a single whole-read value, so
-// this stays a low-noise footer rather than a per-row marker (true per-row
-// freshness needs a SessionView state_updated_at field — out of scope,
-// follow-up gco-cyt3). session peek deliberately prints no footer: the server
-// reads pane output live from the runtime, so the bead cache's age says
-// nothing about it.
-func sessionCacheAgeBanner(ageSeconds float64) string {
-	return fmt.Sprintf("(cache age: %.0fs — STATE may lag the runtime; verify a just-woken session via transcript / bead state)", ageSeconds)
 }
 
 // sessionViewProgramStatus formats the STATUS column: the state the session
@@ -3157,7 +3139,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	}
 
 	gateCfg, gateErr := loadCityConfig(cityPath, io.Discard)
-	if gateErr == nil && cliLaneExecutesMessage(gateCfg) {
+	if gateErr == nil && cliLaneExecutesMessageAt(cityPath, gateCfg) {
 		return submitSessionLane(&sessionSubmitLane{
 			cityPath: cityPath, target: target, message: message, intent: intent, key: key,
 			asJSON: jsonOutput, stdout: stdout, stderr: stderr,
@@ -3244,6 +3226,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	programShadowDecideFor(sessionID)
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		op.finishMessage(false, err)

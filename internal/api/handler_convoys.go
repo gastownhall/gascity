@@ -8,7 +8,7 @@ import "github.com/gastownhall/gascity/internal/beads"
 // recognized — its bead lives only in the graph store, never on a rig store. On a
 // default city the graph store equals the work store, so this leg is byte-identical.
 func isGraphConvoyID(s *Server, id string) bool {
-	if graphStore := s.state.GraphBeadStore().Store; graphStore != nil && graphStore != s.state.CityBeadStore() {
+	if graphStore := s.state.Stores().Graph().Store; graphStore != nil && graphStore != s.state.CityBeadStore() {
 		// Graph-first leg: a plain (work) convoy id misses here and the rig
 		// legs below answer it.
 		if b, err := beads.FederatedGet(graphStore, id); err == nil {

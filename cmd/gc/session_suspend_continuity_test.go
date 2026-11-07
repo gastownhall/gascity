@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -62,7 +63,7 @@ func TestSuspendPreservesConversationThroughExitReconciliation(t *testing.T) {
 				if !in.sweep {
 					by = testActorIn(t, in.kind, e.city)
 				}
-				mgr := session.NewManagerWithOptions(e.mem, e.sp, session.WithClock(e.clk), session.WithCityPath(e.city))
+				mgr := session.NewManagerWithOptions(beadstest.Sessions(e.mem), e.sp, session.WithClock(e.clk), session.WithCityPath(e.city))
 				if err := mgr.Suspend(context.Background(), by, e.seat.ID, in.soft); err != nil {
 					t.Fatalf("Suspend: %v", err)
 				}
@@ -122,7 +123,7 @@ func TestSuspendIsNoExitForV2Decide(t *testing.T) {
 					if !in.sweep {
 						by = testActorIn(t, in.kind, city)
 					}
-					mgr := session.NewManagerWithOptions(store, sp, session.WithClock(&clock.Fake{Time: gatherNow}), session.WithCityPath(city))
+					mgr := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithClock(&clock.Fake{Time: gatherNow}), session.WithCityPath(city))
 					if err := mgr.Suspend(context.Background(), by, "gc-1", in.soft); err != nil {
 						t.Fatalf("Suspend: %v", err)
 					}

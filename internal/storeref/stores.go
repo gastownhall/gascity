@@ -23,14 +23,20 @@ package storeref
 // every operation, exactly as the routes did. A refused city still serves work
 // from its work ledger, and so do these handles.
 //
-// Stores answers for the city scope only, and reads Topology.Work and
-// Topology.Bindings. Per-rig handles and federated legs arrive with the phases
-// that have callers for them (S4's Graph(scope), T7's plan legs).
+// Stores reads Topology.Work, Topology.Rigs and Topology.Bindings. It answers
+// the city scope for every class, and a rig scope for the two classes a rig
+// scope has: its work store (Rig) and the graph store a molecule launched at
+// it is placed in (GraphFor). Sessions, mail, orders and nudges are city
+// classes, so no rig frame exists for them: a sessions handle over a rig work
+// store would be the misroute shape. Plan-ordered federated legs arrive with
+// T7.
 //
 // NewStores and Place take raw stores and hand out handles over them, so the
 // storeclass lint confines their callers (tools/nogo/analyzers/storeclass).
 
 import (
+	"sort"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -42,6 +48,32 @@ import (
 type Projection interface {
 	WorkView(beads.Store) beads.Store
 	ClassView(beads.Store) beads.Store
+}
+
+// Unviewer is the optional half of a Projection that can see through one of
+// its own views: front is the store the view polices, and rebind puts a store
+// rebuilt from front behind the same side of the same projection.
+type Unviewer interface {
+	ViewFront(beads.Store) (front beads.Store, rebind func(beads.Store) beads.Store, ok bool)
+}
+
+// Unview returns the store under p's outermost view of s, and a function that
+// puts a rebuilt copy of that store behind the same side of p. Without a
+// projection, or when s is not one of its views, it returns s and the
+// identity. It is for a caller that rebuilds its store rather than reading it
+// (gc status's ctx-bound bd clone): unwrapping lets the rebuild find the real
+// backing, and the rewrap keeps the rebuilt store's reads policed.
+func Unview(p Projection, s beads.Store) (beads.Store, func(beads.Store) beads.Store) {
+	identity := func(store beads.Store) beads.Store { return store }
+	unviewer, ok := p.(Unviewer)
+	if !ok || s == nil {
+		return s, identity
+	}
+	front, rebind, isView := unviewer.ViewFront(s)
+	if !isView || rebind == nil {
+		return s, identity
+	}
+	return front, rebind
 }
 
 // RefusingClassStore is a store that answers every operation with a standing
@@ -63,13 +95,36 @@ type StoresOptions struct {
 
 // Stores is one epoch's class handles for a city. It is a value: a holder
 // swaps it whole when the stores it was minted from are replaced, and a
-// caller holding an old one keeps the old epoch's stores.
-type Stores struct{ city beads.ClassStores }
+// caller holding an old one keeps the old epoch's stores. Its rig handles are
+// minted from the same topology as its city handles, so one Stores never
+// mixes two epochs.
+type Stores struct {
+	city beads.ClassStores
+	rigs []rigStores
+}
 
-// NewStores mints the handles for t. Every handle wraps the store Place
-// answers for its class.
+// rigStores is one rig scope's handles.
+type rigStores struct {
+	name  string
+	ref   StoreRef
+	work  beads.WorkStore
+	graph beads.GraphStore
+}
+
+// RigWork is one rig's work store, as Stores.Rigs lists it.
+type RigWork struct {
+	Name string
+	Work beads.WorkStore
+}
+
+// NewStores mints the handles for t. Every city handle wraps the store Place
+// answers for its class over t. Each rig leg of t gets two handles, with the
+// same options: its work store (Place ClassWork with the rig leg as the work
+// leg) and its graph store (Place ClassGraph over that same frame, the
+// binding when graph is relocated, else the rig's own work store). A rig leg
+// whose ref is not a rig ref names no rig and is skipped.
 func NewStores(t Topology, opts StoresOptions) Stores {
-	return Stores{city: beads.MintClassStores(beads.MintSpec{
+	s := Stores{city: beads.MintClassStores(beads.MintSpec{
 		Work:     Place(t, opts, coordclass.ClassWork),
 		Graph:    Place(t, opts, coordclass.ClassGraph),
 		Sessions: Place(t, opts, coordclass.ClassSessions),
@@ -77,6 +132,19 @@ func NewStores(t Topology, opts StoresOptions) Stores {
 		Orders:   Place(t, opts, coordclass.ClassOrders),
 		Nudges:   Place(t, opts, coordclass.ClassNudges),
 	})}
+	for _, leg := range t.Rigs {
+		name, ok := ScopeRigContext(string(leg.Ref))
+		if !ok || name == "" {
+			continue
+		}
+		frame := Topology{Work: leg, Bindings: t.Bindings, Refused: t.Refused}
+		h := beads.MintClassStores(beads.MintSpec{
+			Work:  Place(frame, opts, coordclass.ClassWork),
+			Graph: Place(frame, opts, coordclass.ClassGraph),
+		})
+		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph})
+	}
+	return s
 }
 
 // Place is the store class c lives in on t: the plane's refusal, else the
@@ -128,3 +196,60 @@ func (s Stores) Mail() beads.MailStore { return s.city.Mail }
 
 // Nudges is the nudges store.
 func (s Stores) Nudges() beads.NudgesStore { return s.city.Nudges }
+
+// RigLegs is the rig legs of a holder's rig stores, keyed by rig name, in
+// name order: a rig whose store did not open has no leg. It is how a holder
+// that keeps its rigs in a map hands them to NewStores.
+func RigLegs(stores map[string]beads.Store) []Leg {
+	names := make([]string, 0, len(stores))
+	for name, store := range stores {
+		if store != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	legs := make([]Leg, len(names))
+	for i, name := range names {
+		legs[i] = Leg{Ref: RigRef(name), Store: stores[name]}
+	}
+	return legs
+}
+
+// Rig is rig name's work store, and false for a rig this epoch did not open.
+func (s Stores) Rig(name string) (beads.WorkStore, bool) {
+	for _, r := range s.rigs {
+		if r.name == name {
+			return r.work, true
+		}
+	}
+	return beads.WorkStore{}, false
+}
+
+// Rigs is every rig this epoch opened, in the topology's order (the holder's:
+// cmd/gc's router lists them by name), each with its work store. A holder
+// opens suspended rigs too, so they are listed: a suspended rig's store runs
+// no cache, and a bd read of it can wake its retired proxy and Dolt. A caller
+// that must leave a suspended scope untouched skips it by name.
+func (s Stores) Rigs() []RigWork {
+	out := make([]RigWork, len(s.rigs))
+	for i, r := range s.rigs {
+		out[i] = RigWork{Name: r.name, Work: r.work}
+	}
+	return out
+}
+
+// GraphFor is the graph store at scope ref (S4a placement): the binding when
+// graph is relocated, else that scope's work store, the city's for WorkRef and
+// a rig's for its RigRef. It answers false for a scope this epoch has no store
+// frame for.
+func (s Stores) GraphFor(ref StoreRef) (beads.GraphStore, bool) {
+	if ref == WorkRef {
+		return s.city.Graph, true
+	}
+	for _, r := range s.rigs {
+		if r.ref == ref {
+			return r.graph, true
+		}
+	}
+	return beads.GraphStore{}, false
+}

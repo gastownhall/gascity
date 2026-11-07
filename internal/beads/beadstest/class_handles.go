@@ -31,6 +31,12 @@ func Orders(s beads.Store) beads.OrdersStore { return beads.OrdersStore{Store: s
 // Nudges is a nudges-class handle over s, for a test.
 func Nudges(s beads.Store) beads.NudgesStore { return beads.NudgesStore{Store: s} }
 
+// GraphMolecule is a graph-class molecule target over s, for a test.
+func GraphMolecule(s beads.Store) beads.MoleculeTarget { return beads.GraphMolecule(Graph(s)) }
+
+// WorkMolecule is a work-class molecule target over s, for a test.
+func WorkMolecule(s beads.Store) beads.MoleculeTarget { return beads.WorkMolecule(Work(s)) }
+
 // ClassStores is every class's handle, for a test that hands a fixture city
 // to code taking several classes.
 type ClassStores struct {
@@ -96,6 +102,11 @@ var capabilityProbes = []capabilityProbe{
 	probe[beads.ConditionalAssigneeTransferer]("ConditionalAssigneeTransferer"),
 	probe[beads.DepMetadataReader]("DepMetadataReader"),
 	probe[*beads.CachingStore]("*CachingStore"),
+	probe[beads.ChildrenBatchLister]("ChildrenBatchLister"),
+	probe[beads.AtomicTxStore]("AtomicTxStore"),
+	probe[beads.CacheStatsReporter]("CacheStatsReporter"),
+	probe[beads.CacheLivenessReporter]("CacheLivenessReporter"),
+	probe[beads.CachedLister]("CachedLister"),
 }
 
 // RunClassHandleCapabilityConformance checks, for a store from newStore, that
@@ -109,6 +120,8 @@ func RunClassHandleCapabilityConformance(t *testing.T, newStore func(t *testing.
 	raw := newStore(t)
 	handles := SingleStore(raw).All()
 	handles["nested"] = Graph(Work(raw))
+	handles["graph molecule"] = GraphMolecule(raw)
+	handles["work molecule"] = WorkMolecule(raw)
 	checkHandleCapabilities(t, raw, handles)
 }
 

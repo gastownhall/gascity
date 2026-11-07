@@ -77,8 +77,8 @@ func TestParseArgsMatchesPflag(t *testing.T) {
 // knows, and lookup by id.
 func TestInventoriesAreWellFormed(t *testing.T) {
 	known := map[string]bool{"bool": true, "string": true, "int": true, "int64": true, "float64": true, "duration": true, "stringSlice": true, "stringArray": true}
-	if len(Inventories()) < 2 {
-		t.Fatalf("want the bd 1.3.2 and Enterprise inventories, got %d", len(Inventories()))
+	if len(Inventories()) < 3 {
+		t.Fatalf("want the bd 1.3.2, bd 1.3.4 and Enterprise inventories, got %d", len(Inventories()))
 	}
 	for _, inv := range Inventories() {
 		if inv.Command("") == nil {
@@ -104,7 +104,7 @@ func TestInventoriesAreWellFormed(t *testing.T) {
 			}
 		}
 	}
-	if InventoryByName("bd-1.3.2") == nil || InventoryByName("bd-1.3.0-enterprise-77612097cec0") == nil || InventoryByName("nope") != nil {
+	if InventoryByName("bd-1.3.2") == nil || InventoryByName("bd-1.3.4") == nil || InventoryByName("bd-1.3.0-enterprise-77612097cec0") == nil || InventoryByName("nope") != nil {
 		t.Error("InventoryByName does not find the pinned inventories by id")
 	}
 }

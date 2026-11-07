@@ -43,12 +43,12 @@ Send mail to the mayor:
 
 ```shell
 ~/my-city
-$ gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"
+$ gc mail send mayor -s "Review needed" -m "Please have the my-project reviewer review hello.py"
 Sent message mc-msg-8t8 to mayor
 ```
 
-`gc mail send` takes the recipient as a positional argument and the subject/body
-via `-s`/`-m` flags. (You can also pass just `<to> <body>` with no subject.)
+Your message ID will differ. `gc mail send` takes the recipient as a positional
+argument and the subject/body via `-s`/`-m` flags. (You can also pass just `<to> <body>` with no subject.)
 
 Mail does not create wake demand by itself. Add `--notify` to request a turn for
 the recipient even when earlier mail is still unread. In a managed city, that
@@ -69,11 +69,13 @@ See the inbox:
 ~/my-city
 $ gc mail inbox mayor
 ID          FROM   SUBJECT        BODY
-mc-msg-8t8  human  Review needed  Please look at the auth module changes in my-project
+mc-msg-8t8  human  Review needed  Please have the my-project reviewer review hello.py
 ```
 
 `gc mail inbox` lists only unread messages, so there's no STATE column —
-everything listed is unread by definition.
+everything listed is unread by definition. (If the mayor has already taken a
+turn since you sent the mail, it may have read the message, and these two
+commands report no unread mail.)
 
 If you want to see the mayor react right away in `peek` or `logs`, give it a
 turn:
@@ -84,8 +86,8 @@ $ gc session nudge mayor "Check mail and hook status, then act accordingly"
 Nudged mayor
 ```
 
-(As in Tutorial 03, you may see `Queued nudge for mayor` instead — both
-confirm the nudge is on its way.)
+(As in Tutorial 03, you may see a `Queued nudge for mayor ...` line instead —
+both confirm the nudge is on its way.)
 
 The nudge doesn't deliver the mail — it only starts a new turn. The delivery
 happens via a hook: on each turn, `gc mail check --inject` runs and any unread
@@ -100,15 +102,24 @@ handle it, and slings the work:
 
 ```shell
 ~/my-city
-$ gc session peek mayor --lines 6
-[mayor] Got mail: "Review needed" — auth module changes in my-project
+$ gc session peek mayor
+[mayor] Got mail: "Review needed" — review hello.py in my-project
 [mayor] Routing to my-project/reviewer...
-[mayor] Running: gc sling my-project/reviewer "Review the auth module changes"
+[mayor] Running: gc sling my-project/reviewer "Review hello.py and report feedback"
 ```
 
 (The above is illustrative — `peek` returns the actual terminal contents of the
-session, so you'll see whatever the agent has rendered, not Gas City–formatted
-lines.)
+session, a screenful of the provider's interface, so you'll see whatever the
+agent has rendered, not Gas City–formatted lines. The mayor may phrase the task
+differently or take a turn or two before slinging it; peek again to catch up.)
+
+To confirm the hand-off, look for the reviewer's new session (it may already
+have finished and shut down if the review was quick):
+
+```shell
+~/my-city
+$ gc session list --template my-project/reviewer
+```
 
 The mayor slung a bead to the rig-scoped `my-project/reviewer` agent and Gas
 City resolved the rest: it woke the reviewer if asleep, or routed to an
@@ -127,8 +138,16 @@ receive mail, pick up slung work, and drain queued nudges automatically.
 
 `gc init` wires Claude's hooks for you: it writes a managed `.gc/settings.json`
 that Claude reads on every session start. No TOML in `pack.toml` or `city.toml`
-is needed for the default behavior — `grep install_agent_hooks` in a fresh city
-turns up nothing.
+is needed for the default behavior:
+
+```shell
+~/my-city
+$ grep -rn install_agent_hooks --include='*.toml' .    # prints nothing
+
+~/my-city
+$ ls .gc/settings.json
+.gc/settings.json
+```
 
 Claude is the only provider wired automatically. To run an agent on a different
 provider — say you moved the mayor to Codex — list that provider in
