@@ -1177,7 +1177,16 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimCandidate := candidate
 		if reclaimedFrom != "" {
+			// A successful reclaim reverts the lease: the bead goes back to ready
+			// AND loses its assignee. The exact claim fences on the facts it
+			// OBSERVED, so carrying the pre-reclaim owner here would fence on an
+			// assignee the store no longer holds and refuse the bead this cycle
+			// just freed (the generic Claim is immune: it CASes on the store's
+			// own state). Clear both, so the retried claim matches what
+			// `bd reclaim` left behind and the reclaim-then-claim flow lands in
+			// this invocation.
 			claimCandidate.Status = "open"
+			claimCandidate.Assignee = ""
 		}
 		claimed, ok, err := ops.claimCandidate(ctx, dir, opts.Env, claimCandidate, opts.Assignee)
 		// The straddle fence asks when the CAS landed; stamp it before the

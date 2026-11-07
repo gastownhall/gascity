@@ -847,3 +847,78 @@ func TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding(t *testing.T) 
 		t.Errorf("the claim route read the class binding %d time(s) for an id only that binding can mint, want exactly 1: zero means a clean census retired the authority leg, which nothing may do, and more than one means the probe is being repeated", counter.gets)
 	}
 }
+
+// TestClassRoutedClaimExactEscalatesOnlyOnNotFound is the exact-claim sibling of
+// TestClassRoutedClaimEscalatesOnlyOnNotFound. A graph step resident in the
+// relocated binding that is not yet memoized resident is answered by the work
+// store with a not-found, and that is the only answer that may open the
+// escalation to the binding — otherwise a dropped exact-claim escalation strands
+// every cross-store graph claim. A refusal the work store made before any write
+// (its candidate preconditions or generation did not match) is its answer, and
+// retrying it against a second ledger is how one logical bead gets claimed
+// twice.
+func TestClassRoutedClaimExactEscalatesOnlyOnNotFound(t *testing.T) {
+	metadata := map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1",
+		beadmeta.StepIDMetadataKey:     "build",
+		beadmeta.RoutedToMetadataKey:   "worker",
+	}
+	setup := func(t *testing.T, id string) (*hookClaimClassRoute, beads.Store, beads.Bead) {
+		t.Helper()
+		class := newClaimRouteClassStore(t)
+		step, err := class.Create(beads.Bead{ID: id, Title: "graph step " + id, Type: "task", Status: "open", Metadata: metadata})
+		if err != nil {
+			t.Fatalf("minting %s in the class binding: %v", id, err)
+		}
+		return newClaimRouteFor(t, class), class, step
+	}
+
+	t.Run("the work store does not hold it", func(t *testing.T) {
+		route, class, step := setup(t, "gcg-300")
+		candidate := beads.Bead{ID: step.ID, Status: "open", Metadata: metadata}
+		ops := classRoutedHookClaimOps(hookClaimOps{
+			ClaimExact: func(_ context.Context, _ string, _ []string, bead beads.Bead, _, _ string) (beads.Bead, bool, error) {
+				if bead.ID != step.ID {
+					t.Errorf("work-scope exact claim called for %q, want %q", bead.ID, step.ID)
+				}
+				return beads.Bead{}, false, beads.ErrNotFound
+			},
+		}, route)
+
+		claimed, ok, err := ops.ClaimExact(context.Background(), "/work", nil, candidate, "worker-1", "session-1")
+		if err != nil || !ok {
+			t.Fatalf("routed exact claim of %s = (ok=%v, err=%v), want a successful claim", step.ID, ok, err)
+		}
+		if claimed.Assignee != "worker-1" || claimed.Metadata[beadmeta.SessionIDMetadataKey] != "session-1" ||
+			claimed.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" {
+			t.Fatalf("routed exact claim returned %+v, want the claim's assignee, session stamp and generation 1", claimed)
+		}
+		held, err := class.Get(step.ID)
+		if err != nil || held.Assignee != "worker-1" || !strings.EqualFold(held.Status, "in_progress") {
+			t.Fatalf("binding holds %s as status=%q assignee=%q (err=%v), want in_progress owned by worker-1", step.ID, held.Status, held.Assignee, err)
+		}
+	})
+
+	t.Run("the work store answered before writing", func(t *testing.T) {
+		route, class, step := setup(t, "gcg-301")
+		candidate := beads.Bead{ID: step.ID, Status: "open", Metadata: metadata}
+		ops := classRoutedHookClaimOps(hookClaimOps{
+			ClaimExact: func(_ context.Context, _ string, _ []string, _ beads.Bead, _, _ string) (beads.Bead, bool, error) {
+				// A precondition refusal is definitive: the write never ran.
+				return beads.Bead{ID: step.ID, Assignee: "other-worker"}, false, nil
+			},
+		}, route)
+
+		claimed, ok, err := ops.ClaimExact(context.Background(), "/work", nil, candidate, "worker-1", "session-1")
+		if ok || err != nil || claimed.Assignee != "other-worker" {
+			t.Fatalf("refused work-scope exact claim = (%+v, ok=%v, err=%v), want the work store's own refusal", claimed, ok, err)
+		}
+		held, err := class.Get(step.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if held.Assignee != "" || held.Metadata[beadmeta.ClaimGenerationMetadataKey] != "" || held.Metadata[beadmeta.SessionIDMetadataKey] != "" {
+			t.Fatalf("binding changed to %+v on a work-store refusal, want it untouched", held)
+		}
+	})
+}

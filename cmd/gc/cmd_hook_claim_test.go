@@ -731,3 +731,158 @@ func TestDoHookClaimTreatsBdNotClaimableRefusalAsALostClaim(t *testing.T) {
 		})
 	}
 }
+
+// TestDoHookClaimReclaimsStaleAssigneeThenExactClaimsSameCycle pins the
+// reclaim→exact-claim interaction for a session-bound graph step. A successful
+// reclaim reverts the lease, so the canonical bead is open AND unassigned; the
+// tier retries the claim from the work query's PRE-reclaim row, and the exact
+// claim fences on exactly the facts that row carries. Observing the stale
+// assignee there refuses the bead this cycle just freed, so the retry has to
+// observe the post-reclaim (empty) one for the flow to land in this invocation.
+func TestDoHookClaimReclaimsStaleAssigneeThenExactClaimsSameCycle(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "workflow root", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{
+		Title: "graph step", Type: "task", Status: "in_progress", Assignee: "dead-worker",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.StepIDMetadataKey:     "build",
+			beadmeta.RoutedToMetadataKey:   "worker",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workQuery := `[{"id":"` + step.ID + `","status":"in_progress","assignee":"dead-worker","metadata":{` +
+		`"gc.root_bead_id":"` + root.ID + `","gc.step_id":"build","gc.routed_to":"worker"}}]`
+	var reclaimed []string
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return workQuery, nil },
+		// The reclaim's own effect on the store, reduced to the two fields the
+		// claim preconditions read: bd's lease revert sets status=open,
+		// assignee=NULL.
+		ReclaimStale: func(_ context.Context, _ string, _ []string, beadID string) (bool, string, error) {
+			open, cleared := "open", ""
+			if err := store.Update(beadID, beads.UpdateOpts{Status: &open, Assignee: &cleared}); err != nil {
+				t.Fatalf("applying the reclaim revert to %s: %v", beadID, err)
+			}
+			return true, "dead-worker", nil
+		},
+		ClaimExact: func(_ context.Context, _ string, _ []string, candidate beads.Bead, assignee, sessionID string) (beads.Bead, bool, error) {
+			return hookClaimExactThroughStore(store.Get, store, candidate, assignee, sessionID)
+		},
+		WorkflowStore: func(context.Context, string, []string, string, string) beads.Store { return store },
+		EmitHookClaimReclaimedStale: func(beadID, previousOwner, newAssignee string) {
+			reclaimed = append(reclaimed, beadID+"|"+previousOwner+"|"+newAssignee)
+		},
+		// A bounded, quiet drain probe: this row is about the claim, not the
+		// drain fence, and the default seam resolves a city on disk.
+		DrainPending: func(string) (bool, error) { return false, nil },
+		DrainAck:     func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee:               "worker-1",
+		RouteTargets:           []string{"worker"},
+		AutoReclaimStaleClaims: true,
+		Env:                    []string{"GC_SESSION_ID=session-1"},
+		JSON:                   true,
+	}, ops, &stdout, &stderr)
+
+	// The claim, not the exit code, is the statement under test: an
+	// unacknowledged JSON drain also exits nonzero, so asserting first on the
+	// bead keeps a pre-fix failure on the reclaim→claim interaction itself.
+	held, err := store.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Status != "in_progress" || held.Assignee != "worker-1" {
+		t.Fatalf("reclaimed step = status=%q assignee=%q, want in_progress owned by worker-1; stderr=%s", held.Status, held.Assignee, stderr.String())
+	}
+	if held.Metadata[beadmeta.SessionIDMetadataKey] != "session-1" || held.Metadata[beadmeta.ClaimGenerationMetadataKey] != "1" {
+		t.Fatalf("reclaimed step metadata = %#v, want the exact claim's session stamp and generation 1", held.Metadata)
+	}
+	if want := step.ID + "|dead-worker|worker-1"; len(reclaimed) != 1 || reclaimed[0] != want {
+		t.Fatalf("reclaimed_stale events = %v, want exactly [%q]", reclaimed, want)
+	}
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+}
+
+// TestHookClaimExactRefusesACanonicalReadbackThatMissesItsOwnWrite covers the
+// exact seam's post-claim readback: the write committed, but the canonical read
+// does not show it. That is ok=true plus an error, so the caller stops instead
+// of draining or handing out a claim the store does not agree with.
+func TestHookClaimExactRefusesACanonicalReadbackThatMissesItsOwnWrite(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{Title: "step", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	get := func(id string) (beads.Bead, error) {
+		reads++
+		if reads == 1 {
+			return store.Get(id)
+		}
+		// A projection that never saw the write: pre-claim status, no session
+		// stamp, no generation.
+		return created, nil
+	}
+
+	_, ok, err := hookClaimExactThroughStore(get, store, created, "worker-1", "session-1")
+	if !ok {
+		t.Fatalf("exact claim readback mismatch = (ok=%v, err=%v), want ok=true so the caller stops", ok, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "unexpected canonical claim") {
+		t.Fatalf("exact claim readback mismatch error = %v, want an unexpected-canonical-claim refusal", err)
+	}
+}
+
+// TestHookClaimExactWithBdStoreFailsClosedWithoutConditionalWrites covers the
+// bd adapter: it resolves the store's conditional writer and inherits the
+// primitive's fail-closed answer when the live bd has no --if-revision. The
+// claim must not fall back to an unconditional update, so nothing is written.
+func TestHookClaimExactWithBdStoreFailsClosedWithoutConditionalWrites(t *testing.T) {
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+
+	updates := 0
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandRunner {
+		return func(_ string, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command name = %q, want bd", name)
+			}
+			switch {
+			case len(args) == 2 && args[1] == "--help":
+				// A released bd: no conditional-write verb advertises the fence.
+				return []byte("Flags:\n      --json   JSON output\n"), nil
+			case len(args) == 3 && args[0] == "show":
+				return []byte(`[{"id":"step-1","status":"open","metadata":{"gc.root_bead_id":"root-1","gc.step_id":"build"}}]`), nil
+			case len(args) > 0 && args[0] == "update":
+				updates++
+				return nil, errors.New("unexpected unconditional bd update")
+			}
+			t.Fatalf("unexpected bd args: %#v", args)
+			return nil, nil
+		}
+	}
+
+	candidate := beads.Bead{ID: "step-1", Status: "open", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "build",
+	}}
+	_, ok, err := hookClaimExactWithBdStore(context.Background(), "/rig", nil, candidate, "worker-1", "session-1")
+	if ok || !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+		t.Fatalf("exact claim on a bd without --if-revision = (ok=%v, err=%v), want ErrConditionalWriteUnsupported", ok, err)
+	}
+	if updates != 0 {
+		t.Fatalf("bd updates = %d, want 0: an incapable store must refuse before writing", updates)
+	}
+}
