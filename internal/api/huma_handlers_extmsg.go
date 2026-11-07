@@ -37,6 +37,23 @@ func (s *Server) humaExtmsgAdapterRegistry() (*extmsg.AdapterRegistry, error) {
 
 // --- Inbound ---
 
+// replayableInbound reports whether a failed normalized inbound is replayed
+// once before the handler answers: a retryable fault on a live request whose
+// provider message ID lets the transcript's dedup find an entry the failed
+// attempt may have stored, so the replay answers 200 and wakes the members
+// rather than leaving a stored message unannounced behind a 5xx.
+func replayableInbound(ctx context.Context, err error, msg extmsg.ExternalInboundMessage) bool {
+	switch {
+	case errors.Is(err, extmsg.ErrInvalidInput),
+		errors.Is(err, extmsg.ErrInvalidConversation),
+		errors.Is(err, extmsg.ErrInvariantViolation),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		return false
+	}
+	return ctx.Err() == nil && strings.TrimSpace(msg.ProviderMessageID) != ""
+}
+
 // humaHandleExtMsgInbound is the Huma-typed handler for POST /v0/extmsg/inbound.
 func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInboundInput) (*ExtMsgInboundOutput, error) {
 	svc, err := s.humaExtmsgServices()
@@ -58,6 +75,9 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
+		if handleErr != nil && replayableInbound(ctx, handleErr, *input.Body.Message) {
+			result, handleErr = extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
+		}
 		if handleErr != nil {
 			// HandleInboundNormalized fails in one of two classes. Permanent
 			// rejections (a malformed/unroutable conversation, or an invariant
