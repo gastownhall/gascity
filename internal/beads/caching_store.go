@@ -193,6 +193,7 @@ type CachingStore struct {
 	stats          CacheStats
 	onChange       func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)
 	problemf       func(string)
+	logger         *log.Logger
 	problemLog     map[string]cacheProblemLogState
 
 	// lastReconcileLogAt rate-limits the per-reconcile success log line
@@ -652,6 +653,25 @@ func WithClock(now func() time.Time) CachingStoreOption {
 	}
 }
 
+// WithLogger sends the cache's log lines (its reconcile heartbeat, cadence
+// changes, stagger and problems) to logger instead of the standard logger.
+// A nil logger keeps the default. No production cache injects a logger.
+func WithLogger(logger *log.Logger) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.logger = logger
+	}
+}
+
+// logf writes one log line to the cache's logger (WithLogger), the standard
+// logger by default.
+func (c *CachingStore) logf(format string, args ...any) {
+	if c.logger != nil {
+		c.logger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 // NewCachingStoreForTest wraps any Store for testing without production prefix
 // validation. It keeps the legacy 3-param onChange (tests do not exercise the
 // typed correlation fields); adaptLegacyOnChange bridges it to production form.
@@ -706,7 +726,7 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 }
 
 func newCachingStore(backing Store, idPrefix string, onChange func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
-	return &CachingStore{
+	c := &CachingStore{
 		backing:             backing,
 		idPrefix:            normalizeIDPrefix(idPrefix),
 		epoch:               cacheEpochs.Add(1),
@@ -722,13 +742,14 @@ func newCachingStore(backing Store, idPrefix string, onChange func(source Change
 		readyProjectionLost: make(map[string]struct{}),
 		problemLog:          make(map[string]cacheProblemLogState),
 		onChange:            onChange,
-		problemf: func(msg string) {
-			log.Printf("beads cache: %s", msg)
-		},
-		primeRetryDelay: defaultCachePrimeRetryDelay,
-		stopCh:          make(chan struct{}),
-		reconcileKick:   make(chan struct{}, 1),
+		primeRetryDelay:     defaultCachePrimeRetryDelay,
+		stopCh:              make(chan struct{}),
+		reconcileKick:       make(chan struct{}, 1),
 	}
+	c.problemf = func(msg string) {
+		c.logf("beads cache: %s", msg)
+	}
+	return c
 }
 
 // clockNow reads the cache's clock (WithClock), the real one by default.
@@ -1983,7 +2004,7 @@ func (c *CachingStore) StartReconciler(ctx context.Context, stagger StaggerOptio
 	c.stats.StaggerOffsetMs = offset.Milliseconds()
 	c.mu.Unlock()
 
-	log.Printf("beads cache: stagger=%dms agent=%s", offset.Milliseconds(), agentID)
+	c.logf("beads cache: stagger=%dms agent=%s", offset.Milliseconds(), agentID)
 
 	go func() {
 		defer c.lifecycleWG.Done()
