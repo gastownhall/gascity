@@ -66,6 +66,10 @@ func newGatedScanProvider(city string, wedged func(n int64) bool) *gatedScanProv
 // Scan scripts for newGatedScanProvider.
 func neverWedged(int64) bool  { return false }
 func alwaysWedged(int64) bool { return true }
+func wedgedFrom(first int64) func(int64) bool {
+	return func(n int64) bool { return n >= first }
+}
+
 func (p *gatedScanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	n := p.scans.Add(1)
 	if p.wedged(n) {
@@ -486,4 +490,127 @@ func intsString(xs []int) string {
 		parts[i] = strconv.Itoa(x)
 	}
 	return strings.Join(parts, ",")
+}
+
+// cancelOnWedge returns a context the test cancels the moment a wedged scan of
+// sp begins, so a gate's wait on that scan ends deterministically, without
+// wall time; the scan itself stays wedged until the test ends.
+func cancelOnWedge(t *testing.T, sp *gatedScanProvider) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(sp.unblock)
+	go func() {
+		select {
+		case <-sp.entered:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
+}
+
+// seedSuspendedGatedTarget creates a session whose first scan (CreateSession's)
+// answers, and suspends it, so a later Start or StartRuntimeOnly takes the
+// resume path and reaches the pre-start orphan gate on a wedged scan.
+func seedSuspendedGatedTarget(t *testing.T) (*Manager, *gatedScanProvider, Info) {
+	t.Helper()
+	city := t.TempDir()
+	sp := newGatedScanProvider(city, wedgedFrom(2))
+	mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	return mgr, sp, info
+}
+
+// AC-5: at every gated start, a pre-start orphan scan that cannot answer
+// starts no runtime, its runtime-unavailable error reaches the caller, and a
+// direct create rolls back the row and explicit name it just wrote.
+func TestPreStartOrphanScanDefersEveryGatedStart(t *testing.T) {
+	t.Run("Start", func(t *testing.T) {
+		mgr, sp, info := seedSuspendedGatedTarget(t)
+		startsBefore := sp.starts.Load()
+		ctx := cancelOnWedge(t, sp)
+
+		err := mgr.Start(ctx, testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+
+		wantGateDeferred(t, err, sp, 2, startsBefore)
+	})
+
+	t.Run("StartRuntimeOnly", func(t *testing.T) {
+		mgr, sp, info := seedSuspendedGatedTarget(t)
+		startsBefore := sp.starts.Load()
+		by := runtimeOnlyActor(t, mgr, info.ID)
+		inc := mintUnder(t, mgr, by.Lease, info.ID)
+		ctx := cancelOnWedge(t, sp)
+
+		err := mgr.StartRuntimeOnly(ctx, by, info.ID, inc, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+
+		wantGateDeferred(t, err, sp, 2, startsBefore)
+	})
+
+	t.Run("stale-key fresh restart", func(t *testing.T) {
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store, "session_key", "k-stale", "resume_flag", "--resume")
+		city := t.TempDir()
+		sp := newGatedScanProvider(city, wedgedFrom(2))
+		sp.startErr = runtime.ErrSessionDiedDuringStartup
+		mgr := newTestManager(t, store, sp, WithCityPath(city))
+		ctx := cancelOnWedge(t, sp)
+
+		err := mgr.Start(ctx, testActor(mgr, ActorOperator), b.ID, "claude --resume k-stale", runtime.Config{})
+
+		// The resume's own Start (the one that died) precedes the fresh
+		// restart's gate; nothing may start after it.
+		wantGateDeferred(t, err, sp, 2, 1)
+	})
+
+	t.Run("CreateSession", func(t *testing.T) {
+		city := t.TempDir()
+		sp := newGatedScanProvider(city, alwaysWedged)
+		store := beads.NewMemStore()
+		mgr := newTestManager(t, store, sp, WithCityPath(city))
+		ctx := cancelOnWedge(t, sp)
+
+		_, err := mgr.CreateSession(ctx, CreateOptions{ExplicitName: "sky", Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+
+		wantGateDeferred(t, err, sp, 1, 0)
+		rows, listErr := store.List(beads.ListQuery{Type: BeadType, IncludeClosed: true})
+		if listErr != nil {
+			t.Fatalf("listing rows: %v", listErr)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%d rows after the refused create, want the one rolled-back row", len(rows))
+		}
+		if row := rows[0]; row.Status != "closed" || row.Metadata["session_name"] != "" || row.Metadata["session_name_explicit"] != "" {
+			t.Fatalf("row status=%q session_name=%q session_name_explicit=%q, want it closed with its explicit name cleared", row.Status, row.Metadata["session_name"], row.Metadata["session_name_explicit"])
+		}
+		// The name is free again: a create of a new row (its own scan key)
+		// takes it.
+		mgr = newTestManager(t, store, newGatedScanProvider(city, neverWedged), WithCityPath(city))
+		if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
+			t.Fatalf("re-creating the rolled-back explicit name: %v", err)
+		}
+	})
+}
+
+// wantGateDeferred checks a start refused at its pre-start orphan gate: the
+// error wraps runtime.ErrRuntimeUnavailable, the gate's scan (number gateScan)
+// was the last one launched, and no provider Start came after startsBefore.
+func wantGateDeferred(t *testing.T, err error, sp *gatedScanProvider, gateScan, startsBefore int64) {
+	t.Helper()
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !strings.Contains(err.Error(), "pre-start orphan") {
+		t.Fatalf("err = %v, want the pre-start orphan gate's error wrapping runtime.ErrRuntimeUnavailable", err)
+	}
+	if got := sp.scans.Load(); got != gateScan {
+		t.Fatalf("%d scans launched, want %d (the gate's)", got, gateScan)
+	}
+	if got := sp.starts.Load(); got != startsBefore {
+		t.Fatalf("provider Start called %d times, want %d: nothing may start after an unanswered orphan scan", got, startsBefore)
+	}
 }
