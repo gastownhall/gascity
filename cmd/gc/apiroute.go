@@ -93,6 +93,17 @@ func supervisorFallthroughMutationAPIClient(cityPath string) (*api.Client, strin
 	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisorMutation)
 }
 
+// standaloneAPIClient resolves the API client only where a standalone
+// controller serves the city on its own [api] port, as apiClient does there. It
+// returns nil, without resolving the supervisor-managed client, for a
+// supervisor-hosted city and for a city with no live controller. It serves a
+// caller whose API call is an optional probe ahead of a local path that answers
+// either way, where reaching the supervisor costs more than the probe saves: the
+// per-turn `gc mail check --inject` hook (mailCheckClient).
+func standaloneAPIClient(cityPath string) *api.Client {
+	return routeAPIClient(cityPath, apiRouteStandaloneOnly)
+}
+
 // apiRoute selects how routeAPIClient routes the shapes in which its callers
 // differ.
 type apiRoute int
@@ -109,6 +120,10 @@ const (
 	// except nil for a supervisor-hosted city whose supervisor requires write
 	// grants.
 	apiRoutePreferSupervisorMutation
+	// apiRouteStandaloneOnly is standaloneAPIClient's routing: a standalone
+	// controller's [api] endpoint, and nil wherever apiClient would hand back
+	// the supervisor-managed client.
+	apiRouteStandaloneOnly
 )
 
 // supervisorRequiresGrantFor reports whether a supervisor hosting the city
@@ -153,11 +168,14 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	case identity.PID == 0:
 		// No controller socket: the supervisor-managed client, nil unless the
 		// supervisor runs the city.
+		if route == apiRouteStandaloneOnly {
+			return nil
+		}
 		return apiRouteSupervisorClientHook(cityPath)
 	case identity.HostingMode == controllerHostingSupervisor:
 		// The supervisor hosts the city in-process and serves it on its own
 		// port via city-scoped routes, ignoring [api] port.
-		if supervisorRequiresGrantFor(route) {
+		if route == apiRouteStandaloneOnly || supervisorRequiresGrantFor(route) {
 			return nil
 		}
 		return apiRouteSupervisorClientHook(cityPath)
