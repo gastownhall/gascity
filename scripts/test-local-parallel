@@ -302,6 +302,7 @@ set +e
 # fan-out is addressable as one tree; the background job it becomes is still a
 # subshell, so the gate-FD severing above keeps its original scope.
 run_fan_out() {
+  rm -f "$LOCAL_TEST_LOG_DIR"/*.failed
   if [[ -n "$gate_fd" ]]; then
     eval "exec ${gate_fd}>&-"
   fi
@@ -354,12 +355,38 @@ run_fan_out() {
     echo "[$label] ok"
   else
     status=$?
-    echo "[$label] failed with exit ${status}; log: ${log}" >&2
-    sed -n '"'"'1,240p'"'"' "$log" >&2
+    : >"$LOCAL_TEST_LOG_DIR/${safe_label}.failed"
+    echo "[$label] FAILED (exit ${status}); log: ${log}" >&2
     exit "$status"
   fi
 ' _
 }
+
+# Each failed job leaves a .failed marker next to its log. Name every one and
+# show what broke: its `--- FAIL:` lines, or the log tail when it has none (a
+# build failure, a panic, or a timeout fails before any test reports).
+report_failed_jobs() {
+  local dir="$1" marker job job_log found=0
+  echo "" >&2
+  echo "=== FAILED JOBS ===" >&2
+  for marker in "$dir"/*.failed; do
+    [[ -e "$marker" ]] || continue
+    found=1
+    job="$(basename "$marker" .failed)"
+    job_log="$dir/${job}.log"
+    echo "  ${job} (log: ${job_log})" >&2
+    if grep -q '^--- FAIL:' "$job_log" 2>/dev/null; then
+      grep -A2 '^--- FAIL:' "$job_log" | head -n 40 | sed 's/^/    /' >&2 || true
+    elif [[ -f "$job_log" ]]; then
+      tail -n 40 "$job_log" | sed 's/^/    /' >&2 || true
+    fi
+  done
+  if [[ "$found" -eq 0 ]]; then
+    echo "  (no job left a failure marker; the fan-out itself failed)" >&2
+  fi
+  echo "Logs: ${dir}" >&2
+}
+
 # No watchdog deadline here: each shard runner owns its own, sized to its own
 # go test budget. A second global one would only fire late and less precisely.
 gc_harness_run_supervised "${mode} fan-out" "" 0 -- run_fan_out
@@ -372,7 +399,7 @@ if [[ "$status" -eq 0 ]]; then
   fi
   echo "All ${mode} jobs passed"
 else
-  echo "One or more ${mode} jobs failed; logs are in ${log_dir}" >&2
+  report_failed_jobs "$log_dir"
 fi
 
 exit "$status"
