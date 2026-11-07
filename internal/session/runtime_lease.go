@@ -543,18 +543,30 @@ func (l *RuntimeLease) Release() {
 // later Release or ReleaseChecked returns nil.
 func (l *RuntimeLease) ReleaseChecked() error { return l.release() }
 
+// Abandon ends the lease's hold on the name without touching the store: it
+// cancels the Watch contexts (cause ErrRuntimeLeaseReleased) and drops the
+// name's flock, and makes no store call, reads included. The row's record and
+// the lock file's body are left as they were, to lapse at expiry or to be
+// taken at once by the next acquirer's dead-holder proof. It is for a holder
+// that gave up on the store, whose Release would read and write it. Abandon
+// shares Release's once, so whichever drop comes first wins and the other is
+// a no-op. A nil lease abandons nothing.
+func (l *RuntimeLease) Abandon() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		l.endWatches()
+		unlockRuntimeNameFile(l.lock)
+	})
+}
+
 func (l *RuntimeLease) release() (err error) {
 	if l == nil {
 		return nil
 	}
 	l.once.Do(func() {
-		l.mu.Lock()
-		l.released = true
-		for _, cancel := range l.watchers {
-			cancel(ErrRuntimeLeaseReleased)
-		}
-		l.watchers = nil
-		l.mu.Unlock()
+		l.endWatches()
 		if l.id != "" {
 			_, err = l.updateMetadataFenced(runtimeLeaseAttempts, func(Info, PersistedResponse) MetadataPatch {
 				return RuntimeLeaseClearPatch()
@@ -566,6 +578,18 @@ func (l *RuntimeLease) release() (err error) {
 		unlockRuntimeNameFile(l.lock)
 	})
 	return err
+}
+
+// endWatches marks the lease released and cancels its Watch contexts with
+// ErrRuntimeLeaseReleased. It runs inside the lease's once.
+func (l *RuntimeLease) endWatches() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.released = true
+	for _, cancel := range l.watchers {
+		cancel(ErrRuntimeLeaseReleased)
+	}
+	l.watchers = nil
 }
 
 // holdsRow reports whether the row bead is open and records this lease.
