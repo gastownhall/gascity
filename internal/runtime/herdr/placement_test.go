@@ -15,6 +15,26 @@ func TestPlacementFor(t *testing.T) {
 		wantTab  string
 	}{
 		{
+			// gascity#8933: the default session_template ("{{.Agent}}") makes a
+			// town agent's runtime name just its bare agent name -- no "--" and
+			// no "__" to split on at all. Falling back to workspace = name
+			// would give "mayor" its own one-agent workspace instead of the
+			// shared town one. town comes from the herdr session's own city
+			// name.
+			name:     "bare town agent name groups into town workspace",
+			sessName: "mayor",
+			env:      nil,
+			wantWS:   "gastown",
+			wantTab:  "mayor",
+		},
+		{
+			name:     "bare town agent name with GC_ALIAS still groups into town workspace",
+			sessName: "deacon",
+			env:      map[string]string{"GC_ALIAS": "gastown.deacon"},
+			wantWS:   "gastown",
+			wantTab:  "deacon",
+		},
+		{
 			name:     "wisp gets rig workspace and themed tab",
 			sessName: "gastown__polecat-gc-wisp-3nvj3yx",
 			env:      map[string]string{"GC_RIG": "webapp", "GC_ALIAS": "webapp/gastown.furiosa"},
@@ -111,10 +131,64 @@ func TestPlacementFor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotWS, gotTab := placementFor(tt.sessName, tt.env)
+			gotWS, gotTab := placementFor(tt.sessName, tt.env, "gastown")
 			if gotWS != tt.wantWS || gotTab != tt.wantTab {
-				t.Errorf("placementFor(%q, %v) = (%q, %q), want (%q, %q)",
-					tt.sessName, tt.env, gotWS, gotTab, tt.wantWS, tt.wantTab)
+				t.Errorf("placementFor(%q, %v, %q) = (%q, %q), want (%q, %q)",
+					tt.sessName, tt.env, "gastown", gotWS, gotTab, tt.wantWS, tt.wantTab)
+			}
+		})
+	}
+}
+
+// TestWorkspaceTabFor pins workspaceTabFor directly (gascity#8933): a bare
+// town-agent name (the default session_template, "{{.Agent}}", produces
+// names with neither "--" nor "__") must resolve to the shared town
+// workspace, not one named after the agent itself. The rig-qualified case is
+// a regression guard that the grouping that already worked correctly for rig
+// agents is unchanged.
+func TestWorkspaceTabFor(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessName string
+		town     string
+		wantWS   string
+		wantTab  string
+	}{
+		{
+			name:     "bare town agent name falls back to the town workspace",
+			sessName: "mayor",
+			town:     "gastown",
+			wantWS:   "gastown",
+			wantTab:  "mayor",
+		},
+		{
+			name:     "rig-qualified name is unaffected by town",
+			sessName: "webapp--gastown__refinery",
+			town:     "gastown",
+			wantWS:   "webapp",
+			wantTab:  "refinery",
+		},
+		{
+			name:     "town-qualified name is unaffected by town",
+			sessName: "gastown__mayor",
+			town:     "gastown",
+			wantWS:   "gastown",
+			wantTab:  "mayor",
+		},
+		{
+			name:     "bare name with no town falls back to the name itself",
+			sessName: "mayor",
+			town:     "",
+			wantWS:   "mayor",
+			wantTab:  "mayor",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotWS, gotTab := workspaceTabFor(tt.sessName, tt.town)
+			if gotWS != tt.wantWS || gotTab != tt.wantTab {
+				t.Errorf("workspaceTabFor(%q, %q) = (%q, %q), want (%q, %q)",
+					tt.sessName, tt.town, gotWS, gotTab, tt.wantWS, tt.wantTab)
 			}
 		})
 	}
