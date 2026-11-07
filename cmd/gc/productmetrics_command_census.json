@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 217,
+  "next_id": 218,
   "permanent_ids": [
     {
       "name": "help",
@@ -1802,6 +1802,37 @@
       "classification": "github-pr-backfill",
       "owner": "immediate",
       "id": 59
+    },
+    {
+      "path": "gc github runs",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable-group",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "immediate",
+      "id": 1
+    },
+    {
+      "path": "gc github runs evaluate",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "github-runs-evaluate",
+      "owner": "immediate",
+      "id": 217
     },
     {
       "path": "gc graph",
