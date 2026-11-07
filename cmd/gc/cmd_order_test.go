@@ -3376,6 +3376,7 @@ prefix = "fe"
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
+	cfg.Orders.MaxTimeout = "2h"
 	store := beads.NewMemStore()
 	a := orders.Order{
 		Name:     "poll",
@@ -3383,9 +3384,11 @@ prefix = "fe"
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "true",
+		Timeout:  "6h",
 	}
 
 	var stdout, stderr bytes.Buffer
+	start := time.Now()
 	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr: %s", code, stderr.String())
@@ -3400,6 +3403,13 @@ prefix = "fe"
 	}
 	if !slicesContain(all[0].Labels, "exec") {
 		t.Fatalf("tracking bead labels = %v, want exec", all[0].Labels)
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, all[0].Metadata[beadmeta.OrderDispatchDeadlineMetadataKey])
+	if err != nil || deadline.Before(start.Add(2*time.Hour)) || deadline.After(time.Now().Add(2*time.Hour)) {
+		t.Fatalf("manual run deadline = %s (%v), want the capped two-hour dispatch deadline", deadline, err)
+	}
+	if all[0].Status != "closed" {
+		t.Fatalf("completed manual run status = %q, want closed", all[0].Status)
 	}
 }
 
