@@ -347,7 +347,7 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		if warn != "" {
 			r.Status = doctor.StatusWarning
 			r.Message += "; " + warn
-			r.FixHint = firstHint(r.FixHint, "declare proc.exec and input-fence in the script's handshake if it fences input")
+			r.FixHint = firstHint(r.FixHint, "declare proc.exec and input-fence in the script's handshake if its box's tmux fences input; a carrier.ops runtime takes no fenced input")
 		}
 	}
 	for _, refusal := range v2LatchRefusals(c.cfg, cityPathOf(ctx), c.lookupEnv) {

@@ -171,9 +171,10 @@ func (h execHandshake) fix(script string) string {
 func (h execHandshake) ready() bool { return h.err == nil && len(h.missing) == 0 }
 
 // fencesInput reports a handshake that fences input to one incarnation
-// (proc.exec and input-fence; sessionexec.Provider.InputFencing).
+// (proc.exec and input-fence without carrier.ops;
+// sessionexec.Provider.InputFencing).
 func (h execHandshake) fencesInput() bool {
-	return h.info.Has(runtime.ProtocolCapabilityConnectionExec) && h.info.Has(runtime.ProtocolCapabilityInputFence)
+	return h.info.Has(runtime.ProtocolCapabilityConnectionExec) && h.info.Has(runtime.ProtocolCapabilityInputFence) && !h.info.Has(runtime.ProtocolCapabilityCarrierOps)
 }
 
 // execRuntimeDoctorDetail is the session reconciler check's line about the
@@ -195,7 +196,11 @@ func execRuntimeDoctorDetail(cfg *config.City, cityPath string, lookupEnv func(s
 	}
 	detail = fmt.Sprintf("exec session runtime %q: v2-ready (%s)", name, strings.Join(sessionexec.V2ProfileCapabilities(), ", "))
 	if mode == reconcilerV2 && !h.fencesInput() {
-		warn = fmt.Sprintf("v2 runs on the exec session runtime %q, whose handshake does not declare %s with %s: input gc fences to one incarnation (a fenced turn stop or nudge) is refused on it", name, runtime.ProtocolCapabilityInputFence, runtime.ProtocolCapabilityConnectionExec)
+		if h.info.Has(runtime.ProtocolCapabilityCarrierOps) {
+			warn = fmt.Sprintf("v2 runs on the exec session runtime %q, which selects carrier.ops: fenced input is refused on it, even with input-fence declared", name)
+		} else {
+			warn = fmt.Sprintf("v2 runs on the exec session runtime %q, whose handshake does not declare %s with %s: input gc fences to one incarnation (a fenced turn stop or nudge) is refused on it", name, runtime.ProtocolCapabilityInputFence, runtime.ProtocolCapabilityConnectionExec)
+		}
 	}
 	return detail, warn
 }
