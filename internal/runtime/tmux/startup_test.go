@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2590,6 +2591,35 @@ func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
 	}
 	if respawn.command != "env -u CI -u NO_COLOR claude" {
 		t.Errorf("respawnAgent command = %q, want %q", respawn.command, "env -u CI -u NO_COLOR claude")
+	}
+}
+
+// A launch-only env change (OperatorEnv is launch-half) must reach the
+// respawned agent: respawn-pane inherits the SESSION's old environment, so the
+// relaunch applies the operator-authored keys to the session env before it
+// respawns. The effective value is Env's when Env overrides the operator's, and
+// a key outside OperatorEnv is not re-sent.
+func TestDoRelaunchSession_AppliesOperatorEnvBeforeRespawn(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+	cfg := runtime.Config{
+		Command:     "claude",
+		Env:         map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-env", "GC_OTHER": "unrelated"},
+		OperatorEnv: map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-operator"},
+	}
+
+	if err := doRelaunchSession(context.Background(), ops, "gc-city-agent-a", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	methods := ops.callMethods()
+	apply, respawn := methodIndex(methods, "applySessionEnv"), methodIndex(methods, "respawnAgent")
+	if apply < 0 || respawn < 0 || apply > respawn {
+		t.Fatalf("calls = %v, want applySessionEnv before respawnAgent", methods)
+	}
+	got := callsByMethod(t, ops, "applySessionEnv", 1)[0].env
+	want := map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-env"}
+	if !maps.Equal(got, want) {
+		t.Errorf("applySessionEnv env = %v, want %v", got, want)
 	}
 }
 

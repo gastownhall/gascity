@@ -233,6 +233,43 @@ func TestRelaunch_WarmBoxRespawnsPane(t *testing.T) {
 	}
 }
 
+// A launch-only env change (OperatorEnv is launch-half) reaches a warm-box
+// Relaunch with the new value in Config.Env, but respawn-pane inherits the
+// session's OLD environment, so the respawn must carry the operator-authored
+// keys itself (-e KEY=VALUE). The effective value is Env's when Env overrides
+// it. A key outside OperatorEnv is not part of the drift and is not re-sent.
+func TestRelaunch_WarmBoxRespawnAppliesOperatorEnv(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableWarmScript(logf)))
+
+	err := p.Relaunch(context.Background(), "s", runtime.Config{
+		Command:     "agent --resume",
+		Env:         map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-env", "GC_OTHER": "unrelated"},
+		OperatorEnv: map[string]string{"OP_KEY": "new", "OP_OVERRIDDEN": "from-operator"},
+	})
+	if err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	var respawn string
+	for _, line := range strings.Split(readLog(t, logf), "\n") {
+		if strings.Contains(line, "respawn-pane") {
+			respawn = line
+		}
+	}
+	if respawn == "" {
+		t.Fatalf("no respawn-pane in the log:\n%s", readLog(t, logf))
+	}
+	for _, want := range []string{"OP_KEY=new", "OP_OVERRIDDEN=from-env"} {
+		if !strings.Contains(respawn, want) {
+			t.Errorf("respawn-pane must carry %q so the restarted agent sees it:\n%s", want, respawn)
+		}
+	}
+	if strings.Contains(respawn, "GC_OTHER") {
+		t.Errorf("respawn-pane re-sent a key outside OperatorEnv:\n%s", respawn)
+	}
+}
+
 func TestStart(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())

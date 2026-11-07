@@ -328,6 +328,48 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 	}
 }
 
+// TestProvider_RelaunchAppliesOperatorEnv is the end-to-end form of the
+// config-drift restart: a session started with env value "old" is relaunched
+// with an operator-env change to "new" (a launch-only drift), and the restarted
+// agent process itself must see "new". respawn-pane inherits the session's old
+// environment, so without the relaunch applying the env the agent sees "old".
+func TestProvider_RelaunchAppliesOperatorEnv(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-env"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := fmt.Sprintf("sh -c 'echo $GC_RELAUNCH_ENV_TEST > %s; sleep 300'", marker)
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command:     agentCmd,
+		WorkDir:     workDir,
+		Env:         map[string]string{"GC_RELAUNCH_ENV_TEST": "old"},
+		OperatorEnv: map[string]string{"GC_RELAUNCH_ENV_TEST": "old"},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "old")
+
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command:     agentCmd,
+		WorkDir:     workDir,
+		Env:         map[string]string{"GC_RELAUNCH_ENV_TEST": "new"},
+		OperatorEnv: map[string]string{"GC_RELAUNCH_ENV_TEST": "new"},
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "new")
+}
+
 // TestProvider_RelaunchInWarmSession proves the un-weld relaunch path (B1):
 // Relaunch respawns the agent with a NEW command inside the SAME box, the box is
 // reused (its session env survives, since Relaunch never re-sets env), and a
