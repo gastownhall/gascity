@@ -209,6 +209,7 @@ Capabilities:
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
+| `idle-boundary` | With `proc.exec`, `report-activity` and `report-attachment`, declares that the agent runs in the in-box tmux session `main`, so gc may read its idle boundary with `capture-pane` over `exec` (see [Idle sleep](#idle-sleep)). Without it, gc runs no idle wait for the pack and its interactive sessions do not sleep. A runtime whose box runs no tmux does not declare it. `gc runtime conformance` checks the declaration (`RPP-CONN-002`): in a started box, `tmux has-session -t main` and the idle capture must succeed over `exec`. |
 | `input-fence` | With `proc.exec`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
@@ -231,11 +232,11 @@ depends on its handshake:
 
 | Handshake declares | `sleep_capability` | What sleeps |
 |---|---|---|
-| `report-activity`, `report-attachment` **and** `proc.exec` | `full` | Every session class, interactive ones included. |
+| `report-activity`, `report-attachment`, `proc.exec` **and** `idle-boundary` | `full` | Every session class, interactive ones included. |
 | anything less (or no handshake) | `timed_only` | Non-interactive sessions only. An interactive policy resolves to `off` with `sleep_policy_adjustment_reason = interactive_capability_insufficient`. |
 
 `full` needs a safe idle boundary, so an interactive session is never stopped
-in the middle of a turn. A runtime that declares all three must:
+in the middle of a turn. A runtime that declares all four must:
 
 - **Run the agent in the in-box tmux session `main`.** The orchestrator reads
   the pane over `exec` (`tmux capture-pane -t main -p -S -120`). It treats the
@@ -278,8 +279,17 @@ stays awake, and every wait for its idle boundary runs to its timeout:
 interrupting it (`interrupt_now`) can restart the session, and stopping a turn
 reports an error.
 
+A script written before `idle-boundary` existed, which declares only the
+first three, gets `timed_only` until it adds `idle-boundary`: its interactive
+sessions stop sleeping, and gc stops waiting for its idle boundary. A
+wait-idle nudge is queued instead of delivered at the boundary, and
+`interrupt_now` and stopping a turn get no idle wait. Non-interactive sleep,
+attachment and `exec` are unchanged. gc no longer reads the first three as
+proof that the box runs tmux, because a runtime without tmux declares them
+too. `gc runtime check` warns about a script in this state.
+
 The `is-attached` rule above applies to every runtime that declares
-`report-attachment`, even without the other two capabilities. gc runs the op
+`report-attachment`, even without the other capabilities. gc runs the op
 directly and treats any non-zero exit, including 2, as "attached": the session
 stays awake and destructive actions on it are held.
 

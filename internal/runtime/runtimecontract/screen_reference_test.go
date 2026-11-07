@@ -67,7 +67,7 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 	if !report.V2Ready || report.Protocol.Locality != "local" {
 		t.Errorf("handshake: v2-ready %v (missing %v), locality %q; want v2-ready and local", report.V2Ready, report.V2Missing, report.Protocol.Locality)
 	}
-	wantSkip := map[Code]bool{ReqConnectionExec: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true}
+	wantSkip := map[Code]bool{ReqConnectionExec: true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true}
 	for _, res := range report.Results {
 		switch {
 		case res.Status == StatusFail:

@@ -57,6 +57,18 @@ const (
 // 66 (no screen) when no box holds the name.
 const goldenPeek = faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; cat "$box/cmd0"; echo`
 
+// goldenExec runs the piped command in the box. Its tmux is the box's own:
+// the session `main` exists while the box does (has-session) and its pane
+// shows the agent's command (capture-pane), as the idle-boundary declaration
+// promises; any other tmux command goes to the host's tmux unchanged. eval,
+// not sh -c, so the command sees the box's tmux. The golden does not declare
+// proc.exec, so gc's own idle reads (tmux -u set-environment and
+// show-environment, whose first argument is -u) never reach this model;
+// declaring proc.exec here would need them modeled too.
+const goldenExec = `cmd=$(cat); ` +
+	`tmux() { case "$1" in has-session) [ -d "$box" ] ;; capture-pane) [ -d "$box" ] && cat "$box/cmd0" ;; *) command tmux "$@" ;; esac; }; ` +
+	`eval "$cmd"`
+
 // goldenPrelude computes the city's state and the name's box, and the
 // helpers the observe.v1 bodies share: ident prints $box's identity, and
 // alive reports whether a box's agent (cmd0) is among its process names.
@@ -75,7 +87,7 @@ alive() { for p in $(tr ',' ' ' < "$1/procs"); do if [ "$p" = "$(cat "$1/cmd0")"
 // behavior.
 func Bodies() map[string]string {
 	return map[string]string{
-		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped"]}'`,
+		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary"]}'`,
 		"start":             goldenStart,
 		"stop":              `rm -rf "$box"`,
 		"is-running":        `if [ -d "$box" ]; then echo true; else echo false; fi`,
@@ -89,7 +101,7 @@ func Bodies() map[string]string {
 		"inventory":         goldenInventory,
 		"kill-object":       goldenKillObject,
 		"peek":              goldenPeek,
-		"exec":              `sh -c "$(cat)"`,
+		"exec":              goldenExec,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able
 		// (exec runs regardless).
