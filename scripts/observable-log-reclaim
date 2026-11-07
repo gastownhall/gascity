@@ -106,9 +106,12 @@ scan_open() {
 		fd="$p/fd"
 		if [ ! -d "$fd" ] || [ ! -r "$fd" ] || [ ! -x "$fd" ]; then
 			[ -d "$p" ] || continue # the process exited while we looked
-			probe_fail "cannot read $fd: cannot tell which logs are open"
+			# The kernel gives a non-dumpable process (credential change, setuid
+			# helper, hardened daemon) a root-owned fd table. Name it so the
+			# operator can see exactly what blocks the answer.
+			probe_fail "cannot read $fd (process $(cat -- "$p/comm" 2>/dev/null || echo '?'), fd table owned by $(stat -c %U -- "$fd" 2>/dev/null || echo '?')): cannot tell which logs are open"
 			OPEN_OK=0
-			return
+			continue
 		fi
 		set -- "$fd"/*
 		if [ -e "$1" ] || [ -L "$1" ]; then
