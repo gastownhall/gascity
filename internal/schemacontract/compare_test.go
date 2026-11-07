@@ -154,6 +154,21 @@ func TestCheckIntegerIsSubsetOfNumber(t *testing.T) {
 	wantBreaking(t, check(t, number, with(`["integer","string"]`)), "1", "$.b", "types widened")
 }
 
+// R5 inside unions that carry null: narrowing an integer-or-null union to its
+// integer member is clean, and a number that gains null, alone or beside
+// integer, widens the contract, because the integer-in-number rule admits
+// integer only.
+func TestCheckIntegerSubsetOfNumberWithNullUnions(t *testing.T) {
+	with := func(types string) string { return doc("1", ``, `"b":{"type":`+types+`}`) }
+	number, integer := with(`"number"`), with(`"integer"`)
+	nullableNumber, nullableInteger := with(`["number","null"]`), with(`["integer","null"]`)
+
+	wantClean(t, check(t, nullableInteger, integer))
+
+	wantBreaking(t, check(t, number, nullableInteger), "1", "$.b", "types widened")
+	wantBreaking(t, check(t, number, nullableNumber), "1", "$.b", "types widened")
+}
+
 func TestCheckAdditiveFieldAsksForGenerator(t *testing.T) {
 	recorded := doc("1", `"a"`, `"a":{"type":"string"}`)
 	live := doc("1", `"a"`, `"a":{"type":"string"},"b":{"type":"integer"}`)
