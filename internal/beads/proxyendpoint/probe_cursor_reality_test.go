@@ -249,6 +249,12 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 				if strings.Contains(strings.ToLower(statement), "information_schema.columns") {
 					t.Fatalf("the session asked information_schema.columns: %q", statement)
 				}
+				// The same holds for information_schema.tables: each point read
+				// materializes every table on the server, where SHOW TABLES
+				// answers every existence question in one cheap statement.
+				if strings.Contains(strings.ToLower(statement), "information_schema.tables") {
+					t.Fatalf("the session asked information_schema.tables: %q", statement)
+				}
 			}
 			wantColumnProbe := tc.ignored > 0 && !tc.absentTables["wisps"] && !tc.absentTables["wisp_dependencies"] &&
 				!tc.absentTables[IgnoredSentinelColumnTable]
@@ -282,8 +288,8 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 		t.Fatalf("report.Head = %q, want the session's HEAD", report.Head)
 	}
 	statements := fake.statements()
-	if len(statements) == 0 || !strings.HasPrefix(statements[0], cursorExistsWithHeadQuery) {
-		t.Fatalf("the session's first statement is not the main-lane existence check carrying HEAD: %v", statements)
+	if len(statements) == 0 || statements[0] != headQuery {
+		t.Fatalf("the session's first statement is not the HEAD read: %v", statements)
 	}
 	headReads := 0
 	for _, statement := range statements {
@@ -294,12 +300,11 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 	if headReads != 1 {
 		t.Fatalf("the session asked for HEAD in %d statement(s), want exactly 1: %v", headReads, statements)
 	}
-	// A healthy database at 66/26 with every sentinel present: two cursor
-	// existence checks, two MAX reads, two sentinel tables, three floored
-	// sentinel tables, and the sentinel column (its table's existence, then
-	// SHOW COLUMNS). HEAD adds none of them.
-	if want := 4 + len(ignoredSentinelTables) + len(ignoredSentinelFlooredTables) + 2; len(statements) != want {
-		t.Fatalf("the session issued %d statements, want the %d it issues without a HEAD read of its own: %v", len(statements), want, statements)
+	// A healthy database at 66/26 with every sentinel present: HEAD, one SHOW
+	// TABLES answering every table existence question, two MAX reads, and the
+	// sentinel column's SHOW COLUMNS.
+	if want := 5; len(statements) != want {
+		t.Fatalf("the session issued %d statements, want %d: %v", len(statements), want, statements)
 	}
 	if opened := fake.opened.Load(); opened != 1 {
 		t.Fatalf("the session opened %d connection(s), want 1", opened)

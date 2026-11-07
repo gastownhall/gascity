@@ -2208,7 +2208,7 @@ func TestAdmitRefusesAnUncheckedCursorReality(t *testing.T) {
 // Both "did not move" and "could not tell" are legitimate answers, and the whole
 // value of the check turns on their not being the same answer. A probe that
 // cannot read HEAD does NOT degrade to "": it fails its session, which
-// classifies ProbeUnknown and admits nothing (readMainCursorAndHead;
+// classifies ProbeUnknown and admits nothing (readHead;
 // TestProbeSessionReadsHeadOnItsFirstStatement's "a HEAD the server cannot
 // answer" row). What does reach this function with an empty head is a
 // memoized pin (Pin.withoutHead) and, in principle, a SQL NULL hash — so an
