@@ -16,9 +16,14 @@ import (
 // then the stop verb with the idle finalize. Idle timeout is a stop, not a
 // park (v5.7, SESS-576): the finalize writes SleepPatch(idle-timeout) and
 // nothing that holds the row down, so a row AL1 still wants is started
-// again by A18 (one pass later than legacy, §12.2 #60). The decision rests
-// on the lane's reads; the stop re-proves idleness fresh on the routed leaf
-// before it kills (idleReproved).
+// again by A18 (one pass later than legacy, §12.2 #60). The stop of a seat
+// holding work the held-work keep counts (seatHoldsWork) differs in its
+// sleep reason alone: it finishes as its timer drain would have
+// (idleTimeoutHeldWorkFinish), the drain the keep holds back inside its
+// bound, and A21 parks the seat on its blocked work where that drain would
+// have left it parked. The decision rests on the lane's reads; the stop
+// re-proves idleness fresh on the routed leaf before it kills
+// (idleReproved).
 
 // A15's stops: the idle timeout, and the assigned-work defer streak's
 // forced stop (SESS-575).
@@ -40,7 +45,9 @@ func isIdleReason(reason string) bool {
 // longer reads its own. A pending interaction is the ladder's hold, which
 // leaves an active cancelable request to A19. The stop's legs, read fresh,
 // catch a prompt, an attach and, but for the forced stop, a claim since
-// the pass.
+// the pass. The idle timeout of a seat holding work the held-work keep
+// counts (seatHoldsWork) finishes as its timer drain would have, inside
+// the keep's bound or past it.
 func armIdleTimeout(r *rowFacts) (intent, bool) {
 	dec, ok := r.idleLadder()
 	obs := r.w.Observed[r.k]
@@ -51,8 +58,11 @@ func armIdleTimeout(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	it := intent{Kind: intentStop, Reason: decideIdleTimeout, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}, Finish: idleTimeoutFinish}
-	if dec.TraceReason == string(TraceReasonAssignedWorkExhausted) {
+	switch {
+	case dec.TraceReason == string(TraceReasonAssignedWorkExhausted):
 		it.Reason, it.Finish = decideIdleExhausted, idleExhaustedFinish
+	case r.seatHoldsWork():
+		it.Finish = idleTimeoutHeldWorkFinish
 	}
 	return it, true
 }
@@ -200,6 +210,18 @@ func idleReproved(v txView) bool {
 // SleepPatch(idle-timeout), a sleep through the Sleep cell; never a close.
 func idleTimeoutFinish(f finalizeFacts) finalizeChoice {
 	return finalizeChoice{Patch: session.SleepPatch(f.Now, string(session.SleepReasonIdleTimeout)), AsSleep: true}
+}
+
+// idleTimeoutHeldWorkFinish is the idle stop's finalize for a seat holding
+// work the held-work keep counts (seatHoldsWork): it finishes as the seat's
+// timer drain would have, legacy's too (finalizePatch with work:
+// CompleteDrainPatch(idle)), a sleep through the Sleep cell; never a close.
+// Inside the keep's bound the stop ends the hold that held that drain back;
+// past it (heldWorkInBound) the drain may still be running. A21 then parks
+// the seat on its blocked work (parkableRow) where that drain would have
+// left it parked, and strands it where that drain would have stranded it.
+func idleTimeoutHeldWorkFinish(f finalizeFacts) finalizeChoice {
+	return finalizeChoice{Patch: session.CompleteDrainPatch(f.Now, string(session.SleepReasonIdle), f.FreshWake), AsSleep: true}
 }
 
 // idleExhaustedFinish is the forced stop's: SleepPatch(assigned-work
