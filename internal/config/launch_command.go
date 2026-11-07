@@ -44,6 +44,9 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 		}
 		command = ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
 	}
+	if providerLaunchFamily(resolved) == "kimi" {
+		command = normalizeKimiACPCommand(command)
+	}
 
 	return appendProviderSettings(cityPath, providerLaunchFamily(resolved), command), nil
 }
@@ -86,6 +89,9 @@ func ProviderTemplateCommand(resolved *ResolvedProvider, transport string, insta
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
+	if providerLaunchFamily(resolved) == "kimi" {
+		command = normalizeKimiACPCommand(command)
+	}
 	return command, nil
 }
 
@@ -121,6 +127,20 @@ func appendKimiHookConfigArg(command string) string {
 	}
 	parts = append(parts, configArgs...)
 	return shellquote.Join(parts)
+}
+
+func normalizeKimiACPCommand(command string) string {
+	parts := shellquote.Split(command)
+	for i, part := range parts {
+		if part == "acp" && i != len(parts)-1 {
+			normalized := make([]string, 0, len(parts))
+			normalized = append(normalized, parts[:i]...)
+			normalized = append(normalized, parts[i+1:]...)
+			normalized = append(normalized, part)
+			return shellquote.Join(normalized)
+		}
+	}
+	return command
 }
 
 // BuildProviderResumeCommand applies schema-managed option overrides to a

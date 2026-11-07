@@ -559,7 +559,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		// which is the raw Moonshot SDK var, nor OPENAI_* which is openai-type only).
 		UpstreamBaseURLEnv:   "KIMI_BASE_URL",
 		UpstreamAPIKeyEnv:    "KIMI_API_KEY",
-		Args:                 []string{"--yolo", "--no-thinking"},
+		Args:                 []string{"--yolo"},
 		PromptMode:           "none",
 		ReadyDelayMs:         5000,
 		ProcessNames:         []string{"kimi", "python"},
@@ -569,11 +569,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:     "AGENTS.md",
 		ResumeFlag:           "--session",
 		ResumeStyle:          "flag",
-		PrintArgs:            []string{"--quiet", "--prompt"},
-		TitleModel:           "kimi-k2.6",
-		ACPArgs:              []string{"--yolo", "--no-thinking", "acp"},
+		PrintArgs:            []string{"--prompt"},
+		TitleModel:           "kimi-code/kimi-for-coding",
+		ACPArgs:              []string{"--yolo", "acp"},
+		OptionDefaults:       map[string]string{"model": "kimi-code/k3"},
 		OptionsSchema: []BuiltinProviderOption{
 			modelOption(
+				modelChoice("kimi-code/k3.1-pro", "K3.1 Pro"),
+				modelChoice("kimi-code/k3", "K3"),
+				modelChoice("kimi-code/kimi-for-coding", "Kimi for Coding"),
 				modelChoice("kimi-k2.6", "Kimi K2.6"),
 				modelChoice("kimi-k2-thinking-turbo", "Kimi K2 Thinking Turbo"),
 			),
