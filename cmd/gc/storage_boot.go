@@ -300,6 +300,13 @@ func storageSplitShapeOf(storage config.StorageConfig) (storageSplitShape, strin
 // A non-nil error is a refusal, already carrying the operator instruction; the
 // caller prints it and stops.
 func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec events.Recorder, stderr io.Writer) (*storageRoutes, error) {
+	// A gc older than the split's recorded floor reads none of it, whatever
+	// the config says (storage_min_gc_version.go). One failed stat on a city
+	// that has none.
+	if err := minGCVersionRefusal(cityPath, version); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
+
 	// The bypass, first — and now with the one question a city that HAS served
 	// a split can answer differently from a city that never did.
 	//
