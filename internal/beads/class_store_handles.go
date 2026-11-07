@@ -17,6 +17,18 @@ var (
 	_ interface{ Handles() StoreHandles } = MoleculeTarget{}
 )
 
+// HasExplicitHandles reports whether the store below s's class layers has
+// handles of its own (a CachingStore, a policy store): whether HandlesFor(s)
+// answers a real cached and live tier, rather than the logical wrappers over
+// one store. A class layer forwards Handles whatever lies beneath it, so
+// asserting the Handles method on s itself would say yes for a handle over a
+// plain store, and a caller that pays a second, live read only for explicit
+// handles would pay it there too.
+func HasExplicitHandles(s StoreReader) bool {
+	_, ok := physicalStore(s).(interface{ Handles() StoreHandles })
+	return ok
+}
+
 // forwardHandles is HandlesFor(inner) with layer as the writer.
 func forwardHandles(layer, inner Store) StoreHandles {
 	handles := HandlesFor(inner)

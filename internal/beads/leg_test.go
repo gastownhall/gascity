@@ -184,26 +184,6 @@ func (s *handOffStore) Get(id string) (Bead, error) {
 	return b, err
 }
 
-func TestUndecoratedFunc(t *testing.T) {
-	const leg = "github.com/gastownhall/gascity/internal/beads.(*relicLeg).Get"
-	for in, want := range map[string]string{
-		leg:                      leg,
-		leg + "-fm":              leg,
-		leg + ".func1":           leg,
-		leg + ".func2.3":         leg,
-		leg + ".gowrap1":         leg,
-		leg + ".deferwrap1":      leg,
-		leg + ".func1-fm":        leg,
-		"pkg.f.func":             "pkg.f.func",
-		"pkg.(*T).funcy":         "pkg.(*T).funcy",
-		"pkg.(*T).Get.func1.2.3": "pkg.(*T).Get",
-	} {
-		if got := undecoratedFunc(in); got != want {
-			t.Errorf("undecoratedFunc(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestZeroLegHandles: a zero ResidentStore or FederatedReader is no store,
 // answers no capability, and names no ref or role.
 func TestZeroLegHandles(t *testing.T) {
@@ -262,9 +242,10 @@ func TestLegHandlesNameTheirRefAndRole(t *testing.T) {
 	}
 }
 
-// TestReaderAsAnswersOnlyClassNeutralCapabilities: a leg reader hands out
-// its store's readers, never a writer or the store.
-func TestReaderAsAnswersOnlyClassNeutralCapabilities(t *testing.T) {
+// TestReaderAsAnswersOnlyReadCapabilities: a leg reader hands out its
+// store's readers, never a writer (the assignee-only writers the class gate
+// passes included) or the store.
+func TestReaderAsAnswersOnlyReadCapabilities(t *testing.T) {
 	cache := NewCachingStoreForTest(NewMemStore(), nil)
 	r := MintRelicLeg(WorkStore{cache}, "")
 	if c, ok := ReaderAs[Counter](r); !ok || c != Counter(cache) {
@@ -275,6 +256,15 @@ func TestReaderAsAnswersOnlyClassNeutralCapabilities(t *testing.T) {
 	}
 	if _, ok := ReaderAs[ConditionalWriter](r); ok {
 		t.Error("ReaderAs[ConditionalWriter]: a read-only leg handed out a writer")
+	}
+	if _, ok := As[ConditionalAssignmentReleaser](WorkStore{cache}); !ok {
+		t.Fatal("fixture: the cache is no ConditionalAssignmentReleaser")
+	}
+	if _, ok := ReaderAs[ConditionalAssignmentReleaser](r); ok {
+		t.Error("ReaderAs[ConditionalAssignmentReleaser]: a read-only leg handed out an assignee writer")
+	}
+	if _, ok := ReaderAs[ConditionalAssigneeTransferer](r); ok {
+		t.Error("ReaderAs[ConditionalAssigneeTransferer]: a read-only leg handed out an assignee writer")
 	}
 	if _, ok := ReaderAs[*CachingStore](r); ok {
 		t.Error("ReaderAs[*CachingStore]: a read-only leg handed out its store")
@@ -391,5 +381,28 @@ func BenchmarkLegGet(b *testing.B) {
 				_, _ = get("x")
 			}
 		})
+	}
+}
+
+// TestHasExplicitHandlesAsksThePhysicalStore: a class layer forwards
+// Handles whatever it wraps, so the question is the store's below the
+// layers: a cache or a policy store has explicit handles, a plain store has
+// none, through any handle, leg or resident.
+func TestHasExplicitHandlesAsksThePhysicalStore(t *testing.T) {
+	mem := NewMemStore()
+	cache := NewCachingStoreForTest(mem, nil)
+	for name, wrap := range handleWraps {
+		if HasExplicitHandles(wrap(mem)) {
+			t.Errorf("%s over a plain store: explicit handles", name)
+		}
+		if !HasExplicitHandles(wrap(cache)) {
+			t.Errorf("%s over a cache: no explicit handles", name)
+		}
+	}
+	if HasExplicitHandles(MintFederatedLeg(mem, "")) || !HasExplicitHandles(MintRelicLeg(cache, "")) {
+		t.Error("a leg reader does not answer its store's")
+	}
+	if HasExplicitHandles(nil) || HasExplicitHandles(WorkStore{}) {
+		t.Error("no store has explicit handles")
 	}
 }

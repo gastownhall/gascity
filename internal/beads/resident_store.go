@@ -10,7 +10,9 @@ package beads
 // MintResidentLeg; beadstest in tests).
 //
 // The split-strict gate polices its reads (OD-T7-3) unless it was minted over
-// a leg layer (MintResidentLeg), whose role its reads then carry.
+// a leg layer (MintResidentLeg). Then its Store-method bead reads carry the
+// leg's role; a read below the leg (a capability through As, HandlesFor,
+// LiveFor or GetMany) carries none, and is policed.
 type ResidentStore struct {
 	Store
 	ref string

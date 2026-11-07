@@ -1510,6 +1510,7 @@ go_test(
         "demand_claimed_work_test.go",
         "demand_cross_store_gate_test.go",
         "demand_divergence_test.go",
+        "demand_explicit_handles_test.go",
         "demand_pool_bound_claim_window_test.go",
         "demand_pool_scale_check_leg_test.go",
         "demand_serve_agreement_test.go",

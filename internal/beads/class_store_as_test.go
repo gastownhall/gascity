@@ -215,13 +215,13 @@ func TestAsRoutesEveryCapabilityHelper(t *testing.T) {
 }
 
 // capabilityHelperOf is the capability an exported func XFor(Store) (T, bool)
-// returns; a read helper widened to take a leg reader (storeReader) counts.
+// returns; a read helper widened to take a leg reader (StoreReader) counts.
 func capabilityHelperOf(fn *ast.FuncDecl) (string, bool) {
 	if !fn.Name.IsExported() || !strings.HasSuffix(fn.Name.Name, "For") {
 		return "", false
 	}
 	params, results := fieldTypes(fn.Type.Params), fieldTypes(fn.Type.Results)
-	if len(params) != 1 || len(results) != 2 || !identNamed(params[0], "Store") && !identNamed(params[0], "storeReader") || !identNamed(results[1], "bool") {
+	if len(params) != 1 || len(results) != 2 || !identNamed(params[0], "Store") && !identNamed(params[0], "StoreReader") || !identNamed(results[1], "bool") {
 		return "", false
 	}
 	capability, ok := results[0].(*ast.Ident)

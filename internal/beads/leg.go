@@ -1,9 +1,6 @@
 package beads
 
-import (
-	"runtime"
-	"strings"
-)
+import "runtime"
 
 // This file is the typed federation leg (typed-stores design §3.6, T7a): a
 // read that may miss because its row may live in another store runs through a
@@ -311,23 +308,38 @@ func (r FederatedReader) DepList(id, direction string) ([]Dep, error) {
 	return r.leg.DepList(id, direction)
 }
 
-// ReaderAs is As for a leg: r's capability T, for a class-neutral T only (the
-// readers and assignee-only writers passesClassGate lists), so a read-only
-// leg never hands out a writer or its store. A capability read runs below the
-// leg layer, so it carries no role on the stack: the gate polices it.
+// ReaderAs is As for a leg: r's capability T, for a read capability only
+// (passesReaderGate), so a read-only leg never hands out a writer or its
+// store. A capability read runs below the leg layer, so it carries no role on
+// the stack: the gate polices it.
 func ReaderAs[T any](r FederatedReader) (T, bool) {
 	var zero T
-	if r.leg == nil || !passesClassGate[T]() {
+	if r.leg == nil || !passesReaderGate[T]() {
 		return zero, false
 	}
 	return As[T](r.leg)
 }
 
-// storeReader is a Store or a FederatedReader: what the read helpers
-// (SameStore, LiveFor, PhysicalStoreKey, IsNilStore, GetMany,
-// DepListBatchFor, ReadyBlockedByAbsentFor) take, so a leg passes to them as
-// its store does.
-type storeReader interface {
+// passesReaderGate reports whether a leg reader may hand out T: a
+// class-neutral capability (passesClassGate) that writes nothing. The class
+// gate lets the assignee-only writers through, because they cannot change a
+// bead's class; a read-only leg refuses them, because they write.
+func passesReaderGate[T any]() bool {
+	switch any((*T)(nil)).(type) {
+	case *ConditionalAssignmentReleaser, *ConditionalAssigneeTransferer:
+		return false
+	}
+	return passesClassGate[T]()
+}
+
+// StoreReader is the read side a Store and a FederatedReader share: what the
+// read helpers (SameStore, LiveFor, PhysicalStoreKey, IsNilStore,
+// HasExplicitHandles, GetMany, DepListBatchFor, ReadyBlockedByAbsentFor)
+// take, so a leg passes to them as its store does. It is not a capability to
+// hold: outside internal/beads, take a typed handle or a FederatedReader, and
+// the storeclass lint reports a type assertion on a StoreReader as it does
+// one on a store.
+type StoreReader interface {
 	Get(id string) (Bead, error)
 	List(query ListQuery) ([]Bead, error)
 	Ready(query ...ReadyQuery) ([]Bead, error)
@@ -339,8 +351,8 @@ type storeReader interface {
 }
 
 var (
-	_ storeReader = Store(nil)
-	_ storeReader = FederatedReader{}
+	_ StoreReader = Store(nil)
+	_ StoreReader = FederatedReader{}
 )
 
 // legReadFrames are the frames a leg layer's bead reads leave, by role.
@@ -357,9 +369,12 @@ var legReadFrames = func() map[string]LegRole {
 // LegRoleOnStack reports the role of the innermost leg-layer read pcs (from
 // runtime.Callers) pass through, or NoLegRole. It sits beside
 // ReadMarkerOnStack: the split-strict gate honors both until the markers go
-// (T7j). A frame is matched by its function with method-value ("-fm") and
-// closure decorations dropped, so a leg read taken as a method value, or a
-// closure inside one, still counts.
+// (T7j). A frame is matched by its exact function name. A leg read taken as
+// a method value, or made from a closure, still counts with no name
+// decoration stripped: the leg's own read method is never inlined, so its
+// undecorated frame is on the stack whatever wrapper or closure called it
+// (TestLegRoleOnStackShapes), and the leg methods make no closures of their
+// own.
 //
 // A role is visible only on the goroutine that made the read: a leg read must
 // run on the calling goroutine, and a read a store hands to another goroutine
@@ -371,45 +386,11 @@ func LegRoleOnStack(pcs []uintptr) LegRole {
 	frames := runtime.CallersFrames(pcs)
 	for {
 		frame, more := frames.Next()
-		if role, ok := legReadFrames[undecoratedFunc(frame.Function)]; ok {
+		if role, ok := legReadFrames[frame.Function]; ok {
 			return role
 		}
 		if !more {
 			return NoLegRole
 		}
 	}
-}
-
-// undecoratedFunc drops a method value's "-fm" suffix and the compiler's
-// closure segments ("f.func1", "f.func2.3", "f.gowrap1", "f.deferwrap1") from
-// a frame's function name.
-func undecoratedFunc(name string) string {
-	name = strings.TrimSuffix(name, "-fm")
-	for {
-		dot := strings.LastIndexByte(name, '.')
-		if dot < 0 || !isClosureSegment(name[dot+1:]) {
-			return name
-		}
-		name = name[:dot]
-	}
-}
-
-// isClosureSegment reports a closure segment of a function name: funcN,
-// gowrapN, deferwrapN, or a bare number (a closure nested in one).
-func isClosureSegment(seg string) bool {
-	for _, prefix := range []string{"func", "gowrap", "deferwrap"} {
-		if rest, ok := strings.CutPrefix(seg, prefix); ok {
-			seg = rest
-			break
-		}
-	}
-	if seg == "" {
-		return false
-	}
-	for _, c := range seg {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
 }

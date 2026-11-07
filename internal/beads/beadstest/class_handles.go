@@ -82,13 +82,13 @@ func (c ClassStores) All() map[string]beads.Store {
 }
 
 // capabilityProbe looks one capability up through beads.As, and through
-// beads.ReaderAs on a leg reader. neutral marks a class-neutral capability,
-// the only kind ReaderAs answers.
+// beads.ReaderAs on a leg reader. readable marks a read capability, the only
+// kind ReaderAs answers: class-neutral, and writing nothing.
 type capabilityProbe struct {
-	name    string
-	look    func(beads.Store) (any, bool)
-	reader  func(beads.FederatedReader) (any, bool)
-	neutral bool
+	name     string
+	look     func(beads.Store) (any, bool)
+	reader   func(beads.FederatedReader) (any, bool)
+	readable bool
 }
 
 func probe[T any](name string) capabilityProbe {
@@ -101,10 +101,10 @@ func probe[T any](name string) capabilityProbe {
 	}}
 }
 
-// neutralProbe is probe for a class-neutral capability.
-func neutralProbe[T any](name string) capabilityProbe {
+// readProbe is probe for a read capability.
+func readProbe[T any](name string) capabilityProbe {
 	p := probe[T](name)
-	p.neutral = true
+	p.readable = true
 	return p
 }
 
@@ -117,25 +117,27 @@ var capabilityProbes = []capabilityProbe{
 	probe[beads.GraphApplyStore]("GraphApplyStore"),
 	probe[beads.MetadataCASWriter]("MetadataCASWriter"),
 	probe[beads.AtomicConditionalCloser]("AtomicConditionalCloser"),
-	neutralProbe[beads.NamespaceCensus]("NamespaceCensus"),
-	neutralProbe[beads.DependencyBatchLister]("DependencyBatchLister"),
-	neutralProbe[beads.GraphOnlyReadyStore]("GraphOnlyReadyStore"),
+	readProbe[beads.NamespaceCensus]("NamespaceCensus"),
+	readProbe[beads.DependencyBatchLister]("DependencyBatchLister"),
+	readProbe[beads.GraphOnlyReadyStore]("GraphOnlyReadyStore"),
 	probe[beads.AssignmentGuardedUpdater]("AssignmentGuardedUpdater"),
-	neutralProbe[beads.AbsentBlockedReader]("AbsentBlockedReader"),
-	neutralProbe[beads.Counter]("Counter"),
+	readProbe[beads.AbsentBlockedReader]("AbsentBlockedReader"),
+	readProbe[beads.Counter]("Counter"),
 	probe[beads.ForeignIDCreator]("ForeignIDCreator"),
 	probe[beads.StorageCreateStore]("StorageCreateStore"),
 	probe[beads.StorageGraphApplyStore]("StorageGraphApplyStore"),
 	probe[beads.EphemeralGraphApplyStore]("EphemeralGraphApplyStore"),
-	neutralProbe[beads.ConditionalAssignmentReleaser]("ConditionalAssignmentReleaser"),
-	neutralProbe[beads.ConditionalAssigneeTransferer]("ConditionalAssigneeTransferer"),
-	neutralProbe[beads.DepMetadataReader]("DepMetadataReader"),
+	// Class-neutral (a class guard passes them), but writers: no leg reader
+	// hands them out.
+	probe[beads.ConditionalAssignmentReleaser]("ConditionalAssignmentReleaser"),
+	probe[beads.ConditionalAssigneeTransferer]("ConditionalAssigneeTransferer"),
+	readProbe[beads.DepMetadataReader]("DepMetadataReader"),
 	probe[*beads.CachingStore]("*CachingStore"),
-	neutralProbe[beads.ChildrenBatchLister]("ChildrenBatchLister"),
+	readProbe[beads.ChildrenBatchLister]("ChildrenBatchLister"),
 	probe[beads.AtomicTxStore]("AtomicTxStore"),
-	neutralProbe[beads.CacheStatsReporter]("CacheStatsReporter"),
-	neutralProbe[beads.CacheLivenessReporter]("CacheLivenessReporter"),
-	neutralProbe[beads.CachedLister]("CachedLister"),
+	readProbe[beads.CacheStatsReporter]("CacheStatsReporter"),
+	readProbe[beads.CacheLivenessReporter]("CacheLivenessReporter"),
+	readProbe[beads.CachedLister]("CachedLister"),
 }
 
 // RunClassHandleCapabilityConformance checks, for a store from newStore, that
@@ -216,9 +218,27 @@ var helperProbes = []helperProbe{
 	{"AssignmentGuardedUpdaterFor", func(s beads.Store) (any, bool) { return beads.AssignmentGuardedUpdaterFor(s) }},
 	{"ConditionalWriterForTarget", func(s beads.Store) (any, bool) { return beads.ConditionalWriterForTarget(s) }},
 	{"GuardedBatcherFor", func(s beads.Store) (any, bool) { return beads.GuardedBatcherFor(s) }},
+	{"ResolveConditionalWriter", resolvedConditionalWriter},
 	{"IDPrefixFor", func(s beads.Store) (any, bool) { return beads.IDPrefixFor(s), true }},
 	{"HandlesFor.Cached", func(s beads.Store) (any, bool) { return beads.HandlesFor(s).Cached, true }},
 	{"HandlesFor.Live", func(s beads.Store) (any, bool) { return beads.HandlesFor(s).Live, true }},
+}
+
+// resolution is what ResolveConditionalWriter answers: the writer the
+// store's stamped mode resolves to (nil under off or unset), whether it
+// carried a diagnostic, and its error.
+type resolution struct {
+	writer     beads.ConditionalWriter
+	diagnostic bool
+	err        string
+}
+
+// resolvedConditionalWriter is the ResolveConditionalWriter probe. On a
+// store stamped require it answers the store's writer; a layer that dropped
+// its resolution target would read the mode as unset and answer none.
+func resolvedConditionalWriter(s beads.Store) (any, bool) {
+	writer, diag, err := beads.ResolveConditionalWriter(s)
+	return resolution{writer: writer, diagnostic: diag != nil, err: errText(err)}, true
 }
 
 // checkHelperAnswers reports a handle on which a helperProbe answers other
@@ -244,8 +264,8 @@ func checkHelperAnswers(t errorReporter, raw beads.Store, class string, h beads.
 }
 
 // checkReaderCapabilities reports a leg reader that is not over raw, that
-// reaches a class-neutral capability other than as raw does, or that reaches
-// any other capability at all.
+// reaches a read capability other than as raw does, or that reaches any
+// other capability (a writer, the store) at all.
 func checkReaderCapabilities(t errorReporter, raw beads.Store, readers map[string]beads.FederatedReader) {
 	t.Helper()
 	for leg, r := range readers {
@@ -254,7 +274,7 @@ func checkReaderCapabilities(t errorReporter, raw beads.Store, readers map[strin
 		}
 		for _, p := range capabilityProbes {
 			got, gotOK := p.reader(r)
-			if !p.neutral {
+			if !p.readable {
 				if gotOK {
 					t.Errorf("%s reader, %s: a read-only leg handed out %T", leg, p.name, got)
 				}

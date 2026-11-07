@@ -25,6 +25,12 @@ type Counter interface{ Count() int }
 
 type CachingStore struct{ Store }
 
+func (*CachingStore) IsLive() bool { return true }
+
+func (*CachingStore) Lookup(string) (Bead, error) { return Bead{}, nil }
+
+type StoreReader interface{ Lookup(id string) (Bead, error) }
+
 type WorkStore struct{ Store }
 
 type GraphStore struct{ Store }
@@ -165,6 +171,12 @@ func peelSwitchNoAssign(s beads.Store) { switch s.(type) { case *beads.CachingSt
 
 func peelOther(x any) { _, _ = x.(*beads.CachingStore); switch x.(type) { case beads.WorkStore: } }
 
+func peelProbe(s beads.Store) { _, _ = s.(interface{ IsLive() bool }) } // raw-param cap-assert cache-peel
+
+func peelProbeOther(s beads.Store) { _, _ = s.(interface{ Count() int }) } // raw-param cap-assert
+
+func readerAssert(r beads.StoreReader) { _, _ = r.(beads.Counter); _, _ = r.(*beads.CachingStore) } // cap-assert cap-assert cache-peel
+
 func assertSwitch(w beads.WorkStore) { var s beads.Store = w; switch s.(type) { case beads.Counter: } } // cap-assert
 
 func assertBoxed(g beads.GraphStore) { _, _ = any(g).(beads.Counter) } // cap-assert
@@ -255,16 +267,18 @@ func fixture(s beads.Store) beads.GraphStore { return beads.GraphStore{Store: s}
 
 func config() storeclass.Config {
 	return storeclass.Config{
-		Module:           module,
-		Store:            module + "internal/beads.Store",
-		Handles:          []string{module + "internal/beads.WorkStore", module + "internal/beads.GraphStore"},
-		HandleField:      "Store",
-		UnwrapMethods:    []string{"Raw", "ConditionalWritesResolveTarget"},
-		MintFuncs:        []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
-		RawCarriers:      []string{module + "internal/storeref.Leg"},
-		TestMintPackages: []string{module + "internal/beads/beadstest"},
-		CacheTypes:       []string{module + "internal/beads.CachingStore"},
-		Markers:          []string{module + "internal/beads.FederatedRead"},
+		Module:            module,
+		Store:             module + "internal/beads.Store",
+		Handles:           []string{module + "internal/beads.WorkStore", module + "internal/beads.GraphStore"},
+		HandleField:       "Store",
+		UnwrapMethods:     []string{"Raw", "ConditionalWritesResolveTarget"},
+		MintFuncs:         []string{module + "internal/beads.MintClassStores", module + "internal/storeref.NewStores"},
+		RawCarriers:       []string{module + "internal/storeref.Leg"},
+		TestMintPackages:  []string{module + "internal/beads/beadstest"},
+		CacheTypes:        []string{module + "internal/beads.CachingStore"},
+		CacheProbeMethods: []string{"IsLive"},
+		StoreReaders:      []string{module + "internal/beads.StoreReader"},
+		Markers:           []string{module + "internal/beads.FederatedRead"},
 		Allow: []storeclass.Allow{
 			{Package: "internal/beads", Reason: "the engines and handles"},
 			{Package: "internal/storeref", Rules: storeclass.AllRulesBut(storeclass.CapAssert), Reason: "the mint and executors"},

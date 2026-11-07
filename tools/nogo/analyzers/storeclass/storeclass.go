@@ -15,12 +15,13 @@
 //   - unwrap: a handle's embedded store read back (.Store, through any
 //     embedding) or an unwrap method (Raw) named;
 //   - cap-assert: a type assertion or type switch on a store value (a
-//     beads.Store, an interface that is one, or a store, concrete store or
-//     handle boxed by a conversion): use beads.As or an XFor helper, which
-//     see through the handle;
+//     beads.Store, an interface that is one, a beads.StoreReader, or a store,
+//     concrete store or handle boxed by a conversion): use beads.As or an
+//     XFor helper, which see through the handle;
 //   - cache-peel: on such a store value, an assertion or a type-switch case
-//     naming the cache (*beads.CachingStore) or a typed handle (a peel by
-//     hand, as liveReads does). A store value may be a handle, and through a
+//     naming the cache (*beads.CachingStore), a typed handle (a peel by
+//     hand, as liveReads does), or an interface asking for a method only the
+//     cache has (IsLive, Stats: Config.CacheProbeMethods). A store value may be a handle, and through a
 //     handle the cache assertion answers false and the read serves the
 //     cache; a hand peel misses every class layer it does not name. Use
 //     beads.LiveFor, beads.HandlesFor (which the handles forward) or
@@ -212,20 +213,22 @@ type Allow struct {
 
 // Config is what the lint guards, by fully qualified name ("importpath.Name").
 type Config struct {
-	Module           string   // module path prefix with a trailing "/": only its packages are linted
-	Store            string   // the raw store interface
-	Handles          []string // the typed class handle types
-	HandleField      string   // the handles' embedded store field
-	UnwrapMethods    []string // handle methods that return the raw store
-	AsFuncs          []string // capability helpers (beads.As): an instance whose T is a store unwraps
-	MintFuncs        []string // functions that mint handles
-	RawCarriers      []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options, owners, plans): holding one is raw
-	TestMintPackages []string // packages production code may not import
-	CacheTypes       []string // concrete cache store types an assertion on a store peels to (cache-peel)
-	Markers          []string // federated/relic read marker functions
-	Allow            []Allow
-	Sealed           []string    // module-relative packages with no baseline
-	Baseline         map[Key]int // the pinned counts, or nil to load them
+	Module            string   // module path prefix with a trailing "/": only its packages are linted
+	Store             string   // the raw store interface
+	Handles           []string // the typed class handle types
+	HandleField       string   // the handles' embedded store field
+	UnwrapMethods     []string // handle methods that return the raw store
+	AsFuncs           []string // capability helpers (beads.As): an instance whose T is a store unwraps
+	MintFuncs         []string // functions that mint handles
+	RawCarriers       []string // named types that carry raw stores (storeref's legs, topology, bindings, mint options, owners, plans): holding one is raw
+	TestMintPackages  []string // packages production code may not import
+	CacheTypes        []string // concrete cache store types an assertion on a store peels to (cache-peel)
+	CacheProbeMethods []string // methods only the cache has: an interface asking for one peels to it (cache-peel)
+	StoreReaders      []string // read interfaces a store passes as (beads.StoreReader): an assertion on one is on a store
+	Markers           []string // federated/relic read marker functions
+	Allow             []Allow
+	Sealed            []string    // module-relative packages with no baseline
+	Baseline          map[Key]int // the pinned counts, or nil to load them
 	// LoadBaseline, when Baseline is nil, loads the pinned counts the first
 	// time a module package is checked.
 	LoadBaseline func() (map[Key]int, error)
@@ -588,7 +591,26 @@ func (c *checker) cachePeel(base, fn string, typ ast.Expr, what string) {
 		c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store: through a typed handle it answers false and the read serves the cache; use beads.LiveFor, beads.HandlesFor or beads.As, which see through the handle", what, c.typeString(t)))
 	case c.isHandle(t):
 		c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store peels a typed handle by hand and misses every class layer it does not name; use beads.LiveFor, beads.HandlesFor or beads.As, which see through them all", what, c.typeString(t)))
+	default:
+		if m := c.cacheProbeMethod(t); m != "" {
+			c.add(base, fn, CachePeel, typ.Pos(), fmt.Sprintf("%s to %s on a store asks for the cache's own %s: through a typed handle it answers false; use beads.As, which sees through the handle", what, c.typeString(t), m))
+		}
 	}
+}
+
+// cacheProbeMethod is the first method of interface t that only the cache
+// has (Config.CacheProbeMethods), or "".
+func (c *checker) cacheProbeMethod(t types.Type) string {
+	iface, ok := t.Underlying().(*types.Interface)
+	if !ok {
+		return ""
+	}
+	for i := range iface.NumMethods() {
+		if name := iface.Method(i).Name(); slices.Contains(c.cfg.CacheProbeMethods, name) {
+			return name
+		}
+	}
+	return ""
 }
 
 // switchOperand is the value a type switch switches on.
@@ -866,7 +888,7 @@ func (c *checker) isConcreteStore(t *types.Named) bool {
 func (c *checker) isStoreValue(x ast.Expr) bool {
 	info := c.pass.TypesInfo
 	t := info.TypeOf(x)
-	if c.isStore(t) {
+	if c.isStore(t) || t != nil && slices.Contains(c.cfg.StoreReaders, fullName(t)) {
 		return true
 	}
 	if t != nil && c.storeIface != nil {

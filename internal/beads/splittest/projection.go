@@ -342,7 +342,11 @@ func newProjectionView(p *Projection, front beads.Store, side projectionSide) be
 	v := &view{Store: front, p: p, side: side}
 	storage, hasStorage := front.(beads.StorageCreateStore)
 	cache, isCache := front.(cacheProbes)
-	handles, hasHandles := front.(handlesProvider)
+	// Explicit handles are the store's below its class layers: a class
+	// handle forwards Handles over any store, and a view over a handle over
+	// a plain store must not claim them.
+	hasHandles := beads.HasExplicitHandles(front)
+	handles, _ := front.(handlesProvider)
 	switch {
 	case hasStorage && isCache:
 		sv := &storageCacheView{storageView: &storageView{view: v, storage: storage}, cache: cache}

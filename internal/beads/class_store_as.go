@@ -195,7 +195,7 @@ func passesClassGate[T any]() bool {
 // as the store it reads. A nil or zero handle is the
 // same as nothing, and a store whose dynamic type is not comparable (== on
 // it would panic) is the same as nothing either.
-func SameStore(a, b storeReader) (same bool) {
+func SameStore(a, b StoreReader) (same bool) {
 	pa, pb := physicalStore(a), physicalStore(b)
 	if pa == nil || pb == nil {
 		return false
@@ -220,7 +220,7 @@ func SameStore(a, b storeReader) (same bool) {
 // capabilities rather than the handle's. s may be a FederatedReader, whose
 // live reader is its store's (and carries no leg role). s must be a store: a
 // zero handle answers a reader whose reads panic, as HandlesFor(nil) does.
-func LiveFor(s storeReader) LiveReader {
+func LiveFor(s StoreReader) LiveReader {
 	return HandlesFor(physicalStore(s)).Live
 }
 
@@ -229,7 +229,7 @@ func LiveFor(s storeReader) LiveReader {
 // "%T:%v" of its value for any other, and "<nil>" for no store. Like SameStore
 // it sees through every class handle and leg reader, so two handles over one
 // store, of any classes, share the store's own key.
-func PhysicalStoreKey(s storeReader) string {
+func PhysicalStoreKey(s StoreReader) string {
 	p := physicalStore(s)
 	if p == nil {
 		return "<nil>"
@@ -247,7 +247,7 @@ func PhysicalStoreKey(s storeReader) string {
 // (or a handle over one), or a nil pointer below its class layers. A typed nil passes a
 // nil check on the interface and then panics on its first method call, so a
 // constructor that refuses an absent store asks this rather than == nil.
-func IsNilStore(s storeReader) bool {
+func IsNilStore(s StoreReader) bool {
 	p := physicalStore(s)
 	if p == nil {
 		return true
@@ -259,7 +259,7 @@ func IsNilStore(s storeReader) bool {
 // physicalStore is s below its class layers (leg readers and leg layers
 // included), or nil: no store, or a reader that is neither a store nor a
 // class layer.
-func physicalStore(s storeReader) Store {
+func physicalStore(s StoreReader) Store {
 	for range classLayerMaxDepth {
 		layer, ok := s.(classLayer)
 		if !ok {

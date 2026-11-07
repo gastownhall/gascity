@@ -24,6 +24,12 @@ var (
 	federatedLegOver = func(s beads.Store) beads.Store { return beadstest.ResidentLeg(beadstest.FederatedLeg(s)) }
 	relicLegOver     = func(s beads.Store) beads.Store { return beadstest.ResidentLeg(beadstest.RelicLeg(s)) }
 	residentOver     = func(s beads.Store) beads.Store { return beadstest.Resident(s) }
+	// cacheOver puts a CachingStore between the caller and the gate store,
+	// so the leg frame sits deep below the gate's own: a stack walk cut
+	// short would miss it.
+	cacheOver        = func(s beads.Store) beads.Store { return beads.NewCachingStoreForTest(s, nil) }
+	federatedOnCache = func(s beads.Store) beads.Store { return federatedLegOver(cacheOver(s)) }
+	relicOnCache     = func(s beads.Store) beads.Store { return relicLegOver(cacheOver(s)) }
 )
 
 // dualModePairs are the shapes the gate must judge alike while it honors
@@ -38,6 +44,8 @@ var dualModePairs = map[string][2]readShape{
 	"relic marker, federated":   {{beads.RelicRead, itself}, {beads.RelicRead, federatedLegOver}},
 	"federated marker, relic":   {{beads.FederatedRead, itself}, {beads.FederatedRead, relicLegOver}},
 	"federated, through a view": {{beads.FederatedRead, itself}, {unmarked, func(s beads.Store) beads.Store { return beadstest.Graph(federatedLegOver(s)) }}},
+	"federated, over a cache":   {{beads.FederatedRead, cacheOver}, {unmarked, federatedOnCache}},
+	"relic, over a cache":       {{beads.RelicRead, cacheOver}, {unmarked, relicOnCache}},
 }
 
 // projectionSightings runs a by-id read (convoy.ConvoyClose), a dep read
@@ -70,10 +78,12 @@ func TestGateDualModeParityOnTheProjection(t *testing.T) {
 		}
 	}
 	want := map[string]struct{ violations, relics int }{
-		"federated":           {1, 0}, // the write only
-		"relic":               {1, 2}, // the write, and both reads as debt
-		"strict resident":     {3, 0},
-		"strict class handle": {3, 0},
+		"federated":               {1, 0}, // the write only
+		"relic":                   {1, 2}, // the write, and both reads as debt
+		"strict resident":         {3, 0},
+		"strict class handle":     {3, 0},
+		"federated, over a cache": {1, 0},
+		"relic, over a cache":     {1, 2},
 	}
 	for name, n := range want {
 		got := projectionSightings(t, dualModePairs[name][1])
@@ -101,7 +111,10 @@ func TestGateDualModeParityOnAStrictLeaf(t *testing.T) {
 			t.Errorf("%s: the leg's violations differ from the marker's:\n leg    %+v\n marker %+v", name, legged, marked)
 		}
 	}
-	for name, want := range map[string]int{"federated": 0, "relic": 0, "strict resident": 1, "strict class handle": 1} {
+	for name, want := range map[string]int{
+		"federated": 0, "relic": 0, "strict resident": 1, "strict class handle": 1,
+		"federated, over a cache": 0, "relic, over a cache": 0,
+	} {
 		if got := strictViolations(t, dualModePairs[name][1]); len(got) != want {
 			t.Errorf("%s through a leg: %d violations, want %d: %+v", name, len(got), want, got)
 		}

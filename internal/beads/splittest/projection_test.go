@@ -779,3 +779,19 @@ func sameIDs(rows []beads.Bead, want ...string) bool {
 	}
 	return true
 }
+
+// TestProjectionViewOverAHandleClaimsOnlyItsStoresHandles: a class handle
+// forwards Handles whatever it wraps, so a view over a handle claims explicit
+// handles exactly when the store below it has them: none over a plain store
+// (cmd/gc's demand read must not pay a second, live Ready), the cache's over
+// a CachingStore.
+func TestProjectionViewOverAHandleClaimsOnlyItsStoresHandles(t *testing.T) {
+	p, leaf, _ := newTestProjection(t)
+	if _, ok := newProjectionView(p, beadstest.Sessions(leaf), sideClass).(handlesProvider); ok {
+		t.Error("a view over a handle over a plain store claims explicit handles")
+	}
+	cache := beads.NewCachingStoreForTest(leaf, nil)
+	if _, ok := newProjectionView(p, beadstest.Sessions(cache), sideClass).(handlesProvider); !ok {
+		t.Error("a view over a handle over a cache hides the cache's handles")
+	}
+}
