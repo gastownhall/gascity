@@ -282,7 +282,7 @@ func TestEffectLintBansBlindWrites(t *testing.T) {
 // or (UpdateRowFenced) write only through a resolved conditional writer.
 var effectLintSessionReads = []string{
 	"Backed", "CircuitResetGeneration", "CircuitState", "CurrentClaimBeadID", "ExtmsgHandleSource", "Get",
-	"GetLocalString", "GetPersistedResponse", "GetState", "GetWait", "HasOpenSessionNamed", "List", "ListAddresses",
+	"GetLocalString", "GetPersistedResponse", "GetState", "GetWait", "HasOpenSessionNamed", "LatestEphemeralTerminalFailure", "List", "ListAddresses",
 	"ListAll", "ListAllForReconcile", "ListAllForReconcileWithFingerprint", "ListAllWithResponses",
 	"ListByMetadataInfos", "ListLabeledSessionInfosUnfiltered", "ListStartupHealthEpisodes", "ListWaits",
 	"LoadStartupHealthEpisode", "LookupConfiguredNamed", "MailboxAddress", "MailboxAddresses", "PersistedMarkers",
