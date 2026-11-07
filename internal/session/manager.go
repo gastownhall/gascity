@@ -790,7 +790,9 @@ const orphanScanBudget = 10 * time.Second
 // nothing — no answer is never confirmed absence, and no root dies on a scan
 // that answered nothing. A retry while one scan of the same key is still out
 // is refused at once, without a second scan, whatever Manager made it. An
-// already-ended context launches no scan.
+// already-ended context launches no scan, and a caller that ends mid-cleanup
+// stops the terminations that have not started, keeping any that already
+// failed in the returned error.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
@@ -854,6 +856,14 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	}
 	var termErrs []error
 	for _, live := range orphans {
+		if err := ctx.Err(); err != nil {
+			// The caller's context ended: stop the terminations that have not
+			// started, keeping any that already failed in the returned error.
+			if len(termErrs) > 0 {
+				return fmt.Errorf("orphan cleanup for %s canceled: %w (earlier termination failures: %w)", sessionID, err, errors.Join(termErrs...))
+			}
+			return fmt.Errorf("orphan cleanup for %s canceled: %w", sessionID, err)
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))

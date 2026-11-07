@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -404,6 +405,99 @@ func TestKillExistingOrphansIgnoresTheAnswerOfAnAbandonedScan(t *testing.T) {
 		}
 		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 4200 {
 			t.Fatalf("terminated %v, want only the fresh scan's root 4200, never the abandoned 4100", got)
+		}
+	})
+}
+
+// TestKillExistingOrphansStopsBetweenTerminationsWhenContextDone: a caller
+// that ends mid-cleanup stops the terminations that have not started, while
+// the ones already made stand.
+func TestKillExistingOrphansStopsBetweenTerminationsWhenContextDone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{roots: []runtime.LiveRuntime{
+			{PID: 4100, IsTracked: false}, {PID: 4200, IsTracked: false},
+		}})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sp.onTerminate = func(n int) {
+			if n == 1 {
+				cancel()
+			}
+		}
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "killExistingOrphans", func() error {
+			return mgr.killExistingOrphans(ctx, "gc-a")
+		})
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want it to wrap context.Canceled", err)
+		}
+		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 4100 {
+			t.Fatalf("terminated %v, want only the first root: cancellation stops the later terminations", got)
+		}
+	})
+}
+
+// TestKillExistingOrphansKeepsTerminationFailuresWhenCancelStopsTheRest: the
+// cancellation that stops the remaining terminations does not swallow a
+// termination that already failed.
+func TestKillExistingOrphansKeepsTerminationFailuresWhenCancelStopsTheRest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp := newScriptedScanProvider(t.TempDir(), scanStep{roots: []runtime.LiveRuntime{
+			{PID: 4100, IsTracked: false}, {PID: 4200, IsTracked: false},
+		}})
+		sp.killErrPID = 4100
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sp.onTerminate = func(n int) {
+			if n == 1 {
+				cancel()
+			}
+		}
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+		err := withOrphanScanWatchdog(t, "killExistingOrphans", func() error {
+			return mgr.killExistingOrphans(ctx, "gc-a")
+		})
+
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "survived SIGKILL") {
+			t.Fatalf("err = %v, want the retained termination failure inside the cancellation error", err)
+		}
+		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 4100 {
+			t.Fatalf("terminated %v, want only the first, failed termination", got)
+		}
+	})
+}
+
+// TestKillExistingOrphansCompletedScanStillTerminatesItsRoots: a completed
+// scan keeps its existing contract whatever it returned alongside its roots:
+// the roots are terminated, and a scan error — even one wrapping
+// runtime.ErrRuntimeUnavailable — is a completed scan's answer, not the
+// unfinished-scan deferral.
+func TestKillExistingOrphansCompletedScanStillTerminatesItsRoots(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			err  error
+		}{
+			{name: "no error"},
+			{name: "plain scan error", err: errors.New("partial scan failed")},
+			{name: "unavailable scan error", err: fmt.Errorf("listing: %w", runtime.ErrRuntimeUnavailable)},
+		} {
+			sp := newScriptedScanProvider(t.TempDir(), scanStep{
+				roots: []runtime.LiveRuntime{{PID: 4100, IsTracked: false}},
+				err:   tc.err,
+			})
+			mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+			err := mgr.killExistingOrphans(context.Background(), "gc-a")
+			if err != nil {
+				t.Fatalf("%s: err = %v, want nil: terminations succeeded", tc.name, err)
+			}
+			if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 4100 {
+				t.Fatalf("%s: terminated %v, want the scan's root", tc.name, got)
+			}
 		}
 	})
 }
