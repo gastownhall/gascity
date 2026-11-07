@@ -13,11 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
@@ -32,7 +35,6 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
-	"github.com/spf13/cobra"
 )
 
 func init() {
@@ -524,15 +526,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// The sling's scope stores: store as the work store, and the graph class
 	// at that scope, the binding on a city that relocates it.
 	cs := cliStores(cityPath, store)
-	// Session beads live in the city's sessions store, never in a rig store:
-	// a rig-scope sling opens the city store to read them.
+	// Session beads live in the city's sessions store, never in a rig store.
+	// That is the scope's sessions handle at city scope and on a city that
+	// relocates the sessions class (the binding); a rig-scope sling on a city
+	// that does not opens the city store to read them. A city store that does
+	// not open leaves the sling reading sessions in its rig store, as it did
+	// before, with a warning: the sling's own work is in the rig ledger.
 	sessions := cs.Sessions()
-	if !samePath(storeDir, cityPath) {
-		cityStore, err := openSlingCityStore(cityPath)
-		if err != nil {
-			return fail("store_open_failed", fmt.Sprintf("gc sling: opening the city store: %v", err))
-		}
-		if cityStore != nil {
+	if _, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions); !relocated && !samePath(storeDir, cityPath) { // residency:allow — asks only whether the sessions class is relocated, to decide whether the scope's handle already is the city's
+		if cityStore, err := openCityStoreAtWithConfig(cityPath, cfg); err != nil {
+			fmt.Fprintf(stderr, "warning: gc sling: opening the city store for session lookups: %v; reading sessions in the rig store\n", err) //nolint:errcheck // best-effort stderr
+		} else if cityStore != nil {
 			defer closeBeadStoreHandle(cityStore) //nolint:errcheck // best-effort
 			sessions = cliStores(cityPath, cityStore).Sessions()
 		}
