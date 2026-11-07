@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "execenv",
     srcs = [
+        "batchfile_other.go",
+        "batchfile_windows.go",
         "execenv.go",
         "process_env.go",
     ],
@@ -13,7 +15,9 @@ go_library(
 go_test(
     name = "execenv_test",
     srcs = [
+        "batchfile_windows_test.go",
         "execenv_test.go",
+        "execrequest_test.go",
         "process_env_test.go",
         "testenv_import_test.go",
     ],

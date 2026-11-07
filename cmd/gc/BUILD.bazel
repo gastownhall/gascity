@@ -2580,6 +2580,8 @@ go_test(
         "//internal/pathutil",
         "//internal/pendingwatch",
         "//internal/pidutil",
+        "//internal/platform/filelock",
+        "//internal/platform/localsocket",
         "//internal/poolplan",
         "//internal/processenv",
         "//internal/processgroup/processgrouptest",
