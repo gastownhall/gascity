@@ -109,7 +109,7 @@ while IFS= read -r tid; do
     # re-reads with stderr merged, since that is where the not-found text is.
     if BEAD_OUTPUT=$(gc bd show "$tid" --json 2>/dev/null); then
         BEAD_STATUS=$(echo "$BEAD_OUTPUT" | jq -r 'if type == "array" then (.[0].status // "deleted") elif type == "object" and ((.error // "") | test("not found|no issue found"; "i")) then "deleted" else "unknown" end' 2>/dev/null || echo "unknown")
-    elif BEAD_OUTPUT=$(gc bd show "$tid" --json 2>&1 || true); echo "$BEAD_OUTPUT" | grep -qiE 'not found|no issue found'; then
+    elif BEAD_OUTPUT=$(gc bd show "$tid" --json 2>&1 || true); grep -qiE 'not found|no issue found' <<<"$BEAD_OUTPUT"; then
         BEAD_STATUS="deleted"
     else
         BEAD_STATUS="unknown"

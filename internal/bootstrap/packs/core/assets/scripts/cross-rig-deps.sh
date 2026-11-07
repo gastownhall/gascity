@@ -79,7 +79,7 @@ CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
 SUSPENDED_PREFIXES=$(gc rig list --json 2>/dev/null \
     | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
 while IFS= read -r closed_id; do
-    if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${closed_id%%-*}"; then
+    if [ -n "$SUSPENDED_PREFIXES" ] && grep -qxF -- "${closed_id%%-*}" <<<"$SUSPENDED_PREFIXES"; then
         continue
     fi
     # Find beads that have a blocks dep on this closed issue.
@@ -97,7 +97,7 @@ while IFS= read -r closed_id; do
         continue
     fi
     while IFS= read -r dep_id; do
-        if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${dep_id%%-*}"; then
+        if [ -n "$SUSPENDED_PREFIXES" ] && grep -qxF -- "${dep_id%%-*}" <<<"$SUSPENDED_PREFIXES"; then
             continue
         fi
         # Convert blocks → related: remove blocking semantics, keep audit trail.
