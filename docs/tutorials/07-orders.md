@@ -204,11 +204,12 @@ Notes per trigger:
 
 Cooldown, cron, and event orders share a dispatch budget:
 `orders.max_dispatches_per_tick` (default 4) orders start per pass, and a pass
-runs once per `daemon.patrol_interval` (default `30s`). Nine such orders take
-three passes to come all the way round, so the shortest interval any of them can
-keep is `ceil(9 / 4) × 30s = 1m30s`: a `30s` cooldown beside eight others
-fires about every `90s`. `gc doctor`'s `order-dispatch-floor` check flags
-any order whose interval sits below that floor; raise
+runs once per `daemon.patrol_interval` (default `30s`). When all nine such
+orders are due together, they take three passes to come all the way round, so
+in the worst case a `30s` cooldown beside eight others fires only about every
+`ceil(9 / 4) × 30s = 1m30s`. Orders that are not due spend no budget, so
+quieter neighbours let it fire sooner. `gc doctor`'s `order-dispatch-floor`
+check flags any order whose interval sits below that worst-case estimate; raise
 `orders.max_dispatches_per_tick`, lengthen the interval, or suspend orders to
 clear it.
 

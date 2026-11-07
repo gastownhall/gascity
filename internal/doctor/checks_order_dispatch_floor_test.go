@@ -250,7 +250,7 @@ func TestOrderDispatchFloor_SurfacesInNonVerboseDoctorOutput(t *testing.T) {
 	printResult(&out, result, false)
 
 	got := out.String()
-	for _, want := range []string{"order-dispatch-floor", "1m30s", "orders.max_dispatches_per_tick", "minimum"} {
+	for _, want := range []string{"order-dispatch-floor", "1m30s", "orders.max_dispatches_per_tick", "minimum", "Worst case"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("non-verbose output missing %q:\n%s", want, got)
 		}

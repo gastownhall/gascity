@@ -32,10 +32,11 @@ func WithOrderDispatchFloorInapplicableFunc(fn OrderDispatchFloorInapplicableFun
 //
 // The dispatcher starts at most orders.max_dispatches_per_tick orders per pass
 // and passes run one per patrol interval, so a ring of N cooldown, cron and
-// event orders takes ceil(N/budget) passes to come all the way round. An order
-// can fire no more often than that: a 30s cooldown beside eight other orders
-// fires about every 90s, and order-firing-current later reports it stale with
-// no hint that the config can never be met.
+// event orders takes ceil(N/budget) passes to come all the way round. When
+// every counted order is due together, an order can fire no more often than
+// that: a 30s cooldown beside eight other due orders fires about every 90s,
+// and order-firing-current later reports it stale with no hint that the
+// config can never be met.
 //
 // N counts every enabled cooldown, cron and event order, not just the ones due
 // on a given pass. That is an upper bound, and it needs no store reads: a
@@ -168,13 +169,13 @@ func (c *OrderDispatchFloorCheck) Run(ctx *CheckContext) *CheckResult {
 // itself, and the ring.
 func orderDispatchFloorHint(ringSize int, patrol, tightest, floor time.Duration) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "The minimum achievable interval is %s. ", formatDispatchFloorDuration(floor))
+	fmt.Fprintf(&b, "Worst case, with every counted order due together, the minimum interval is %s. ", formatDispatchFloorDuration(floor))
 	if allowed := int(tightest / patrol); allowed >= 1 {
 		fmt.Fprintf(&b, "Raise orders.max_dispatches_per_tick to %d to fit the tightest order, ", (ringSize+allowed-1)/allowed)
 	} else {
 		fmt.Fprintf(&b, "The tightest interval is shorter than the %s patrol, so a budget cannot fit it: lower daemon.patrol_interval, ", formatDispatchFloorDuration(patrol))
 	}
-	b.WriteString("lengthen the flagged intervals to at least the minimum, or suspend orders to shrink the ring.")
+	b.WriteString("lengthen the flagged intervals to at least that estimate, or suspend orders to shrink the ring.")
 	return b.String()
 }
 
