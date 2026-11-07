@@ -40,7 +40,7 @@ permissions:
 # ci.yml's key under this workflow's own prefix: concurrency groups are
 # shared by every workflow of the repository.
 concurrency:
-  group: advisory-probes-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  group: advisory-probes-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || (github.event.pull_request.number || github.ref || github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

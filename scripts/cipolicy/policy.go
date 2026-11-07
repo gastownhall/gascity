@@ -332,7 +332,15 @@ const (
 	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
 	// filters and two outputs removed; no new job, trigger, step command or
 	// permission.
-	expectedCIExecutionHash     = "8d71c559b60d2715b518faf498209843132276ed3e448929e1841f082136e6cf"
+	//
+	// Bumped again (ga-tniyjy): the workflow concurrency group keys push events
+	// on github.sha instead of github.ref. Under a shared per-ref group GitHub
+	// cancels the run already pending when a newer push queues, so an
+	// intermediate main commit could be canceled before it started and never
+	// get a verdict. Reviewed delta: the concurrency.group expression only;
+	// pull_request grouping and cancel-in-progress are unchanged. No new job,
+	// step, trigger or permission.
+	expectedCIExecutionHash     = "ac744e2874530d5720fc9dd2e072a14d0beaf3550841d758be79b8ea459479b4"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
