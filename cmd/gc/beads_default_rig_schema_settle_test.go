@@ -31,10 +31,11 @@ type schemaRigBdCall struct {
 
 const behindSchemaListError = `Error 1105 (HY000): table "i" does not have column "storage_class"`
 
-// newBehindSchemaRig builds the fixture. migrateBody is the shell the fake bd
+// newBehindSchemaRig builds the fixture around a bd that reports 1.3.1-rc.1,
+// the release in #8106. migrateBody is the shell the fake bd
 // runs for `bd migrate ...`; "$MARKER" names the file whose presence makes
 // bd list readable.
-func newBehindSchemaRig(t *testing.T, bdVersion, migrateBody string) behindSchemaRig {
+func newBehindSchemaRig(t *testing.T, migrateBody string) behindSchemaRig {
 	t.Helper()
 	clearGCEnv(t)
 	cityPath := t.TempDir()
@@ -69,7 +70,7 @@ case "${1:-}" in
     exit 1
     ;;
   version)
-    echo "bd version %s (fixture)"
+    echo "bd version 1.3.1-rc.1 (fixture)"
     ;;
   migrate)
     %s
@@ -83,7 +84,7 @@ case "${1:-}" in
     fi
     ;;
 esac
-`, marker, logPath, bdVersion, migrateBody, behindSchemaListError)
+`, marker, logPath, migrateBody, behindSchemaListError)
 	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func describeSchemaRigCalls(calls []schemaRigBdCall) string {
 const migrateMakesSchemaCurrent = `touch "$MARKER"; echo "Applied 2 schema migrations"`
 
 func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStore(t *testing.T) {
-	rig := newBehindSchemaRig(t, "1.3.1-rc.1", migrateMakesSchemaCurrent)
+	rig := newBehindSchemaRig(t, migrateMakesSchemaCurrent)
 
 	if err := initAndHookDir(rig.cityPath, rig.rigPath, "tc"); err != nil {
 		t.Fatalf("initAndHookDir should settle the adopted store's schema and pass readiness: %v", err)
@@ -275,7 +276,7 @@ func TestSettleAdoptedDefaultRigBdSchemaForwardsMigrationOutput(t *testing.T) {
 }
 
 func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStoreUsesPinnedBdAndCanonicalGCBin(t *testing.T) {
-	rig := newBehindSchemaRig(t, "1.3.1-rc.1", migrateMakesSchemaCurrent)
+	rig := newBehindSchemaRig(t, migrateMakesSchemaCurrent)
 	// A different bd earlier on PATH than the pinned BD_BIN: settlement must
 	// never reach it.
 	decoyDir := filepath.Join(t.TempDir(), "decoy")
@@ -321,7 +322,7 @@ func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStoreU
 }
 
 func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStorePreservesOperatorConsent(t *testing.T) {
-	rig := newBehindSchemaRig(t, "1.3.1-rc.1", migrateMakesSchemaCurrent)
+	rig := newBehindSchemaRig(t, migrateMakesSchemaCurrent)
 	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
 
 	if err := initAndHookDir(rig.cityPath, rig.rigPath, "tc"); err != nil {
@@ -335,4 +336,45 @@ func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStoreP
 	if got := calls[at].unlock; got != "1" {
 		t.Fatalf("bd migrate schema saw BD_ALLOW_REMOTE_MIGRATE=%q, want the operator's ambient 1 preserved", got)
 	}
+}
+
+const remoteBackedRefusal = "Error: refusing to auto-apply 3 pending schema migrations to a remote-backed database"
+
+func TestSettleAdoptedDefaultRigBdSchemaRemoteBackedRefusalWarnsAndContinues(t *testing.T) {
+	runner := &recordingBdRunner{version: "bd version 1.3.1\n", migrateErr: errors.New("exit status 1: " + remoteBackedRefusal)}
+	var stderr bytes.Buffer
+	if err := settleAdoptedDefaultRigBdSchema(runner.run, "/city/rigs/api", &stderr); err != nil {
+		t.Fatalf("a remote-backed refusal is bd's decision, not a failed initialization: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "/city/rigs/api") || !strings.Contains(stderr.String(), remoteBackedRefusal) {
+		t.Fatalf("the refusal must be reported with the scope and bd's message; stderr %q", stderr.String())
+	}
+}
+
+func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStoreRemoteBackedRefusal(t *testing.T) {
+	refuse := `echo '` + remoteBackedRefusal + `' >&2; exit 1`
+	t.Run("readiness passes", func(t *testing.T) {
+		// The store is readable at its current schema; the refusal leaves it be.
+		rig := newBehindSchemaRig(t, refuse)
+		if err := os.WriteFile(filepath.Join(filepath.Dir(rig.logPath), "schema-current"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := initAndHookDir(rig.cityPath, rig.rigPath, "tc"); err != nil {
+			t.Fatalf("initAndHookDir must continue to readiness after a remote-backed refusal: %v", err)
+		}
+		calls := rig.invocations(t)
+		if migrateAt, listAt := firstSchemaRigCall(calls, "migrate schema --quiet"), firstSchemaRigCall(calls, "list "); migrateAt < 0 || listAt < migrateAt {
+			t.Fatalf("want the refused migration, then readiness; bd calls:\n%s", describeSchemaRigCalls(calls))
+		}
+	})
+	t.Run("readiness stays authoritative", func(t *testing.T) {
+		rig := newBehindSchemaRig(t, refuse)
+		err := initAndHookDir(rig.cityPath, rig.rigPath, "tc")
+		if err == nil || !strings.Contains(err.Error(), "storage_class") {
+			t.Fatalf("err = %v, want readiness's own failure after a remote-backed refusal", err)
+		}
+		if listAt := firstSchemaRigCall(rig.invocations(t), "list "); listAt < 0 {
+			t.Fatal("readiness never ran after the remote-backed refusal")
+		}
+	})
 }

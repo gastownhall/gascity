@@ -2260,10 +2260,11 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 //
 // It follows finish_bd_schema_migrations in gc-beads-bd.sh: a bd older than
 // MigrateSchemaMinBDVersion is skipped with a warning, a bd whose version
-// cannot be read still runs the step, and what bd reports goes to stderr. run
-// is the init runner, so the pinned bd, the scope and canonical GC_BIN carry
-// over; no migration unlock or force flag is added, so bd's own consent rules
-// decide what the verb may migrate.
+// cannot be read still runs the step, a refusal by bd's remote-backed gate is
+// reported and initialization continues to readiness, and what bd reports goes
+// to stderr. run is the init runner, so the pinned bd, the scope and canonical
+// GC_BIN carry over; no migration unlock or force flag is added, so bd's own
+// consent rules decide what the verb may migrate.
 func settleAdoptedDefaultRigBdSchema(run beads.CommandRunner, dir string, stderr io.Writer) error {
 	store := beads.NewBdStore(dir, run)
 	version, err := store.BDVersion()
@@ -2274,6 +2275,13 @@ func settleAdoptedDefaultRigBdSchema(run beads.CommandRunner, dir string, stderr
 		return nil
 	}
 	out, err := store.MigrateSchema()
+	if errors.Is(err, beads.ErrRemoteBackedMigrateRefused) {
+		// bd's gate leaves a remote-backed store's migration to an operator.
+		// Readiness, which runs next, decides whether the store is usable at
+		// its current schema.
+		fmt.Fprintf(stderr, "warning: pending bd schema migrations for %s were not applied (remote-backed scope; see bd's message): %v\n", dir, err) //nolint:errcheck // best-effort diagnostic
+		return nil
+	}
 	if err != nil {
 		return err
 	}
