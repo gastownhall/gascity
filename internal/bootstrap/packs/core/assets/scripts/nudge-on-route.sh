@@ -10,8 +10,10 @@
 #
 # This order is exactly that workaround, shipped. It subscribes to
 # bead.updated events; whenever a bead carries a gc.routed_to target it
-# runs `gc session nudge <target> "<message>"`. Idempotent: a given
-# (bead, routed_to) pair is nudged at most once. Dedup state lives in
+# nudges that target — except a pool base with more than one active member,
+# which it defers to the controller's idle-claim backstop (see
+# nudge_routed_target). Idempotent: a given (bead, routed_to) pair is
+# handled at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
 # pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -54,28 +56,31 @@ duration_to_seconds() {
     esac
 }
 
-# Nudge the session(s) named by a routed_to target. A multi-session pool
+# Nudge the session named by a routed_to target. A multi-session pool
 # routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
 # which is the members' `template`, not a session name — `gc session nudge`
-# resolves a single session and cannot target a pool base. So enumerate the
-# pool's active members by template and nudge each; a target with no members
-# (a single-session agent, or an explicit slot name) is nudged directly.
-# Returns 0 if at least one nudge succeeded, non-zero otherwise.
+# resolves a single session and cannot target a pool base. Detect that shape,
+# but do not fan out: the controller binds routed pool demand to one eligible
+# slot, and the native idle-claim backstop delivers a bounded nudge if that
+# slot does not claim normally. Nudging every active member also wakes busy
+# siblings that cannot claim the new work. A template with exactly one active
+# member is safe to nudge once; a target with no members (a named session or
+# explicit slot) is nudged directly.
 nudge_routed_target() {
     _target="$1"
-    _members="$(gc session list --json --state active --template "$_target" 2>/dev/null \
-        | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || _members=""
-    if [ -n "$_members" ]; then
-        _any=1
-        while IFS= read -r _m; do
-            [ -n "$_m" ] || continue
-            if gc session nudge "$_m" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
-                _any=0
-            fi
-        done <<MEMBERS
-$_members
-MEMBERS
-        return "$_any"
+    _sessions="$(gc session list --json --state active --template "$_target" 2>/dev/null)" \
+        || _sessions='{"sessions":[]}'
+    _member_count="$(printf '%s\n' "$_sessions" \
+        | jq -r '(.sessions // []) | length' 2>/dev/null)" || _member_count=0
+    if [ "$_member_count" -gt 1 ]; then
+        return 0
+    fi
+    if [ "$_member_count" -eq 1 ]; then
+        _members="$(printf '%s\n' "$_sessions" \
+            | jq -r '(.sessions // [])[0] | .name // .id' 2>/dev/null)" || _members=""
+        [ -n "$_members" ] || return 0
+        gc session nudge "$_members" "$NUDGE_MESSAGE" >/dev/null 2>&1
+        return $?
     fi
     gc session nudge "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
 }
@@ -115,6 +120,8 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
+    # A deferred pool route also returns 0: the backstop owns its wake, so
+    # recording the pair as handled is intended.
     if nudge_routed_target "$routed_to"; then
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         NUDGED=$((NUDGED + 1))
