@@ -175,6 +175,12 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
 	env["GC_BEADS_PREFIX"] = target.Prefix
+	// The order acts for this city, so it carries the city's own effective
+	// name — the same resolver pack commands use — rather than whatever
+	// GC_CITY_NAME the controller's environment holds. Projected here (and
+	// reserved in orders.IsReservedExecEnvKey) so mergeOrderExecEnv displaces
+	// the ambient value instead of inheriting a sibling city's name.
+	env["GC_CITY_NAME"] = loadedCityName(cfg, cityPath)
 	// Tag every bd interaction this exec order produces with the order's
 	// name so audit logs and the dashboard can attribute housekeeping
 	// activity to the responsible order rather than an ambient identity.

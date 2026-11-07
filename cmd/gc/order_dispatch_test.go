@@ -9800,6 +9800,97 @@ func TestOrderExecEnvGitHubTokenOrderEnvOverrideWins(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvStampsEffectiveCityName pins the order-side half of the
+// per-city GC_CITY_NAME projection: the exec env carries the city's own
+// effective name (resolved identity, workspace name, or city directory
+// basename, via loadedCityName), so mergeOrderExecEnv displaces whatever
+// ambient value the dispatcher holds and the merged env carries exactly one
+// authoritative entry. A rig-scoped order still carries the city identity,
+// not the rig directory's basename.
+func TestOrderExecEnvStampsEffectiveCityName(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_CITY_NAME", "neighbor-city")
+
+	cases := []struct {
+		name string
+		cfg  *config.City
+		rig  bool
+		want string
+	}{
+		{
+			name: "runtime identity wins over workspace name",
+			cfg: &config.City{
+				ResolvedWorkspaceName: "own-city",
+				Workspace:             config.Workspace{Name: "declared-name"},
+			},
+			want: "own-city",
+		},
+		{
+			name: "workspace name fallback",
+			cfg:  &config.City{Workspace: config.Workspace{Name: "ws-name"}},
+			want: "ws-name",
+		},
+		{
+			name: "no config: the city directory",
+			cfg:  nil,
+			want: "city-dir",
+		},
+		{
+			name: "rig-scoped order keeps city identity",
+			cfg:  &config.City{ResolvedWorkspaceName: "own-city"},
+			rig:  true,
+			want: "own-city",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := filepath.Join(t.TempDir(), "city-dir")
+			if err := os.MkdirAll(cityPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := execStoreTarget{ScopeRoot: cityPath, ScopeKind: "city", Prefix: "pc"}
+			if tc.rig {
+				rigDir := filepath.Join(t.TempDir(), "rigs", "pg")
+				if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue_prefix: pg\ndolt.auto-start: false\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				target = execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "pg", RigName: "pg"}
+			}
+			a := orders.Order{Name: "doctor", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+			envSlice, err := orderExecEnvWithError(cityPath, tc.cfg, target, a, nil)
+			if err != nil {
+				t.Fatalf("orderExecEnvWithError() error = %v", err)
+			}
+			assertSingleCityNameEntry(t, envSlice, tc.want, "projection")
+			merged := mergeOrderExecEnv([]string{"GC_CITY_NAME=neighbor-city", "PATH=/usr/bin"}, envSlice)
+			assertSingleCityNameEntry(t, merged, tc.want, "merged exec env")
+		})
+	}
+}
+
+func assertSingleCityNameEntry(t *testing.T, env []string, want, where string) {
+	t.Helper()
+	count := 0
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key != "GC_CITY_NAME" {
+			continue
+		}
+		count++
+		if value != want {
+			t.Errorf("%s: GC_CITY_NAME = %q, want %q (env=%v)", where, value, want, env)
+		}
+	}
+	if count != 1 {
+		t.Errorf("%s: %d GC_CITY_NAME entries, want exactly 1 (env=%v)", where, count, env)
+	}
+}
+
 // TestOrderExecEnvRejectsReservedOrderEnvKeys verifies that `[order.env]`
 // cannot shadow controller-owned routing and identity variables after the
 // store target has already been resolved.
