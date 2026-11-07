@@ -3463,7 +3463,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-				cr.cfg, poolWorkBeads, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
+				cr.cfg, poolWorkBeads, nil, nil, openInfos, result.ScaleCheckCounts, nil, poolDecisionTime, parked, trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
 		)
@@ -4415,7 +4415,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			filteredCfg, poolWorkBeads, nil, nil, openInfos, wfcResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		filteredSnap,
 		effectivePoolPartialRetentionTemplates(wfcResult),
 	)
@@ -4838,7 +4838,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
+				cr.cfg, poolWorkBeads, nil, nil, openSessionInfos, result.ScaleCheckCounts, nil, poolDecisionTime,
 				parkSeatsForResult(cr.cfg, openSessionInfos, result, poolDecisionTime.UTC()), trace)),
 			sessionBeads,
 			effectivePoolPartialRetentionTemplates(result),
