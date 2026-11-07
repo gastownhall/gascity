@@ -128,3 +128,24 @@ func TestSlingReslingOfPoolClaimedWorkIsIdempotent(t *testing.T) {
 		t.Errorf("re-sling of work pool session %s holds finalized again (convoy_id %v), want an idempotent no-op", own.ID, got)
 	}
 }
+
+// TestGraphBindingIsTheRelocatedGraphStore pins graphBinding, the binding
+// apiBeadRouter honors a request's store for, read from the request's own
+// Stores: it is the store relocatedGraphStore names, the binding on a city
+// that relocates graph and none on one that does not.
+func TestGraphBindingIsTheRelocatedGraphStore(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		state := newFakeState(t)
+		state.cityBeadStore = beads.NewMemStore()
+		if split {
+			state.graphBeadStore = beads.NewMemStore()
+		}
+		got, want := graphBinding(state.Stores()).Store, relocatedGraphStore(state)
+		if got != want {
+			t.Errorf("split=%t: graphBinding = %v, want relocatedGraphStore's %v", split, got, want)
+		}
+		if split && want == nil {
+			t.Errorf("split=%t: no binding; the fixture does not relocate graph", split)
+		}
+	}
+}

@@ -58,7 +58,7 @@ func TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r := apiBeadRouter{server: New(state), store: beadstest.Work(rig)}
+		r := apiBeadRouter{server: New(state), store: beadstest.Work(rig), binding: graphBinding(state.Stores())}
 		if err := r.Route(t.Context(), sling.RouteRequest{BeadID: root.ID, Target: "myrig/worker", Store: target(binding)}); err != nil {
 			t.Fatalf("%s: route: %v", name, err)
 		}

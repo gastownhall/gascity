@@ -2086,6 +2086,11 @@ func listContainerChildren(querier BeadChildQuerier, containerID string, include
 }
 
 // DoSlingBatch handles convoy expansion before delegating to DoSling.
+//
+// A convoy's members are read through convoy.MembersIn, which follows its
+// tracks edges, only when querier is the work handle (beads.WorkStore, as
+// both doors pass SlingDeps.Store); any other querier expands to the
+// convoy's DB children alone, and a tracks-only member is not routed.
 func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (SlingResult, error) {
 	a := opts.Target
 

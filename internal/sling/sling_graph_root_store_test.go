@@ -2,6 +2,7 @@ package sling
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -360,5 +361,43 @@ func TestValidateExistingBeadWithNoStoreSaysSo(t *testing.T) {
 	var lookupErr *BeadLookupError
 	if !errors.As(err, &lookupErr) || !strings.Contains(lookupErr.Err.Error(), "store not configured") {
 		t.Fatalf("validateExistingBead with no store = %v, want the store-not-configured lookup error", err)
+	}
+}
+
+// TestSplitSlingRefusesASecondLiveConvoyFirstRoot is the #5420 guard on a
+// split city: a convoy-first --on launch's synthetic input convoy lives in the
+// work store, beside the bead it tracks, and its workflow root in the graph
+// binding. checkLegacySourceWorkflowConflict finds the live root by the convoy
+// in the work store and the root in the graph store; read through the work
+// store alone it found none and a second live root was launched.
+func TestSplitSlingRefusesASecondLiveConvoyFirstRoot(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	deps, work, graph := splitSlingDeps(t, cfg)
+	source, err := work.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	first, err := s.AttachFormula(t.Context(), "graph-work", source.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("first AttachFormula: %v", err)
+	}
+	if _, err := graph.Get(first.WorkflowID); err != nil {
+		t.Fatalf("the first root %s is not in the graph binding (%v); the fixture does not separate the legs", first.WorkflowID, err)
+	}
+
+	_, err = s.AttachFormula(t.Context(), "graph-work", source.ID, a, FormulaOpts{})
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) || !slices.Contains(conflictErr.WorkflowIDs, first.WorkflowID) {
+		t.Fatalf("second AttachFormula error = %v, want a ConflictError naming the live root %s", err, first.WorkflowID)
+	}
+	if live := liveGraphV2Roots(t, graph); len(live) != 1 {
+		t.Fatalf("live graph roots in the binding = %d, want exactly 1 (no duplicate launched); roots=%+v", len(live), live)
 	}
 }

@@ -421,6 +421,11 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 // each transport is what keeps the API from drifting from the CLI; the API
 // once skipped convoy expansion and dropped title and vars on the target's
 // default formula. querier is the store the bead or convoy is read from.
+//
+// A convoy's members are read through convoy.MembersIn, which follows its
+// tracks edges, only when querier is the work handle (beads.WorkStore, as
+// both doors pass SlingDeps.Store); any other querier expands to the
+// convoy's DB children alone, and a tracks-only member is not routed.
 func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQuerier) (SlingResult, error) {
 	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
 		// Formula paths attach per child (or treat a convoy as one graph.v2
@@ -443,6 +448,11 @@ func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQ
 }
 
 // ExpandConvoy expands a convoy and routes each open child.
+//
+// A convoy's members are read through convoy.MembersIn, which follows its
+// tracks edges, only when querier is the work handle (beads.WorkStore, as
+// both doors pass SlingDeps.Store); any other querier expands to the
+// convoy's DB children alone, and a tracks-only member is not routed.
 func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.Agent, opts RouteOpts, querier BeadChildQuerier) (SlingResult, error) {
 	return DoSlingBatch(SlingOpts{
 		Target:        target,

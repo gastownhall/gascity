@@ -291,3 +291,24 @@ func TestUndeliverableHandoffWarningReadsTheClaimantInTheSessionsStore(t *testin
 		t.Fatalf("a claim by the pool's own session %s, in the sessions store, reported undeliverable: %s", own.ID, msg)
 	}
 }
+
+// TestCheckBeadStateWithOnlyAWorkStore pins the convoy-recovery and pool-claim
+// reads of a SlingDeps that carries a work store and nothing else: the live
+// auto-convoy in the work store makes routed work idempotent, and a claim by
+// a session bead id, with no sessions store to read it in, is not the pool's.
+func TestCheckBeadStateWithOnlyAWorkStore(t *testing.T) {
+	pool := config.Agent{Name: "smiths", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(4)}
+	target := agentutil.RoutedToIdentity(&pool)
+	work, sessions := beads.NewMemStore(), beads.NewMemStoreFrom(100, nil, nil)
+	deps := SlingDeps{Store: beadstest.Work(work)}
+
+	unclaimed := routedPoolWork(t, work, target, "")
+	if result := CheckBeadState(work, unclaimed.ID, pool, deps); !result.Idempotent {
+		t.Errorf("CheckBeadState(routed work with a live auto-convoy) = %+v, want idempotent", result)
+	}
+	own := createPoolSessionBead(t, sessions, target, "open")
+	held := routedPoolWork(t, work, target, own.ID)
+	if result := CheckBeadState(work, held.ID, pool, deps); result.Idempotent {
+		t.Errorf("CheckBeadState(work claimed by session %s, no sessions store) = %+v, want not idempotent", own.ID, result)
+	}
+}

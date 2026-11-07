@@ -213,7 +213,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			fmt.Fprintf(apiSlingStderr(), "warning: %s\n", message) //nolint:errcheck
 		},
 		Runner:   s.slingRunner(),
-		Router:   apiBeadRouter{server: s, store: store},
+		Router:   apiBeadRouter{server: s, store: store, binding: graphBinding(st)},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
@@ -629,6 +629,19 @@ func (n *apiNotifier) PokeControlDispatch(_ string) {
 type apiBeadRouter struct {
 	server *Server
 	store  beads.WorkStore
+	// binding is the request's relocated graph binding, zero on a city that
+	// does not relocate graph (graphBinding).
+	binding beads.GraphStore
+}
+
+// graphBinding is st's graph store when the city relocates the graph class,
+// else the zero handle: on a city that relocates nothing the graph store is
+// the city's work store.
+func graphBinding(st storeref.Stores) beads.GraphStore {
+	if beads.SameStore(st.Graph(), st.Work()) {
+		return beads.GraphStore{}
+	}
+	return st.Graph()
 }
 
 func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
@@ -660,7 +673,7 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.store != (beads.WorkStore{}) {
 		store = r.store
 	}
-	if beads.SameStore(req.Store, relocatedGraphStore(r.server.state)) {
+	if beads.SameStore(req.Store, r.binding) {
 		store = req.Store
 	}
 	if store == nil {
