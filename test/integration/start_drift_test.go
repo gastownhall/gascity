@@ -848,13 +848,22 @@ func bootstrapDriftCity(t *testing.T, binary string, env []string, gcHome string
 	return cityDir
 }
 
+// driftCommandTimeout bounds one `gc start` invocation in the drift
+// scenarios. It is generous enough for the restart-loop guard test
+// (which runs four `gc start` cycles).
+const driftCommandTimeout = 60 * time.Second
+
 // runDriftCommand runs `binary args...` capturing combined output,
-// exit code, and wall-clock duration. The default timeout is 60s,
-// generous enough for the restart-loop guard test (which runs four
-// `gc start` cycles).
+// exit code, and wall-clock duration, bounded by driftCommandTimeout.
 func runDriftCommand(t *testing.T, binary string, env []string, cwd string, args ...string) (string, int, time.Duration) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return runDriftCommandWithin(t, driftCommandTimeout, binary, env, cwd, args...)
+}
+
+// runDriftCommandWithin is runDriftCommand with an explicit bound.
+func runDriftCommandWithin(t *testing.T, timeout time.Duration, binary string, env []string, cwd string, args ...string) (string, int, time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = env

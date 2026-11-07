@@ -88,6 +88,7 @@ go_test(
         "prompt_query_federation_test.go",
         "review_check_scripts_test.go",
         "review_formula_test.go",
+        "run_drift_command_test.go",
         "skill_lifecycle_test.go",
         "start_drift_test.go",
         "supervisor_unit_guard_test.go",
