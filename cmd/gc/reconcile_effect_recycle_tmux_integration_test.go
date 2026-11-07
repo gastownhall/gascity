@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -132,7 +133,9 @@ func waitTmux(t *testing.T, what string, ready func() bool) {
 func TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux(t *testing.T) {
 	sp, tm := realTmux(t, "zag")
 	env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
-	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env}); err != nil {
+	// The launch records its process names (GT_PROCESS_NAMES), as gc's does:
+	// the fresh read judges the agent by them.
+	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env, ProcessNames: []string{"agent"}}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	agent := tm("list-panes", "-s", "-t", "=s-gc-1:", "-F", "#{pane_id}")
@@ -188,5 +191,75 @@ func TestStartRecyclePinsThePeeksObjectOnRealTmux(t *testing.T) {
 	s := k.runKind()
 	if s.Cause != causePeekError || k.meta("sleep_reason") != "" || k.meta("provider_terminal_error") != "" {
 		t.Fatalf("object %q replaced by %q during the peek: settlement %+v, sleep_reason %q, provider_terminal_error %q; want refused peek-error, nothing parked", before, object(), s, k.meta("sleep_reason"), k.meta("provider_terminal_error"))
+	}
+}
+
+// TestReadRuntimeJudgesByLaunchNamesOnRealTmux (ga-2xkdf5). Kills a fresh
+// read judging the agent by the current template's process names on the
+// seam-backed tmux provider gc runs: a session launched running sleep reads
+// alive under the names it was launched with (or, launched with none, by
+// its pane alone), whatever names the template now gives; one launched with
+// names no process carries reads a zombie though the template's runs.
+func TestReadRuntimeJudgesByLaunchNamesOnRealTmux(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		launch   []string
+		template []string
+		class    runtimeClass
+	}{
+		{"alive under its launch names", []string{"sleep"}, []string{"new-agent"}, rtAlive},
+		{"launched with no names: the pane alone", nil, []string{"new-agent"}, rtAlive},
+		{"its launch process gone, the template's running", []string{"agent"}, []string{"sleep"}, rtZombie},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sp, _ := realTmux(t, "lnm")
+			env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
+			if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env, ProcessNames: c.launch}); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			rt, cause := readRuntime(context.Background(), sp, c.template, "s-gc-1", time.Now(), time.Now)
+			if cause != "" || rt.Class != c.class || rt.Identity.Token != "tok" || !rt.Same {
+				t.Fatalf("read %+v cause %q, want class %d on one object with its identity", rt, cause, c.class)
+			}
+		})
+	}
+}
+
+// TestStartSparesAnAgentRelaunchedUnderNewNamesOnRealTmux (the #8923
+// review). Kills a warm relaunch that leaves the identity naming the box's
+// first launch, by which the fresh read judges the agent: a session
+// launched running sleep under [sleep], then relaunched in its warm box (A14's
+// launch-only drift) running tail under [tail], reads alive under the names
+// its identity then records, and a start over it settles the already-running
+// no-op, its session and pane untouched.
+func TestStartSparesAnAgentRelaunchedUnderNewNamesOnRealTmux(t *testing.T) {
+	sp, tm := realTmux(t, "rln")
+	env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
+	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env, ProcessNames: []string{"sleep"}, AcceptStartupDialogs: new(bool)}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	relaunch := runtime.Config{Command: "sh -c 'echo relaunched; exec tail -f /dev/null'", ProcessNames: []string{"tail"}, AcceptStartupDialogs: new(bool)}
+	if err := sp.(runtime.RelaunchProvider).Relaunch(context.Background(), "s-gc-1", relaunch); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	waitTmux(t, "the relaunched agent", func() bool {
+		l, ok := freshRead(context.Background(), sp, "s-gc-1", []string{"tail"}, time.Now())
+		return ok && l.Alive
+	})
+	rt, cause := readRuntime(context.Background(), sp, []string{"tail"}, "s-gc-1", time.Now(), time.Now)
+	if cause != "" || rt.Class != rtAlive || !rt.Same || rt.Identity.Token != "tok" || !slices.Equal(rt.Identity.ProcessNames, []string{"tail"}) {
+		t.Fatalf("read %+v cause %q, want the relaunched agent alive under the names its identity records", rt, cause)
+	}
+	panes := func() string {
+		return tm("list-panes", "-s", "-t", "=s-gc-1:", "-F", "#{session_id}/#{session_created} #{pane_id} pid=#{pane_pid} dead=#{pane_dead}")
+	}
+	before := panes()
+	k := startKit(t, intentStart, "awake", "last_woke_at", gatherNow.Add(-2*time.Minute).Format(time.RFC3339))
+	k.it.Deadline = time.Now().Add(70 * time.Second)
+	k.resolvesProcessNames("tail")
+	k.p.Runtime = sp
+	s := k.runKind()
+	if after := panes(); s.Outcome != settledNoop || s.Cause != causeAlreadyRunning || after != before || len(k.starts()) != 0 {
+		t.Fatalf("settlement %+v, starts %d; panes %q, was %q; want the already-running no-op, the relaunched agent untouched", s, len(k.starts()), after, before)
 	}
 }

@@ -400,3 +400,90 @@ func TestReadRuntimeBlankNameAndALateCorpse(t *testing.T) {
 		}
 	}
 }
+
+// Kills a fresh read judging the agent by the current template's process
+// names (ga-2xkdf5): a reload moved the row's template to "new-agent" while
+// its runtime still runs the "agent" it was launched with. The second read
+// asks for the launch names a readable identity records (none when it
+// records none), so the launch agent reads alive and its exit reads a
+// zombie whatever the template names find; an unreadable identity proves no
+// launch agent dead, so a not-alive answer stays unknown. The first read
+// keeps the caller's names, and the bracket, corpse and hop rules hold.
+func TestReadRuntimeJudgesTheAgentByItsLaunchNames(t *testing.T) {
+	template := []string{"new-agent"}
+	for _, c := range []struct {
+		name      string
+		template  []string
+		mark      func(*simRuntime)
+		elsewhere bool                    // the name runs on the fall-through's other backend too
+		during    func(*simProvider, int) // runs inside the nth read
+		class     runtimeClass
+		alive     bool
+		second    []string // the second read's process names
+	}{
+		{"the launch agent runs, the template's does not", template, launchedAs([]string{"agent"}, "agent"), false, nil, rtAlive, true, []string{"agent"}},
+		{"the launch agent exited, the template's runs", template, launchedAs([]string{"agent"}, "new-agent"), false, nil, rtZombie, false, []string{"agent"}},
+		{"no launch names: the pane alone answers", template, launchedAs(nil, "other"), false, nil, rtAlive, true, []string{}},
+		{"unreadable identity, agent not alive", template, unreadable(launchedAs([]string{"agent"}, "agent")), false, nil, rtUnknown, false, template},
+		{"launch and template names agree", []string{"agent"}, launchedAs([]string{"agent"}, "agent"), false, nil, rtAlive, true, []string{"agent"}},
+		{"unreadable identity, agent alive", template, unreadable(launchedAs([]string{"agent"}, "new-agent")), false, nil, rtAlive, true, template},
+		{"no launch names, the provider reads the agent dead", template, func(r *simRuntime) { launchedAs(nil, "other")(r); r.zombie = true }, false, nil, rtZombie, false, []string{}},
+		{"corpse, unreadable identity", template, unreadable(func(r *simRuntime) { launchedAs([]string{"agent"}, "agent")(r); r.corpse = true }), false, nil, rtCorpse, false, template},
+		{"dies between the reads, alive on a fall-through hop", template, launchedAs([]string{"agent"}, "agent"), true, func(sp *simProvider, n int) {
+			if n == 2 {
+				sp.rts["s-1"].corpse = true
+			}
+		}, rtUnknown, false, []string{"agent"}},
+		{"the second read errs", template, launchedAs([]string{"agent"}, "agent"), false, func(sp *simProvider, n int) {
+			if n == 2 {
+				sp.rts["s-1"].probeErr = true
+			}
+		}, rtUnknown, false, []string{"agent"}},
+		{"replaced between the reads", template, launchedAs([]string{"agent"}, "agent"), false, func(sp *simProvider, n int) {
+			if n == 2 {
+				sp.put("s-1", "gc-1", "2", "tok-2")
+				launchedAs([]string{"agent"}, "agent")(sp.rts["s-1"])
+			}
+		}, rtAlive, false, []string{"agent"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sp := newSimProvider()
+			sp.put("s-1", "gc-1", "1", "tok-1")
+			c.mark(sp.rts["s-1"])
+			leaf := &recordingLeaf{simProvider: sp}
+			if c.during != nil {
+				leaf.during = func() { c.during(sp, len(leaf.names)) }
+			}
+			var p runtime.Provider = leaf
+			if c.elsewhere {
+				other := newSimProvider()
+				other.put("s-1", "gc-1", "1", "tok-1")
+				p = fallThrough{recordingLeaf: leaf, other: other}
+			}
+			rt, cause := readRuntime(context.Background(), p, c.template, "s-1", gatherNow, func() time.Time { return gatherNow })
+			if cause != "" {
+				t.Fatalf("refused %q", cause)
+			}
+			if rt.Class != c.class || rt.Alive() != c.alive {
+				t.Fatalf("class %d, alive %t (process names read %v), want class %d, alive %t", rt.Class, rt.Alive(), leaf.names, c.class, c.alive)
+			}
+			if len(leaf.names) == 0 || !slices.Equal(leaf.names[0], c.template) {
+				t.Fatalf("process names read %v, want the first read by the caller's %v", leaf.names, c.template)
+			}
+			if len(leaf.names) < 2 || !slices.Equal(leaf.names[1], c.second) {
+				t.Fatalf("process names read %v, want the second read by %v", leaf.names, c.second)
+			}
+		})
+	}
+}
+
+// launchedAs marks a runtime launched with launch (its GT_PROCESS_NAMES)
+// whose pane now runs procs.
+func launchedAs(launch []string, procs ...string) func(*simRuntime) {
+	return func(r *simRuntime) { r.launch, r.procs = launch, procs }
+}
+
+// unreadable is mark with the runtime's identity unreadable.
+func unreadable(mark func(*simRuntime)) func(*simRuntime) {
+	return func(r *simRuntime) { mark(r); r.envErr = true }
+}

@@ -377,7 +377,8 @@ func offDisarmLine(target string) string {
 // With the switch off every runtime.Config carries the zero arm (the config
 // derivation's tests pin that), and the tmux command lines are today's: a
 // create's byte for byte, and a respawn's respawn-pane, which the respawn
-// follows only with the removal of a capture bound to the pane
+// leads only with its record of the agent's process names and follows only
+// with the removal of a capture bound to the pane
 // (TestRespawnUnderSwitchOffRemovesOnlyABoundCapture).
 func TestSwitchOffIsByteIdentical(t *testing.T) {
 	tm, rec, _, probes := captureTestTmux(t)
@@ -389,7 +390,7 @@ func TestSwitchOffIsByteIdentical(t *testing.T) {
 	if err := ops.createSession("gc-off2", "/work", "codex", map[string]string{"GC_RIG": "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ops.respawnAgent("%4", "/work", "codex", nil); err != nil {
+	if err := ops.respawnAgent("%4", "/work", "codex", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	wantLine := `'new-session' '-d' '-P' '-F' '#{pane_id}' '-s' 'gc-off' '-c' '/work' '-e' 'ANTHROPIC_AUTH_TOKEN=` + testSecret + `' 'codex'`
@@ -397,7 +398,7 @@ func TestSwitchOffIsByteIdentical(t *testing.T) {
 		t.Fatalf("staged %q, want exactly %q", rec.staged, wantLine)
 	}
 	wantArgv := []string{"-u", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gc-off2", "-c", "/work", "-e", "GC_RIG=r", "codex"}
-	wantRespawn := []string{"-u", "respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex", ";"}
+	wantRespawn := []string{"-u", "set-environment", "-t", "%4", "-u", "GT_PROCESS_NAMES", ";", "respawn-pane", "-k", "-t", "%4", "-c", "/work", "codex", ";"}
 	var sawArgv, sawRespawn bool
 	for _, c := range rec.calls {
 		sawArgv = sawArgv || slices.Equal(c, wantArgv)

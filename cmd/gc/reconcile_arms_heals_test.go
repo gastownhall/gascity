@@ -33,6 +33,9 @@ type freshObserver struct {
 	runLive error
 	// activityErr is GetLastActivity's error, nil to pass through to the fake.
 	activityErr error
+	// procs, when set, are the pane's processes: a running read finds the
+	// agent alive only under a process name it asks for among them.
+	procs []string
 }
 
 func (f *freshObserver) tmux() runtime.Provider {
@@ -57,11 +60,15 @@ func (r observerReads) GetLastActivity(name string) (time.Time, error) {
 	return r.FullFake.GetLastActivity(name)
 }
 
-func (r observerReads) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+func (r observerReads) ObserveLivenessWithError(_ string, pn []string) (runtime.Liveness, error) {
 	if r.o.read != nil {
 		r.o.read()
 	}
-	return r.o.l, r.o.err
+	l := r.o.l
+	if r.o.procs != nil && l.Running {
+		l.Alive = slices.ContainsFunc(pn, func(n string) bool { return slices.Contains(r.o.procs, n) })
+	}
+	return l, r.o.err
 }
 
 // RunLive fails with the observer's error, else records the fake's call.
@@ -1124,6 +1131,35 @@ func TestDeadRuntimeHealTakesAClassifiedDeadRuntime(t *testing.T) {
 				t.Fatalf("settlement %+v, row %v, want healed asleep with wake_attempts %s", s, m, tc.attempts)
 			}
 		})
+	}
+}
+
+// Kills an asleep heal judging a classified runtime by its current template
+// (ga-2xkdf5): A12 classified the row's runtime, then a reload moved the
+// template to "new-agent" while the runtime runs the "agent" it was
+// launched with. The heal's fresh read proves it alive under its launch
+// names and refuses runtime-present, the row left active with its session
+// key.
+func TestDeadRuntimeHealSparesAnAgentAliveUnderItsLaunchNames(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", "active", "session_key", "k-1", "last_woke_at", rowAt(-10*time.Second))
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3", ProcessNames: []string{"agent"}}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+	tp := TemplateParams{TemplateName: "worker"}
+	tp.Hints.ProcessNames = []string{"new-agent"}
+	c.w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: tp}}}
+	f := &freshObserver{
+		Fake:  runtime.NewFake(),
+		l:     runtime.Liveness{Running: true, ObjectID: "$1", ObjectCreated: "1", PanePID: "42"},
+		env:   map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3", "GC_RUNTIME_EPOCH": "3", "GT_PROCESS_NAMES": "agent"},
+		procs: []string{"agent"},
+	}
+	it, s := c.run(t, f.tmux(), nil)
+	if it.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("decideRow = (%q, %q), want the dead-runtime heal", it.Kind, it.Reason)
+	}
+	if m := c.meta(t); s.Outcome != settledRefused || s.Cause != causeRuntimePresent || m["state"] != "active" || m["session_key"] != "k-1" {
+		t.Fatalf("settlement %+v, row %v, want refused runtime-present, the row active with its session key", s, m)
 	}
 }
 

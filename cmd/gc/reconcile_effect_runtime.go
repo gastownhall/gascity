@@ -47,6 +47,11 @@ func (r *txRuntime) Alive() bool { return r.Class == rtAlive && r.Same }
 // readRuntime reads name fresh on sp since since, with processNames (the
 // row's template's, processNamesFor), the bracketing read at now(); or
 // refuses with a cause when no backend resolves the name, or it is blank.
+// The bracketing read judges the agent by the process names its identity
+// records, the ones the runtime was launched with (none when it records
+// none), since a reload can move the template to another provider's under a
+// runtime still running its launch agent. An unreadable identity proves no
+// launch agent dead, so its not-alive answer stays unknown.
 func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time, now func() time.Time) (*txRuntime, string) {
 	name = strings.TrimSpace(name)
 	leaf, _, known := runtime.ResolveBackend(sp, name)
@@ -68,7 +73,11 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 		return rt, ""
 	}
 	rt.Identity = readRuntimeIdentity(ctx, leaf, name)
-	again, ok := freshRead(ctx, leaf, name, processNames, now())
+	agentNames := processNames
+	if rt.Identity.Known {
+		agentNames = rt.Identity.ProcessNames
+	}
+	again, ok := freshRead(ctx, leaf, name, agentNames, now())
 	if rt.Again = again; !ok {
 		return rt, ""
 	}
@@ -82,7 +91,9 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 			rt.Class = rtCorpse
 		}
 	case !again.Alive:
-		rt.Class = rtZombie
+		if rt.Identity.Known {
+			rt.Class = rtZombie
+		}
 	default:
 		rt.Class = rtAlive
 	}
@@ -109,8 +120,9 @@ func hopsQuiet(ctx context.Context, sp runtime.Provider, name string, processNam
 	return true
 }
 
-// processNamesFor is row's template's process names, by which a read tells a
-// zombie (its agent dead) from a live runtime; none when unresolved.
+// processNamesFor is row's template's process names, by which a read finds
+// a runtime present and which a read's hops probe; a runtime's agent is
+// judged by its launch names (readRuntime). None when unresolved.
 func processNamesFor(w *World, row session.Info) []string {
 	if res, ok := w.Templates.lookup(row); ok {
 		return res.TP.Hints.ProcessNames

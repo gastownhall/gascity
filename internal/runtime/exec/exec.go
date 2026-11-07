@@ -485,6 +485,18 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
+	argv, err := p.launchArgv(ctx, name, cfg)
+	if err != nil {
+		return err
+	}
+	return p.runLaunch(ctx, name, cfg, argv)
+}
+
+// launchArgv is the tmux command list that launches cfg's agent in name's
+// box: respawn-pane -k in the box's agent session, or new-session where it
+// has none, with the launch's input fence joined on. A FreshOnly launch
+// refuses an existing agent session.
+func (p *Provider) launchArgv(ctx context.Context, name string, cfg runtime.Config) ([]string, error) {
 	command := cfg.Command
 	if command == "" {
 		command = defaultLaunchShell
@@ -492,7 +504,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	var argv []string
 	if _, code, _ := p.Exec(ctx, name, []string{"tmux", "has-session", "-t", execTmuxSession}); code == 0 {
 		if cfg.FreshOnly {
-			return fmt.Errorf("exec provider: fresh launch in %q found an existing agent session", name)
+			return nil, fmt.Errorf("exec provider: fresh launch in %q found an existing agent session", name)
 		}
 		argv = []string{"tmux", "respawn-pane", "-k", "-t", execTmuxSession, command}
 	} else {
@@ -501,7 +513,12 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	// The agent pane's fence changes in the same tmux command list that
 	// launches the agent, so no input fenced for another incarnation is
 	// let through between them.
-	argv = append(argv, p.launchFenceArgs(name, cfg)...)
+	return append(argv, p.launchFenceArgs(name, cfg)...), nil
+}
+
+// runLaunch runs argv, launchArgv's command list, in name's box over the
+// exec op, then publishes the ready prompt and dismisses startup dialogs.
+func (p *Provider) runLaunch(ctx context.Context, name string, cfg runtime.Config, argv []string) error {
 	if _, code, err := p.Exec(ctx, name, argv); err != nil {
 		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
 	} else if code != 0 {
@@ -513,14 +530,14 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path
 // ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
-// the agent in the warm box over the exec op (launchAgent) — no reprovision. A
+// the agent in the warm box over the exec op (relaunchAgent) — no reprovision. A
 // welded pack has no in-place relaunch (the agent is welded into `start`), so it
 // degrades to a full reprovision (Stop+Start), which is still correct. On a
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if p.supportsSeparableLaunch() {
-		return p.launchAgent(ctx, name, cfg)
+		return p.relaunchAgent(ctx, name, cfg)
 	}
 	if err := p.Stop(name); err != nil {
 		return err
@@ -532,6 +549,33 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return err
 	}
 	return p.startFresh(ctx, name, cfg)
+}
+
+// relaunchAgent respawns cfg's agent in name's warm box (launchArgv, then
+// runLaunch) once a v2-ready box's identity names the process names it will
+// run under (recordLaunchProcessNames). The names are recorded after the
+// launch is chosen and just before it runs, and a cancellation that lands in
+// between puts back the names the identity held: the first launch's agent
+// runs on, and judged by the relaunched agent's names it would read dead. A
+// launch whose exec fails may have respawned the agent, so the names it
+// recorded stay.
+func (p *Provider) relaunchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
+	argv, err := p.launchArgv(ctx, name, cfg)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("exec provider: relaunching agent in %q: %w", name, err)
+	}
+	restore, err := p.recordLaunchProcessNames(name, cfg)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(fmt.Errorf("exec provider: relaunching agent in %q: %w", name, err), restore())
+	}
+	return p.runLaunch(ctx, name, cfg, argv)
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {

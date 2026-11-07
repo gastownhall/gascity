@@ -330,8 +330,9 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 
 // TestProvider_RelaunchInWarmSession proves the un-weld relaunch path (B1):
 // Relaunch respawns the agent with a NEW command inside the SAME box, the box is
-// reused (its session env survives, since Relaunch never re-sets env), and a
-// relaunch into a non-existent box is an error rather than a silent provision.
+// reused (its session env survives, since Relaunch re-sets no env but the
+// identity's process names, which name the relaunched agent), and a relaunch
+// into a non-existent box is an error rather than a silent provision.
 func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -352,11 +353,12 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 		return fmt.Sprintf("sh -c 'echo %s > %s; sleep 300'", tag, marker)
 	}
 
-	// Provision the warm box (welded Start) with a sentinel session env value.
+	// Provision the warm box (welded Start) with a sentinel session env value,
+	// its launch recording process names of its own.
 	if err := p.Start(context.Background(), name, runtime.Config{
 		Command: agentCmd("first"),
 		WorkDir: workDir,
-		Env:     map[string]string{"GC_RELAUNCH_TEST": "warm"},
+		Env:     map[string]string{"GC_RELAUNCH_TEST": "warm", "GT_PROCESS_NAMES": "first-agent"},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -364,6 +366,7 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 
 	// Relaunch the agent in the SAME box with a new command. Env is provision-half
 	// and intentionally NOT re-passed; the box keeps its session environment.
+	// The relaunched config names no process names.
 	if err := p.Relaunch(context.Background(), name, runtime.Config{
 		Command: agentCmd("second"),
 		WorkDir: workDir,
@@ -377,13 +380,18 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 
 	// The box was reused, not recreated: the session env set at Start survives a
-	// launch-only relaunch (Relaunch never re-sets env).
+	// launch-only relaunch (Relaunch re-sets no env but the process names).
 	val, err := p.Tmux().GetEnvironment(name, "GC_RELAUNCH_TEST")
 	if err != nil {
 		t.Fatalf("GetEnvironment: %v", err)
 	}
 	if val != "warm" {
 		t.Fatalf("GC_RELAUNCH_TEST after relaunch = %q, want %q (warm box should be reused, not recreated)", val, "warm")
+	}
+	// The identity's process names are the relaunched agent's, not the first
+	// launch's: it names none, so the session has none, as a start with none.
+	if names, err := p.Tmux().GetEnvironment(name, "GT_PROCESS_NAMES"); !errors.Is(err, errEnvUnset) {
+		t.Fatalf("GT_PROCESS_NAMES after a relaunch naming none = (%q, %v), want it unset", names, err)
 	}
 
 	// Relaunch into a non-existent box is an error, not a silent provision.
@@ -737,6 +745,30 @@ func TestProvider_KilledAgentPaneFailsClosed(t *testing.T) {
 	}
 	if got := f.mustRun(t, "display-message", "-p", "-t", human, "#{pane_pid} #{pane_dead}"); got != humanPID+" 0" {
 		t.Errorf("human pane %s = %q, want %q (untouched)", human, got, humanPID+" 0")
+	}
+}
+
+// A relaunch refused at its agent-pane lookup leaves the identity's process
+// names as they were (the #8923 review): the first launch's agent runs on,
+// and judged by the relaunched agent's names it would read dead, so a
+// start's recycle would kill it as a zombie. Here a human's split carries
+// the agent marker too, so the lookup is ambiguous and refuses.
+func TestProvider_RelaunchRefusedAtItsPaneLookupKeepsTheNames(t *testing.T) {
+	f := newAgentPaneFixture(t, "apn", "1")
+	// The names the first launch's agent (sh, then its sleep) runs under.
+	f.mustRun(t, "set-environment", "-t", sessionTarget(f.name), gtProcessNamesEnvKey, "sh,sleep")
+	human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+	f.mustRun(t, "set-option", "-p", "-F", "-t", human, agentPaneOption, "#{session_id}")
+
+	err := f.p.Relaunch(context.Background(), f.name, runtime.Config{Command: f.agentCmd("second"), WorkDir: f.workDir, ProcessNames: []string{"tail"}})
+	if !errors.Is(err, errAgentPaneAmbiguous) {
+		t.Fatalf("Relaunch = %v, want the ambiguous lookup's refusal", err)
+	}
+	if names, err := f.p.Tmux().GetEnvironment(f.name, gtProcessNamesEnvKey); err != nil || names != "sh,sleep" {
+		t.Errorf("GT_PROCESS_NAMES after the refused relaunch = (%q, %v), want the first launch's %q", names, err, "sh,sleep")
+	}
+	if got := f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{pane_pid} #{pane_dead}"); got != f.agentPID+" 0" {
+		t.Errorf("agent pane %s = %q, want the first launch's agent %q, alive", f.agent, got, f.agentPID+" 0")
 	}
 }
 

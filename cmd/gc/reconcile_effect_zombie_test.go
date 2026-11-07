@@ -508,3 +508,37 @@ func TestAliveNoteFromAnyEffect(t *testing.T) {
 		t.Fatalf("noted %+v after the stop, want no alive note", n)
 	}
 }
+
+// Kills a zombie classification judging the agent by the current template
+// (ga-2xkdf5), or by names it cannot prove the launch's: a reload moved the
+// template to "new-agent" while the runtime still runs the "agent" it was
+// launched with, its pane showing crash-like output. Alive under its launch
+// names, or with its identity unreadable, it records no crash, no metric,
+// and writes nothing; unreadable, it refuses on liveness unknown.
+func TestZombieSparesAnAgentAliveUnderItsLaunchNames(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		mark       func(*simRuntime)
+		unreadable bool
+	}{
+		{"alive under its launch names", launchedAs([]string{"agent"}, "agent"), false},
+		{"identity unreadable", unreadable(launchedAs([]string{"agent"}, "agent")), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := crashMetrics(t)
+			k, _ := zombieKit(t, true, "gc-1", "tok", "panic: boom")
+			k.mutate(func(r *simRuntime) { r.zombie = false; c.mark(r) })
+			k.resolvesProcessNames("new-agent")
+			s := k.runKind()
+			if c.unreadable && (s.Outcome != settledRefused || s.Cause != causeLivenessUnknown) {
+				t.Fatalf("settlement %+v, want refused with cause %q", s, causeLivenessUnknown)
+			}
+			if crashFacts(s) != 0 || len(*got) != 0 || len(k.sp.kills) != 0 || len(k.starts()) != 0 {
+				t.Fatalf("settlement %+v: crashes %d metrics %v kills %d starts %d, want none", s, crashFacts(s), *got, len(k.sp.kills), len(k.starts()))
+			}
+			if k.meta("sleep_reason") != "" || k.meta("state") != "asleep" {
+				t.Fatalf("row state %q sleep_reason %q, want nothing written", k.meta("state"), k.meta("sleep_reason"))
+			}
+		})
+	}
+}
