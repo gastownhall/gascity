@@ -2261,8 +2261,9 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 // It follows finish_bd_schema_migrations in gc-beads-bd.sh: a bd older than
 // MigrateSchemaMinBDVersion is skipped with a warning, a bd whose version
 // cannot be read still runs the step, a refusal by bd's remote-backed gate is
-// reported and initialization continues to readiness, and what bd reports goes
-// to stderr. run is the init runner, so the pinned bd, the scope and canonical
+// reported and initialization continues to readiness, any other migration
+// failure is returned before readiness runs, and what bd reports goes to
+// stderr. run is the init runner, so the pinned bd, the scope and canonical
 // GC_BIN carry over; no migration unlock or force flag is added, so bd's own
 // consent rules decide what the verb may migrate.
 func settleAdoptedDefaultRigBdSchema(run beads.CommandRunner, dir string, stderr io.Writer) error {
@@ -2283,7 +2284,7 @@ func settleAdoptedDefaultRigBdSchema(run beads.CommandRunner, dir string, stderr
 		return nil
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("settling bd schema of adopted rig store %q: %w", dir, err)
 	}
 	if msg := strings.TrimSpace(string(out)); msg != "" {
 		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort diagnostic

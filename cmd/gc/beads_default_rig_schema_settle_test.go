@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -377,4 +378,37 @@ func TestInitAndHookDirSettlesBehindSchemaOfAlreadyInitializedDefaultRigBdStoreR
 			t.Fatal("readiness never ran after the remote-backed refusal")
 		}
 	})
+}
+
+func TestSettleAdoptedDefaultRigBdSchemaOtherFailureNamesTheScope(t *testing.T) {
+	cause := errors.New("exit status 1: Error: cannot migrate: dirty working set in table issues")
+	runner := &recordingBdRunner{version: "bd version 1.3.1\n", migrateErr: cause}
+	err := settleAdoptedDefaultRigBdSchema(runner.run, "/city/rigs/api", io.Discard)
+	if !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want the migration failure", err)
+	}
+	if !strings.Contains(err.Error(), "/city/rigs/api") || !strings.Contains(err.Error(), "dirty working set in table issues") {
+		t.Fatalf("err = %q, want it to name the scope and carry bd's diagnostic", err)
+	}
+}
+
+func TestInitAndHookDirDefaultRigSchemaMigrationFailureStopsBeforeReadiness(t *testing.T) {
+	for name, diagnostic := range map[string]string{
+		"dirty table":   "Error: cannot migrate: dirty working set in table issues",
+		"shared server": "Error: refusing to auto-apply 3 pending schema migrations to a database shared with other clients",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newBehindSchemaRig(t, `echo '`+diagnostic+`' >&2; exit 1`)
+			err := initAndHookDir(rig.cityPath, rig.rigPath, "tc")
+			if err == nil {
+				t.Fatal("initAndHookDir succeeded over a failed schema migration")
+			}
+			if !strings.Contains(err.Error(), rig.rigPath) || !strings.Contains(err.Error(), diagnostic) {
+				t.Fatalf("err = %q, want it to name the scope %s and carry bd's diagnostic", err, rig.rigPath)
+			}
+			if calls := rig.invocations(t); firstSchemaRigCall(calls, "list ") >= 0 {
+				t.Fatalf("readiness ran after a failed schema migration; bd calls:\n%s", describeSchemaRigCalls(calls))
+			}
+		})
+	}
 }
