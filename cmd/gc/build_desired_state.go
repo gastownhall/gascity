@@ -249,10 +249,22 @@ type scaleCheckDemand struct {
 }
 
 var (
-	errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
-	errPoolSessionCreatePartial         = errors.New("pool session create skipped: demand read partial")
-	errPoolSessionCreateProviderRed     = errors.New("pool session create skipped: provider red")
+	errPoolSessionCreateBudgetExhausted  = errors.New("pool session create budget exhausted")
+	errPoolSessionCreatePartial          = errors.New("pool session create skipped: demand read partial")
+	errPoolSessionCreateProviderRed      = errors.New("pool session create skipped: provider red")
+	errPoolSessionCreateTerminalCooldown = errors.New("pool session create skipped: terminal cooldown active")
 )
+
+const (
+	poolTerminalCreateCooldown  = 5 * time.Minute
+	poolTerminalCreateClockSkew = time.Minute
+)
+
+func poolTerminalCreateCooldownActive(_ *agentBuildParams, _ *config.Agent, _, _ string, _ time.Time) bool {
+	return false
+}
+
+var _, _ = poolTerminalCreateCooldown, poolTerminalCreateClockSkew
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
 // contending pools so stable template sort order does not always win.
@@ -4202,6 +4214,8 @@ func realizePoolDesiredSessionsAt(
 				case errors.Is(err, errPoolSessionCreateProviderRed):
 					// debug-level: fires every tick during a red episode; not operator noise
 					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (provider red, fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
+				case errors.Is(err, errPoolSessionCreateTerminalCooldown):
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create blocked)\n", qualifiedName, err) //nolint:errcheck
 				case errors.Is(err, errPoolSessionNameUnavailable):
 					// The slot's runtime name is a function of its identity, so
 					// it cannot be worked around by minting another one — that
@@ -5573,7 +5587,7 @@ func selectOrPlanPoolSessionBeadAvoiding(
 			return info, slot, nil, err
 		}
 	}
-	plan, err := planFreshPoolSessionBead(bp, cfgAgent, template, request, usedSlots)
+	plan, err := planFreshPoolSessionBead(bp, cfgAgent, template, request, decisionTime, usedSlots)
 	if err == nil || passed == nil {
 		return session.Info{}, 0, plan, err
 	}
@@ -5628,7 +5642,7 @@ func selectPreferredPoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent
 
 // planFreshPoolSessionBead reserves a fresh slot for request and returns the
 // create plan, or the reason no fresh session can start this tick.
-func planFreshPoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, template string, request SessionRequest, usedSlots map[int]bool) (*poolSessionCreatePlan, error) {
+func planFreshPoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, template string, request SessionRequest, decisionTime time.Time, usedSlots map[int]bool) (*poolSessionCreatePlan, error) {
 	if !bp.hasCompleteSessionSnapshot() {
 		return nil, errPoolSessionCreatePartial
 	}
@@ -5663,6 +5677,11 @@ func planFreshPoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	if healthy, present := bp.providerHealthSnapshot.check(provName); present && !healthy {
 		delete(usedSlots, slot)
 		return nil, errPoolSessionCreateProviderRed
+	}
+
+	if poolTerminalCreateCooldownActive(bp, cfgAgent, template, qualifiedInstance, decisionTime) {
+		delete(usedSlots, slot)
+		return nil, errPoolSessionCreateTerminalCooldown
 	}
 
 	if !bp.tryClaimPoolSessionCreate(template) {
