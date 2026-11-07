@@ -128,7 +128,9 @@ they need, and how many times --` + storageTimeBudgetFlag + ` would pause the ru
 estimates come from the row and edge counts read here and from rates measured
 on a loaded host, both printed with them. It starts no bead-store provider: on
 a city whose provider is down it reports that and checks nothing that reads a
-store.`,
+store. Reading a binding already there (a city with a convergence marker, which
+it refuses) opens it read-only, which may leave the -wal and -shm sidecars
+SQLite needs for the read beside a quiescent binding; nothing else is written.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			force, err := parseStorageForce(forced)
 			if err == nil && cmd.Flags().Changed(storageTimeBudgetFlag) && !split {
@@ -286,14 +288,23 @@ func runStoragePreflightChecks(request storageOperatorRequest, found *preflightF
 		return found.block(stdout, "binding root", stateErr)
 	}
 	if state == infraConvergenceMarked {
-		preflightPass(stdout, "cutover", "already converged — the marker is present, so the migration would not copy")
+		// Quiet (preflight --split) leaves this row to the caller, which
+		// blocks the cutover on it.
 		if !found.quiet {
+			preflightPass(stdout, "cutover", "already converged — the marker is present, so the migration would not copy")
 			fmt.Fprintf(stdout, "\nNothing to migrate: this city is already converged. Run `%s` to see what it holds.\n", storageStatusInstruction()) //nolint:errcheck // best-effort stdout
 		}
 		found.converged = true
 		return 0
 	}
 	if state == infraConvergenceStale {
+		// A marker naming another work store is not re-copied: the re-copy
+		// would rewrite it with this store's identity (B15). The migration
+		// holds it first (runInfraClassMigrationFrom), and so does this.
+		if _, _, hold := markerWorkStoreIdentityHold(request.CityPath, target, storagePreflightLogPrefix, io.Discard); hold != nil {
+			hold.Target = target
+			return found.block(stdout, "cutover", fmt.Errorf("%s: %s", hold.Outcome, preflightAdviceDetail(*hold)))
+		}
 		// A restore under way is the one stale binding the migration does not
 		// re-copy: it refuses and names the restore.
 		if err := infraRestoreRecopyRefusal(target); err != nil {

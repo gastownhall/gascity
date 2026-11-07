@@ -5394,7 +5394,9 @@ they need, and how many times --time-budget would pause the run. The
 estimates come from the row and edge counts read here and from rates measured
 on a loaded host, both printed with them. It starts no bead-store provider: on
 a city whose provider is down it reports that and checks nothing that reads a
-store.
+store. Reading a binding already there (a city with a convergence marker, which
+it refuses) opens it read-only, which may leave the -wal and -shm sidecars
+SQLite needs for the read beside a quiescent binding; nothing else is written.
 
 ```
 gc storage preflight [flags]

@@ -415,3 +415,99 @@ func TestCityIDFloorBelowWarning(t *testing.T) {
 		t.Errorf("hosted: %q", got)
 	}
 }
+
+// TestStorageSplitDoctorRows reaches each remaining row of the check: a floor
+// under the carried ids (M33), a rig awaiting import (M34), a legacy combined
+// store (M36), a remote stage (M40) and a PATH gc that cannot report its
+// version (M39).
+func TestStorageSplitDoctorRows(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(t *testing.T) storageOperatorRequest
+		status doctor.CheckStatus
+		want   string
+	}{
+		{
+			name: "floor below the carried ids",
+			setup: func(t *testing.T) storageOperatorRequest {
+				cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+				request := storageTestRequest(t, cfg)
+				source := stubInfraMigrationSource(t).(*beads.MemStore)
+				source.HonorExplicitIDs = true
+				stubInfraControllerPing(t, 0)
+				mustCreateInfraBead(t, source, beads.Bead{ID: "gc-abcd", Title: "a session", Type: "session"})
+				var log bytes.Buffer
+				if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+					t.Fatalf("migrating: %s: %s", got.Outcome, log.String())
+				}
+				stubCityHashConfig(t, cityHashConfig{Conf: &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "3"}}, Prefix: "gc"})
+				return request
+			},
+			status: doctor.StatusWarning, want: "is 3, below the 5 the carried ids need: run `gc storage repair-sequence --id-floor`",
+		},
+		{
+			name: "a rig awaiting import",
+			setup: func(t *testing.T) storageOperatorRequest {
+				request, _ := convergedSplitCity(t)
+				rigPath := t.TempDir()
+				request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
+				rig := beads.NewMemStore()
+				rig.IDPrefix = "ga"
+				mustCreateInfraBead(t, rig, beads.Bead{Title: "a session", Type: "session"})
+				prev := openStorageScopeStore
+				openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+					if storePath == rigPath {
+						return rig, nil
+					}
+					return prev(storePath, cityPath)
+				}
+				t.Cleanup(func() { openStorageScopeStore = prev })
+				return request
+			},
+			status: doctor.StatusWarning, want: "1 rig(s) await import",
+		},
+		{
+			name: "a legacy combined store",
+			setup: func(t *testing.T) storageOperatorRequest {
+				request, _ := convergedSplitCity(t)
+				if err := os.MkdirAll(filepath.Join(request.CityPath, ".gc", "infra", ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return request
+			},
+			status: doctor.StatusWarning, want: "legacy combined infrastructure store",
+		},
+		{
+			name: "a remote stage",
+			setup: func(t *testing.T) storageOperatorRequest {
+				request, _ := convergedSplitCity(t)
+				if err := writeRemoteStage(request.CityPath, remoteStage{ControllerCity: "hq", ControllerPath: "/srv/hq"}); err != nil {
+					t.Fatal(err)
+				}
+				return request
+			},
+			status: doctor.StatusOK, want: "remote stage of hq (/srv/hq)",
+		},
+		{
+			name: "a PATH gc that cannot report its version",
+			setup: func(t *testing.T) storageOperatorRequest {
+				request, _ := convergedSplitCity(t)
+				stubGCVersion(t, "1.6.0")
+				stubSessionPathGC(t, "", errors.New("exit status 2"))
+				if err := writeMinGCVersion(request.CityPath, "1.5.1"); err != nil {
+					t.Fatal(err)
+				}
+				return request
+			},
+			status: doctor.StatusWarning, want: "could not report its version (exit status 2)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := tc.setup(t)
+			got := newStorageSplitCheck(request.Cfg, request.CityPath).Run(nil)
+			if got.Status != tc.status || !strings.Contains(got.Message, tc.want) {
+				t.Errorf("storage-split = %v %q, want %v containing %q; details %v", got.Status, got.Message, tc.status, tc.want, got.Details)
+			}
+		})
+	}
+}

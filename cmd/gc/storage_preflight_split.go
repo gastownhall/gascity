@@ -183,17 +183,21 @@ func splitBudgetAdvice(city, budget time.Duration, floor bool) (note bool, text 
 		about, atLeast = "at least "+splitDuration(city), "at least "
 	}
 	fits := splitBudgetFitting(city)
-	switch resumes := splitBudgetResumes(city, budget); {
+	resumes := splitBudgetResumes(city, budget)
+	switch {
 	case budget <= 0:
 		return false, fmt.Sprintf("no --%s: the run does not pause, and the city stays stopped for all of it (%s)", storageTimeBudgetFlag, about)
 	case resumes == 0 && !floor:
 		return false, fmt.Sprintf("ESTIMATE: the city's copy and clear (%s) fit --%s %s; the run would not pause", about, storageTimeBudgetFlag, budget)
 	case resumes == 0:
-		return true, fmt.Sprintf("ESTIMATE: the city's copy and clear take %s against --%s %s; this lane's rate is not measured, so whether the run pauses is not known. --%s %s or more runs the estimate in one", about, storageTimeBudgetFlag, budget, storageTimeBudgetFlag, fits)
-	default:
-		return true, fmt.Sprintf("ESTIMATE: the city's copy and clear take %s, over --%s %s: the run would pause (exit %d) %s%d time(s) and need %s%d resume(s) of the same command, and the city stays stopped until the last run finishes. --%s %s runs it in one",
-			about, storageTimeBudgetFlag, budget, storagePausedExitCode, atLeast, resumes, atLeast, resumes, storageTimeBudgetFlag, fits)
+		return true, fmt.Sprintf("ESTIMATE: the city's copy and clear take %s against --%s %s; this lane's rate is not measured, so whether the run pauses is not known. `--%s %s` or more runs the estimate in one", about, storageTimeBudgetFlag, budget, storageTimeBudgetFlag, fits)
 	}
+	fitsIn := fmt.Sprintf("`--%s %s` runs it in one", storageTimeBudgetFlag, fits)
+	if floor {
+		fitsIn = fmt.Sprintf("`--%s %s` or more may run it in one", storageTimeBudgetFlag, fits)
+	}
+	return true, fmt.Sprintf("ESTIMATE: the city's copy and clear take %s, over --%s %s: the run would pause (exit %d) %s%d time(s) and need %s%d resume(s) of the same command, and the city stays stopped until the last run finishes. %s",
+		about, storageTimeBudgetFlag, budget, storagePausedExitCode, atLeast, resumes, atLeast, resumes, fitsIn)
 }
 
 // splitBudgetFitting is a --time-budget the estimate fits in one run: a
@@ -374,10 +378,21 @@ func splitConvergedRefusal(cityPath string, split *config.City) error {
 		report = confirmInfraContainment(cityPath, target, prefix, io.Discard)
 	}
 	report.Target = target
-	if report.Outcome == infraMigrationConverged {
+	switch report.Outcome {
+	case infraMigrationConverged:
 		return fmt.Errorf("%s records that this city already moved its infrastructure classes into binding %s, and boot's check confirms the binding holds them: city.toml lost its [storage] block, not its split. Restore the block above and run `%s`; migrating again would copy the work store's slice over the binding", target.MarkerPath(), target.Binding, storageStatusInstruction())
+	case infraMigrationIdentityMismatch:
+		return fmt.Errorf("%s: %s", report.Outcome, strings.TrimPrefix(infraMigrationOperatorAdvice(report, prefix), prefix+": "))
+	case infraMigrationRetained, infraMigrationStranded:
+		// No [storage] and no served note: the binding was never served, so
+		// the work store is the current copy and boot's remedy for a served
+		// binding (clear the work store's copies) would lose its changes.
+		return fmt.Errorf("%s records a copy into binding %s that this city never served: city.toml has no [storage] and no note says it served one, so the work store holds the current rows, and boot's check of the binding reports %s. %s is a leftover. Move it aside and run this again. Restoring the [storage] block and clearing instead would discard every change made in the work store since %s was written", target.MarkerPath(), target.Binding, report.Outcome, target.Root, target.MarkerPath())
 	}
-	return fmt.Errorf("%s records an earlier split into binding %s, and boot's check of it reports %s: %s", target.MarkerPath(), target.Binding, report.Outcome, strings.TrimPrefix(infraMigrationOperatorAdvice(report, prefix), prefix+": "))
+	if report.Fault == nil {
+		report.Fault = errors.New("no reason recorded")
+	}
+	return fmt.Errorf("%s records an earlier copy into binding %s, and boot's check of it could not finish (%s: %w). Resolve that, or move %s aside, and run this again", target.MarkerPath(), target.Binding, report.Outcome, report.Fault, target.Root)
 }
 
 // splitStorageTOML renders cfg's [storage] as city.toml spells it.
@@ -618,8 +633,9 @@ func splitPreflightFooter(stdout io.Writer, request storageOperatorRequest, summ
 	if len(request.Cfg.Rigs) > 0 {
 		snapshot = append(snapshot, "--rigs")
 	}
+	snapshot = append(append(snapshot, "--"+storageFleetStoppedFlag), force...)
 	steps := []string{
-		strings.Join(append(snapshot, "--"+storageFleetStoppedFlag), " ") + "  (the disk estimate counts this snapshot; migrate takes none)",
+		strings.Join(snapshot, " ") + "  (the disk estimate counts this snapshot; migrate takes none)",
 		"add the [storage] block printed above to city.toml",
 		strings.Join(append([]string{storageClearInstruction()}, force...), " "),
 	}

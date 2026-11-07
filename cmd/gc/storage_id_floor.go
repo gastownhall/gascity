@@ -246,7 +246,8 @@ func reserveCityIDs(cityPath string, carried []string) (cityIDFloorResult, error
 // cityIDFloorPlan is the city work store's floor as it stands against the
 // carried ids, read without writing (preflight --split, doctor storage-split).
 type cityIDFloorPlan struct {
-	// Need is the min_hash_length the ids need, capped at bd's; 0 when none.
+	// Need is the min_hash_length the ids need, capped at bd's
+	// (rigImportHashFloor); 0 when none.
 	Need int
 	// Current is the min_hash_length in force (0 when unset).
 	Current int
@@ -268,7 +269,7 @@ func planCityIDFloor(cityPath string, ids []string) (cityIDFloorPlan, error) {
 	if surface.Conf == nil {
 		return cityIDFloorPlan{Skipped: surface.Skipped}, nil
 	}
-	plan := cityIDFloorPlan{Need: min(cityIDFloor(ids, surface.Prefix), bdMaxMintedHashLength), Hosted: surface.Hosted}
+	plan := cityIDFloorPlan{Need: cityIDFloor(ids, surface.Prefix), Hosted: surface.Hosted}
 	if plan.Need == 0 {
 		return plan, nil
 	}

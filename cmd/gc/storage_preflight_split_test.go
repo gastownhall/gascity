@@ -681,14 +681,28 @@ func TestSplitPreflightWritesNothingThroughTheRealOpener(t *testing.T) {
 // the work store over the binding.
 func TestSplitPreflightRefusesACityWithAConvergenceMarker(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		migrate func(testing.TB, string, *config.City, io.Writer) infraMigrationReport
-		want    string
+		name         string
+		migrate      func(testing.TB, string, *config.City, io.Writer) infraMigrationReport
+		otherStore   bool
+		want, absent []string
 	}{
-		{"cleared", migrateInfraClasses, "boot's check confirms the binding holds them"},
-		{"copies retained", func(tb testing.TB, city string, cfg *config.City, log io.Writer) infraMigrationReport {
-			return migrateInfraClassesRetainingSource(tb.(*testing.T), city, cfg, log)
-		}, "records an earlier split"},
+		{name: "cleared", migrate: migrateInfraClasses, want: []string{"boot's check confirms the binding holds them", "Restore the block above"}},
+		{
+			name: "copies retained",
+			migrate: func(tb testing.TB, city string, cfg *config.City, log io.Writer) infraMigrationReport {
+				return migrateInfraClassesRetainingSource(tb.(*testing.T), city, cfg, log)
+			},
+			// SHOULD-B: never served, so the work store is current and the
+			// binding a leftover; boot's served-binding remedy is not printed.
+			want:   []string{"never served", "retained-copies", "is a leftover", "Move it aside and run this again", "would discard every change made in the work store"},
+			absent: []string{"Do NOT revert", "clear them", "Restore the block above"},
+		},
+		{
+			// N2: a marker naming another work store.
+			name: "another work store", migrate: migrateInfraClasses, otherStore: true,
+			want:   []string{"identity-mismatch", "belongs to a different work store"},
+			absent: []string{"Restore the block above", "is a leftover"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request, _, _ := splitReadyCity(t, 30, nativeDoltLane)
@@ -702,6 +716,10 @@ func TestSplitPreflightRefusesACityWithAConvergenceMarker(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			target := mustResolveInfraTarget(t, request.CityPath, split)
+			if tc.otherStore {
+				setMarkerWorkStoreIdentity(t, target, "another-project")
+			}
 			// The plain preflight's short-circuit (M24): converged, nothing to
 			// copy, and no command named.
 			plain := request
@@ -714,10 +732,67 @@ func TestSplitPreflightRefusesACityWithAConvergenceMarker(t *testing.T) {
 			if code != 1 || !slices.Contains(summary.Blocks, "cutover") || summary.Estimate != nil {
 				t.Fatalf("exit %d, blocks %v, estimate %v:\n%s", code, summary.Blocks, summary.Estimate, out)
 			}
-			if !strings.Contains(out, tc.want) || strings.Contains(out, "Ready.") || strings.Contains(out, "Nothing to migrate") {
-				t.Errorf("the report lacks %q or names a migration:\n%s", tc.want, out)
+			for _, w := range append(tc.want, "[BLOCK] cutover") {
+				if !strings.Contains(out, w) {
+					t.Errorf("the report lacks %q:\n%s", w, out)
+				}
+			}
+			for _, a := range append(tc.absent, "Ready.", "Nothing to migrate", "[ok]    cutover") {
+				if strings.Contains(out, a) {
+					t.Errorf("the report says %q:\n%s", a, out)
+				}
 			}
 		})
+	}
+}
+
+// setMarkerWorkStoreIdentity rewrites a convergence marker's work-store line
+// to name project.
+func setMarkerWorkStoreIdentity(t *testing.T, target infraBindingTarget, project string) {
+	t.Helper()
+	data, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, workStoreIdentityLinePrefix) {
+			kept = append(kept, line)
+		}
+	}
+	other := workStoreIdentityLinePrefix + workStoreIdentity{ProjectID: project}.String()
+	if err := os.WriteFile(target.MarkerPath(), []byte(other+"\n"+strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAStaleMarkerFromAnotherWorkStoreIsHeld (SHOULD-A, M50): a stale marker
+// that names another work store is held as identity-mismatch by the plain
+// preflight, as the migration holds it, and by status, never offered the
+// re-copy that would rewrite the marker with this store's identity.
+func TestAStaleMarkerFromAnotherWorkStoreIsHeld(t *testing.T) {
+	request, cfg, _ := preflightReadyCity(t, 2)
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("migrating: %s: %s", got.Outcome, log.String())
+	}
+	target := mustResolveInfraTarget(t, request.CityPath, cfg)
+	setMarkerWorkStoreIdentity(t, target, "another-project")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(target.Database + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceStale {
+		t.Fatalf("state = %v, %v: the fixture is not stale", state, err)
+	}
+	var out bytes.Buffer
+	if code := doStoragePreflight(request, &out, io.Discard); code != 1 || !strings.Contains(out.String(), "[BLOCK] cutover") || !strings.Contains(out.String(), "identity-mismatch") || strings.Contains(out.String(), "the copy would run again") {
+		t.Errorf("preflight: exit %d:\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := doStorageStatusCity(request, &out, io.Discard); code != 1 || !strings.Contains(out.String(), "identity-mismatch") || strings.Contains(out.String(), "repair the binding with") {
+		t.Errorf("status: exit %d:\n%s", code, out.String())
 	}
 }
 
@@ -803,9 +878,9 @@ func TestSplitBudgetAdvice(t *testing.T) {
 	}{
 		{"no budget", 90 * time.Second, 0, false, false, []string{"no --time-budget", "stays stopped", "about 1m30s"}, nil},
 		{"fits", 30 * time.Second, time.Minute, false, false, []string{"would not pause", "about 30s"}, []string{"at least"}},
-		{"fits a floor", 30 * time.Second, time.Minute, true, true, []string{"at least 30s", "not known", "--time-budget 1m0s or more"}, []string{"would not pause", "about at least"}},
-		{"over", 90 * time.Second, time.Minute, false, true, []string{"about 1m30s", "pause (exit 75) 1 time(s)", "need 1 resume(s)", "stays stopped until the last run finishes", "--time-budget 2m0s runs it in one"}, []string{"at least"}},
-		{"over a floor", 150 * time.Second, time.Minute, true, true, []string{"at least 2m30s", "at least 2 time(s)", "need at least 2 resume(s)", "--time-budget 4m0s"}, []string{"about at least", "about"}},
+		{"fits a floor", 30 * time.Second, time.Minute, true, true, []string{"at least 30s", "not known", "`--time-budget 1m0s` or more"}, []string{"would not pause", "about at least"}},
+		{"over", 90 * time.Second, time.Minute, false, true, []string{"about 1m30s", "pause (exit 75) 1 time(s)", "need 1 resume(s)", "stays stopped until the last run finishes", "`--time-budget 2m0s` runs it in one"}, []string{"at least"}},
+		{"over a floor", 150 * time.Second, time.Minute, true, true, []string{"at least 2m30s", "at least 2 time(s)", "need at least 2 resume(s)", "`--time-budget 4m0s` or more"}, []string{"about at least", "about"}},
 	} {
 		note, text := splitBudgetAdvice(tc.city, tc.budget, tc.floor)
 		if note != tc.note {
@@ -876,11 +951,16 @@ func TestSplitBdVouchStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		inventory string
-		ok        bool
-		want      string
-	}{{inv, true, "matched inventory " + inv}, {"", false, "matches no pinned inventory"}} {
-		saveBdTrustCache(city, bdTrustCache{Entries: []bdTrustCacheEntry{{bdBinaryID: id, InventorySet: set, CheckedAt: time.Now(), bdTrustVerdict: bdTrustVerdict{Inventory: tc.inventory, Diffs: []string{"a diff"}}}}})
+		inventory, set string
+		ok             bool
+		want           string
+	}{
+		{inv, set, true, "matched inventory " + inv},
+		{"", set, false, "matches no pinned inventory"},
+		// N11: a verdict judged against another inventory set says nothing.
+		{inv, "another-set", false, "not checked"},
+	} {
+		saveBdTrustCache(city, bdTrustCache{Entries: []bdTrustCacheEntry{{bdBinaryID: id, InventorySet: tc.set, CheckedAt: time.Now(), bdTrustVerdict: bdTrustVerdict{Inventory: tc.inventory, Diffs: []string{"a diff"}}}}})
 		if got, ok := splitBdVouchStatus(city); ok != tc.ok || !strings.Contains(got, tc.want) {
 			t.Errorf("cached %q: %q, %t", tc.inventory, got, ok)
 		}
@@ -912,5 +992,75 @@ func TestSplitPreflightLaneWindowCarriesTheCitysConfig(t *testing.T) {
 	}
 	if activeMigrationWindow(request.CityPath) != nil {
 		t.Error("the lane window outlived the reads")
+	}
+}
+
+// TestSplitPreflightFloorReadsAndNeverWrites (N16, M51b): the floor row's
+// numbers come from the store's min_hash_length and the carried ids, an
+// 8-character suffix capped at bd's maximum, and the read sets nothing.
+func TestSplitPreflightFloorReadsAndNeverWrites(t *testing.T) {
+	conf := &fakeHashConfig{values: map[string]string{bdMinHashLengthKey: "3"}}
+	stubCityHashConfig(t, cityHashConfig{Conf: conf, Prefix: "mc"})
+	found := preflightFindings{rows: []beads.Bead{{ID: "mc-abc"}, {ID: "mc-abcdefgh"}, {ID: "other-abcdefghi"}}}
+	var out bytes.Buffer
+	splitPreflightFloor(t.TempDir(), found, &out)
+	if want := "the split raises " + bdMinHashLengthKey + " from 3 to 8"; !strings.Contains(out.String(), want) {
+		t.Errorf("floor row %q, want %q", out.String(), want)
+	}
+	if len(conf.sets) != 0 {
+		t.Errorf("the floor read wrote %v", conf.sets)
+	}
+}
+
+// TestSplitPreflightCountsTheRigsItWouldImport (M17, M21, N7, N8): a rig
+// whose import moves rows adds them to the binding's disk estimate, and Ready
+// snapshots the rigs and imports them, every step carrying --force.
+func TestSplitPreflightCountsTheRigsItWouldImport(t *testing.T) {
+	bare, _, _ := splitReadyCity(t, 20, nativeDoltLane)
+	_, without, _ := runSplitPreflight(t, bare)
+	if without.Estimate == nil {
+		t.Fatal("no estimate without the rig")
+	}
+	request, _, _ := splitReadyCity(t, 20, nativeDoltLane)
+	request.Force = storageForce{RemoteRuntime: true}
+	rigPath := t.TempDir()
+	request.Cfg.Rigs = []config.Rig{{Name: "alpha", Prefix: "ga", Path: rigPath}}
+	rig := beads.NewMemStore()
+	rig.IDPrefix = "ga"
+	row := mustCreateInfraBead(t, rig, beads.Bead{Title: "a session the rig still holds", Type: "session"})
+	prev := openStorageScopeStore
+	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+		if storePath == rigPath {
+			return rig, nil
+		}
+		return prev(storePath, cityPath)
+	}
+	t.Cleanup(func() { openStorageScopeStore = prev })
+	code, summary, out := runSplitPreflight(t, request)
+	if code != 0 || summary.Estimate == nil || !summary.RigImports || summary.Estimate.input.rigRows == 0 {
+		t.Fatalf("exit %d, %+v:\n%s", code, summary, out)
+	}
+	if got, least := summary.Estimate.disk.binding, without.Estimate.disk.binding+splitBindingPerJSONByte*splitJSONBytes([]beads.Bead{row}); got < least {
+		t.Errorf("binding estimate %d with the rig, want at least %d (the city's plus the rig row's)", got, least)
+	}
+	for _, want := range []string{
+		"1. gc storage snapshot --work --rigs --fleet-stopped --force=remote-runtime",
+		"3. " + storageClearInstruction() + " --force=remote-runtime",
+		"4. gc storage migrate --from-rigs --fleet-stopped --force=remote-runtime",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Ready lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestSplitPreflightMarksAFloorLanesEstimate (M12a): on a lane whose rates
+// are a floor, the estimate row says "at least", never "about".
+func TestSplitPreflightMarksAFloorLanesEstimate(t *testing.T) {
+	proxied := beads.BeadsDiagnostic{Store: beads.BeadsStoreNameNativeDoltStore, Proxied: &beads.ProxiedDiagnostic{}}
+	request, _, _ := splitReadyCity(t, 20, proxied)
+	code, _, out := runSplitPreflight(t, request)
+	if code != 0 || !strings.Contains(out, "and clear at least ") || strings.Contains(out, "and clear about ") {
+		t.Fatalf("exit %d:\n%s", code, out)
 	}
 }
