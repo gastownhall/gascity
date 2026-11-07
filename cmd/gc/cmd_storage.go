@@ -345,7 +345,8 @@ open row the binding minted for a rig's scope, an edge that would join two
 open rows in different stores, and an edge payload its destination cannot
 write. An explicit session_reconciler = "v2" refuses too, unless
 --reconciler=legacy rewrites it in the same edit. --dry-run prints the plan
-and every refusal and writes nothing.
+and every refusal and writes nothing; it takes no lock and needs no
+--fleet-stopped, so it rehearses on a live city.
 
 --to-rigs --rig X returns rig X's imported rows to its store and keeps the
 city split: the binding's copies go once the rig's are proven, and the rig
@@ -438,7 +439,7 @@ open, boot and the other storage commands refuse the city.`,
 	cmd.Flags().StringVar(&reconciler, storageReconcilerFlag, "",
 		"with --"+storageToWorkFlag+", rewrite [daemon] session_reconciler to this value (legacy) in the same city.toml edit")
 	cmd.Flags().BoolVar(&dryRun, storageDryRunFlag, false,
-		"with --"+storageToWorkFlag+" or --"+storageToRigsFlag+", print what would move and every refusal, and write nothing")
+		"with --"+storageToWorkFlag+" or --"+storageToRigsFlag+", print what would move and every refusal, and write nothing (no lock, no --"+storageFleetStoppedFlag+": a live rehearsal)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	addStorageForceFlag(cmd, &forced)

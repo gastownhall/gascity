@@ -42,8 +42,12 @@ func reverseCityTOMLText(reconciler string, rigs ...config.Rig) string {
 type reverseEngineCity struct {
 	engineCity
 	request storageOperatorRequest
-	// before is the work store as the forward migration found it.
-	before map[string]beads.Bead
+	// before is the work store as the forward migration found it, and
+	// afterForward as the forward migration left it.
+	before, afterForward map[string]beads.Bead
+	// extraEdges are edges a test added to the work store beside the
+	// fixture's own (c.deps).
+	extraEdges map[[2]string]string
 }
 
 func newReverseEngineCity(t *testing.T, rows int, reconciler string) reverseEngineCity {
@@ -68,6 +72,7 @@ func newReverseEngineCity(t *testing.T, rows int, reconciler string) reverseEngi
 		t.Fatalf("loading the city: %v", err)
 	}
 	stubInfraControllerPing(t, 0)
+	seedEveryCarriedField(t, city.source)
 	before := map[string]beads.Bead{}
 	for _, b := range rigTestList(t, city.source) {
 		before[b.ID] = b
@@ -83,7 +88,42 @@ func newReverseEngineCity(t *testing.T, rows int, reconciler string) reverseEngi
 	if err := recordServedBinding(plan, city.cityPath, cfg.EffectiveStorage(), city.target); err != nil {
 		t.Fatal(err)
 	}
-	return reverseEngineCity{engineCity: city, request: storageOperatorRequest{CityPath: city.cityPath, Cfg: cfg, FleetStopped: true}, before: before}
+	afterForward := map[string]beads.Bead{}
+	for _, b := range rigTestList(t, city.source) {
+		afterForward[b.ID] = b
+	}
+	return reverseEngineCity{engineCity: city, request: storageOperatorRequest{CityPath: city.cityPath, Cfg: cfg, FleetStopped: true}, before: before, afterForward: afterForward, extraEdges: map[[2]string]string{}}
+}
+
+// seedEveryCarriedField adds infrastructure rows carrying every field a copy
+// carries (priority, description, defer_until, step ref, close reason,
+// no-history, a parent with no parent-child edge, as retry and Ralph beads
+// are created) to the work store before the split.
+func seedEveryCarriedField(t *testing.T, source beads.Store) {
+	t.Helper()
+	under, _, _ := unwrapBeadPolicyStore(source)
+	creator := under.(beads.ForeignIDCreator)
+	at := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	deferred := at.Add(30 * 24 * time.Hour)
+	one, zero := 1, 0
+	for _, b := range []beads.Bead{
+		{
+			ID: "mc-f00001", Title: "a root with every field", Type: "molecule", Status: "closed", CloseReason: "finished", Priority: &one, Description: "the root's body",
+			Metadata: beads.StringMap{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}, CreatedAt: at, UpdatedAt: at.Add(time.Hour),
+		},
+		{
+			ID: "mc-f00002", Title: "a retry step", Type: "task", Status: "open", ParentID: "mc-f00001", Ref: "step-review", Priority: &zero, DeferUntil: &deferred, Description: "retry 2",
+			Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "mc-f00001"}, CreatedAt: at.Add(time.Minute), UpdatedAt: at.Add(2 * time.Minute),
+		},
+		{
+			ID: "mc-f00003", Title: "a no-history session", Type: "session", Status: "closed", CloseReason: "drained", NoHistory: true, Labels: []string{"gc:session"},
+			Metadata: beads.StringMap{"session_id": "mc-f00003"}, CreatedAt: at.Add(2 * time.Minute), UpdatedAt: at.Add(3 * time.Minute),
+		},
+	} {
+		if _, err := creator.CreateWithForeignID(b); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func (c reverseEngineCity) reverse(t *testing.T, opts reverseOptions) (int, string, string) {
@@ -139,13 +179,24 @@ func (c reverseEngineCity) assertReversedNotLossy(t *testing.T) {
 		if !ok {
 			t.Fatalf("the work store lost %s", id)
 		}
-		w, gg := withoutReverseStamps(want), withoutReverseStamps(g)
-		if want.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] == "" && g.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != "" {
-			// The forward clear recorded the edges it dropped on this work
-			// bead, which bumped its updated_at; the reverse leaves it be.
-			w.UpdatedAt, gg.UpdatedAt = time.Time{}, time.Time{}
+		// An infrastructure row is the row the split found, but for the
+		// reverse's own stamp: gc.infra_migrated_from and
+		// gc.migrated_cross_edges compare too. A work row never moved, so it
+		// is the row the forward migration left (its clear recorded the edges
+		// it dropped on it).
+		w := want
+		if !isInfra(want) {
+			w = c.afterForward[id]
 		}
-		if diff := beadCopyDifference(w, gg); diff != "" {
+		gg := g
+		gg.Metadata = beads.StringMap{}
+		for k, v := range g.Metadata {
+			if k != beadmeta.InfraReversedFromMetadataKey {
+				gg.Metadata[k] = v
+			}
+		}
+		gg.IsBlocked, w.IsBlocked = nil, nil
+		if diff := reverseExactDifference(w, gg); diff != "" {
 			t.Fatalf("row %s differs after the round trip: %s", id, diff)
 		}
 		stamped := g.Metadata[beadmeta.InfraReversedFromMetadataKey] != ""
@@ -160,6 +211,9 @@ func (c reverseEngineCity) assertReversedNotLossy(t *testing.T) {
 	wantEdges := map[[2]string]string{}
 	for _, d := range c.deps {
 		wantEdges[[2]string{d.IssueID, d.DependsOnID}] = d.Type
+	}
+	for k, v := range c.extraEdges {
+		wantEdges[k] = v
 	}
 	gotEdges := 0
 	for id := range got {
@@ -186,6 +240,18 @@ func (c reverseEngineCity) assertReversedNotLossy(t *testing.T) {
 	if gotEdges != len(wantEdges) {
 		t.Fatalf("the work store holds %d edges after the reverse, want the %d it held before the split", gotEdges, len(wantEdges))
 	}
+}
+
+// reverseExactDifference is beadCopyDifference with every key compared,
+// gc.infra_migrated_from included.
+func reverseExactDifference(want, got beads.Bead) string {
+	if diff := beadCopyDifference(want, got); diff != "" {
+		return diff
+	}
+	if want.Metadata[infraMigrationStampKey] != got.Metadata[infraMigrationStampKey] {
+		return fmt.Sprintf("%s %q != %q", infraMigrationStampKey, want.Metadata[infraMigrationStampKey], got.Metadata[infraMigrationStampKey])
+	}
+	return ""
 }
 
 // assertRevertedCityServesSingleStore proves a finished --to-work: no
@@ -231,7 +297,7 @@ func (c reverseEngineCity) assertRevertedCityServesSingleStore(t *testing.T) {
 func TestReverseToWorkRoundTripsAnMCShapedCity(t *testing.T) {
 	city := newReverseEngineCity(t, 300, "")
 	closeBindingGates(t, city)
-	floor := filepath.Join(city.cityPath, ".gc", reverseMinGCVersionName)
+	floor := minGCVersionPath(city.cityPath)
 	if err := os.WriteFile(floor, []byte("1.6.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +454,7 @@ func TestAbortReverseRemovesExactlyTheStampedRows(t *testing.T) {
 			city := newReverseEngineCity(t, 300, "")
 			closeBindingGates(t, city)
 			tomlBefore, _ := os.ReadFile(filepath.Join(city.cityPath, "city.toml"))
-			if err := os.WriteFile(filepath.Join(city.cityPath, ".gc", reverseMinGCVersionName), []byte("1.6.0\n"), 0o644); err != nil {
+			if err := os.WriteFile(minGCVersionPath(city.cityPath), []byte("1.6.0\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			under, _, _ := unwrapBeadPolicyStore(city.source)
@@ -422,7 +488,7 @@ func TestAbortReverseRemovesExactlyTheStampedRows(t *testing.T) {
 			if got, _ := os.ReadFile(filepath.Join(city.cityPath, "city.toml")); !bytes.Equal(got, tomlBefore) {
 				t.Fatalf("the abort did not put city.toml back:\n%s", got)
 			}
-			for _, path := range []string{bornSplitServedNotePath(city.cityPath), infraClearedNotePath(city.cityPath), filepath.Join(city.cityPath, ".gc", reverseMinGCVersionName), city.target.MarkerPath()} {
+			for _, path := range []string{bornSplitServedNotePath(city.cityPath), infraClearedNotePath(city.cityPath), minGCVersionPath(city.cityPath), city.target.MarkerPath()} {
 				if !fileExists(path) {
 					t.Fatalf("%s is gone after the abort", path)
 				}
@@ -493,26 +559,40 @@ func TestReverseRefusesAnExplicitV2Reconciler(t *testing.T) {
 // pre-split bytes and nothing else changed since, R4 writes those bytes back;
 // once something else changed, it removes [storage] in place instead.
 func TestReverseRestoresThePreSplitCityTOML(t *testing.T) {
-	for _, tc := range []struct{ changed, badSum bool }{{false, false}, {true, false}, {false, true}} {
-		changed := tc.changed || tc.badSum
-		t.Run(fmt.Sprintf("changed=%v badSum=%v", tc.changed, tc.badSum), func(t *testing.T) {
+	// edited: the operator changed city.toml after the split (a comment
+	// only, or a value), so the split's after-sum no longer matches.
+	for _, tc := range []struct {
+		name   string
+		edit   func(string) string
+		badSum bool
+	}{
+		{"unchanged since the split", nil, false},
+		{"a comment edited since", func(s string) string { return strings.Replace(s, "# trailing comment", "# an operator's note", 1) }, false},
+		{"a value edited since", func(s string) string { return strings.Replace(s, `name = "reverse-city"`, `name = "renamed-since"`, 1) }, false},
+		{"a journal that does not prove", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			city := newReverseEngineCity(t, 60, "")
 			closeBindingGates(t, city)
 			path := filepath.Join(city.cityPath, "city.toml")
+			written, _ := os.ReadFile(path)
+			pre := "# the operator's own layout\n[workspace]\nname = \"reverse-city\"\n"
+			after := sha256Hex(written)
+			if tc.edit != nil {
+				if err := os.WriteFile(path, []byte(tc.edit(string(written))), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			current, _ := os.ReadFile(path)
 			removed, err := config.RemoveStorageFromCityTOML(current)
 			if err != nil {
 				t.Fatal(err)
 			}
-			pre := strings.Replace(string(removed), "# a city that was split", "# the operator's own layout", 1)
-			if tc.changed {
-				pre = strings.Replace(pre, `name = "reverse-city"`, `name = "renamed-since"`, 1)
-			}
 			sum := sha256Hex([]byte(pre))
 			if tc.badSum {
 				sum = sha256Hex([]byte("other bytes"))
 			}
-			journal := fmt.Sprintf(`{"city_toml_before": %q, "city_toml_before_sha256": %q}`, pre, sum)
+			journal := fmt.Sprintf(`{"city_toml_before": %q, "city_toml_before_sha256": %q, "city_toml_after_sha256": %q}`, pre, sum, after)
 			if err := os.WriteFile(filepath.Join(city.cityPath, ".gc", storageSplitJournalName), []byte(journal), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -520,11 +600,12 @@ func TestReverseRestoresThePreSplitCityTOML(t *testing.T) {
 				t.Fatalf("--to-work = %d: %s%s", code, stdout, stderr)
 			}
 			got, _ := os.ReadFile(path)
-			if want := !changed; (string(got) == pre) != want {
-				t.Fatalf("restored the pre-split bytes = %v, want %v:\n%s", string(got) == pre, want, got)
+			restore := tc.edit == nil && !tc.badSum
+			if (string(got) == pre) != restore {
+				t.Fatalf("restored the pre-split bytes = %v, want %v:\n%s", string(got) == pre, restore, got)
 			}
-			if changed && !bytes.Equal(got, removed) {
-				t.Fatalf("[storage] was not removed in place:\n%s", got)
+			if !restore && !bytes.Equal(got, removed) {
+				t.Fatalf("[storage] was not removed in place, keeping every edit:\n%s", got)
 			}
 		})
 	}
@@ -650,7 +731,14 @@ func TestReverseClosedGatesAndD8(t *testing.T) {
 		t.Fatalf("the reverse did not report the gates: %s", stdout)
 	}
 	// Every original edge is back, gated ones included.
-	city.before[born.ID] = got
+	want := got
+	want.Metadata = beads.StringMap{}
+	for k, v := range got.Metadata {
+		if k != beadmeta.InfraReversedFromMetadataKey {
+			want.Metadata[k] = v
+		}
+	}
+	city.before[born.ID] = want
 	city.assertReversedNotLossy(t)
 }
 

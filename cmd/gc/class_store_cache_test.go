@@ -137,6 +137,7 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// The reverse migration's created form (S5-G), engine-only: the reverse
 	// opens the store it copies into itself.
 	"CreatedForm":          nil,
+	"AcceptsDanglingDep":   nil,
 	"DepAddBatch":          nil,
 	"DepMetadataBatch":     nil,
 	"DepRemoveBatch":       nil,

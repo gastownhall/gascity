@@ -78,6 +78,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"ApplyGraphPlanWithStorage": nativeStoreMutation,
 	"CreateWithForeignID":       nativeStoreMutation,
 	"CreateWithForeignIDBatch":  nativeStoreMutation,
+	"DepAddBatch":               nativeStoreMutation,
+	"AcceptsDanglingDep":        nativeStoreLifecycle,
 	// CreatedForm converts a bead; it reads the scope's types.infra once.
 	"CreatedForm":                 nativeStoreRead,
 	"CloseIfMatch":                nativeStoreMutation,

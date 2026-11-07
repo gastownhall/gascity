@@ -49,8 +49,21 @@ type reverseTarget struct {
 	// be asked.
 	payloads func(edges map[string][]beads.Dep) (map[beads.DepPair]string, error)
 	// form is the store's created form (beads.CreatedFormer), or nil.
-	form  func(beads.Bead) (beads.Bead, error)
-	close func()
+	form func(beads.Bead) (beads.Bead, error)
+	// acceptsDangling reports whether the store keeps an edge whose target
+	// it does not hold (beads.DanglingDepJudge; true without one).
+	acceptsDangling func(issueID, dependsOnID string) bool
+	close           func()
+}
+
+// dropsRef reports whether the store keeps no step ref (its created form
+// drops it).
+func (t *reverseTarget) dropsRef() bool {
+	if t.form == nil {
+		return false
+	}
+	got, err := t.form(beads.Bead{ID: "probe", Title: "probe", Ref: "probe"})
+	return err == nil && got.Ref == ""
 }
 
 // reverseTargetOpener opens a destination; tests replace it.
@@ -99,6 +112,9 @@ func openReverseTarget(cityPath string, cfg *config.City, dest string) (*reverse
 			t.unsupported = "it is a generic exec store whose provider offers no import op (listed by its capabilities op), so it cannot take a bead under its own id"
 		}
 	}
+	if fidelity, ok := beads.As[beads.ForeignIDCreateFidelity](under); ok && !fidelity.ForeignIDCreateKeepsRows() && t.unsupported == "" {
+		t.unsupported = fmt.Sprintf("store %s is a proxied store whose write leaf has no create that keeps a bead's id, status and timestamps (it falls back to a plain create)", t.engine)
+	}
 	if t.create == nil && t.unsupported == "" {
 		t.unsupported = fmt.Sprintf("store %s cannot create a bead under its own id", t.engine)
 	}
@@ -139,6 +155,10 @@ func openReverseTarget(cityPath string, cfg *config.City, dest string) (*reverse
 	}
 	if former, ok := beads.As[beads.CreatedFormer](under); ok {
 		t.form = former.CreatedForm
+	}
+	t.acceptsDangling = func(string, string) bool { return true }
+	if judge, ok := beads.As[beads.DanglingDepJudge](under); ok {
+		t.acceptsDangling = judge.AcceptsDanglingDep
 	}
 	return t, nil
 }
@@ -205,6 +225,9 @@ func reverseCopyInto(t *reverseTarget, reopen func() (*reverseTarget, error), ro
 	kept := map[string]bool{}
 	var drop []string
 	for _, b := range stamped {
+		if b.Metadata[beadmeta.InfraReversedFromMetadataKey] != stamp {
+			continue // only this run's rows are ever deleted
+		}
 		w, ok := want[b.ID]
 		keep := ok && reverseRowDifference(t.form, w, b) == ""
 		for _, d := range existing[b.ID] {
@@ -357,36 +380,33 @@ func reverseVerify(reopen func() (*reverseTarget, error), rows []beads.Bead, edg
 // reverseDeleteRows removes ids from t with every edge that joins one of them
 // to a row that stays, first: a store's delete rewrites a surviving
 // neighbor's text that names a deleted id, and finds the neighbors by their
-// edges (rigImportClear).
+// edges (rigImportClear). The edges onto the ids are found from the down edges
+// of every row the store holds, read in batches.
 func reverseDeleteRows(t *reverseTarget, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	sort.Strings(ids)
 	going := setOf(ids)
-	down, err := t.down(ids)
+	all, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return fmt.Errorf("listing %s: %w", reverseDestNoun(t.dest), err)
+	}
+	every := make([]string, 0, len(all))
+	for _, b := range all {
+		every = append(every, b.ID)
+	}
+	down, err := t.down(every)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		for _, d := range down[id] {
-			if going[d.DependsOnID] || strings.HasPrefix(d.DependsOnID, "external:") {
+	for _, from := range sortedMapKeys(down) {
+		for _, d := range down[from] {
+			if going[from] == going[d.DependsOnID] || strings.HasPrefix(d.DependsOnID, "external:") {
 				continue
 			}
-			if err := t.rows.DepRemove(id, d.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return fmt.Errorf("removing dep %s -> %s: %w", id, d.DependsOnID, err)
-			}
-		}
-		up, err := t.rows.DepList(id, "up")
-		if err != nil {
-			return fmt.Errorf("listing the dependents of %s: %w", id, err)
-		}
-		for _, d := range up {
-			if going[d.IssueID] {
-				continue
-			}
-			if err := t.rows.DepRemove(d.IssueID, id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-				return fmt.Errorf("removing dep %s -> %s: %w", d.IssueID, id, err)
+			if err := t.rows.DepRemove(from, d.DependsOnID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+				return fmt.Errorf("removing dep %s -> %s: %w", from, d.DependsOnID, err)
 			}
 		}
 	}
@@ -394,4 +414,58 @@ func reverseDeleteRows(t *reverseTarget, ids []string) error {
 		return fmt.Errorf("removing %d row(s) from %s: %w", len(ids), reverseDestNoun(t.dest), err)
 	}
 	return nil
+}
+
+// reverseEdgesOnto reads, from every row t holds that ids does not name, the
+// edges onto one of ids, with their payloads: the edges the store held onto a
+// planned id before the reverse wrote anything (an earlier clear re-added
+// W -> D with D only in the binding), which a delete of D would take with it.
+func reverseEdgesOnto(t *reverseTarget, ids map[string]bool) ([]reverseEdge, error) {
+	all, err := t.rows.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing %s: %w", reverseDestNoun(t.dest), err)
+	}
+	from := make([]string, 0, len(all))
+	for _, b := range all {
+		if !ids[b.ID] {
+			from = append(from, b.ID)
+		}
+	}
+	down, err := t.down(from)
+	if err != nil {
+		return nil, err
+	}
+	onto := map[string][]beads.Dep{}
+	for id, deps := range down {
+		for _, d := range deps {
+			if ids[d.DependsOnID] {
+				onto[id] = append(onto[id], d)
+			}
+		}
+	}
+	payloads := map[beads.DepPair]string{}
+	if t.payloads != nil && len(onto) > 0 {
+		if payloads, err = t.payloads(onto); err != nil {
+			return nil, err
+		}
+	}
+	var out []reverseEdge
+	for _, id := range sortedMapKeys(onto) {
+		for _, d := range onto[id] {
+			out = append(out, reverseEdge{From: id, To: d.DependsOnID, Type: d.Type, Payload: payloads[beads.DepPair{IssueID: id, DependsOnID: d.DependsOnID}]})
+		}
+	}
+	return out, nil
+}
+
+// reverseEdge is one edge as the journal records it.
+type reverseEdge struct {
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Type    string `json:"type"`
+	Payload string `json:"payload,omitempty"`
+}
+
+func (e reverseEdge) dep() beads.DepWithPayload {
+	return beads.DepWithPayload{Dep: beads.Dep{IssueID: e.From, DependsOnID: e.To, Type: e.Type}, Payload: e.Payload}
 }
