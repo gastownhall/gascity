@@ -125,6 +125,38 @@ Bazel does not serve, such as the macOS jobs. Workflow jobs that still run a
 Go-native suite call these `-go` names explicitly, so each workflow says
 which engine it uses.
 
+`make check-affected` is the pre-flight sized to a branch. It diffs the
+working tree against the merge base with `AFFECTED_BASE` (default
+`origin/HEAD`), untracked files included, and runs:
+
+- the shell guards shared with `make check`, with formatting limited to changed Go files;
+- nogo over changed packages and every package that imports them (`make lint-targets`);
+- `bazel test` over every registered unit test target in each selected Go package,
+  including auxiliary `go_test` and variant targets (`make test-bazel-targets`).
+  Selection includes changed packages, packages containing a direct reader of a changed
+  file, and importers while there are at most `AFFECTED_MAX_RDEP_TESTS` (5). Aggregate
+  readers through filegroups run while there are at most `AFFECTED_MAX_READER_TESTS` (5).
+  Direct readers outside Go packages run as their declared Bazel test targets.
+
+Target names come from Bazel's graph, never a guessed `<package>_test` name.
+Manual targets remain in their explicitly invoked tiers, and the runner does not
+add integration or acceptance configuration. Those tiers still require their
+matching commands above. Packages with untagged Go tests but no registered
+`go_test` fail closed with a `make bazel-sync` remedy.
+
+A diff that touches the Go module, Bazel's module or workspace configuration,
+a `.bzl` file, `tools/`, `third_party/`, the Makefile, the linter
+configuration, the root BUILD file, or a BUILD file outside a Go package requires
+the full `make check` on a remote executor or CI. The same holds for a Go file
+outside every package and any failed, unsupported or ambiguous selection.
+`check-affected` exits nonzero with the reason and recovery command; it never
+starts a whole-repository local suite or invokes `check-go` as a fallback.
+A changed package without a BUILD file fails until `make bazel-sync` writes one.
+Human/offline Go-native checks remain explicit: `make check-go` or
+`make test-go-pkgs GO_TEST_PKGS='./internal/config'`; they are not the Bazel gate.
+`make check-affected AFFECTED_ACTION=plan` prints the selection without
+running checks. The selector is `scripts/affected-preflight`.
+
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`
 with `GC_FAST_UNIT=0`:
