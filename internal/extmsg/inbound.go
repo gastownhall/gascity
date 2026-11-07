@@ -4,10 +4,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+// ShouldReplayInboundNormalized reports whether the inbound handler should
+// repeat HandleInboundNormalized once after err. A retryable fault (the entry
+// may already be stored, or a redelivery would dedupe onto it) deserves one
+// bounded replay before the error maps to a status; a permanent rejection
+// re-resolves identically, and a dead context has no business starting one.
+// A blank provider message ID leaves the replay no dedupe key, so the message
+// would store twice: it is not replayable.
+func ShouldReplayInboundNormalized(ctx context.Context, err error, providerMessageID string) bool {
+	if err == nil {
+		return false
+	}
+	if strings.TrimSpace(providerMessageID) == "" {
+		return false
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	switch {
+	case errors.Is(err, ErrInvalidInput),
+		errors.Is(err, ErrInvalidConversation),
+		errors.Is(err, ErrInvariantViolation):
+		return false
+	}
+	return true
+}
 
 // InboundResult captures the outcome of processing an inbound message.
 // TargetSessionID is set when the conversation is bound to a concrete

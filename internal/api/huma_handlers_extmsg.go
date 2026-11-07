@@ -58,6 +58,14 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
+		if handleErr != nil && extmsg.ShouldReplayInboundNormalized(ctx, handleErr, input.Body.Message.ProviderMessageID) {
+			// One bounded replay: a retryable fault can strike after the
+			// message is stored (the ambiguous-create case), and the second
+			// pass dedupes onto the stored entry by provider message ID.
+			// Exactly one replay, never more — the adapter's redelivery is
+			// the retry loop for anything that still fails.
+			result, handleErr = extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
+		}
 		if handleErr != nil {
 			// HandleInboundNormalized fails in one of two classes. Permanent
 			// rejections (a malformed/unroutable conversation, or an invariant
