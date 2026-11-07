@@ -37,6 +37,26 @@ func (s *Server) humaExtmsgAdapterRegistry() (*extmsg.AdapterRegistry, error) {
 
 // --- Inbound ---
 
+// extmsgInboundReplayable reports whether a failed normalized inbound may be
+// replayed once before the handler answers. Only a transient fault qualifies,
+// the request must still be live, and the message must carry a provider
+// message ID: that ID is what lets the replay resolve an entry the failed
+// attempt stored instead of storing the message twice.
+func extmsgInboundReplayable(ctx context.Context, err error, msg extmsg.ExternalInboundMessage) bool {
+	switch {
+	case strings.TrimSpace(msg.ProviderMessageID) == "",
+		ctx.Err() != nil,
+		errors.Is(err, extmsg.ErrInvalidInput),
+		errors.Is(err, extmsg.ErrInvalidConversation),
+		errors.Is(err, extmsg.ErrInvariantViolation),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		return false
+	default:
+		return true
+	}
+}
+
 // humaHandleExtMsgInbound is the Huma-typed handler for POST /v0/extmsg/inbound.
 func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInboundInput) (*ExtMsgInboundOutput, error) {
 	svc, err := s.humaExtmsgServices()
@@ -58,6 +78,17 @@ func (s *Server) humaHandleExtMsgInbound(ctx context.Context, input *ExtMsgInbou
 	// Pre-normalized path.
 	if input.Body.Message != nil {
 		result, handleErr := extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
+		if handleErr != nil && extmsgInboundReplayable(ctx, handleErr, *input.Body.Message) {
+			// A transient fault can follow a transcript write that landed: the
+			// store reported the entry create as failed after committing it, or
+			// the next_sequence advance after the create failed. Answering 5xx
+			// then leaves the stored message unannounced unless the adapter
+			// retries. Replay it once here: Append resolves a stored entry by
+			// provider_message_id before it writes, so the replay finds the entry
+			// (and makes it visible to transcript readers) instead of storing a
+			// second copy, and the members are notified below.
+			result, handleErr = extmsg.HandleInboundNormalized(ctx, deps, *input.Body.Message)
+		}
 		if handleErr != nil {
 			// HandleInboundNormalized fails in one of two classes. Permanent
 			// rejections (a malformed/unroutable conversation, or an invariant
