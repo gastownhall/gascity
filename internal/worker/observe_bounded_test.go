@@ -405,3 +405,41 @@ func TestObserveBoundedRejectsBlankKey(t *testing.T) {
 		}
 	})
 }
+
+// ObserveBounded is runtime.CallBounded under the worker's name: one
+// implementation, one table of outstanding keys, one sentinel. A call the
+// session layer has outstanding under a key (it cannot import this package)
+// must hold that key against ObserveBounded too, and the refusal must match
+// both names of the sentinel.
+func TestObserveBoundedSharesOutstandingKeysWithRuntimeCallBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		wedge := newWedgedObservation()
+		defer wedge.unblock()
+		key := t.Name()
+		ctx, cancel := context.WithTimeout(context.Background(), observeBound)
+		defer cancel()
+		if _, err := runtime.CallBounded(ctx, key, wedge.observe); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("runtime.CallBounded on a wedged call: err = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+		}
+
+		var spawned atomic.Int64
+		_, err := observeWithinBound(t, key, func(context.Context) (int, error) {
+			spawned.Add(1)
+			return 2, nil
+		})
+
+		if got := spawned.Load(); got != 0 {
+			t.Fatalf("ObserveBounded started %d observations while runtime.CallBounded held the key, want 0", got)
+		}
+		if !errors.Is(err, ErrObservationOutstanding) || !errors.Is(err, runtime.ErrBoundedCallOutstanding) {
+			t.Fatalf("err = %v, want it to match ErrObservationOutstanding and runtime.ErrBoundedCallOutstanding", err)
+		}
+
+		wedge.unblock()
+		synctest.Wait()
+		got, err := observeWithinBound(t, key, func(context.Context) (int, error) { return 6, nil })
+		if err != nil || got != 6 {
+			t.Fatalf("after the runtime call returned, ObserveBounded = (%d, %v), want the key released and (6, nil)", got, err)
+		}
+	})
+}

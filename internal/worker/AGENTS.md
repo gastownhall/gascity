@@ -37,6 +37,13 @@ wait can hang on a wedged tmux subprocess or a stalled store, and nothing
 cancels it, so the wait is raced against the caller's context and abandoned
 when the context ends. Take the bound from the caller's own context.
 
+The implementation is `runtime.CallBounded` and `runtime.CallShared`
+(`internal/runtime/bounded_call.go`); `ObserveBounded`, `ObserveShared` and
+`ErrObservationOutstanding` are the same functions and sentinel under the
+worker's names. It lives below `internal/session`, which cannot import this
+package, so a layer below the worker bounds its calls with the same
+implementation and the same tables of outstanding keys.
+
 - An abandoned wait is an error wrapping both `runtime.ErrRuntimeUnavailable`
   and the context error. It is never a confirmed absence: callers must treat it
   as "do not know" (`SESSION-RUNTIME-009`), not as `ErrSessionNotFound`.
