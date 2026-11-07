@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +22,32 @@ type managedDoltSQLHealthReport struct {
 	QueryReady      bool
 	ReadOnly        string
 	ConnectionCount string
+	// Database is the scope database the check was asked to prove. It is
+	// empty when the caller named none, and then DatabaseReady and
+	// DatabaseError carry no information.
+	Database string
+	// DatabaseReady is true only when Database is present, its default
+	// branch head resolves, and (with the read-only check) a sample write
+	// and read-back against it succeed. A server that answers SQL while the
+	// city database is missing or unreadable must not read as healthy.
+	DatabaseReady bool
+	// DatabaseError says which database check failed when DatabaseReady is
+	// false.
+	DatabaseError string
 }
+
+// managedDoltHealthTarget names the scope database a health check must prove
+// resolvable and readable. DataDir is the managed server's data directory and
+// is set only when gc owns the server: an external endpoint's databases live
+// somewhere this host cannot see.
+type managedDoltHealthTarget struct {
+	Database string
+	DataDir  string
+}
+
+// managedDoltCommitHashPattern matches a Dolt commit hash as DOLT_HASHOF
+// returns it: 32 characters of Dolt's base32 alphabet.
+var managedDoltCommitHashPattern = regexp.MustCompile(`^[0-9a-v]{32}$`)
 
 // managedDoltProbeDatabase is the legacy dedicated probe database name. The
 // read-only probe no longer creates or writes to it: Dolt's autostats subsystem
@@ -40,6 +67,8 @@ var errManagedDoltNoUserDatabase = errors.New("no user database available for ma
 var (
 	managedDoltQueryProbeDirectFn      = managedDoltQueryProbeDirect
 	managedDoltReadOnlyStateDirectFn   = managedDoltReadOnlyStateDirect
+	managedDoltDatabaseHeadDirectFn    = managedDoltDatabaseHeadDirect
+	managedDoltProbeReadBackDirectFn   = managedDoltProbeReadBackDirect
 	managedDoltConnectionCountDirectFn = managedDoltConnectionCountDirect
 	managedDoltResetProbeDirectFn      = managedDoltResetProbeDirect
 	managedDoltSQLCommandTimeout       = 5 * time.Second
@@ -124,17 +153,28 @@ func managedDoltQueryProbe(host, port, user string) error {
 }
 
 func managedDoltReadOnlyState(host, port, user string) (string, error) {
+	return managedDoltReadOnlyStateFor(host, port, user, "")
+}
+
+// managedDoltReadOnlyStateFor runs the read-only write probe against database,
+// or against the first user database on the server when database is empty.
+func managedDoltReadOnlyStateFor(host, port, user, database string) (string, error) {
+	database = strings.TrimSpace(database)
 	if managedDoltPassword() != "" {
-		return managedDoltReadOnlyStateDirectFn(host, port, user)
+		return managedDoltReadOnlyStateDirectFn(host, port, user, database)
 	}
-	db, err := managedDoltSelectUserDatabase(host, port, user)
-	if err != nil {
-		return "unknown", err
+	db := database
+	if db == "" {
+		var err error
+		db, err = managedDoltSelectUserDatabase(host, port, user)
+		if err != nil {
+			return "unknown", err
+		}
 	}
 	if db == "" {
 		return "unknown", errManagedDoltNoUserDatabase
 	}
-	_, err = runManagedDoltSQL(host, port, user, "-q", managedDoltReadOnlyProbeSQLFor(db))
+	_, err := runManagedDoltSQL(host, port, user, "-q", managedDoltReadOnlyProbeSQLFor(db))
 	if err == nil {
 		return "false", nil
 	}
@@ -240,38 +280,189 @@ func managedDoltConnectionCount(host, port, user string) (string, error) {
 	return "", fmt.Errorf("parse connection count from %q", strings.TrimSpace(out))
 }
 
-func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (managedDoltSQLHealthReport, error) {
+// managedDoltHealthCheck probes the server SQL layer with the read-only
+// check and no scope database. Callers that need to skip the read-only probe
+// or prove a database use managedDoltHealthCheckFor.
+func managedDoltHealthCheck(host, port, user string) (managedDoltSQLHealthReport, error) {
+	return managedDoltHealthCheckFor(host, port, user, true, managedDoltHealthTarget{})
+}
+
+// managedDoltHealthCheckFor is managedDoltHealthCheck with a scope database
+// to prove. A failure to reach the server SQL layer is an error; a failure of
+// the named database is reported in-band through DatabaseReady and
+// DatabaseError so the caller can tell "server down" from "server up, city
+// database gone" and say which.
+func managedDoltHealthCheckFor(host, port, user string, checkReadOnly bool, target managedDoltHealthTarget) (managedDoltSQLHealthReport, error) {
 	if err := managedDoltQueryProbe(host, port, user); err != nil {
 		return managedDoltSQLHealthReport{}, err
 	}
 	report := managedDoltSQLHealthReport{
 		QueryReady: true,
 		ReadOnly:   "false",
+		Database:   strings.TrimSpace(target.Database),
+	}
+	if report.Database != "" {
+		if err := managedDoltCheckDatabase(host, port, user, report.Database, target.DataDir); err != nil {
+			report.DatabaseError = err.Error()
+			if checkReadOnly {
+				report.ReadOnly = "unknown"
+			}
+			report.ConnectionCount = managedDoltConnectionCountBestEffort(host, port, user)
+			return report, nil
+		}
+		report.DatabaseReady = true
 	}
 	if checkReadOnly {
-		state, err := managedDoltReadOnlyState(host, port, user)
-		if err != nil {
-			if !errors.Is(err, errManagedDoltNoUserDatabase) {
-				return managedDoltSQLHealthReport{}, err
-			}
+		state, err := managedDoltReadOnlyStateFor(host, port, user, report.Database)
+		switch {
+		case err == nil:
+		case report.Database != "":
+			report.DatabaseReady = false
+			report.DatabaseError = fmt.Sprintf("sample write to database %q failed: %v", report.Database, err)
+		case !errors.Is(err, errManagedDoltNoUserDatabase):
+			return managedDoltSQLHealthReport{}, err
 		}
 		report.ReadOnly = state
+		if report.DatabaseReady && state == "false" {
+			if err := managedDoltProbeReadBack(host, port, user, report.Database); err != nil {
+				report.DatabaseReady = false
+				report.DatabaseError = fmt.Sprintf("sample read from database %q failed: %v", report.Database, err)
+			}
+		}
 	}
-	if count, err := managedDoltConnectionCount(host, port, user); err == nil {
-		report.ConnectionCount = count
-	}
+	report.ConnectionCount = managedDoltConnectionCountBestEffort(host, port, user)
 	return report, nil
+}
+
+func managedDoltConnectionCountBestEffort(host, port, user string) string {
+	count, err := managedDoltConnectionCount(host, port, user)
+	if err != nil {
+		return ""
+	}
+	return count
+}
+
+// managedDoltCheckDatabase proves database exists and its default branch head
+// resolves. When dataDir is set it first requires the database's on-disk
+// repository, because a server can keep serving a database whose directory
+// was removed or swapped underneath it.
+func managedDoltCheckDatabase(host, port, user, database, dataDir string) error {
+	if strings.TrimSpace(dataDir) != "" {
+		if err := managedDoltDatabaseOnDisk(dataDir, database); err != nil {
+			return err
+		}
+	}
+	if _, err := managedDoltDatabaseHead(host, port, user, database); err != nil {
+		return fmt.Errorf("database %q default branch head unresolvable: %w", database, err)
+	}
+	return nil
+}
+
+// managedDoltDatabaseOnDisk reports whether dataDir holds a Dolt repository
+// for database. Dolt matches database names case-insensitively, so a
+// directory that differs only in case counts.
+func managedDoltDatabaseOnDisk(dataDir, database string) error {
+	if managedDoltIsRepoDir(filepath.Join(dataDir, database)) {
+		return nil
+	}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return fmt.Errorf("database %q: reading data dir %s: %w", database, dataDir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.EqualFold(entry.Name(), database) && managedDoltIsRepoDir(filepath.Join(dataDir, entry.Name())) {
+			return nil
+		}
+	}
+	return fmt.Errorf("database %q absent from data dir %s", database, dataDir)
+}
+
+func managedDoltIsRepoDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".dolt"))
+	return err == nil && info.IsDir()
+}
+
+// managedDoltDatabaseHead returns the commit hash of database's default
+// branch head. A fresh session lands on the default branch, so USE fails
+// when the database is missing from the catalog (errno 1049) or its default
+// branch cannot be resolved (errno 1105).
+func managedDoltDatabaseHead(host, port, user, database string) (string, error) {
+	if managedDoltPassword() != "" {
+		return managedDoltDatabaseHeadDirectFn(host, port, user, database)
+	}
+	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q",
+		"USE "+managedDoltQuoteIdent(database)+"; SELECT DOLT_HASHOF('HEAD') AS head")
+	if err != nil {
+		return "", err
+	}
+	return managedDoltParseHead(out)
+}
+
+func managedDoltParseHead(out string) (string, error) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	head := strings.TrimSpace(lines[len(lines)-1])
+	if !managedDoltCommitHashPattern.MatchString(head) {
+		return "", fmt.Errorf("unexpected head %q", strings.TrimSpace(out))
+	}
+	return head, nil
+}
+
+// managedDoltProbeReadBack reads back the row the read-only probe just wrote
+// into database, so the check covers the read path as well as the write.
+func managedDoltProbeReadBack(host, port, user, database string) error {
+	if managedDoltPassword() != "" {
+		return managedDoltProbeReadBackDirectFn(host, port, user, database)
+	}
+	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", managedDoltProbeReadBackSQLFor(database))
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	return managedDoltCheckReadBackCount(strings.TrimSpace(lines[len(lines)-1]))
+}
+
+func managedDoltProbeReadBackSQLFor(database string) string {
+	quotedDB := managedDoltQuoteIdent(database)
+	return "USE " + quotedDB + "; SELECT COUNT(*) AS cnt FROM " + quotedDB + "." + managedDoltQuoteIdent(managedDoltProbeTable) + " WHERE k = 1"
+}
+
+func managedDoltCheckReadBackCount(text string) error {
+	count, err := strconv.Atoi(text)
+	if err != nil {
+		return fmt.Errorf("parse probe row count %q: %w", text, err)
+	}
+	if count != 1 {
+		return fmt.Errorf("probe row count = %d after write, want 1", count)
+	}
+	return nil
 }
 
 func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 	if !report.QueryReady {
 		return []string{"query_ready\tfalse"}
 	}
-	return []string{
+	fields := []string{
 		"query_ready\ttrue",
 		"read_only\t" + report.ReadOnly,
 		"connection_count\t" + report.ConnectionCount,
 	}
+	if report.Database == "" {
+		return fields
+	}
+	fields = append(fields, "database\t"+managedDoltFieldValue(report.Database))
+	if report.DatabaseReady {
+		return append(fields, "database_ready\ttrue")
+	}
+	return append(fields,
+		"database_ready\tfalse",
+		"database_error\t"+managedDoltFieldValue(report.DatabaseError),
+	)
+}
+
+// managedDoltFieldValue flattens a value onto one line of the tab-separated
+// key/value report the provider script parses.
+func managedDoltFieldValue(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func managedDoltPassword() string {
@@ -312,7 +503,7 @@ func managedDoltQueryProbeDirect(host, port, user string) error {
 	return nil
 }
 
-func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
+func managedDoltReadOnlyStateDirect(host, port, user, database string) (string, error) {
 	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
 		return "unknown", err
@@ -329,9 +520,12 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	userDB, err := managedDoltSelectUserDatabaseFromConn(ctx, conn)
-	if err != nil {
-		return "unknown", err
+	userDB := database
+	if userDB == "" {
+		userDB, err = managedDoltSelectUserDatabaseFromConn(ctx, conn)
+		if err != nil {
+			return "unknown", err
+		}
 	}
 	if userDB == "" {
 		return "unknown", errManagedDoltNoUserDatabase
@@ -346,6 +540,57 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 		}
 	}
 	return "false", nil
+}
+
+// managedDoltDatabaseConnDirect opens a pooled connection with database
+// selected. The caller closes the returned connection and cancels its context.
+func managedDoltDatabaseConnDirect(host, port, user, database string) (*sql.Conn, context.Context, context.CancelFunc, error) {
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+	if _, err := conn.ExecContext(ctx, "USE "+managedDoltQuoteIdent(database)); err != nil {
+		conn.Close() //nolint:errcheck
+		cancel()
+		return nil, nil, nil, err
+	}
+	return conn, ctx, cancel, nil
+}
+
+func managedDoltDatabaseHeadDirect(host, port, user, database string) (string, error) {
+	conn, ctx, cancel, err := managedDoltDatabaseConnDirect(host, port, user, database)
+	if err != nil {
+		return "", err
+	}
+	defer cancel()
+	defer conn.Close() //nolint:errcheck
+	var head string
+	if err := conn.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&head); err != nil {
+		return "", err
+	}
+	return managedDoltParseHead(head)
+}
+
+func managedDoltProbeReadBackDirect(host, port, user, database string) error {
+	conn, ctx, cancel, err := managedDoltDatabaseConnDirect(host, port, user, database)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	defer conn.Close() //nolint:errcheck
+	quotedDB := managedDoltQuoteIdent(database)
+	var count int
+	query := "SELECT COUNT(*) FROM " + quotedDB + "." + managedDoltQuoteIdent(managedDoltProbeTable) + " WHERE k = 1"
+	if err := conn.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return err
+	}
+	return managedDoltCheckReadBackCount(strconv.Itoa(count))
 }
 
 func managedDoltSelectUserDatabaseFromConn(ctx context.Context, conn *sql.Conn) (string, error) {
