@@ -1038,9 +1038,28 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // It must also apply the same inProgressBlockedByEnrichmentScript gate before
 // serving a surviving candidate, or a blocked in_progress wisp step is
 // re-served on every hook tick (ga-qjozkw).
+//
+// The probe reads BOTH assigned statuses, in_progress first and then open: a
+// patrol wisp stays `open` for its whole life — pouring and
+// assigning it claims nothing — so a wisp poured+assigned by an earlier cycle
+// that died before claiming matched neither this probe's in_progress scan nor
+// the assigned-ready tiers' reads in the prompt-side AssignedInProgressQuery,
+// and the next session poured a duplicate while the assigned wisp sat unseen.
+// The union keeps the crash-recovery precedence: an in_progress candidate the
+// session already claimed is served before any open one, so recovery never
+// jumps to a merely-claimable sibling. The open side carries the ready tier's
+// epic exclusion: a molecule root with children has no executable spec, and
+// serving one here would adopt a container the ready tiers refuse. Both scans
+// stay AND-only (`ephemeral=true AND status=<s>`), never one OR query, so the
+// snapshot read keeps parsing on bd builds whose query language has no
+// parenthesized boolean grouping. The open scan shares the ready tier's
+// `open_ephemeral` snapshot var and query byte-for-byte, so in the combined
+// work query — where ephemeralAssignedReadyProbeScript runs after this tier —
+// the memoized read is taken once for both (workquery_ephemeral_scan_reuse
+// pins the count); change one call site only by changing both.
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
+	filter := inProgressEphemeralUnionFilterJQ(1)
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -1048,28 +1067,69 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 	// the post-truncation nheld check here would always read zero. Mail is
 	// dropped there too: a claimed mail wisp is never work, so it must not hold
 	// the crash-recovery slot (#5815).
-	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
-		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
-		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+	return ephemeralAssignedInProgressSnapshotShell() +
+		`r=$(printf "%s\n%s" "$in_progress_ephemeral" "$open_ephemeral" | ` +
+		`jq -s --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(false, false) +
 		`fi; `
 }
 
+// inProgressEphemeralUnionFilterJQ is the jq the in-progress probe applies to
+// the two-snapshot union: `[in_progress rows, open rows]` slurped by jq -s,
+// each side filtered to the identity's unheld non-mail rows (the open side
+// additionally excluding epics), concatenated in_progress-first, then
+// truncated to limit candidates.
+func inProgressEphemeralUnionFilterJQ(limit int) string {
+	holdsAndMail := excludeHoldLabelsJQClause() + excludeMailMessagesJQClause()
+	inProgressFilter := `[.[] | select((.assignee // "") == $id)` + holdsAndMail + `]`
+	openFilter := `[.[] | select((.assignee // "") == $id)` + holdsAndMail +
+		` | select(((.issue_type // .type // "") != "epic"))]`
+	truncate := ``
+	if limit > 0 {
+		truncate = ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `(.[0] | ` + inProgressFilter + `) + (.[1] | ` + openFilter + `)` + truncate
+}
+
+// ephemeralAssignedInProgressSnapshotShell emits the probe's two memoized
+// status scans. The open block is byte-identical to the ready tier's
+// (ephemeralStatusSnapshotShell("open_ephemeral", "open")) so the combined
+// work query pays for the scan once; see
+// ephemeralAssignedInProgressProbeScript's doc comment.
+func ephemeralAssignedInProgressSnapshotShell() string {
+	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
+		ephemeralStatusSnapshotShell("open_ephemeral", "open")
+}
+
+// ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor is the graph-
+// anchor variant of ephemeralAssignedInProgressProbeScript and reads the same
+// in_progress+open union, under the same precedence: a claimed
+// in_progress candidate is served before any open one, and the candidates
+// window behind a workflow root keeps the same union and ordering.
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
-	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
-		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
+	union := inProgressEphemeralUnionFilterJQ(0)
+	return ephemeralAssignedInProgressSnapshotShellFor("gc_open_ephemeral_in_progress") +
+		`r=$(printf "%s\n%s" "$gc_open_ephemeral_in_progress" "$open_ephemeral" | jq -s --arg id "$` + shellVar + `" ` + shellquote.Quote(union+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
-		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:20]`) + ` 2>/dev/null); ` +
+		`r=$(printf "%s\n%s" "$gc_open_ephemeral_in_progress" "$open_ephemeral" | jq -s --arg id "$` + shellVar + `" ` + shellquote.Quote(union+` | .[:20]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		serveOrdinaryInProgressCandidateScript(false, false) +
 		`fi; ` +
 		`fi; `
+}
+
+// ephemeralAssignedInProgressSnapshotShellFor is the snapshot pair for the
+// deferring variant, whose in_progress scan memoizes under its own var (the
+// deferring script reads the snapshot twice — serve and candidates window).
+// The open block stays the ready tier's byte-identical open_ephemeral read.
+func ephemeralAssignedInProgressSnapshotShellFor(inProgressVar string) string {
+	return ephemeralStatusSnapshotShell(inProgressVar, "in_progress") +
+		ephemeralStatusSnapshotShell("open_ephemeral", "open")
 }
 
 // ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
