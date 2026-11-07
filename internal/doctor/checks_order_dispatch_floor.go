@@ -28,15 +28,17 @@ func WithOrderDispatchFloorInapplicableFunc(fn OrderDispatchFloorInapplicableFun
 }
 
 // OrderDispatchFloorCheck reports cooldown and cron orders whose configured
-// interval is shorter than the dispatcher can achieve.
+// interval is below the worst-case dispatch estimate, the cadence an order gets
+// when every counted order is due together.
 //
 // The dispatcher starts at most orders.max_dispatches_per_tick orders per pass
 // and passes run one per patrol interval, so a ring of N cooldown, cron and
 // event orders takes ceil(N/budget) passes to come all the way round. When
 // every counted order is due together, an order can fire no more often than
 // that: a 30s cooldown beside eight other due orders fires about every 90s,
-// and order-firing-current later reports it stale with no hint that the
-// config can never be met.
+// and order-firing-current may later report it stale with no hint that the
+// budget, not the order, is the cause. Orders that are not due spend no
+// budget, so the live dispatcher often does better.
 //
 // N counts every enabled cooldown, cron and event order, not just the ones due
 // on a given pass. That is an upper bound, and it needs no store reads: a

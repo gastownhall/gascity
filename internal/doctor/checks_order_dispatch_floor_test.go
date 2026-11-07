@@ -259,3 +259,20 @@ func TestOrderDispatchFloor_SurfacesInNonVerboseDoctorOutput(t *testing.T) {
 		t.Errorf("non-verbose output leaked per-order details:\n%s", got)
 	}
 }
+
+// An interval shorter than one patrol pass cannot be fit by any budget, so the
+// hint points at the patrol interval instead.
+func TestOrderDispatchFloor_HintNamesPatrolWhenIntervalBelowOnePass(t *testing.T) {
+	cityPath, cfg := orderDispatchFloorCity(t, "30s", 0)
+	writeOrderFiringTestOrder(t, cityPath, "sub-pass", "cooldown", "10s")
+	writeOrderDispatchFloorFillers(t, filepath.Join(cityPath, "orders"), "ring", 8)
+
+	result := runOrderDispatchFloorTest(t, cfg, cityPath)
+
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(result.FixHint, "daemon.patrol_interval") {
+		t.Fatalf("FixHint = %q, want it to name daemon.patrol_interval", result.FixHint)
+	}
+}
