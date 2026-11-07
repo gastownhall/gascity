@@ -397,3 +397,57 @@ func TestProviderOwnedScopeInitCarriesResolvedIdleTimeout(t *testing.T) {
 		t.Fatalf("init op saw %s=%q, want 45m0s", config.ProxiedIdleTimeoutEnv, got)
 	}
 }
+
+// Issue #8106: when the default rig-store initializer adopts a store bd
+// reports as already initialized, it settles that store's schema client-side
+// before readiness, as gc-beads-bd.sh does with finish_bd_schema_migrations:
+// `bd migrate schema --quiet` runs through the init runner, with no migration
+// unlock or force flag added by gc. Without it, a store behind the paired bd's
+// schema fails every boot's `init rig "X" beads` readiness check.
+func TestDefaultRigBdStoreInitSettlesSchemaClientSide(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "api")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := "[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n\n" +
+		"[[rigs]]\nname = \"api\"\npath = " + strconv.Quote(rig) + "\nprefix = \"api\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityTOML), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "bd-args")
+	fakeBd := filepath.Join(city, "bd")
+	script := "#!/bin/sh\nprintf 'BD_ALLOW_REMOTE_MIGRATE=%s %s\\n' \"$BD_ALLOW_REMOTE_MIGRATE\" \"$*\" >> \"" + logPath + "\"\n" +
+		"case \"$1\" in\n" +
+		"  init) echo \"Found existing Dolt database 'api' for this workspace. This workspace is already initialized; just run bd commands normally. Aborting.\" >&2; exit 1 ;;\n" +
+		"  version) echo 'bd version 1.3.1-rc.1 (fixture)' ;;\n" +
+		"  list) echo '[]' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(fakeBd, []byte(script), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+
+	if err := initDefaultRigBdStore(city, rig, "api", "api"); err != nil {
+		t.Fatalf("initDefaultRigBdStore: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	migrated := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.Contains(line, "--force") || strings.HasPrefix(line, "BD_ALLOW_REMOTE_MIGRATE=1 ") {
+			t.Fatalf("gc added a migration unlock or force flag to a bd invocation: %q; bd invocations:\n%s", line, data)
+		}
+		if line == "BD_ALLOW_REMOTE_MIGRATE= migrate schema --quiet" {
+			migrated = true
+		}
+	}
+	if !migrated {
+		t.Fatalf("adopting an already-initialized rig store never ran `bd migrate schema --quiet`; bd invocations:\n%s", data)
+	}
+}

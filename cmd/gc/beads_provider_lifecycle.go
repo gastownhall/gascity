@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -2214,7 +2215,8 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	}
 	applyExportSuppressionEnv(env)
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
-	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
+	proxied := scopeInitUsesProxiedDoltMode(cityPath, dir)
+	if proxied {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 		// bd init under a user-level dolt.shared-server: true would root the
 		// new proxy in ~/.beads/shared-server and persist that choice into the
@@ -2236,13 +2238,49 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	if canonicalDoltDatabase != "" {
 		args = append(args, "--database", canonicalDoltDatabase)
 	}
-	if _, err := beads.ExecCommandRunnerWithEnv(env)(dir, "bd", args...); err != nil {
-		if isBdAlreadyInitializedError(err) {
-			return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+	run := beads.ExecCommandRunnerWithEnv(env)
+	if _, err := run(dir, "bd", args...); err != nil {
+		if !isBdAlreadyInitializedError(err) {
+			return fmt.Errorf("bd init: %w", err)
 		}
-		return fmt.Errorf("bd init: %w", err)
+		if !proxied {
+			if err := settleAdoptedDefaultRigBdSchema(run, dir, os.Stderr); err != nil {
+				return err
+			}
+		}
 	}
 	return finalizeCanonicalBdScopeInit(cityPath, dir, prefix, canonicalDoltDatabase)
+}
+
+// settleAdoptedDefaultRigBdSchema applies the paired bd's pending schema
+// migrations to a direct-server store initDefaultRigBdStore adopted rather
+// than created, before readiness reads it. bd init exits early on a store that
+// already exists, so without this step a store left behind the paired bd's
+// schema fails readiness on every startup.
+//
+// It follows finish_bd_schema_migrations in gc-beads-bd.sh: a bd older than
+// MigrateSchemaMinBDVersion is skipped with a warning, a bd whose version
+// cannot be read still runs the step, and what bd reports goes to stderr. run
+// is the init runner, so the pinned bd, the scope and canonical GC_BIN carry
+// over; no migration unlock or force flag is added, so bd's own consent rules
+// decide what the verb may migrate.
+func settleAdoptedDefaultRigBdSchema(run beads.CommandRunner, dir string, stderr io.Writer) error {
+	store := beads.NewBdStore(dir, run)
+	version, err := store.BDVersion()
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: cannot read the bd version for %s (%v); running bd migrate schema anyway\n", dir, err) //nolint:errcheck // best-effort diagnostic
+	} else if deps.CompareVersions(version, beads.MigrateSchemaMinBDVersion) < 0 {
+		fmt.Fprintf(stderr, "warning: bd %s predates 'bd migrate schema' (bd %s); any pending schema migrations for %s are left to bd's next write\n", version, beads.MigrateSchemaMinBDVersion, dir) //nolint:errcheck // best-effort diagnostic
+		return nil
+	}
+	out, err := store.MigrateSchema()
+	if err != nil {
+		return err
+	}
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort diagnostic
+	}
+	return nil
 }
 
 func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) error {
