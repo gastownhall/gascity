@@ -764,6 +764,28 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+// orphanScanBudget is the longest a start waits for its pre-start orphan scan.
+// The scan cannot be canceled (it reads the process table and asks the
+// provider which roots it tracks), so on expiry the wait is abandoned, not the
+// scan.
+const orphanScanBudget = 10 * time.Second
+
+// orphanScanKey names the pre-start orphan scan of one session in one city for
+// runtime.CallBounded. Its namespace keeps it apart from every other bounded
+// call's key, and the normalized city path makes every spelling of one city one
+// key, so a wedged scan holds one goroutine per session per city across every
+// Manager in the process.
+func orphanScanKey(normalizedCityPath, sessionID string) string {
+	return "orphan-scan\x00" + normalizedCityPath + "\x00" + sessionID
+}
+
+// orphanScan is one completed pre-start orphan scan: the roots it found and the
+// error it returned with them.
+type orphanScan struct {
+	found []runtime.LiveRuntime
+	err   error
+}
+
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
 // a non-nil error when an orphan could not be confirmed dead, or, terminating
@@ -775,17 +797,37 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // terminated unless one of them is LiveUnlisted, which terminates none, and
 // matching the started replacement is impossible because it does not exist
 // yet.
+//
+// The scan is waited on no longer than orphanScanBudget or ctx, whichever ends
+// first, through runtime.CallBounded under orphanScanKey. A scan that gives no
+// answer in that time, or one refused because an earlier scan of the same key
+// has not returned, terminates nothing and returns an error wrapping
+// runtime.ErrRuntimeUnavailable: an unfinished scan says nothing about what is
+// running, so the start defers. An abandoned scan's late answer reaches no
+// one; the next start scans afresh once it returns.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
-	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
+	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	key := orphanScanKey(cityPath, sessionID)
+	scanCtx, cancel := context.WithTimeout(ctx, orphanScanBudget)
+	defer cancel()
+	scan, err := runtime.CallBounded(scanCtx, key, func(context.Context) (orphanScan, error) {
+		found, err := scanner.FindRuntimesBySessionID(sessionID)
+		return orphanScan{found: found, err: err}, nil
+	})
+	if err != nil {
+		if !errors.Is(err, runtime.ErrBoundedCallOutstanding) {
+			log.Printf("session: refusing to start %s: pre-start orphan scan %q did not answer: %v", sessionID, key, err)
+		}
+		return fmt.Errorf("pre-start orphan scan for session %s did not answer: %w", sessionID, err)
+	}
+	found, err := scan.found, scan.err
 	if err != nil {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
-	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {

@@ -59,7 +59,9 @@ implementation and the same tables of outstanding keys.
   session name (`postStartObservationKey`), and the conversation lane's
   executor keys by session bead ID under the `lane` prefix
   (`laneObservationKey`), so a wedged lane probe never blocks a lifecycle
-  observation.
+  observation. `internal/session` bounds its pre-start orphan scan under the
+  `orphan-scan` prefix, keyed by normalized city path and session bead ID
+  (`orphanScanKey`).
 - `worker.ObserveShared` is the form for reads several callers make of one key
   at once (turn reads: `CurrentTurn`, `WatchTurns` and its session reload, the
   idle overlay). A call
