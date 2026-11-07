@@ -337,3 +337,52 @@ func TestKillExistingOrphansKeysLatchByCityAndSession(t *testing.T) {
 		}
 	})
 }
+
+// AC-3: an abandoned scan's late answer is no one's: once it returns and frees
+// its key, the next start scans afresh and terminates only what that fresh
+// scan reports.
+func TestKillExistingOrphansNeverActsOnAnAbandonedScan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		city := t.TempDir()
+		sp := newGatedScanProvider(city, func(n int64) bool { return n == 1 })
+		sp.answer = func(n int64) []runtime.LiveRuntime {
+			if n == 1 {
+				return orphanAt(100) // the abandoned scan's late root A
+			}
+			return orphanAt(200) // the fresh scan's root B
+		}
+		defer sp.unblock()
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city))
+		wantUnansweredScan(t, killWithWatchdog(context.Background(), t, mgr, "sid-late"), context.DeadlineExceeded)
+		sp.unblock()
+		synctest.Wait()
+
+		err := killWithWatchdog(context.Background(), t, mgr, "sid-late")
+		if err != nil {
+			t.Fatalf("killExistingOrphans after the late return = %v, want a fresh scan's answer", err)
+		}
+		if got := sp.scans.Load(); got != 2 {
+			t.Fatalf("%d scans, want the abandoned one and one fresh scan", got)
+		}
+		if got := sp.terminatedPIDs(); len(got) != 1 || got[0] != 200 {
+			t.Fatalf("terminated %v, want only the fresh scan's root 200, never the abandoned scan's 100", got)
+		}
+	})
+}
+
+// AC-3: a scan that returns frees its key: the next start scans afresh.
+func TestKillExistingOrphansFreesTheKeyWhenTheScanReturns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		city := t.TempDir()
+		sp := newGatedScanProvider(city, neverWedged)
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(city))
+		for i := 0; i < 3; i++ {
+			if err := killWithWatchdog(context.Background(), t, mgr, "sid-seq"); err != nil {
+				t.Fatalf("start %d: killExistingOrphans = %v, want nil", i, err)
+			}
+		}
+		if got := sp.scans.Load(); got != 3 {
+			t.Fatalf("%d scans for 3 sequential starts, want 3", got)
+		}
+	})
+}
