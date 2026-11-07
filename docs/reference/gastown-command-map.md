@@ -9,7 +9,7 @@ Two rules help a lot to find the closest home (`gc` or `bd`) for a command equiv
 - the closest home is `gc` if the `gt` command is about _orchestration, sessions, routing, hooks, or runtime behavior_ 
 - the closest home is `bd` if the `gt` command is really about _bead CRUD or bead content_.
 
-See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://gastownhall.github.io/beads/cli-reference) for the full CLI surfaces, and [The six primitives](/getting-started/how-gas-city-works) for the canonical model these commands map onto.
+See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https://beads.gascity.com/cli-reference) for the full CLI surfaces, and [The six primitives](/getting-started/how-gas-city-works) for the canonical model these commands map onto.
 
 ## Workspace And Runtime
 
@@ -63,7 +63,7 @@ See the [`gc` CLI reference](/reference/cli) and the [`bd` CLI reference](https:
 | `gt formula` | `gc formula list/show/cook/version-check`, `gc sling --formula`, `gc order` | `gc formula` manages formulas (list, show, cook, version-check — `version-check` detects whether the on-disk formula file changed after a bead was cooked from it). `gc sling --formula` dispatches a v2 formula as a workflow (a v1 formula materializes as a wisp). |
 | `gt mol` | `gc formula cook`, `bd mol ...` | `gc formula cook` creates workflows (v2) (or molecules under the v1 materialization); `bd` handles bead-level operations. |
 | `gt mq` | no direct generic `gc` command | Gastown-style merge queue behavior lives in the pack and formulas, not a generic platform namespace. |
-| `gt gate` | `gc wait`; formula `[steps.gate]` | Durable waits are the closest platform concept. Formulas also carry gates natively — a step-level `[steps.gate]` (types such as `gh:run`, `gh:pr`, `timer`, `human`, `mail`) or `[[compose.gate]]` rules — the closer match when migrating molecule workflows. See [Steps](/reference/specs/formula-spec-v2#13-steps). |
+| `gt gate` | `gc wait`; formula `[steps.gate]` | Durable waits are the closest platform concept. Formulas also carry gates natively — a step-level `[steps.gate]` (types such as `gh:run`, `gh:pr`, `timer`, `human`, `mail`) or `[[compose.gate]]` rules — the closer match when migrating molecule workflows. See [Steps](/reference/specs/formula-spec-v2#1-3-steps). |
 | `gt park` | `gc wait` | Same underlying idea: stop and resume around a dependency or gate. |
 | `gt resume` | `gc wait ready`, `gc session wake`, `gc mail check` | Depends on whether the action is a parked wait, sleeping session, or handoff/mail resume. |
 | `gt synthesis` | partial: `gc converge`, formulas, convoys | No one-command parity. |

@@ -589,7 +589,7 @@ component in the current release — v1 or v2 — reads it back at runtime, so a
 for keep-trying-until-it-passes behavior today. The condition is _not_ the
 `{{var}}` syntax from Conditions — it's an expression over step state, like
 `probe.status == 'complete'`. The
-[Loops](/reference/specs/formula-spec-v2#16-loops) spec section covers the
+[Loops](/reference/specs/formula-spec-v2#1-6-loops) spec section covers the
 grammar.
 </Accordion>
 
@@ -644,7 +644,7 @@ City runs `scripts/verify.sh`; exit 0 means done, non-zero spawns another
 iteration — up to `max_attempts` total. If all attempts fail, the step fails.
 One nonzero exit is special: 75 says the script could not reach the
 infrastructure it needed to decide, so Gas City re-runs the check without
-spending an attempt — see [Check](/reference/specs/formula-spec-v2#31-check)
+spending an attempt — see [Check](/reference/specs/formula-spec-v2#3-1-check)
 in the spec.
 
 ### Retry
