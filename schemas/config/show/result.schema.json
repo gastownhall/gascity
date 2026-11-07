@@ -51,6 +51,40 @@
           "items": {
             "type": "string"
           }
+        },
+        "pack_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "message",
+              "details"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "warning",
+                  "error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": true
+          }
         }
       },
       "additionalProperties": true
