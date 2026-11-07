@@ -2528,6 +2528,20 @@ func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
 	return durationOr(c.MaxTimeout, 0)
 }
 
+// DefaultMaxOrderDispatchesPerTick is the per-pass dispatch budget used when
+// orders.max_dispatches_per_tick is unset or not positive.
+const DefaultMaxOrderDispatchesPerTick = 4
+
+// EffectiveMaxDispatchesPerTick returns the per-pass dispatch budget the order
+// dispatcher runs with: MaxDispatchesPerTick when positive, else
+// DefaultMaxOrderDispatchesPerTick.
+func (c OrdersConfig) EffectiveMaxDispatchesPerTick() int {
+	if c.MaxDispatchesPerTick != nil && *c.MaxDispatchesPerTick > 0 {
+		return *c.MaxDispatchesPerTick
+	}
+	return DefaultMaxOrderDispatchesPerTick
+}
+
 // DefaultAPIPort is the default TCP port for the API server.
 const DefaultAPIPort = 9443
 

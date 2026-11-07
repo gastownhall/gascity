@@ -8705,3 +8705,27 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
 	}
 }
+
+func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+	for _, tc := range []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset uses the default", nil, DefaultMaxOrderDispatchesPerTick},
+		{"zero uses the default", intPtr(0), DefaultMaxOrderDispatchesPerTick},
+		{"negative uses the default", intPtr(-3), DefaultMaxOrderDispatchesPerTick},
+		{"positive is honored", intPtr(9), 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := OrdersConfig{MaxDispatchesPerTick: tc.in}.EffectiveMaxDispatchesPerTick()
+			if got != tc.want {
+				t.Fatalf("EffectiveMaxDispatchesPerTick() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	if DefaultMaxOrderDispatchesPerTick != 4 {
+		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
+	}
+}
