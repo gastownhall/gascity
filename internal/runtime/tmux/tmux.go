@@ -4152,19 +4152,26 @@ func (t *Tmux) dismissMidSessionDialogBeforeNudge(ctx context.Context, target st
 // Provider.nudge's idle wait. A blocking mid-session dialog does not close by
 // itself, and the session-limit chooser, a numbered menu, never reads idle
 // (isMenuCursorRow), so a nudge that waited first would run out its whole
-// window before step 0 cleared the dialog. It holds the nudge lock through
-// the settle delay, so a concurrent nudge peeks only once the dialog is gone
-// and never types its own dismissal keys into the prompt. Best-effort, as
-// step 0 is: a lock timeout or an unresolved pane skips it.
+// window before step 0 cleared the dialog. Its first look takes no lock: with
+// no dialog on screen there is nothing to clear, and the idle wait must not
+// queue behind another nudge's delivery, since each wait is judged on the
+// record as it decides. A dialog on screen takes the nudge lock, held through
+// the settle delay, and the dismissal peeks again under it, so a concurrent
+// nudge finds the dialog gone and never types its own dismissal keys into the
+// prompt. Best-effort, as step 0 is: a failed look, a lock timeout or an
+// unresolved pane skips it.
 func (t *Tmux) dismissMidSessionDialogBeforeIdleWait(ctx context.Context, session string) {
-	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return
-	}
-	defer releaseNudgeLock(session)
 	target, err := t.agentInputTarget(session)
 	if err != nil {
 		return
 	}
+	if screen, err := t.CaptureVisiblePane(target); err != nil || !runtime.MidSessionDialogShowing(screen) {
+		return
+	}
+	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
+		return
+	}
+	defer releaseNudgeLock(session)
 	if t.dismissMidSessionDialogBeforeNudge(ctx, target) {
 		time.Sleep(midSessionDialogSettleDelay)
 	}
