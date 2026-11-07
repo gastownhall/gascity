@@ -21,6 +21,7 @@ cmd/gc/allocator_create_named.go	liveFenceStore	raw-field	1
 cmd/gc/allocator_create_named.go	recordRowToken	raw-param	1
 cmd/gc/allocator_create_named.go	reopenNamed	raw-param	2
 cmd/gc/allocator_decide.go	demandView	raw-field	2
+cmd/gc/allocator_demand_reads.go	demandLegCache	cache-peel	1
 cmd/gc/allocator_demand_reads.go	demandLegCache	cap-assert	2
 cmd/gc/allocator_demand_reads.go	demandLegCache	raw-param	1
 cmd/gc/allocator_demand_reads.go	demandLegCache	raw-result	1
@@ -40,6 +41,7 @@ cmd/gc/allocator_demand_reads.go	v2DemandReads.ReadyAll	raw-param	1
 cmd/gc/allocator_demand_reads.go	v2DemandReads.recorded	raw-param	1
 cmd/gc/allocator_health.go	readStartupHealthEpisodes	raw-param	1
 cmd/gc/api_state.go	beadEventRelicProbe.residentStore	raw-result	1
+cmd/gc/api_state.go	closeBeadStoreHandle	cache-peel	1
 cmd/gc/api_state.go	closeBeadStoreHandle	cap-assert	2
 cmd/gc/api_state.go	closeBeadStoreHandle	raw-param	1
 cmd/gc/api_state.go	committedCloseOwner	raw-param	1
@@ -53,6 +55,7 @@ cmd/gc/api_state.go	controllerState.ResetSessionCircuitBreaker	unwrap	1
 cmd/gc/api_state.go	controllerState.ScopedStoreLike	raw-param	1
 cmd/gc/api_state.go	controllerState.ScopedStoreLike	raw-result	1
 cmd/gc/api_state.go	controllerState.WaitForSessionCommandable	unwrap	1
+cmd/gc/api_state.go	controllerState.applyBeadEventToStores	cache-peel	1
 cmd/gc/api_state.go	controllerState.applyBeadEventToStores	cap-assert	1
 cmd/gc/api_state.go	controllerState.applyCommittedClose	raw-param	1
 cmd/gc/api_state.go	controllerState.applyInferredClose	raw-param	2
@@ -79,6 +82,7 @@ cmd/gc/api_state.go	relicStoreRef	raw-param	2
 cmd/gc/api_state.go	scheduleCloseBeadStoreHandle	raw-param	1
 cmd/gc/api_state.go	scheduleCloseReplacedBeadStoreHandles	raw-param	2
 cmd/gc/api_state.go	storePointerKey	raw-param	1
+cmd/gc/api_state.go	uncachedBeadStore	cache-peel	1
 cmd/gc/api_state.go	uncachedBeadStore	cap-assert	1
 cmd/gc/api_state.go	uncachedBeadStore	raw-param	1
 cmd/gc/api_state.go	uncachedBeadStore	raw-result	1
@@ -104,6 +108,7 @@ cmd/gc/autoclose_sweep.go	autocloseSweep	raw-field	1
 cmd/gc/autoclose_sweep.go	autocloseSweep.observe	raw-param	1
 cmd/gc/autoclose_sweep.go	autocloseSweep.retain	raw-param	1
 cmd/gc/autoclose_sweep.go	controllerState.anySuspendedRigStoreLocked	raw-param	1
+cmd/gc/autoclose_sweep.go	controllerState.sweepCaches	cache-peel	1
 cmd/gc/autoclose_sweep.go	controllerState.sweepCaches	cap-assert	1
 cmd/gc/autoclose_sweep.go	controllerState.sweepCaches	raw-result	1
 cmd/gc/bd_close_events.go	announceBdPassthroughCloses	raw-param	1
@@ -783,6 +788,7 @@ cmd/gc/conversation_lane_host.go	conversationLaneHost.store	unwrap	1
 cmd/gc/conversation_lane_host.go	isNilBeadStore	raw-param	1
 cmd/gc/conversation_lane_host.go	laneLiveSessions	raw-field	1
 cmd/gc/conversation_lane_host.go	laneLiveSessions.ConditionalWritesResolveTarget	raw-result	1
+cmd/gc/conversation_lane_host.go	laneSessionsCache	cache-peel	1
 cmd/gc/conversation_lane_host.go	laneSessionsCache	cap-assert	2
 cmd/gc/conversation_lane_host.go	laneSessionsCache	raw-param	1
 cmd/gc/conversation_lane_host.go	laneSessionsCache	raw-result	1
@@ -790,6 +796,7 @@ cmd/gc/conversation_lane_host.go	laneStoreBinding	cap-assert	1
 cmd/gc/conversation_lane_host.go	laneStoreBinding	raw-param	1
 cmd/gc/conversation_lane_host.go	laneStoreCapability	mint	1
 cmd/gc/conversation_lane_host.go	laneStoreCapability	raw-param	1
+cmd/gc/conversation_lane_host.go	laneUnwrapStore	cache-peel	1
 cmd/gc/conversation_lane_host.go	laneUnwrapStore	cap-assert	1
 cmd/gc/conversation_lane_host.go	laneUnwrapStore	raw-param	1
 cmd/gc/conversation_lane_host.go	laneUnwrapStore	raw-result	1
@@ -1177,6 +1184,7 @@ cmd/gc/order_store.go	unwrapOrderTrackingSweepStore	cap-assert	1
 cmd/gc/order_store.go	unwrapOrderTrackingSweepStore	raw-param	1
 cmd/gc/order_store.go	unwrapOrderTrackingSweepStore	raw-result	1
 cmd/gc/pending_interaction_lane.go	pendingInteractionListing	raw-param	1
+cmd/gc/planner_notice.go	laneStoreWrapped	cache-peel	1
 cmd/gc/planner_notice.go	laneStoreWrapped	cap-assert	1
 cmd/gc/planner_notice.go	laneStoreWrapped	raw-param	1
 cmd/gc/planner_notice.go	laneStoreWrapped	raw-result	1
@@ -1253,8 +1261,10 @@ cmd/gc/reconcile_fenced_store.go	_	raw-var	1
 cmd/gc/reconcile_fenced_store.go	blindWriteRefusingStore	raw-field	1
 cmd/gc/reconcile_fenced_store.go	blindWriteRefusingStore.ConditionalWritesResolveTarget	raw-result	1
 cmd/gc/reconcile_fenced_store.go	fencedWriter	raw-field	1
+cmd/gc/reconcile_fenced_store.go	fencedWriter.freshStore	cache-peel	1
 cmd/gc/reconcile_fenced_store.go	fencedWriter.freshStore	cap-assert	1
 cmd/gc/reconcile_fenced_store.go	fencedWriter.freshStore	raw-result	1
+cmd/gc/reconcile_fenced_store.go	fencedWriter.leaseFront	cache-peel	1
 cmd/gc/reconcile_fenced_store.go	fencedWriter.leaseFront	cap-assert	1
 cmd/gc/reconcile_fenced_store.go	freshRowStore	raw-field	2
 cmd/gc/reconcile_fenced_store.go	leaseRowStore	raw-field	1
@@ -1262,12 +1272,14 @@ cmd/gc/reconcile_fenced_store.go	readOnlyStore	raw-field	1
 cmd/gc/reconcile_gather.go	World	raw-field	3
 cmd/gc/reconcile_gather.go	censusDemandEnv	raw-param	2
 cmd/gc/reconcile_gather.go	demandProbeStores	raw-result	1
+cmd/gc/reconcile_gather.go	gather	cache-peel	1
 cmd/gc/reconcile_gather.go	gather	cap-assert	1
 cmd/gc/reconcile_gather.go	gather	mint	1
 cmd/gc/reconcile_gather.go	gatherEnv	raw-field	3
 cmd/gc/reconcile_gather.go	gatherEnv.externalReadsEnv	mint	1
 cmd/gc/reconcile_gather.go	k1EnvWith	raw-param	1
 cmd/gc/reconcile_gather_demand.go	demandGatherEnv	raw-field	2
+cmd/gc/reconcile_observe_v2.go	inputAges	cache-peel	1
 cmd/gc/reconcile_observe_v2.go	inputAges	cap-assert	1
 cmd/gc/reconcile_observe_v2.go	inputAges	raw-param	1
 cmd/gc/reconcile_pass.go	allocSummary	raw-field	1
@@ -1348,9 +1360,11 @@ cmd/gc/runtime_ownerless_reap.go	newOwnerlessReap	raw-param	2
 cmd/gc/runtime_ownerless_reap.go	ownerLookup	raw-field	1
 cmd/gc/runtime_ownerless_reap.go	reapOwnerlessRuntime	raw-param	1
 cmd/gc/runtime_ownerless_reap.go	sessionOwnerLookup	raw-param	2
+cmd/gc/scoped_store.go	bdStoreBacking	cache-peel	1
 cmd/gc/scoped_store.go	bdStoreBacking	cap-assert	1
 cmd/gc/scoped_store.go	bdStoreBacking	raw-param	1
 cmd/gc/scoped_store.go	bdStoreBacking	raw-result	1
+cmd/gc/scoped_store.go	beadPolicyConfig	cache-peel	1
 cmd/gc/scoped_store.go	beadPolicyConfig	cap-assert	1
 cmd/gc/scoped_store.go	beadPolicyConfig	raw-param	1
 cmd/gc/scoped_store.go	scopedBdStoreForCity	raw-result	1
@@ -1365,6 +1379,7 @@ cmd/gc/seat_work.go	seatWorkHit	raw-field	1
 cmd/gc/seat_work.go	seatWorkLeg	raw-field	1
 cmd/gc/seat_work.go	seatWorkQuery	raw-field	1
 cmd/gc/seat_work.go	seatWorkQuery.accepts	raw-param	1
+cmd/gc/seat_work.go	unwrapClassStore	cache-peel	2
 cmd/gc/seat_work.go	unwrapClassStore	cap-assert	1
 cmd/gc/seat_work.go	unwrapClassStore	raw-param	1
 cmd/gc/seat_work.go	unwrapClassStore	raw-result	1
@@ -1372,6 +1387,7 @@ cmd/gc/seat_work.go	unwrapClassStore	unwrap	2
 cmd/gc/seat_work_close.go	closeTimeLister	raw-param	1
 cmd/gc/seat_work_close.go	lateSeatWork	raw-param	2
 cmd/gc/seat_work_close.go	storeBackedBy	raw-param	1
+cmd/gc/seat_work_close.go	storeLayer	cache-peel	3
 cmd/gc/seat_work_close.go	storeLayer	cap-assert	2
 cmd/gc/seat_work_close.go	storeLayer	raw-param	1
 cmd/gc/seat_work_close.go	storeLayer	raw-result	2
@@ -1494,6 +1510,7 @@ cmd/gc/session_name_lookup.go	sessionAgentMetricIdentityByName	raw-param	1
 cmd/gc/session_ownership.go	liveBeadRead	raw-param	1
 cmd/gc/session_ownership.go	liveClaimVeto	raw-param	1
 cmd/gc/session_ownership.go	liveRead	raw-field	1
+cmd/gc/session_ownership.go	liveReads	cache-peel	2
 cmd/gc/session_ownership.go	liveReads	cap-assert	1
 cmd/gc/session_ownership.go	liveReads	raw-param	1
 cmd/gc/session_ownership.go	liveReads	unwrap	2
@@ -1633,6 +1650,7 @@ cmd/gc/wisp_gc.go	enumerateWorkClassMoleculeRoots	raw-param	1
 cmd/gc/wisp_gc.go	enumerateWorkClassMoleculeRoots	read-marker	1
 cmd/gc/wisp_gc.go	isRelocatedSQLiteSessionLedger	cap-assert	3
 cmd/gc/wisp_gc.go	isRelocatedSQLiteSessionLedger	raw-param	2
+cmd/gc/wisp_gc.go	liveBackingStore	cache-peel	1
 cmd/gc/wisp_gc.go	liveBackingStore	cap-assert	1
 cmd/gc/wisp_gc.go	liveBackingStore	raw-param	1
 cmd/gc/wisp_gc.go	liveBackingStore	raw-result	1
