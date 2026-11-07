@@ -1455,6 +1455,11 @@
           "description": "DriftDrainTimeout is the maximum time to wait for an agent to acknowledge\na drain signal during a config-drift restart. If the agent doesn't ack\nwithin this window, the controller force-kills and restarts it.\nDuration string (e.g., \"2m\", \"5m\"). Defaults to \"2m\".",
           "default": "2m"
         },
+        "drift_deferral_escalate_after": {
+          "type": "string",
+          "description": "DriftDeferralEscalateAfter is how long a config-drift restart may stay\ndeferred behind a seat's held work before the controller emits one\nescalated session.config_drift_deferred event for the episode. The\nescalation is a signal only: it never drains, restarts or kills the\nsession. Positive Go duration string (e.g., \"30m\", \"4h\"). Defaults to\n\"1h\".",
+          "default": "1h"
+        },
         "observe_paths": {
           "items": {
             "type": "string"
@@ -1532,7 +1537,7 @@
         },
         "auto_prune_worker_dir": {
           "type": "boolean",
-          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits.\nNil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, not a managed worktree (one gc worktree ensure\nprovisioned, which only its owner removes), clean working tree, no\nunpushed commits. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
           "default": true
         }
       },
@@ -2445,6 +2450,10 @@
           "type": "boolean",
           "description": "Relay wraps the agent in the probe-answering relay, for programs that\nonly report after their support probe is answered. Unset inherits."
         },
+        "hold_mid_turn": {
+          "type": "boolean",
+          "description": "HoldMidTurn declares that the program aborts its running turn when\ninput is typed into it mid-turn. It governs the conversation lane's\nkeystroke boundary and the bypass of the quiescence gate that a\ndelivery starved on a never-quiet session takes. Under the [session]\nprogram_status switch on, the lane's quiescence boundary stays closed,\nand a delivery at it is held right before it is typed, while a fresh\nread of the program's own record shows a live working record; the lane\ntakes the starved bypass only on such a read that decides and shows no\nlive working record. Under off and shadow the lane never takes the\nstarved bypass. Legacy delivery defers the bypass under on while such a\nread shows a live working record, and otherwise takes it as without\nthe declaration. Every other delivery is unchanged. It reaches a pane\nwhen its capture is armed (create, respawn, heal), and heal keeps it\ncurrent. Unset inherits."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"
@@ -2845,6 +2854,22 @@
           },
           "type": "array",
           "description": "DefaultSlingTargets is the plural form of DefaultSlingTarget.\nWhen set, targetless gc sling picks one entry at random each dispatch.\nTakes precedence over DefaultSlingTarget when non-empty. Each entry is\nresolved the same way as DefaultSlingTarget. Example:\n  default_sling_targets = [\"rig/polecat-a\", \"rig/polecat-b\"]"
+        },
+        "federation": {
+          "type": "string",
+          "enum": [
+            "city",
+            "rig"
+          ],
+          "description": "Federation selects which of this city's agents may act on the rig's bead\nstore. \"city\" (the default) keeps today's behavior: city-scoped agents\nread every rig, and any agent whose identity matches a row may serve,\nclaim or release it. \"rig\" restricts this city to identities inside the\nrig's namespace (\"\u003cname\u003e/...\", compared under the bead store's actor\nfold) and to this city's own pool sessions of the rig's agents; rows\nowned by anything else are left alone. Set it on a rig whose bead store\nanother city also attaches. It is deliberately not patchable. NOT YET\nENFORCED: this build validates the setting and warns at start and\nreload, but still acts on every row of the rig's store, so a rig with\nfederation = \"rig\" is not protected yet."
+        },
+        "namespace": {
+          "type": "string",
+          "enum": [
+            "shared",
+            "exclusive"
+          ],
+          "description": "Namespace declares whether another city may serve this rig's namespace\non the same bead store: \"shared\" (the default) or \"exclusive\".\n\"exclusive\" requires federation = \"rig\". It is a declaration that\ncross-city checks read; it changes nothing in this city on its own."
         },
         "session_sleep": {
           "$ref": "#/$defs/SessionSleepConfig",

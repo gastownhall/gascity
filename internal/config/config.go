@@ -655,6 +655,23 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// Federation selects which of this city's agents may act on the rig's bead
+	// store. "city" (the default) keeps today's behavior: city-scoped agents
+	// read every rig, and any agent whose identity matches a row may serve,
+	// claim or release it. "rig" restricts this city to identities inside the
+	// rig's namespace ("<name>/...", compared under the bead store's actor
+	// fold) and to this city's own pool sessions of the rig's agents; rows
+	// owned by anything else are left alone. Set it on a rig whose bead store
+	// another city also attaches. It is deliberately not patchable. NOT YET
+	// ENFORCED: this build validates the setting and warns at start and
+	// reload, but still acts on every row of the rig's store, so a rig with
+	// federation = "rig" is not protected yet.
+	Federation string `toml:"federation,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Namespace declares whether another city may serve this rig's namespace
+	// on the same bead store: "shared" (the default) or "exclusive".
+	// "exclusive" requires federation = "rig". It is a declaration that
+	// cross-city checks read; it changes nothing in this city on its own.
+	Namespace string `toml:"namespace,omitempty" jsonschema:"enum=shared,enum=exclusive"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -2926,6 +2943,13 @@ type DaemonConfig struct {
 	// within this window, the controller force-kills and restarts it.
 	// Duration string (e.g., "2m", "5m"). Defaults to "2m".
 	DriftDrainTimeout string `toml:"drift_drain_timeout,omitempty" jsonschema:"default=2m"`
+	// DriftDeferralEscalateAfter is how long a config-drift restart may stay
+	// deferred behind a seat's held work before the controller emits one
+	// escalated session.config_drift_deferred event for the episode. The
+	// escalation is a signal only: it never drains, restarts or kills the
+	// session. Positive Go duration string (e.g., "30m", "4h"). Defaults to
+	// "1h".
+	DriftDeferralEscalateAfter string `toml:"drift_deferral_escalate_after,omitempty" jsonschema:"default=1h"`
 	// ObservePaths lists extra directories to search for Claude JSONL session
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
@@ -3060,8 +3084,9 @@ type DaemonConfig struct {
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, clean working tree, no unpushed commits.
-	// Nil (unset) defaults to true so pool worktrees do not
+	// .gc/worktrees/ tree, not a managed worktree (one gc worktree ensure
+	// provisioned, which only its owner removes), clean working tree, no
+	// unpushed commits. Nil (unset) defaults to true so pool worktrees do not
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
@@ -3122,7 +3147,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits).
+// probes (not a managed worktree, clean tree, no unpushed commits).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
@@ -3362,6 +3387,20 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
+}
+
+// DefaultDriftDeferralEscalateAfter is the default age at which a deferred
+// config-drift episode over held work escalates.
+const DefaultDriftDeferralEscalateAfter = time.Hour
+
+// DriftDeferralEscalateAfterDuration returns the drift-deferral escalation
+// horizon. Defaults to DefaultDriftDeferralEscalateAfter if empty,
+// unparseable, or not positive.
+func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
+	if dur := durationOr(d.DriftDeferralEscalateAfter, DefaultDriftDeferralEscalateAfter); dur > 0 {
+		return dur
+	}
+	return DefaultDriftDeferralEscalateAfter
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -5179,6 +5218,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateProgramStatus(&cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateRigFederation(cfg.Rigs); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

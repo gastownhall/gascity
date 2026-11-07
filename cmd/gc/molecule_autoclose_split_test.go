@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -46,7 +47,7 @@ func pourV1Molecule(t *testing.T, e splitEnv, attachTo string) (root beads.Bead,
 		t.Fatalf("v1 poured recipe classifies %s, want work", got)
 	}
 	owner = moleculeClassStore(recipe, e.work, e.graphStore())
-	res, err := molecule.Instantiate(context.Background(), owner, recipe, molecule.Options{})
+	res, err := molecule.Instantiate(context.Background(), beadstest.GraphMolecule(owner), recipe, molecule.Options{})
 	if err != nil {
 		t.Fatalf("instantiating %s: %v", name, err)
 	}

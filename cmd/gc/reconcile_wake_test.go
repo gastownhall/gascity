@@ -147,7 +147,7 @@ func TestLegacyWakeUnchanged(t *testing.T) {
 // signals exactly the wiring's channels, which the runtime's run loop selects
 // on (assertWakeSignalsWired checks the runtime half).
 func TestControllerWiringWakesItsOwnSignals(t *testing.T) {
-	w, err := newControllerWiring(&config.City{}, nil, io.Discard)
+	w, err := newControllerWiring(&config.City{}, "", nil, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}

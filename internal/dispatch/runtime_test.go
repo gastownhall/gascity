@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -93,7 +94,7 @@ func TestProcessScopeCheckClosesScopeOnSuccess(t *testing.T) {
 	mustDepAdd(t, store, cleanup.ID, body.ID, "blocks")
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -167,7 +168,7 @@ func TestProcessScopeCheckSuccessUsesScopedSnapshotQueries(t *testing.T) {
 	mustDepAdd(t, store, control.ID, step.ID, "blocks")
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -241,7 +242,7 @@ func TestProcessScopeCheckPassWithRemainingOpenAvoidsClosedSnapshot(t *testing.T
 
 	mustDepAdd(t, store, control.ID, done.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -312,7 +313,7 @@ func TestProcessScopeCheckKeepsControlOpenIfBodyCloseoutFails(t *testing.T) {
 	mustDepAdd(t, store, control.ID, step.ID, "blocks")
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-	_, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatal("ProcessControl(scope-check) succeeded, want injected closeout error")
 	}
@@ -397,7 +398,7 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	mustDepAdd(t, store, cleanup.ID, body.ID, "blocks")
 	mustDepAdd(t, store, futureControl.ID, futureMember.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check fail): %v", err)
 	}
@@ -517,7 +518,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 			mustDepAdd(t, store, control.ID, source.ID, "blocks")
 			mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-			subjectID, err := resolveScopeCheckSubjectID(store, control.ID)
+			subjectID, err := resolveScopeCheckSubjectID(beadstest.Graph(store), control)
 			if err != nil {
 				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
 			}
@@ -525,7 +526,7 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				t.Fatalf("subject = %s, want source %s (fanout is %s)", subjectID, source.ID, fanout.ID)
 			}
 
-			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(scope-check): %v", err)
 			}
@@ -546,6 +547,134 @@ func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProcessScopeCheckSubjectSkipsCrossRootDrainGate pins that a drain item's
+// scope-check, which also blocks on the item root of a predecessor member
+// (drainWorkflowExternalDeps wires that gate onto every step of the item),
+// resolves its own step as the subject even when the gate edge is listed
+// first. Taking the predecessor's failed root as the subject aborted the
+// item's first iteration right after its prepare step passed.
+func TestProcessScopeCheckSubjectSkipsCrossRootDrainGate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "predecessor item",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":    "workflow",
+			"gc.outcome": "fail",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "develop iteration 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-item",
+			"gc.step_ref":     "develop.iteration.1",
+		},
+	})
+	prepare := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for prepare",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "control",
+		},
+	})
+	implement := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-item",
+			"gc.scope_ref":    "develop.iteration.1",
+			"gc.scope_role":   "member",
+			"gc.on_fail":      "abort_scope",
+		},
+	})
+
+	// The drain gate goes in first so a first-blocker lookup would pick the
+	// predecessor's failed root.
+	mustDepAdd(t, store, control.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, control.ID, prepare.ID, "blocks")
+	mustDepAdd(t, store, implement.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, implement.ID, control.ID, "blocks")
+	mustDepAdd(t, store, body.ID, implement.ID, "blocks")
+
+	subjectID, err := resolveScopeCheckSubjectID(beadstest.Graph(store), control)
+	if err != nil {
+		t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+	}
+	if subjectID != prepare.ID {
+		t.Fatalf("subject = %s, want prepare %s (drain gate is %s)", subjectID, prepare.ID, predecessorRoot.ID)
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "continue" {
+		t.Fatalf("scope result = %+v, want processed continue", result)
+	}
+	if got := mustGetBead(t, store, implement.ID); got.Status != "open" {
+		t.Fatalf("implement status = %q (outcome %q), want open: the scope must not abort", got.Status, got.Metadata["gc.outcome"])
+	}
+	if got := mustGetBead(t, store, body.ID); got.Status != "open" {
+		t.Fatalf("body status = %q (outcome %q), want open", got.Status, got.Metadata["gc.outcome"])
+	}
+}
+
+// TestResolveBlockingSubjectIDSkipsCrossRootDrainGate pins the same rule for
+// the ralph and retry controls: the subject is the first blocker in the
+// control's own root, not a predecessor drain item's root listed before it.
+func TestResolveBlockingSubjectIDSkipsCrossRootDrainGate(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	predecessorRoot := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "predecessor item",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.outcome": "fail"},
+	})
+	iteration := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "develop iteration 1",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": "wf-item"},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "develop",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "ralph", "gc.root_bead_id": "wf-item"},
+	})
+	mustDepAdd(t, store, control.ID, predecessorRoot.ID, "blocks")
+	mustDepAdd(t, store, control.ID, iteration.ID, "blocks")
+
+	subjectID, err := resolveBlockingSubjectID(beadstest.Graph(store), control)
+	if err != nil {
+		t.Fatalf("resolveBlockingSubjectID: %v", err)
+	}
+	if subjectID != iteration.ID {
+		t.Fatalf("subject = %s, want iteration %s (drain gate is %s)", subjectID, iteration.ID, predecessorRoot.ID)
 	}
 }
 
@@ -623,7 +752,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl(t *testing.T)
 	// fixture recorded: the assertion below is about the abort's ordering.
 	store.closeOrder = nil
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check fail): %v", err)
 	}
@@ -749,7 +878,7 @@ func TestProcessScopeCheckAbortSkipsMemberBlockedOnOutOfScopeOpenBead(t *testing
 	mustDepAdd(t, store, member.ID, control.ID, "blocks")
 	mustDepAdd(t, store, member.ID, outsider.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check fail): %v", err)
 	}
@@ -866,7 +995,7 @@ func TestReconcileTerminalScopedMemberSkipsSiblingBlockedOnPreservedControl(t *t
 	mustDepAdd(t, store, preserved.ID, failed.ID, "blocks")
 	mustDepAdd(t, store, sibling.ID, preserved.ID, "blocks")
 
-	result, err := reconcileTerminalScopedMember(store, mustGetBead(t, store, failed.ID))
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), mustGetBead(t, store, failed.ID))
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(fail): %v", err)
 	}
@@ -949,7 +1078,7 @@ func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-	_, err := ProcessControl(store, control, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatalf("ProcessControl(legacy body self-edge) succeeded; expected the ga-a6zy9 deadlock refusal")
 	}
@@ -1003,7 +1132,7 @@ func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 	})
 	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check hard fail): %v", err)
 	}
@@ -1125,7 +1254,7 @@ func TestProcessScopeCheckAbortScopeNormalizesFailureContract(t *testing.T) {
 			store := beads.NewMemStore()
 			control, futureMember, futureControl, body := scopeCheckAbortScopeFixture(t, store, tc.subjectMeta)
 
-			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(scope-check): %v", err)
 			}
@@ -1256,7 +1385,7 @@ func TestProcessRetryControlHardFailClosesScopeBodyWithPendingScopeCheck(t *test
 	mustDepAdd(t, store, body.ID, preflightScopeCheck.ID, "blocks")
 	mustDepAdd(t, store, body.ID, implementScopeCheck.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, preflight.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, preflight.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry hard fail): %v", err)
 	}
@@ -1313,7 +1442,7 @@ func TestProcessScopeCheckAbortScopeAffirmativeAndLegacyOutcomes(t *testing.T) {
 			store := beads.NewMemStore()
 			control, futureMember, _, body := scopeCheckAbortScopeFixture(t, store, tc.subjectMeta)
 
-			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(scope-check): %v", err)
 			}
@@ -1476,7 +1605,7 @@ func TestReconcileTerminalScopedMemberRetryAttemptExplicitFailDoesNotAbortScope(
 		},
 	})
 
-	result, err := reconcileTerminalScopedMember(store, failedAttempt)
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), failedAttempt)
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(retry attempt explicit fail): %v", err)
 	}
@@ -1580,7 +1709,7 @@ func TestLoadDownDepsForScopeSkipFallsBackWhenBatchUnsupported(t *testing.T) {
 	dependent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "dependent", Type: "task"})
 	mustDepAdd(t, store, dependent.ID, blocker.ID, "blocks")
 
-	deps, err := loadDownDepsForScopeSkip(store, []string{dependent.ID})
+	deps, err := loadDownDepsForScopeSkip(beadstest.Graph(store), []string{dependent.ID})
 	if err != nil {
 		t.Fatalf("loadDownDepsForScopeSkip returned %v; a capability miss must fall back, not abort the scope", err)
 	}
@@ -1598,7 +1727,7 @@ func TestLoadDownDepsForScopeSkipStillFailsClosedOnRealBatchError(t *testing.T) 
 	store := &scopeSkipFailingBatchStore{MemStore: beads.NewMemStore()}
 	bead := mustCreateWorkflowBead(t, store, beads.Bead{Title: "anchor", Type: "task"})
 
-	if _, err := loadDownDepsForScopeSkip(store, []string{bead.ID}); err == nil {
+	if _, err := loadDownDepsForScopeSkip(beadstest.Graph(store), []string{bead.ID}); err == nil {
 		t.Fatal("loadDownDepsForScopeSkip succeeded on a transport error; only the capability sentinel may fall back")
 	}
 }
@@ -1685,7 +1814,7 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 		members:     []beads.Bead{body, failed, control, futureMember, futureControl, independent},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -1812,7 +1941,7 @@ func TestSkipOpenScopeMembersContinuesAfterPreserveOnlyRound(t *testing.T) {
 		members:     []beads.Bead{body, failed, control, apply, applyTwin, scorecardFinalize, applyFinalize, applyTwinFinalize},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -1866,7 +1995,7 @@ func TestSkipOpenScopeMembersStillFailsOnGenuineBlocksCycle(t *testing.T) {
 		members:     []beads.Bead{body, control, left, right},
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err == nil {
 		t.Fatalf("skipOpenScopeMembers = (%d, nil), want a deadlock error for a genuine blocks cycle", skipped)
 	}
@@ -1916,7 +2045,7 @@ func TestSkipOpenScopeMembersDeadlockErrorNamesCurrentStuckMembers(t *testing.T)
 		members:     []beads.Bead{body, control, left, right, preserved},
 		body:        body,
 	}
-	_, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	_, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err == nil {
 		t.Fatal("skipOpenScopeMembers = nil error, want a deadlock error for the surviving blocks cycle")
 	}
@@ -1962,7 +2091,7 @@ func TestSkipOpenScopeMembersConvergesOverManyRounds(t *testing.T) {
 		members:     members,
 		body:        body,
 	}
-	skipped, err := snapshot.skipOpenScopeMembers(store, control.ID)
+	skipped, err := snapshot.skipOpenScopeMembers(beadstest.Graph(store), control.ID)
 	if err != nil {
 		t.Fatalf("skipOpenScopeMembers: %v", err)
 	}
@@ -2041,7 +2170,7 @@ func TestProcessScopeCheckTreatsRetryAttemptFailureAsNonTerminalForScope(t *test
 	mustDepAdd(t, store, control.ID, run1.ID, "blocks")
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check retry attempt): %v", err)
 	}
@@ -2116,7 +2245,7 @@ func TestProcessScopeCheckReturnsPendingWhenSubjectStillOpen(t *testing.T) {
 	mustDepAdd(t, store, control.ID, retryControl.ID, "blocks")
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-	_, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(scope-check with open subject) = %v, want ErrControlPending", err)
 	}
@@ -2192,7 +2321,7 @@ func TestProcessScopeCheckReturnsPendingWhenRetryAttemptSubjectStillOpen(t *test
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, control.ID, "blocks")
 
-	_, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(scope-check with open retry attempt) = %v, want ErrControlPending", err)
 	}
@@ -2270,7 +2399,7 @@ func TestProcessScopeCheckReturnsPendingWhenRetryAttemptSubjectOutsideScopeStill
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, control.ID, "blocks")
 
-	_, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(scope-check with open out-of-scope retry attempt) = %v, want ErrControlPending", err)
 	}
@@ -2353,7 +2482,7 @@ func TestProcessScopeCheckRetryAttemptPassPropagatesMemberMetadata(t *testing.T)
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, control.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check retry attempt): %v", err)
 	}
@@ -2406,7 +2535,7 @@ func TestProcessScopeCheckReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 
 	mustDepAdd(t, store, control.ID, step.ID, "blocks")
 
-	_, err := ProcessControl(store, control, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("ProcessControl(scope-check missing body) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
@@ -2469,7 +2598,8 @@ func TestProcessScopeCheckRetriesTransientMissingScopeBody(t *testing.T) {
 		hideReads: 3,
 	}
 	var trace bytes.Buffer
-	result, err := ProcessControl(store, control, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 		},
@@ -2529,7 +2659,7 @@ func TestResolveScopeBodyStopsRetryWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := resolveScopeBody(store, workflow.ID, "body", "control", ProcessOptions{Context: ctx})
+	_, err := resolveScopeBody(beadstest.Graph(store), workflow.ID, "body", "control", ProcessOptions{Work: beadstest.Work(store), Context: ctx})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("resolveScopeBody error = %v, want context.Canceled", err)
 	}
@@ -2562,7 +2692,7 @@ func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 		},
 	})
 
-	_, err := ProcessControl(store, fanout, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("ProcessControl(fanout missing scope body) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
@@ -2605,7 +2735,7 @@ func TestProcessFanoutReturnsMalformedForInvalidSourceOutputJSON(t *testing.T) {
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	_, err := ProcessControl(store, fanout, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("ProcessControl(fanout invalid output JSON) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
@@ -2649,7 +2779,7 @@ func TestProcessFanoutReturnsMalformedForInvalidBondVars(t *testing.T) {
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{t.TempDir()}})
+	_, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{t.TempDir()}})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("ProcessControl(fanout invalid bond vars) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
@@ -2715,7 +2845,7 @@ description = "Source {source_convoy_id}"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	_, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if !errors.Is(err, ErrControlGraphMalformed) {
 		t.Fatalf("ProcessControl(fanout missing required bond var) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
@@ -2773,7 +2903,7 @@ func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testi
 		rootID:   workflow.ID,
 	}
 
-	result, err := reconcileTerminalScopedMember(store, failed)
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), failed)
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(fail): %v", err)
 	}
@@ -2849,7 +2979,7 @@ func TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope(t *testing.
 		},
 	})
 
-	result, err := reconcileTerminalScopedMember(store, failed)
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), failed)
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(bare close): %v", err)
 	}
@@ -2911,7 +3041,7 @@ func TestReconcileTerminalScopedMemberReusesResolvedBodyForPassingScope(t *testi
 		rootID:   workflow.ID,
 	}
 
-	result, err := reconcileTerminalScopedMember(store, step)
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), step)
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(pass): %v", err)
 	}
@@ -2984,7 +3114,8 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
 	var trace bytes.Buffer
-	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 		},
@@ -3658,7 +3789,7 @@ func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -3715,7 +3846,7 @@ func TestProcessWorkflowFinalizeAbortScopeBareCloseFailsWorkflow(t *testing.T) {
 	mustDepAdd(t, store, finalizer.ID, sink.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -3787,7 +3918,7 @@ func TestProcessWorkflowFinalizeFailsOnHardFailedAbortScopeDescendant(t *testing
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -3849,7 +3980,7 @@ func TestProcessWorkflowFinalizeIgnoresTransientRetryDescendant(t *testing.T) {
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -3980,7 +4111,7 @@ func TestProcessWorkflowFinalizeIgnoresSupersededHardRetryDescendant(t *testing.
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -4015,7 +4146,7 @@ func TestProcessWorkflowFinalizeUsesCloseOperationForTerminalBeads(t *testing.T)
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -4065,7 +4196,7 @@ func TestProcessWorkflowFinalizeClosesOpenSpecSidecars(t *testing.T) {
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -4115,7 +4246,7 @@ func TestProcessWorkflowFinalizeClosesRemainingGeneratedMembers(t *testing.T) {
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -4171,7 +4302,7 @@ func TestProcessWorkflowFinalizeTreatsQuarantinedControlAsFailure(t *testing.T) 
 	mustDepAdd(t, store, finalizer.ID, control.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -4198,7 +4329,7 @@ func TestProcessWorkflowFinalizeOrphanedRootClosesFinalizerWithoutError(t *testi
 		},
 	})
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(orphan finalize): %v", err)
 	}
@@ -4238,7 +4369,7 @@ func TestProcessWorkflowFinalizeOrphanedRootReportsFinalizerCloseFailure(t *test
 		finalizerID: finalizer.ID,
 	}
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatalf("ProcessControl(orphan finalize) error = nil, want finalizer close failure")
 	}
@@ -4341,7 +4472,8 @@ func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
 		}
 	}
 
-	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{
+		Work:            beadstest.Work(rigStore),
 		ResolveStoreRef: resolver,
 	})
 	if err != nil {
@@ -4491,7 +4623,8 @@ func TestProcessWorkflowFinalizeRetriesWhenSourceStoreResolverFails(t *testing.T
 		return f.resolver(ref)
 	}
 
-	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	_, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: resolver,
 	})
 	if err == nil {
@@ -4541,7 +4674,8 @@ func TestProcessWorkflowFinalizeRetriesWhenSourceBeadLookupFails(t *testing.T) {
 		return f.resolver(ref)
 	}
 
-	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	_, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: resolver,
 	})
 	if err == nil {
@@ -4569,7 +4703,8 @@ func TestProcessWorkflowFinalizeClosesSourcesUnderProvidedLock(t *testing.T) {
 		return fn()
 	}
 
-	if _, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	if _, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:               beadstest.Work(f.rigStore),
 		ResolveStoreRef:    f.resolver,
 		SourceWorkflowLock: locker,
 	}); err != nil {
@@ -4659,7 +4794,8 @@ func TestProcessWorkflowFinalizeConvergesUnderConcurrentSharedAncestor(t *testin
 		go func(finalizer beads.Bead) {
 			defer wg.Done()
 			<-start
-			result, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+			result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{
+				Work:            beadstest.Work(rigStore),
 				ResolveStoreRef: resolver,
 				SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 					return []SourceWorkflowStore{
@@ -4715,7 +4851,8 @@ func TestProcessWorkflowFinalizePreservesExistingParentOutcome(t *testing.T) {
 		t.Fatalf("SetMetadata(city outcome): %v", err)
 	}
 
-	if _, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	if _, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: f.resolver,
 	}); err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
@@ -4749,7 +4886,8 @@ func TestProcessWorkflowFinalizeDoesNotCloseSourcesWhenRootCloseFails(t *testing
 		}
 	}
 
-	_, err := ProcessControl(rigStore, f.finalizer, ProcessOptions{
+	_, err := ProcessControl(beadstest.Graph(rigStore), f.finalizer, ProcessOptions{
+		Work:                 beadstest.Work(rigStore),
 		ResolveStoreRef:      resolver,
 		SourceWorkflowStores: sourceChainFixtureStores(f),
 		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
@@ -4793,7 +4931,8 @@ func TestProcessWorkflowFinalizeRecordsSourceWorkflowStoreScanFailure(t *testing
 	f := newSourceChainFinalizeFixture(t)
 	scanErr := errors.New("skipped source-workflow store: rigs/broken")
 
-	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	_, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: f.resolver,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return nil, scanErr
@@ -4845,9 +4984,9 @@ func TestProcessWorkflowFinalizeCompletesAfterPendingResolverHeals(t *testing.T)
 		}
 		return f.resolver(ref)
 	}
-	opts := ProcessOptions{ResolveStoreRef: resolver}
+	opts := ProcessOptions{Work: beadstest.Work(f.rigStore), ResolveStoreRef: resolver}
 
-	if _, err := ProcessControl(f.rigStore, f.finalizer, opts); !errors.Is(err, ErrControlPending) {
+	if _, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, opts); !errors.Is(err, ErrControlPending) {
 		t.Fatalf("pre-heal ProcessControl error = %v, want ErrControlPending", err)
 	}
 	pending := mustGetBead(t, f.rigStore, f.finalizer.ID)
@@ -4863,7 +5002,7 @@ func TestProcessWorkflowFinalizeCompletesAfterPendingResolverHeals(t *testing.T)
 
 	// `gc rig add` puts the entry back.
 	rigRestored = true
-	if _, err := ProcessControl(f.rigStore, pending, opts); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(f.rigStore), pending, opts); err != nil {
 		t.Fatalf("post-heal ProcessControl: %v", err)
 	}
 
@@ -4913,7 +5052,7 @@ func TestProcessWorkflowFinalizeFailOutcomeInheritsPendingResolver(t *testing.T)
 		return f.resolver(ref)
 	}
 
-	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: resolver})
+	_, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{Work: beadstest.Work(f.rigStore), ResolveStoreRef: resolver})
 	// Assert the subclass, not just the parent. The cmd layer keys the loudness
 	// horizon on ErrControlDriftPending, so a rewrap along the FAIL path that
 	// preserved only ErrControlPending would keep this retryable while silently
@@ -4948,7 +5087,7 @@ func TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp(t *testing.T) {
 	store := &controlCloseTrackingStore{Store: mem, targetID: finalizer.ID}
 	cause := errors.New(`rig "ghostrig" not found in city config`)
 
-	if err := recordWorkflowFinalizeError(store, finalizer, cause); !errors.Is(err, cause) {
+	if err := recordWorkflowFinalizeError(beadstest.Graph(store), finalizer, cause); !errors.Is(err, cause) {
 		t.Fatalf("first record returned %v, want the original cause", err)
 	}
 	if store.setMetadataCalls != 1 {
@@ -4957,7 +5096,7 @@ func TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp(t *testing.T) {
 
 	// The next sweep re-reads the bead and reports the same refusal.
 	restamped := mustGetBead(t, mem, finalizer.ID)
-	if err := recordWorkflowFinalizeError(store, restamped, cause); !errors.Is(err, cause) {
+	if err := recordWorkflowFinalizeError(beadstest.Graph(store), restamped, cause); !errors.Is(err, cause) {
 		t.Fatalf("repeat record returned %v, want the original cause", err)
 	}
 	if store.setMetadataCalls != 1 {
@@ -4965,7 +5104,7 @@ func TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp(t *testing.T) {
 	}
 
 	// A genuinely different reason still lands.
-	if err := recordWorkflowFinalizeError(store, restamped, errors.New("closing workflow spec sidecars: boom")); err == nil {
+	if err := recordWorkflowFinalizeError(beadstest.Graph(store), restamped, errors.New("closing workflow spec sidecars: boom")); err == nil {
 		t.Fatal("changed-reason record returned nil, want the cause")
 	}
 	if store.setMetadataCalls != 2 {
@@ -4983,7 +5122,7 @@ func TestRecordWorkflowFinalizeErrorTruncatesAtUTF8Boundary(t *testing.T) {
 	})
 	reason := strings.Repeat("a", maxWorkflowFinalizeErrorMetadata-1) + "é tail"
 
-	err := recordWorkflowFinalizeError(store, finalizer, errors.New(reason))
+	err := recordWorkflowFinalizeError(beadstest.Graph(store), finalizer, errors.New(reason))
 	if err == nil {
 		t.Fatal("recordWorkflowFinalizeError err = nil, want original error returned")
 	}
@@ -5013,7 +5152,8 @@ func TestProcessWorkflowFinalizeLeavesAncestorOpenWhenLiveRootExistsInAnotherSto
 	})
 	var trace bytes.Buffer
 
-	if _, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	if _, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: f.resolver,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -5091,7 +5231,8 @@ func TestProcessWorkflowFinalizeLeavesSharedAncestorOpenForIndirectLiveRoot(t *t
 	}
 	var trace bytes.Buffer
 
-	if _, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	if _, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: resolver,
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -5169,7 +5310,7 @@ func TestProcessWorkflowFinalizeClosesIntraStoreSourceBeadWithoutResolver(t *tes
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	if _, err := ProcessControl(store, finalizer, ProcessOptions{}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
 	sourceAfter, err := store.Get(source.ID)
@@ -5253,7 +5394,7 @@ func TestProcessWorkflowFinalizeUnderCanceledRunFinalizesCanceled(t *testing.T) 
 			mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
 			mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 			}
@@ -5327,7 +5468,8 @@ func TestProcessWorkflowFinalizeStopsOnSourceChainCycle(t *testing.T) {
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
 	var trace bytes.Buffer
-	if _, err := ProcessControl(store, finalizer, ProcessOptions{
+	if _, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 		},
@@ -5379,7 +5521,8 @@ func TestPreflightSourceBeadChainReportsDepthLimitBeforeMutation(t *testing.T) {
 	}
 
 	var trace bytes.Buffer
-	err := preflightSourceBeadChain(store, root.ID, ProcessOptions{
+	err := preflightSourceBeadChain(beadstest.Graph(store), root.ID, ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 		},
@@ -5494,7 +5637,8 @@ func TestProcessWorkflowFinalizeLeavesCrossStoreSourceBeadOpenOnFailure(t *testi
 		}
 	}
 
-	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{
+		Work:            beadstest.Work(rigStore),
 		ResolveStoreRef: resolver,
 	})
 	if err != nil {
@@ -5585,7 +5729,8 @@ func TestProcessWorkflowFinalizeKeepsFinalizerOpenWhenSourceResolverFails(t *tes
 	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	_, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+	_, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{
+		Work: beadstest.Work(rigStore),
 		ResolveStoreRef: func(ref string) (beads.Store, error) {
 			return nil, fmt.Errorf("resolver offline for %s", ref)
 		},
@@ -5681,7 +5826,8 @@ func TestProcessWorkflowFinalizeKeepsFinalizerOpenWhenSourceStoreReadFails(t *te
 		}
 	}
 
-	_, err := ProcessControl(rigStore, finalizer, ProcessOptions{
+	_, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{
+		Work:            beadstest.Work(rigStore),
 		ResolveStoreRef: resolver,
 	})
 	if err == nil {
@@ -5752,7 +5898,7 @@ func TestProcessRalphCheckRetriesThenPasses(t *testing.T) {
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result1, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result1, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -5768,7 +5914,7 @@ func TestProcessRalphCheckRetriesThenPasses(t *testing.T) {
 		t.Fatalf("close run2: %v", err)
 	}
 
-	result2, err := ProcessControl(store, check2, ProcessOptions{CityPath: cityPath})
+	result2, err := ProcessControl(beadstest.Graph(store), check2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check2): %v", err)
 	}
@@ -5796,7 +5942,7 @@ func TestProcessRalphCheckTransientAppendErrorStaysOpenForRetry(t *testing.T) {
 		Store: base,
 		err:   errors.New("creating ralph retry bead: invalid connection: i/o timeout"),
 	}
-	_, err := ProcessControl(store, mustGetBead(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, check1.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(ralph check append) error = %v, want %v", err, ErrControlPending)
 	}
@@ -5828,7 +5974,7 @@ func TestProcessRalphCheckPassClosesCheckBeforeLogicalAndPropagatesOutputJSON(t 
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -5945,7 +6091,7 @@ func TestNestedRalphScopePassPropagatesOutputJSONToLogical(t *testing.T) {
 	mustDepAdd(t, store, check1.ID, run1.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, check1.ID, "blocks")
 
-	scopeResult, err := ProcessControl(store, control, ProcessOptions{})
+	scopeResult, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -5961,7 +6107,8 @@ func TestNestedRalphScopePassPropagatesOutputJSONToLogical(t *testing.T) {
 		t.Fatalf("run1 gc.output_json = %q, want propagated body output", got)
 	}
 
-	checkResult, err := ProcessControl(store, check1, ProcessOptions{
+	checkResult, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{
+		Work:     beadstest.Work(store),
 		CityPath: cityPath,
 		// Surface ralph check-result trace fields in test logs so a
 		// recurrence of the flake here is diagnosable without re-instrumenting.
@@ -5993,11 +6140,11 @@ func TestProcessRalphCheckResumesExistingRetryAttemptWithoutDuplicates(t *testin
 	if err := store.Close(run1.ID); err != nil {
 		t.Fatalf("close run1: %v", err)
 	}
-	if _, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+	if _, err := appendRalphRetry(beadstest.Graph(store), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}); err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -6044,7 +6191,7 @@ func TestAppendRalphRetryDefersAssigneesUntilDepsAreWired(t *testing.T) {
 	run1 = mustGetBead(t, inspect, run1.ID)
 	check1 = mustGetBead(t, inspect, check1.ID)
 
-	mapping, err := appendRalphRetry(inspect, logical.ID, run1, check1, 2, ProcessOptions{})
+	mapping, err := appendRalphRetry(beadstest.Graph(inspect), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(inspect)})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
@@ -6073,7 +6220,7 @@ func TestAppendRalphRetryGraphEdgesSkipsParentChildDeps(t *testing.T) {
 	mustDepAdd(t, store, child.ID, blocker.ID, "blocks")
 
 	plan := &beads.GraphApplyPlan{}
-	if err := appendRalphRetryGraphEdges(plan, store, child.ID, map[string]bool{
+	if err := appendRalphRetryGraphEdges(plan, beadstest.Graph(store), child.ID, map[string]bool{
 		parent.ID:  true,
 		blocker.ID: true,
 	}); err != nil {
@@ -6126,7 +6273,7 @@ max = -1
 	run1 = mustGetBead(t, store, run1.ID)
 	check1 = mustGetBead(t, store, check1.ID)
 
-	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{CityPath: cityPath})
+	mapping, err := appendRalphRetry(beadstest.Graph(store), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
@@ -6239,7 +6386,7 @@ func TestAppendRalphRetryRemapsNestedRetryLogicalRefs(t *testing.T) {
 	mustDepAdd(t, store, check1.ID, run1.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, check1.ID, "blocks")
 
-	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{})
+	mapping, err := appendRalphRetry(beadstest.Graph(store), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
@@ -6256,6 +6403,88 @@ func TestAppendRalphRetryRemapsNestedRetryLogicalRefs(t *testing.T) {
 	}
 	if got := nestedEval2.Metadata["gc.control_for"]; got != "demo.review-loop.run.2.review-claude.eval.1" {
 		t.Fatalf("nested eval gc.control_for = %q, want demo.review-loop.run.2.review-claude.eval.1", got)
+	}
+}
+
+// countingGraphApplyStore is a graph-apply-capable store that counts the
+// plans it applies.
+type countingGraphApplyStore struct {
+	*graphApplyOuterDepFailStore
+	applies int
+}
+
+func (s *countingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	s.applies++
+	return s.graphApplyOuterDepFailStore.ApplyGraphPlan(ctx, plan)
+}
+
+// TestAppendRalphRetryAppliesTheGraphThroughTheGraphHandle pins that with
+// graph apply on, a ralph retry over a graph-apply-capable store reaches that
+// store's ApplyGraphPlan through the GraphStore handle it is given, rather
+// than falling back to the one-bead-at-a-time legacy append.
+func TestAppendRalphRetryAppliesTheGraphThroughTheGraphHandle(t *testing.T) {
+	prev := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prev) })
+
+	// failed is preset so the wrapped store's DepAdd never injects a fault.
+	store := &countingGraphApplyStore{graphApplyOuterDepFailStore: &graphApplyOuterDepFailStore{MemStore: beads.NewMemStore(), failed: true}}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review loop",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "attempt 1 body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "scope",
+			"gc.scope_role":      "body",
+			"gc.scope_name":      "review-loop",
+			"gc.step_ref":        "demo.review-loop.run.1",
+			"gc.step_id":         "review-loop",
+			"gc.ralph_step_id":   "review-loop",
+			"gc.attempt":         "1",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+		},
+	})
+	check1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "check review loop",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "check",
+			"gc.step_id":         "review-loop",
+			"gc.ralph_step_id":   "review-loop",
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "2",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.logical_bead_id": logical.ID,
+			"gc.step_ref":        "demo.review-loop.check.1",
+		},
+	})
+	mustDepAdd(t, store, check1.ID, run1.ID, "blocks")
+	mustDepAdd(t, store, logical.ID, check1.ID, "blocks")
+
+	mapping, err := appendRalphRetry(beadstest.Graph(store), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("appendRalphRetry: %v", err)
+	}
+	if store.applies != 1 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 1: the retry did not reach the graph-apply store through its GraphStore handle", store.applies)
+	}
+	if mapping[run1.ID] == "" || mapping[check1.ID] == "" {
+		t.Fatalf("mapping = %v, want the body and the check re-minted", mapping)
 	}
 }
 
@@ -6391,7 +6620,7 @@ func TestResolveLogicalBeadIDPrefersExactScopeCheckTargetStep(t *testing.T) {
 		},
 	})
 
-	if got := resolveLogicalBeadID(store, scopeCheck); got != child.ID {
+	if got := resolveLogicalBeadID(beadstest.Graph(store), scopeCheck); got != child.ID {
 		t.Fatalf("resolveLogicalBeadID(child scope-check) = %q, want %q", got, child.ID)
 	}
 }
@@ -6407,7 +6636,7 @@ func TestProcessRalphCheckExhaustsRetries(t *testing.T) {
 	if err := store.Close(run1.ID); err != nil {
 		t.Fatalf("close run1: %v", err)
 	}
-	result1, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result1, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -6419,7 +6648,7 @@ func TestProcessRalphCheckExhaustsRetries(t *testing.T) {
 	if err := store.Close(run2.ID); err != nil {
 		t.Fatalf("close run2: %v", err)
 	}
-	result2, err := ProcessControl(store, check2, ProcessOptions{CityPath: cityPath})
+	result2, err := ProcessControl(beadstest.Graph(store), check2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check2): %v", err)
 	}
@@ -6459,7 +6688,8 @@ func TestProcessRalphCheckTraceCapturesGateResultFieldsOnFailure(t *testing.T) {
 	}
 
 	var trace bytes.Buffer
-	result, err := ProcessControl(store, check1, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{
+		Work:     beadstest.Work(store),
 		CityPath: cityPath,
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
@@ -6505,7 +6735,8 @@ func TestProcessRalphCheckTraceClipsLargeOutputs(t *testing.T) {
 	}
 
 	var trace bytes.Buffer
-	if _, err := ProcessControl(store, check1, ProcessOptions{
+	if _, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{
+		Work:     beadstest.Work(store),
 		CityPath: cityPath,
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
@@ -6621,7 +6852,7 @@ func TestProcessRalphCheckRetriesNestedAttemptScope(t *testing.T) {
 	if err := store.Close(member1.ID); err != nil {
 		t.Fatalf("close member1: %v", err)
 	}
-	if _, err := ProcessControl(store, control1, ProcessOptions{}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(store), control1, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
 
@@ -6630,7 +6861,7 @@ func TestProcessRalphCheckRetriesNestedAttemptScope(t *testing.T) {
 		t.Fatalf("run1/body = status %q outcome %q, want closed/fail", run1After.Status, run1After.Metadata["gc.outcome"])
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -6646,7 +6877,7 @@ func TestProcessRalphCheckRetriesNestedAttemptScope(t *testing.T) {
 		t.Fatalf("logical deps = %+v, want exactly one current blocker", logicalDeps)
 	}
 	check2 := mustGetBead(t, store, logicalDeps[0].DependsOnID)
-	run2ID, err := resolveBlockingSubjectID(store, check2.ID)
+	run2ID, err := resolveBlockingSubjectID(beadstest.Graph(store), check2)
 	if err != nil {
 		t.Fatalf("resolve run2 subject: %v", err)
 	}
@@ -6799,7 +7030,7 @@ func TestAppendRalphRetryClonesIterationFanoutControls(t *testing.T) {
 	mustDepAdd(t, store, check1.ID, run1.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, check1.ID, "blocks")
 
-	mapping, err := appendRalphRetry(store, logical.ID, run1, check1, 2, ProcessOptions{})
+	mapping, err := appendRalphRetry(beadstest.Graph(store), logical.ID, run1, check1, 2, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("appendRalphRetry: %v", err)
 	}
@@ -6873,7 +7104,7 @@ func TestProcessRalphCheckRecoversPartialRetryAttempt(t *testing.T) {
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -6937,7 +7168,7 @@ func TestProcessRalphCheckRecoversIncompletelyWiredRetryAttempt(t *testing.T) {
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -7010,7 +7241,7 @@ func TestProcessRalphCheckRecoversRetryAttemptMissingFinalAssigneePass(t *testin
 		t.Fatalf("close run1: %v", err)
 	}
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -7102,7 +7333,7 @@ needs = ["{target}.review"]
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result1, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result1, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -7159,7 +7390,7 @@ needs = ["{target}.review"]
 		}
 	}
 
-	result2, err := ProcessControl(store, mustGetBead(t, store, fanout.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result2, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, fanout.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout finalize): %v", err)
 	}
@@ -7235,7 +7466,7 @@ title = "Review {reviewer}"
 		Store: base,
 		err:   errors.New("creating fragment bead: invalid connection: i/o timeout"),
 	}
-	_, err := ProcessControl(store, mustGetBead(t, store, fanout.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, fanout.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(fanout transient instantiate) error = %v, want %v", err, ErrControlPending)
 	}
@@ -7327,7 +7558,8 @@ on_exhausted = "hard_fail"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           dir,
 		FormulaSearchPaths: []string{dir},
 	})
@@ -7429,7 +7661,8 @@ metadata = { "gc.run_target" = "{reviewer}", "gc.scope_ref" = "body", "gc.scope_
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           dir,
 		FormulaSearchPaths: []string{dir},
 	})
@@ -7528,7 +7761,8 @@ on_exhausted = "hard_fail"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           dir,
 		FormulaSearchPaths: []string{dir},
 	})
@@ -7626,7 +7860,8 @@ on_exhausted = "hard_fail"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           dir,
 		FormulaSearchPaths: []string{dir},
 		PrepareFragment: func(fragment *formula.FragmentRecipe, _ beads.Bead) error {
@@ -7772,7 +8007,7 @@ metadata = { "gc.scope_ref" = "{scope_ref}" }
 
 	opts := testProcessOptionsWithControlDispatcher("")
 	opts.FormulaSearchPaths = []string{dir}
-	result, err := ProcessControl(store, fanout, opts)
+	result, err := ProcessControl(beadstest.Graph(store), fanout, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -7856,7 +8091,7 @@ metadata = { "gc.scope_ref" = "{scope_ref}" }
 
 	opts := testProcessOptionsWithControlDispatcher("")
 	opts.FormulaSearchPaths = []string{dir}
-	result, err := ProcessControl(store, fanout, opts)
+	result, err := ProcessControl(beadstest.Graph(store), fanout, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -7941,7 +8176,7 @@ title = "Review {reviewer}"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -8010,7 +8245,7 @@ title = "Review {reviewer}"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	if _, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
 	if child := findAttemptByRef(t, store, workflow.ID, "expansion-review.design-review.prepare-review-items.item.1.review"); child.ID == "" {
@@ -8105,10 +8340,10 @@ on_exhausted = "hard_fail"
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment: %v", err)
 	}
-	if err := routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{CityPath: dir}, store); err != nil {
+	if err := routeFanoutFragmentSteps(fragment, fanout, ProcessOptions{Work: beadstest.Work(store), CityPath: dir}); err != nil {
 		t.Fatalf("routeFanoutFragmentSteps: %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment: %v", err)
 	}
 	staleRetryControl := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
@@ -8119,7 +8354,8 @@ on_exhausted = "hard_fail"
 		t.Fatalf("stale route metadata: %v", err)
 	}
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           dir,
 		FormulaSearchPaths: []string{dir},
 	})
@@ -8215,7 +8451,7 @@ needs = ["{target}.review"]
 		if err != nil {
 			t.Fatalf("CompileExpansionFragment(%s): %v", reviewer, err)
 		}
-		if _, err := molecule.InstantiateFragment(context.Background(), store, fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+		if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), fragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 			t.Fatalf("InstantiateFragment(%s): %v", reviewer, err)
 		}
 	}
@@ -8225,7 +8461,7 @@ needs = ["{target}.review"]
 		t.Fatalf("store.List before: %v", err)
 	}
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout resume): %v", err)
 	}
@@ -8322,7 +8558,7 @@ needs = ["{target}.review"]
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	legacyInst, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID})
+	legacyInst, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID})
 	if err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
@@ -8335,7 +8571,7 @@ needs = ["{target}.review"]
 		t.Fatalf("store.List before: %v", err)
 	}
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout legacy resume): %v", err)
 	}
@@ -8430,11 +8666,11 @@ needs = ["{target}.review"]
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout blank-state legacy recreate): %v", err)
 	}
@@ -8539,11 +8775,11 @@ needs = ["{target}.review"]
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout legacy resume): %v", err)
 	}
@@ -8640,7 +8876,7 @@ title = "Review {reviewer}"
 	if err != nil {
 		t.Fatalf("CompileExpansionFragment(legacy): %v", err)
 	}
-	if _, err := molecule.InstantiateFragment(context.Background(), store, legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
+	if _, err := molecule.InstantiateFragment(context.Background(), beadstest.GraphMolecule(store), legacyFragment, molecule.FragmentOptions{RootID: workflow.ID}); err != nil {
 		t.Fatalf("InstantiateFragment(legacy): %v", err)
 	}
 
@@ -8655,7 +8891,7 @@ title = "Review {reviewer}"
 		t.Fatalf("close legacy fragment: %v", err)
 	}
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout closed legacy resume): %v", err)
 	}
@@ -8752,7 +8988,7 @@ title = "Review {reviewer}"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout sequential): %v", err)
 	}
@@ -8874,7 +9110,7 @@ title = "Review {reviewer}"
 		},
 	})
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout resume sequential): %v", err)
 	}
@@ -8974,7 +9210,8 @@ title = "Review {reviewer}"
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
 		FormulaSearchPaths: []string{dir},
 		PrepareFragment: func(fragment *formula.FragmentRecipe, _ beads.Bead) error {
 			for _, step := range fragment.Steps {
@@ -9110,7 +9347,7 @@ needs = ["{target}.review"]
 		},
 	})
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout recover partial): %v", err)
 	}
@@ -9218,7 +9455,7 @@ needs = ["{target}.review"]
 		},
 	})
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout recover incomplete): %v", err)
 	}
@@ -9298,7 +9535,7 @@ func TestFragmentInstanceCompleteAllowsRetriedRalphLogicalDep(t *testing.T) {
 		"expansion-review.review-loop.check.1": originalCheck.ID,
 	}
 
-	complete, err := fragmentInstanceComplete(store, fragment, mapping, nil)
+	complete, err := fragmentInstanceComplete(beadstest.Graph(store), fragment, mapping, nil)
 	if err != nil {
 		t.Fatalf("fragmentInstanceComplete: %v", err)
 	}
@@ -9338,7 +9575,7 @@ func TestCollectRalphAttemptBeadsSkipsDynamicFragments(t *testing.T) {
 		},
 	})
 
-	attemptSet, err := collectRalphAttemptBeads(store, subject)
+	attemptSet, err := collectRalphAttemptBeads(beadstest.Graph(store), subject)
 	if err != nil {
 		t.Fatalf("collectRalphAttemptBeads: %v", err)
 	}
@@ -9403,7 +9640,7 @@ func TestCopyRetryDepsSkipsDynamicFragmentTargets(t *testing.T) {
 	})
 	mustDepAdd(t, store, oldControl.ID, dynamicSink.ID, "blocks")
 
-	if err := copyRetryDeps(store, oldControl.ID, newControl.ID, map[string]string{}); err != nil {
+	if err := copyRetryDeps(beadstest.Graph(store), oldControl.ID, newControl.ID, map[string]string{}); err != nil {
 		t.Fatalf("copyRetryDeps: %v", err)
 	}
 
@@ -9431,7 +9668,7 @@ func TestCopiedDepsPresentSkipsDynamicFragmentTargets(t *testing.T) {
 	})
 	mustDepAdd(t, store, oldControl.ID, dynamicSink.ID, "blocks")
 
-	ok, err := copiedDepsPresent(store, oldControl.ID, newControl.ID, map[string]string{})
+	ok, err := copiedDepsPresent(beadstest.Graph(store), oldControl.ID, newControl.ID, map[string]string{})
 	if err != nil {
 		t.Fatalf("copiedDepsPresent: %v", err)
 	}
@@ -9452,10 +9689,10 @@ func TestCanDiscardPartialFragmentBeadWaitsForDependents(t *testing.T) {
 		dependent.ID: dependent,
 		blocker.ID:   blocker,
 	}
-	if canDiscardPartialFragmentBead(store, blocker.ID, pending) {
+	if canDiscardPartialFragmentBead(beadstest.Graph(store), blocker.ID, pending) {
 		t.Fatal("blocker should not be discarded before its dependent")
 	}
-	if !canDiscardPartialFragmentBead(store, dependent.ID, pending) {
+	if !canDiscardPartialFragmentBead(beadstest.Graph(store), dependent.ID, pending) {
 		t.Fatal("dependent should be discardable before its blocker")
 	}
 }
@@ -9528,7 +9765,7 @@ title = "Review {reviewer}"
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 	mustDepAdd(t, store, body.ID, fanout.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawn): %v", err)
 	}
@@ -9557,7 +9794,7 @@ title = "Review {reviewer}"
 		t.Fatalf("close sink: %v", err)
 	}
 
-	result, err = ProcessControl(store, mustGetBead(t, store, fanout.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	result, err = ProcessControl(beadstest.Graph(store), mustGetBead(t, store, fanout.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout finalize): %v", err)
 	}
@@ -9595,7 +9832,7 @@ func TestProcessFanoutSpawnedNoOpsWhileBlockersRemainOpen(t *testing.T) {
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout spawned pending): %v", err)
 	}
@@ -9615,7 +9852,7 @@ func TestDiscardPartialFragmentMarksClosedBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	bead := mustCreateWorkflowBead(t, store, beads.Bead{Title: "partial", Type: "task", Status: "closed"})
 
-	if err := discardPartialFragmentInstance(store, map[string]beads.Bead{bead.ID: bead}); err != nil {
+	if err := discardPartialFragmentInstance(beadstest.Graph(store), map[string]beads.Bead{bead.ID: bead}); err != nil {
 		t.Fatalf("discardPartialFragmentInstance: %v", err)
 	}
 
@@ -9631,7 +9868,7 @@ func TestDiscardPartialRetryMarksClosedBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	bead := mustCreateWorkflowBead(t, store, beads.Bead{Title: "partial", Type: "task", Status: "closed"})
 
-	if err := discardPartialRalphRetry(store, map[string]beads.Bead{bead.ID: bead}); err != nil {
+	if err := discardPartialRalphRetry(beadstest.Graph(store), map[string]beads.Bead{bead.ID: bead}); err != nil {
 		t.Fatalf("discardPartialRalphRetry: %v", err)
 	}
 
@@ -9676,7 +9913,7 @@ func TestProcessFanoutFailsWhenSourceFailed(t *testing.T) {
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout fail): %v", err)
 	}
@@ -9729,7 +9966,7 @@ func TestProcessFanoutFailsWhenAbortScopeSourceClosedBare(t *testing.T) {
 	})
 	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
 
-	result, err := ProcessControl(store, fanout, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(fanout bare-failed source): %v", err)
 	}
@@ -9874,7 +10111,7 @@ func TestResolveInheritedMetadataPrefersParentBeforeWorkflowRoot(t *testing.T) {
 		},
 	})
 
-	got := resolveInheritedMetadata(store, check, "work_dir")
+	got := resolveInheritedMetadata(beadstest.Graph(store), check, "work_dir")
 	if got != "/run/body" {
 		t.Fatalf("resolveInheritedMetadata() = %q, want parent-scoped value", got)
 	}
@@ -9906,7 +10143,7 @@ func TestRunRalphCheckResolvesRelativeWorkDirAgainstCityPath(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-1", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{CityPath: cityPath})
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck: %v", err)
 	}
@@ -9946,7 +10183,7 @@ func TestRunRalphCheckRejectsNonPositiveMetadataTimeouts(t *testing.T) {
 			}
 			subject := beads.Bead{ID: "run-1", Type: "task"}
 
-			_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{CityPath: cityPath})
+			_, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if err == nil {
 				t.Fatalf("runRalphCheck succeeded, want non-positive %s error", tt.key)
 			}
@@ -9971,7 +10208,7 @@ func TestRunRalphCheckTimeoutMetadataPrecedence(t *testing.T) {
 			"gc.step_timeout": "1ms",
 		},
 	}
-	stepResult, err := runRalphCheck(store, stepOnly, subject, 1, ProcessOptions{CityPath: cityPath})
+	stepResult, err := runRalphCheck(beadstest.Graph(store), stepOnly, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck step-only: %v", err)
 	}
@@ -9988,7 +10225,7 @@ func TestRunRalphCheckTimeoutMetadataPrecedence(t *testing.T) {
 			"gc.check_timeout": "30s",
 		},
 	}
-	checkResult, err := runRalphCheck(store, checkOverrides, subject, 1, ProcessOptions{CityPath: cityPath})
+	checkResult, err := runRalphCheck(beadstest.Graph(store), checkOverrides, subject, 1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("runRalphCheck check-overrides: %v", err)
 	}
@@ -10036,7 +10273,8 @@ func TestRunRalphCheckUsesStorePathForRelativeCheckAndSubjectEnv(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-1", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 2, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 2, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10094,7 +10332,8 @@ func TestRunRalphCheckRigScopedRelativeCheckPathResolvesAgainstStore(t *testing.
 	}
 	subject := beads.Bead{ID: "run-rig", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10142,7 +10381,8 @@ func TestRunRalphCheckSiblingStoreRelativeCheckPathResolves(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-sibling", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10184,7 +10424,8 @@ func TestRunRalphCheckRejectsPathTraversalAboveCityPath(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-evil", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10232,7 +10473,8 @@ func TestRunRalphCheckAllowsAbsoluteCheckPath(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-abs", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: []string{filepath.Join(packDir, "formulas")},
@@ -10272,7 +10514,8 @@ func TestRunRalphCheckAllowsAbsoluteCheckPathUnderFormulaPackRoot(t *testing.T) 
 	}
 	subject := beads.Bead{ID: "run-local-pack", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: []string{filepath.Join(localPackRoot, "formulas")},
@@ -10315,7 +10558,8 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathUnderUnrelatedCachedPack(t *testin
 	}
 	subject := beads.Bead{ID: "run-other-pack", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: []string{filepath.Join(activePackRoot, "formulas")},
@@ -10361,7 +10605,8 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathOutsideTrustedRoots(t *testing.T) 
 	}
 	subject := beads.Bead{ID: "run-abs-outside", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10410,7 +10655,8 @@ func TestRunRalphCheckRejectsAbsoluteCheckPathSymlinkOutsideTrustedRoots(t *test
 	}
 	subject := beads.Bead{ID: "run-abs-symlink-outside", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10460,7 +10706,8 @@ func TestRunRalphCheckAllowsAbsoluteCheckPathWithExternalWorkDir(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-abs-workdir", Type: "task"}
 
-	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:               beadstest.Work(store),
 		CityPath:           cityPath,
 		StorePath:          storePath,
 		FormulaSearchPaths: []string{filepath.Join(packRoot, "formulas")},
@@ -10517,7 +10764,8 @@ func TestRunRalphCheckRejectsRelativeCheckPathWithExternalWorkDir(t *testing.T) 
 			}
 			subject := beads.Bead{ID: "run-rel-workdir", Type: "task"}
 
-			result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+			result, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+				Work:      beadstest.Work(store),
 				CityPath:  cityPath,
 				StorePath: storePath,
 			})
@@ -10570,7 +10818,8 @@ func TestRunRalphCheckRejectsSymlinkEscapeViaStore(t *testing.T) {
 	}
 	subject := beads.Bead{ID: "run-symlink-escape", Type: "task"}
 
-	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+	_, err := runRalphCheck(beadstest.Graph(store), check, subject, 1, ProcessOptions{
+		Work:      beadstest.Work(store),
 		CityPath:  cityPath,
 		StorePath: storePath,
 	})
@@ -10876,7 +11125,7 @@ func TestRetryControlPropagatesAttemptMetadata(t *testing.T) {
 	})
 	mustDepAdd(t, store, retryControl.ID, attempt.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, retryControl.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, retryControl.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry): %v", err)
 	}
@@ -10946,7 +11195,7 @@ func TestScopeBodyPropagatesMemberMetadata(t *testing.T) {
 	mustDepAdd(t, store, control.ID, step.ID, "blocks")
 	mustDepAdd(t, store, body.ID, control.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -11024,7 +11273,7 @@ func TestFullMetadataPropagationChain(t *testing.T) {
 	mustDepAdd(t, store, iterBody.ID, scopeCheck.ID, "blocks")
 
 	// Process scope-check — should propagate review.verdict to iteration body.
-	result, err := ProcessControl(store, mustGetBead(t, store, scopeCheck.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, scopeCheck.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -11098,7 +11347,7 @@ func TestProcessScopeCheckIgnoresOpenSpecBeadsWhenCompletingScope(t *testing.T) 
 	mustDepAdd(t, store, scopeCheck.ID, member.ID, "blocks")
 	mustDepAdd(t, store, body.ID, scopeCheck.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, scopeCheck.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, scopeCheck.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -11178,7 +11427,7 @@ func TestProcessScopeCheckDoesNotSkipOpenSpecBeadsWhenFailingScope(t *testing.T)
 	mustDepAdd(t, store, scopeCheck.ID, failedMember.ID, "blocks")
 	mustDepAdd(t, store, body.ID, scopeCheck.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGetBead(t, store, scopeCheck.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, scopeCheck.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check): %v", err)
 	}
@@ -11238,13 +11487,14 @@ func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
 
 	var traceBuf bytes.Buffer
 	opts := ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&traceBuf, format, args...)
 			traceBuf.WriteByte('\n')
 		},
 	}
 
-	result, err := ProcessControl(store, control, opts)
+	result, err := ProcessControl(beadstest.Graph(store), control, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -11285,13 +11535,14 @@ func TestProcessControlClosesControlWhenWorkflowRootMissing(t *testing.T) {
 
 	var traceBuf bytes.Buffer
 	opts := ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&traceBuf, format, args...)
 			traceBuf.WriteByte('\n')
 		},
 	}
 
-	result, err := ProcessControl(store, control, opts)
+	result, err := ProcessControl(beadstest.Graph(store), control, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -11361,13 +11612,14 @@ func TestProcessControlClosesControlWhenWorkflowRootCanceled(t *testing.T) {
 
 	var traceBuf bytes.Buffer
 	opts := ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&traceBuf, format, args...)
 			traceBuf.WriteByte('\n')
 		},
 	}
 
-	result, err := ProcessControl(store, control, opts)
+	result, err := ProcessControl(beadstest.Graph(store), control, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -11430,7 +11682,7 @@ func TestProcessWorkflowFinalize_PurgesMoleculeArtifactDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11471,7 +11723,7 @@ func TestProcessWorkflowFinalize_NoCityPath(t *testing.T) {
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
 	// CityPath omitted → purge is skipped.
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11511,7 +11763,7 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 	})
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11569,15 +11821,15 @@ func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 				},
 			})
 
-			snapshot, err := loadScopeSnapshotWithBody(store, workflow.ID, "body", body)
+			snapshot, err := loadScopeSnapshotWithBody(beadstest.Graph(store), workflow.ID, "body", body)
 			if err != nil {
 				t.Fatalf("loadScopeSnapshotWithBody: %v", err)
 			}
 			var trace bytes.Buffer
-			opts := ProcessOptions{Tracef: func(format string, args ...any) {
+			opts := ProcessOptions{Work: beadstest.Work(store), Tracef: func(format string, args ...any) {
 				fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 			}}
-			if err := closeScopeAsPassed(store, snapshot, subject, opts, subject.ID); err != nil {
+			if err := closeScopeAsPassed(beadstest.Graph(store), snapshot, subject, opts, subject.ID); err != nil {
 				t.Fatalf("closeScopeAsPassed: %v", err)
 			}
 
@@ -11663,15 +11915,15 @@ func TestAbortScopeSharedConvergence(t *testing.T) {
 		},
 	})
 
-	snapshot, err := loadScopeSnapshotWithBody(store, workflow.ID, "body", body)
+	snapshot, err := loadScopeSnapshotWithBody(beadstest.Graph(store), workflow.ID, "body", body)
 	if err != nil {
 		t.Fatalf("loadScopeSnapshotWithBody: %v", err)
 	}
 	var trace bytes.Buffer
-	opts := ProcessOptions{Tracef: func(format string, args ...any) {
+	opts := ProcessOptions{Work: beadstest.Work(store), Tracef: func(format string, args ...any) {
 		fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 	}}
-	skipped, err := abortScope(store, snapshot, opts, failed.ID)
+	skipped, err := abortScope(beadstest.Graph(store), snapshot, opts, failed.ID)
 	if err != nil {
 		t.Fatalf("abortScope: %v", err)
 	}
@@ -11776,7 +12028,7 @@ func TestProcessWorkflowFinalizeSettlesWithOpenTeardownTail(t *testing.T) {
 	mustDepAdd(t, store, finalizer.ID, body.ID, "blocks")
 	mustDepAdd(t, store, teardownControl.ID, teardownAttempt.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -11837,7 +12089,7 @@ func TestProcessWorkflowFinalizePendsOnOpenNonTeardownBlocker(t *testing.T) {
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 	mustDepAdd(t, store, finalizer.ID, work.ID, "blocks")
 
-	if _, err := ProcessControl(store, finalizer, ProcessOptions{}); !errors.Is(err, ErrControlPending) {
+	if _, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)}); !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(workflow-finalize) err = %v, want ErrControlPending", err)
 	}
 	if after := mustGetBead(t, store, workflow.ID); after.Status != "open" {
@@ -11890,7 +12142,7 @@ func cookTeardownMolecule(t *testing.T, store beads.Store) string {
 	if err := os.WriteFile(filepath.Join(dir, "teardown-settlement.toml"), []byte(teardownSettlementFormula), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
-	result, err := molecule.Cook(context.Background(), store, "teardown-settlement", []string{dir}, molecule.Options{})
+	result, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "teardown-settlement", []string{dir}, molecule.Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -11918,7 +12170,7 @@ func runMolecule(t *testing.T, store beads.Store, rootID, workOutcome string) {
 	t.Helper()
 	const maxRounds = 60
 	for round := 0; round < maxRounds; round++ {
-		members, err := molecule.ListSubtree(store, rootID)
+		members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 		if err != nil {
 			t.Fatalf("listing molecule members: %v", err)
 		}
@@ -11945,7 +12197,7 @@ func runMolecule(t *testing.T, store beads.Store, rootID, workOutcome string) {
 					continue
 				}
 				if servingControls {
-					_, err := ProcessControl(store, current, ProcessOptions{})
+					_, err := ProcessControl(beadstest.Graph(store), current, ProcessOptions{Work: beadstest.Work(store)})
 					if errors.Is(err, ErrControlPending) {
 						continue
 					}
@@ -12007,7 +12259,7 @@ func closeAsWorker(t *testing.T, store beads.Store, bead beads.Bead, rootID, wor
 			}
 		}
 	}
-	if err := updateMetadataAndClose(store, bead.ID, metadata); err != nil {
+	if err := updateMetadataAndClose(beadstest.Graph(store), bead.ID, metadata); err != nil {
 		t.Fatalf("worker close %s: %v", bead.ID, err)
 	}
 }
@@ -12039,7 +12291,7 @@ func isTeardownAttempt(bead beads.Bead, teardownSteps map[string]bool) bool {
 
 func memberReport(t *testing.T, store beads.Store, rootID string) string {
 	t.Helper()
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 	if err != nil {
 		t.Fatalf("listing molecule members: %v", err)
 	}
@@ -12063,7 +12315,7 @@ func memberReport(t *testing.T, store beads.Store, rootID string) string {
 // root-outcome guard.
 func teardownTailBeads(t *testing.T, store beads.Store, rootID string) (control, attempt beads.Bead) {
 	t.Helper()
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 	if err != nil {
 		t.Fatalf("listing molecule members: %v", err)
 	}
@@ -12090,7 +12342,7 @@ func teardownTailBeads(t *testing.T, store beads.Store, rootID string) (control,
 
 func assertNoOpenMembers(t *testing.T, store beads.Store, rootID string) {
 	t.Helper()
-	members, err := molecule.ListSubtree(store, rootID)
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
 	if err != nil {
 		t.Fatalf("listing molecule members: %v", err)
 	}
@@ -12219,7 +12471,7 @@ func TestProcessWorkflowFinalizeStampsFailureOnOpenDomainParent(t *testing.T) {
 	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{Work: beadstest.Work(rigStore), ResolveStoreRef: cityStoreRefResolver(cityStore)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
 	}
@@ -12286,7 +12538,7 @@ func TestProcessWorkflowFinalizeFailureStampFallsBackToGenericReason(t *testing.
 	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	if _, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)}); err != nil {
+	if _, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{Work: beadstest.Work(rigStore), ResolveStoreRef: cityStoreRefResolver(cityStore)}); err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
 	}
 
@@ -12340,7 +12592,7 @@ func TestProcessWorkflowFinalizeFailAnnotationFailsLoudWithoutResolver(t *testin
 	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	if _, err := ProcessControl(rigStore, finalizer, ProcessOptions{}); err == nil {
+	if _, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{Work: beadstest.Work(rigStore)}); err == nil {
 		t.Fatal("want a loud error marking a cross-store failed parent with no resolver; got nil")
 	}
 	fin, err := rigStore.Get(finalizer.ID)
@@ -12433,7 +12685,7 @@ func TestProcessWorkflowFinalizeFailureStampSupersedesStaleDiagnostics(t *testin
 	mustDepAdd(t, rigStore, finalizer.ID, step.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{Work: beadstest.Work(rigStore), ResolveStoreRef: cityStoreRefResolver(cityStore)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
 	}
@@ -12490,7 +12742,7 @@ func TestProcessWorkflowFinalizePassCloseClearsStaleFailureStamp(t *testing.T) {
 	mustDepAdd(t, rigStore, finalizer.ID, step.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{Work: beadstest.Work(rigStore), ResolveStoreRef: cityStoreRefResolver(cityStore)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize pass): %v", err)
 	}
@@ -12568,7 +12820,7 @@ func TestProcessWorkflowFinalizeFailureStampNamesAbortScopeMember(t *testing.T) 
 	mustDepAdd(t, rigStore, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, rigStore, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(rigStore, finalizer, ProcessOptions{ResolveStoreRef: cityStoreRefResolver(cityStore)})
+	result, err := ProcessControl(beadstest.Graph(rigStore), finalizer, ProcessOptions{Work: beadstest.Work(rigStore), ResolveStoreRef: cityStoreRefResolver(cityStore)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize abort-scope fail): %v", err)
 	}
@@ -12629,7 +12881,7 @@ func TestProcessWorkflowFinalizeStampsFailureOnSameStoreDomainParent(t *testing.
 	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
 	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize fail): %v", err)
 	}
@@ -12668,7 +12920,8 @@ func stampSourceChainLaunch(t *testing.T, f sourceChainFinalizeFixture, formula,
 func finalizeSourceChainFixture(t *testing.T, f sourceChainFinalizeFixture) (ControlResult, string) {
 	t.Helper()
 	var trace bytes.Buffer
-	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:                 beadstest.Work(f.rigStore),
 		ResolveStoreRef:      f.resolver,
 		SourceWorkflowStores: sourceChainFixtureStores(f),
 		SourceWorkflowLock:   func(_ string, _ string, fn func() error) error { return fn() },
@@ -12914,7 +13167,8 @@ func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testin
 		return f.resolver(ref)
 	}
 
-	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: resolver,
 	})
 	if err != nil {

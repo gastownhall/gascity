@@ -368,12 +368,21 @@ func buildAssignedSkillsPromptFragment(
 // originTag is non-empty, each bullet trails with " *(origin)*" so
 // shared entries can show whether they came from the city pack, an
 // import binding, or a compatibility bootstrap pack. Descriptions are included when the
-// SKILL.md frontmatter provided one.
+// SKILL.md frontmatter provided one, and the frontmatter name when it differs
+// from the listed name.
 func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
 	for _, e := range entries {
 		b.WriteString("- `")
 		b.WriteString(e.Name)
 		b.WriteString("`")
+		// An imported skill is listed under its binding-prefixed name, but
+		// its SKILL.md keeps the pack's name, and a provider that registers
+		// skills by frontmatter name loads it only under that one (#8501).
+		if fm := strings.TrimSpace(e.FrontmatterName); fm != "" && fm != e.Name {
+			b.WriteString(" (SKILL.md name: `")
+			b.WriteString(fm)
+			b.WriteString("`)")
+		}
 		if strings.TrimSpace(e.Description) != "" {
 			b.WriteString(" — ")
 			b.WriteString(strings.TrimSpace(e.Description))

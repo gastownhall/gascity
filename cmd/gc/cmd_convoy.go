@@ -239,7 +239,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 	// Ensure metadata is persisted on all backends. MemStore carries Metadata
 	// through Create, but BdStore/exec.Store may not. setConvoyFields uses
 	// SetMetadata which works across all backends.
-	if err := setConvoyFields(store, convoy.ID, opts.Fields); err != nil {
+	if err := setConvoyFields(beads.WorkStore{Store: store}, convoy.ID, opts.Fields); err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: warning: setting fields: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: convoy already created and event will be emitted.
 	}
@@ -260,7 +260,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := convoycore.TrackItem(childStore, convoy.ID, id); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: childStore}}, convoy.ID, id); err != nil {
 			fmt.Fprintf(stderr, "gc convoy create: tracking %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -467,8 +467,8 @@ func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheck
 // renderConvoyListFromAPI renders the API-sourced convoy list through the
 // same writer as the local route (writeConvoyList), so both print one schema
 // with one content. hidden is the number of synthetic convoys left out. A
-// non-empty human listing appends the stale-cache banner when the cache age
-// exceeds the threshold. Two cases reach it only on a remote target, which
+// non-empty human listing is followed by the cache-age footer on stderr when
+// the server's cache is behind (writeCacheAgeFooter). Two cases reach it only on a remote target, which
 // has no local route, and each is named on stderr: a server that predates
 // child_ids, and sharedIDs, the IDs that more than one store's convoy carries,
 // whose rows all show the one store's progress /convoy/{id}/check reports.
@@ -486,8 +486,8 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 	if code := writeConvoyList(rows, hidden, jsonOut, stdout, stderr); code != 0 {
 		return code
 	}
-	if !jsonOut && len(rows) > 0 && cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
+	if !jsonOut && len(rows) > 0 {
+		writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	}
 	return 0
 }
@@ -990,12 +990,9 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 // suspended rig is a question about that rig's bead, so that rig's store is
 // still read.
 func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) func(string) (beads.Store, error) {
-	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	asleep := byIDSuspendedStoreRoots(cfg, cityPath, beadID)
 	if len(asleep) == 0 {
 		return openStore
-	}
-	if rd := rigDirForBead(cfg, beadID); rd != "" {
-		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
 	}
 	return func(dir string) (beads.Store, error) {
 		if len(asleep[normalizePathForCompare(dir)]) > 0 {
@@ -1003,6 +1000,20 @@ func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(s
 		}
 		return openStore(dir)
 	}
+}
+
+// byIDSuspendedStoreRoots is suspendedRigStoreRoots less the store root of the
+// rig beadID's prefix routes to: the suspended stores a by-id probe of beadID
+// leaves unopened.
+func byIDSuspendedStoreRoots(cfg *config.City, cityPath, beadID string) map[string][]string {
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
+		return asleep
+	}
+	if rd := rigDirForBead(cfg, beadID); rd != "" {
+		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
+	}
+	return asleep
 }
 
 // refuseBindingRigCollision restores the uniqueness contract to the one case
@@ -1395,7 +1406,7 @@ func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
 }
 
 func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
-	return convoycore.Members(store, convoyID, includeClosed)
+	return convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, includeClosed)
 }
 
 func doConvoyListAcrossStores(stores []convoyStoreView, opts convoyListOptions, stdout, stderr io.Writer) int {
@@ -1551,8 +1562,8 @@ func routeConvoyStatus(cityPath, convoyID string, c *api.Client, nilReason strin
 // same writers as the local route. Progress is summarized from the members the
 // server returned, exactly as the local route summarizes its own read
 // (convoyProgressFromChildren), so it carries dangling_tracks too. The human
-// output appends the stale-cache banner when the cache age exceeds the
-// threshold.
+// output is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
 func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut bool, stdout, stderr io.Writer) int {
 	convoy := cr.Body.Convoy
 	children := cr.Body.Children
@@ -1561,9 +1572,7 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 		return writeConvoyStatusJSON(convoy, children, progress, stdout, stderr)
 	}
 	writeConvoyStatusText(stdout, convoy, children, progress)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 
@@ -1755,7 +1764,7 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 		fmt.Fprintf(stderr, "gc convoy target: bead %s is not a convoy\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := setConvoyFields(store, id, ConvoyFields{Target: target}); err != nil {
+	if err := setConvoyFields(beads.WorkStore{Store: store}, id, ConvoyFields{Target: target}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy target: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1842,7 +1851,7 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 		return 1
 	}
 
-	if err := convoycore.TrackItem(store, convoyID, issueID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, convoyID, issueID); err != nil {
 		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2064,7 +2073,7 @@ type explicitReasonCloser interface {
 // behavior lives in the convoy domain package so the sling reap path and this
 // CLI projection share one implementation.
 func closeConvoyWithReason(store beads.Store, id, reason string) error {
-	return convoycore.CloseWithReason(store, id, reason)
+	return convoycore.CloseWithReason(beads.WorkStore{Store: store}, id, reason)
 }
 
 // doConvoyCheck auto-closes convoys where all children are closed.
@@ -2615,7 +2624,10 @@ func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec ev
 		}
 	}
 
-	trackingConvoys, err := convoycore.TrackingConvoysForItem(store, beadID)
+	// store is the closed bead's store, which the autoclose callers hand over
+	// as the graph store: convoys are work class, so this read can miss them
+	// (typed-store design misroute #3; T9(d)).
+	trackingConvoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, beadID)
 	if err != nil {
 		run.note(err)
 		return run

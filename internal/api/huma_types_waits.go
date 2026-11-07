@@ -55,11 +55,13 @@ type WaitListBody struct {
 // WaitListOutput is the response envelope for GET /v0/city/{cityName}/waits.
 type WaitListOutput struct {
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
-	Body      WaitListBody
+	CacheRefresh
+	Body WaitListBody
 }
 
 // WaitGetOutput is the response envelope for GET /v0/city/{cityName}/wait/{id}.
 type WaitGetOutput struct {
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache last took in fresh data from its store: a full re-scan, or a write, event or row re-read it applied. It is the cache's age, not each row's, so it grows between re-scans and while the city is suspended. An endpoint reports it only when its body is read from the cache, and not every such endpoint does; 0 when this one does not, the store it read has no cache, or the cache has never been primed."`
-	Body      WaitView
+	CacheRefresh
+	Body WaitView
 }

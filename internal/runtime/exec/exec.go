@@ -290,7 +290,7 @@ func exitTwoIsFailure(op string) bool {
 // exit 2 is therefore a failure rather than the unknown-op no-op.
 func strictWhenReady(op string) bool {
 	switch op {
-	case "stop", "get-meta", "set-meta", "remove-meta":
+	case "stop", "get-meta", "set-meta", "remove-meta", "peek":
 		return true
 	default:
 		return false
@@ -298,8 +298,9 @@ func strictWhenReady(op string) bool {
 }
 
 // strictExitTwo is a v2-ready script's exit 2 from op: a stop that stopped
-// nothing ([runtime.ErrStopUnsupported]) or a metadata op with no store
-// ([runtime.ErrMetaUnsupported]). (is-running needs no entry: its exit 2
+// nothing ([runtime.ErrStopUnsupported]), a metadata op with no store
+// ([runtime.ErrMetaUnsupported]), or a peek that read nothing (the op's
+// failure, never an empty screen). (is-running needs no entry: its exit 2
 // already reads as no answer. A v2-ready listing is `inventory`, whose
 // exit 2 is a failure like any other.)
 func strictExitTwo(op string, base error) error {
@@ -832,8 +833,18 @@ func (p *Provider) nudgeOp(name string, content []runtime.ContentBlock) error {
 	return err
 }
 
+// peekOp runs the `peek` op. A v2-ready script's exit 66
+// ([runtime.ExitCodeNoScreen]) answers "no screen" (no box, or a dead box
+// whose screen is gone): an empty screen with no error, for every caller, so
+// a start whose agent exits while its startup dialogs are read sees a blank
+// screen, not a failed start.
 func (p *Provider) peekOp(name string, lines int) (string, error) {
-	return p.run(nil, "peek", name, strconv.Itoa(lines))
+	out, err := p.run(nil, "peek", name, strconv.Itoa(lines))
+	var e *opExitError
+	if errors.As(err, &e) && e.code == runtime.ExitCodeNoScreen && p.v2Ready() {
+		return "", nil
+	}
+	return out, err
 }
 
 func (p *Provider) sendKeysOp(name string, keys ...string) error {

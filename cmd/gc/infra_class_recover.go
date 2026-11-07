@@ -818,6 +818,15 @@ func reportInfraEdgePlan(stdout io.Writer, plan infraEdgePlan) {
 	}
 }
 
+// strandedRecoveryControllerRefusal is the refusal for a controller still
+// answering the city's socket, or "".
+func strandedRecoveryControllerRefusal(cityPath, logPrefix string) string {
+	if pid := infraMigrationForeignControllerPID(cityPath); pid != 0 {
+		return fmt.Sprintf("%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid)
+	}
+	return ""
+}
+
 // doStorageRecoverStranded performs the repair, in the order the hazards demand.
 //
 // Structural validation first, because a plan boot would refuse must not be
@@ -855,7 +864,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		return 1
 	}
 	if state != infraConvergenceMarked {
-		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q (%s is absent or its database is gone), so nothing here is a stranded write — the whole copy is still owed. Run:  %s\n", //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: this city has not converged onto binding %q (%s is absent, its database is gone, or a re-copy into it has not finished), so nothing here is a stranded write — the whole copy is still owed. Run:  %s\n", //nolint:errcheck // best-effort stderr
 			logPrefix, target.Binding, target.MarkerPath(), storageMigrationCommand)
 		return 1
 	}
@@ -872,13 +881,18 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// (storage_verb_exclusion.go), and under a shared-store attestation every
 	// co-tenant's lock too; a dry run writes neither store.
 	sharedAttested := false
+	var controllerLock *os.File
 	if !opts.DryRun {
-		controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{})
+		controllerLock, err = acquireStorageVerbExclusion(request, storageVerbScope{})
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		defer controllerLock.Close() //nolint:errcheck // released last, after the guard
+		if refusal := strandedRecoveryControllerRefusal(request.CityPath, logPrefix); refusal != "" {
+			fmt.Fprint(stderr, refusal) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -886,15 +900,14 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		}
 		defer shared.Release()
 		sharedAttested = shared.Attested
+		if !request.FleetStopped {
+			fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands after this run stays stranded and the next check names it\n", //nolint:errcheck // best-effort stderr
+				logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
+			return 1
+		}
 		recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
-	}
-	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
-		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing infrastructure beads to the work store; a repair proven against a moving source proves nothing. Stop it (gc stop) and run this again\n", logPrefix, pid) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if !request.FleetStopped && !opts.DryRun {
-		fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands after this run stays stranded and the next check names it\n", //nolint:errcheck // best-effort stderr
-			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
+	} else if refusal := strandedRecoveryControllerRefusal(request.CityPath, logPrefix); refusal != "" {
+		fmt.Fprint(stderr, refusal) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -912,6 +925,18 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	if !opts.DryRun {
+		// The maintenance window (storage_maintenance.go), once every check
+		// that reads no store has passed, the guard last, and before anything
+		// opens the work store. It closes before the guard is released. A dry
+		// run reads the store as it finds it.
+		window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer window.closeReporting(logPrefix, stderr, &code)
+	}
 
 	// The manifest, under the lock that makes it a read-modify-WRITE rather than
 	// two unrelated operations. runInfraClassMigration reads and writes it

@@ -19,20 +19,6 @@ func IsTerminalStatus(status string) bool {
 	return status == "closed" || status == "tombstone"
 }
 
-// TrackItem records that convoyID tracks itemID, spanning only the one class
-// handle store.
-//
-// This is the residual unnamed call shape kept for the consumer packages that
-// have not yet been converted to name their classes (internal/api,
-// internal/dispatch, internal/graphv2, internal/sling and the non-convoy
-// cmd/gc commands). Its memberStores tail is interpreted as Work-class scopes —
-// the meaning its one non-empty caller already documents
-// (dispatch.ProcessOptions.MemberStores, "the work-class store tail"). New code
-// names its classes and calls TrackItemIn.
-func TrackItem(store beads.Store, convoyID, itemID string, memberStores ...beads.Store) error {
-	return TrackItemIn(MemberClasses{Convoy: store, Work: memberStores}, convoyID, itemID)
-}
-
 // TrackItemIn records that convoyID tracks itemID without changing itemID's
 // parent-child relationship.
 //
@@ -50,7 +36,7 @@ func TrackItemIn(classes MemberClasses, convoyID, itemID string) error {
 	if err != nil {
 		return fmt.Errorf("getting tracked item %s: %w", itemID, err)
 	}
-	if !sameHandle(owner.store, classes.Convoy) {
+	if !owner.sameAs(workHandle("convoy", classes.Convoy)) {
 		return fmt.Errorf("tracking %s in convoy %s: member is owned by the %s class store: %w",
 			itemID, convoyID, owner.class, ErrMemberNotCoResident)
 	}
@@ -61,7 +47,7 @@ func TrackItemIn(classes MemberClasses, convoyID, itemID string) error {
 }
 
 // UntrackItem removes a convoy membership edge from convoyID to itemID.
-func UntrackItem(store beads.Store, convoyID, itemID string) error {
+func UntrackItem(store beads.WorkStore, convoyID, itemID string) error {
 	deps, err := store.DepList(convoyID, "down")
 	if err != nil {
 		return fmt.Errorf("listing convoy %s dependencies: %w", convoyID, err)
@@ -88,17 +74,6 @@ func UntrackItem(store beads.Store, convoyID, itemID string) error {
 		return fmt.Errorf("removing %s dependency %s -> %s: %w", TrackingDepType, convoyID, itemID, err)
 	}
 	return nil
-}
-
-// Members returns the beads tracked by a convoy, spanning only the one class
-// handle store.
-//
-// This is the residual unnamed call shape kept for the consumer packages that
-// have not yet been converted to name their classes; see TrackItem for the
-// inventory and for how the memberStores tail is interpreted. New code names
-// its classes and calls MembersIn.
-func Members(store beads.Store, convoyID string, includeClosed bool, memberStores ...beads.Store) ([]beads.Bead, error) {
-	return MembersIn(MemberClasses{Convoy: store, Work: memberStores}, convoyID, includeClosed)
 }
 
 // MembersIn returns beads tracked by a convoy. It supports both the current
@@ -194,7 +169,7 @@ func IsUnresolvedTrackedItem(b beads.Bead) bool {
 // class store, and the edge alone answers the question without materializing
 // the member bead. It therefore takes no member classes — a caller cannot name
 // a class here and be misled into thinking it was consulted.
-func HasTrack(store beads.Store, convoyID, itemID string) (bool, error) {
+func HasTrack(store beads.WorkStore, convoyID, itemID string) (bool, error) {
 	deps, err := store.DepList(convoyID, "down")
 	if err != nil {
 		return false, fmt.Errorf("listing convoy %s dependencies: %w", convoyID, err)
@@ -216,7 +191,7 @@ func HasTrack(store beads.Store, convoyID, itemID string) (bool, error) {
 // does not — the member's own store holds no part of this answer, and a
 // parameter that is accepted but never read would let a caller believe a class
 // participated when it did not.
-func TrackingConvoysForItem(store beads.Store, itemID string) ([]beads.Bead, error) {
+func TrackingConvoysForItem(store beads.WorkStore, itemID string) ([]beads.Bead, error) {
 	deps, err := store.DepList(itemID, "up")
 	if err != nil {
 		return nil, fmt.Errorf("listing dependents of item %s: %w", itemID, err)

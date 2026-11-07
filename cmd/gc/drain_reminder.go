@@ -223,6 +223,14 @@ func maybeRemindDrainingSession(
 // the stop-pending re-examination, on the arm that has just observed the runtime
 // still ALIVE after re-queueing its stop. That arm is the wedge, and it is the
 // only caller — the pass owns no scan of its own.
+//
+// That re-examination is the legacy session reconciler's
+// finalize_drain_ack_stop_pending tick phase, which a controller running
+// session_reconciler = "v2" does not run: v2 answers an outstanding stop with
+// D6's alert (planner.escalateStop) and reminds no agent. So the reminder, and
+// its drain_reminder program-status shadow point, decide only under the
+// legacy reconciler; under v2 the point records nothing because nothing
+// decides there.
 func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info sessions.Info, clk clock.Clock, stdout io.Writer) drainReminderOutcome {
 	if clk == nil {
 		clk = clock.Real{}
@@ -520,7 +528,7 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 	if blocked {
 		if noteDrainReminderHold(store, info, drainReminderHoldPending) {
 			fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-				"%s: holding the drain reminder for %s: it is waiting on a dialog that is answered in the terminal\n",
+				"%s: holding the drain reminder for %s: it is waiting on a dialog to be answered\n",
 				drainReminderLabel, name)
 		}
 		return drainReminderHeld, false

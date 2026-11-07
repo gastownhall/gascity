@@ -466,13 +466,14 @@ func TestRouteRigStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
-// TestRouteRigStatus_APIStaleBanner verifies the human-output staleness
-// banner appears when the supervisor reports a cache age > 30 s.
-func TestRouteRigStatus_APIStaleBanner(t *testing.T) {
+// TestRouteRigStatus_CacheAgeFooterOnStderr verifies the API route prints
+// the cache-age footer on stderr, not stdout, when the supervisor reports a
+// cache age more than twice its re-scan interval.
+func TestRouteRigStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	cityPath := writeRigStatusTestCity(t)
 	staleHandler := func(_ *testing.T) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("X-GC-Cache-Age-S", "99")
+			setBehindCacheHeaders(w)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "test-city", "path": "/tmp",
@@ -497,7 +498,5 @@ func TestRouteRigStatus_APIStaleBanner(t *testing.T) {
 	if code := routeRigStatus(cityPath, "test-city", rig, nil, "", nil, nil, nil, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age:") {
-		t.Errorf("human output should include stale banner, got:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
