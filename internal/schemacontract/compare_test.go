@@ -134,6 +134,26 @@ func TestCheckScalarUnionWideningIsBreaking(t *testing.T) {
 	wantClean(t, check(t, recorded, narrowed))
 }
 
+// R5: integer is a subset of number, so number -> integer narrows the contract
+// and integer -> number widens it, alone or inside a union.
+func TestCheckIntegerIsSubsetOfNumber(t *testing.T) {
+	with := func(types string) string { return doc("1", ``, `"b":{"type":`+types+`}`) }
+	number, integer := with(`"number"`), with(`"integer"`)
+	nullableNumber, nullableInteger := with(`["number","null"]`), with(`["integer","null"]`)
+
+	wantClean(t, check(t, number, integer))
+	wantClean(t, check(t, number, number))
+	wantClean(t, check(t, nullableNumber, nullableInteger))
+	wantClean(t, check(t, nullableNumber, integer))
+	wantClean(t, check(t, nullableNumber, number))
+
+	wantBreaking(t, check(t, integer, number), "1", "$.b", "types widened")
+	wantBreaking(t, check(t, integer, nullableNumber), "1", "$.b", "types widened")
+	wantBreaking(t, check(t, nullableInteger, number), "1", "$.b", "types widened")
+	wantBreaking(t, check(t, nullableInteger, nullableNumber), "1", "$.b", "types widened")
+	wantBreaking(t, check(t, number, with(`["integer","string"]`)), "1", "$.b", "types widened")
+}
+
 func TestCheckAdditiveFieldAsksForGenerator(t *testing.T) {
 	recorded := doc("1", `"a"`, `"a":{"type":"string"}`)
 	live := doc("1", `"a"`, `"a":{"type":"string"},"b":{"type":"integer"}`)
