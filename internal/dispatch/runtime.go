@@ -1169,7 +1169,7 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
 
-	outcome, err := resolveFinalizeOutcome(store, bead, opts)
+	outcome, skippedBlockers, err := resolveFinalizeOutcome(store, bead, opts)
 	if err != nil {
 		if errors.Is(err, errFinalizePending) {
 			return ControlResult{}, ErrControlPending
@@ -1236,7 +1236,7 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 	// next serve cycle will retry. Source-chain propagation is preflighted first
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
-	outcome, err = completeWorkflowRoot(store, bead, rootID, outcome, opts)
+	outcome, err = completeWorkflowRoot(store, bead, rootID, outcome, skippedBlockers, opts)
 	if err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, err)
 	}
@@ -1313,8 +1313,8 @@ func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts Proce
 // root's diagnosis is stamped on its still-open source here. The finalizer
 // closes last, so a stamp that fails leaves it open, and the retry reads the
 // quarantine up front and takes the fail branch.
-func completeWorkflowRoot(store beads.GraphStore, finalizer beads.Bead, rootID, outcome string, opts ProcessOptions) (string, error) {
-	err := closeWorkflowRoot(store, rootID, outcome)
+func completeWorkflowRoot(store beads.GraphStore, finalizer beads.Bead, rootID, outcome string, skippedBlockers []string, opts ProcessOptions) (string, error) {
+	err := closeWorkflowRoot(store, rootID, outcome, skippedBlockers...)
 	switch {
 	case err == nil:
 		return outcome, nil
@@ -2189,8 +2189,10 @@ func setOutcomeAndClose(store beads.GraphStore, beadID, outcome string) error {
 // the close too. Only the finalizer closes a root, so the guard lives here
 // rather than in setOutcomeAndClose, where it would cost every control and spec
 // close a read (call_budget_test.go) and reach retry and ralph logical beads,
-// which keep their own terminal semantics.
-func closeWorkflowRoot(store beads.GraphStore, rootID, outcome string) error {
+// which keep their own terminal semantics. A pass whose finalizer had skipped
+// blockers also writes their IDs (SkippedBlockersMetadataKey) in the same
+// close, so the root says that some of its work never ran.
+func closeWorkflowRoot(store beads.GraphStore, rootID, outcome string, skippedBlockers ...string) error {
 	if outcome == beadmeta.OutcomePass {
 		current, err := store.Get(rootID)
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
@@ -2198,6 +2200,12 @@ func closeWorkflowRoot(store beads.GraphStore, rootID, outcome string) error {
 		}
 		if err == nil && isControlQuarantined(current) {
 			return fmt.Errorf("%w: refusing pass on %s", errRootQuarantined, rootID)
+		}
+		if len(skippedBlockers) > 0 {
+			return updateMetadataAndClose(store, rootID, map[string]string{
+				beadmeta.OutcomeMetadataKey:         outcome,
+				beadmeta.SkippedBlockersMetadataKey: strings.Join(skippedBlockers, ","),
+			})
 		}
 	}
 	return setOutcomeAndClose(store, rootID, outcome)
@@ -2238,16 +2246,16 @@ func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 	return stepRef == scopeRef || strings.HasSuffix(stepRef, "."+scopeRef)
 }
 
-func resolveFinalizeOutcome(store beads.GraphStore, finalizer beads.Bead, opts ProcessOptions) (string, error) {
-	outcome, err := resolveBlockedOutcome(store, finalizer.ID)
+func resolveFinalizeOutcome(store beads.GraphStore, finalizer beads.Bead, opts ProcessOptions) (string, []string, error) {
+	outcome, skipped, err := resolveBlockedOutcomeAndSkips(store, finalizer.ID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if outcome == beadmeta.OutcomePass && rootID != "" {
 		_, failed, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID, opts)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if failed {
 			outcome = beadmeta.OutcomeFail
@@ -2263,13 +2271,13 @@ func resolveFinalizeOutcome(store beads.GraphStore, finalizer beads.Bead, opts P
 		// the caller's missing-root path.
 		root, err := getRootInView(store, rootID, opts)
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return "", err
+			return "", nil, err
 		}
 		if err == nil && isControlQuarantined(root) {
 			outcome = beadmeta.OutcomeFail
 		}
 	}
-	return outcome, nil
+	return outcome, skipped, nil
 }
 
 // isControlQuarantined reports whether the control dispatcher closed b as a
@@ -2376,9 +2384,18 @@ func hasFailureStamp(bead beads.Bead) bool {
 }
 
 func resolveBlockedOutcome(store beads.GraphStore, beadID string) (string, error) {
+	outcome, _, err := resolveBlockedOutcomeAndSkips(store, beadID)
+	return outcome, err
+}
+
+// resolveBlockedOutcomeAndSkips is resolveBlockedOutcome plus the sorted IDs
+// of the closed blockers that carry gc.outcome=skipped. A skipped blocker never
+// ran to a verdict, so it does not fail the outcome; the IDs let a pass that
+// included one say so on the workflow root (gastownhall/gascity#6096).
+func resolveBlockedOutcomeAndSkips(store beads.GraphStore, beadID string) (string, []string, error) {
 	deps, err := store.DepList(beadID, "down")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var blockerIDs []string
 	for _, dep := range deps {
@@ -2388,24 +2405,29 @@ func resolveBlockedOutcome(store beads.GraphStore, beadID string) (string, error
 	}
 	prefetched, err := beads.PrefetchExact(store, blockerIDs)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	outcome := beadmeta.OutcomePass
+	var skipped []string
 	for _, id := range blockerIDs {
 		blocker, ok := prefetched[id]
 		if !ok {
 			if blocker, err = store.Get(id); err != nil {
-				return "", err
+				return "", nil, err
 			}
 		}
 		if blocker.Status != "closed" {
-			return "", fmt.Errorf("%w: blocker %s is still open", errFinalizePending, blocker.ID)
+			return "", nil, fmt.Errorf("%w: blocker %s is still open", errFinalizePending, blocker.ID)
 		}
 		if beadOutcomeFailed(blocker) {
 			outcome = beadmeta.OutcomeFail
 		}
+		if strings.TrimSpace(blocker.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomeSkipped {
+			skipped = append(skipped, blocker.ID)
+		}
 	}
-	return outcome, nil
+	slices.Sort(skipped)
+	return outcome, skipped, nil
 }
 
 // terminalAbortScopeFailureMember returns the direct member whose terminal
