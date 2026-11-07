@@ -2482,7 +2482,16 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 						return err
 					}
 				}
+				// Every gc invocation starts with an empty map, so the cooldown
+				// is also read from, and recorded in, the city's pack state.
+				if recentManagedDoltRecover(cityPath, now, providerRecoverCooldown()) {
+					return err
+				}
 				lastBeadsProviderRecover.Store(cityKey, now)
+				if recordErr := recordManagedDoltRecover(cityPath, now); recordErr != nil {
+					// Not fatal: this process still holds the in-memory cooldown.
+					fmt.Fprintf(os.Stderr, "gc: record recover cooldown: %v\n", recordErr) //nolint:errcheck
+				}
 			}
 			if recErr := runProviderOpWithEnvContext(ctx, script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
@@ -2496,6 +2505,9 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				}
 			}
 		} else if providerUsesBdStoreContract(provider) {
+			// The server answers: an unresponsive streak recorded by an
+			// earlier deferred recover is over.
+			clearManagedDoltUnresponsiveSince(cityPath)
 			deps := healthyManagedRuntimePublicationDeps{
 				currentPort:     currentManagedDoltPort,
 				lifecycleOwned:  managedDoltLifecycleOwned,
